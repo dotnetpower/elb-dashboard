@@ -1,0 +1,137 @@
+"""Idempotent helpers for resource group + VNet + NSG + Public IP."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+from azure.core.credentials import TokenCredential
+
+from services.azure_clients import network_client, resource_client
+
+LOGGER = logging.getLogger(__name__)
+
+VNET_NAME_TEMPLATE = "vnet-{vm_name}"
+SUBNET_NAME = "default"
+NSG_NAME_TEMPLATE = "nsg-{vm_name}"
+PIP_NAME_TEMPLATE = "pip-{vm_name}"
+NIC_NAME_TEMPLATE = "nic-{vm_name}"
+
+
+@dataclass(frozen=True)
+class NetworkInfo:
+    nic_id: str
+    public_ip_id: str
+    public_ip_address: str
+    fqdn: str
+
+
+def ensure_resource_group(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    region: str,
+) -> None:
+    """Create or update the resource group. Idempotent."""
+    rc = resource_client(credential, subscription_id)
+    LOGGER.info("ensure_resource_group rg=%s region=%s", resource_group, region)
+    rc.resource_groups.create_or_update(
+        resource_group,
+        {"location": region, "tags": {"managed-by": "elastic-blast-azure-functionapp"}},
+    )
+
+
+def ensure_network(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    region: str,
+    vm_name: str,
+    allowed_ssh_cidr: str,
+) -> NetworkInfo:
+    """Create VNet + subnet + NSG + Public IP + NIC. Idempotent."""
+    nc = network_client(credential, subscription_id)
+    vnet_name = VNET_NAME_TEMPLATE.format(vm_name=vm_name)
+    nsg_name = NSG_NAME_TEMPLATE.format(vm_name=vm_name)
+    pip_name = PIP_NAME_TEMPLATE.format(vm_name=vm_name)
+    nic_name = NIC_NAME_TEMPLATE.format(vm_name=vm_name)
+    dns_label = f"elb-term-{vm_name.lower()}"
+
+    LOGGER.info(
+        "ensure_network vnet=%s nsg=%s pip=%s nic=%s", vnet_name, nsg_name, pip_name, nic_name
+    )
+
+    nsg_poller = nc.network_security_groups.begin_create_or_update(
+        resource_group,
+        nsg_name,
+        {
+            "location": region,
+            "security_rules": [
+                {
+                    "name": "AllowSshFromCaller",
+                    "protocol": "Tcp",
+                    "source_port_range": "*",
+                    "destination_port_range": "22",
+                    "source_address_prefix": allowed_ssh_cidr,
+                    "destination_address_prefix": "*",
+                    "access": "Allow",
+                    "priority": 1000,
+                    "direction": "Inbound",
+                },
+            ],
+        },
+    )
+    nsg = nsg_poller.result()
+
+    vnet_poller = nc.virtual_networks.begin_create_or_update(
+        resource_group,
+        vnet_name,
+        {
+            "location": region,
+            "address_space": {"address_prefixes": ["10.42.0.0/16"]},
+            "subnets": [
+                {
+                    "name": SUBNET_NAME,
+                    "address_prefix": "10.42.1.0/24",
+                    "network_security_group": {"id": nsg.id},
+                }
+            ],
+        },
+    )
+    vnet = vnet_poller.result()
+    subnet_id = vnet.subnets[0].id
+
+    pip_poller = nc.public_ip_addresses.begin_create_or_update(
+        resource_group,
+        pip_name,
+        {
+            "location": region,
+            "sku": {"name": "Standard"},
+            "public_ip_allocation_method": "Static",
+            "dns_settings": {"domain_name_label": dns_label},
+        },
+    )
+    pip = pip_poller.result()
+
+    nic_poller = nc.network_interfaces.begin_create_or_update(
+        resource_group,
+        nic_name,
+        {
+            "location": region,
+            "ip_configurations": [
+                {
+                    "name": "ipconfig1",
+                    "subnet": {"id": subnet_id},
+                    "public_ip_address": {"id": pip.id},
+                }
+            ],
+        },
+    )
+    nic = nic_poller.result()
+
+    return NetworkInfo(
+        nic_id=nic.id,
+        public_ip_id=pip.id,
+        public_ip_address=pip.ip_address or "",
+        fqdn=pip.dns_settings.fqdn if pip.dns_settings else "",
+    )

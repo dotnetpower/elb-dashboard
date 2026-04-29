@@ -1,0 +1,167 @@
+/* Glassmorphic design tokens. Calm, low-contrast, deep-navy palette. */
+:root {
+  /* Surfaces */
+  --glass-bg: rgba(255, 255, 255, 0.08);
+  --glass-bg-strong: rgba(255, 255, 255, 0.14);
+  --glass-border: rgba(255, 255, 255, 0.18);
+  --glass-blur: 18px;
+  --glass-radius: 16px;
+
+  /* Background */
+  --bg-gradient: radial-gradient(
+    1200px 600px at 20% 0%,
+    #1c2541 0%,
+    #0b132b 60%,
+    #050816 100%
+  );
+
+  /* Text */
+  --text-primary: #e8ecf4;
+  --text-muted: #9aa3b8;
+  --text-faint: #6c7793;
+
+  /* Accents — cool, low saturation */
+  --accent: #7aa7ff;
+  --success: #6ad6a3;
+  --warning: #f0c674;
+  --danger: #e07b8a;
+
+  /* Spacing scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* Motion */
+  --motion-fast: 120ms ease-out;
+  --motion-base: 200ms ease-out;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "Inter",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--bg-gradient);
+  background-attachment: fixed;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+.glass-card {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--glass-radius);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  padding: var(--space-5);
+}
+
+.glass-card--strong {
+  background: var(--glass-bg-strong);
+}
+
+.glass-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 14px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background var(--motion-base);
+}
+
+.glass-button:hover {
+  background: var(--glass-bg-strong);
+}
+
+.glass-button--primary {
+  background: rgba(122, 167, 255, 0.18);
+  border-color: rgba(122, 167, 255, 0.4);
+}
+
+.glass-button--primary:hover {
+  background: rgba(122, 167, 255, 0.28);
+}
+
+.glass-input {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color var(--motion-base);
+}
+
+.glass-input:focus {
+  border-color: var(--accent);
+}
+
+.glass-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-1);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}

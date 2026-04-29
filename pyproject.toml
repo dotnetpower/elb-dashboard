@@ -1,0 +1,21 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["api"]
+extend-exclude = [".venv", "venv", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "RUF"]
+ignore = [
+  "S101", # asserts in tests are fine
+  "S104", # bind 0.0.0.0 — Functions runtime decides
+]
+
+[tool.ruff.lint.per-file-ignores]
+"api/tests/**" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+files = ["api"]
