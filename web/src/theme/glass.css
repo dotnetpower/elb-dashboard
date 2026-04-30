@@ -140,6 +140,19 @@ button {
   border-color: var(--accent);
 }
 
+select.glass-input {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239aa3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+}
+
+select.glass-input option {
+  background: #0b132b;
+  color: var(--text-primary);
+}
+
 .glass-label {
   display: block;
   font-size: 12px;
@@ -164,4 +177,65 @@ button {
 
 .spin {
   animation: spin 1s linear infinite;
+}
+
+/* Common layout utilities */
+.page-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-4);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.glass-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--glass-bg);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* Confirm dialog (replaces native confirm()) */
+.glass-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: grid;
+  place-items: center;
+  z-index: 1000;
+}
+
+.glass-dialog {
+  width: min(400px, 90vw);
+  text-align: center;
+}
+
+.glass-dialog__actions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: center;
+  margin-top: var(--space-4);
+}
+
+.glass-button--danger {
+  background: rgba(224, 123, 138, 0.18);
+  border-color: rgba(224, 123, 138, 0.4);
+  color: var(--danger);
+}
+
+.glass-button--danger:hover {
+  background: rgba(224, 123, 138, 0.28);
 }
