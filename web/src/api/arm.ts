@@ -1,5 +1,8 @@
 import { msalInstance, armLoginRequest } from "@/auth/msal";
-import { InteractionRequiredAuthError } from "@azure/msal-browser";
+import {
+  InteractionRequiredAuthError,
+  BrowserAuthError,
+} from "@azure/msal-browser";
 
 export interface SubscriptionSummary {
   subscriptionId: string;
@@ -30,14 +33,23 @@ async function getArmAccessToken(): Promise<string> {
     });
     return result.accessToken;
   } catch (err) {
+    // If another interaction is already in progress, wait and retry once.
+    if (
+      err instanceof BrowserAuthError &&
+      (err as { errorCode?: string }).errorCode === "interaction_in_progress"
+    ) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const retry = await msalInstance.acquireTokenSilent({
+        ...armLoginRequest,
+        account,
+      });
+      return retry.accessToken;
+    }
     if (err instanceof InteractionRequiredAuthError) {
-      // Incremental consent for ARM. Redirect is more reliable than popup
-      // (no pop-up blockers, mobile-friendly). The page will reload after.
       await msalInstance.acquireTokenRedirect({
         ...armLoginRequest,
         account,
       });
-      // acquireTokenRedirect navigates away; this throw is for type-safety.
       throw new Error("redirecting for ARM consent");
     }
     throw err;

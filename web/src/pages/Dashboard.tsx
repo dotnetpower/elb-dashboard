@@ -5,6 +5,7 @@ import { ClusterCard } from "@/components/cards/ClusterCard";
 import { StorageCard } from "@/components/cards/StorageCard";
 import { AcrCard } from "@/components/cards/AcrCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
+import { JobCard } from "@/components/cards/JobCard";
 
 export interface MonitoringConfig {
   subscriptionId: string;
@@ -66,6 +67,7 @@ export function Dashboard() {
           resourceGroup={config.terminalResourceGroup}
           vmName={config.terminalVmName}
         />
+        <JobCard />
       </div>
     </div>
   );

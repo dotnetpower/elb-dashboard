@@ -239,3 +239,4 @@ coverage/
 .DS_Store
 Thumbs.db
 .tsbuild/
+.azurite/

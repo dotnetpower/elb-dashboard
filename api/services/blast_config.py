@@ -1,0 +1,86 @@
+"""Generate elastic-blast INI configuration from structured input."""
+
+from __future__ import annotations
+
+import configparser
+import io
+from typing import Any
+
+
+def generate_config(params: dict[str, Any]) -> str:
+    """Build an elastic-blast.ini from a flat dict of parameters.
+
+    Returns the INI text suitable for writing to a file or uploading.
+    """
+    cfg = configparser.ConfigParser()
+
+    # [cloud-provider]
+    cfg.add_section("cloud-provider")
+    cfg.set("cloud-provider", "azure-region", params.get("region", "koreacentral"))
+    if params.get("acr_resource_group"):
+        cfg.set("cloud-provider", "azure-acr-resource-group", params["acr_resource_group"])
+    if params.get("acr_name"):
+        cfg.set("cloud-provider", "azure-acr-name", params["acr_name"])
+    cfg.set("cloud-provider", "azure-resource-group", params.get("resource_group", ""))
+    if params.get("storage_account"):
+        cfg.set("cloud-provider", "azure-storage-account", params["storage_account"])
+
+    # [cluster]
+    cfg.add_section("cluster")
+    job_id = params.get("job_id", "blast-job")
+    cfg.set("cluster", "name", f"elastic-blast-{job_id[:12]}")
+    cfg.set("cluster", "machine-type", params.get("machine_type", "Standard_D8s_v3"))
+    cfg.set("cluster", "num-nodes", str(params.get("num_nodes", 1)))
+    cfg.set("cluster", "pd-size", params.get("pd_size", "3000Gi"))
+
+    # [blast]
+    cfg.add_section("blast")
+    cfg.set("blast", "program", params.get("program", "blastn"))
+    cfg.set("blast", "db", params.get("db", ""))
+    cfg.set("blast", "queries", params.get("query_blob_url", ""))
+    cfg.set("blast", "results", params.get("results_url", ""))
+
+    # Build options string
+    options_parts: list[str] = []
+    evalue = params.get("evalue")
+    if evalue is not None:
+        options_parts.append(f"-evalue {evalue}")
+    max_target_seqs = params.get("max_target_seqs")
+    if max_target_seqs is not None:
+        options_parts.append(f"-max_target_seqs {max_target_seqs}")
+    outfmt = params.get("outfmt")
+    if outfmt is not None:
+        options_parts.append(f"-outfmt {outfmt}")
+    word_size = params.get("word_size")
+    if word_size is not None:
+        options_parts.append(f"-word_size {word_size}")
+    gap_open = params.get("gap_open")
+    if gap_open is not None:
+        options_parts.append(f"-gapopen {gap_open}")
+    gap_extend = params.get("gap_extend")
+    if gap_extend is not None:
+        options_parts.append(f"-gapextend {gap_extend}")
+    additional = params.get("additional_options", "").strip()
+    if additional:
+        options_parts.append(additional)
+    if options_parts:
+        cfg.set("blast", "options", " ".join(options_parts))
+
+    mem_request = params.get("mem_request")
+    if mem_request:
+        cfg.set("blast", "mem-request", mem_request)
+    mem_limit = params.get("mem_limit")
+    if mem_limit:
+        cfg.set("blast", "mem-limit", mem_limit)
+    batch_len = params.get("batch_len")
+    if batch_len:
+        cfg.set("blast", "batch-len", str(batch_len))
+
+    # [timeouts]
+    cfg.add_section("timeouts")
+    cfg.set("timeouts", "init-pv", "45")
+    cfg.set("timeouts", "blast-k8s-job", "10080")
+
+    buf = io.StringIO()
+    cfg.write(buf)
+    return buf.getvalue()

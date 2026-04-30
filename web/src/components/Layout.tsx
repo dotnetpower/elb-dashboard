@@ -1,7 +1,7 @@
 import type { PropsWithChildren } from "react";
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
-import { Activity, Terminal as TerminalIcon, LogOut } from "lucide-react";
+import { Activity, Terminal as TerminalIcon, LogOut, Search, List } from "lucide-react";
 
 import "./Layout.css";
 
@@ -20,9 +20,15 @@ export function Layout({ children }: PropsWithChildren) {
           </div>
         </div>
 
-        <nav className="layout__nav">
+        <nav className="layout__nav" aria-label="Main navigation">
           <NavLink to="/" end className="layout__nav-item">
             <Activity size={16} strokeWidth={1.5} /> Dashboard
+          </NavLink>
+          <NavLink to="/blast/submit" className="layout__nav-item">
+            <Search size={16} strokeWidth={1.5} /> BLAST Search
+          </NavLink>
+          <NavLink to="/blast/jobs" className="layout__nav-item">
+            <List size={16} strokeWidth={1.5} /> Jobs
           </NavLink>
           <NavLink to="/terminal" className="layout__nav-item">
             <TerminalIcon size={16} strokeWidth={1.5} /> Remote Terminal

@@ -7,11 +7,22 @@ async function getAccessToken(): Promise<string> {
   if (!account) {
     throw new Error("not signed in");
   }
-  const result = await msalInstance.acquireTokenSilent({
-    ...apiLoginRequest,
-    account,
-  });
-  return result.accessToken;
+  try {
+    const result = await msalInstance.acquireTokenSilent({
+      ...apiLoginRequest,
+      account,
+    });
+    return result.accessToken;
+  } catch {
+    // If silent fails (e.g. consent not yet granted), wait briefly and retry
+    // to avoid racing with another interactive flow.
+    await new Promise((r) => setTimeout(r, 1500));
+    const result = await msalInstance.acquireTokenSilent({
+      ...apiLoginRequest,
+      account,
+    });
+    return result.accessToken;
+  }
 }
 
 export interface ApiError extends Error {
@@ -49,4 +60,5 @@ export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "POST", body: JSON.stringify(body) }),
+  del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };

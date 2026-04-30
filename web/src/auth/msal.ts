@@ -29,7 +29,10 @@ export const msalConfig: Configuration = {
 /** Scope for talking to our own Function App API.
  *  The App Registration must expose a scope named `user_impersonation`. */
 export const apiLoginRequest = {
-  scopes: [`api://${clientId}/user_impersonation`],
+  scopes: [
+    `api://${clientId}/user_impersonation`,
+    "https://management.azure.com/user_impersonation",
+  ],
 };
 
 /** Scope for downstream ARM calls — the same access token is forwarded by
