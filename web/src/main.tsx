@@ -20,35 +20,47 @@ const queryClient = new QueryClient({
 });
 
 async function bootstrap() {
-  // Must be awaited before any other MSAL call (msal-browser v3 requirement).
-  await msalInstance.initialize();
+  const devBypass = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
 
-  // Restore an active account between page loads.
-  const existingAccounts = msalInstance.getAllAccounts();
-  if (existingAccounts.length > 0) {
-    msalInstance.setActiveAccount(existingAccounts[0]);
+  try {
+    // Must be awaited before any other MSAL call (msal-browser v3 requirement).
+    await msalInstance.initialize();
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("MSAL initialize failed:", err);
   }
 
-  // Set the active account whenever a login completes.
-  msalInstance.addEventCallback((event) => {
-    if (
-      (event.eventType === EventType.LOGIN_SUCCESS ||
-        event.eventType === EventType.ACQUIRE_TOKEN_SUCCESS) &&
-      event.payload
-    ) {
-      const payload = event.payload as AuthenticationResult;
-      if (payload.account) {
-        msalInstance.setActiveAccount(payload.account);
-      }
+  if (!devBypass) {
+    // Restore an active account between page loads.
+    const existingAccounts = msalInstance.getAllAccounts();
+    if (existingAccounts.length > 0) {
+      msalInstance.setActiveAccount(existingAccounts[0]);
     }
-  });
 
-  // Finish the redirect leg of the auth flow before rendering. The promise
-  // resolves to the AuthenticationResult on the post-login navigation, or
-  // null if no redirect response is being processed.
-  const redirectResult = await msalInstance.handleRedirectPromise();
-  if (redirectResult?.account) {
-    msalInstance.setActiveAccount(redirectResult.account);
+    // Set the active account whenever a login completes.
+    msalInstance.addEventCallback((event) => {
+      if (
+        (event.eventType === EventType.LOGIN_SUCCESS ||
+          event.eventType === EventType.ACQUIRE_TOKEN_SUCCESS) &&
+        event.payload
+      ) {
+        const payload = event.payload as AuthenticationResult;
+        if (payload.account) {
+          msalInstance.setActiveAccount(payload.account);
+        }
+      }
+    });
+
+    // Finish the redirect leg of the auth flow before rendering.
+    try {
+      const redirectResult = await msalInstance.handleRedirectPromise();
+      if (redirectResult?.account) {
+        msalInstance.setActiveAccount(redirectResult.account);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("MSAL redirect handling failed:", err);
+    }
   }
 
   const root = createRoot(document.getElementById("root")!);

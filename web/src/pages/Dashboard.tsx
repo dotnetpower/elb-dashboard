@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 
 import { ConfigBar } from "@/components/ConfigBar";
+import { SetupWizard, loadSavedConfig, clearConfig, type ResourceConfig } from "@/components/SetupWizard";
+import { SettingsPanel } from "@/components/SettingsPanel";
 import { ClusterCard } from "@/components/cards/ClusterCard";
 import { StorageCard } from "@/components/cards/StorageCard";
 import { AcrCard } from "@/components/cards/AcrCard";
@@ -15,60 +17,94 @@ export interface MonitoringConfig {
   storageAccountName: string;
   terminalResourceGroup: string;
   terminalVmName: string;
+  region: string;
 }
 
-const DEFAULT_CONFIG: MonitoringConfig = {
-  subscriptionId: "",
-  workloadResourceGroup: "",
-  acrResourceGroup: "",
-  acrName: "",
-  storageAccountName: "",
-  terminalResourceGroup: "",
-  terminalVmName: "",
-};
-
 export function Dashboard() {
-  const [config, setConfig] = useState<MonitoringConfig>(DEFAULT_CONFIG);
+  const [showWizard, setShowWizard] = useState(() => {
+    const saved = loadSavedConfig();
+    // eslint-disable-next-line no-console
+    console.log("[Dashboard] loadSavedConfig:", saved);
+    return !saved;
+  });
+  const [showSettings, setShowSettings] = useState(false);
+  const [config, setConfig] = useState<MonitoringConfig>(() => {
+    const saved = loadSavedConfig();
+    return saved ?? {
+      subscriptionId: "",
+      workloadResourceGroup: "",
+      acrResourceGroup: "",
+      acrName: "",
+      storageAccountName: "",
+      terminalResourceGroup: "rg-elb-terminal",
+      terminalVmName: "vm-elb-terminal",
+      region: "koreacentral",
+    };
+  });
+
+  const handleWizardComplete = useCallback((wizConfig: ResourceConfig) => {
+    setConfig(wizConfig);
+    setShowWizard(false);
+  }, []);
+
+  const handleRerunWizard = useCallback(() => {
+    clearConfig();
+    setShowSettings(false);
+    setShowWizard(true);
+  }, []);
+
+  if (showWizard) {
+    return <SetupWizard onComplete={handleWizardComplete} />;
+  }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-5)" }}>
-      <header>
-        <h1 style={{ margin: 0 }}>Dashboard</h1>
-        <p className="muted" style={{ marginTop: "var(--space-2)" }}>
-          Live state of your ElasticBLAST resources. Polled every 30 seconds.
-        </p>
-      </header>
+    <>
+      <ConfigBar
+        config={config}
+        onChange={setConfig}
+        onOpenSettings={() => setShowSettings(true)}
+      />
 
-      <ConfigBar config={config} onChange={setConfig} />
+      <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
+        {/* Panel grid */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
+            gap: 8,
+          }}
+        >
+          <ClusterCard
+            subscriptionId={config.subscriptionId}
+            resourceGroup={config.workloadResourceGroup}
+          />
+          <StorageCard
+            subscriptionId={config.subscriptionId}
+            resourceGroup={config.workloadResourceGroup}
+            accountName={config.storageAccountName}
+          />
+          <AcrCard
+            subscriptionId={config.subscriptionId}
+            resourceGroup={config.acrResourceGroup}
+            registryName={config.acrName}
+          />
+          <TerminalCard
+            subscriptionId={config.subscriptionId}
+            resourceGroup={config.terminalResourceGroup}
+            vmName={config.terminalVmName}
+          />
+        </div>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
-          gap: "var(--space-5)",
-        }}
-      >
-        <ClusterCard
-          subscriptionId={config.subscriptionId}
-          resourceGroup={config.workloadResourceGroup}
-        />
-        <StorageCard
-          subscriptionId={config.subscriptionId}
-          resourceGroup={config.workloadResourceGroup}
-          accountName={config.storageAccountName}
-        />
-        <AcrCard
-          subscriptionId={config.subscriptionId}
-          resourceGroup={config.acrResourceGroup}
-          registryName={config.acrName}
-        />
-        <TerminalCard
-          subscriptionId={config.subscriptionId}
-          resourceGroup={config.terminalResourceGroup}
-          vmName={config.terminalVmName}
-        />
+        {/* Jobs — full width */}
         <JobCard />
       </div>
-    </div>
+
+      <SettingsPanel
+        open={showSettings}
+        config={config}
+        onClose={() => setShowSettings(false)}
+        onRerunWizard={handleRerunWizard}
+      />
+    </>
   );
 }

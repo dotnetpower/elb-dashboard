@@ -231,3 +231,94 @@ export const blastApi = {
       `/blast/databases?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}`,
     ),
 };
+
+// ---------------------------------------------------------------------------
+// Resource provisioning (wizard)
+// ---------------------------------------------------------------------------
+
+export interface EnsureRgRequest {
+  subscription_id: string;
+  resource_group: string;
+  region: string;
+}
+
+export interface EnsureStorageRequest {
+  subscription_id: string;
+  resource_group: string;
+  account_name: string;
+  region: string;
+}
+
+export interface EnsureAcrRequest {
+  subscription_id: string;
+  resource_group: string;
+  registry_name: string;
+  region: string;
+}
+
+export const resourceApi = {
+  ensureRg: (req: EnsureRgRequest) =>
+    api.post<{ resource_group: string; status: string }>("/resources/ensure-rg", req),
+
+  ensureStorage: (req: EnsureStorageRequest) =>
+    api.post<{ account_name: string; status: string }>("/resources/ensure-storage", req),
+
+  ensureAcr: (req: EnsureAcrRequest) =>
+    api.post<{ registry_name: string; status: string }>("/resources/ensure-acr", req),
+};
+
+// ---------------------------------------------------------------------------
+// ARM discovery (backend-proxied — uses az login credential)
+// ---------------------------------------------------------------------------
+export interface ArmSubscription {
+  subscriptionId: string;
+  displayName: string;
+  state: string;
+  tenantId: string;
+}
+
+export interface ArmResourceGroup {
+  name: string;
+  location: string;
+}
+
+export interface ArmStorageAccount {
+  name: string;
+  location: string;
+}
+
+export interface ArmAcr {
+  name: string;
+  location: string;
+  loginServer?: string;
+}
+
+export interface ArmVm {
+  name: string;
+  location: string;
+}
+
+export const armProxyApi = {
+  listSubscriptions: () =>
+    api.get<ArmSubscription[]>("/arm/subscriptions"),
+
+  listResourceGroups: (subscriptionId: string) =>
+    api.get<ArmResourceGroup[]>(
+      `/arm/subscriptions/${encodeURIComponent(subscriptionId)}/resource-groups`,
+    ),
+
+  listStorageAccounts: (subscriptionId: string, rg: string) =>
+    api.get<ArmStorageAccount[]>(
+      `/arm/subscriptions/${encodeURIComponent(subscriptionId)}/resource-groups/${encodeURIComponent(rg)}/storage-accounts`,
+    ),
+
+  listAcrs: (subscriptionId: string, rg: string) =>
+    api.get<ArmAcr[]>(
+      `/arm/subscriptions/${encodeURIComponent(subscriptionId)}/resource-groups/${encodeURIComponent(rg)}/acrs`,
+    ),
+
+  listVms: (subscriptionId: string, rg: string) =>
+    api.get<ArmVm[]>(
+      `/arm/subscriptions/${encodeURIComponent(subscriptionId)}/resource-groups/${encodeURIComponent(rg)}/vms`,
+    ),
+};

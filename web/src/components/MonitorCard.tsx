@@ -7,11 +7,11 @@ interface Props {
   rightSlot?: ReactNode;
 }
 
-const STATUS_COLOR: Record<NonNullable<Props["status"]>, string> = {
-  idle: "var(--text-faint)",
-  loading: "var(--warning)",
-  ok: "var(--success)",
-  error: "var(--danger)",
+const STATUS_TAG: Record<NonNullable<Props["status"]>, { cls: string; label: string } | null> = {
+  idle: null,
+  loading: { cls: "gt gt-o", label: "Loading" },
+  ok: { cls: "gt gt-g", label: "OK" },
+  error: { cls: "gt gt-r", label: "Error" },
 };
 
 export function MonitorCard({
@@ -21,41 +21,21 @@ export function MonitorCard({
   rightSlot,
   children,
 }: PropsWithChildren<Props>) {
+  const tag = STATUS_TAG[status];
+
   return (
-    <section className="glass-card" style={{ minHeight: 200 }}>
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: "var(--space-4)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)" }}>
-          <span
-            aria-hidden
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: 999,
-              background: STATUS_COLOR[status],
-              boxShadow: `0 0 8px ${STATUS_COLOR[status]}`,
-            }}
-          />
-          <div>
-            <h3 style={{ margin: 0, fontSize: 14, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-              {title}
-            </h3>
-            {subtitle && (
-              <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
-                {subtitle}
-              </div>
-            )}
-          </div>
+    <section className="panel">
+      <div className="panel-hd">
+        <div>
+          <div className="title">{title}</div>
+          {subtitle && <div className="sub">{subtitle}</div>}
         </div>
-        {rightSlot}
-      </header>
-      <div>{children}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {tag && <span className={tag.cls}>{tag.label}</span>}
+          {rightSlot}
+        </div>
+      </div>
+      <div className="panel-bd">{children}</div>
     </section>
   );
 }

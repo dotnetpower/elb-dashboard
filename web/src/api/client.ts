@@ -1,8 +1,10 @@
 import { msalInstance, apiLoginRequest } from "@/auth/msal";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
 
-async function getAccessToken(): Promise<string> {
+async function getAccessToken(): Promise<string | null> {
+  if (DEV_BYPASS) return null;
   const account = msalInstance.getActiveAccount();
   if (!account) {
     throw new Error("not signed in");
@@ -14,8 +16,6 @@ async function getAccessToken(): Promise<string> {
     });
     return result.accessToken;
   } catch {
-    // If silent fails (e.g. consent not yet granted), wait briefly and retry
-    // to avoid racing with another interactive flow.
     await new Promise((r) => setTimeout(r, 1500));
     const result = await msalInstance.acquireTokenSilent({
       ...apiLoginRequest,
@@ -36,7 +36,9 @@ async function request<T>(
 ): Promise<T> {
   const token = await getAccessToken();
   const headers = new Headers(init.headers);
-  headers.set("Authorization", `Bearer ${token}`);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
