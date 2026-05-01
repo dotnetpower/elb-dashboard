@@ -141,3 +141,65 @@ def get_vm_status(
         "provisioning_state": vm.provisioning_state,
         "power_state": power_state,
     }
+
+
+# ---------------------------------------------------------------------------
+# Resource creation (idempotent)
+# ---------------------------------------------------------------------------
+def ensure_storage_account(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    account_name: str,
+    region: str,
+) -> None:
+    """Create a Standard_LRS HNS-enabled storage account. Idempotent."""
+    client = storage_client(credential, subscription_id)
+    LOGGER.info("ensure_storage_account account=%s rg=%s", account_name, resource_group)
+    poller = client.storage_accounts.begin_create(
+        resource_group,
+        account_name,
+        {
+            "location": region,
+            "sku": {"name": "Standard_LRS"},
+            "kind": "StorageV2",
+            "properties": {
+                "is_hns_enabled": True,
+                "public_network_access": "Disabled",
+                "minimum_tls_version": "TLS1_2",
+            },
+            "tags": {"managed-by": "elastic-blast-azure-functionapp"},
+        },
+    )
+    poller.result()
+
+    # Create default containers
+    blob_client = client.blob_containers
+    for container_name in ("blast-db", "queries", "results"):
+        try:
+            blob_client.create(resource_group, account_name, container_name, {})
+        except Exception:
+            pass  # container may already exist
+
+
+def ensure_acr(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    registry_name: str,
+    region: str,
+) -> None:
+    """Create a Standard SKU ACR. Idempotent."""
+    client = acr_client(credential, subscription_id)
+    LOGGER.info("ensure_acr registry=%s rg=%s", registry_name, resource_group)
+    poller = client.registries.begin_create(
+        resource_group,
+        registry_name,
+        {
+            "location": region,
+            "sku": {"name": "Standard"},
+            "admin_user_enabled": False,
+            "tags": {"managed-by": "elastic-blast-azure-functionapp"},
+        },
+    )
+    poller.result()

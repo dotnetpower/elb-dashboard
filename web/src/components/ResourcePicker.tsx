@@ -19,6 +19,8 @@ interface Props {
   disabledPlaceholder?: string;
   /** Allow free-text entry as a fallback (renders an `Other…` option). */
   allowCustom?: boolean;
+  /** Compact chip mode for the config strip. */
+  compact?: boolean;
 }
 
 export function ResourcePicker({
@@ -29,6 +31,7 @@ export function ResourcePicker({
   fetcher,
   disabledPlaceholder = "Configure parent first",
   allowCustom = false,
+  compact = false,
 }: Props) {
   const reactId = useId();
   const enabled = fetcher !== null;
@@ -50,6 +53,28 @@ export function ResourcePicker({
   const knownValues = new Set(query.data?.map((i) => i.value) ?? []);
   const showCustomInput = allowCustom && value && !knownValues.has(value);
 
+  if (compact) {
+    return (
+      <div className="cfg-chip">
+        <span className="lbl">{label}</span>
+        <select
+          value={value}
+          disabled={!enabled || query.isLoading}
+          onChange={(e) => onChange(e.target.value)}
+        >
+          {!enabled && <option value="">{disabledPlaceholder}</option>}
+          {enabled && query.isLoading && <option value="">Loading…</option>}
+          {query.data?.map((item) => (
+            <option key={item.value} value={item.value}>
+              {item.label}
+            </option>
+          ))}
+          {allowCustom && <option value="__custom__">Other…</option>}
+        </select>
+      </div>
+    );
+  }
+
   return (
     <label htmlFor={reactId}>
       <span className="glass-label">{label}</span>
@@ -68,7 +93,6 @@ export function ResourcePicker({
           value={value}
           disabled={!enabled || query.isLoading || query.isError}
           onChange={(e) => onChange(e.target.value)}
-          style={{ appearance: "auto" }}
         >
           {!enabled && <option value="">{disabledPlaceholder}</option>}
           {enabled && query.isLoading && <option value="">Loading…</option>}

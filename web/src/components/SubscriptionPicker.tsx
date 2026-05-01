@@ -7,9 +7,10 @@ interface Props {
   value: string;
   onChange: (subscriptionId: string) => void;
   label?: string;
+  compact?: boolean;
 }
 
-export function SubscriptionPicker({ value, onChange, label = "Subscription" }: Props) {
+export function SubscriptionPicker({ value, onChange, label = "Subscription", compact = false }: Props) {
   const query = useQuery({
     queryKey: ["arm-subscriptions"],
     queryFn: listSubscriptions,
@@ -23,6 +24,27 @@ export function SubscriptionPicker({ value, onChange, label = "Subscription" }: 
     }
   }, [value, query.data, onChange]);
 
+  if (compact) {
+    return (
+      <div className="cfg-chip">
+        <span className="lbl">{label}</span>
+        <select
+          value={value}
+          disabled={query.isLoading || query.isError}
+          onChange={(e) => onChange(e.target.value)}
+        >
+          {query.isLoading && <option value="">Loading…</option>}
+          {query.isError && <option value="">Error</option>}
+          {query.data?.map((s: SubscriptionSummary) => (
+            <option key={s.subscriptionId} value={s.subscriptionId}>
+              {s.displayName} ({s.subscriptionId.slice(0, 8)}…)
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
   return (
     <label>
       <span className="glass-label">{label}</span>
@@ -31,7 +53,6 @@ export function SubscriptionPicker({ value, onChange, label = "Subscription" }: 
         value={value}
         disabled={query.isLoading || query.isError}
         onChange={(e) => onChange(e.target.value)}
-        style={{ appearance: "auto" }}
       >
         {query.isLoading && <option value="">Loading…</option>}
         {query.isError && <option value="">Failed to load</option>}

@@ -551,6 +551,248 @@ async def delete_blast_job(
 
 
 # ---------------------------------------------------------------------------
+# ARM discovery — backend-proxied so the browser uses az login credential
+# ---------------------------------------------------------------------------
+@app.route(route="arm/subscriptions", methods=["GET"])
+def list_subscriptions(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    from azure.mgmt.resource import SubscriptionClient
+
+    cred = credential_for_caller(identity.raw_token)
+    client = SubscriptionClient(cred)
+    subs = []
+    for s in client.subscriptions.list():
+        state = s.state
+        subs.append({
+            "subscriptionId": s.subscription_id,
+            "displayName": s.display_name,
+            "state": state.value if hasattr(state, "value") else str(state or "Unknown"),
+            "tenantId": s.tenant_id,
+        })
+    subs.sort(key=lambda x: x["displayName"])
+    return _json_response(subs)
+
+
+@app.route(route="arm/subscriptions/{subscription_id}/resource-groups", methods=["GET"])
+def list_resource_groups_route(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    subscription_id = req.route_params.get("subscription_id")
+    if not subscription_id:
+        return _error_response(400, "subscription_id missing")
+
+    from services.azure_clients import resource_client
+
+    cred = credential_for_caller(identity.raw_token)
+    rc = resource_client(cred, subscription_id)
+    groups = [{"name": g.name, "location": g.location}
+              for g in rc.resource_groups.list()]
+    groups.sort(key=lambda x: x["name"])
+    return _json_response(groups)
+
+
+@app.route(route="arm/subscriptions/{subscription_id}/resource-groups/{rg}/storage-accounts", methods=["GET"])
+def list_storage_accounts_route(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    subscription_id = req.route_params.get("subscription_id")
+    rg = req.route_params.get("rg")
+    if not subscription_id or not rg:
+        return _error_response(400, "subscription_id and rg required")
+
+    from services.azure_clients import storage_client as sc
+
+    cred = credential_for_caller(identity.raw_token)
+    client = sc(cred, subscription_id)
+    accounts = [{"name": a.name, "location": a.location}
+                for a in client.storage_accounts.list_by_resource_group(rg)]
+    accounts.sort(key=lambda x: x["name"])
+    return _json_response(accounts)
+
+
+@app.route(route="arm/subscriptions/{subscription_id}/resource-groups/{rg}/acrs", methods=["GET"])
+def list_acrs_route(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    subscription_id = req.route_params.get("subscription_id")
+    rg = req.route_params.get("rg")
+    if not subscription_id or not rg:
+        return _error_response(400, "subscription_id and rg required")
+
+    from services.azure_clients import acr_client
+
+    cred = credential_for_caller(identity.raw_token)
+    client = acr_client(cred, subscription_id)
+    registries = [{"name": r.name, "location": r.location,
+                   "loginServer": r.login_server}
+                  for r in client.registries.list_by_resource_group(rg)]
+    registries.sort(key=lambda x: x["name"])
+    return _json_response(registries)
+
+
+@app.route(route="arm/subscriptions/{subscription_id}/resource-groups/{rg}/vms", methods=["GET"])
+def list_vms_route(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    subscription_id = req.route_params.get("subscription_id")
+    rg = req.route_params.get("rg")
+    if not subscription_id or not rg:
+        return _error_response(400, "subscription_id and rg required")
+
+    from services.azure_clients import compute_client as cc
+
+    cred = credential_for_caller(identity.raw_token)
+    client = cc(cred, subscription_id)
+    vms = [{"name": v.name, "location": v.location}
+           for v in client.virtual_machines.list(rg)]
+    vms.sort(key=lambda x: x["name"])
+    return _json_response(vms)
+
+
+# ---------------------------------------------------------------------------
+# Resource provisioning — wizard-driven resource creation
+# ---------------------------------------------------------------------------
+@app.route(route="resources/ensure-rg", methods=["POST"])
+def ensure_resource_group(req: func.HttpRequest) -> func.HttpResponse:
+    """Create a resource group if it doesn't exist. Idempotent."""
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    try:
+        body = json.loads(req.get_body() or b"{}")
+    except json.JSONDecodeError as exc:
+        return _error_response(400, f"invalid JSON: {exc}")
+
+    required = {"subscription_id", "resource_group", "region"}
+    missing = required - body.keys()
+    if missing:
+        return _error_response(400, f"missing fields: {sorted(missing)}")
+
+    from services import network as net_svc
+
+    cred = credential_for_caller(identity.raw_token)
+    try:
+        net_svc.ensure_resource_group(
+            cred, body["subscription_id"], body["resource_group"], body["region"],
+        )
+    except Exception as exc:
+        LOGGER.warning("ensure_resource_group failed: %s", exc)
+        return _error_response(500, f"failed to create resource group: {exc}")
+
+    LOGGER.info(
+        "ensure_resource_group by oid=%s rg=%s",
+        identity.object_id, body["resource_group"],
+    )
+    return _json_response({
+        "resource_group": body["resource_group"],
+        "region": body["region"],
+        "status": "created",
+    })
+
+
+@app.route(route="resources/ensure-storage", methods=["POST"])
+def ensure_storage_account(req: func.HttpRequest) -> func.HttpResponse:
+    """Create a storage account with HNS if it doesn't exist. Idempotent."""
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    try:
+        body = json.loads(req.get_body() or b"{}")
+    except json.JSONDecodeError as exc:
+        return _error_response(400, f"invalid JSON: {exc}")
+
+    required = {"subscription_id", "resource_group", "account_name", "region"}
+    missing = required - body.keys()
+    if missing:
+        return _error_response(400, f"missing fields: {sorted(missing)}")
+
+    cred = credential_for_caller(identity.raw_token)
+    try:
+        monitoring_svc.ensure_storage_account(
+            cred,
+            body["subscription_id"],
+            body["resource_group"],
+            body["account_name"],
+            body["region"],
+        )
+    except Exception as exc:
+        LOGGER.warning("ensure_storage_account failed: %s", exc)
+        return _error_response(500, f"failed to create storage account: {exc}")
+
+    LOGGER.info(
+        "ensure_storage_account by oid=%s account=%s",
+        identity.object_id, body["account_name"],
+    )
+    return _json_response({
+        "account_name": body["account_name"],
+        "region": body["region"],
+        "status": "created",
+    })
+
+
+@app.route(route="resources/ensure-acr", methods=["POST"])
+def ensure_acr(req: func.HttpRequest) -> func.HttpResponse:
+    """Create an ACR if it doesn't exist. Idempotent."""
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    try:
+        body = json.loads(req.get_body() or b"{}")
+    except json.JSONDecodeError as exc:
+        return _error_response(400, f"invalid JSON: {exc}")
+
+    required = {"subscription_id", "resource_group", "registry_name", "region"}
+    missing = required - body.keys()
+    if missing:
+        return _error_response(400, f"missing fields: {sorted(missing)}")
+
+    cred = credential_for_caller(identity.raw_token)
+    try:
+        monitoring_svc.ensure_acr(
+            cred,
+            body["subscription_id"],
+            body["resource_group"],
+            body["registry_name"],
+            body["region"],
+        )
+    except Exception as exc:
+        LOGGER.warning("ensure_acr failed: %s", exc)
+        return _error_response(500, f"failed to create ACR: {exc}")
+
+    LOGGER.info(
+        "ensure_acr by oid=%s registry=%s",
+        identity.object_id, body["registry_name"],
+    )
+    return _json_response({
+        "registry_name": body["registry_name"],
+        "region": body["region"],
+        "status": "created",
+    })
+
+
+# ---------------------------------------------------------------------------
 # BLAST — results
 # ---------------------------------------------------------------------------
 @app.route(route="blast/jobs/{job_id}/results", methods=["GET"])
