@@ -109,7 +109,7 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
         f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
         f"# Ensure az login is active (fallback to managed identity)\n"
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
-        f"cd /home/azureuser/elastic-blast-azure && "
+        f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
         f"source venv/bin/activate && "
         f"python bin/elastic-blast submit --cfg /tmp/elb-{job_id}.ini 2>&1 | tail -50; "
         f"echo EXIT_CODE=$?'"
@@ -126,14 +126,16 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
 
     exit_code = _parse_exit_code(output)
     # Check for real elastic-blast ERROR lines (not XML ErrorCode in Azure responses).
-    # Real errors appear as "ERROR: <message>" at line start.
+    # Exclude non-fatal warnings like "Unrecognized configuration parameter".
+    NON_FATAL_PATTERNS = ["Unrecognized configuration parameter", "Invalid machine type"]
     has_fatal_error = False
     for line in output.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("ERROR:") and "Memory limit" in stripped:
-            has_fatal_error = True
-            break
-        if stripped.startswith("ERROR:") and "elastic-blast" in stripped.lower():
+        if not stripped.startswith("ERROR:"):
+            continue
+        if any(nf in stripped for nf in NON_FATAL_PATTERNS):
+            continue
+        if "Memory limit" in stripped or "elastic-blast" in stripped.lower():
             has_fatal_error = True
             break
     success = exit_code == 0 and not has_fatal_error
@@ -156,7 +158,7 @@ def activity_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
         f"sudo -u azureuser bash -c '"
         f"export HOME=/home/azureuser && "
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
-        f"cd /home/azureuser/elastic-blast-azure && "
+        f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
         f"source venv/bin/activate && "
         f"python bin/elastic-blast status --cfg /tmp/elb-{job_id}.ini --exit-code 2>&1 | tail -20; "
         f"echo EXIT_CODE=$?'"
@@ -235,7 +237,7 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
         f"export HOME=/home/azureuser && "
         f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
-        f"cd /home/azureuser/elastic-blast-azure && "
+        f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
         f"source venv/bin/activate && "
         f"python bin/elastic-blast prepare --cfg /tmp/elb-{job_id}.ini 2>&1 | tail -80; "
         f"echo EXIT_CODE=$?'"
@@ -268,7 +270,7 @@ def activity_run_elastic_blast_delete(payload: dict[str, Any]) -> dict[str, Any]
         f"#!/bin/bash\n"
         f"sudo -u azureuser bash -c '"
         f"export HOME=/home/azureuser && "
-        f"cd /home/azureuser/elastic-blast-azure && "
+        f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
         f"source venv/bin/activate && "
         f"python bin/elastic-blast delete --cfg /tmp/elb-{job_id}.ini 2>&1 | tail -20'"
     )
@@ -301,6 +303,7 @@ def activity_export_blast_results(payload: dict[str, Any]) -> dict[str, Any]:
         f"export HOME=/home/azureuser\n"
         f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI\n"
         f"cd /home/azureuser/elastic-blast-azure\n"
+        f"export PYTHONPATH=src:$PYTHONPATH\n"
         f"source venv/bin/activate\n"
         f"\n"
         f"CFG=/tmp/elb-{job_id}.ini\n"

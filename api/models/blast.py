@@ -66,9 +66,9 @@ class BlastSubmitRequest(BaseModel):
         return v
 
     # Cluster configuration
-    machine_type: str = Field("Standard_E32s_v3")
-    num_nodes: int = Field(1, ge=1, le=100)
-    pd_size: str = Field("3000Gi")
+    machine_type: str = Field("Standard_E16s_v5")
+    num_nodes: int = Field(3, ge=1, le=100)
+    pd_size: str = Field("1000Gi")
     mem_request: str = Field("8Gi")
     mem_limit: str = Field("24Gi")
     batch_len: int | None = None
