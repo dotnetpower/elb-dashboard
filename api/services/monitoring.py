@@ -501,12 +501,55 @@ def get_vm_status(
         (s.display_status for s in statuses if s.code and s.code.startswith("PowerState/")),
         None,
     )
+
+    # OS disk size
+    os_disk_gb: int | None = None
+    if vm.storage_profile and vm.storage_profile.os_disk:
+        os_disk_gb = vm.storage_profile.os_disk.disk_size_gb
+
+    # Managed Identity
+    has_managed_identity = False
+    identity_type: str | None = None
+    if vm.identity:
+        identity_type = vm.identity.type
+        has_managed_identity = identity_type in ("SystemAssigned", "SystemAssigned, UserAssigned")
+
+    # Public IP — resolve from NIC → IP config → public IP resource
+    public_ip: str | None = None
+    fqdn: str | None = None
+    try:
+        from azure.mgmt.network import NetworkManagementClient
+        net_client = NetworkManagementClient(credential, subscription_id)
+        if vm.network_profile and vm.network_profile.network_interfaces:
+            nic_id = vm.network_profile.network_interfaces[0].id
+            nic_parts = nic_id.split("/")
+            nic_rg = nic_parts[nic_parts.index("resourceGroups") + 1]
+            nic_name = nic_parts[-1]
+            nic = net_client.network_interfaces.get(nic_rg, nic_name)
+            if nic.ip_configurations:
+                pip_ref = nic.ip_configurations[0].public_ip_address
+                if pip_ref and pip_ref.id:
+                    pip_parts = pip_ref.id.split("/")
+                    pip_rg = pip_parts[pip_parts.index("resourceGroups") + 1]
+                    pip_name = pip_parts[-1]
+                    pip = net_client.public_ip_addresses.get(pip_rg, pip_name)
+                    public_ip = pip.ip_address
+                    if pip.dns_settings and pip.dns_settings.fqdn:
+                        fqdn = pip.dns_settings.fqdn
+    except Exception as exc:
+        LOGGER.debug("could not resolve public IP for %s: %s", vm_name, exc)
+
     return {
         "name": vm.name,
         "region": vm.location,
         "vm_size": vm.hardware_profile.vm_size if vm.hardware_profile else None,
         "provisioning_state": vm.provisioning_state,
         "power_state": power_state,
+        "os_disk_gb": os_disk_gb,
+        "public_ip": public_ip,
+        "fqdn": fqdn,
+        "has_managed_identity": has_managed_identity,
+        "identity_type": identity_type,
     }
 
 

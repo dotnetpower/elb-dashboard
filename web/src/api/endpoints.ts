@@ -60,6 +60,15 @@ export const terminalApi = {
       `/terminal/${encodeURIComponent(vmName)}/stop?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(resourceGroup)}`,
       {},
     ),
+  startVm: (vmName: string, subscriptionId: string, resourceGroup: string) =>
+    api.post<{ ok: boolean; vm_name: string; status: string }>(
+      `/terminal/${encodeURIComponent(vmName)}/start?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(resourceGroup)}`,
+      {},
+    ),
+  health: (vmName: string, subscriptionId: string, resourceGroup: string) =>
+    api.get<TerminalHealth>(
+      `/terminal/${encodeURIComponent(vmName)}/health?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(resourceGroup)}`,
+    ),
 };
 
 export interface AksAgentPool {
@@ -114,6 +123,21 @@ export interface VmStatus {
   vm_size: string | null;
   provisioning_state: string | null;
   power_state: string | null;
+  os_disk_gb: number | null;
+  public_ip: string | null;
+  fqdn: string | null;
+  has_managed_identity: boolean;
+  identity_type: string | null;
+}
+
+export interface TerminalHealth {
+  az_cli: string;
+  kubectl: string;
+  azcopy: string;
+  python: string;
+  az_login_active: boolean;
+  az_login_user: string;
+  az_login_age_seconds: number;
 }
 
 export interface K8sNode {
