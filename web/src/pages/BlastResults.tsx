@@ -546,11 +546,24 @@ export function BlastResults() {
     : job?.runtime_status === "Failed" ? "error"
     : jobPhase || "unknown";
 
-  // Track phase transitions for toast notifications
-  // Skip toast on initial load (prevPhaseRef starts as null)
+  // Track phase transitions for toast notifications.
+  // Only toast when we observe a LIVE transition (running → completed).
+  // If the job is already terminal on first load, never toast.
+  const initialPhaseRef = useRef<string | null>(null);
   useEffect(() => {
     if (prevPhaseRef.current === null) {
-      // First render — record phase but don't toast
+      // First render — record phase, never toast
+      prevPhaseRef.current = phase;
+      initialPhaseRef.current = phase;
+      return;
+    }
+    // If the job was already terminal when we first loaded, skip all toasts
+    const wasTerminalOnLoad = initialPhaseRef.current === "completed"
+      || initialPhaseRef.current === "failed"
+      || initialPhaseRef.current === "error"
+      || initialPhaseRef.current === "submit_failed"
+      || initialPhaseRef.current === "cancelled";
+    if (wasTerminalOnLoad) {
       prevPhaseRef.current = phase;
       return;
     }
