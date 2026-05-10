@@ -472,7 +472,15 @@ function ClusterDetails({
 
   const nodeMetrics = (topQuery.data?.nodes ?? []).map((n) => {
     const short = n.name.replace(/^aks-/, "").replace(/-vmss\d+$/, "");
-    return { name: short, fullName: n.name, cpu: n.cpu, cpuPct: `${n.cpu_pct}%`, mem: n.memory, memPct: `${n.memory_pct}%` };
+    return {
+      name: short,
+      fullName: n.name,
+      cpu: n.cpu,
+      cpuPct: n.cpu_pct,
+      mem: n.memory,
+      memPct: n.memory_pct,
+      memTotal: n.memory_total ?? "?",
+    };
   });
 
   // ESC + body scroll lock for modal
@@ -487,34 +495,48 @@ function ClusterDetails({
 
   return (
     <div style={{ marginTop: "var(--space-2)" }}>
-      {/* Compact inline: node CPU/Memory bars */}
+      {/* Node Resources table — matching ACR card style */}
       {isRunning && nodeMetrics.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-          <div className="muted" style={{ fontSize: 9, textTransform: "uppercase", display: "flex", justifyContent: "space-between" }}>
-            <span>Node Resources</span>
-            {topQuery.isFetching && <Loader2 size={9} className="spin" />}
-          </div>
-          {nodeMetrics.map((n) => (
-            <div key={n.fullName} style={{ fontSize: 10, display: "grid", gridTemplateColumns: "1fr 70px 70px", gap: 6, alignItems: "center" }}>
-              <span className="muted" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={n.fullName}>{n.name}</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                <div style={{ flex: 1, height: 4, background: "var(--bg-tertiary)", borderRadius: 2, overflow: "hidden" }}>
-                  <div style={{ width: n.cpuPct, height: "100%", background: "var(--accent)", borderRadius: 2 }} />
-                </div>
-                <span style={{ fontSize: 9, color: "var(--text-faint)", minWidth: 28, textAlign: "right" }}>{n.cpuPct}</span>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                <div style={{ flex: 1, height: 4, background: "var(--bg-tertiary)", borderRadius: 2, overflow: "hidden" }}>
-                  <div style={{ width: n.memPct, height: "100%", background: "var(--purple)", borderRadius: 2 }} />
-                </div>
-                <span style={{ fontSize: 9, color: "var(--text-faint)", minWidth: 28, textAlign: "right" }}>{n.memPct}</span>
-              </div>
-            </div>
-          ))}
-          <div className="muted" style={{ fontSize: 8, display: "flex", gap: 12 }}>
-            <span><span style={{ display: "inline-block", width: 6, height: 6, borderRadius: 1, background: "var(--accent)", verticalAlign: "middle", marginRight: 3 }} />CPU</span>
-            <span><span style={{ display: "inline-block", width: 6, height: 6, borderRadius: 1, background: "var(--purple)", verticalAlign: "middle", marginRight: 3 }} />Memory</span>
-          </div>
+        <div style={{ marginTop: 4 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
+                <th style={{ textAlign: "left", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>
+                  Node
+                  {topQuery.isFetching && <Loader2 size={9} className="spin" style={{ marginLeft: 4, verticalAlign: "middle" }} />}
+                </th>
+                <th style={{ textAlign: "right", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>CPU</th>
+                <th style={{ textAlign: "right", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>Memory</th>
+              </tr>
+            </thead>
+            <tbody>
+              {nodeMetrics.map((n) => (
+                <tr key={n.fullName} style={{ borderBottom: "1px solid var(--border-weak)" }}>
+                  <td style={{ padding: "5px 0", fontSize: 11 }} title={n.fullName}>
+                    <span className="muted">{n.name}</span>
+                  </td>
+                  <td style={{ padding: "5px 0", textAlign: "right" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
+                      <div style={{ width: 48, height: 5, background: "var(--bg-tertiary)", borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{ width: `${Math.max(n.cpuPct, 2)}%`, height: "100%", background: n.cpuPct > 80 ? "var(--danger)" : n.cpuPct > 50 ? "var(--warning)" : "var(--accent)", borderRadius: 3, transition: "width 0.6s ease" }} />
+                      </div>
+                      <code style={{ fontSize: 10, color: "var(--text-secondary)", minWidth: 50, textAlign: "right" }}>{n.cpu}</code>
+                      <span style={{ fontSize: 9, color: "var(--text-faint)", minWidth: 28, textAlign: "right" }}>{n.cpuPct}%</span>
+                    </div>
+                  </td>
+                  <td style={{ padding: "5px 0", textAlign: "right" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
+                      <div style={{ width: 48, height: 5, background: "var(--bg-tertiary)", borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{ width: `${Math.max(n.memPct, 2)}%`, height: "100%", background: n.memPct > 80 ? "var(--danger)" : n.memPct > 50 ? "var(--warning)" : "var(--purple, #a78bfa)", borderRadius: 3, transition: "width 0.6s ease" }} />
+                      </div>
+                      <code style={{ fontSize: 10, color: "var(--text-secondary)", minWidth: 50, textAlign: "right" }}>{n.mem}</code>
+                      <span style={{ fontSize: 9, color: "var(--text-faint)", minWidth: 28, textAlign: "right" }}>{n.memPct}%</span>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
