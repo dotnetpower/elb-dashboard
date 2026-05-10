@@ -143,13 +143,20 @@ function StepLogBlock({ log, state, stepKey }: { log: string; state: StepState; 
   const [copied, setCopied] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
 
-  // Split into summary (first line or status line) and detail (console output)
+  // Split into summary (first line) and detail (rest with line numbers)
   const delimIdx = log.indexOf("---");
   const hasSections = delimIdx > 0;
-  const summary = hasSections ? log.slice(0, delimIdx).trim() : log;
-  const detail = hasSections ? log.slice(delimIdx).trim() : null;
+  const allLines = log.split("\n");
+  // Summary = text before the first "---" section, or first line if multi-line without "---"
+  const summary = hasSections
+    ? log.slice(0, delimIdx).trim()
+    : allLines.length <= 2 ? log : allLines[0];
+  // Detail = everything from "---" onward, or lines 2+ if no "---" but multi-line
+  const detail = hasSections
+    ? log.slice(delimIdx).trim()
+    : allLines.length > 2 ? allLines.slice(1).join("\n") : null;
   const detailLines = detail?.split("\n") ?? [];
-  const isLong = detailLines.length > 30;
+  const isLong = detailLines.length > 40;
 
   const copyLog = () => {
     navigator.clipboard.writeText(log).catch(() => {});
@@ -172,12 +179,13 @@ function StepLogBlock({ log, state, stepKey }: { log: string; state: StepState; 
       {detail && (
         <div className={`step-log-detail${isLong && !isExpanded ? " step-log-detail--collapsed" : ""}`}>
           <div className="step-log-lines">
-            {(isLong && !isExpanded ? detailLines.slice(0, 30) : detailLines).map((line, i) => {
+            {(isLong && !isExpanded ? detailLines.slice(0, 40) : detailLines).map((line, i) => {
               let lineClass = "step-log-text";
               if (line.startsWith("WARNING") || line.startsWith("⚠")) lineClass += " step-log-text--warn";
-              else if (line.startsWith("ERROR") || line.startsWith("✗")) lineClass += " step-log-text--error";
+              else if (line.startsWith("ERROR") || line.startsWith("✗") || /ErrorCode:|<Error>|ContainerNotFound|FATAL/.test(line)) lineClass += " step-log-text--error";
               else if (line.startsWith("✓") || line.includes("=ok") || line.includes("EXIT_CODE=0")) lineClass += " step-log-text--ok";
               else if (line.startsWith("---")) lineClass += " step-log-text--header";
+              else if (line.startsWith("INFO:")) lineClass += " step-log-text--info";
               return (
                 <div key={`${stepKey}-${i}`} className="step-log-line">
                   <span className="step-log-ln">{i + 1}</span>
@@ -524,15 +532,19 @@ export function BlastResults() {
   const publicAccessDisabled = resultsQuery.data?.public_access_disabled === true;
   const customStatus = (typeof job?.custom_status === "object" && job?.custom_status !== null)
     ? (job.custom_status as Record<string, unknown>) : null;
-  // Phase resolution: prefer the job's own phase/status over the orchestrator runtime_status,
-  // because Durable Functions marks "Completed" even when the orchestrator returns a failure.
-  const jobPhase = (customStatus?.phase as string) || job?.phase || job?.status;
-  const isJobFailed = jobPhase === "failed" || jobPhase === "error" || jobPhase === "submit_failed";
+  // Phase resolution: use multiple signals to determine the real status.
+  // Priority: output.phase (orchestrator final result) > custom_status.phase > entity phase > runtime_status
+  const outputPhase = (typeof job?.output === "object" && job?.output !== null)
+    ? (job.output as Record<string, unknown>).phase as string | undefined : undefined;
+  const outputStatus = (typeof job?.output === "object" && job?.output !== null)
+    ? (job.output as Record<string, unknown>).status as string | undefined : undefined;
+  const jobPhase = outputPhase || (customStatus?.phase as string) || job?.phase || job?.status;
+  const isJobFailed = jobPhase === "failed" || jobPhase === "error" || jobPhase === "submit_failed"
+    || outputStatus === "failed";
   const phase = isJobFailed ? (jobPhase as string)
-    : job?.runtime_status === "Completed" && !isJobFailed ? (jobPhase === "completed" || !jobPhase ? "completed" : jobPhase as string)
+    : job?.runtime_status === "Completed" && !isJobFailed ? "completed"
     : job?.runtime_status === "Failed" ? "error"
     : jobPhase || "unknown";
-  const color = statusColor(phase);
 
   // Track phase transitions for toast notifications
   // Skip toast on initial load (prevPhaseRef starts as null)
@@ -579,11 +591,26 @@ export function BlastResults() {
     }
   };
 
-  const isRunning = phase !== "completed" && phase !== "failed" && phase !== "deleted" && phase !== "error" && phase !== "cancelled" && phase !== "submit_failed";
   const isFailed = isJobFailed;
   const blastStatus = customStatus?.blast_status as string | undefined;
   const pollAttempt = customStatus?.poll_attempt as number | undefined;
   const runtimeStatus = job?.runtime_status as string | undefined;
+
+  // Detect errors in submit/export logs
+  const stepsObj = (customStatus?.steps ?? (typeof job?.output === "object" ? (job.output as Record<string, unknown>)?.steps : null) ?? {}) as Record<string, Record<string, unknown>>;
+  const exportStep = stepsObj?.exporting_results as Record<string, unknown> | undefined;
+  const submitStep = stepsObj?.submitting as Record<string, unknown> | undefined;
+  const hasOutputFiles = exportStep?.has_output_files as boolean | undefined;
+  const submitOutput = (submitStep?.output as string) ?? "";
+  const submitHasErrors = /ErrorCode:|<Error>|ERROR:/.test(submitOutput);
+  // "completed" but submit had errors or no .out files = treat as failed
+  const completedButFailed = phase === "completed" && (hasOutputFiles === false || submitHasErrors);
+  // Effective phase: override to submit_failed when completed-but-failed
+  const effectivePhase = completedButFailed ? "submit_failed" : phase;
+  const effectiveIsFailed = isFailed || completedButFailed;
+  const effectiveColor = statusColor(effectivePhase === "submit_failed" ? "failed" : effectivePhase);
+  const outFiles = files.filter((f) => f.name.endsWith(".out"));
+  const isRunning = !effectiveIsFailed && phase !== "completed" && phase !== "deleted" && phase !== "cancelled";
 
   return (
     <div className="page-stack">
@@ -661,8 +688,8 @@ export function BlastResults() {
               </div>
             )}
 
-            {/* Success banner */}
-            {phase === "completed" && (
+            {/* Success banner — only when truly clean */}
+            {phase === "completed" && !completedButFailed && !effectiveIsFailed && (
               <div style={{
                 padding: "14px 16px", marginBottom: "var(--space-3)", borderRadius: 10,
                 background: "linear-gradient(135deg, rgba(106,214,163,0.12), rgba(106,214,163,0.04))",
@@ -682,20 +709,22 @@ export function BlastResults() {
                     Job Completed Successfully
                   </div>
                   <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
-                    {files.length > 0 ? `${files.length} result file${files.length === 1 ? "" : "s"} ready for download` : "Checking results..."}
+                    {outFiles.length > 0 ? `${outFiles.length} result file${outFiles.length === 1 ? "" : "s"} ready for download` : files.length > 0 ? `${files.length} file${files.length === 1 ? "" : "s"} available` : "Checking results..."}
                   </div>
                 </div>
               </div>
             )}
 
+
             {/* Failure banner */}
-            {isFailed && (() => {
+            {effectiveIsFailed && (() => {
               // Extract the most useful error info from the job data
-              const errorOutput = (typeof job.output === "object" && job.output !== null)
-                ? (job.output as Record<string, unknown>).error as string ?? ""
-                : typeof job.error === "string" ? job.error : "";
-              const failedStep = phase === "submit_failed" ? "Submit Job"
-                : phase === "error" && customStatus?.phase === "running" ? "BLAST Run"
+              const errorOutput = completedButFailed ? submitOutput
+                : (typeof job.output === "object" && job.output !== null)
+                  ? (job.output as Record<string, unknown>).error as string ?? ""
+                  : typeof job.error === "string" ? job.error : "";
+              const failedStep = effectivePhase === "submit_failed" ? "Submit Job"
+                : effectivePhase === "error" && customStatus?.phase === "running" ? "BLAST Run"
                 : "Execution";
               // Find first actual error line from the output
               const errorLines = errorOutput.split("\n").filter(
@@ -759,9 +788,9 @@ export function BlastResults() {
               <span style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
                 <span style={{
                   width: 8, height: 8, borderRadius: 999,
-                  background: color, boxShadow: `0 0 8px ${color}`,
+                  background: effectiveColor, boxShadow: `0 0 8px ${effectiveColor}`,
                 }} />
-                {phase}
+                {effectivePhase === "submit_failed" ? "failed" : effectivePhase}
               </span>
               <span className="muted">Created</span>
               <span>{job.created_at ? new Date(job.created_at).toLocaleString() : "—"}</span>
@@ -796,7 +825,7 @@ export function BlastResults() {
         )}
 
         {/* Summary metric cards for completed jobs */}
-        {job && phase === "completed" && files.length > 0 && (
+        {job && phase === "completed" && !effectiveIsFailed && files.length > 0 && (
           <div className="metric-grid" style={{ marginTop: "var(--space-3)" }}>
             <div className="metric-block">
               <div className="mv">{files.length}</div>
@@ -807,9 +836,10 @@ export function BlastResults() {
               <div className="mu">Total size</div>
             </div>
             <div className="metric-block">
-              <div className="mv" style={{ color: "var(--success)" }}>
-                <CheckCircle2 size={18} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
-                {phase}
+              <div className="mv" style={{ color: completedButFailed ? "var(--danger)" : "var(--success)" }}>
+                {completedButFailed
+                  ? <><XCircle size={18} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />failed</>
+                  : <><CheckCircle2 size={18} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />{phase}</>}
               </div>
               <div className="mu">Status</div>
             </div>
@@ -833,7 +863,7 @@ export function BlastResults() {
           <h3 style={{ margin: "0 0 10px 0", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
             <FileText size={15} strokeWidth={1.5} /> Execution Steps
           </h3>
-          <StepLogSection phase={phase} job={job as unknown as Record<string, unknown>} subscriptionId={subscriptionId} storageAccount={storageAccount} resourceGroup={resourceGroup} />
+          <StepLogSection phase={effectivePhase} job={job as unknown as Record<string, unknown>} subscriptionId={subscriptionId} storageAccount={storageAccount} resourceGroup={resourceGroup} />
         </section>
       )}
 
@@ -862,7 +892,18 @@ export function BlastResults() {
             <Loader2 size={16} className="spin" style={{ color: "var(--accent)", flexShrink: 0 }} />
             <span style={{ color: "var(--text-muted)" }}>
               Results will appear here once the job completes. Current phase:{" "}
-              <strong style={{ color: "var(--accent)" }}>{phase}</strong>
+              <strong style={{ color: "var(--accent)" }}>{effectivePhase}</strong>
+            </span>
+          </div>
+        ) : effectiveIsFailed ? (
+          <div style={{
+            marginTop: "var(--space-3)", padding: "16px", borderRadius: 10,
+            background: "rgba(224,123,138,0.04)", border: "1px solid rgba(224,123,138,0.15)",
+            fontSize: 13, display: "flex", alignItems: "center", gap: 10,
+          }}>
+            <XCircle size={16} style={{ color: "var(--danger)", flexShrink: 0 }} />
+            <span style={{ color: "var(--text-muted)" }}>
+              No results available — the job failed at the <strong style={{ color: "var(--danger)" }}>{effectivePhase === "submit_failed" ? "Submit" : "Execution"}</strong> step.
             </span>
           </div>
         ) : !subscriptionId || !storageAccount ? (
