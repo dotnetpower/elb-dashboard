@@ -95,7 +95,7 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
 
   return (
     <MonitorCard
-      title="ACR"
+      title="Azure Container Registry"
       subtitle={enabled ? `${registryName} · ${resourceGroup}` : "Configure ACR name"}
       status={buildStatus === "building" || hasServerBuilding ? "loading" : status}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}

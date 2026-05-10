@@ -200,7 +200,7 @@ export function ClusterCard({
 
   return (
     <MonitorCard
-      title="AKS Cluster"
+      title="Azure Kubernetes Service Cluster"
       subtitle={enabled ? resourceGroup : "Configure subscription / RG"}
       status={provStatus === "creating" ? "loading" : status}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
