@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Database, Loader2, CheckCircle2, AlertTriangle, Lock, Globe, ShieldAlert, Download, Circle, Maximize2, X, RefreshCw } from "lucide-react";
 
-import { api } from "@/api/client";
+import { api, formatApiError } from "@/api/client";
 import { monitoringApi, blastApi } from "@/api/endpoints";
 import { MonitorCard } from "@/components/MonitorCard";
 import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
@@ -56,7 +56,7 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
       setToggleMsg({ type: "ok", text: "Change applied. Propagation may take a few seconds." });
     },
     onError: (e) => {
-      setToggleMsg({ type: "err", text: (e as Error).message });
+      setToggleMsg({ type: "err", text: formatApiError(e, "storage") });
     },
   });
 
@@ -307,7 +307,7 @@ function BlastDbSection({
       // Refresh database list
       dbQuery.refetch();
     } catch (e) {
-      setDownloadResult({ db: dbName, msg: (e as Error).message, type: "err" });
+      setDownloadResult({ db: dbName, msg: formatApiError(e, "storage"), type: "err" });
     } finally {
       setDownloading(null);
     }
