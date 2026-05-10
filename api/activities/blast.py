@@ -98,7 +98,7 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
         write_script,
     )
     if "WRITE_OK" not in write_output:
-        return {"output": sanitise(write_output)[:1000], "success": False, "job_id": job_id}
+        return {"output": sanitise(write_output)[:4000], "success": False, "job_id": job_id}
 
     # Then run elastic-blast submit
     submit_script = (
@@ -121,7 +121,7 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
         payload["terminal_vm_name"],
         submit_script,
     )
-    sanitised = sanitise(output)[:2000]
+    sanitised = sanitise(output)[:4000]
     LOGGER.info("elastic-blast submit output: %s", sanitised[:500])
 
     exit_code = _parse_exit_code(output)
@@ -168,7 +168,7 @@ def activity_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
         payload["terminal_vm_name"],
         script,
     )
-    sanitised = sanitise(output)[:1000]
+    sanitised = sanitise(output)[:4000]
 
     exit_code = _parse_exit_code(output)
 
@@ -196,6 +196,69 @@ def _parse_exit_code(output: str) -> int:
     return 6  # UNKNOWN
 
 
+def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: runs elastic-blast prepare on the Remote Terminal VM.
+
+    Prepares the AKS cluster with DB shards for warm execution.
+    This creates the cluster, downloads DB shards to local SSDs, but does NOT
+    run BLAST jobs. Use submit with reuse=true afterwards.
+    """
+    cred = credential_for_caller(payload.get("user_assertion"))
+    job_id = _validate_job_id(payload["job_id"])
+
+    config_text = payload.get("config_text", "")
+    if not config_text:
+        config_text = generate_config(payload)
+
+    import base64
+    config_b64 = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
+
+    write_script = (
+        f"#!/bin/bash\n"
+        f"printf '%s' '{config_b64}' | base64 -d > /tmp/elb-{job_id}.ini\n"
+        f"chmod 644 /tmp/elb-{job_id}.ini\n"
+        f"chown azureuser:azureuser /tmp/elb-{job_id}.ini\n"
+        f"echo WRITE_OK"
+    )
+    write_output = compute_svc.run_shell(
+        cred, payload["subscription_id"],
+        payload["terminal_resource_group"], payload["terminal_vm_name"],
+        write_script,
+    )
+    if "WRITE_OK" not in write_output:
+        return {"output": sanitise(write_output)[:1000], "success": False, "job_id": job_id}
+
+    prepare_script = (
+        f"#!/bin/bash\n"
+        f"chown -R azureuser:azureuser /home/azureuser/.azcopy /home/azureuser/.azure 2>/dev/null; "
+        f"sudo -u azureuser bash -c '"
+        f"export HOME=/home/azureuser && "
+        f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
+        f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
+        f"cd /home/azureuser/elastic-blast-azure && "
+        f"source venv/bin/activate && "
+        f"python bin/elastic-blast prepare --cfg /tmp/elb-{job_id}.ini 2>&1 | tail -80; "
+        f"echo EXIT_CODE=$?'"
+    )
+    output = compute_svc.run_shell(
+        cred,
+        payload["subscription_id"],
+        payload["terminal_resource_group"],
+        payload["terminal_vm_name"],
+        prepare_script,
+    )
+    sanitised = sanitise(output)[:2000]
+    LOGGER.info("elastic-blast prepare output: %s", sanitised[:500])
+
+    exit_code = _parse_exit_code(output)
+    success = exit_code == 0
+    return {
+        "output": sanitised,
+        "success": success,
+        "job_id": job_id,
+    }
+
+
 def activity_run_elastic_blast_delete(payload: dict[str, Any]) -> dict[str, Any]:
     """side-effect: runs elastic-blast delete on the Remote Terminal VM."""
     cred = credential_for_caller(payload.get("user_assertion"))
@@ -216,7 +279,7 @@ def activity_run_elastic_blast_delete(payload: dict[str, Any]) -> dict[str, Any]
         payload["terminal_vm_name"],
         script,
     )
-    return {"output": sanitise(output)[:1000], "success": True}
+    return {"output": sanitise(output)[:4000], "success": True}
 
 
 def activity_export_blast_results(payload: dict[str, Any]) -> dict[str, Any]:

@@ -73,6 +73,13 @@ class BlastSubmitRequest(BaseModel):
     mem_limit: str = Field("24Gi")
     batch_len: int | None = None
 
+    # Warm cluster / DB sharding
+    enable_warmup: bool = Field(True, description="Run prepare step to warm cluster with DB shards before BLAST")
+    reuse: bool = Field(False, description="Reuse existing warm cluster instead of creating a new one")
+    db_auto_partition: bool = Field(True, description="Automatically partition DB into shards for parallel search")
+    db_partitions: int = Field(0, ge=0, le=64, description="Number of DB partitions (0 = auto)")
+    db_partition_prefix: str = Field("", max_length=200)
+
     # Azure resource names
     acr_resource_group: str = Field("")
     acr_name: str = Field("")
