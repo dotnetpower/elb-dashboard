@@ -627,9 +627,21 @@ export function BlastResults() {
   const submitStep = stepsObj?.submitting as Record<string, unknown> | undefined;
   const hasOutputFiles = exportStep?.has_output_files as boolean | undefined;
   const submitOutput = (submitStep?.output as string) ?? "";
-  const submitHasErrors = /ErrorCode:|<Error>|ERROR:/.test(submitOutput);
-  // "completed" but submit had errors or no .out files = treat as failed
-  const completedButFailed = phase === "completed" && (hasOutputFiles === false || submitHasErrors);
+  // Only match fatal errors — not non-fatal config warnings
+  const submitHasFatalErrors = (() => {
+    if (/ErrorCode:|<Error>/.test(submitOutput)) return true;
+    // Check for ERROR: at line start, but exclude known non-fatal warnings
+    const NON_FATAL = ["Unrecognized configuration parameter"];
+    for (const line of submitOutput.split("\n")) {
+      if (line.startsWith("ERROR:")) {
+        const isFatal = !NON_FATAL.some((nf) => line.includes(nf));
+        if (isFatal) return true;
+      }
+    }
+    return false;
+  })();
+  // "completed" but submit had fatal errors or no .out files = treat as failed
+  const completedButFailed = phase === "completed" && (hasOutputFiles === false || submitHasFatalErrors);
   // Effective phase: override to submit_failed when completed-but-failed
   const effectivePhase = completedButFailed ? "submit_failed" : phase;
   const effectiveIsFailed = isFailed || completedButFailed;
