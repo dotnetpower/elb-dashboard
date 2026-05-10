@@ -641,7 +641,9 @@ export function BlastResults() {
     return false;
   })();
   // "completed" but submit had fatal errors or no .out files = treat as failed
-  const completedButFailed = phase === "completed" && (hasOutputFiles === false || submitHasFatalErrors);
+  // However, trust the orchestrator's final verdict if it explicitly says "completed"
+  const orchestratorSaysCompleted = outputStatus === "completed";
+  const completedButFailed = phase === "completed" && !orchestratorSaysCompleted && (hasOutputFiles === false || submitHasFatalErrors);
   // Effective phase: override to submit_failed when completed-but-failed
   const effectivePhase = completedButFailed ? "submit_failed" : phase;
   const effectiveIsFailed = isFailed || completedButFailed;
