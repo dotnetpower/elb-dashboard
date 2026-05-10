@@ -33,12 +33,26 @@ def generate_config(params: dict[str, Any]) -> str:
     cfg.set("cluster", "num-nodes", str(params.get("num_nodes", 1)))
     cfg.set("cluster", "pd-size", params.get("pd_size", "3000Gi"))
 
+    # Warm cluster reuse mode
+    if params.get("reuse"):
+        cfg.set("cluster", "reuse", "true")
+
     # [blast]
     cfg.add_section("blast")
     cfg.set("blast", "program", params.get("program", "blastn"))
     cfg.set("blast", "db", params.get("db", ""))
     cfg.set("blast", "queries", params.get("query_blob_url", ""))
     cfg.set("blast", "results", params.get("results_url", ""))
+
+    # DB partitioning / sharding
+    if params.get("db_auto_partition"):
+        cfg.set("blast", "db-auto-partition", "true")
+    db_partitions = params.get("db_partitions")
+    if db_partitions and int(db_partitions) > 0:
+        cfg.set("blast", "db-partitions", str(db_partitions))
+    db_partition_prefix = params.get("db_partition_prefix")
+    if db_partition_prefix:
+        cfg.set("blast", "db-partition-prefix", db_partition_prefix)
 
     # Build options string
     options_parts: list[str] = []

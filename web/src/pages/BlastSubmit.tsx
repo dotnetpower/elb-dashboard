@@ -88,6 +88,8 @@ interface FormState {
   additional_options: string;
   selectedCluster: string;
   optimize: string;
+  enable_warmup: boolean;
+  db_auto_partition: boolean;
 }
 
 const INITIAL: FormState = {
@@ -109,6 +111,8 @@ const INITIAL: FormState = {
   additional_options: "",
   selectedCluster: "",
   optimize: "megablast",
+  enable_warmup: true,
+  db_auto_partition: true,
 };
 
 function Tip({ text }: { text: string }) {
@@ -291,6 +295,8 @@ export function BlastSubmit() {
       pd_size: "3000Gi",
       mem_request: "16Gi",
       mem_limit: "32Gi",
+      enable_warmup: form.enable_warmup,
+      db_auto_partition: form.db_auto_partition,
       acr_resource_group: acrRg || undefined,
       acr_name: acrName || undefined,
       storage_account: storageAccount,
@@ -583,6 +589,29 @@ export function BlastSubmit() {
             </div>
           )}
         </>)}
+
+        {/* Warmup & DB Sharding */}
+        {selectedCluster && (
+          <div style={{ marginTop: 12, padding: "10px 14px", background: "var(--glass-bg)", border: "1px solid var(--glass-border)", borderRadius: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+              <Zap size={14} style={{ color: "var(--warning)" }} />
+              Performance
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginBottom: 6 }}>
+              <input type="checkbox" checked={form.enable_warmup} onChange={(e) => set("enable_warmup", e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+              <span>Warmup cluster <span className="muted">(prepare DB shards on local SSD before BLAST)</span></span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12 }}>
+              <input type="checkbox" checked={form.db_auto_partition} onChange={(e) => set("db_auto_partition", e.target.checked)} style={{ accentColor: "var(--accent)" }} />
+              <span>DB auto-partition <span className="muted">(split DB into shards for parallel search)</span></span>
+            </label>
+            {form.enable_warmup && (
+              <div className="muted" style={{ fontSize: 10, marginTop: 6, lineHeight: 1.5 }}>
+                The prepare step will create the cluster, download DB shards to node SSDs, then submit BLAST with reuse=true. This adds ~5-10 min setup but significantly improves search performance for large databases.
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* ── Step 5: Algorithm Parameters (collapsed) ── */}

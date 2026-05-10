@@ -93,18 +93,41 @@ def submit_blast_orchestrator(
         request["config_text"] = config_result.get("config_text", "")
         steps["configuring"] = {"config_url": config_result.get("config_blob_url")}
 
-        # 5. Submit
+        # 5. Warmup / Prepare (optional — enabled by default for DB sharding)
+        enable_warmup = request.get("enable_warmup", True)
+        if enable_warmup:
+            context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
+            prepare_result = yield context.call_activity("run_elastic_blast_prepare_activity", request)
+            prepare_output = prepare_result.get("output", "")
+            steps["warming_up"] = {
+                "success": prepare_result.get("success"),
+                "output": prepare_output[:4000],
+            }
+            if not prepare_result.get("success"):
+                context.set_custom_status({"phase": "warmup_failed", "job_id": job_id, "steps": steps})
+                yield context.call_activity("set_storage_public_access_activity", disable_payload)
+                context.signal_entity(entity_id, "update_job",
+                    {"job_id": job_id, "status": "failed", "phase": "warmup_failed"})
+                return {"job_id": job_id, "status": "failed", "phase": "warmup_failed",
+                        "error": prepare_output[:4000], "steps": steps}
+            # After prepare, set reuse=true so submit uses the warm cluster
+            request["reuse"] = True
+            # Regenerate config with reuse=true
+            config_result = yield context.call_activity("generate_blast_config_activity", request)
+            request["config_text"] = config_result.get("config_text", "")
+
+        # 6. Submit
         context.set_custom_status({"phase": "submitting", "job_id": job_id, "steps": steps})
         submit_result = yield context.call_activity("run_elastic_blast_submit_activity", request)
         submit_output = submit_result.get("output", "")
-        steps["submitting"] = {"success": submit_result.get("success"), "output": submit_output[:1000]}
+        steps["submitting"] = {"success": submit_result.get("success"), "output": submit_output[:4000]}
         if not submit_result.get("success"):
             context.set_custom_status({"phase": "submit_failed", "job_id": job_id, "steps": steps})
             yield context.call_activity("set_storage_public_access_activity", disable_payload)
             context.signal_entity(entity_id, "update_job",
                 {"job_id": job_id, "status": "failed", "phase": "submit_failed"})
             return {"job_id": job_id, "status": "failed", "phase": "submit_failed",
-                    "error": submit_output[:500], "steps": steps}
+                    "error": submit_output[:4000], "steps": steps}
 
         # 6. Poll status — minimum 2 polls before accepting "completed"
         # elastic-blast can report EXIT_CODE=0 prematurely if auth fails or
@@ -141,7 +164,7 @@ def submit_blast_orchestrator(
                 else:
                     break  # Failed is trustworthy immediately
 
-        steps["running"] = {"final_status": final_status, "polls": attempt + 1, "last_output": last_check_output[:500]}
+        steps["running"] = {"final_status": final_status, "polls": attempt + 1, "last_output": last_check_output[:4000]}
 
         # 7. Export results — verify .out files actually exist in blob
         if final_status == "completed":
@@ -199,7 +222,7 @@ def submit_blast_orchestrator(
                 steps["exporting_results"] = {
                     "success": export_result.get("success"),
                     "auth_failed": export_result.get("auth_failed"),
-                    "output": export_result.get("output", "")[:800],
+                    "output": export_result.get("output", "")[:4000],
                     "has_output_files": has_output_files,
                 }
                 LOGGER.info("Results export: %s", export_result)

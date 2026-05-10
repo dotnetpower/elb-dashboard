@@ -21,6 +21,7 @@ const PHASE_STEPS = [
   { key: "enabling_storage", label: "Open Storage", desc: "Enable public access", icon: HardDrive },
   { key: "uploading", label: "Upload Query", desc: "Send sequence to blob", icon: Upload },
   { key: "configuring", label: "Configure", desc: "Generate INI config", icon: Settings },
+  { key: "warming_up", label: "Warmup", desc: "Prepare DB shards on SSD", icon: Dna },
   { key: "submitting", label: "Submit Job", desc: "Send to AKS cluster", icon: Send },
   { key: "running", label: "BLAST Run", desc: "Sequence alignment", icon: Dna },
   { key: "exporting_results", label: "Export", desc: "Copy results to blob", icon: Package },
@@ -32,6 +33,8 @@ const PHASE_MESSAGES: Record<string, string> = {
   enabling_storage: "Enabling storage public access for data transfer...",
   uploading: "Uploading query sequence to Azure Blob Storage...",
   configuring: "Generating ElasticBLAST configuration...",
+  warming_up: "Preparing cluster with DB shards on local SSD (warmup)...",
+  warmup_failed: "Cluster warmup failed.",
   submitting: "Submitting job to AKS cluster...",
   running: "BLAST search is running on the cluster...",
   exporting_results: "Verifying result files and exporting logs from cluster...",
@@ -226,13 +229,14 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
   // Map failure phases to their corresponding step key
   const PHASE_TO_STEP: Record<string, string> = {
     submit_failed: "submitting",
+    warmup_failed: "warming_up",
   };
   const effectivePhaseKey = PHASE_TO_STEP[phase] ?? phase;
   const currentPhaseIdx = PHASE_STEPS.findIndex((s) => s.key === effectivePhaseKey);
 
   const getStepState = (idx: number, _key: string): StepState => {
     if (phase === "completed") return "done";
-    if (phase === "failed" || phase === "error" || phase === "submit_failed") {
+    if (phase === "failed" || phase === "error" || phase === "submit_failed" || phase === "warmup_failed") {
       if (currentPhaseIdx < 0) return "skipped"; // unknown phase
       if (idx < currentPhaseIdx) return "done";
       if (idx === currentPhaseIdx) return "error";
@@ -266,6 +270,13 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
       case "configuring": {
         const cu = sd.config_url as string;
         return state === "done" ? `✓ Config generated and uploaded.\n   ${cu || `queries/${jobId}/elastic-blast.ini`}` : "Generating elastic-blast INI configuration...";
+      }
+      case "warming_up": {
+        const wo = sd.output as string;
+        if (state === "error" && wo) return `✗ Warmup failed:\n${wo}`;
+        if (state === "done" && sd.success) return `✓ Cluster warmed up — DB shards loaded on local SSD.\n${wo ? `\n--- Console Output ---\n${(wo).slice(0, 800)}` : ""}`;
+        if (state === "done") return `✓ Warmup step completed.\n${wo ? `\n--- Console Output ---\n${wo.slice(0, 800)}` : ""}`;
+        return "Running elastic-blast prepare — downloading DB shards to node SSDs...";
       }
       case "submitting": {
         const so = sd.output as string || (output as Record<string, unknown>)?.error as string;
@@ -539,7 +550,7 @@ export function BlastResults() {
   const outputStatus = (typeof job?.output === "object" && job?.output !== null)
     ? (job.output as Record<string, unknown>).status as string | undefined : undefined;
   const jobPhase = outputPhase || (customStatus?.phase as string) || job?.phase || job?.status;
-  const isJobFailed = jobPhase === "failed" || jobPhase === "error" || jobPhase === "submit_failed"
+  const isJobFailed = jobPhase === "failed" || jobPhase === "error" || jobPhase === "submit_failed" || jobPhase === "warmup_failed"
     || outputStatus === "failed";
   const phase = isJobFailed ? (jobPhase as string)
     : job?.runtime_status === "Completed" && !isJobFailed ? "completed"
@@ -562,6 +573,7 @@ export function BlastResults() {
       || initialPhaseRef.current === "failed"
       || initialPhaseRef.current === "error"
       || initialPhaseRef.current === "submit_failed"
+      || initialPhaseRef.current === "warmup_failed"
       || initialPhaseRef.current === "cancelled";
     if (wasTerminalOnLoad) {
       prevPhaseRef.current = phase;

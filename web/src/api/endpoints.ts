@@ -337,6 +337,11 @@ export interface BlastSubmitRequest {
   mem_request?: string;
   mem_limit?: string;
   batch_len?: number;
+  enable_warmup?: boolean;
+  reuse?: boolean;
+  db_auto_partition?: boolean;
+  db_partitions?: number;
+  db_partition_prefix?: string;
   acr_resource_group?: string;
   acr_name?: string;
   storage_account?: string;
