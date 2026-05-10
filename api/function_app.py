@@ -298,6 +298,95 @@ def stop_terminal_vm(req: func.HttpRequest) -> func.HttpResponse:
         return _error_response(500, sanitise(str(exc)))
 
 
+@app.route(route="terminal/{vm_name}/start", methods=["POST"])
+def start_terminal_vm(req: func.HttpRequest) -> func.HttpResponse:
+    """Start a deallocated terminal VM."""
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+    vm_name = req.route_params.get("vm_name")
+    if not vm_name:
+        return _error_response(400, "vm_name missing")
+    if err := _validate_name(vm_name, _RE_VM_NAME, "vm_name"):
+        return _error_response(400, err)
+    rg = req.params.get("resource_group") or os.environ.get("TERMINAL_DEFAULT_RG", "rg-elb-terminal")
+    if err := _validate_rg(rg):
+        return _error_response(400, err)
+    sub = req.params.get("subscription_id") or os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+    if err := _validate_sub(sub):
+        return _error_response(400, err)
+    cred = credential_for_caller(identity.raw_token)
+    try:
+        from azure.mgmt.compute import ComputeManagementClient
+        cc = ComputeManagementClient(cred, sub)
+        cc.virtual_machines.begin_start(rg, vm_name).result()
+        LOGGER.info("VM %s started in %s", vm_name, rg)
+        return _json_response({"ok": True, "vm_name": vm_name, "status": "running"})
+    except Exception as exc:
+        LOGGER.warning("Failed to start VM %s: %s", vm_name, exc)
+        return _error_response(500, sanitise(str(exc)))
+
+
+@app.route(route="terminal/{vm_name}/health", methods=["GET"])
+def terminal_health_check(req: func.HttpRequest) -> func.HttpResponse:
+    """Check az login status and installed tool versions on the terminal VM."""
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+    vm_name = req.route_params.get("vm_name")
+    if not vm_name:
+        return _error_response(400, "vm_name missing")
+    if err := _validate_name(vm_name, _RE_VM_NAME, "vm_name"):
+        return _error_response(400, err)
+    rg = req.params.get("resource_group") or os.environ.get("TERMINAL_DEFAULT_RG", "rg-elb-terminal")
+    sub = req.params.get("subscription_id") or os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+    cred = credential_for_caller(identity.raw_token)
+    script = (
+        "#!/bin/bash\n"
+        "echo AZ_VERSION=$(az version -o tsv --query '\"azure-cli\"' 2>/dev/null || echo 'not installed')\n"
+        "echo KUBECTL_VERSION=$(kubectl version --client --short 2>/dev/null | head -1 || echo 'not installed')\n"
+        "echo AZCOPY_VERSION=$(azcopy --version 2>/dev/null | head -1 || echo 'not installed')\n"
+        "echo PYTHON_VERSION=$(python3.11 --version 2>/dev/null || echo 'not installed')\n"
+        "if [ -f /home/azureuser/.azure/azureProfile.json ]; then\n"
+        "  MTIME=$(stat -c %Y /home/azureuser/.azure/azureProfile.json 2>/dev/null || echo 0)\n"
+        "  NOW=$(date +%s)\n"
+        "  AGE=$((NOW - MTIME))\n"
+        "  echo AZ_LOGIN_AGE_SECONDS=$AGE\n"
+        "  echo AZ_LOGIN_USER=$(cat /home/azureuser/.azure/azureProfile.json 2>/dev/null | python3 -c 'import sys,json; subs=json.load(sys.stdin).get(\"subscriptions\",[]); print(subs[0].get(\"user\",{}).get(\"name\",\"unknown\") if subs else \"none\")' 2>/dev/null || echo 'unknown')\n"
+        "else\n"
+        "  echo AZ_LOGIN_AGE_SECONDS=-1\n"
+        "  echo AZ_LOGIN_USER=none\n"
+        "fi\n"
+    )
+    try:
+        output = compute_svc.run_shell(cred, sub, rg, vm_name, script)
+        result: dict[str, Any] = {}
+        for line in output.strip().split("\n"):
+            if "=" in line:
+                k, v = line.split("=", 1)
+                result[k.strip()] = v.strip()
+        # Parse az login age
+        age_str = result.get("AZ_LOGIN_AGE_SECONDS", "-1")
+        try:
+            age = int(age_str)
+        except ValueError:
+            age = -1
+        az_login_active = 0 < age < 86400  # Active if profile updated in last 24h
+        return _json_response({
+            "az_cli": result.get("AZ_VERSION", "unknown"),
+            "kubectl": result.get("KUBECTL_VERSION", "unknown"),
+            "azcopy": result.get("AZCOPY_VERSION", "unknown"),
+            "python": result.get("PYTHON_VERSION", "unknown"),
+            "az_login_active": az_login_active,
+            "az_login_user": result.get("AZ_LOGIN_USER", "unknown"),
+            "az_login_age_seconds": age,
+        })
+    except Exception as exc:
+        return _error_response(500, sanitise(str(exc)))
+
+
 # ---------------------------------------------------------------------------
 # Monitoring (read-only)
 # ---------------------------------------------------------------------------

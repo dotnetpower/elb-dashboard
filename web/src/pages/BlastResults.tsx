@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Download, ArrowLeft, RefreshCw, Copy, CheckCircle2, Loader2,
+  Download, ArrowLeft, RefreshCw, Copy, Check, CheckCircle2, Loader2,
   Server, HardDrive, Upload, Settings, Send, Dna, Package, Trophy,
   Clock, XCircle, FileText, AlertTriangle, Unlock, FolderOpen,
   ChevronRight, ChevronDown, StopCircle,
@@ -136,14 +136,77 @@ function FilePreview({ jobId, filename, subscriptionId, storageAccount, maxBytes
 }
 
 // --- Collapsible Step Log (GitHub Actions style) ---
-type StepState = "done" | "active" | "pending" | "error";
+type StepState = "done" | "active" | "pending" | "error" | "skipped";
+
+// Premium log block with line numbers, syntax coloring, scrolling, and copy
+function StepLogBlock({ log, state, stepKey }: { log: string; state: StepState; stepKey: string }) {
+  const [copied, setCopied] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  // Split into summary (first line or status line) and detail (console output)
+  const delimIdx = log.indexOf("---");
+  const hasSections = delimIdx > 0;
+  const summary = hasSections ? log.slice(0, delimIdx).trim() : log;
+  const detail = hasSections ? log.slice(delimIdx).trim() : null;
+  const detailLines = detail?.split("\n") ?? [];
+  const isLong = detailLines.length > 30;
+
+  const copyLog = () => {
+    navigator.clipboard.writeText(log).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="step-log-block" data-state={state}>
+      {/* Summary line */}
+      <div className="step-log-summary">
+        <span>{summary}</span>
+        <button className="step-log-copy" onClick={copyLog} title="Copy full log">
+          {copied ? <Check size={11} strokeWidth={2} /> : <Copy size={11} strokeWidth={1.5} />}
+          <span>{copied ? "Copied" : "Copy"}</span>
+        </button>
+      </div>
+
+      {/* Detail/console output */}
+      {detail && (
+        <div className={`step-log-detail${isLong && !isExpanded ? " step-log-detail--collapsed" : ""}`}>
+          <div className="step-log-lines">
+            {(isLong && !isExpanded ? detailLines.slice(0, 30) : detailLines).map((line, i) => {
+              let lineClass = "step-log-text";
+              if (line.startsWith("WARNING") || line.startsWith("⚠")) lineClass += " step-log-text--warn";
+              else if (line.startsWith("ERROR") || line.startsWith("✗")) lineClass += " step-log-text--error";
+              else if (line.startsWith("✓") || line.includes("=ok") || line.includes("EXIT_CODE=0")) lineClass += " step-log-text--ok";
+              else if (line.startsWith("---")) lineClass += " step-log-text--header";
+              return (
+                <div key={`${stepKey}-${i}`} className="step-log-line">
+                  <span className="step-log-ln">{i + 1}</span>
+                  <span className={lineClass}>{line || "\u00A0"}</span>
+                </div>
+              );
+            })}
+          </div>
+          {isLong && !isExpanded && (
+            <button className="step-log-expand" onClick={() => setIsExpanded(true)}>
+              Show all {detailLines.length} lines
+            </button>
+          )}
+          {isLong && isExpanded && (
+            <button className="step-log-expand" onClick={() => setIsExpanded(false)}>
+              Collapse
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGroup: _resourceGroup }: {
   phase: string; job: Record<string, unknown>;
   subscriptionId: string; storageAccount: string; resourceGroup: string;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const currentPhaseIdx = PHASE_STEPS.findIndex((s) => s.key === phase);
   const customStatus = (typeof job?.custom_status === "object" && job?.custom_status !== null)
     ? (job.custom_status as Record<string, unknown>) : null;
   const output = job?.output as Record<string, unknown> | null;
@@ -152,12 +215,20 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
 
   const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  const getStepState = (idx: number, key: string): StepState => {
+  // Map failure phases to their corresponding step key
+  const PHASE_TO_STEP: Record<string, string> = {
+    submit_failed: "submitting",
+  };
+  const effectivePhaseKey = PHASE_TO_STEP[phase] ?? phase;
+  const currentPhaseIdx = PHASE_STEPS.findIndex((s) => s.key === effectivePhaseKey);
+
+  const getStepState = (idx: number, _key: string): StepState => {
     if (phase === "completed") return "done";
     if (phase === "failed" || phase === "error" || phase === "submit_failed") {
+      if (currentPhaseIdx < 0) return "skipped"; // unknown phase
       if (idx < currentPhaseIdx) return "done";
-      if (idx === currentPhaseIdx || key === phase) return "error";
-      return "pending";
+      if (idx === currentPhaseIdx) return "error";
+      return "skipped";
     }
     if (currentPhaseIdx < 0) return "pending";
     if (idx < currentPhaseIdx) return "done";
@@ -167,6 +238,7 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
 
   const getStepLog = (key: string, state: StepState): string | null => {
     if (state === "pending") return null;
+    if (state === "skipped") return "⊘ Skipped — previous step failed.";
     const sd = stepsData[key] || {};
     switch (key) {
       case "checking_vm": {
@@ -265,10 +337,11 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
             borderRadius: 6, overflow: "hidden",
             background: isOpen ? "rgba(255,255,255,0.03)" : "transparent",
             border: isOpen ? "1px solid var(--border-weak)" : "1px solid transparent",
+            opacity: state === "skipped" ? 0.5 : 1,
           }}>
             <button
-              onClick={() => state !== "pending" && toggle(s.key)}
-              disabled={state === "pending"}
+              onClick={() => state !== "pending" && state !== "skipped" && toggle(s.key)}
+              disabled={state === "pending" || state === "skipped"}
               style={{
                 all: "unset", display: "flex", alignItems: "center", gap: 10,
                 width: "100%", padding: "8px 12px", cursor: state === "pending" ? "default" : "pointer",
@@ -277,42 +350,42 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
             >
               {/* Expand chevron */}
               <span style={{ color: "var(--text-faint)", width: 14, flexShrink: 0 }}>
-                {state !== "pending" ? (isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : null}
+                {state !== "pending" && state !== "skipped" ? (isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : null}
               </span>
               {/* Status icon */}
               <span style={{ flexShrink: 0 }}>
                 {state === "done" && <CheckCircle2 size={16} style={{ color: "var(--success)" }} />}
                 {state === "active" && <Loader2 size={16} className="spin" style={{ color: "var(--accent)" }} />}
                 {state === "error" && <XCircle size={16} style={{ color: "var(--danger)" }} />}
+                {state === "skipped" && <Icon size={15} style={{ color: "var(--text-faint)", opacity: 0.5 }} />}
                 {state === "pending" && <Icon size={15} style={{ color: "var(--text-faint)", opacity: 0.4 }} />}
               </span>
               {/* Label */}
               <span style={{ flex: 1, color: stateColor, fontWeight: state === "active" ? 600 : 400 }}>
                 {s.label}
                 <span style={{ fontSize: 11, marginLeft: 8, color: "var(--text-faint)", fontWeight: 400 }}>
-                  {s.desc}
+                  {state === "skipped" ? "Skipped" : s.desc}
                 </span>
               </span>
-              {/* Duration placeholder */}
+              {/* Status badge */}
               {state === "done" && (
                 <span style={{ fontSize: 11, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
                   ✓
                 </span>
               )}
+              {state === "skipped" && (
+                <span style={{ fontSize: 10, color: "var(--text-faint)", padding: "1px 6px", background: "rgba(255,255,255,0.04)", borderRadius: 3 }}>
+                  skipped
+                </span>
+              )}
+              {state === "error" && (
+                <span style={{ fontSize: 10, color: "var(--danger)", padding: "1px 6px", background: "rgba(224,123,138,0.08)", borderRadius: 3 }}>
+                  failed
+                </span>
+              )}
             </button>
-            {/* Collapsible log */}
-            {isOpen && log && (
-              <div style={{
-                padding: "8px 12px 10px 50px", fontSize: 12, lineHeight: 1.6,
-                fontFamily: "var(--font-mono, 'Fira Code', monospace)",
-                color: state === "error" ? "var(--danger)" : "var(--text-muted)",
-                whiteSpace: "pre-wrap", wordBreak: "break-word",
-                borderTop: "1px solid var(--border-weak)",
-                background: "rgba(0,0,0,0.15)",
-              }}>
-                {log}
-              </div>
-            )}
+            {/* Collapsible log — premium CI-style */}
+            {isOpen && log && <StepLogBlock log={log} state={state} stepKey={s.key} />}
             {/* Extra content: file previews */}
             {isOpen && renderStepExtra(s.key, state, isOpen) && (
               <div style={{
@@ -451,11 +524,14 @@ export function BlastResults() {
   const publicAccessDisabled = resultsQuery.data?.public_access_disabled === true;
   const customStatus = (typeof job?.custom_status === "object" && job?.custom_status !== null)
     ? (job.custom_status as Record<string, unknown>) : null;
-  // When orchestrator is Completed/Failed, trust runtime_status over potentially stale custom_status
-  const phase = job?.runtime_status === "Completed" ? "completed"
+  // Phase resolution: prefer the job's own phase/status over the orchestrator runtime_status,
+  // because Durable Functions marks "Completed" even when the orchestrator returns a failure.
+  const jobPhase = (customStatus?.phase as string) || job?.phase || job?.status;
+  const isJobFailed = jobPhase === "failed" || jobPhase === "error" || jobPhase === "submit_failed";
+  const phase = isJobFailed ? (jobPhase as string)
+    : job?.runtime_status === "Completed" && !isJobFailed ? (jobPhase === "completed" || !jobPhase ? "completed" : jobPhase as string)
     : job?.runtime_status === "Failed" ? "error"
-    : (customStatus?.phase as string)
-    || job?.phase || job?.status || "unknown";
+    : jobPhase || "unknown";
   const color = statusColor(phase);
 
   // Track phase transitions for toast notifications
@@ -503,8 +579,8 @@ export function BlastResults() {
     }
   };
 
-  const isRunning = phase !== "completed" && phase !== "failed" && phase !== "deleted" && phase !== "error" && phase !== "cancelled";
-  const isFailed = phase === "failed" || phase === "error";
+  const isRunning = phase !== "completed" && phase !== "failed" && phase !== "deleted" && phase !== "error" && phase !== "cancelled" && phase !== "submit_failed";
+  const isFailed = isJobFailed;
   const blastStatus = customStatus?.blast_status as string | undefined;
   const pollAttempt = customStatus?.poll_attempt as number | undefined;
   const runtimeStatus = job?.runtime_status as string | undefined;
@@ -613,26 +689,56 @@ export function BlastResults() {
             )}
 
             {/* Failure banner */}
-            {isFailed && (
-              <div style={{
-                padding: "14px 16px", marginBottom: "var(--space-3)", borderRadius: 10,
-                background: "linear-gradient(135deg, rgba(224,123,138,0.12), rgba(224,123,138,0.04))",
-                border: "1px solid rgba(224,123,138,0.25)",
-                display: "flex", alignItems: "center", gap: 12,
-              }}>
+            {isFailed && (() => {
+              // Extract the most useful error info from the job data
+              const errorOutput = (typeof job.output === "object" && job.output !== null)
+                ? (job.output as Record<string, unknown>).error as string ?? ""
+                : typeof job.error === "string" ? job.error : "";
+              const failedStep = phase === "submit_failed" ? "Submit Job"
+                : phase === "error" && customStatus?.phase === "running" ? "BLAST Run"
+                : "Execution";
+              // Find first actual error line from the output
+              const errorLines = errorOutput.split("\n").filter(
+                (l) => l.startsWith("ERROR:") || l.startsWith("✗") || l.includes("fatal") || l.includes("FATAL"),
+              );
+              const errorSummary = errorLines.length > 0 ? errorLines[0] : "";
+
+              return (
                 <div style={{
-                  width: 36, height: 36, borderRadius: "50%", display: "flex",
-                  alignItems: "center", justifyContent: "center",
-                  background: "var(--danger)", color: "#fff",
+                  padding: "14px 16px", marginBottom: "var(--space-3)", borderRadius: 10,
+                  background: "linear-gradient(135deg, rgba(224,123,138,0.12), rgba(224,123,138,0.04))",
+                  border: "1px solid rgba(224,123,138,0.25)",
                 }}>
-                  <XCircle size={18} />
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{
+                      width: 36, height: 36, borderRadius: "50%", display: "flex",
+                      alignItems: "center", justifyContent: "center",
+                      background: "var(--danger)", color: "#fff", flexShrink: 0,
+                    }}>
+                      <XCircle size={18} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 15, fontWeight: 600, color: "var(--danger)" }}>
+                        Job Failed at {failedStep}
+                      </div>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+                        {phase === "submit_failed" ? "The ElasticBLAST submit command failed. Check the execution steps below for details." : "An error occurred during execution. See the step logs for details."}
+                      </div>
+                    </div>
+                  </div>
+                  {errorSummary && (
+                    <div style={{
+                      marginTop: 10, padding: "8px 12px", borderRadius: 6,
+                      background: "rgba(224,123,138,0.06)", border: "1px solid rgba(224,123,138,0.12)",
+                      fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--danger)",
+                      whiteSpace: "pre-wrap", wordBreak: "break-word",
+                    }}>
+                      {errorSummary}
+                    </div>
+                  )}
                 </div>
-                <div>
-                  <div style={{ fontSize: 15, fontWeight: 600, color: "var(--danger)" }}>Job Failed</div>
-                  {job?.error && <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>{String(job.error).slice(0, 200)}</div>}
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
             <div style={{
               display: "grid", gridTemplateColumns: "140px 1fr",
