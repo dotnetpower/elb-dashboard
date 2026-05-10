@@ -11,6 +11,7 @@ import { BlastJobs } from "@/pages/BlastJobs";
 import { BlastResults } from "@/pages/BlastResults";
 
 const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
+const CLIENT_ID_MISSING = !import.meta.env.VITE_AZURE_CLIENT_ID && !DEV_BYPASS;
 
 function AppRoutes() {
   return (
@@ -30,6 +31,24 @@ function AppRoutes() {
 }
 
 export function App() {
+  // #67: Show visible error when client ID is missing
+  if (CLIENT_ID_MISSING) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24 }}>
+        <div className="glass-card glass-card--strong" style={{ width: "min(480px, 100%)", textAlign: "center" }}>
+          <h2 style={{ marginTop: 0, color: "var(--warning)" }}>Setup Required</h2>
+          <p className="muted" style={{ lineHeight: 1.6 }}>
+            This app is not configured yet. An administrator needs to create an Azure App Registration
+            and set <code className="code-val">VITE_AZURE_CLIENT_ID</code> in the environment.
+          </p>
+          <p className="muted" style={{ fontSize: 12 }}>
+            See the <a href="https://github.com/dotnetpower/elastic-blast-azure-functionapp#readme" target="_blank" rel="noreferrer">README</a> for setup instructions.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (DEV_BYPASS) {
     return <AppRoutes />;
   }

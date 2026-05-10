@@ -22,6 +22,9 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+    watch: {
+      ignored: ["**/node_modules/**", "**/.venv/**", "**/.git/**"],
+    },
   },
   build: {
     outDir: "dist",

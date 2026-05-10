@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { Settings, X, RotateCcw } from "lucide-react";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 import type { ResourceConfig } from "@/components/SetupWizard";
 
@@ -10,6 +12,16 @@ interface Props {
 }
 
 export function SettingsPanel({ open, config, onClose, onRerunWizard }: Props) {
+  const trapRef = useFocusTrap<HTMLDivElement>(open);
+
+  // Close on ESC
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   const fields: Array<{ section?: string; label: string; value: string; auto?: boolean }> = [
@@ -23,12 +35,27 @@ export function SettingsPanel({ open, config, onClose, onRerunWizard }: Props) {
   ];
 
   return (
-    <div style={{
-      position: "fixed", top: 0, right: 0, bottom: 0, width: 360,
-      background: "var(--bg-primary)", borderLeft: "1px solid var(--border-medium)",
-      boxShadow: "-8px 0 32px rgba(0,0,0,0.4)", zIndex: 60,
-      display: "flex", flexDirection: "column",
-    }}>
+    <>
+      {/* Backdrop */}
+      <div
+        onClick={onClose}
+        style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)",
+          zIndex: 59,
+        }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Resource Settings"
+        ref={trapRef}
+        style={{
+          position: "fixed", top: 0, right: 0, bottom: 0, width: 360,
+          background: "var(--bg-primary)", borderLeft: "1px solid var(--border-medium)",
+          boxShadow: "-8px 0 32px rgba(0,0,0,0.4)", zIndex: 60,
+          display: "flex", flexDirection: "column",
+        }}
+      >
       {/* Header */}
       <div style={{
         padding: "16px 20px", borderBottom: "1px solid var(--border-weak)",
@@ -104,5 +131,6 @@ export function SettingsPanel({ open, config, onClose, onRerunWizard }: Props) {
         </button>
       </div>
     </div>
+    </>
   );
 }

@@ -21,8 +21,7 @@ export const msalConfig: Configuration = {
     navigateToLoginRequestUrl: true,
   },
   cache: {
-    cacheLocation: "localStorage",
-    storeAuthStateInCookie: true,
+    cacheLocation: "sessionStorage",
   },
 };
 
@@ -31,7 +30,6 @@ export const msalConfig: Configuration = {
 export const apiLoginRequest = {
   scopes: [
     `api://${clientId}/user_impersonation`,
-    "https://management.azure.com/user_impersonation",
   ],
 };
 

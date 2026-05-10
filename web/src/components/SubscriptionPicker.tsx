@@ -1,19 +1,20 @@
-import { useEffect } from "react";
+import { useEffect, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { listSubscriptions, type SubscriptionSummary } from "@/api/arm";
+import { armProxyApi, type ArmSubscription } from "@/api/endpoints";
 
 interface Props {
   value: string;
   onChange: (subscriptionId: string) => void;
   label?: string;
   compact?: boolean;
+  style?: CSSProperties;
 }
 
-export function SubscriptionPicker({ value, onChange, label = "Subscription", compact = false }: Props) {
+export function SubscriptionPicker({ value, onChange, label = "Subscription", compact = false, style }: Props) {
   const query = useQuery({
     queryKey: ["arm-subscriptions"],
-    queryFn: listSubscriptions,
+    queryFn: armProxyApi.listSubscriptions,
     staleTime: 5 * 60_000,
   });
 
@@ -26,7 +27,7 @@ export function SubscriptionPicker({ value, onChange, label = "Subscription", co
 
   if (compact) {
     return (
-      <div className="cfg-chip">
+      <div className="cfg-chip" style={style}>
         <span className="lbl">{label}</span>
         <select
           value={value}
@@ -35,9 +36,9 @@ export function SubscriptionPicker({ value, onChange, label = "Subscription", co
         >
           {query.isLoading && <option value="">Loading…</option>}
           {query.isError && <option value="">Error</option>}
-          {query.data?.map((s: SubscriptionSummary) => (
+          {query.data?.map((s: ArmSubscription) => (
             <option key={s.subscriptionId} value={s.subscriptionId}>
-              {s.displayName} ({s.subscriptionId.slice(0, 8)}…)
+              {s.displayName}
             </option>
           ))}
         </select>
@@ -59,7 +60,7 @@ export function SubscriptionPicker({ value, onChange, label = "Subscription", co
         {query.data && query.data.length === 0 && (
           <option value="">No subscriptions visible to this account</option>
         )}
-        {query.data?.map((s: SubscriptionSummary) => (
+        {query.data?.map((s: ArmSubscription) => (
           <option key={s.subscriptionId} value={s.subscriptionId}>
             {s.displayName} ({s.subscriptionId.slice(0, 8)}…) · {s.state}
           </option>

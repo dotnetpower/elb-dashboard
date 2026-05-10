@@ -38,29 +38,32 @@
 }
 
 .layout__logo-sub {
-  font-size: 10px;
+  font-size: 9px;
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.1em;
+  white-space: nowrap;
 }
 
 .layout__nav {
   display: flex;
-  gap: 2px;
-  margin-left: 28px;
+  gap: 1px;
+  margin-left: 16px;
 }
 
 .layout__nav-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
+  gap: 5px;
+  padding: 5px 10px;
   border-radius: 6px;
   color: var(--text-muted);
   text-decoration: none;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
-  transition: all 0.15s;
+  transition: all var(--motion-fast);
+  position: relative;
+  white-space: nowrap;
 }
 
 .layout__nav-item:hover {
@@ -69,9 +72,12 @@
   text-decoration: none;
 }
 
+/* #12 Active nav indicator — pill style */
 .layout__nav-item.active {
-  color: var(--text-primary);
-  background: var(--bg-secondary);
+  color: var(--accent);
+  background: rgba(110, 159, 255, 0.1);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 6px 6px 0;
 }
 
 .layout__spacer {
@@ -113,6 +119,26 @@
   cursor: pointer;
 }
 
+/* #26 Nav group labels & separators — subtle, not clickable */
+.layout__nav-group-label {
+  font-size: 8px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0 2px 0 8px;
+  display: flex;
+  align-items: center;
+  opacity: 0.6;
+  user-select: none;
+}
+.layout__nav-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border-weak);
+  margin: 0 2px;
+  opacity: 0.5;
+}
+
 .layout__user-menu {
   display: flex;
   align-items: center;
@@ -123,7 +149,7 @@
   flex: 1;
   min-width: 0;
   padding: 16px 20px;
-  max-width: 1600px;
+  max-width: 1440px;
   margin: 0 auto;
   width: 100%;
 }

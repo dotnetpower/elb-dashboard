@@ -18,6 +18,7 @@ export class ErrorBoundary extends Component<PropsWithChildren, State> {
 
   render() {
     if (this.state.error) {
+      const errorText = `${this.state.error.name}: ${this.state.error.message}\n${this.state.error.stack ?? ""}`;
       return (
         <div
           style={{
@@ -29,7 +30,7 @@ export class ErrorBoundary extends Component<PropsWithChildren, State> {
         >
           <div
             className="glass-card glass-card--strong"
-            style={{ width: "min(500px, 90vw)", textAlign: "center" }}
+            style={{ width: "min(520px, 90vw)", textAlign: "center" }}
           >
             <h2 style={{ marginTop: 0, color: "var(--danger)" }}>
               Something went wrong
@@ -37,16 +38,38 @@ export class ErrorBoundary extends Component<PropsWithChildren, State> {
             <p className="muted" style={{ lineHeight: 1.6, wordBreak: "break-word" }}>
               {this.state.error.message}
             </p>
-            <button
-              className="glass-button glass-button--primary"
-              style={{ marginTop: "var(--space-4)" }}
-              onClick={() => {
-                this.setState({ error: null });
-                window.location.reload();
-              }}
-            >
-              Reload
-            </button>
+            <div style={{
+              marginTop: "var(--space-3)", padding: "12px", borderRadius: 6,
+              background: "var(--bg-tertiary)", fontSize: 12, color: "var(--text-muted)",
+              textAlign: "left", lineHeight: 1.5,
+            }}>
+              <strong>If this keeps happening, try:</strong>
+              <ol style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+                <li>Clear your browser cache and cookies</li>
+                <li>Sign out and sign back in</li>
+                <li>Try a different browser</li>
+                <li>Contact your administrator with the error details below</li>
+              </ol>
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: "var(--space-4)" }}>
+              <button
+                className="glass-button"
+                onClick={() => {
+                  navigator.clipboard.writeText(errorText).catch(() => {});
+                }}
+              >
+                Copy error details
+              </button>
+              <button
+                className="glass-button glass-button--primary"
+                onClick={() => {
+                  this.setState({ error: null });
+                  window.location.reload();
+                }}
+              >
+                Reload
+              </button>
+            </div>
           </div>
         </div>
       );

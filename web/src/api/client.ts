@@ -9,20 +9,29 @@ async function getAccessToken(): Promise<string | null> {
   if (!account) {
     throw new Error("not signed in");
   }
-  try {
-    const result = await msalInstance.acquireTokenSilent({
-      ...apiLoginRequest,
-      account,
-    });
-    return result.accessToken;
-  } catch {
-    await new Promise((r) => setTimeout(r, 1500));
-    const result = await msalInstance.acquireTokenSilent({
-      ...apiLoginRequest,
-      account,
-    });
-    return result.accessToken;
+  // #20: Exponential backoff retry (up to 3 attempts)
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const result = await msalInstance.acquireTokenSilent({
+        ...apiLoginRequest,
+        account,
+      });
+      return result.accessToken;
+    } catch (err) {
+      lastError = err;
+      if (err instanceof Error && err.name === "InteractionRequiredAuthError") {
+        // Redirect to login — cannot be retried silently
+        await msalInstance.acquireTokenRedirect({ ...apiLoginRequest, account });
+        throw err;
+      }
+      // Exponential backoff: 1s, 2s, 4s
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
+      }
+    }
   }
+  throw lastError;
 }
 
 export interface ApiError extends Error {
@@ -43,6 +52,19 @@ async function request<T>(
     headers.set("Content-Type", "application/json");
   }
   const response = await fetch(`${API_BASE}/api${path}`, { ...init, headers });
+  // #44: Auto-handle 401 — trigger re-authentication
+  if (response.status === 401 && !DEV_BYPASS) {
+    const account = msalInstance.getActiveAccount();
+    if (account) {
+      try {
+        await msalInstance.acquireTokenRedirect({ ...apiLoginRequest, account });
+      } catch { /* redirect will handle it */ }
+    }
+    const err = new Error("Session expired. Signing in again…") as ApiError;
+    err.status = 401;
+    err.body = null;
+    throw err;
+  }
   const text = await response.text();
   const body = text ? JSON.parse(text) : null;
   if (!response.ok) {

@@ -7,13 +7,15 @@ import { BrowserRouter } from "react-router-dom";
 
 import { msalInstance } from "@/auth/msal";
 import { App } from "@/App";
+import { ToastProvider } from "@/components/Toast";
 import "@/theme/glass.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 30_000,
+      staleTime: 60_000,
       refetchOnWindowFocus: false,
+      refetchIntervalInBackground: false,
       retry: 1,
     },
   },
@@ -69,7 +71,9 @@ async function bootstrap() {
       <MsalProvider instance={msalInstance}>
         <QueryClientProvider client={queryClient}>
           <BrowserRouter>
-            <App />
+            <ToastProvider>
+              <App />
+            </ToastProvider>
           </BrowserRouter>
         </QueryClientProvider>
       </MsalProvider>

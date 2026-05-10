@@ -29,6 +29,7 @@ export interface OrchestrationStatus<TOutput = unknown> {
 export interface TerminalConnectionInfo {
   vm_name: string;
   resource_group: string;
+  subscription_id?: string;
   region: string;
   fqdn: string;
   ssh_host: string;
@@ -49,7 +50,29 @@ export const terminalApi = {
     api.get<{ vm_name: string; password: string }>(
       `/terminal/${encodeURIComponent(vmName)}/password`,
     ),
+  openSsh: (vmName: string, callerIp: string, subscriptionId: string, resourceGroup: string) =>
+    api.post<{ ok: boolean; nsg: string; allowed_ip: string }>(
+      `/terminal/${encodeURIComponent(vmName)}/open-ssh?caller_ip=${encodeURIComponent(callerIp)}&subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(resourceGroup)}`,
+      {},
+    ),
+  stopVm: (vmName: string, subscriptionId: string, resourceGroup: string) =>
+    api.post<{ ok: boolean; vm_name: string; status: string }>(
+      `/terminal/${encodeURIComponent(vmName)}/stop?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(resourceGroup)}`,
+      {},
+    ),
 };
+
+export interface AksAgentPool {
+  name: string;
+  vm_size: string | null;
+  count: number | null;
+  min_count: number | null;
+  max_count: number | null;
+  os_type: string | null;
+  mode: string | null;
+  power_state: string | null;
+  enable_auto_scaling: boolean | null;
+}
 
 export interface AksClusterSummary {
   name: string;
@@ -61,6 +84,9 @@ export interface AksClusterSummary {
   node_count: number | null;
   node_sku: string | null;
   kubelet_object_id: string | null;
+  agent_pools?: AksAgentPool[];
+  network_plugin?: string | null;
+  fqdn?: string | null;
 }
 
 export interface StorageSummary {
@@ -78,6 +104,8 @@ export interface AcrSummary {
   login_server: string;
   sku: string | null;
   expected_image_tags: Record<string, string>;
+  actual_tags?: Record<string, string[]>;
+  building_images?: string[];
 }
 
 export interface VmStatus {
@@ -86,6 +114,37 @@ export interface VmStatus {
   vm_size: string | null;
   provisioning_state: string | null;
   power_state: string | null;
+}
+
+export interface K8sNode {
+  name: string;
+  status: string;
+  roles: string;
+  age: string;
+  version: string;
+  internal_ip: string;
+  os_image: string;
+  kernel: string;
+  runtime: string;
+}
+
+export interface K8sPod {
+  namespace: string;
+  name: string;
+  ready: string;
+  status: string;
+  restarts: number;
+  age: string;
+  node: string;
+}
+
+export interface K8sNodeMetrics {
+  name: string;
+  cpu: string;
+  cpu_pct: number;
+  memory: string;
+  memory_pct: number;
+  memory_total: string;
 }
 
 export const monitoringApi = {
@@ -104,6 +163,117 @@ export const monitoringApi = {
   terminal: (subscriptionId: string, rg: string, vmName: string) =>
     api.get<VmStatus>(
       `/monitor/terminal?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&vm_name=${encodeURIComponent(vmName)}`,
+    ),
+  runAksCommand: (subscriptionId: string, rg: string, clusterName: string, command: string) =>
+    api.post<{ exit_code: number; output: string; started_at: string | null; finished_at: string | null }>(
+      "/monitor/aks/run-command",
+      { subscription_id: subscriptionId, resource_group: rg, cluster_name: clusterName, command },
+    ),
+
+  // Direct K8s API (fast, ~1-3s)
+  k8sNodes: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<{ nodes: K8sNode[] }>(
+      `/monitor/aks/nodes?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+  k8sPods: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<{ pods: K8sPod[] }>(
+      `/monitor/aks/pods?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+  k8sTopNodes: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<{ nodes: K8sNodeMetrics[] }>(
+      `/monitor/aks/top-nodes?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+  k8sPodLogs: (subscriptionId: string, rg: string, clusterName: string, namespace: string, podName: string, tail?: number) =>
+    api.get<{ logs: string; pod_name: string; namespace: string }>(
+      `/monitor/aks/pod-logs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&pod_name=${encodeURIComponent(podName)}&tail=${tail ?? 200}`,
+    ),
+
+  buildAcrImages: (subscriptionId: string, rg: string, registryName: string) =>
+    api.post<{ results: { image: string; status: string; run_id?: string; error?: string; output?: string }[] }>(
+      "/acr/build-images",
+      { subscription_id: subscriptionId, resource_group: rg, registry_name: registryName },
+    ),
+  prepareBlastDb: (subscriptionId: string, storageRg: string, accountName: string, dbName: string) =>
+    api.post<{ ok: boolean; db_name: string; files_copied?: number; files_already_copying?: number; source_version?: string; output: string }>(
+      "/storage/prepare-db",
+      { subscription_id: subscriptionId, storage_resource_group: storageRg, account_name: accountName, db_name: dbName },
+    ),
+};
+
+// ---------------------------------------------------------------------------
+// AKS Cluster provisioning
+// ---------------------------------------------------------------------------
+export interface AksProvisionRequest {
+  subscription_id: string;
+  resource_group: string;
+  region: string;
+  cluster_name: string;
+  node_sku?: string;
+  node_count?: number;
+  acr_resource_group?: string;
+  acr_name?: string;
+  storage_resource_group?: string;
+  storage_account?: string;
+}
+
+export interface AksProvisionResponse {
+  cluster_name: string;
+  resource_group: string;
+  region: string;
+  node_sku: string;
+  node_count: number;
+  status: string;
+  message: string;
+  roles_assigned?: string[];
+}
+
+export const aksApi = {
+  listSkus: () =>
+    api.get<{ skus: string[]; default: string }>("/aks/skus"),
+
+  provision: (req: AksProvisionRequest) =>
+    api.post<AksProvisionResponse>("/aks/provision", req),
+
+  delete: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.post<{ cluster_name: string; status: string }>("/aks/delete", {
+      subscription_id: subscriptionId,
+      resource_group: rg,
+      cluster_name: clusterName,
+    }),
+
+  start: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.post<{ cluster_name: string; status: string }>("/aks/start", {
+      subscription_id: subscriptionId,
+      resource_group: rg,
+      cluster_name: clusterName,
+    }),
+
+  stop: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.post<{ cluster_name: string; status: string }>("/aks/stop", {
+      subscription_id: subscriptionId,
+      resource_group: rg,
+      cluster_name: clusterName,
+    }),
+
+  assignRoles: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    acrRg: string,
+    acrName: string,
+    storageRg: string,
+    storageAccount: string,
+  ) =>
+    api.post<{ kubelet_oid: string; roles_assigned: string[] }>(
+      `/aks/${encodeURIComponent(clusterName)}/assign-roles`,
+      {
+        subscription_id: subscriptionId,
+        resource_group: rg,
+        acr_resource_group: acrRg,
+        acr_name: acrName,
+        storage_resource_group: storageRg,
+        storage_account: storageAccount,
+      },
     ),
 };
 
@@ -181,6 +351,11 @@ export interface BlastResultFile {
 export interface BlastDatabase {
   name: string;
   container: string;
+  file_count?: number;
+  total_bytes?: number;
+  last_modified?: string;
+  source_version?: string;
+  downloaded_at?: string;
 }
 
 export const blastApi = {
@@ -203,17 +378,27 @@ export const blastApi = {
 
   listJobs: () => api.get<{ jobs: BlastJobSummary[] }>("/blast/jobs"),
 
-  getJob: (jobId: string) =>
-    api.get<BlastJobSummary>(`/blast/jobs/${encodeURIComponent(jobId)}`),
+  getJob: (jobId: string, history = false) =>
+    api.get<BlastJobSummary>(`/blast/jobs/${encodeURIComponent(jobId)}${history ? "?history=1" : ""}`),
+
+  cancelJob: (jobId: string) =>
+    api.post<{ job_id: string; status: string }>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/cancel`, {},
+    ),
 
   deleteJob: (jobId: string) =>
     api.del<{ job_id: string; status: string }>(
       `/blast/jobs/${encodeURIComponent(jobId)}`,
     ),
 
-  listResults: (jobId: string, subscriptionId: string, storageAccount: string) =>
-    api.get<{ job_id: string; files: BlastResultFile[] }>(
-      `/blast/jobs/${encodeURIComponent(jobId)}/results?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}`,
+  readJobFile: (jobId: string, filename: string, subscriptionId: string, storageAccount: string, maxBytes = 4096) =>
+    api.get<{ name: string; content: string; truncated: boolean }>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/file?name=${encodeURIComponent(filename)}&subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&max_bytes=${maxBytes}`,
+    ),
+
+  listResults: (jobId: string, subscriptionId: string, storageAccount: string, resourceGroup?: string) =>
+    api.get<{ job_id: string; files: BlastResultFile[]; public_access_disabled?: boolean; message?: string }>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/results?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
     ),
 
   downloadResult: (
@@ -226,10 +411,13 @@ export const blastApi = {
       `/blast/jobs/${encodeURIComponent(jobId)}/results/download?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&blob_name=${encodeURIComponent(blobName)}`,
     ),
 
-  listDatabases: (subscriptionId: string, storageAccount: string) =>
-    api.get<{ databases: BlastDatabase[] }>(
-      `/blast/databases?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}`,
+  listDatabases: (subscriptionId: string, storageAccount: string, resourceGroup: string) =>
+    api.get<{ databases: BlastDatabase[]; public_access_disabled?: boolean; message?: string }>(
+      `/blast/databases?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&resource_group=${encodeURIComponent(resourceGroup)}`,
     ),
+
+  checkUpdates: () =>
+    api.get<{ latest_version: string }>("/blast/databases/check-updates"),
 };
 
 // ---------------------------------------------------------------------------
@@ -280,6 +468,7 @@ export interface ArmSubscription {
 export interface ArmResourceGroup {
   name: string;
   location: string;
+  tags?: Record<string, string>;
 }
 
 export interface ArmStorageAccount {
@@ -320,5 +509,16 @@ export const armProxyApi = {
   listVms: (subscriptionId: string, rg: string) =>
     api.get<ArmVm[]>(
       `/arm/subscriptions/${encodeURIComponent(subscriptionId)}/resource-groups/${encodeURIComponent(rg)}/vms`,
+    ),
+
+  getRgTags: (subscriptionId: string, rg: string) =>
+    api.get<{ resource_group: string; tags: Record<string, string> }>(
+      `/arm/resource-group/tags?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}`,
+    ),
+
+  setRgTags: (subscriptionId: string, rg: string, tags: Record<string, string>) =>
+    api.post<{ resource_group: string; tags: Record<string, string> }>(
+      "/arm/resource-group/tags",
+      { subscription_id: subscriptionId, resource_group: rg, tags },
     ),
 };

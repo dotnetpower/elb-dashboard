@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import { blastApi } from "@/api/endpoints";
 import { MonitorCard } from "@/components/MonitorCard";
+import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 import { statusColor } from "@/constants";
 
 export function JobCard() {
@@ -15,22 +16,25 @@ export function JobCard() {
   const jobs = query.data?.jobs ?? [];
   const recent = [...jobs].reverse().slice(0, 5);
   const running = jobs.filter(
-    (j) => !["completed", "failed", "deleted"].includes(j.status),
+    (j) => !["completed", "failed", "submit_failed", "error", "deleted"].includes(j.phase || j.status),
   ).length;
 
   const status = query.isLoading
     ? "loading"
     : query.isError
       ? "error"
-      : running > 0
-        ? "loading"
-        : "ok";
+      : "ok";
 
   return (
     <MonitorCard
       title="BLAST Jobs"
       subtitle={`${jobs.length} total · ${running} active`}
       status={status}
+      refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
+      refreshInterval={30_000}
+      onRefresh={() => query.refetch()}
+      accentColor="jobs"
+      collapsible
       rightSlot={
         <Link
           to="/blast/submit"
@@ -44,7 +48,10 @@ export function JobCard() {
       {query.isError && (
         <div className="muted">Failed: {(query.error as Error).message}</div>
       )}
-      {recent.length === 0 && !query.isError && (
+      {query.isLoading && (
+        <div className="muted">Loading jobs...</div>
+      )}
+      {!query.isLoading && recent.length === 0 && !query.isError && (
         <div className="muted">No jobs yet.</div>
       )}
       {recent.length > 0 && (

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect } from "react";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 interface Props {
-  open: boolean;
+  open?: boolean;
   title: string;
   message?: string;
   confirmLabel?: string;
@@ -10,23 +11,24 @@ interface Props {
 }
 
 export function ConfirmDialog({
-  open,
+  open = true,
   title,
   message,
   confirmLabel = "Confirm",
   onConfirm,
   onCancel,
 }: Props) {
-  const cancelRef = useRef<HTMLButtonElement>(null);
+  const trapRef = useFocusTrap<HTMLDivElement>(open);
 
   useEffect(() => {
-    if (open) cancelRef.current?.focus();
-  }, [open]);
+    if (!open) return;
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", handleEsc);
+    return () => window.removeEventListener("keydown", handleEsc);
+  }, [open, onCancel]);
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
-    },
+  const handleBackdropClick = useCallback(
+    (e: React.MouseEvent) => { if (e.target === e.currentTarget) onCancel(); },
     [onCancel],
   );
 
@@ -35,11 +37,11 @@ export function ConfirmDialog({
   return (
     <div
       className="glass-dialog-backdrop"
-      onClick={onCancel}
-      onKeyDown={handleKeyDown}
+      onClick={handleBackdropClick}
       role="dialog"
       aria-modal="true"
       aria-label={title}
+      ref={trapRef}
     >
       <div
         className="glass-card glass-card--strong glass-dialog"
@@ -49,7 +51,6 @@ export function ConfirmDialog({
         {message && <p className="muted">{message}</p>}
         <div className="glass-dialog__actions">
           <button
-            ref={cancelRef}
             className="glass-button"
             onClick={onCancel}
           >
@@ -58,6 +59,7 @@ export function ConfirmDialog({
           <button
             className="glass-button glass-button--danger"
             onClick={onConfirm}
+            aria-label={`Permanently ${confirmLabel.toLowerCase()}`}
           >
             {confirmLabel}
           </button>

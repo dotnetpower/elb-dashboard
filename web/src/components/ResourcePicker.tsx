@@ -1,4 +1,4 @@
-import { useEffect, useId } from "react";
+import { useEffect, useId, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 interface Item {
@@ -21,6 +21,7 @@ interface Props {
   allowCustom?: boolean;
   /** Compact chip mode for the config strip. */
   compact?: boolean;
+  style?: CSSProperties;
 }
 
 export function ResourcePicker({
@@ -32,6 +33,7 @@ export function ResourcePicker({
   disabledPlaceholder = "Configure parent first",
   allowCustom = false,
   compact = false,
+  style,
 }: Props) {
   const reactId = useId();
   const enabled = fetcher !== null;
@@ -55,7 +57,7 @@ export function ResourcePicker({
 
   if (compact) {
     return (
-      <div className="cfg-chip">
+      <div className="cfg-chip" style={style}>
         <span className="lbl">{label}</span>
         <select
           value={value}

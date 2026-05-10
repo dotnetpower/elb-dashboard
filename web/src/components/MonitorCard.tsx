@@ -1,41 +1,140 @@
-import type { PropsWithChildren, ReactNode } from "react";
+import { type PropsWithChildren, type ReactNode, useState, useCallback } from "react";
+import { ChevronDown, RefreshCw } from "lucide-react";
+import { RefreshRing } from "@/components/RefreshRing";
+import { useRelativeTime } from "@/hooks/useRelativeTime";
 
 interface Props {
   title: string;
   subtitle?: ReactNode;
-  status?: "idle" | "loading" | "ok" | "error";
+  status?: "idle" | "loading" | "ok" | "ready" | "not-provisioned" | "error";
   rightSlot?: ReactNode;
+  lastRefreshed?: Date | null;
+  refreshCountdown?: number | null;
+  refreshInterval?: number;
+  onRefresh?: () => void;
+  accentColor?: "cluster" | "storage" | "acr" | "terminal" | "jobs";
+  collapsible?: boolean;
+  defaultCollapsed?: boolean;
 }
 
 const STATUS_TAG: Record<NonNullable<Props["status"]>, { cls: string; label: string } | null> = {
   idle: null,
   loading: { cls: "gt gt-o", label: "Loading" },
   ok: { cls: "gt gt-g", label: "OK" },
+  ready: { cls: "gt gt-b", label: "Ready" },
+  "not-provisioned": { cls: "gt gt-m", label: "Not Provisioned" },
   error: { cls: "gt gt-r", label: "Error" },
 };
+
+const STORAGE_PREFIX = "elb-card-collapsed-";
+
+function getCollapsedState(title: string, defaultVal: boolean): boolean {
+  try {
+    const v = localStorage.getItem(STORAGE_PREFIX + title);
+    return v != null ? v === "1" : defaultVal;
+  } catch { return defaultVal; }
+}
 
 export function MonitorCard({
   title,
   subtitle,
   status = "idle",
   rightSlot,
+  lastRefreshed,
+  refreshCountdown,
+  refreshInterval,
+  onRefresh,
+  accentColor,
+  collapsible = false,
+  defaultCollapsed = false,
   children,
 }: PropsWithChildren<Props>) {
   const tag = STATUS_TAG[status];
+  const relTime = useRelativeTime(lastRefreshed?.getTime() ?? null);
+  const [collapsed, setCollapsed] = useState(() => getCollapsedState(title, defaultCollapsed));
+
+  const toggleCollapse = useCallback(() => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(STORAGE_PREFIX + title, next ? "1" : "0"); } catch { /* noop */ }
+      return next;
+    });
+  }, [title]);
+
+  const panelCls = ["panel", accentColor ? `panel--accent-${accentColor}` : ""].filter(Boolean).join(" ");
+  const hdCls = ["panel-hd", collapsible ? "panel-hd--collapsible" : ""].filter(Boolean).join(" ");
 
   return (
-    <section className="panel">
-      <div className="panel-hd">
-        <div>
-          <div className="title">{title}</div>
-          {subtitle && <div className="sub">{subtitle}</div>}
+    <section className={panelCls}>
+      {status === "loading" && (
+        <div style={{
+          position: "absolute", top: 0, left: 0, right: 0, height: 2,
+          background: "rgba(122,167,255,0.15)", overflow: "hidden", zIndex: 1,
+        }}>
+          <div style={{
+            width: "40%", height: "100%",
+            background: "linear-gradient(90deg, transparent, var(--accent), transparent)",
+            animation: "shimmer 1.5s ease-in-out infinite",
+          }} />
         </div>
+      )}
+      <div className={hdCls} onClick={collapsible ? toggleCollapse : undefined}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {collapsible && (
+            <ChevronDown
+              size={14}
+              className={`panel__collapse-icon${collapsed ? " panel__collapse-icon--collapsed" : ""}`}
+            />
+          )}
+          <div>
+            <div className="title">{title}</div>
+            {subtitle && <div className="sub">{subtitle}</div>}
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* #27 Circular countdown ring */}
+          {refreshCountdown != null && refreshInterval && (
+            <RefreshRing seconds={refreshCountdown} total={Math.ceil(refreshInterval / 1000)} />
+          )}
+          {/* #26 Relative time */}
+          {relTime && (
+            <span
+              style={{ fontSize: 10, color: "var(--text-faint)" }}
+              title={lastRefreshed?.toLocaleString()}
+            >
+              {relTime}
+            </span>
+          )}
           {tag && <span className={tag.cls}>{tag.label}</span>}
-          {rightSlot}
+          {/* #29 Unified refresh button */}
+          {onRefresh && (
+            <button
+              className="glass-button"
+              onClick={(e) => { e.stopPropagation(); onRefresh(); }}
+              disabled={status === "loading"}
+              style={{ padding: "3px 6px" }}
+              title="Refresh now"
+            >
+              <RefreshCw size={11} strokeWidth={1.5} />
+            </button>
+          )}
+          {rightSlot && (
+            <div onClick={(e) => e.stopPropagation()}>
+              {rightSlot}
+            </div>
+          )}
         </div>
       </div>
-      <div className="panel-bd">{children}</div>
+      {/* #8 Skeleton loading */}
+      {status === "loading" && !children ? (
+        <div className="panel-bd">
+          <div className="skeleton skeleton-line" style={{ width: "85%" }} />
+          <div className="skeleton skeleton-line" style={{ width: "70%" }} />
+          <div className="skeleton skeleton-line" style={{ width: "55%" }} />
+        </div>
+      ) : (
+        <div className={`panel-bd${collapsed ? " panel-bd--collapsed" : ""}`}>{children}</div>
+      )}
     </section>
   );
 }

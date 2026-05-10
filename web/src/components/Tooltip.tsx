@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type ReactNode } from "react";
+import { useState, useRef, useEffect, useId, type ReactNode } from "react";
 import { HelpCircle } from "lucide-react";
 
 interface Props {
@@ -10,6 +10,7 @@ interface Props {
 export function Tooltip({ content, width = 320 }: Props) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const tooltipId = useId();
 
   // Close on outside click
   useEffect(() => {
@@ -30,11 +31,13 @@ export function Tooltip({ content, width = 320 }: Props) {
         onMouseLeave={() => setOpen(false)}
         onClick={() => setOpen((o) => !o)}
         aria-label="More info"
+        aria-expanded={open}
+        aria-describedby={open ? tooltipId : undefined}
       >
         <HelpCircle size={13} strokeWidth={1.5} />
       </button>
       {open && (
-        <div className="tooltip-popup" style={{ width }}>
+        <div className="tooltip-popup" role="tooltip" id={tooltipId} style={{ width, left: "50%", transform: "translateX(-50%)" }}>
           {content}
         </div>
       )}

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2, AlertTriangle, CheckCircle2, Plus } from "lucide-react";
 
 import { armProxyApi, resourceApi } from "@/api/endpoints";
 import { Tooltip } from "@/components/Tooltip";
+import { AZURE_REGIONS } from "@/constants";
 
 const STORAGE_KEY = "elb-resource-config";
 
@@ -75,23 +76,20 @@ function validateStep2(c: ResourceConfig): ValidationErrors {
   else if (!RG_RE.test(c.acrResourceGroup)) e.acrResourceGroup = "Invalid name";
   if (!c.terminalResourceGroup) e.terminalResourceGroup = "Terminal RG is required";
   else if (!RG_RE.test(c.terminalResourceGroup)) e.terminalResourceGroup = "Invalid name";
-  if (!c.region) e.region = "Region is required";
   return e;
 }
 
 function validateStep3(c: ResourceConfig): ValidationErrors {
   const e: ValidationErrors = {};
-  if (c.storageAccountName && !STORAGE_RE.test(c.storageAccountName)) e.storageAccountName = "3-24 lowercase letters and numbers only";
-  if (c.acrName && !ACR_RE.test(c.acrName)) e.acrName = "5-50 alphanumeric characters only";
+  if (!c.storageAccountName) e.storageAccountName = "Storage Account name is required";
+  else if (!STORAGE_RE.test(c.storageAccountName)) e.storageAccountName = "3-24 lowercase letters and numbers only";
+  if (!c.acrName) e.acrName = "Container Registry name is required";
+  else if (!ACR_RE.test(c.acrName)) e.acrName = "5-50 alphanumeric characters only";
   if (c.terminalVmName && !VM_RE.test(c.terminalVmName)) e.terminalVmName = "Invalid VM name";
   return e;
 }
 
-const REGIONS = [
-  "koreacentral", "koreasouth", "eastus", "eastus2", "westus", "westus2",
-  "centralus", "northeurope", "westeurope", "southeastasia", "eastasia",
-  "japaneast", "japanwest", "australiaeast",
-];
+const REGIONS = AZURE_REGIONS.map((r) => r.value);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -185,7 +183,23 @@ export function SetupWizard({ onComplete }: Props) {
     setStep((s) => (s + 1) as Step);
   }, [step, config]);
 
-  const handleFinish = useCallback(() => { saveConfig(config); onComplete(config); }, [config, onComplete]);
+  const handleFinish = useCallback(() => {
+    saveConfig(config);
+    // Save associated resource config as RG tags (fire-and-forget)
+    if (config.subscriptionId && config.workloadResourceGroup) {
+      import("@/api/endpoints").then(({ armProxyApi }) => {
+        armProxyApi.setRgTags(config.subscriptionId, config.workloadResourceGroup, {
+          "elb-acr-rg": config.acrResourceGroup || "",
+          "elb-acr": config.acrName || "",
+          "elb-storage": config.storageAccountName || "",
+          "elb-terminal-rg": config.terminalResourceGroup || "",
+          "elb-terminal-vm": config.terminalVmName || "",
+          "elb-region": config.region || "",
+        }).catch(() => {}); // Best-effort, don't block
+      });
+    }
+    onComplete(config);
+  }, [config, onComplete]);
 
   // Live validation
   useEffect(() => {
@@ -194,7 +208,10 @@ export function SetupWizard({ onComplete }: Props) {
     setErrors(v);
   }, [config, step, attempted]);
 
-  const stepLabels = ["Subscription", "Resource Groups", "Discover", "Confirm"];
+  const currentStepErrors = step === 1 ? validateStep1(config) : step === 2 ? validateStep2(config) : step === 3 ? validateStep3(config) : {};
+  const canProceed = Object.keys(currentStepErrors).length === 0;
+
+  const stepLabels = ["Account", "Project Folders", "Find Resources", "Confirm"];
 
   // ── Render ──
   return (
@@ -205,8 +222,8 @@ export function SetupWizard({ onComplete }: Props) {
         <div style={{ padding: "24px 32px 0", display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg, #6e9fff, #b877d9)", boxShadow: "0 2px 12px rgba(110,159,255,0.25)" }} />
           <div>
-            <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>ElasticBLAST Setup</h1>
-            <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 1 }}>Configure your Azure resources</div>
+            <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Set up your BLAST workspace</h1>
+            <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 1 }}>Connect to Azure and configure resources for running BLAST searches</div>
           </div>
         </div>
 
@@ -231,14 +248,21 @@ export function SetupWizard({ onComplete }: Props) {
 
           {/* Step 1 */}
           {step === 1 && (<div>
-            <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Choose Subscription</h2>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>Select the Azure subscription where your ElasticBLAST resources live.</p>
+            <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Choose your Azure account</h2>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
+              A subscription is your Azure billing account. If you're not sure which to choose, ask your lab administrator or IT team.
+            </p>
             <label style={{ display: "block" }}>
               <span className="glass-label">Subscription</span>
               {subsQuery.isLoading ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 0", color: "var(--text-muted)" }}><Loader2 size={14} className="spin" /> Loading subscriptions...</div>
               ) : subsQuery.isError ? (<>
-                <div style={{ color: "var(--warning)", fontSize: 12, marginBottom: 8, lineHeight: 1.5 }}>Could not load subscriptions. Enter your Subscription ID manually:</div>
+                <div style={{ color: "var(--warning)", fontSize: 12, marginBottom: 8, lineHeight: 1.5 }}>
+                  Could not load subscriptions. Enter your Subscription ID manually.{" "}
+                  <a href="https://portal.azure.com/#view/Microsoft_Azure_Billing/SubscriptionsBlade" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+                    Find it in the Azure Portal →
+                  </a>
+                </div>
                 <input className="glass-input" placeholder="12345678-1234-1234-1234-123456789abc" value={config.subscriptionId} onChange={(e) => setConfig((c) => ({ ...c, subscriptionId: e.target.value.trim() }))} spellCheck={false} style={{ fontFamily: "var(--font-mono)", fontSize: 12 }} />
               </>) : (
                 <select className="glass-input" value={config.subscriptionId} onChange={(e) => setConfig((c) => ({ ...c, subscriptionId: e.target.value }))}>
@@ -252,27 +276,19 @@ export function SetupWizard({ onComplete }: Props) {
 
           {/* Step 2 */}
           {step === 2 && (<div>
-            <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Resource Groups & Region</h2>
+            <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Project Folders</h2>
             <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 14, lineHeight: 1.5 }}>
-              Configure where your Azure resources will be deployed.
+              Resource groups are like project folders that organize your Azure resources.
+              You'll need one for BLAST workloads and one for the container registry.
+              We can create them for you if they don't exist yet.
             </p>
 
-            {/* Region */}
-            <label style={{ display: "block", marginBottom: 14 }}>
-              <span className="glass-label">
-                Region
-                <Tooltip content={<>
-                  <strong>Azure Region</strong><br />
-                  All resources (AKS, Storage, ACR, VM) are created in this region.
-                  Choose the one closest to your data for best performance.
-                  <div className="tt-note">Tip: koreacentral is recommended for Korea-based researchers.</div>
-                </>} />
-              </span>
-              <select className="glass-input" value={config.region} onChange={(e) => setConfig((c) => ({ ...c, region: e.target.value }))}>
-                {REGIONS.map((r) => <option key={r} value={r}>{r}</option>)}
-              </select>
-              <ErrorMsg msg={errors.region} />
-            </label>
+            {config.region && (
+              <div style={{ marginBottom: 14, padding: "8px 12px", background: "rgba(110,159,255,0.06)", border: "1px solid rgba(110,159,255,0.15)", borderRadius: "var(--radius)", fontSize: 12, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 14 }}>📍</span>
+                Primary region (from Workload RG): <strong style={{ color: "var(--text-primary)", marginLeft: 4 }}>{config.region}</strong>
+              </div>
+            )}
 
             {rgQuery.isLoading ? (
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)" }}>
@@ -300,6 +316,7 @@ export function SetupWizard({ onComplete }: Props) {
                 rgData={rgQuery.data}
                 isManual={rgQuery.isError || !rgQuery.data?.length}
                 error={errors.workloadResourceGroup}
+                isPrimary
                 tooltip={<>
                   <strong>Workload Resource Group</strong><br />
                   Contains the resources for running BLAST searches.
@@ -380,7 +397,7 @@ export function SetupWizard({ onComplete }: Props) {
             {/* Storage */}
             <ResourceRow
               label={`Storage Account (${config.workloadResourceGroup})`}
-              icon="🗄" placeholder="elbstorage01"
+              icon="🗄" placeholder="e.g. elbstorage01 (3-24 lowercase + numbers)"
               value={config.storageAccountName}
               onChange={(v) => setConfig((c) => ({ ...c, storageAccountName: v }))}
               query={storageQuery}
@@ -393,7 +410,7 @@ export function SetupWizard({ onComplete }: Props) {
             {/* ACR */}
             <ResourceRow
               label={`Container Registry (${config.acrResourceGroup})`}
-              icon="📦" placeholder="elbacr"
+              icon="📦" placeholder="e.g. elbacr (5-50 alphanumeric)"
               value={config.acrName}
               onChange={(v) => setConfig((c) => ({ ...c, acrName: v }))}
               query={acrQuery}
@@ -409,7 +426,7 @@ export function SetupWizard({ onComplete }: Props) {
             </div>
             <div style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-weak)", borderRadius: "var(--radius)", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
               <div style={{ fontSize: 16 }}>🖥</div>
-              <input className="glass-input" placeholder="vm-elb-terminal" value={config.terminalVmName} onChange={(e) => setConfig((c) => ({ ...c, terminalVmName: e.target.value.trim() }))} spellCheck={false} style={{ flex: 1, fontSize: 12 }} />
+              <input className="glass-input" placeholder="e.g. vm-elb-terminal" value={config.terminalVmName} onChange={(e) => setConfig((c) => ({ ...c, terminalVmName: e.target.value.trim() }))} spellCheck={false} style={{ flex: 1, fontSize: 12 }} />
               {!vmQuery.isLoading && config.terminalVmName && vmQuery.data?.some((v) => v.name === config.terminalVmName) ? (
                 <span className="gt gt-g"><CheckCircle2 size={10} /> Found</span>
               ) : <span className="gt gt-o">Provision later</span>}
@@ -429,7 +446,7 @@ export function SetupWizard({ onComplete }: Props) {
               <tbody>
                 {([
                   ["Subscription", config.subscriptionId],
-                  ["Region", config.region],
+                  ["Primary Region", config.region || "— (auto-detected)"],
                   ["Workload RG", config.workloadResourceGroup],
                   ["Storage", config.storageAccountName || "— (skip)"],
                   ["ACR RG", config.acrResourceGroup],
@@ -452,7 +469,7 @@ export function SetupWizard({ onComplete }: Props) {
           {step > 1 ? <button className="glass-button" onClick={() => { setStep((s) => (s - 1) as Step); setAttempted(false); setErrors({}); }}>← Back</button> : <div />}
           <div style={{ display: "flex", gap: 8 }}>
             {step < 4 ? (
-              <button className="glass-button glass-button--primary" onClick={handleNext}>Next →</button>
+              <button className="glass-button glass-button--primary" onClick={handleNext} disabled={!canProceed} style={!canProceed ? { opacity: 0.4, cursor: "not-allowed" } : undefined}>Next →</button>
             ) : (
               <button className="glass-button" style={{ background: "rgba(115,191,105,0.12)", borderColor: "rgba(115,191,105,0.35)", color: "var(--success)" }} onClick={handleFinish}>Save & Open Dashboard →</button>
             )}
@@ -481,13 +498,27 @@ interface ResourceRowProps {
 
 function ResourceRow({ label, icon, placeholder, value, onChange, query, isValid, mutation, error }: ResourceRowProps) {
   const found = !query.isLoading && value && query.data?.some((r) => r.name === value);
+  const duplicate = !query.isLoading && value && !found && query.data?.some((r) => r.name.toLowerCase() === value.toLowerCase());
+  const noResources = !query.isLoading && !query.isError && query.data?.length === 0;
 
   return (
     <>
-      <div style={{ fontSize: 11, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.06em", margin: "14px 0 6px" }}>{label}</div>
+      <div style={{ fontSize: 11, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.06em", margin: "14px 0 6px", display: "flex", alignItems: "center", gap: 6 }}>
+        {label}
+        {!query.isLoading && query.data && (
+          <span style={{ fontSize: 10, color: "var(--text-faint)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
+            ({query.data.length} found)
+          </span>
+        )}
+      </div>
+      {noResources && (
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6, lineHeight: 1.4 }}>
+          No existing resources found. Enter a name to create one.
+        </div>
+      )}
       <div style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-weak)", borderRadius: "var(--radius)", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{ fontSize: 16 }}>{icon}</div>
-        {query.isError || (!query.isLoading && !query.data?.length) ? (
+        {query.isError || noResources ? (
           <input className="glass-input" placeholder={placeholder} value={value} onChange={(e) => onChange(e.target.value.trim())} spellCheck={false} style={{ flex: 1, fontSize: 12 }} />
         ) : query.isLoading ? (
           <div style={{ flex: 1, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}><Loader2 size={14} className="spin" /> Scanning...</div>
@@ -502,7 +533,7 @@ function ResourceRow({ label, icon, placeholder, value, onChange, query, isValid
           <button
             className="glass-button glass-button--primary"
             style={{ fontSize: 11, padding: "3px 8px", whiteSpace: "nowrap" }}
-            disabled={!isValid || mutation.isPending}
+            disabled={!isValid || mutation.isPending || mutation.isSuccess}
             onClick={() => mutation.mutate()}
           >
             {mutation.isPending ? <Loader2 size={10} className="spin" /> :
@@ -512,6 +543,11 @@ function ResourceRow({ label, icon, placeholder, value, onChange, query, isValid
         ) : null}
       </div>
       <ErrorMsg msg={error} />
+      {duplicate && (
+        <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--warning)", fontSize: 11, marginTop: 4 }}>
+          <AlertTriangle size={11} /> A resource with a similar name exists (case mismatch). Check the name.
+        </div>
+      )}
       {mutation.isError && <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>{(mutation.error as Error).message}</div>}
     </>
   );
@@ -530,25 +566,35 @@ interface RgFieldProps {
   isManual: boolean;
   error?: string;
   tooltip: ReactNode;
+  /** When true, selecting this RG also sets config.region */
+  isPrimary?: boolean;
 }
 
-function RgField({ label, configKey, placeholder, config, setConfig, rgData, isManual, error, tooltip }: RgFieldProps) {
+function RgField({ label, configKey, placeholder, config, setConfig, rgData, isManual, error, tooltip, isPrimary }: RgFieldProps) {
+  const queryClient = useQueryClient();
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState(placeholder);
+  const [newRegion, setNewRegion] = useState(config.region || "koreacentral");
 
   const createMut = useMutation({
     mutationFn: () => resourceApi.ensureRg({
       subscription_id: config.subscriptionId,
       resource_group: newName,
-      region: config.region,
+      region: newRegion,
     }),
-    onSuccess: () => {
-      setConfig((c) => ({ ...c, [configKey]: newName }));
+    onSuccess: async () => {
+      setConfig((c) => {
+        const next = { ...c, [configKey]: newName };
+        if (isPrimary) next.region = newRegion;
+        return next;
+      });
+      await queryClient.invalidateQueries({ queryKey: ["wizard-rgs"] });
       setCreating(false);
     },
   });
 
   const nameValid = RG_RE.test(newName) && newName.length > 0;
+  const nameDuplicate = Boolean(rgData?.some((g) => g.name.toLowerCase() === newName.toLowerCase()));
 
   return (
     <div style={{ marginBottom: 12 }}>
@@ -559,54 +605,87 @@ function RgField({ label, configKey, placeholder, config, setConfig, rgData, isM
 
       {creating ? (
         /* ── Create-new mode ── */
-        <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-          <div style={{ flex: 1 }}>
-            <input
-              className="glass-input"
-              placeholder={placeholder}
-              value={newName}
-              onChange={(e) => setNewName(e.target.value.trim())}
-              spellCheck={false}
-              autoFocus
-            />
-            {!nameValid && newName && (
-              <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--danger)", fontSize: 11, marginTop: 4 }}>
-                <AlertTriangle size={11} /> Letters, numbers, hyphens, underscores, periods only
-              </div>
-            )}
-            {createMut.isError && (
-              <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>
-                {(createMut.error as Error).message}
-              </div>
-            )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+            <div style={{ flex: 1 }}>
+              <input
+                className="glass-input"
+                placeholder={placeholder}
+                value={newName}
+                onChange={(e) => setNewName(e.target.value.trim())}
+                spellCheck={false}
+                autoFocus
+              />
+              {!nameValid && newName && (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--danger)", fontSize: 11, marginTop: 4 }}>
+                  <AlertTriangle size={11} /> Letters, numbers, hyphens, underscores, periods only
+                </div>
+              )}
+              {nameValid && nameDuplicate && (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--warning)", fontSize: 11, marginTop: 4 }}>
+                  <AlertTriangle size={11} /> Resource group &quot;{newName}&quot; already exists. It will be reused.
+                </div>
+              )}
+              {createMut.isError && (
+                <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>
+                  {(createMut.error as Error).message}
+                </div>
+              )}
+            </div>
+            <button
+              className="glass-button glass-button--primary"
+              style={{ padding: "7px 14px", fontSize: 12, whiteSpace: "nowrap", marginTop: 0 }}
+              disabled={!nameValid || createMut.isPending}
+              onClick={() => createMut.mutate()}
+            >
+              {createMut.isPending ? <><Loader2 size={12} className="spin" /> Creating...</> :
+               createMut.isSuccess ? <><CheckCircle2 size={12} /> Created</> :
+               <><Plus size={12} /> Create</>}
+            </button>
+            <button
+              className="glass-button"
+              style={{ padding: "7px 10px", fontSize: 12 }}
+              onClick={() => { setCreating(false); createMut.reset(); }}
+            >
+              Cancel
+            </button>
           </div>
-          <button
-            className="glass-button glass-button--primary"
-            style={{ padding: "7px 14px", fontSize: 12, whiteSpace: "nowrap", marginTop: 0 }}
-            disabled={!nameValid || createMut.isPending}
-            onClick={() => createMut.mutate()}
-          >
-            {createMut.isPending ? <><Loader2 size={12} className="spin" /> Creating...</> :
-             createMut.isSuccess ? <><CheckCircle2 size={12} /> Created</> :
-             <><Plus size={12} /> Create</>}
-          </button>
-          <button
-            className="glass-button"
-            style={{ padding: "7px 10px", fontSize: 12 }}
-            onClick={() => { setCreating(false); createMut.reset(); }}
-          >
-            Cancel
-          </button>
+          <div>
+            <span className="glass-label" style={{ fontSize: 11 }}>Region</span>
+            <select
+              className="glass-input"
+              value={newRegion}
+              onChange={(e) => setNewRegion(e.target.value)}
+              style={{ fontSize: 12 }}
+            >
+              {REGIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+          </div>
         </div>
       ) : isManual ? (
         /* ── Manual input mode (ARM unavailable) ── */
-        <input
-          className="glass-input"
-          placeholder={placeholder}
-          value={config[configKey]}
-          onChange={(e) => setConfig((c) => ({ ...c, [configKey]: e.target.value.trim() }))}
-          spellCheck={false}
-        />
+        <div>
+          <input
+            className="glass-input"
+            placeholder={placeholder}
+            value={config[configKey]}
+            onChange={(e) => setConfig((c) => ({ ...c, [configKey]: e.target.value.trim() }))}
+            spellCheck={false}
+          />
+          {isPrimary && (
+            <div style={{ marginTop: 8 }}>
+              <span className="glass-label" style={{ fontSize: 11 }}>Region (for new resources)</span>
+              <select
+                className="glass-input"
+                value={config.region}
+                onChange={(e) => setConfig((c) => ({ ...c, region: e.target.value }))}
+                style={{ fontSize: 12 }}
+              >
+                {REGIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
       ) : (
         /* ── Select from existing + Create new button ── */
         <div style={{ display: "flex", gap: 6 }}>
@@ -614,7 +693,14 @@ function RgField({ label, configKey, placeholder, config, setConfig, rgData, isM
             className="glass-input"
             style={{ flex: 1 }}
             value={config[configKey]}
-            onChange={(e) => setConfig((c) => ({ ...c, [configKey]: e.target.value }))}
+            onChange={(e) => {
+              const selected = rgData?.find((g) => g.name === e.target.value);
+              setConfig((c) => {
+                const next = { ...c, [configKey]: e.target.value };
+                if (isPrimary && selected) next.region = selected.location;
+                return next;
+              });
+            }}
           >
             <option value="">Select...</option>
             {rgData?.map((g) => (
@@ -624,7 +710,7 @@ function RgField({ label, configKey, placeholder, config, setConfig, rgData, isM
           <button
             className="glass-button"
             style={{ padding: "7px 10px", fontSize: 11, whiteSpace: "nowrap" }}
-            onClick={() => { setCreating(true); setNewName(placeholder); createMut.reset(); }}
+            onClick={() => { setCreating(true); setNewName(placeholder); setNewRegion(config.region || "koreacentral"); createMut.reset(); }}
           >
             <Plus size={12} /> New
           </button>
