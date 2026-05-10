@@ -192,7 +192,7 @@ def _parse_exit_code(output: str) -> int:
             try:
                 return int(line.split("=", 1)[1])
             except ValueError:
-                pass
+                LOGGER.warning("failed to parse EXIT_CODE from line: %s", line[:80])
     return 6  # UNKNOWN
 
 

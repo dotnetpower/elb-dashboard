@@ -86,7 +86,7 @@ def run_aks_command(
         raise ValueError("Command contains forbidden shell metacharacters")
     allowed_prefixes = ("kubectl get ", "kubectl top ", "kubectl describe ", "kubectl version", "kubectl logs ")
     if not any(command.startswith(p) for p in allowed_prefixes):
-        raise ValueError(f"Only read-only kubectl commands are allowed: {', '.join(allowed_prefixes)}")
+        raise ValueError("Command not allowed: only read-only kubectl commands are accepted")
 
     client = aks_client(credential, subscription_id)
     from azure.mgmt.containerservice.models import RunCommandRequest
@@ -182,12 +182,14 @@ def _get_k8s_session(
     # Register cleanup of temp files on session close
     _orig_close = session.close
     def _cleanup_close() -> None:
-        _orig_close()
-        for f in _temp_files:
-            try:
-                os.unlink(f)
-            except OSError:
-                pass
+        try:
+            _orig_close()
+        finally:
+            for f in _temp_files:
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
     session.close = _cleanup_close  # type: ignore[assignment]
 
     return session, server

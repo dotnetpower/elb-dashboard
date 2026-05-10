@@ -89,12 +89,19 @@ def _validate_rg(value: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+_RE_INSTANCE_ID = re.compile(r"^[a-zA-Z0-9]{16,64}$")
+
+
 def _json_response(body: Any, status: int = 200) -> func.HttpResponse:
-    return func.HttpResponse(
+    resp = func.HttpResponse(
         json.dumps(body, default=str),
         status_code=status,
-        mimetype="application/json",
+        mimetype="application/json; charset=utf-8",
     )
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def _error_response(status: int, message: str) -> func.HttpResponse:
@@ -176,8 +183,8 @@ async def get_provision_status(
         return _error_response(exc.status, exc.message)
 
     instance_id = req.route_params.get("instance_id")
-    if not instance_id:
-        return _error_response(400, "instance_id missing")
+    if not instance_id or not _RE_INSTANCE_ID.match(instance_id):
+        return _error_response(400, "invalid instance_id")
     status = await client.get_status(instance_id, show_input=False)
     if status is None or status.runtime_status is None:
         return _error_response(404, "instance not found")
@@ -628,7 +635,12 @@ def aks_pod_logs(req: func.HttpRequest) -> func.HttpResponse:
     params, err = _require_query(req, "subscription_id", "resource_group", "cluster_name", "namespace", "pod_name")
     if err:
         return err
-    tail = int(req.params.get("tail", "200"))
+    try:
+        tail = int(req.params.get("tail", "200"))
+    except ValueError:
+        return _error_response(400, "tail must be a valid integer")
+    if tail < 1 or tail > 10000:
+        return _error_response(400, "tail must be between 1 and 10000")
     cred = credential_for_caller(identity.raw_token)
     try:
         logs = monitoring_svc.k8s_pod_logs(cred, params["subscription_id"], params["resource_group"], params["cluster_name"], params["namespace"], params["pod_name"], tail)
@@ -837,8 +849,8 @@ async def get_blast_submit_status(
         return _error_response(exc.status, exc.message)
 
     instance_id = req.route_params.get("instance_id")
-    if not instance_id:
-        return _error_response(400, "instance_id missing")
+    if not instance_id or not _RE_INSTANCE_ID.match(instance_id):
+        return _error_response(400, "invalid instance_id")
     status = await client.get_status(instance_id, show_input=False)
     if status is None or status.runtime_status is None:
         return _error_response(404, "instance not found")
@@ -880,7 +892,10 @@ def read_blast_job_file(req: func.HttpRequest) -> func.HttpResponse:
         return err
 
     cred = credential_for_caller(identity.raw_token)
-    max_bytes = min(int(req.params.get("max_bytes", "4096")), 10000)
+    try:
+        max_bytes = min(int(req.params.get("max_bytes", "4096")), 10000)
+    except ValueError:
+        max_bytes = 4096
 
     try:
         text = storage_data_svc.read_blob_text(
@@ -994,7 +1009,7 @@ async def get_blast_job(
     req: func.HttpRequest, client: df.DurableOrchestrationClient
 ) -> func.HttpResponse:
     try:
-        validate_bearer_token(req.headers.get("Authorization"))
+        identity = validate_bearer_token(req.headers.get("Authorization"))
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
@@ -1008,6 +1023,10 @@ async def get_blast_job(
     job = next((j for j in (jobs or []) if j.get("job_id") == job_id), None)
     if not job:
         return _error_response(404, "job not found")
+
+    # Ownership check — only the job owner can view details
+    if job.get("owner_oid") and job["owner_oid"] != identity.object_id:
+        return _error_response(403, "not authorized to view this job")
 
     # Enrich with orchestrator status if instance_id is known
     instance_id = job.get("instance_id")
@@ -1089,7 +1108,7 @@ async def cancel_blast_job(
 ) -> func.HttpResponse:
     """Terminate a running BLAST orchestrator and mark the job as cancelled."""
     try:
-        validate_bearer_token(req.headers.get("Authorization"))
+        identity = validate_bearer_token(req.headers.get("Authorization"))
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
@@ -1103,6 +1122,10 @@ async def cancel_blast_job(
     job = next((j for j in (jobs or []) if j.get("job_id") == job_id), None)
     if not job:
         return _error_response(404, "job not found")
+
+    # Ownership check
+    if job.get("owner_oid") and job["owner_oid"] != identity.object_id:
+        return _error_response(403, "not authorized to cancel this job")
 
     instance_id = job.get("instance_id")
     if not instance_id:
