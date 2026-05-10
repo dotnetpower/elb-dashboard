@@ -363,6 +363,15 @@ export interface BlastJobSummary {
   custom_status?: unknown;
   output?: unknown;
   config_snapshot?: Record<string, unknown>;
+  infrastructure?: {
+    subscription_id?: string;
+    resource_group?: string;
+    region?: string;
+    storage_account?: string;
+    acr_name?: string;
+    cluster_name?: string;
+    terminal_vm?: string;
+  };
   error?: string;
 }
 

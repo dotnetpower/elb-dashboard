@@ -820,6 +820,20 @@ export function BlastResults() {
                   <span>{String((job.config_snapshot as Record<string, unknown>).num_nodes ?? "—")}</span>
                 </>
               )}
+              {/* Infrastructure info */}
+              {job.infrastructure && (() => {
+                const infra = job.infrastructure as Record<string, unknown>;
+                return (<>
+                  <span className="muted">Cluster</span>
+                  <span><code style={{ fontSize: 11 }}>{String(infra.cluster_name ?? "—")}</code></span>
+                  <span className="muted">Region</span>
+                  <span>{String(infra.region ?? "—")}</span>
+                  <span className="muted">Resource Group</span>
+                  <span>{String(infra.resource_group ?? "—")}</span>
+                  <span className="muted">Storage</span>
+                  <span>{String(infra.storage_account ?? "—")}</span>
+                </>);
+              })()}
             </div>
           </>
         )}

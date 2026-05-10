@@ -913,6 +913,15 @@ async def start_blast_submit(
                 "machine_type": parsed.machine_type,
                 "num_nodes": parsed.num_nodes,
             },
+            "infrastructure": {
+                "subscription_id": parsed.subscription_id,
+                "resource_group": parsed.resource_group,
+                "region": parsed.region,
+                "storage_account": parsed.storage_account,
+                "acr_name": parsed.acr_name,
+                "cluster_name": f"elastic-blast-{job_id[:12]}",
+                "terminal_vm": parsed.terminal_vm_name,
+            },
             "owner_oid": identity.object_id,
         },
     )
