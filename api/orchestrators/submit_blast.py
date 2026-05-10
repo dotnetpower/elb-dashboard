@@ -24,6 +24,8 @@ LOGGER = logging.getLogger(__name__)
 
 STATUS_POLL_INTERVAL_SECONDS = 30
 STATUS_POLL_MAX_ATTEMPTS = 720  # 720 * 30s = 6 hours max
+RESULTS_VERIFY_INTERVAL_SECONDS = 30
+RESULTS_VERIFY_MAX_ATTEMPTS = 10  # 10 * 30s = 5 min max waiting for .out files
 
 
 def submit_blast_orchestrator(
@@ -141,17 +143,64 @@ def submit_blast_orchestrator(
 
         steps["running"] = {"final_status": final_status, "polls": attempt + 1, "last_output": last_check_output[:500]}
 
-        # 7. Export results
+        # 7. Export results — verify .out files actually exist in blob
         if final_status == "completed":
             context.set_custom_status({"phase": "exporting_results", "job_id": job_id, "steps": steps})
-            export_wait = context.current_utc_datetime + timedelta(seconds=60)
-            yield context.create_timer(export_wait)
+
+            # 7a. Wait for results-export pod to finish writing
+            # elastic-blast's "completed" status means BLAST computation is done,
+            # but the results-export pod may still be uploading .out files to blob.
+            result_blobs_payload = {
+                "subscription_id": request["subscription_id"],
+                "storage_account": account,
+                "prefix": f"{job_id}/",
+                "user_assertion": request.get("user_assertion"),
+            }
+            has_output_files = False
+            for verify_attempt in range(RESULTS_VERIFY_MAX_ATTEMPTS):
+                verify_wait = context.current_utc_datetime + timedelta(
+                    seconds=RESULTS_VERIFY_INTERVAL_SECONDS,
+                )
+                yield context.create_timer(verify_wait)
+
+                try:
+                    blob_list = yield context.call_activity(
+                        "list_result_blobs_activity", result_blobs_payload,
+                    )
+                    blobs = blob_list.get("blobs", [])
+                    out_files = [b for b in blobs if b.get("name", "").endswith(".out")]
+                    context.set_custom_status({
+                        "phase": "exporting_results", "job_id": job_id,
+                        "verify_attempt": verify_attempt + 1,
+                        "blob_count": len(blobs), "out_file_count": len(out_files),
+                        "steps": steps,
+                    })
+                    if out_files:
+                        has_output_files = True
+                        LOGGER.info(
+                            "Found %d .out files after %d verify attempts",
+                            len(out_files), verify_attempt + 1,
+                        )
+                        break
+                except Exception as exc:
+                    LOGGER.warning(
+                        "result blob verification attempt %d failed: %s",
+                        verify_attempt + 1, exc,
+                    )
+
+            steps["result_verification"] = {
+                "has_output_files": has_output_files,
+                "verify_attempts": verify_attempt + 1,
+            }
+
+            # 7b. Run export activity (captures logs/status as artifacts)
             try:
                 export_result = yield context.call_activity("export_blast_results_activity", request)
                 steps["exporting_results"] = {
                     "success": export_result.get("success"),
                     "auth_failed": export_result.get("auth_failed"),
                     "output": export_result.get("output", "")[:800],
+                    "has_output_files": has_output_files,
                 }
                 LOGGER.info("Results export: %s", export_result)
             except Exception as exc:

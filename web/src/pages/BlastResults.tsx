@@ -34,7 +34,7 @@ const PHASE_MESSAGES: Record<string, string> = {
   configuring: "Generating ElasticBLAST configuration...",
   submitting: "Submitting job to AKS cluster...",
   running: "BLAST search is running on the cluster...",
-  exporting_results: "Exporting results from cluster to storage...",
+  exporting_results: "Verifying result files and exporting logs from cluster...",
   completed: "Job completed successfully!",
   failed: "Job failed.",
   error: "An error occurred.",
@@ -212,9 +212,17 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
       case "exporting_results": {
         const ed = sd as Record<string, unknown>;
         const eo = ed.output as string;
-        if (state === "done" && ed.success) return `✓ Results exported.\n\n--- Export Log ---\n${eo || "(no output)"}`;
-        if (state === "done" && ed.auth_failed) return `⚠ Export partially failed: VM az login expired.\nResults written by AKS pods directly may still be available.\n\n--- Export Log ---\n${eo || ""}`;
-        if (state === "done") return `✓ Export step completed.\n${eo ? `\n--- Export Log ---\n${eo}` : ""}`;
+        const hasOut = ed.has_output_files as boolean | undefined;
+        const verifyData = stepsData.result_verification as Record<string, unknown> | undefined;
+        const verifyAttempts = verifyData?.verify_attempts as number | undefined;
+        const outInfo = hasOut !== undefined
+          ? (hasOut ? "✓ .out result files found in blob." : "⚠ No .out result files detected yet.")
+          : "";
+        const verifyInfo = verifyAttempts ? ` (${verifyAttempts} verification polls)` : "";
+        if (state === "done" && ed.success) return `✓ Results exported.${verifyInfo}\n${outInfo}\n\n--- Export Log ---\n${eo || "(no output)"}`;
+        if (state === "done" && ed.auth_failed) return `⚠ Export partially failed: VM az login expired.\n${outInfo}\nResults written by AKS pods directly may still be available.\n\n--- Export Log ---\n${eo || ""}`;
+        if (state === "done") return `✓ Export step completed.${verifyInfo}\n${outInfo}${eo ? `\n\n--- Export Log ---\n${eo}` : ""}`;
+        if (verifyAttempts) return `Verifying result blobs... (attempt ${verifyAttempts})`;
         return "Waiting for results-export K8s job + capturing pod logs...";
       }
       case "completed": {
