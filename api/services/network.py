@@ -135,3 +135,56 @@ def ensure_network(
         public_ip_address=pip.ip_address or "",
         fqdn=pip.dns_settings.fqdn if pip.dns_settings else "",
     )
+
+
+def create_ssh_rule(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    nsg_name: str,
+    caller_ip: str,
+) -> None:
+    """Create or update an NSG rule to allow SSH from a specific IP."""
+    nc = network_client(credential, subscription_id)
+    nc.security_rules.begin_create_or_update(
+        resource_group, nsg_name, "AllowSSH",
+        {
+            "protocol": "Tcp",
+            "source_port_range": "*",
+            "destination_port_range": "22",
+            "source_address_prefix": f"{caller_ip}/32",
+            "destination_address_prefix": "*",
+            "access": "Allow",
+            "priority": 100,
+            "direction": "Inbound",
+        },
+    ).result()
+
+
+def delete_resource(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    resource_type: str,
+    name: str,
+) -> None:
+    """Delete a network resource (nic, pip, nsg) by type."""
+    nc = network_client(credential, subscription_id)
+    if resource_type == "nic":
+        nc.network_interfaces.begin_delete(resource_group, name).result()
+    elif resource_type == "pip":
+        nc.public_ip_addresses.begin_delete(resource_group, name).result()
+    elif resource_type == "nsg":
+        nc.network_security_groups.begin_delete(resource_group, name).result()
+    LOGGER.info("Deleted %s/%s in %s", resource_type, name, resource_group)
+
+
+def delete_resource_group(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+) -> None:
+    """Delete a resource group."""
+    rc = resource_client(credential, subscription_id)
+    rc.resource_groups.begin_delete(resource_group).result()
+    LOGGER.info("Deleted resource group %s", resource_group)

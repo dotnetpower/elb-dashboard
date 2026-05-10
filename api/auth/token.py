@@ -11,6 +11,7 @@ References:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -71,19 +72,55 @@ def _get_jwks_client(tenant_id: str) -> PyJWKClient:
     return new_client
 
 
+_DEV_OID_CACHE: str | None = None
+
+
+def _resolve_dev_oid() -> str:
+    """Best-effort resolve the real Azure AD OID of the developer's az login session.
+
+    Cached after first successful resolution to avoid repeated token fetches.
+    """
+    global _DEV_OID_CACHE  # noqa: PLW0603
+    if _DEV_OID_CACHE:
+        return _DEV_OID_CACHE
+    try:
+        import base64 as _b64
+        from azure.identity import DefaultAzureCredential as _DAC
+
+        cred = _DAC()
+        tok = cred.get_token("https://management.azure.com/.default")
+        payload = tok.token.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        claims = json.loads(_b64.urlsafe_b64decode(payload))
+        oid = claims.get("oid", "")
+        if oid:
+            LOGGER.debug("dev bypass resolved real OID")
+            _DEV_OID_CACHE = oid
+            return oid
+    except Exception as exc:
+        LOGGER.warning("dev bypass could not resolve real OID: %s", exc)
+    return "dev-bypass-oid"
+
+
 def validate_bearer_token(authorization_header: str | None) -> CallerIdentity:
     """Validate an `Authorization: Bearer <token>` header.
 
     Raises AuthError on any failure. Returns a CallerIdentity on success.
     """
     if os.environ.get("AUTH_DEV_BYPASS", "false").lower() == "true":
+        # H1: Only allow bypass in explicit Development environment
+        func_env = os.environ.get("AZURE_FUNCTIONS_ENVIRONMENT", "").lower()
+        if func_env not in ("", "development"):
+            LOGGER.error("AUTH_DEV_BYPASS=true in %s environment — refusing", func_env)
+            raise AuthError(500, "Server misconfiguration: auth bypass enabled outside Development")
         LOGGER.warning("AUTH_DEV_BYPASS=true — skipping token validation. DO NOT USE IN PROD.")
+        oid = _resolve_dev_oid()
         return CallerIdentity(
-            object_id="dev-bypass-oid",
+            object_id=oid,
             tenant_id=os.environ.get("AZURE_TENANT_ID", "common"),
             upn="dev@local",
             raw_token=DEV_BYPASS_TOKEN,
-            claims={"oid": "dev-bypass-oid"},
+            claims={"oid": oid},
         )
 
     if not authorization_header or not authorization_header.lower().startswith("bearer "):

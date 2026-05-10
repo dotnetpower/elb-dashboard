@@ -32,6 +32,22 @@ def _credential(user_assertion: str | None):
     return credential_for_caller(user_assertion)
 
 
+def activity_ensure_keyvault(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: creates Key Vault if missing. Returns vault URI."""
+    cred = _credential(payload.get("user_assertion"))
+    vault_name = payload.get("vault_name") or f"kv-elb-{payload['vm_name'][-8:]}"
+    vault_uri = kv_svc.ensure_keyvault(
+        cred,
+        payload["subscription_id"],
+        payload["resource_group"],
+        payload["region"],
+        vault_name,
+        payload.get("tenant_id", os.environ.get("AZURE_TENANT_ID", "")),
+        caller_oid=payload.get("owner_oid", ""),
+    )
+    return {"vault_uri": vault_uri, "vault_name": vault_name}
+
+
 def activity_ensure_resource_group(payload: dict[str, Any]) -> dict[str, Any]:
     """side-effect: creates RG if missing."""
     cred = _credential(payload.get("user_assertion"))
@@ -66,7 +82,9 @@ def activity_ensure_network(payload: dict[str, Any]) -> dict[str, Any]:
 def activity_generate_password(payload: dict[str, Any]) -> dict[str, Any]:
     """side-effect: writes a Key Vault secret named vm-<vm_name>-password."""
     cred = _credential(payload.get("user_assertion"))
-    vault_uri = os.environ["KEY_VAULT_URI"]
+    vault_uri = payload.get("vault_uri") or os.environ.get("KEY_VAULT_URI", "")
+    if not vault_uri:
+        raise ValueError("vault_uri is required — ensure Key Vault was provisioned first")
     password = generate_admin_password(24)
     secret_name = f"vm-{payload['vm_name']}-password"
     secret_id = kv_svc.store_secret(

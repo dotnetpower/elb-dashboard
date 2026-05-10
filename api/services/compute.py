@@ -87,17 +87,58 @@ def run_shell(
     resource_group: str,
     vm_name: str,
     script: str,
+    max_retries: int = 3,
 ) -> str:
-    """Execute a shell snippet via the Run Command extension. Returns stdout+stderr."""
+    """Execute a shell snippet via the Run Command extension. Returns stdout+stderr.
+
+    Retries on Conflict (concurrent Run Command) with exponential backoff.
+    """
+    import time as _time
     cc = compute_client(credential, subscription_id)
-    poller = cc.virtual_machines.begin_run_command(
-        resource_group,
-        vm_name,
-        {"command_id": "RunShellScript", "script": [script]},
-    )
-    result = poller.result()
-    parts = []
-    for item in result.value or []:
-        if item.message:
-            parts.append(item.message)
-    return "\n".join(parts)
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            poller = cc.virtual_machines.begin_run_command(
+                resource_group,
+                vm_name,
+                {"command_id": "RunShellScript", "script": [script]},
+            )
+            result = poller.result()
+            parts = []
+            for item in result.value or []:
+                if item.message:
+                    parts.append(item.message)
+            return "\n".join(parts)
+        except Exception as exc:
+            last_exc = exc
+            if "Conflict" in str(exc) or "in progress" in str(exc):
+                wait = (attempt + 1) * 15  # 15s, 30s, 45s
+                LOGGER.warning("Run Command conflict on %s, retrying in %ds (attempt %d/%d)", vm_name, wait, attempt + 1, max_retries)
+                _time.sleep(wait)
+            else:
+                raise
+    raise last_exc  # type: ignore[misc]
+
+
+def deallocate_vm(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    vm_name: str,
+) -> None:
+    """Deallocate (stop) a VM. Idempotent."""
+    cc = compute_client(credential, subscription_id)
+    cc.virtual_machines.begin_deallocate(resource_group, vm_name).result()
+    LOGGER.info("VM %s deallocated in %s", vm_name, resource_group)
+
+
+def delete_vm(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    vm_name: str,
+) -> None:
+    """Delete a VM and wait for completion."""
+    cc = compute_client(credential, subscription_id)
+    cc.virtual_machines.begin_delete(resource_group, vm_name).result()
+    LOGGER.info("VM %s deleted in %s", vm_name, resource_group)

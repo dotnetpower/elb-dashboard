@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+_SHELL_METACHAR = re.compile(r"[;&|`$(){}\\!\n\r<>~\[\]?*]")
 
 
 class BlastProgram(StrEnum):
@@ -54,12 +57,20 @@ class BlastSubmitRequest(BaseModel):
     gap_extend: int | None = None
     additional_options: str = Field("", max_length=500)
 
+    # #23: Reject shell metacharacters at the Pydantic boundary
+    @field_validator("additional_options")
+    @classmethod
+    def reject_shell_metachar(cls, v: str) -> str:
+        if _SHELL_METACHAR.search(v):
+            raise ValueError("additional_options contains forbidden characters")
+        return v
+
     # Cluster configuration
     machine_type: str = Field("Standard_D8s_v3")
     num_nodes: int = Field(1, ge=1, le=100)
     pd_size: str = Field("3000Gi")
-    mem_request: str = Field("16Gi")
-    mem_limit: str = Field("32Gi")
+    mem_request: str = Field("8Gi")
+    mem_limit: str = Field("24Gi")
     batch_len: int | None = None
 
     # Azure resource names

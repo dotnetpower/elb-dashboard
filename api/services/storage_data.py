@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -37,6 +38,22 @@ def upload_query_text(
     blob = svc.get_blob_client(container, blob_path)
     blob.upload_blob(fasta_text.encode("utf-8"), overwrite=True)
     return blob.url
+
+
+def read_blob_text(
+    credential: TokenCredential,
+    account_name: str,
+    container: str,
+    blob_path: str,
+    max_bytes: int = 4096,
+) -> str:
+    """Read the first max_bytes of a text blob. Returns UTF-8 text."""
+    if ".." in blob_path or blob_path.startswith("/"):
+        raise ValueError("invalid blob_path: path traversal not allowed")
+    svc = _blob_service(credential, account_name)
+    blob = svc.get_blob_client(container, blob_path)
+    data = blob.download_blob(offset=0, length=max_bytes).readall()
+    return data.decode("utf-8", errors="replace")
 
 
 def list_result_blobs(
@@ -93,13 +110,57 @@ def list_databases(
 ) -> list[dict[str, Any]]:
     """List available BLAST databases in the blast-db container.
 
-    Scans for top-level directories that contain database files.
+    BLAST databases consist of multiple files like core_nt.00.nhd,
+    core_nt.00.nhi, core_nt.nal, etc. We extract the base DB name
+    by stripping the volume number and extension suffixes.
     """
+    # Known BLAST DB file extensions
+    _DB_EXTS = {
+        ".nhd", ".nhi", ".nhr", ".nin", ".nnd", ".nni", ".nog", ".nsq", ".nxm",
+        ".nal", ".ndb", ".njs", ".nos", ".not", ".ntf", ".nto",
+        ".phd", ".phi", ".phr", ".pin", ".pnd", ".pni", ".pog", ".psq", ".pxm",
+        ".pal", ".pdb", ".pjs", ".pos", ".pot", ".ptf", ".pto",
+    }
     svc = _blob_service(credential, account_name)
     cc = svc.get_container_client(container)
-    db_names: set[str] = set()
+    db_info: dict[str, dict[str, Any]] = {}
+    metadata_blobs: dict[str, str] = {}  # db_name -> metadata json content
     for blob in cc.list_blobs():
-        parts = blob.name.split("/")
-        if len(parts) >= 1:
-            db_names.add(parts[0])
-    return [{"name": n, "container": container} for n in sorted(db_names)]
+        name = blob.name.split("/")[-1]  # strip any subdirectory
+        # Collect metadata files separately
+        if name.endswith("-metadata.json"):
+            try:
+                bc = cc.get_blob_client(blob.name)
+                metadata_blobs[name.replace("-metadata.json", "")] = bc.download_blob().readall().decode("utf-8")
+            except Exception:
+                pass
+            continue
+        # Check if file has a known BLAST extension
+        for ext in _DB_EXTS:
+            if name.endswith(ext):
+                base = name[: -len(ext)]
+                # Strip volume number suffix (e.g. ".00", ".01")
+                base = re.sub(r"\.\d+$", "", base)
+                if base:
+                    if base not in db_info:
+                        db_info[base] = {"name": base, "container": container, "file_count": 0, "total_bytes": 0, "last_modified": None}
+                    db_info[base]["file_count"] += 1
+                    db_info[base]["total_bytes"] += blob.size or 0
+                    blob_modified = blob.last_modified
+                    if blob_modified:
+                        mod_str = blob_modified.isoformat() if hasattr(blob_modified, "isoformat") else str(blob_modified)
+                        prev = db_info[base]["last_modified"]
+                        if not prev or mod_str > prev:
+                            db_info[base]["last_modified"] = mod_str
+                break
+    # Enrich with metadata (source_version, downloaded_at)
+    import json as _json
+    for db_name, info in db_info.items():
+        if db_name in metadata_blobs:
+            try:
+                meta = _json.loads(metadata_blobs[db_name])
+                info["source_version"] = meta.get("source_version")
+                info["downloaded_at"] = meta.get("downloaded_at")
+            except Exception:
+                pass
+    return sorted(db_info.values(), key=lambda d: d["name"])

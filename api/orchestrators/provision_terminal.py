@@ -12,10 +12,13 @@ Output: TerminalConnectionInfo (FQDN, username, password secret URI, status).
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import Any
 
 import azure.durable_functions as df
+
+LOGGER = logging.getLogger(__name__)
 
 CLOUD_INIT_POLL_INTERVAL_SECONDS = 30
 CLOUD_INIT_MAX_ATTEMPTS = 30  # 30 * 30s = 15 min hard ceiling
@@ -27,15 +30,24 @@ def provision_terminal_orchestrator(
     request: dict[str, Any] = context.get_input() or {}
 
     # 1. RG
+    context.set_custom_status({"phase": "rg", "step": 1, "description": "Creating resource group"})
     yield context.call_activity("ensure_resource_group_activity", request)
 
     # 2. Network (depends only on RG)
+    context.set_custom_status({"phase": "network", "step": 2, "description": "Setting up network"})
     network = yield context.call_activity("ensure_network_activity", request)
 
-    # 3. Password (independent of network — could fan-out, but keep linear for clarity)
-    password_info = yield context.call_activity("generate_password_activity", request)
+    # 3. Key Vault (depends only on RG)
+    context.set_custom_status({"phase": "keyvault", "step": 3, "description": "Creating Key Vault"})
+    kv_info = yield context.call_activity("ensure_keyvault_activity", request)
 
-    # 4. VM (needs NIC + password)
+    # 4. Password (needs Key Vault)
+    context.set_custom_status({"phase": "password", "step": 4, "description": "Generating admin password"})
+    password_payload = {**request, "vault_uri": kv_info["vault_uri"]}
+    password_info = yield context.call_activity("generate_password_activity", password_payload)
+
+    # 5. VM (needs NIC + password)
+    context.set_custom_status({"phase": "vm", "step": 5, "description": "Creating VM"})
     vm_payload = {
         **request,
         "nic_id": network["nic_id"],
@@ -43,7 +55,7 @@ def provision_terminal_orchestrator(
     }
     vm = yield context.call_activity("create_vm_activity", vm_payload)
 
-    # 5. Poll cloud-init (Run Command can fail before VM agent is ready, so tolerate errors)
+    # 6. Poll cloud-init (Run Command can fail before VM agent is ready, so tolerate errors)
     cloud_init_status = "unknown"
     for attempt in range(CLOUD_INIT_MAX_ATTEMPTS):
         next_check = context.current_utc_datetime + timedelta(
@@ -53,7 +65,14 @@ def provision_terminal_orchestrator(
         try:
             check = yield context.call_activity("check_cloud_init_activity", request)
             cloud_init_status = check.get("status", "unknown")
-        except Exception:
+        except Exception as exc:
+            # #21: Distinguish transient (VM agent not ready) from permanent errors
+            exc_str = str(exc).lower()
+            if "not found" in exc_str or "authorization" in exc_str:
+                cloud_init_status = "error"
+                LOGGER.warning("cloud-init check permanent error: %s", exc)
+                break
+            # Transient — VM agent may still be starting
             cloud_init_status = "running"
         if cloud_init_status in ("done", "failed"):
             break

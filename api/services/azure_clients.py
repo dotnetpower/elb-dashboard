@@ -11,6 +11,7 @@ from __future__ import annotations
 from azure.core.credentials import TokenCredential
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
+from azure.mgmt.keyvault import KeyVaultManagementClient
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerregistry import ContainerRegistryManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
@@ -33,6 +34,10 @@ def credential_for_caller(user_assertion: str | None) -> TokenCredential:
     if user_assertion and user_assertion != DEV_BYPASS_TOKEN:
         return caller_credential(user_assertion)
     return DefaultAzureCredential(exclude_interactive_browser_credential=True)
+
+
+# Alias for activities that receive assertion from orchestrator input
+credential_for_assertion = credential_for_caller
 
 
 def resource_client(credential: TokenCredential, subscription_id: str) -> ResourceManagementClient:
@@ -63,3 +68,7 @@ def aks_client(credential: TokenCredential, subscription_id: str) -> ContainerSe
 
 def kv_secret_client(credential: TokenCredential, vault_uri: str) -> SecretClient:
     return SecretClient(vault_url=vault_uri, credential=credential)
+
+
+def kv_mgmt_client(credential: TokenCredential, subscription_id: str) -> KeyVaultManagementClient:
+    return KeyVaultManagementClient(credential, subscription_id)

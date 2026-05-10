@@ -32,6 +32,7 @@ def submit_blast_orchestrator(
     request: dict[str, Any] = context.get_input() or {}
     job_id = request.get("job_id", context.instance_id)
     request["job_id"] = job_id
+    entity_id = df.EntityId("job_registry_entity", "default")
 
     storage_payload = {
         "subscription_id": request["subscription_id"],
@@ -42,73 +43,144 @@ def submit_blast_orchestrator(
     }
     disable_payload = {**storage_payload, "enabled": False}
 
-    # 1. Upload query if inline text provided
-    context.set_custom_status({"phase": "uploading", "job_id": job_id})
-    if request.get("query_data"):
-        upload_result = yield context.call_activity("upload_query_activity", request)
-        request["query_blob_url"] = upload_result["query_blob_url"]
+    try:
+        # Accumulate step results for rich frontend display
+        steps: dict[str, Any] = {}
 
-    # 2. Enable storage public access
-    context.set_custom_status({"phase": "enabling_storage", "job_id": job_id})
-    yield context.call_activity("set_storage_public_access_activity", storage_payload)
-
-    # 3. Wait for propagation
-    propagation = context.current_utc_datetime + timedelta(seconds=15)
-    yield context.create_timer(propagation)
-
-    # 4. Generate and upload config
-    context.set_custom_status({"phase": "configuring", "job_id": job_id})
-    account = request["storage_account"]
-    request["results_url"] = f"https://{account}.blob.core.windows.net/results"
-    db = request.get("db", "")
-    if db and not db.startswith("http"):
-        request["db"] = f"https://{account}.blob.core.windows.net/{db}"
-
-    yield context.call_activity("generate_blast_config_activity", request)
-
-    # 5. Submit
-    context.set_custom_status({"phase": "submitting", "job_id": job_id})
-    submit_result = yield context.call_activity("run_elastic_blast_submit_activity", request)
-    if not submit_result.get("success"):
-        # Disable storage before returning failure
-        yield context.call_activity("set_storage_public_access_activity", disable_payload)
-        return {
-            "job_id": job_id,
-            "status": "failed",
-            "phase": "submitting",
-            "error": submit_result.get("output", "submit failed"),
+        # 0. Ensure Remote Terminal VM is running
+        context.set_custom_status({"phase": "checking_vm", "job_id": job_id, "steps": steps})
+        vm_payload = {
+            "subscription_id": request["subscription_id"],
+            "resource_group": request.get("terminal_resource_group", "rg-elb-terminal"),
+            "vm_name": request.get("terminal_vm_name", "vm-elb-terminal"),
+            "user_assertion": request.get("user_assertion"),
         }
+        vm_status = yield context.call_activity("ensure_vm_running_activity", vm_payload)
+        steps["checking_vm"] = {"power_state": vm_status.get("power_state"), "started": vm_status.get("started")}
+        if vm_status.get("started"):
+            boot_wait = context.current_utc_datetime + timedelta(seconds=30)
+            yield context.create_timer(boot_wait)
 
-    # 6. Poll status
-    final_status = "unknown"
-    for attempt in range(STATUS_POLL_MAX_ATTEMPTS):
-        next_poll = context.current_utc_datetime + timedelta(seconds=STATUS_POLL_INTERVAL_SECONDS)
-        yield context.create_timer(next_poll)
+        # 1. Enable storage access
+        context.set_custom_status({"phase": "enabling_storage", "job_id": job_id, "steps": steps})
+        yield context.call_activity("set_storage_public_access_activity", storage_payload)
+        steps["enabling_storage"] = {"done": True}
 
+        # 2. Wait for propagation
+        propagation = context.current_utc_datetime + timedelta(seconds=15)
+        yield context.create_timer(propagation)
+
+        # 3. Upload query
+        context.set_custom_status({"phase": "uploading", "job_id": job_id, "steps": steps})
+        if request.get("query_data"):
+            upload_result = yield context.call_activity("upload_query_activity", request)
+            request["query_blob_url"] = upload_result["query_blob_url"]
+            steps["uploading"] = {"blob_url": upload_result.get("query_blob_url"), "blob_path": upload_result.get("blob_path")}
+        else:
+            steps["uploading"] = {"skipped": True}
+
+        # 4. Generate and upload config
+        context.set_custom_status({"phase": "configuring", "job_id": job_id, "steps": steps})
+        account = request["storage_account"]
+        request["results_url"] = f"https://{account}.blob.core.windows.net/results/{job_id}"
+        db = request.get("db", "")
+        if db and not db.startswith("http"):
+            request["db"] = f"https://{account}.blob.core.windows.net/{db}"
+
+        config_result = yield context.call_activity("generate_blast_config_activity", request)
+        request["config_text"] = config_result.get("config_text", "")
+        steps["configuring"] = {"config_url": config_result.get("config_blob_url")}
+
+        # 5. Submit
+        context.set_custom_status({"phase": "submitting", "job_id": job_id, "steps": steps})
+        submit_result = yield context.call_activity("run_elastic_blast_submit_activity", request)
+        submit_output = submit_result.get("output", "")
+        steps["submitting"] = {"success": submit_result.get("success"), "output": submit_output[:1000]}
+        if not submit_result.get("success"):
+            context.set_custom_status({"phase": "submit_failed", "job_id": job_id, "steps": steps})
+            yield context.call_activity("set_storage_public_access_activity", disable_payload)
+            context.signal_entity(entity_id, "update_job",
+                {"job_id": job_id, "status": "failed", "phase": "submit_failed"})
+            return {"job_id": job_id, "status": "failed", "phase": "submit_failed",
+                    "error": submit_output[:500], "steps": steps}
+
+        # 6. Poll status — minimum 2 polls before accepting "completed"
+        # elastic-blast can report EXIT_CODE=0 prematurely if auth fails or
+        # the AKS cluster hasn't been created yet.
+        final_status = "unknown"
+        last_check_output = ""
+        MIN_POLLS_BEFORE_COMPLETE = 3  # At least 90 seconds before trusting "completed"
+        for attempt in range(STATUS_POLL_MAX_ATTEMPTS):
+            next_poll = context.current_utc_datetime + timedelta(seconds=STATUS_POLL_INTERVAL_SECONDS)
+            yield context.create_timer(next_poll)
+
+            try:
+                check = yield context.call_activity("check_blast_status_activity", request)
+                final_status = check.get("status", "unknown")
+                last_check_output = check.get("output", "")
+            except Exception as exc:
+                LOGGER.warning("status check failed attempt=%d: %s", attempt + 1, exc)
+                final_status = "unknown"
+
+            context.set_custom_status({
+                "phase": "running", "job_id": job_id,
+                "blast_status": final_status, "poll_attempt": attempt + 1,
+                "steps": steps,
+            })
+
+            if final_status in ("completed", "failed"):
+                # Don't trust early "completed" — elastic-blast can return
+                # EXIT_CODE=0 if az login fails or cluster isn't ready yet
+                if attempt + 1 >= MIN_POLLS_BEFORE_COMPLETE:
+                    break
+                elif final_status == "completed":
+                    LOGGER.warning("Ignoring early completed at poll %d (min=%d)", attempt + 1, MIN_POLLS_BEFORE_COMPLETE)
+                    final_status = "running"  # Reset and keep polling
+                else:
+                    break  # Failed is trustworthy immediately
+
+        steps["running"] = {"final_status": final_status, "polls": attempt + 1, "last_output": last_check_output[:500]}
+
+        # 7. Export results
+        if final_status == "completed":
+            context.set_custom_status({"phase": "exporting_results", "job_id": job_id, "steps": steps})
+            export_wait = context.current_utc_datetime + timedelta(seconds=60)
+            yield context.create_timer(export_wait)
+            try:
+                export_result = yield context.call_activity("export_blast_results_activity", request)
+                steps["exporting_results"] = {
+                    "success": export_result.get("success"),
+                    "auth_failed": export_result.get("auth_failed"),
+                    "output": export_result.get("output", "")[:800],
+                }
+                LOGGER.info("Results export: %s", export_result)
+            except Exception as exc:
+                steps["exporting_results"] = {"success": False, "error": str(exc)[:300]}
+                LOGGER.warning("Results export failed (non-fatal): %s", exc)
+
+        # 8. Always disable storage public access
         try:
-            check = yield context.call_activity("check_blast_status_activity", request)
-            final_status = check.get("status", "unknown")
+            yield context.call_activity("set_storage_public_access_activity", disable_payload)
         except Exception as exc:
-            LOGGER.warning("status check failed attempt=%d: %s", attempt + 1, exc)
-            final_status = "unknown"
+            LOGGER.warning("Failed to disable storage: %s", exc)
 
-        context.set_custom_status(
-            {
-                "phase": "running",
-                "job_id": job_id,
-                "blast_status": final_status,
-                "poll_attempt": attempt + 1,
-            }
-        )
+        # Signal entity with final status
+        result_phase = "completed" if final_status == "completed" else final_status
+        context.set_custom_status({"phase": result_phase, "job_id": job_id, "steps": steps})
+        context.signal_entity(entity_id, "update_job",
+            {"job_id": job_id, "status": final_status, "phase": result_phase})
 
-        if final_status in ("completed", "failed"):
-            break
+        return {"job_id": job_id, "status": final_status, "phase": result_phase, "steps": steps}
 
-    # 7. Always disable storage public access
-    yield context.call_activity("set_storage_public_access_activity", disable_payload)
-
-    return {
-        "job_id": job_id,
-        "status": final_status,
-        "phase": "completed" if final_status == "completed" else final_status,
-    }
+    except Exception as exc:
+        # CRITICAL: Always update entity on any failure so UI doesn't show stale status
+        LOGGER.error("submit_blast_orchestrator failed for job=%s: %s", job_id, exc)
+        error_msg = str(exc)[:500]
+        context.signal_entity(entity_id, "update_job",
+            {"job_id": job_id, "status": "failed", "phase": "error", "error": error_msg})
+        # Try to disable storage access on failure
+        try:
+            yield context.call_activity("set_storage_public_access_activity", disable_payload)
+        except Exception:
+            pass
+        raise  # Re-raise so the orchestrator status shows Failed

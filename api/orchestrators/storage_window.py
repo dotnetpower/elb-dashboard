@@ -11,13 +11,18 @@ sleeps for a TTL, then re-disables. The UI calls it as a fire-and-forget
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import Any
 
 import azure.durable_functions as df
 
+LOGGER = logging.getLogger(__name__)
+
 DEFAULT_TTL_SECONDS = 5 * 60
 PROPAGATION_DELAY_SECONDS = 15
+DISABLE_MAX_RETRIES = 3
+DISABLE_RETRY_DELAY_SECONDS = 10
 
 
 def storage_public_access_window_orchestrator(
@@ -38,8 +43,24 @@ def storage_public_access_window_orchestrator(
     deadline = context.current_utc_datetime + timedelta(seconds=ttl_seconds)
     yield context.create_timer(deadline)
 
-    try:
-        yield context.call_activity("set_storage_public_access_activity", disable_payload)
-        return {"final_state": "Disabled"}
-    except Exception:
-        return {"final_state": "Unknown"}
+    # #5 CRITICAL: Retry disable with backoff — storage must NEVER be left public
+    for attempt in range(DISABLE_MAX_RETRIES):
+        try:
+            yield context.call_activity("set_storage_public_access_activity", disable_payload)
+            return {"final_state": "Disabled"}
+        except Exception as exc:
+            LOGGER.warning(
+                "storage disable attempt %d/%d failed: %s",
+                attempt + 1, DISABLE_MAX_RETRIES, exc,
+            )
+            if attempt < DISABLE_MAX_RETRIES - 1:
+                retry_at = context.current_utc_datetime + timedelta(
+                    seconds=DISABLE_RETRY_DELAY_SECONDS * (attempt + 1)
+                )
+                yield context.create_timer(retry_at)
+
+    # All retries exhausted — raise so the orchestrator fails visibly
+    raise RuntimeError(
+        f"CRITICAL: Failed to disable storage public access after {DISABLE_MAX_RETRIES} retries. "
+        "Storage account may be publicly accessible. Manual intervention required."
+    )

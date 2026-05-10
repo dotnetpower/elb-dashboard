@@ -62,6 +62,11 @@ def generate_config(params: dict[str, Any]) -> str:
         options_parts.append(f"-gapextend {gap_extend}")
     additional = params.get("additional_options", "").strip()
     if additional:
+        # Reject shell metacharacters to prevent command injection
+        import re
+        _SHELL_META = re.compile(r"[;&|`$(){}\\!\n\r]")
+        if _SHELL_META.search(additional):
+            raise ValueError(f"additional_options contains forbidden characters: {additional[:50]}")
         options_parts.append(additional)
     if options_parts:
         cfg.set("blast", "options", " ".join(options_parts))
