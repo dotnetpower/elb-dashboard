@@ -1,0 +1,59 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "api: start",
+      "type": "shell",
+      "command": "func start --python --debug-port 9091",
+      "options": {
+        "cwd": "${workspaceFolder}/api",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+          "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "file": 1,
+          "location": 2,
+          "message": 3
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Azure Functions Core Tools",
+          "endsPattern": "For detailed output, run func with --verbose flag"
+        }
+      }
+    },
+    {
+      "label": "web: dev",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}/web"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "file": 1,
+          "location": 2,
+          "message": 3
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "VITE",
+          "endsPattern": "press h \\+ enter to show help"
+        }
+      }
+    },
+    {
+      "label": "fullstack: start",
+      "dependsOn": ["api: start", "web: dev"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    }
+  ]
+}

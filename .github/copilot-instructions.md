@@ -6,6 +6,20 @@
 
 ---
 
+## 0. Implementation Discipline (NON-NEGOTIABLE)
+
+**Do NOT rush to implement.** Before writing any code:
+
+1. **Step back** — Read the request carefully. Identify what is actually being asked.
+2. **Deep analysis** — Investigate the current codebase, data flow, Azure API behaviour, and edge cases. Run exploratory commands and read existing code before making assumptions.
+3. **Plan** — Write a concrete plan (what files change, what APIs are called, what the data flow looks like, what can go wrong). Present the plan for review if the scope is non-trivial.
+4. **Implement** — Only after the plan is solid. Make one logical change at a time, verify each step.
+5. **Verify** — Test the change end-to-end (curl, browser, or pytest). Never mark done without evidence of success.
+
+> Fast coding that breaks things costs more than thoughtful coding that works the first time. When in doubt, investigate more before typing.
+
+---
+
 ## 1. Mission
 
 Provide a **browser-only** control plane for ElasticBLAST on Azure so a researcher never opens a local terminal:

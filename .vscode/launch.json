@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "API: Azure Functions",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 9091
+      },
+      "preLaunchTask": "api: start"
+    },
+    {
+      "name": "Web: Vite Dev",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:8090",
+      "webRoot": "${workspaceFolder}/web/src",
+      "preLaunchTask": "web: dev"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Full Stack",
+      "configurations": ["API: Azure Functions", "Web: Vite Dev"],
+      "stopAll": true,
+      "presentation": {
+        "order": 1
+      }
+    }
+  ]
+}
