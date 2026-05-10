@@ -85,6 +85,9 @@ class BlastSubmitRequest(BaseModel):
     acr_name: str = Field("")
     storage_account: str = Field("")
 
+    # AKS cluster (actual cluster name for tracking)
+    aks_cluster_name: str = Field("", max_length=100)
+
     # Terminal VM (for elastic-blast CLI execution)
     terminal_resource_group: str = Field("rg-elb-terminal")
     terminal_vm_name: str = Field("vm-elb-terminal")

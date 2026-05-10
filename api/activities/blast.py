@@ -6,11 +6,13 @@ Each activity is single-purpose, idempotent, and side-effect tagged.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
 from services import compute as compute_svc
 from services import storage_data as storage_data_svc
+from services import monitoring as monitoring_svc
 from services.azure_clients import credential_for_caller
 from services.blast_config import generate_config
 from services.sanitise import sanitise
@@ -18,6 +20,23 @@ from services.sanitise import sanitise
 LOGGER = logging.getLogger(__name__)
 
 _SAFE_JOB_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _get_vm_ssh_password(credential, payload: dict[str, Any]) -> str | None:
+    """Try to get VM SSH password for fast SSH execution.
+
+    Returns password string or None if unavailable (falls back to Run Command).
+    """
+    vault_url = payload.get("keyvault_url") or os.environ.get("ELB_KEYVAULT_URL", "")
+    vm_name = payload.get("terminal_vm_name", "vm-elb-terminal")
+    if not vault_url:
+        return None
+    try:
+        from services.keyvault import get_secret
+        return get_secret(credential, vault_url, f"vm-{vm_name}-password")
+    except Exception as exc:
+        LOGGER.debug("Could not get SSH password from Key Vault: %s", exc)
+        return None
 
 
 def _validate_job_id(job_id: str) -> str:
@@ -28,21 +47,30 @@ def _validate_job_id(job_id: str) -> str:
 
 
 def activity_upload_query(payload: dict[str, Any]) -> dict[str, Any]:
-    """side-effect: uploads FASTA query text to blob storage."""
+    """side-effect: uploads FASTA query text to blob storage.
+
+    Retries up to 3 times with 5s delay to handle storage network propagation.
+    """
+    import time as _time
     cred = credential_for_caller(payload.get("user_assertion"))
     account = payload["storage_account"]
     job_id = _validate_job_id(payload["job_id"])
     blob_path = f"{job_id}/input.fa"
 
-    url = storage_data_svc.upload_query_text(
-        cred,
-        account,
-        "queries",
-        blob_path,
-        payload["query_data"],
-    )
-    LOGGER.info("uploaded query to %s", url)
-    return {"query_blob_url": url, "blob_path": blob_path}
+    last_exc = None
+    for attempt in range(3):
+        try:
+            url = storage_data_svc.upload_query_text(
+                cred, account, "queries", blob_path, payload["query_data"],
+            )
+            LOGGER.info("uploaded query to %s", url)
+            return {"query_blob_url": url, "blob_path": blob_path}
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                LOGGER.warning("upload_query attempt %d failed (%s), retrying in 5s", attempt + 1, exc)
+                _time.sleep(5)
+    raise last_exc  # type: ignore[misc]
 
 
 def activity_generate_blast_config(payload: dict[str, Any]) -> dict[str, Any]:
@@ -70,77 +98,52 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
     Instead of using azcopy to download the config (which requires az login),
     we write the config directly to the VM via Run Command. The config was
     already generated and is available in the payload.
+
+    Config write + submit are combined into a single Run Command to avoid
+    the ~30-60s Azure Run Command overhead per call.
     """
     cred = credential_for_caller(payload.get("user_assertion"))
     job_id = _validate_job_id(payload["job_id"])
 
-    # First write the config file directly (avoids azcopy auth issue)
     config_text = payload.get("config_text", "")
     if not config_text:
-        # Regenerate if not in payload
         config_text = generate_config(payload)
 
-    # Base64 encoding avoids shell interpretation entirely.
-    # Base64 alphabet is [A-Za-z0-9+/=] — all safe inside single quotes.
     import base64
     config_b64 = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
 
-    write_script = (
+    # Single Run Command: write config + run submit (saves ~30-60s overhead)
+    combined_script = (
         f"#!/bin/bash\n"
         f"printf '%s' '{config_b64}' | base64 -d > /tmp/elb-{job_id}.ini\n"
         f"chmod 644 /tmp/elb-{job_id}.ini\n"
         f"chown azureuser:azureuser /tmp/elb-{job_id}.ini\n"
-        f"echo WRITE_OK"
-    )
-    write_output = compute_svc.run_shell(
-        cred, payload["subscription_id"],
-        payload["terminal_resource_group"], payload["terminal_vm_name"],
-        write_script,
-    )
-    if "WRITE_OK" not in write_output:
-        return {"output": sanitise(write_output)[:4000], "success": False, "job_id": job_id}
-
-    # Then run elastic-blast submit
-    submit_script = (
-        f"#!/bin/bash\n"
-        f"chown -R azureuser:azureuser /home/azureuser/.azcopy /home/azureuser/.azure 2>/dev/null; "
+        f"chown -R azureuser:azureuser /home/azureuser/.azcopy /home/azureuser/.azure 2>/dev/null\n"
         f"sudo -u azureuser bash -c '"
         f"export HOME=/home/azureuser && "
         f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
-        f"# Ensure az login is active (fallback to managed identity)\n"
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
         f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
         f"source venv/bin/activate && "
         f"python bin/elastic-blast submit --cfg /tmp/elb-{job_id}.ini 2>&1 | tail -50; "
         f"echo EXIT_CODE=$?'"
     )
+    ssh_pw = _get_vm_ssh_password(cred, payload)
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
         payload["terminal_resource_group"],
         payload["terminal_vm_name"],
-        submit_script,
+        combined_script,
+        ssh_password=ssh_pw,
     )
     sanitised = sanitise(output)[:4000]
     LOGGER.info("elastic-blast submit output: %s", sanitised[:500])
 
     exit_code = _parse_exit_code(output)
-    # Check for real elastic-blast ERROR lines (not XML ErrorCode in Azure responses).
-    # Exclude non-fatal warnings like "Unrecognized configuration parameter".
-    NON_FATAL_PATTERNS = ["Unrecognized configuration parameter", "Invalid machine type"]
-    has_fatal_error = False
-    for line in output.split("\n"):
-        stripped = line.strip()
-        if not stripped.startswith("ERROR:"):
-            continue
-        if any(nf in stripped for nf in NON_FATAL_PATTERNS):
-            continue
-        if "Memory limit" in stripped or "elastic-blast" in stripped.lower():
-            has_fatal_error = True
-            break
-    success = exit_code == 0 and not has_fatal_error
-    if has_fatal_error and exit_code == 0:
-        LOGGER.warning("elastic-blast submit returned EXIT_CODE=0 but output contains fatal ERROR")
+    success = exit_code == 0
+    if not success:
+        LOGGER.warning("elastic-blast submit failed with EXIT_CODE=%d", exit_code)
     return {
         "output": sanitised,
         "success": success,
@@ -163,12 +166,14 @@ def activity_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
         f"python bin/elastic-blast status --cfg /tmp/elb-{job_id}.ini --exit-code 2>&1 | tail -20; "
         f"echo EXIT_CODE=$?'"
     )
+    ssh_pw = _get_vm_ssh_password(cred, payload)
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
         payload["terminal_resource_group"],
         payload["terminal_vm_name"],
         script,
+        ssh_password=ssh_pw,
     )
     sanitised = sanitise(output)[:4000]
 
@@ -215,25 +220,16 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
     import base64
     config_b64 = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
 
-    write_script = (
+    # Single Run Command: write config + run prepare (saves ~30-60s overhead)
+    combined_script = (
         f"#!/bin/bash\n"
+        f"set -o pipefail\n"
         f"printf '%s' '{config_b64}' | base64 -d > /tmp/elb-{job_id}.ini\n"
         f"chmod 644 /tmp/elb-{job_id}.ini\n"
         f"chown azureuser:azureuser /tmp/elb-{job_id}.ini\n"
-        f"echo WRITE_OK"
-    )
-    write_output = compute_svc.run_shell(
-        cred, payload["subscription_id"],
-        payload["terminal_resource_group"], payload["terminal_vm_name"],
-        write_script,
-    )
-    if "WRITE_OK" not in write_output:
-        return {"output": sanitise(write_output)[:1000], "success": False, "job_id": job_id}
-
-    prepare_script = (
-        f"#!/bin/bash\n"
-        f"chown -R azureuser:azureuser /home/azureuser/.azcopy /home/azureuser/.azure 2>/dev/null; "
+        f"chown -R azureuser:azureuser /home/azureuser/.azcopy /home/azureuser/.azure 2>/dev/null\n"
         f"sudo -u azureuser bash -c '"
+        f"set -o pipefail && "
         f"export HOME=/home/azureuser && "
         f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
@@ -242,18 +238,25 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
         f"python bin/elastic-blast prepare --cfg /tmp/elb-{job_id}.ini 2>&1 | tail -80; "
         f"echo EXIT_CODE=$?'"
     )
+    ssh_pw = _get_vm_ssh_password(cred, payload)
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
         payload["terminal_resource_group"],
         payload["terminal_vm_name"],
-        prepare_script,
+        combined_script,
+        ssh_password=ssh_pw,
     )
     sanitised = sanitise(output)[:2000]
     LOGGER.info("elastic-blast prepare output: %s", sanitised[:500])
 
     exit_code = _parse_exit_code(output)
-    success = exit_code == 0
+    # Also detect ERROR lines in output (exit code from piped commands may be 0)
+    has_error = any(
+        line.strip().startswith("ERROR:") for line in output.split("\n")
+        if line.strip().startswith("ERROR:")
+    )
+    success = exit_code == 0 and not has_error
     return {
         "output": sanitised,
         "success": success,
@@ -274,12 +277,14 @@ def activity_run_elastic_blast_delete(payload: dict[str, Any]) -> dict[str, Any]
         f"source venv/bin/activate && "
         f"python bin/elastic-blast delete --cfg /tmp/elb-{job_id}.ini 2>&1 | tail -20'"
     )
+    ssh_pw = _get_vm_ssh_password(cred, payload)
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
         payload["terminal_resource_group"],
         payload["terminal_vm_name"],
         script,
+        ssh_password=ssh_pw,
     )
     return {"output": sanitise(output)[:4000], "success": True}
 
@@ -430,6 +435,50 @@ def activity_list_result_blobs(payload: dict[str, Any]) -> dict[str, Any]:
         payload.get("prefix", ""),
     )
     return {"blobs": blobs}
+
+
+def activity_k8s_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: none (read-only). Check BLAST job status via direct K8s API.
+
+    ~1-3s vs ~30s for VM Run Command. Uses AKS kubeconfig to query pod/job status directly.
+    """
+    cred = credential_for_caller(payload.get("user_assertion"))
+    namespace = payload.get("namespace", "")
+    cluster_name = payload.get("cluster_name", "")
+    if not namespace or not cluster_name:
+        return {"status": "unknown", "error": "namespace or cluster_name missing"}
+
+    result = monitoring_svc.k8s_check_blast_status(
+        cred,
+        payload["subscription_id"],
+        payload["resource_group"],
+        cluster_name,
+        namespace,
+    )
+    LOGGER.info("K8s BLAST status for %s: %s", namespace, result.get("status"))
+    return result
+
+
+def activity_k8s_check_warmup_ready(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: none (read-only). Check if cluster namespace already has pods (warm).
+
+    Returns {"warm": True/False}. If warm, warmup/prepare can be skipped.
+    """
+    cred = credential_for_caller(payload.get("user_assertion"))
+    namespace = payload.get("namespace", "")
+    cluster_name = payload.get("cluster_name", "")
+    if not namespace or not cluster_name:
+        return {"warm": False}
+
+    is_warm = monitoring_svc.k8s_check_namespace_exists(
+        cred,
+        payload["subscription_id"],
+        payload["resource_group"],
+        cluster_name,
+        namespace,
+    )
+    LOGGER.info("Warmup check for %s/%s: warm=%s", cluster_name, namespace, is_warm)
+    return {"warm": is_warm}
 
 
 def activity_list_databases(payload: dict[str, Any]) -> dict[str, Any]:

@@ -345,6 +345,7 @@ export interface BlastSubmitRequest {
   acr_resource_group?: string;
   acr_name?: string;
   storage_account?: string;
+  aks_cluster_name?: string;
   terminal_resource_group?: string;
   terminal_vm_name?: string;
 }
