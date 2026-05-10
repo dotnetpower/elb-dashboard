@@ -37,16 +37,19 @@ function configFromTags(
 
 export function Dashboard() {
   const hasSaved = loadSavedConfig();
+  // A saved config is "complete" only if it has ACR + Storage configured
+  const savedIsComplete = !!(hasSaved?.acrName && hasSaved?.storageAccountName);
   const [showWizard, setShowWizard] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [discoveryDone, setDiscoveryDone] = useState(!!hasSaved);
+  const [discoveryDone, setDiscoveryDone] = useState(savedIsComplete);
   const [discoveredWorkspaces, setDiscoveredWorkspaces] = useState<
     { config: ResourceConfig; rgName: string }[]
   >([]);
 
   const [config, setConfig] = useState<ResourceConfig>(() => {
-    const saved = loadSavedConfig();
-    return saved ?? {
+    // Only use saved config if it's complete
+    if (savedIsComplete && hasSaved) return hasSaved;
+    return {
       subscriptionId: "",
       workloadResourceGroup: "",
       acrResourceGroup: "",
@@ -59,7 +62,7 @@ export function Dashboard() {
   });
 
   // --- Auto-discovery: fetch subs → RGs → scan elb-* tags ---
-  const needsDiscovery = !hasSaved && !discoveryDone;
+  const needsDiscovery = !savedIsComplete && !discoveryDone;
 
   const subsQuery = useQuery({
     queryKey: ["auto-discover-subs"],
