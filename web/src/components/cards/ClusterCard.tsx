@@ -61,8 +61,8 @@ export function ClusterCard({
   const [provStart, setProvStart] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
-  // Role assignment result (from auto-assign during provision)
-  const [roleResult, setRoleResult] = useState<string[] | null>(null);
+  // Role assignment result (shown after provision completes)
+  const [roleResult] = useState<string[] | null>(null);
 
   // Start/Stop/Delete loading
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -97,8 +97,9 @@ export function ClusterCard({
     setProvStatus("creating");
     setProvError(null);
     setProvStart(Date.now());
+    setShowProvision(false); // Close modal immediately
     try {
-      const resp = await aksApi.provision({
+      await aksApi.provision({
         subscription_id: subscriptionId,
         resource_group: resourceGroup,
         region,
@@ -110,10 +111,7 @@ export function ClusterCard({
         storage_resource_group: storageResourceGroup || resourceGroup,
         storage_account: storageAccount || "",
       });
-      setRoleResult(resp.roles_assigned || []);
-      setProvStatus("done");
-      setShowProvision(false);
-      query.refetch();
+      // Orchestrator started — stay in "creating" state until cluster appears
     } catch (e) {
       setProvError((e as Error).message);
       setProvStatus("error");
@@ -189,6 +187,22 @@ export function ClusterCard({
     const t = setTimeout(() => setProvStatus("idle"), 10_000);
     return () => clearTimeout(t);
   }, [provStatus]);
+
+  // While creating, poll AKS list faster (every 10s) to detect new cluster
+  useEffect(() => {
+    if (provStatus !== "creating") return;
+    const t = setInterval(() => query.refetch(), 10_000);
+    return () => clearInterval(t);
+  }, [provStatus, query]);
+
+  // Detect when provisioning cluster appears in the list
+  useEffect(() => {
+    if (provStatus !== "creating" || !query.data?.clusters) return;
+    const found = query.data.clusters.find((c) => c.name === clusterName);
+    if (found) {
+      setProvStatus("done");
+    }
+  }, [provStatus, query.data, clusterName]);
 
   const clusterNameValid = CLUSTER_NAME_RE.test(clusterName);
   const estimatedCost = (SKU_INFO[nodeSku]?.costPerNode ?? 1.34) * nodeCount;
@@ -332,18 +346,29 @@ export function ClusterCard({
         document.body,
       )}
 
-      {/* Creating status */}
+      {/* Provisioning banner — persistent until cluster appears */}
       {provStatus === "creating" && (
-        <div style={{ padding: "8px 12px", background: "rgba(110,159,255,0.06)", border: "1px solid rgba(110,159,255,0.15)", borderRadius: 6, fontSize: 12, color: "var(--accent)", marginBottom: "var(--space-3)" }}>
-          <Loader2 size={12} className="spin" style={{ display: "inline", verticalAlign: "middle", marginRight: 6 }} />
-          Creating AKS cluster <strong>{clusterName}</strong>... Elapsed: {formatTime(elapsed)} · Est. 5-10 minutes
+        <div className="glass-card" style={{ padding: "12px 16px", marginBottom: "var(--space-3)", border: "1px solid rgba(110,159,255,0.25)", background: "rgba(110,159,255,0.04)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Loader2 size={16} className="spin" style={{ color: "var(--accent)" }} />
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{clusterName}</div>
+                <div style={{ fontSize: 11, color: "var(--accent)" }}>Provisioning... {formatTime(elapsed)}</div>
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{nodeSku} × {nodeCount} nodes</div>
+              <div style={{ fontSize: 10, color: "var(--text-faint)" }}>Est. 5–10 minutes</div>
+            </div>
+          </div>
         </div>
       )}
       {provStatus === "done" && (
-        <div style={{ fontSize: 12, color: "var(--success)", marginBottom: "var(--space-3)" }}>
-          <CheckCircle2 size={12} style={{ verticalAlign: "middle" }} /> Cluster created in {formatTime(elapsed)}.
+        <div style={{ padding: "8px 12px", background: "rgba(106,214,163,0.06)", border: "1px solid rgba(106,214,163,0.2)", borderRadius: 8, fontSize: 12, color: "var(--success)", marginBottom: "var(--space-3)", display: "flex", alignItems: "center", gap: 6 }}>
+          <CheckCircle2 size={14} /> Cluster <strong>{clusterName}</strong> is ready.
           {roleResult && roleResult.length > 0 && (
-            <span> Roles auto-assigned: {roleResult.join(", ")}</span>
+            <span className="muted" style={{ fontSize: 11 }}> · Roles: {roleResult.join(", ")}</span>
           )}
         </div>
       )}
@@ -428,7 +453,14 @@ export function ClusterCard({
                 if (trans === "stopping") return <span style={{ color: "var(--warning)" }}>Stopping...</span>;
                 return <span style={{ color: c.power_state === "Running" ? "var(--success)" : "var(--warning)" }}>{c.power_state ?? "?"}</span>;
               })()}
-              {" · "}State: {c.provisioning_state ?? "?"}
+              {" · "}State: {(() => {
+                const ps = c.provisioning_state ?? "?";
+                if (ps === "Succeeded") return <span style={{ color: "var(--success)" }}>{ps}</span>;
+                if (ps === "Creating" || ps === "Updating") return <span style={{ color: "var(--accent)", display: "inline-flex", alignItems: "center", gap: 3 }}><Loader2 size={10} className="spin" />{ps}</span>;
+                if (ps === "Deleting") return <span style={{ color: "var(--warning)", display: "inline-flex", alignItems: "center", gap: 3 }}><Loader2 size={10} className="spin" />{ps}</span>;
+                if (ps === "Failed") return <span style={{ color: "var(--danger)" }}>{ps}</span>;
+                return <span>{ps}</span>;
+              })()}
               {" · "}Nodes: {c.node_count ?? "?"} {c.node_sku ? `(${c.node_sku})` : ""}
             </div>
             {c.kubelet_object_id && (
