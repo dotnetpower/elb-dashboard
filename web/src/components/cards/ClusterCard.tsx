@@ -84,6 +84,14 @@ export function ClusterCard({
     return () => clearInterval(timer);
   }, [provStatus, provStart]);
 
+  // ESC to close provision modal
+  useEffect(() => {
+    if (!showProvision) return;
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === "Escape") setShowProvision(false); };
+    window.addEventListener("keydown", handleEsc);
+    return () => window.removeEventListener("keydown", handleEsc);
+  }, [showProvision]);
+
   const handleProvision = async () => {
     if (!region) return;
     setProvStatus("creating");
@@ -209,86 +217,119 @@ export function ClusterCard({
       onRefresh={() => { setActionError(null); setProvError(null); query.refetch(); }}
       accentColor="cluster"
       collapsible
-      rightSlot={
-        enabled && noClusters && !showProvision && (
-          <button
-            className="glass-button glass-button--primary"
-            onClick={() => setShowProvision(true)}
-            style={{ fontSize: 11 }}
-          >
-            <Plus size={12} strokeWidth={1.5} /> Create Cluster
-          </button>
-        )
-      }
     >
       {!enabled && <div className="muted">Set Subscription ID and Workload RG above.</div>}
       {query.isError && <div className="muted">Failed: {(query.error as Error).message}</div>}
-      {query.data?.clusters.length === 0 && !showProvision && provStatus !== "creating" && provStatus !== "done" && (
-        <div className="muted">No AKS clusters found. Click "Create Cluster" to provision one.</div>
+      {query.data?.clusters.length === 0 && provStatus !== "creating" && provStatus !== "done" && (
+        <div className="muted">No AKS clusters found. Click "+ Add Cluster" below to provision one.</div>
       )}
 
-      {/* Provision form */}
-      {showProvision && (
-        <div style={{ padding: "var(--space-3)", border: "1px solid var(--glass-border)", borderRadius: 8, marginBottom: "var(--space-3)" }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: "var(--space-3)" }}>Create AKS Cluster</div>
-          <div style={{ display: "grid", gap: "var(--space-3)" }}>
-            <div>
-              <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Cluster Name</label>
-              <input
-                type="text"
-                value={clusterName}
-                onChange={(e) => setClusterName(e.target.value)}
-                style={{ width: "100%", background: "var(--glass-bg)", border: "1px solid var(--glass-border)", borderRadius: 6, padding: "6px 10px", color: "var(--text-primary)", fontSize: 13 }}
-                placeholder="elb-cluster"
-              />
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-3)" }}>
-              <div>
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Node SKU (E16–E64)</label>
-                <select
-                  value={nodeSku}
-                  onChange={(e) => setNodeSku(e.target.value)}
-                  style={{ width: "100%", background: "var(--glass-bg)", border: "1px solid var(--glass-border)", borderRadius: 6, padding: "6px 10px", color: "var(--text-primary)", fontSize: 13 }}
-                >
-                  {(skuQuery.data?.skus || [DEFAULT_SKU]).map((s) => (
-                    <option key={s} value={s}>{s} — {SKU_INFO[s]?.desc || ""}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Node Count (3–20)</label>
-                <input
-                  type="number"
-                  min={3}
-                  max={20}
-                  value={nodeCount}
-                  onChange={(e) => setNodeCount(Math.max(3, Math.min(20, parseInt(e.target.value) || 3)))}
-                  style={{ width: "100%", background: "var(--glass-bg)", border: "1px solid var(--glass-border)", borderRadius: 6, padding: "6px 10px", color: "var(--text-primary)", fontSize: 13 }}
-                />
-              </div>
-            </div>
-            <div className="muted" style={{ fontSize: 11 }}>
-              Region: <strong>{region || "not set"}</strong> · Est. cost: ~${estimatedCost.toFixed(2)}/hr
-              {!region && <span style={{ color: "var(--danger)", marginLeft: 8 }}>Region required</span>}
-            </div>
-            {!clusterNameValid && clusterName.length > 0 && (
-              <div style={{ fontSize: 10, color: "var(--danger)" }}>
-                Name must start with a letter, contain only letters/digits/hyphens, 2–63 chars.
-              </div>
-            )}
-            <div style={{ display: "flex", gap: "var(--space-2)" }}>
+      {/* Provision modal */}
+      {showProvision && createPortal(
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, backdropFilter: "blur(4px)" }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowProvision(false); }}
+        >
+          <div style={{ background: "var(--bg-primary)", border: "1px solid var(--border-medium)", borderRadius: 16, boxShadow: "0 8px 48px rgba(0,0,0,0.5)", width: 520, maxHeight: "85vh", overflow: "auto" }}>
+            <div style={{ padding: "20px 24px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>Create AKS Cluster</h2>
               <button
-                className="glass-button glass-button--primary"
-                onClick={handleProvision}
-                disabled={provStatus === "creating" || !region || !clusterNameValid}
-                style={{ fontSize: 11 }}
+                onClick={() => setShowProvision(false)}
+                style={{ background: "none", border: "none", color: "var(--text-faint)", cursor: "pointer", padding: 4 }}
+                title="Close"
               >
-                {provStatus === "creating" ? <><Loader2 size={12} className="spin" /> Creating...</> : "Create Cluster"}
+                <X size={18} />
               </button>
-              <button className="glass-button" onClick={() => setShowProvision(false)} style={{ fontSize: 11 }}>Cancel</button>
+            </div>
+            <div style={{ padding: "16px 24px 24px", display: "grid", gap: 16 }}>
+              <div>
+                <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Cluster Name</label>
+                <input
+                  type="text"
+                  value={clusterName}
+                  onChange={(e) => setClusterName(e.target.value)}
+                  className="glass-input"
+                  style={{ width: "100%", fontSize: 13 }}
+                  placeholder="elb-cluster"
+                  autoFocus
+                />
+                {!clusterNameValid && clusterName.length > 0 && (
+                  <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 4 }}>
+                    Must start with a letter, contain only letters/digits/hyphens, 2–63 chars.
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <div>
+                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Node SKU</label>
+                  <select
+                    value={nodeSku}
+                    onChange={(e) => setNodeSku(e.target.value)}
+                    className="glass-input"
+                    style={{ width: "100%", fontSize: 13 }}
+                  >
+                    {(skuQuery.data?.skus || [DEFAULT_SKU]).map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                  <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+                    {SKU_INFO[nodeSku]?.desc || ""}
+                  </div>
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Node Count</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={nodeCount}
+                    onChange={(e) => setNodeCount(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                    className="glass-input"
+                    style={{ width: "100%", fontSize: 13 }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                <div>
+                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Region</label>
+                  <div style={{ fontSize: 13, color: "var(--text-primary)", padding: "6px 0" }}>{region || "Not set"}</div>
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Resource Group</label>
+                  <div style={{ fontSize: 13, color: "var(--text-primary)", padding: "6px 0" }}>{resourceGroup}</div>
+                </div>
+              </div>
+
+              <div style={{ padding: "10px 14px", background: "var(--glass-bg)", border: "1px solid var(--glass-border)", borderRadius: 8, fontSize: 12, color: "var(--text-muted)" }}>
+                Est. cost: <strong style={{ color: "var(--text-primary)" }}>~${estimatedCost.toFixed(2)}/hr</strong>
+                <span style={{ margin: "0 8px" }}>·</span>
+                {nodeCount} × {nodeSku} nodes
+                {!region && <span style={{ color: "var(--danger)", marginLeft: 8 }}>Region required</span>}
+              </div>
+
+              {provError && (
+                <div style={{ fontSize: 12, color: "var(--danger)", display: "flex", alignItems: "center", gap: 6 }}>
+                  <AlertTriangle size={12} /> {provError}
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button className="glass-button" onClick={() => setShowProvision(false)} style={{ fontSize: 12, padding: "8px 16px" }}>Cancel</button>
+                <button
+                  className="glass-button glass-button--primary"
+                  onClick={handleProvision}
+                  disabled={provStatus === "creating" || !region || !clusterNameValid}
+                  style={{ fontSize: 12, padding: "8px 20px" }}
+                >
+                  {provStatus === "creating" ? <><Loader2 size={12} className="spin" /> Creating...</> : <><Plus size={12} /> Create Cluster</>}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* Creating status */}
@@ -416,6 +457,24 @@ export function ClusterCard({
           </li>
         ))}
       </ul>
+
+      {/* Add Cluster button — always visible at bottom when enabled */}
+      {enabled && (
+        <button
+          onClick={() => setShowProvision(true)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            width: "100%", marginTop: 8, padding: "8px 0",
+            background: "none", border: "1px dashed var(--border-medium)", borderRadius: 8,
+            color: "var(--text-muted)", fontSize: 12, cursor: "pointer",
+            transition: "border-color 0.15s, color 0.15s",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.color = "var(--accent)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border-medium)"; e.currentTarget.style.color = "var(--text-muted)"; }}
+        >
+          <Plus size={14} strokeWidth={1.5} /> Add Cluster
+        </button>
+      )}
 
       {actionError && (
         <div style={{ marginTop: "var(--space-2)", fontSize: 11, color: "var(--danger)" }}>
