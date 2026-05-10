@@ -235,6 +235,30 @@ export function ClusterCard({
     >
       {!enabled && <div className="muted">Set Subscription ID and Workload RG above.</div>}
       {query.isError && <div className="muted">Failed: {(query.error as Error).message}</div>}
+
+      {/* Loading skeleton */}
+      {enabled && query.isLoading && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {[1, 2].map((i) => (
+            <div key={i} className="glass-card" style={{ padding: "var(--space-3)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ width: 140, height: 14, background: "var(--glass-bg-strong)", borderRadius: 4 }} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <div style={{ width: 80, height: 12, background: "var(--glass-bg-strong)", borderRadius: 4 }} />
+                  <div style={{ width: 50, height: 22, background: "var(--glass-bg-strong)", borderRadius: 4 }} />
+                </div>
+              </div>
+              <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+                <div style={{ width: 200, height: 11, background: "var(--glass-bg)", borderRadius: 3 }} />
+              </div>
+              <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+                <div style={{ width: 120, height: 10, background: "var(--glass-bg)", borderRadius: 3 }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {query.data?.clusters.length === 0 && provStatus !== "creating" && provStatus !== "done" && (
         <div className="muted">No AKS clusters found. Click "+ Add Cluster" below to provision one.</div>
       )}
@@ -491,8 +515,8 @@ export function ClusterCard({
         ))}
       </ul>
 
-      {/* Add Cluster button — always visible at bottom when enabled */}
-      {enabled && (
+      {/* Add Cluster button — visible when data loaded (not during initial load) */}
+      {enabled && !query.isLoading && (
         <button
           onClick={() => setShowProvision(true)}
           style={{
