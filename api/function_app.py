@@ -919,7 +919,8 @@ async def start_blast_submit(
                 "region": parsed.region,
                 "storage_account": parsed.storage_account,
                 "acr_name": parsed.acr_name,
-                "cluster_name": f"elastic-blast-{job_id[:12]}",
+                "cluster_name": parsed.aks_cluster_name or f"elastic-blast-{job_id[:12]}",
+                "elb_namespace": f"elastic-blast-{job_id[:12]}",
                 "terminal_vm": parsed.terminal_vm_name,
             },
             "owner_oid": identity.object_id,
@@ -2063,6 +2064,16 @@ def run_elastic_blast_delete_activity(payload: dict) -> dict:
 @app.activity_trigger(input_name="payload")
 def list_result_blobs_activity(payload: dict) -> dict:
     return blast_activities.activity_list_result_blobs(payload)
+
+
+@app.activity_trigger(input_name="payload")
+def k8s_check_blast_status_activity(payload: dict) -> dict:
+    return blast_activities.activity_k8s_check_blast_status(payload)
+
+
+@app.activity_trigger(input_name="payload")
+def k8s_check_warmup_ready_activity(payload: dict) -> dict:
+    return blast_activities.activity_k8s_check_warmup_ready(payload)
 
 
 @app.activity_trigger(input_name="payload")

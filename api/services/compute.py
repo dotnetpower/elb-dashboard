@@ -88,11 +88,39 @@ def run_shell(
     vm_name: str,
     script: str,
     max_retries: int = 3,
+    *,
+    ssh_password: str | None = None,
 ) -> str:
-    """Execute a shell snippet via the Run Command extension. Returns stdout+stderr.
+    """Execute a shell snippet on a VM. Returns stdout+stderr.
 
-    Retries on Conflict (concurrent Run Command) with exponential backoff.
+    Strategy: SSH first (1-2s overhead), fallback to Run Command (30-60s) if SSH fails.
+    Pass ssh_password to enable SSH. Without it, falls back to Run Command directly.
     """
+    # Try SSH first if password is available
+    if ssh_password:
+        try:
+            from services.ssh_exec import run_ssh, get_vm_ssh_info
+            ip = get_vm_ssh_info(credential, subscription_id, resource_group, vm_name)
+            if ip:
+                return run_ssh(ip, ssh_password, script)
+            else:
+                LOGGER.warning("No public IP for %s — falling back to Run Command", vm_name)
+        except Exception as exc:
+            LOGGER.warning("SSH failed for %s (%s) — falling back to Run Command", vm_name, exc)
+
+    # Fallback: Run Command
+    return _run_command(credential, subscription_id, resource_group, vm_name, script, max_retries)
+
+
+def _run_command(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    vm_name: str,
+    script: str,
+    max_retries: int = 3,
+) -> str:
+    """Execute via Azure VM Run Command extension. Slow but always works."""
     import time as _time
     cc = compute_client(credential, subscription_id)
     last_exc = None

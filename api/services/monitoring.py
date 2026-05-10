@@ -229,6 +229,108 @@ def k8s_get_nodes(
         session.close()
 
 
+def k8s_check_blast_status(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str,
+) -> dict[str, Any]:
+    """Check elastic-blast job status via direct K8s API (~1-3s vs ~30s for VM Run Command).
+
+    Returns: {"status": "running"|"completed"|"failed"|"unknown", "pods": int, "succeeded": int, "failed": int}
+    """
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        # elastic-blast creates jobs in the namespace OR in default namespace
+        # Try the specified namespace first, fallback to default
+        target_ns = namespace
+        ns_resp = session.get(f"{server}/api/v1/namespaces/{namespace}", timeout=10)
+        if ns_resp.status_code == 404:
+            # Namespace doesn't exist — elastic-blast may use default namespace
+            target_ns = "default"
+
+        # Get batch jobs in the target namespace
+        jobs_resp = session.get(f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs", timeout=10)
+        if jobs_resp.status_code != 200:
+            return {"status": "unknown", "pods": 0, "detail": f"jobs API error: {jobs_resp.status_code}"}
+
+        jobs = jobs_resp.json().get("items", [])
+        if not jobs:
+            return {"status": "creating", "pods": 0, "detail": "no jobs yet"}
+
+        total_succeeded = 0
+        total_failed = 0
+        total_active = 0
+        total_jobs = len(jobs)
+        for job in jobs:
+            status = job.get("status", {})
+            total_succeeded += status.get("succeeded", 0)
+            total_failed += status.get("failed", 0)
+            total_active += status.get("active", 0)
+
+        # Get pods for more detail
+        pods_resp = session.get(f"{server}/api/v1/namespaces/{target_ns}/pods", timeout=10)
+        pod_count = len(pods_resp.json().get("items", [])) if pods_resp.status_code == 200 else 0
+
+        # Determine status
+        if total_failed > 0:
+            blast_status = "failed"
+        elif total_active > 0:
+            blast_status = "running"
+        elif total_succeeded > 0 and total_active == 0:
+            blast_status = "completed"
+        else:
+            blast_status = "unknown"
+
+        return {
+            "status": blast_status,
+            "pods": pod_count,
+            "jobs": total_jobs,
+            "succeeded": total_succeeded,
+            "failed": total_failed,
+            "active": total_active,
+        }
+    except Exception as e:
+        return {"status": "unknown", "pods": 0, "detail": str(e)[:200]}
+    finally:
+        session.close()
+
+
+def k8s_check_namespace_exists(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str,
+) -> bool:
+    """Check if an elastic-blast namespace exists with active pods (~1-3s).
+
+    Falls back to 'default' namespace if the specified namespace doesn't exist,
+    since elastic-blast on AKS creates pods in the default namespace.
+    """
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        # Try specified namespace first
+        resp = session.get(f"{server}/api/v1/namespaces/{namespace}/pods", timeout=10)
+        if resp.status_code == 200:
+            pods = resp.json().get("items", [])
+            if len(pods) > 0:
+                return True
+        # Fallback: check default namespace for vmtouch/elastic-blast pods
+        resp = session.get(f"{server}/api/v1/namespaces/default/pods", timeout=10)
+        if resp.status_code == 200:
+            pods = resp.json().get("items", [])
+            elb_pods = [p for p in pods if "vmtouch" in p.get("metadata", {}).get("name", "")
+                        or "elb" in p.get("metadata", {}).get("name", "")]
+            return len(elb_pods) > 0
+        return False
+    except Exception:
+        return False
+    finally:
+        session.close()
+
+
 def k8s_get_pods(
     credential: TokenCredential,
     subscription_id: str,

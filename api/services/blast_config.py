@@ -25,13 +25,34 @@ def generate_config(params: dict[str, Any]) -> str:
     if params.get("storage_account"):
         cfg.set("cloud-provider", "azure-storage-account", params["storage_account"])
 
+    # Derive storage container from db path (e.g. "blast-db/16S_ribosomal_RNA/...")
+    db_raw = params.get("db", "")
+    if db_raw and not db_raw.startswith("http"):
+        container_name = db_raw.split("/")[0]
+    elif db_raw.startswith("https://"):
+        # https://account.blob.core.windows.net/container/...
+        parts = db_raw.split("/", 4)
+        container_name = parts[3] if len(parts) > 3 else "blast-db"
+    else:
+        container_name = "blast-db"
+    cfg.set("cloud-provider", "azure-storage-account-container", container_name)
+
     # [cluster]
     cfg.add_section("cluster")
     job_id = params.get("job_id", "blast-job")
-    cfg.set("cluster", "name", f"elastic-blast-{job_id[:12]}")
+    # Use existing AKS cluster name if provided, otherwise generate per-job name
+    aks_cluster_name = params.get("aks_cluster_name", "")
+    if aks_cluster_name:
+        cfg.set("cluster", "name", aks_cluster_name)
+    else:
+        cfg.set("cluster", "name", f"elastic-blast-{job_id[:12]}")
     cfg.set("cluster", "machine-type", params.get("machine_type", "Standard_D8s_v3"))
     cfg.set("cluster", "num-nodes", str(params.get("num_nodes", 1)))
     cfg.set("cluster", "pd-size", params.get("pd_size", "3000Gi"))
+
+    # Local SSD for DB sharding (warmup mode)
+    if params.get("enable_warmup") or params.get("use_local_ssd"):
+        cfg.set("cluster", "exp-use-local-ssd", "true")
 
     # Warm cluster reuse mode
     if params.get("reuse"):

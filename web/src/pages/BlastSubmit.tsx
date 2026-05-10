@@ -60,14 +60,15 @@ const DB_DESCRIPTIONS: Record<string, { label: string; size: string; type: "nucl
   "ITS_RefSeq_Fungi": { label: "ITS RefSeq Fungi", size: "~8 MB", type: "nucl" },
 };
 
-const EXAMPLE_FASTA = `>example_query Human insulin mRNA
-ATGGCCCTGTGGATGCGCCTCCTGCCCCTGCTGGCGCTGCTGGCCCTCTGGGGACCTGAC
-CCAGCCGCAGCCTTTGTGAACCAACACCTGTGCGGCTCACACCTGGTGGAAGCTCTCTAC
-CTAGTGTGCGGGGAACGAGGCTTCTTCTACACACCCAAGACCCGCCGGGAGGCAGAGGAC
-CTGCAGGTGGGGCAGGTGGAGCTGGGCGGGGGCCCTGGTGCAGGCAGCCTGCAGCCCTTG
-GCCCTGGAGGGGTCCCTGCAGAAGCGTGGCATTGTGGAACAATGCTGTACCAGCATCTGC
-TCCCTCTACCAGCTGGAGAACTACTGCAACTAGACGCAGCCCGCAGGCAGCCCCACACCCG
-CCGCCTCCTGCACCGAGAGAGATGGAATAAAGCCCTTGAACCAGC`;
+const EXAMPLE_FASTA = `>example_16S_rRNA Escherichia coli 16S ribosomal RNA partial sequence
+AGAGTTTGATCCTGGCTCAGATTGAACGCTGGCGGCAGGCCTAACACATGCAAGTCGAAC
+GGTAACAGGAAGAAGCTTGCTTCTTTGCTGACGAGTGGCGGACGGGTGAGTAATGTCTG
+GGAAACTGCCTGATGGAGGGGGATAACTACTGGAAACGGTAGCTAATACCGCATAACGTCG
+CAAGACCAAAGAGGGGGACCTTAGGGCCTCTTGCCATCGGATGTGCCCAGATGGGATTAGC
+TAGTAGGTGGGGTAACGGCTCACCTAGGCGACGATCCCTAGCTGGTCTGAGAGGATGACC
+AGCCACACTGGAACTGAGACACGGTCCAGACTCCTACGGGAGGCAGCAGTGGGGAATATTG
+CACAATGGGCGCAAGCCTGATGCAGCCATGCCGCGTGTATGAAGAAGGCCTTCGGGTTGT
+AAAGTACTTTCAGCGGGGAGGAAGGGAGTAAAGTTAATACCTTTGCTCATTGA`;
 
 interface FormState {
   program: BlastProgram;
@@ -300,6 +301,7 @@ export function BlastSubmit() {
       acr_resource_group: acrRg || undefined,
       acr_name: acrName || undefined,
       storage_account: storageAccount,
+      aks_cluster_name: selectedCluster.name,
       terminal_resource_group: terminalRg,
       terminal_vm_name: terminalVm,
     });
@@ -461,7 +463,7 @@ export function BlastSubmit() {
           <button className="glass-button blast-action-btn" onClick={() => {
             set("query_data", EXAMPLE_FASTA);
             set("program", "blastn");
-            toast("Example loaded — Human insulin mRNA", "info");
+            toast("Example loaded — E. coli 16S rRNA (matches 16S_ribosomal_RNA DB)", "info");
           }} type="button">
             <Dna size={13} /> Load example
           </button>
@@ -503,7 +505,7 @@ export function BlastSubmit() {
                 {dbQuery.data.databases.map((d) => {
                   const info = DB_DESCRIPTIONS[d.name];
                   const label = info ? `${info.label} (${d.name}) — ${info.size}` : d.name;
-                  return <option key={d.name} value={`${d.container}/${d.name}/${d.name}`}>{label}</option>;
+                  return <option key={d.name} value={`${d.container}/${d.name}`}>{label}</option>;
                 })}
               </select>
               {/* Quick-pick chips */}

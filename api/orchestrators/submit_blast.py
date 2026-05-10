@@ -24,8 +24,9 @@ LOGGER = logging.getLogger(__name__)
 
 STATUS_POLL_INTERVAL_SECONDS = 30
 STATUS_POLL_MAX_ATTEMPTS = 720  # 720 * 30s = 6 hours max
-RESULTS_VERIFY_INTERVAL_SECONDS = 30
-RESULTS_VERIFY_MAX_ATTEMPTS = 10  # 10 * 30s = 5 min max waiting for .out files
+RESULTS_VERIFY_INTERVAL_SECONDS = 15
+RESULTS_VERIFY_MAX_ATTEMPTS = 8  # 8 * 15s = 2 min max waiting for .out files
+STORAGE_PROPAGATION_SECONDS = 10  # VNet rules require ~10-30s propagation after defaultAction toggle
 
 
 def submit_blast_orchestrator(
@@ -68,8 +69,8 @@ def submit_blast_orchestrator(
         yield context.call_activity("set_storage_public_access_activity", storage_payload)
         steps["enabling_storage"] = {"done": True}
 
-        # 2. Wait for propagation
-        propagation = context.current_utc_datetime + timedelta(seconds=15)
+        # 2. Wait for propagation (short — Azure propagation is usually fast)
+        propagation = context.current_utc_datetime + timedelta(seconds=STORAGE_PROPAGATION_SECONDS)
         yield context.create_timer(propagation)
 
         # 3. Upload query
@@ -89,13 +90,61 @@ def submit_blast_orchestrator(
         if db and not db.startswith("http"):
             request["db"] = f"https://{account}.blob.core.windows.net/{db}"
 
+        # When using an existing AKS cluster, always set reuse=true so
+        # elastic-blast detects the cluster and skips creation.
+        if request.get("aks_cluster_name"):
+            request["reuse"] = True
+
         config_result = yield context.call_activity("generate_blast_config_activity", request)
         request["config_text"] = config_result.get("config_text", "")
         steps["configuring"] = {"config_url": config_result.get("config_blob_url")}
 
         # 5. Warmup / Prepare (optional — enabled by default for DB sharding)
+        #    Smart skip: if cluster already has pods in the elastic-blast namespace,
+        #    the cluster is already warm and prepare can be skipped (~66s saved).
         enable_warmup = request.get("enable_warmup", True)
-        if enable_warmup:
+        elb_namespace = f"elastic-blast-{job_id[:12]}"
+        aks_cluster = request.get("aks_cluster_name", "")
+
+        if enable_warmup and aks_cluster:
+            # Fast K8s API check (~1-3s) to see if cluster is already warm
+            warmup_check_payload = {
+                "subscription_id": request["subscription_id"],
+                "resource_group": request["resource_group"],
+                "cluster_name": aks_cluster,
+                "namespace": elb_namespace,
+                "user_assertion": request.get("user_assertion"),
+            }
+            warmup_check = yield context.call_activity("k8s_check_warmup_ready_activity", warmup_check_payload)
+            already_warm = warmup_check.get("warm", False)
+            steps["warmup_check"] = {"already_warm": already_warm}
+
+            if already_warm:
+                LOGGER.info("Cluster %s/%s already warm — skipping prepare", aks_cluster, elb_namespace)
+                request["reuse"] = True
+                config_result = yield context.call_activity("generate_blast_config_activity", request)
+                request["config_text"] = config_result.get("config_text", "")
+                steps["warming_up"] = {"skipped": True, "reason": "cluster already warm"}
+            else:
+                context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
+                prepare_result = yield context.call_activity("run_elastic_blast_prepare_activity", request)
+                prepare_output = prepare_result.get("output", "")
+                steps["warming_up"] = {
+                    "success": prepare_result.get("success"),
+                    "output": prepare_output[:4000],
+                }
+                if not prepare_result.get("success"):
+                    context.set_custom_status({"phase": "warmup_failed", "job_id": job_id, "steps": steps})
+                    yield context.call_activity("set_storage_public_access_activity", disable_payload)
+                    context.signal_entity(entity_id, "update_job",
+                        {"job_id": job_id, "status": "failed", "phase": "warmup_failed"})
+                    return {"job_id": job_id, "status": "failed", "phase": "warmup_failed",
+                            "error": prepare_output[:4000], "steps": steps}
+                request["reuse"] = True
+                config_result = yield context.call_activity("generate_blast_config_activity", request)
+                request["config_text"] = config_result.get("config_text", "")
+        elif enable_warmup:
+            # No AKS cluster name — fall back to always warmup
             context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
             prepare_result = yield context.call_activity("run_elastic_blast_prepare_activity", request)
             prepare_output = prepare_result.get("output", "")
@@ -110,9 +159,7 @@ def submit_blast_orchestrator(
                     {"job_id": job_id, "status": "failed", "phase": "warmup_failed"})
                 return {"job_id": job_id, "status": "failed", "phase": "warmup_failed",
                         "error": prepare_output[:4000], "steps": steps}
-            # After prepare, set reuse=true so submit uses the warm cluster
             request["reuse"] = True
-            # Regenerate config with reuse=true
             config_result = yield context.call_activity("generate_blast_config_activity", request)
             request["config_text"] = config_result.get("config_text", "")
 
@@ -129,20 +176,33 @@ def submit_blast_orchestrator(
             return {"job_id": job_id, "status": "failed", "phase": "submit_failed",
                     "error": submit_output[:4000], "steps": steps}
 
-        # 6. Poll status — minimum 2 polls before accepting "completed"
-        # elastic-blast can report EXIT_CODE=0 prematurely if auth fails or
-        # the AKS cluster hasn't been created yet.
+        # 6. Poll status via K8s API (fast, ~1-3s) or VM Run Command (fallback, ~30s)
         final_status = "unknown"
         last_check_output = ""
-        MIN_POLLS_BEFORE_COMPLETE = 3  # At least 90 seconds before trusting "completed"
+        enable_warmup = request.get("enable_warmup", True)
+        MIN_POLLS_BEFORE_COMPLETE = 1 if enable_warmup else 3
+        poll_interval = 10 if (enable_warmup and aks_cluster) else STATUS_POLL_INTERVAL_SECONDS
+        use_k8s_check = bool(aks_cluster)
         for attempt in range(STATUS_POLL_MAX_ATTEMPTS):
-            next_poll = context.current_utc_datetime + timedelta(seconds=STATUS_POLL_INTERVAL_SECONDS)
+            next_poll = context.current_utc_datetime + timedelta(seconds=poll_interval)
             yield context.create_timer(next_poll)
 
             try:
-                check = yield context.call_activity("check_blast_status_activity", request)
+                if use_k8s_check:
+                    # Fast path: K8s API (~1-3s)
+                    k8s_payload = {
+                        "subscription_id": request["subscription_id"],
+                        "resource_group": request["resource_group"],
+                        "cluster_name": aks_cluster,
+                        "namespace": elb_namespace,
+                        "user_assertion": request.get("user_assertion"),
+                    }
+                    check = yield context.call_activity("k8s_check_blast_status_activity", k8s_payload)
+                else:
+                    # Slow path: VM Run Command (~30s)
+                    check = yield context.call_activity("check_blast_status_activity", request)
                 final_status = check.get("status", "unknown")
-                last_check_output = check.get("output", "")
+                last_check_output = str(check)[:4000]
             except Exception as exc:
                 LOGGER.warning("status check failed attempt=%d: %s", attempt + 1, exc)
                 final_status = "unknown"

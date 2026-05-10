@@ -15,6 +15,14 @@ import { statusColor } from "@/constants";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
+// Shimmer animation for active steps
+const shimmerStyle = `
+@keyframes step-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+`;
+
 // Phase steps matching orchestrator order exactly
 const PHASE_STEPS = [
   { key: "checking_vm", label: "Prepare VM", desc: "Start remote terminal", icon: Server },
@@ -218,11 +226,69 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
   subscriptionId: string; storageAccount: string; resourceGroup: string;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [, setTick] = useState(0);
+  const phaseTimestamps = useRef<Record<string, number>>({});
+  const phaseDurations = useRef<Record<string, number>>({});
   const customStatus = (typeof job?.custom_status === "object" && job?.custom_status !== null)
     ? (job.custom_status as Record<string, unknown>) : null;
   const output = job?.output as Record<string, unknown> | null;
   const stepsData = (customStatus?.steps ?? (output as Record<string, unknown>)?.steps ?? {}) as Record<string, Record<string, unknown>>;
   const jobId = job?.job_id as string;
+
+  // Track phase transitions to calculate per-step durations
+  useEffect(() => {
+    if (!phase) return;
+    const now = Date.now();
+    const ts = phaseTimestamps.current;
+
+    // Find the step key that matches the current phase
+    const stepIdx = PHASE_STEPS.findIndex((s) => s.key === phase);
+    if (stepIdx >= 0 && !ts[phase]) {
+      ts[phase] = now;
+      // Mark previous step as completed with duration
+      if (stepIdx > 0) {
+        const prevKey = PHASE_STEPS[stepIdx - 1].key;
+        if (ts[prevKey] && !phaseDurations.current[prevKey]) {
+          phaseDurations.current[prevKey] = now - ts[prevKey];
+        }
+      }
+    }
+    // If completed/failed, finalize all durations
+    if (phase === "completed" || phase === "failed") {
+      for (let i = 0; i < PHASE_STEPS.length; i++) {
+        const key = PHASE_STEPS[i].key;
+        if (ts[key] && !phaseDurations.current[key]) {
+          const nextKey = PHASE_STEPS[i + 1]?.key;
+          const endTime = nextKey && ts[nextKey] ? ts[nextKey] : now;
+          phaseDurations.current[key] = endTime - ts[key];
+        }
+      }
+    }
+  }, [phase]);
+
+  // Tick every second to update active step timer
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const getStepDuration = (key: string, state: StepState): string | null => {
+    if (state === "pending" || state === "skipped") return null;
+    const dur = phaseDurations.current[key];
+    if (dur) {
+      const s = Math.round(dur / 1000);
+      return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+    }
+    // Active step — show live elapsed
+    if (state === "active") {
+      const start = phaseTimestamps.current[key];
+      if (start) {
+        const elapsed = Math.round((Date.now() - start) / 1000);
+        return elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`;
+      }
+    }
+    return null;
+  };
 
   const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
@@ -339,6 +405,8 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
   };
 
   return (
+    <>
+    <style>{shimmerStyle}</style>
     <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
       {PHASE_STEPS.map((s, i) => {
         const state = getStepState(i, s.key);
@@ -357,7 +425,22 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
             background: isOpen ? "rgba(255,255,255,0.03)" : "transparent",
             border: isOpen ? "1px solid var(--border-weak)" : "1px solid transparent",
             opacity: state === "skipped" ? 0.5 : 1,
+            position: "relative",
           }}>
+            {/* Shimmer bar at top of active step */}
+            {state === "active" && (
+              <div style={{
+                position: "absolute", top: 0, left: 0, right: 0, height: 2,
+                overflow: "hidden", borderRadius: "6px 6px 0 0", pointerEvents: "none",
+                background: "rgba(122,167,255,0.10)",
+              }}>
+                <div style={{
+                  position: "absolute", top: 0, left: 0, width: "33%", height: "100%",
+                  background: "linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%)",
+                  animation: "step-shimmer 1.2s linear infinite",
+                }} />
+              </div>
+            )}
             <button
               onClick={() => state !== "pending" && state !== "skipped" && toggle(s.key)}
               disabled={state === "pending" || state === "skipped"}
@@ -386,22 +469,36 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
                   {state === "skipped" ? "Skipped" : s.desc}
                 </span>
               </span>
-              {/* Status badge */}
-              {state === "done" && (
-                <span style={{ fontSize: 11, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
-                  ✓
-                </span>
-              )}
-              {state === "skipped" && (
-                <span style={{ fontSize: 10, color: "var(--text-faint)", padding: "1px 6px", background: "rgba(255,255,255,0.04)", borderRadius: 3 }}>
-                  skipped
-                </span>
-              )}
-              {state === "error" && (
-                <span style={{ fontSize: 10, color: "var(--danger)", padding: "1px 6px", background: "rgba(224,123,138,0.08)", borderRadius: 3 }}>
-                  failed
-                </span>
-              )}
+              {/* Duration + Status badge */}
+              {(() => {
+                const dur = getStepDuration(s.key, state);
+                return (
+                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {dur && (
+                      <span style={{
+                        fontSize: 11, color: state === "active" ? "var(--accent)" : "var(--text-faint)",
+                        fontVariantNumeric: "tabular-nums", fontWeight: state === "active" ? 500 : 400,
+                        minWidth: 28, textAlign: "right",
+                      }}>
+                        {dur}
+                      </span>
+                    )}
+                    {state === "done" && (
+                      <span style={{ fontSize: 11, color: "var(--success)" }}>✓</span>
+                    )}
+                    {state === "skipped" && (
+                      <span style={{ fontSize: 10, color: "var(--text-faint)", padding: "1px 6px", background: "rgba(255,255,255,0.04)", borderRadius: 3 }}>
+                        skipped
+                      </span>
+                    )}
+                    {state === "error" && (
+                      <span style={{ fontSize: 10, color: "var(--danger)", padding: "1px 6px", background: "rgba(224,123,138,0.08)", borderRadius: 3 }}>
+                        failed
+                      </span>
+                    )}
+                  </span>
+                );
+              })()}
             </button>
             {/* Collapsible log — premium CI-style */}
             {isOpen && log && <StepLogBlock log={log} state={state} stepKey={s.key} />}
@@ -419,6 +516,7 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
         );
       })}
     </div>
+    </>
   );
 }
 
@@ -539,7 +637,20 @@ export function BlastResults() {
   });
 
   const job = jobQuery.data;
-  const files = resultsQuery.data?.files ?? [];
+  const allFiles = resultsQuery.data?.files ?? [];
+  // Separate BLAST result files (.out) from debug/log artifacts
+  const DEBUG_FILES = new Set(["blast-status.txt", "jobs.txt", "pods.txt"]);
+  const resultFiles = allFiles.filter((f: BlastResultFile) => {
+    const basename = f.name.split("/").pop() || "";
+    return !DEBUG_FILES.has(basename) && !basename.endsWith(".log");
+  });
+  const debugFiles = allFiles.filter((f: BlastResultFile) => {
+    const basename = f.name.split("/").pop() || "";
+    return DEBUG_FILES.has(basename) || basename.endsWith(".log");
+  });
+  // Show result files first; if none exist, show debug files as fallback
+  const files = resultFiles.length > 0 ? resultFiles : debugFiles;
+  const hasOnlyDebugFiles = resultFiles.length === 0 && debugFiles.length > 0;
   const publicAccessDisabled = resultsQuery.data?.public_access_disabled === true;
   const customStatus = (typeof job?.custom_status === "object" && job?.custom_status !== null)
     ? (job.custom_status as Record<string, unknown>) : null;
@@ -648,7 +759,6 @@ export function BlastResults() {
   const effectivePhase = completedButFailed ? "submit_failed" : phase;
   const effectiveIsFailed = isFailed || completedButFailed;
   const effectiveColor = statusColor(effectivePhase === "submit_failed" ? "failed" : effectivePhase);
-  const outFiles = files.filter((f) => f.name.endsWith(".out"));
   const isRunning = !effectiveIsFailed && phase !== "completed" && phase !== "deleted" && phase !== "cancelled";
 
   return (
@@ -748,7 +858,7 @@ export function BlastResults() {
                     Job Completed Successfully
                   </div>
                   <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
-                    {outFiles.length > 0 ? `${outFiles.length} result file${outFiles.length === 1 ? "" : "s"} ready for download` : files.length > 0 ? `${files.length} file${files.length === 1 ? "" : "s"} available` : "Checking results..."}
+                    {resultFiles.length > 0 ? `${resultFiles.length} result file${resultFiles.length === 1 ? "" : "s"} ready for download` : hasOnlyDebugFiles ? "No BLAST results — diagnostic logs only" : "Checking results..."}
                   </div>
                 </div>
               </div>
@@ -985,16 +1095,11 @@ export function BlastResults() {
                 background: "var(--bg-tertiary)",
               }}>
                 <div style={{ fontSize: 13, color: "var(--text-primary)", marginBottom: 10 }}>
-                  No result files found in the <code style={{ fontSize: 12 }}>results/{jobId}/</code> path.
+                  No BLAST result files (.out) found in <code style={{ fontSize: 12 }}>results/{jobId}/</code>.
                 </div>
                 <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
-                  This can happen when:
+                  This typically means the BLAST search returned no hits for the given query and database combination.
                 </div>
-                <ul style={{ fontSize: 12, color: "var(--text-muted)", margin: "6px 0 12px 0", paddingLeft: 20, lineHeight: 1.8 }}>
-                  <li>The BLAST search returned no hits for the given query and database</li>
-                  <li>The Remote Terminal VM&apos;s <code>az login</code> session expired during execution</li>
-                  <li>Storage public access was disabled before results could be written</li>
-                </ul>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button className="glass-button" onClick={() => resultsQuery.refetch()} style={{ fontSize: 12 }}>
                     <RefreshCw size={13} /> Try Again
@@ -1078,6 +1183,31 @@ export function BlastResults() {
                 })}
               </tbody>
             </table>
+            {hasOnlyDebugFiles && (
+              <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "rgba(240,198,116,0.08)", fontSize: 12, color: "var(--text-muted)" }}>
+                <AlertTriangle size={13} style={{ verticalAlign: "middle", marginRight: 6, color: "var(--warning)" }} />
+                No BLAST result files (.out) were produced. The files above are diagnostic logs from the cluster.
+                This typically means the search returned no hits for the query/database combination.
+              </div>
+            )}
+            {debugFiles.length > 0 && resultFiles.length > 0 && (
+              <details style={{ marginTop: 14, fontSize: 12 }}>
+                <summary style={{ cursor: "pointer", color: "var(--text-muted)" }}>
+                  {debugFiles.length} diagnostic file{debugFiles.length > 1 ? "s" : ""} (logs, status)
+                </summary>
+                <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {debugFiles.map((f) => {
+                    const fname = f.name.split("/").pop() || f.name;
+                    return (
+                      <button key={f.name} className="glass-button" style={{ fontSize: 11, padding: "4px 10px" }}
+                        onClick={() => handleDownload(f)}>
+                        <Download size={11} /> {fname}
+                      </button>
+                    );
+                  })}
+                </div>
+              </details>
+            )}
           </div>
         )}
       </section>

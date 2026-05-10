@@ -19,6 +19,9 @@ azure-mgmt-containerservice==34.0.0
 # JWT validation
 PyJWT[crypto]==2.9.0
 
+# SSH connectivity (VM command execution — much faster than Run Command)
+paramiko>=3.4.0
+
 # HTTP client (explicit — used by prepare_blast_db for NCBI S3 access)
 requests>=2.31.0
 cryptography==43.0.3
