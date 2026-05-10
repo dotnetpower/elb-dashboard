@@ -86,3 +86,39 @@ export const api = {
     request<T>(path, { method: "POST", body: JSON.stringify(body) }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
+
+// ---------------------------------------------------------------------------
+// RBAC-friendly error formatting
+// ---------------------------------------------------------------------------
+const RBAC_HINTS: Record<string, string> = {
+  "aks":     "Contributor on the workload resource group",
+  "acr":     "Contributor on the ACR resource group",
+  "storage": "Storage Blob Data Contributor on the storage account",
+  "terminal":"Contributor on the terminal resource group",
+  "blast":   "Contributor on the workload resource group",
+  "default": "appropriate RBAC role on the target resource",
+};
+
+/**
+ * Format a caught error into a user-friendly message.
+ * For 403 errors, adds guidance about the required RBAC role.
+ */
+export function formatApiError(err: unknown, context?: string): string {
+  if (!(err instanceof Error)) return String(err);
+  const apiErr = err as Partial<ApiError>;
+  const base = err.message || "Unknown error";
+
+  if (apiErr.status === 403) {
+    const hint = (context && RBAC_HINTS[context]) || RBAC_HINTS["default"];
+    return `Permission denied — you need ${hint}. Ask your Azure admin to assign the role.`;
+  }
+  if (apiErr.status === 401) {
+    return "Session expired. Please sign in again.";
+  }
+  return base;
+}
+
+/** Check if an error is a 403 Forbidden. */
+export function isForbidden(err: unknown): boolean {
+  return (err instanceof Error) && (err as Partial<ApiError>).status === 403;
+}

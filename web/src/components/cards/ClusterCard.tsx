@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Loader2, Plus, Trash2, CheckCircle2, AlertTriangle, Play, Square, Copy, ChevronDown, Terminal, Maximize2, X, RefreshCw } from "lucide-react";
 
 import { monitoringApi, aksApi } from "@/api/endpoints";
+import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
@@ -113,7 +114,7 @@ export function ClusterCard({
       });
       // Orchestrator started — stay in "creating" state until cluster appears
     } catch (e) {
-      setProvError((e as Error).message);
+      setProvError(formatApiError(e, "aks"));
       setProvStatus("error");
     }
   };
@@ -127,7 +128,7 @@ export function ClusterCard({
       await aksApi.delete(subscriptionId, resourceGroup, name);
       query.refetch();
     } catch (e) {
-      setActionError(`Delete failed: ${(e as Error).message}`);
+      setActionError(`Delete failed: ${formatApiError(e, "aks")}`);
     } finally {
       setDeleteTarget(null);
       setActionLoading(null);
@@ -146,7 +147,7 @@ export function ClusterCard({
       // Mark cluster as transitioning
       setTransitioning((prev) => new Map(prev).set(name, action === "start" ? "starting" : "stopping"));
     } catch (e) {
-      setActionError(`${action} failed: ${(e as Error).message}`);
+      setActionError(`${action} failed: ${formatApiError(e, "aks")}`);
     } finally {
       setActionLoading(null);
     }

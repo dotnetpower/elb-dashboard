@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Loader2, Hammer, CheckCircle2, AlertTriangle } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
+import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
 import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 
@@ -76,7 +77,7 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
       setBuildStatus(resp.results.every((r) => r.status === "success") ? "done" : "error");
       query.refetch();
     } catch (e) {
-      setBuildError((e as Error).message);
+      setBuildError(formatApiError(e, "acr"));
       setBuildStatus("error");
     } finally {
       clearInterval(timer);
