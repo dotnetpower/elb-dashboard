@@ -17,10 +17,12 @@ def generate_config(params: dict[str, Any]) -> str:
     # [cloud-provider]
     cfg.add_section("cloud-provider")
     cfg.set("cloud-provider", "azure-region", params.get("region", "koreacentral"))
-    if params.get("acr_resource_group"):
-        cfg.set("cloud-provider", "azure-acr-resource-group", params["acr_resource_group"])
-    if params.get("acr_name"):
-        cfg.set("cloud-provider", "azure-acr-name", params["acr_name"])
+    acr_rg = params.get("acr_resource_group", "")
+    if acr_rg:
+        cfg.set("cloud-provider", "azure-acr-resource-group", acr_rg)
+    acr_name = params.get("acr_name", "")
+    if acr_name:
+        cfg.set("cloud-provider", "azure-acr-name", acr_name)
     cfg.set("cloud-provider", "azure-resource-group", params.get("resource_group", ""))
     if params.get("storage_account"):
         cfg.set("cloud-provider", "azure-storage-account", params["storage_account"])

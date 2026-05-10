@@ -27,7 +27,9 @@ def _get_vm_ssh_password(credential, payload: dict[str, Any]) -> str | None:
 
     Returns password string or None if unavailable (falls back to Run Command).
     """
-    vault_url = payload.get("keyvault_url") or os.environ.get("ELB_KEYVAULT_URL", "")
+    vault_url = (payload.get("keyvault_url")
+                or os.environ.get("ELB_KEYVAULT_URL", "")
+                or os.environ.get("KEY_VAULT_URI", ""))
     vm_name = payload.get("terminal_vm_name", "vm-elb-terminal")
     if not vault_url:
         return None
@@ -113,6 +115,9 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
     config_b64 = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
 
     # Single Run Command: write config + run submit (saves ~30-60s overhead)
+    # ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1 makes elastic-blast submit
+    # BLAST jobs directly via kubectl instead of creating a submit-jobs K8s pod.
+    # This avoids the batch_list.txt dependency that fails in warm-cluster mode.
     combined_script = (
         f"#!/bin/bash\n"
         f"printf '%s' '{config_b64}' | base64 -d > /tmp/elb-{job_id}.ini\n"
@@ -122,6 +127,7 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
         f"sudo -u azureuser bash -c '"
         f"export HOME=/home/azureuser && "
         f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
+        f"export ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1 && "
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
         f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
         f"source venv/bin/activate && "
@@ -221,6 +227,8 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
     config_b64 = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
 
     # Single Run Command: write config + run prepare (saves ~30-60s overhead)
+    # ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1 ensures prepare doesn't
+    # set up the submit-jobs K8s pod path (consistent with submit activity).
     combined_script = (
         f"#!/bin/bash\n"
         f"set -o pipefail\n"
@@ -232,6 +240,7 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
         f"set -o pipefail && "
         f"export HOME=/home/azureuser && "
         f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
+        f"export ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1 && "
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
         f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
         f"source venv/bin/activate && "
@@ -405,12 +414,14 @@ def activity_export_blast_results(payload: dict[str, Any]) -> dict[str, Any]:
         f"'"
     )
 
+    ssh_pw = _get_vm_ssh_password(cred, payload)
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
         payload["terminal_resource_group"],
         payload["terminal_vm_name"],
         export_script,
+        ssh_password=ssh_pw,
     )
     sanitised = sanitise(output)[:2000]
     LOGGER.info("export_blast_results output: %s", sanitised[:500])

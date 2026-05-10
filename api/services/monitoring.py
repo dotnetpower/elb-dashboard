@@ -304,19 +304,25 @@ def k8s_check_namespace_exists(
     cluster_name: str,
     namespace: str,
 ) -> bool:
-    """Check if an elastic-blast namespace exists with active pods (~1-3s).
+    """Check if an elastic-blast cluster is warm and ready for job submission.
 
-    Falls back to 'default' namespace if the specified namespace doesn't exist,
-    since elastic-blast on AKS creates pods in the default namespace.
+    For local-SSD mode: checks if create-workspace DaemonSet exists in kube-system
+    (this persists across runs and indicates DB is loaded on nodes).
+    Also checks default namespace for vmtouch/elb pods as fallback.
     """
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
-        # Try specified namespace first
-        resp = session.get(f"{server}/api/v1/namespaces/{namespace}/pods", timeout=10)
+        # Check kube-system for create-workspace DaemonSet (local-SSD warm indicator)
+        resp = session.get(
+            f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
+            timeout=10,
+        )
         if resp.status_code == 200:
-            pods = resp.json().get("items", [])
-            if len(pods) > 0:
+            ds = resp.json()
+            ready = ds.get("status", {}).get("numberReady", 0)
+            if ready > 0:
                 return True
+
         # Fallback: check default namespace for vmtouch/elastic-blast pods
         resp = session.get(f"{server}/api/v1/namespaces/default/pods", timeout=10)
         if resp.status_code == 200:
