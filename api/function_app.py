@@ -1924,7 +1924,14 @@ def list_blast_databases(req: func.HttpRequest) -> func.HttpResponse:
             params["storage_account"],
         )
     except Exception as exc:
-        return _error_response(500, sanitise(str(exc)))
+        msg = str(exc)
+        if "AuthorizationFailure" in msg or "AuthorizationPermissionMismatch" in msg:
+            return _error_response(403, (
+                "Storage data-plane access denied. "
+                "Assign 'Storage Blob Data Reader' (or Contributor) "
+                "role to your account on this storage account."
+            ))
+        return _error_response(500, sanitise(msg))
     return _json_response({"databases": dbs})
 
 
