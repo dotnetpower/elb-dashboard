@@ -7,6 +7,7 @@ const ROUTE_LABELS: Record<string, string> = {
   "blast": "BLAST",
   "submit": "New Search",
   "jobs": "Jobs",
+  "docs": "API Reference",
 };
 
 export function Breadcrumb() {

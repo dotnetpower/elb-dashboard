@@ -1,7 +1,7 @@
 import { type PropsWithChildren, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
-import { Activity, Terminal as TerminalIcon, LogOut, Search, List, Menu, X, Sun, Moon, HelpCircle } from "lucide-react";
+import { Activity, Terminal as TerminalIcon, LogOut, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2 } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { useTheme } from "@/hooks/useTheme";
@@ -60,6 +60,9 @@ export function Layout({ children }: PropsWithChildren) {
           <span className="layout__nav-group-label">Tools</span>
           <NavLink to="/terminal" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <TerminalIcon size={14} strokeWidth={1.5} /> Terminal
+          </NavLink>
+          <NavLink to="/docs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+            <Code2 size={14} strokeWidth={1.5} /> API
           </NavLink>
         </nav>
 

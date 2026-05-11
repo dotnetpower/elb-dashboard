@@ -8,6 +8,12 @@ export interface ProvisionTerminalRequest {
   vm_size?: string;
   admin_username?: string;
   allowed_ssh_cidr: string;
+  // RBAC auto-assignment fields (optional)
+  workload_resource_group?: string;
+  acr_resource_group?: string;
+  acr_name?: string;
+  storage_account?: string;
+  storage_resource_group?: string;
 }
 
 export interface ProvisionTerminalStarted {
@@ -115,6 +121,7 @@ export interface AcrSummary {
   expected_image_tags: Record<string, string>;
   actual_tags?: Record<string, string[]>;
   building_images?: string[];
+  build_details?: { image: string; status: string; run_id: string }[];
 }
 
 export interface VmStatus {
@@ -216,6 +223,10 @@ export const monitoringApi = {
     api.post<{ results: { image: string; status: string; run_id?: string; error?: string; output?: string }[] }>(
       "/acr/build-images",
       { subscription_id: subscriptionId, resource_group: rg, registry_name: registryName },
+    ),
+  serviceIp: (subscriptionId: string, rg: string, clusterName: string, serviceName: string) =>
+    api.get<{ service_name: string; external_ip: string }>(
+      `/monitor/aks/service-ip?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&service_name=${encodeURIComponent(serviceName)}`,
     ),
   prepareBlastDb: (subscriptionId: string, storageRg: string, accountName: string, dbName: string) =>
     api.post<{ ok: boolean; db_name: string; files_copied?: number; files_already_copying?: number; source_version?: string; output: string }>(
@@ -378,6 +389,7 @@ export interface BlastJobSummary {
     cluster_name?: string;
     terminal_vm?: string;
   };
+  owner_upn?: string;
   error?: string;
 }
 
@@ -398,6 +410,34 @@ export interface BlastDatabase {
 }
 
 export const blastApi = {
+  preFlight: (req: {
+    subscription_id: string;
+    resource_group: string;
+    acr_resource_group?: string;
+    acr_name?: string;
+    storage_account: string;
+    aks_cluster_name: string;
+    terminal_resource_group?: string;
+    terminal_vm_name?: string;
+    db: string;
+    query_data?: string;
+  }) => api.post<{
+    ready: boolean;
+    checks: Array<{
+      id: string;
+      status: "pass" | "fail" | "warn" | "skip";
+      title: string;
+      detail?: string;
+      action?: string;
+      action_type?: string;
+      action_params?: Record<string, string>;
+      severity?: string;
+      suggested_dbs?: string[];
+    }>;
+    critical_blockers: number;
+    summary: string;
+  }>("/blast/pre-flight", req),
+
   submit: (req: BlastSubmitRequest) =>
     api.post<BlastSubmitResponse>("/blast/submit", req),
 

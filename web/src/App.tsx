@@ -9,6 +9,7 @@ import { RemoteTerminal } from "@/pages/RemoteTerminal";
 import { BlastSubmit } from "@/pages/BlastSubmit";
 import { BlastJobs } from "@/pages/BlastJobs";
 import { BlastResults } from "@/pages/BlastResults";
+import { ApiReference } from "@/pages/ApiReference";
 
 const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
 const CLIENT_ID_MISSING = !import.meta.env.VITE_AZURE_CLIENT_ID && !DEV_BYPASS;
@@ -23,6 +24,7 @@ function AppRoutes() {
           <Route path="/blast/submit" element={<BlastSubmit />} />
           <Route path="/blast/jobs" element={<BlastJobs />} />
           <Route path="/blast/jobs/:jobId" element={<BlastResults />} />
+          <Route path="/docs" element={<ApiReference />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>

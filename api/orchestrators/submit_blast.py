@@ -50,7 +50,12 @@ def submit_blast_orchestrator(
         # Accumulate step results for rich frontend display
         steps: dict[str, Any] = {}
 
+        def _ts() -> str:
+            """Replay-safe ISO timestamp from the orchestrator clock."""
+            return context.current_utc_datetime.isoformat()
+
         # 0. Ensure Remote Terminal VM is running
+        steps["checking_vm"] = {"started_at": _ts()}
         context.set_custom_status({"phase": "checking_vm", "job_id": job_id, "steps": steps})
         vm_payload = {
             "subscription_id": request["subscription_id"],
@@ -59,30 +64,33 @@ def submit_blast_orchestrator(
             "user_assertion": request.get("user_assertion"),
         }
         vm_status = yield context.call_activity("ensure_vm_running_activity", vm_payload)
-        steps["checking_vm"] = {"power_state": vm_status.get("power_state"), "started": vm_status.get("started")}
+        steps["checking_vm"].update({"power_state": vm_status.get("power_state"), "started": vm_status.get("started"), "completed_at": _ts()})
         if vm_status.get("started"):
             boot_wait = context.current_utc_datetime + timedelta(seconds=30)
             yield context.create_timer(boot_wait)
 
         # 1. Enable storage access
+        steps["enabling_storage"] = {"started_at": _ts()}
         context.set_custom_status({"phase": "enabling_storage", "job_id": job_id, "steps": steps})
         yield context.call_activity("set_storage_public_access_activity", storage_payload)
-        steps["enabling_storage"] = {"done": True}
+        steps["enabling_storage"].update({"done": True, "completed_at": _ts()})
 
         # 2. Wait for propagation (short — Azure propagation is usually fast)
         propagation = context.current_utc_datetime + timedelta(seconds=STORAGE_PROPAGATION_SECONDS)
         yield context.create_timer(propagation)
 
         # 3. Upload query
+        steps["uploading"] = {"started_at": _ts()}
         context.set_custom_status({"phase": "uploading", "job_id": job_id, "steps": steps})
         if request.get("query_data"):
             upload_result = yield context.call_activity("upload_query_activity", request)
             request["query_blob_url"] = upload_result["query_blob_url"]
-            steps["uploading"] = {"blob_url": upload_result.get("query_blob_url"), "blob_path": upload_result.get("blob_path")}
+            steps["uploading"].update({"blob_url": upload_result.get("query_blob_url"), "blob_path": upload_result.get("blob_path"), "completed_at": _ts()})
         else:
-            steps["uploading"] = {"skipped": True}
+            steps["uploading"].update({"skipped": True, "completed_at": _ts()})
 
         # 4. Generate and upload config
+        steps["configuring"] = {"started_at": _ts()}
         context.set_custom_status({"phase": "configuring", "job_id": job_id, "steps": steps})
         account = request["storage_account"]
         request["results_url"] = f"https://{account}.blob.core.windows.net/results/{job_id}"
@@ -97,7 +105,7 @@ def submit_blast_orchestrator(
 
         config_result = yield context.call_activity("generate_blast_config_activity", request)
         request["config_text"] = config_result.get("config_text", "")
-        steps["configuring"] = {"config_url": config_result.get("config_blob_url")}
+        steps["configuring"].update({"config_url": config_result.get("config_blob_url"), "completed_at": _ts()})
 
         # 5. Warmup / Prepare (optional — enabled by default for DB sharding)
         #    Smart skip: if cluster already has pods in the elastic-blast namespace,
@@ -124,15 +132,17 @@ def submit_blast_orchestrator(
                 request["reuse"] = True
                 config_result = yield context.call_activity("generate_blast_config_activity", request)
                 request["config_text"] = config_result.get("config_text", "")
-                steps["warming_up"] = {"skipped": True, "reason": "cluster already warm"}
+                steps["warming_up"] = {"skipped": True, "reason": "cluster already warm", "started_at": _ts(), "completed_at": _ts()}
             else:
+                steps["warming_up"] = {"started_at": _ts()}
                 context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
                 prepare_result = yield context.call_activity("run_elastic_blast_prepare_activity", request)
                 prepare_output = prepare_result.get("output", "")
-                steps["warming_up"] = {
+                steps["warming_up"].update({
                     "success": prepare_result.get("success"),
                     "output": prepare_output[:4000],
-                }
+                    "completed_at": _ts(),
+                })
                 if not prepare_result.get("success"):
                     context.set_custom_status({"phase": "warmup_failed", "job_id": job_id, "steps": steps})
                     yield context.call_activity("set_storage_public_access_activity", disable_payload)
@@ -145,13 +155,15 @@ def submit_blast_orchestrator(
                 request["config_text"] = config_result.get("config_text", "")
         elif enable_warmup:
             # No AKS cluster name — fall back to always warmup
+            steps["warming_up"] = {"started_at": _ts()}
             context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
             prepare_result = yield context.call_activity("run_elastic_blast_prepare_activity", request)
             prepare_output = prepare_result.get("output", "")
-            steps["warming_up"] = {
+            steps["warming_up"].update({
                 "success": prepare_result.get("success"),
                 "output": prepare_output[:4000],
-            }
+                "completed_at": _ts(),
+            })
             if not prepare_result.get("success"):
                 context.set_custom_status({"phase": "warmup_failed", "job_id": job_id, "steps": steps})
                 yield context.call_activity("set_storage_public_access_activity", disable_payload)
@@ -164,10 +176,11 @@ def submit_blast_orchestrator(
             request["config_text"] = config_result.get("config_text", "")
 
         # 6. Submit
+        steps["submitting"] = {"started_at": _ts()}
         context.set_custom_status({"phase": "submitting", "job_id": job_id, "steps": steps})
         submit_result = yield context.call_activity("run_elastic_blast_submit_activity", request)
         submit_output = submit_result.get("output", "")
-        steps["submitting"] = {"success": submit_result.get("success"), "output": submit_output[:4000]}
+        steps["submitting"].update({"success": submit_result.get("success"), "output": submit_output[:4000], "completed_at": _ts()})
         if not submit_result.get("success"):
             context.set_custom_status({"phase": "submit_failed", "job_id": job_id, "steps": steps})
             yield context.call_activity("set_storage_public_access_activity", disable_payload)
@@ -177,10 +190,13 @@ def submit_blast_orchestrator(
                     "error": submit_output[:4000], "steps": steps}
 
         # 6. Poll status via K8s API (fast, ~1-3s) or VM Run Command (fallback, ~30s)
+        steps["running"] = {"started_at": _ts()}
         final_status = "unknown"
         last_check_output = ""
         enable_warmup = request.get("enable_warmup", True)
-        MIN_POLLS_BEFORE_COMPLETE = 1 if enable_warmup else 3
+        # Always require at least 3 polls before trusting "completed" status.
+        # elastic-blast can return EXIT_CODE=0 before jobs are fully submitted.
+        MIN_POLLS_BEFORE_COMPLETE = 3
         poll_interval = 10 if (enable_warmup and aks_cluster) else STATUS_POLL_INTERVAL_SECONDS
         use_k8s_check = bool(aks_cluster)
         for attempt in range(STATUS_POLL_MAX_ATTEMPTS):
@@ -224,10 +240,11 @@ def submit_blast_orchestrator(
                 else:
                     break  # Failed is trustworthy immediately
 
-        steps["running"] = {"final_status": final_status, "polls": attempt + 1, "last_output": last_check_output[:4000]}
+        steps["running"].update({"final_status": final_status, "polls": attempt + 1, "last_output": last_check_output[:4000], "completed_at": _ts()})
 
         # 7. Export results — verify .out files actually exist in blob
         if final_status == "completed":
+            steps["exporting_results"] = {"started_at": _ts()}
             context.set_custom_status({"phase": "exporting_results", "job_id": job_id, "steps": steps})
 
             # 7a. Wait for results-export pod to finish writing
@@ -279,15 +296,16 @@ def submit_blast_orchestrator(
             # 7b. Run export activity (captures logs/status as artifacts)
             try:
                 export_result = yield context.call_activity("export_blast_results_activity", request)
-                steps["exporting_results"] = {
+                steps["exporting_results"].update({
                     "success": export_result.get("success"),
                     "auth_failed": export_result.get("auth_failed"),
                     "output": export_result.get("output", "")[:4000],
                     "has_output_files": has_output_files,
-                }
+                    "completed_at": _ts(),
+                })
                 LOGGER.info("Results export: %s", export_result)
             except Exception as exc:
-                steps["exporting_results"] = {"success": False, "error": str(exc)[:300]}
+                steps["exporting_results"].update({"success": False, "error": str(exc)[:300], "completed_at": _ts()})
                 LOGGER.warning("Results export failed (non-fatal): %s", exc)
 
         # 8. Always disable storage public access

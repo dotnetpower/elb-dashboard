@@ -105,6 +105,7 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
       title="Remote Terminal"
       subtitle={enabled ? `${vmName} · ${resourceGroup}` : "Not provisioned"}
       status={status}
+      fetching={query.isFetching}
       refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
       refreshInterval={30_000}
       onRefresh={() => { query.refetch(); if (isRunning) healthQuery.refetch(); }}
@@ -165,6 +166,8 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
                   {hourlyCost !== null && (
                     <span className="muted" style={{ fontSize: 10, marginLeft: 8 }}>
                       <DollarSign size={9} style={{ verticalAlign: "middle" }} /> ~${hourlyCost.toFixed(3)}/hr
+                      <span style={{ margin: "0 4px" }}>·</span>
+                      ~${(hourlyCost * 24).toFixed(2)}/day
                     </span>
                   )}
                 </td>
@@ -216,15 +219,23 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
             </div>
           )}
 
-          {/* Installed tools */}
+          {/* Installed tools — compact inline with status icons */}
           {isRunning && healthQuery.data && (
             <div style={{ marginTop: 8 }}>
               <div style={{ fontSize: 10, textTransform: "uppercase", color: "var(--text-faint)", marginBottom: 4 }}>Installed Tools</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 12px", fontSize: 11 }}>
-                <div className="muted">az CLI</div><div>{healthQuery.data.az_cli}</div>
-                <div className="muted">kubectl</div><div>{healthQuery.data.kubectl}</div>
-                <div className="muted">azcopy</div><div>{healthQuery.data.azcopy}</div>
-                <div className="muted">Python</div><div>{healthQuery.data.python}</div>
+                {(["az_cli", "kubectl", "azcopy", "python"] as const).map((tool) => {
+                  const version = healthQuery.data![tool];
+                  const label = tool === "az_cli" ? "az CLI" : tool;
+                  const ok = version && version !== "not found";
+                  return [
+                    <div key={`${tool}-label`} className="muted" style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: ok ? "var(--success)" : "var(--danger)", flexShrink: 0 }} />
+                      {label}
+                    </div>,
+                    <div key={`${tool}-val`}>{version || "—"}</div>,
+                  ];
+                })}
               </div>
             </div>
           )}

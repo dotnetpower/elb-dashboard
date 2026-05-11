@@ -346,7 +346,7 @@ def terminal_health_check(req: func.HttpRequest) -> func.HttpResponse:
     script = (
         "#!/bin/bash\n"
         "echo AZ_VERSION=$(az version -o tsv --query '\"azure-cli\"' 2>/dev/null || echo 'not installed')\n"
-        "echo KUBECTL_VERSION=$(kubectl version --client --short 2>/dev/null | head -1 || echo 'not installed')\n"
+        "echo KUBECTL_VERSION=$(kubectl version --client -o yaml 2>/dev/null | grep gitVersion | head -1 | sed 's/.*: //' || kubectl version --client 2>/dev/null | head -1 || echo 'not installed')\n"
         "echo AZCOPY_VERSION=$(azcopy --version 2>/dev/null | head -1 || echo 'not installed')\n"
         "echo PYTHON_VERSION=$(python3.11 --version 2>/dev/null || echo 'not installed')\n"
         "if [ -f /home/azureuser/.azure/azureProfile.json ]; then\n"
@@ -434,6 +434,8 @@ def build_acr_images(req: func.HttpRequest) -> func.HttpResponse:
 
     acr = ContainerRegistryManagementClient(cred, sub, api_version="2019-06-01-preview")
     results = []
+    # Schedule all builds first (fire pollers in parallel)
+    pollers: list[tuple[str, Any]] = []
     for image, tag in IMAGE_TAGS.items():
         full_image = f"{image}:{tag}"
         build_info = IMAGE_BUILD_INFO.get(image, {})
@@ -470,8 +472,15 @@ steps:
                     platform=PlatformProperties(os=OS.LINUX),
                     timeout=3600,
                 )
-            # #1 CRITICAL: Fire-and-forget — schedule build and return immediately
             poller = acr.registries.begin_schedule_run(rg, registry, build_req)
+            pollers.append((full_image, poller))
+        except Exception as exc:
+            LOGGER.warning("ACR build schedule failed for %s: %s", full_image, exc)
+            results.append({"image": full_image, "status": "failed", "error": sanitise(str(exc))})
+
+    # Collect results from all pollers (builds are now running in parallel in ACR)
+    for full_image, poller in pollers:
+        try:
             run_result = poller.result()
             run_id = run_result.run_id or ""
             status = run_result.status or "Queued"
@@ -664,6 +673,31 @@ def aks_run_command(req: func.HttpRequest) -> func.HttpResponse:
 # ---------------------------------------------------------------------------
 # AKS — Direct Kubernetes API (fast, ~1-3s instead of ~30s)
 # ---------------------------------------------------------------------------
+
+@app.route(route="monitor/aks/service-ip", methods=["GET"])
+def aks_get_service_ip(req: func.HttpRequest) -> func.HttpResponse:
+    """Get the external IP of a K8s LoadBalancer service."""
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+    params, err = _require_query(req, "subscription_id", "resource_group", "cluster_name", "service_name")
+    if err:
+        return err
+    cred = credential_for_caller(identity.raw_token)
+    try:
+        ip = monitoring_svc.k8s_get_service_ip(
+            cred, params["subscription_id"], params["resource_group"],
+            params["cluster_name"], params["service_name"],
+            namespace=req.params.get("namespace", "default"),
+        )
+        if ip:
+            return _json_response({"service_name": params["service_name"], "external_ip": ip})
+        return _error_response(404, f"Service {params['service_name']} not found or has no external IP")
+    except Exception as exc:
+        return _error_response(500, sanitise(str(exc)))
+
+
 @app.route(route="monitor/aks/nodes", methods=["GET"])
 def aks_get_nodes(req: func.HttpRequest) -> func.HttpResponse:
     try:
@@ -858,6 +892,256 @@ def monitor_terminal(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ---------------------------------------------------------------------------
+# BLAST — pre-flight readiness check
+# ---------------------------------------------------------------------------
+@app.route(route="blast/pre-flight", methods=["POST"])
+def blast_pre_flight(req: func.HttpRequest) -> func.HttpResponse:
+    """Validate all preconditions before BLAST submission.
+
+    Checks: ACR images built, BLAST DB exists in storage, AKS cluster running,
+    Terminal VM running, storage containers exist. Returns a checklist with
+    pass/fail for each item and actionable fix suggestions.
+    """
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    raw = req.get_body()
+    if not raw:
+        return _error_response(400, "request body required")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError:
+        return _error_response(400, "invalid JSON")
+
+    sub = body.get("subscription_id", "")
+    rg = body.get("resource_group", "")
+    acr_rg = body.get("acr_resource_group", "")
+    acr_name = body.get("acr_name", "")
+    storage_account = body.get("storage_account", "")
+    cluster_name = body.get("aks_cluster_name", "")
+    terminal_rg = body.get("terminal_resource_group", "rg-elb-terminal")
+    terminal_vm = body.get("terminal_vm_name", "vm-elb-terminal")
+    db_path = body.get("db", "")
+    query_data = body.get("query_data", "")
+
+    if not sub:
+        return _error_response(400, "subscription_id required")
+
+    cred = credential_for_caller(identity.raw_token)
+    checks: list[dict[str, Any]] = []
+
+    # 1. ACR images built
+    if acr_rg and acr_name:
+        try:
+            from azure.mgmt.containerregistry import ContainerRegistryManagementClient
+            acr_client = ContainerRegistryManagementClient(cred, sub)
+            repos = acr_client.repositories.list(acr_rg, acr_name)
+            repo_names = {r for r in repos} if repos else set()
+            from services.image_tags import IMAGE_TAGS
+            missing_images = []
+            for image, tag in IMAGE_TAGS.items():
+                if image not in repo_names:
+                    missing_images.append(f"{image}:{tag}")
+            if missing_images:
+                checks.append({
+                    "id": "acr_images", "status": "fail",
+                    "title": "ACR images not built",
+                    "detail": f"Missing: {', '.join(missing_images)}",
+                    "action": "Build images from the Dashboard ACR card",
+                    "severity": "critical",
+                })
+            else:
+                checks.append({"id": "acr_images", "status": "pass", "title": "ACR images available"})
+        except Exception as exc:
+            checks.append({
+                "id": "acr_images", "status": "warn",
+                "title": "Could not check ACR images",
+                "detail": sanitise(str(exc))[:200],
+                "severity": "medium",
+            })
+    else:
+        checks.append({
+            "id": "acr_images", "status": "skip",
+            "title": "ACR not configured",
+            "detail": "Configure ACR in Dashboard settings",
+            "severity": "high",
+        })
+
+    # 2. BLAST database exists in storage
+    if storage_account and db_path:
+        try:
+            # Extract db base name from path like "blast-db/core_nt/core_nt"
+            db_parts = db_path.split("/")
+            db_name = db_parts[-1] if db_parts else db_path
+            container = db_parts[0] if len(db_parts) > 1 else "blast-db"
+
+            dbs = storage_data_svc.list_databases(cred, storage_account, container)
+            db_names = {d["name"] for d in dbs}
+            if db_name in db_names:
+                db_info = next((d for d in dbs if d["name"] == db_name), None)
+                size_gb = (db_info["total_bytes"] / (1024**3)) if db_info else 0
+                checks.append({
+                    "id": "blast_db", "status": "pass",
+                    "title": f"Database '{db_name}' available",
+                    "detail": f"{db_info['file_count']} files, {size_gb:.1f} GB" if db_info else "",
+                })
+            else:
+                # Suggest downloading
+                available = ", ".join(sorted(db_names)[:5])
+                checks.append({
+                    "id": "blast_db", "status": "fail",
+                    "title": f"Database '{db_name}' not found in storage",
+                    "detail": f"Available: {available}" if available else "No databases found. Download one first.",
+                    "action": f"Download '{db_name}' from NCBI using the Dashboard storage card",
+                    "action_type": "download_db",
+                    "action_params": {"db_name": db_name},
+                    "severity": "critical",
+                    "suggested_dbs": ["core_nt", "16S_ribosomal_RNA", "nt", "nr", "swissprot"],
+                })
+        except Exception as exc:
+            msg = str(exc)
+            if "AuthorizationFailure" in msg or "public" in msg.lower():
+                checks.append({
+                    "id": "blast_db", "status": "warn",
+                    "title": "Storage not accessible",
+                    "detail": "Public network access may be disabled. Enable temporarily to check.",
+                    "severity": "medium",
+                })
+            else:
+                checks.append({
+                    "id": "blast_db", "status": "warn",
+                    "title": "Could not verify database",
+                    "detail": sanitise(msg)[:200],
+                    "severity": "medium",
+                })
+    elif not db_path:
+        checks.append({
+            "id": "blast_db", "status": "fail",
+            "title": "No database selected",
+            "severity": "critical",
+        })
+
+    # 3. AKS cluster running
+    if cluster_name and rg:
+        try:
+            from azure.mgmt.containerservice import ContainerServiceClient
+            aks_client = ContainerServiceClient(cred, sub)
+            cluster = aks_client.managed_clusters.get(rg, cluster_name)
+            power_state = "Unknown"
+            if cluster.power_state:
+                power_state = cluster.power_state.code or "Unknown"
+            prov_state = cluster.provisioning_state or "Unknown"
+            if power_state == "Running" and prov_state == "Succeeded":
+                checks.append({
+                    "id": "aks_cluster", "status": "pass",
+                    "title": f"AKS cluster '{cluster_name}' running",
+                })
+            else:
+                checks.append({
+                    "id": "aks_cluster", "status": "fail",
+                    "title": f"AKS cluster not ready (power={power_state}, provisioning={prov_state})",
+                    "action": "Start cluster from the Dashboard",
+                    "severity": "critical",
+                })
+        except Exception as exc:
+            checks.append({
+                "id": "aks_cluster", "status": "fail",
+                "title": "AKS cluster not found or inaccessible",
+                "detail": sanitise(str(exc))[:200],
+                "action": "Create a cluster from the Dashboard",
+                "severity": "critical",
+            })
+    else:
+        checks.append({
+            "id": "aks_cluster", "status": "fail",
+            "title": "No AKS cluster selected",
+            "action": "Create or select a cluster",
+            "severity": "critical",
+        })
+
+    # 4. Terminal VM running
+    if terminal_vm:
+        try:
+            from services.compute import get_vm_status
+            vm_status = get_vm_status(cred, sub, terminal_rg, terminal_vm)
+            power = vm_status.get("power_state", "unknown")
+            if power == "running":
+                checks.append({"id": "terminal_vm", "status": "pass", "title": "Terminal VM running"})
+            else:
+                checks.append({
+                    "id": "terminal_vm", "status": "fail",
+                    "title": f"Terminal VM not running (state: {power})",
+                    "action": "Start VM from the Terminal page",
+                    "severity": "critical",
+                })
+        except Exception:
+            checks.append({
+                "id": "terminal_vm", "status": "fail",
+                "title": "Terminal VM not found",
+                "action": "Provision a Terminal VM first",
+                "severity": "critical",
+            })
+
+    # 5. Storage containers exist (queries, results, blast-db)
+    if storage_account:
+        try:
+            from azure.storage.blob import BlobServiceClient
+            blob_svc = BlobServiceClient(
+                account_url=f"https://{storage_account}.blob.core.windows.net",
+                credential=cred,
+            )
+            existing_containers = {c.name for c in blob_svc.list_containers()}
+            required = {"blast-db", "queries", "results"}
+            missing_containers = required - existing_containers
+            if missing_containers:
+                checks.append({
+                    "id": "storage_containers", "status": "fail",
+                    "title": f"Missing storage containers: {', '.join(sorted(missing_containers))}",
+                    "action": "Create containers from the Dashboard storage card",
+                    "severity": "high",
+                })
+            else:
+                checks.append({"id": "storage_containers", "status": "pass", "title": "Storage containers ready"})
+        except Exception as exc:
+            checks.append({
+                "id": "storage_containers", "status": "warn",
+                "title": "Could not check storage containers",
+                "detail": sanitise(str(exc))[:200],
+                "severity": "medium",
+            })
+
+    # 6. Query FASTA format validation
+    if query_data:
+        lines = query_data.strip().split("\n")
+        if not lines or not lines[0].startswith(">"):
+            checks.append({
+                "id": "fasta_format", "status": "fail",
+                "title": "Invalid FASTA: must start with '>' header line",
+                "severity": "high",
+            })
+        else:
+            seq_count = sum(1 for l in lines if l.startswith(">"))
+            total_bases = sum(len(l.strip()) for l in lines if not l.startswith(">"))
+            checks.append({
+                "id": "fasta_format", "status": "pass",
+                "title": f"FASTA valid: {seq_count} sequence(s), {total_bases:,} residues",
+            })
+
+    # Summary
+    all_pass = all(c["status"] in ("pass", "skip") for c in checks)
+    critical_fails = [c for c in checks if c["status"] == "fail" and c.get("severity") == "critical"]
+    return _json_response({
+        "ready": all_pass,
+        "checks": checks,
+        "critical_blockers": len(critical_fails),
+        "summary": "All checks passed — ready to submit" if all_pass
+                   else f"{len(critical_fails)} critical issue(s) must be resolved before submitting",
+    })
+
+
+# ---------------------------------------------------------------------------
 # BLAST — job submission
 # ---------------------------------------------------------------------------
 @app.route(route="blast/submit", methods=["POST"])
@@ -924,6 +1208,7 @@ async def start_blast_submit(
                 "terminal_vm": parsed.terminal_vm_name,
             },
             "owner_oid": identity.object_id,
+            "owner_upn": identity.upn or "",
         },
     )
 
@@ -2023,6 +2308,11 @@ def check_cloud_init_activity(payload: dict) -> dict:
 
 
 @app.activity_trigger(input_name="payload")
+def assign_vm_roles_activity(payload: dict) -> dict:
+    return terminal_activities.activity_assign_vm_roles(payload)
+
+
+@app.activity_trigger(input_name="payload")
 def set_storage_public_access_activity(payload: dict) -> dict:
     return storage_activities.activity_set_storage_public_access(payload)
 
@@ -2102,6 +2392,8 @@ def create_aks_cluster_activity(payload: dict) -> dict:
         "identity": {"type": "SystemAssigned"},
         "dns_prefix": payload["cluster_name"],
         "auto_upgrade_profile": {"upgrade_channel": "none"},
+        "oidc_issuer_profile": {"enabled": True},
+        "security_profile": {"workload_identity": {"enabled": True}},
         "agent_pool_profiles": [{
             "name": "nodepool1",
             "count": payload.get("node_count", 10),
@@ -2160,6 +2452,227 @@ def assign_aks_roles_activity(payload: dict) -> dict:
         assigned.append("StorageBlobDataContributor")
 
     return {"kubelet_oid": kubelet_oid, "roles_assigned": assigned}
+
+
+@app.activity_trigger(input_name="payload")
+def setup_workload_identity_activity(payload: dict) -> dict:
+    """Activity: create User-Assigned MI, Federated Credential, and assign roles.
+
+    Enables the OpenAPI pod to authenticate as an Azure identity without
+    az login. Idempotent — safe to re-run on existing clusters.
+    """
+    import uuid as _uuid
+    from services.azure_clients import credential_for_assertion
+    cred = credential_for_assertion(payload["user_assertion"])
+    sub = payload["subscription_id"]
+    rg = payload["resource_group"]
+    cluster_name = payload["cluster_name"]
+    region = payload["region"]
+    mi_name = payload.get("mi_name", "id-elb-openapi")
+    k8s_sa_name = payload.get("k8s_sa_name", "elb-openapi-sa")
+    k8s_namespace = payload.get("k8s_namespace", "default")
+    fed_cred_name = payload.get("fed_cred_name", "fc-elb-openapi")
+
+    # 1. Get OIDC issuer URL from AKS
+    from azure.mgmt.containerservice import ContainerServiceClient
+    aks_client = ContainerServiceClient(cred, sub)
+    cluster = aks_client.managed_clusters.get(rg, cluster_name)
+    oidc_url = ""
+    if cluster.oidc_issuer_profile:
+        oidc_url = cluster.oidc_issuer_profile.issuer_url or ""
+    if not oidc_url:
+        return {"error": "OIDC issuer not enabled on cluster"}
+
+    # 2. Create User-Assigned Managed Identity
+    from azure.mgmt.msi import ManagedServiceIdentityClient
+    msi_client = ManagedServiceIdentityClient(cred, sub)
+    mi = msi_client.user_assigned_identities.create_or_update(
+        rg, mi_name,
+        {"location": region, "tags": {"purpose": "elb-openapi-workload-identity"}},
+    )
+    mi_client_id = mi.client_id
+    mi_principal_id = mi.principal_id
+
+    # 3. Create Federated Identity Credential
+    msi_client.federated_identity_credentials.create_or_update(
+        rg, mi_name, fed_cred_name,
+        {
+            "issuer": oidc_url,
+            "subject": f"system:serviceaccount:{k8s_namespace}:{k8s_sa_name}",
+            "audiences": ["api://AzureADTokenExchange"],
+        },
+    )
+
+    # 4. Assign roles to the MI
+    from azure.mgmt.authorization import AuthorizationManagementClient
+    auth_client = AuthorizationManagementClient(cred, sub)
+
+    # Storage Blob Data Contributor on workload RG (for azcopy/blob access)
+    storage_account = payload.get("storage_account", "")
+    storage_rg = payload.get("storage_resource_group", rg)
+    if storage_account:
+        scope = f"/subscriptions/{sub}/resourceGroups/{storage_rg}/providers/Microsoft.Storage/storageAccounts/{storage_account}"
+        _assign_role(auth_client, scope, mi_principal_id, "ba92f5b4-2d11-453d-a403-e96b0029c9fe")
+
+    # Azure Kubernetes Service Cluster User Role on the cluster (for kubectl)
+    cluster_scope = f"/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerService/managedClusters/{cluster_name}"
+    _assign_role(auth_client, cluster_scope, mi_principal_id, "4abbcc35-e782-43d8-92c5-2d3f1bd2253f")
+
+    return {
+        "mi_name": mi_name,
+        "mi_client_id": mi_client_id,
+        "mi_principal_id": mi_principal_id,
+        "oidc_issuer": oidc_url,
+        "federated_credential": fed_cred_name,
+    }
+
+
+@app.activity_trigger(input_name="payload")
+def deploy_openapi_activity(payload: dict) -> dict:
+    """Activity: deploy elb-openapi to AKS with Workload Identity ServiceAccount.
+
+    Creates a K8s ServiceAccount annotated with the MI client-id, then applies
+    the Deployment + Service manifest. Idempotent.
+    """
+    import json as _json
+    from services.azure_clients import credential_for_assertion
+    from services.image_tags import IMAGE_TAGS
+    cred = credential_for_assertion(payload["user_assertion"])
+    sub = payload["subscription_id"]
+    rg = payload["resource_group"]
+    cluster_name = payload["cluster_name"]
+    mi_client_id = payload.get("mi_client_id", "")
+    k8s_sa_name = payload.get("k8s_sa_name", "elb-openapi-sa")
+    acr_name = payload.get("acr_name", "")
+    storage_account = payload.get("storage_account", "")
+    image_tag = IMAGE_TAGS.get("elb-openapi", "2.0")
+    image = f"{acr_name}.azurecr.io/elb-openapi:{image_tag}" if acr_name else f"elb-openapi:{image_tag}"
+
+    from azure.mgmt.containerservice import ContainerServiceClient
+    aks_client = ContainerServiceClient(cred, sub)
+
+    # Get admin kubeconfig to apply manifests
+    cred_result = aks_client.managed_clusters.list_cluster_admin_credentials(rg, cluster_name)
+    kubeconfig = cred_result.kubeconfigs[0].value.decode("utf-8")
+
+    import tempfile, subprocess
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as kf:
+        kf.write(kubeconfig)
+        kubeconfig_path = kf.name
+
+    try:
+        env = {**dict(__import__("os").environ), "KUBECONFIG": kubeconfig_path}
+
+        # ServiceAccount with Workload Identity annotation
+        sa_manifest = {
+            "apiVersion": "v1", "kind": "ServiceAccount",
+            "metadata": {
+                "name": k8s_sa_name,
+                "namespace": "default",
+                "annotations": {"azure.workload.identity/client-id": mi_client_id} if mi_client_id else {},
+                "labels": {"azure.workload.identity/use": "true"},
+            },
+        }
+
+        # Deployment
+        deploy_manifest = {
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "elb-openapi", "namespace": "default"},
+            "spec": {
+                "replicas": 1,
+                "selector": {"matchLabels": {"app": "elb-openapi"}},
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "elb-openapi",
+                            "azure.workload.identity/use": "true",
+                        },
+                    },
+                    "spec": {
+                        "serviceAccountName": k8s_sa_name,
+                        "containers": [{
+                            "name": "openapi",
+                            "image": image,
+                            "imagePullPolicy": "Always",
+                            "ports": [{"containerPort": 8000}],
+                            "env": [
+                                {"name": "ELB_CLUSTER_NAME", "value": cluster_name},
+                                {"name": "ELB_STORAGE_ACCOUNT", "value": storage_account},
+                                {"name": "ELB_RESOURCE_GROUP", "value": rg},
+                                {"name": "ELB_AZURE_REGION", "value": payload.get("region", "koreacentral")},
+                                {"name": "AZURE_CLIENT_ID", "value": mi_client_id},
+                                {"name": "AZCOPY_AUTO_LOGIN_TYPE", "value": "AZCLI"},
+                                {"name": "AZCOPY_TENANT_ID", "value": payload.get("tenant_id", "")},
+                            ],
+                            "resources": {
+                                "requests": {"cpu": "100m", "memory": "256Mi"},
+                                "limits": {"cpu": "500m", "memory": "512Mi"},
+                            },
+                        }],
+                    },
+                },
+            },
+        }
+
+        # Service
+        svc_manifest = {
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "elb-openapi", "namespace": "default"},
+            "spec": {
+                "type": "LoadBalancer",
+                "selector": {"app": "elb-openapi"},
+                "ports": [{"port": 80, "targetPort": 8000}],
+            },
+        }
+
+        # ClusterRole for OpenAPI pod K8s access
+        role_manifest = {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+            "metadata": {"name": "elb-openapi-role"},
+            "rules": [
+                {"apiGroups": [""], "resources": ["nodes", "pods", "configmaps", "services"],
+                 "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]},
+                {"apiGroups": ["batch"], "resources": ["jobs"],
+                 "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]},
+                {"apiGroups": ["apps"], "resources": ["deployments"],
+                 "verbs": ["get", "list", "watch"]},
+            ],
+        }
+
+        # ClusterRoleBinding
+        binding_manifest = {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+            "metadata": {"name": "elb-openapi-binding"},
+            "subjects": [{"kind": "ServiceAccount", "name": k8s_sa_name, "namespace": "default"}],
+            "roleRef": {"kind": "ClusterRole", "name": "elb-openapi-role", "apiGroup": "rbac.authorization.k8s.io"},
+        }
+
+        # Apply all manifests
+        for manifest in [sa_manifest, role_manifest, binding_manifest, deploy_manifest, svc_manifest]:
+            proc = subprocess.run(
+                ["kubectl", "apply", "-f", "-"],
+                input=_json.dumps(manifest), capture_output=True, text=True,
+                timeout=30, env=env,
+            )
+            if proc.returncode != 0:
+                LOGGER.warning("kubectl apply warning: %s", proc.stderr[:200])
+
+        # Wait for external IP (up to 120s)
+        import time
+        external_ip = ""
+        for _ in range(12):
+            proc = subprocess.run(
+                ["kubectl", "get", "svc", "elb-openapi", "-o", "jsonpath={.status.loadBalancer.ingress[0].ip}"],
+                capture_output=True, text=True, timeout=10, env=env,
+            )
+            if proc.stdout.strip():
+                external_ip = proc.stdout.strip()
+                break
+            time.sleep(10)
+
+        return {"status": "deployed", "image": image, "external_ip": external_ip}
+    finally:
+        __import__("os").unlink(kubeconfig_path)
 
 
 # #6 HIGH: Terminal VM teardown

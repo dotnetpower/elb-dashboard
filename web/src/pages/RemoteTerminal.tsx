@@ -21,6 +21,7 @@ import {
 import {
   type ProvisionTerminalRequest,
   terminalApi,
+  monitoringApi,
 } from "@/api/endpoints";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { SubscriptionPicker } from "@/components/SubscriptionPicker";
@@ -116,12 +117,35 @@ export function RemoteTerminal() {
     vm_size: "Standard_D4s_v5",
     admin_username: "azureuser",
     allowed_ssh_cidr: "",
+    // Auto-populate for RBAC assignment
+    workload_resource_group: savedConfig?.workloadResourceGroup ?? "",
+    acr_resource_group: savedConfig?.acrResourceGroup ?? "",
+    acr_name: savedConfig?.acrName ?? "",
+    storage_account: savedConfig?.storageAccountName ?? "",
+    storage_resource_group: savedConfig?.workloadResourceGroup ?? "",
   }));
   const [errors, setErrors] = useState<ValidationErrors>({});
   const [attempted, setAttempted] = useState(false);
   const [instanceId, setInstanceId] = useState<string | null>(() =>
     sessionStorage.getItem(STORAGE_KEY),
   );
+  const [showProvisionForm, setShowProvisionForm] = useState(false);
+
+  // Check if VM already exists via monitoring API
+  const vmExistsQuery = useQuery({
+    queryKey: ["terminal-exists", savedConfig?.subscriptionId, savedConfig?.terminalResourceGroup, savedConfig?.terminalVmName],
+    queryFn: () => monitoringApi.terminal(
+      savedConfig!.subscriptionId,
+      savedConfig!.terminalResourceGroup ?? "rg-elb-terminal",
+      savedConfig!.terminalVmName ?? "vm-elb-terminal",
+    ),
+    enabled: Boolean(savedConfig?.subscriptionId && savedConfig?.terminalResourceGroup && savedConfig?.terminalVmName) && !instanceId,
+    retry: false,
+    staleTime: 30_000,
+  });
+
+  const vmExists = vmExistsQuery.data && !vmExistsQuery.isError;
+  const vmNotFound = vmExistsQuery.isError;
 
   // Auto-detect caller IP for the NSG rule.
   useEffect(() => {
@@ -195,7 +219,29 @@ export function RemoteTerminal() {
         </p>
       </header>
 
-      {/* ── Provisioning Form ── */}
+      {/* ── Existing VM — shown when VM already exists ── */}
+      {vmExists && !instanceId && !showProvisionForm && (
+        <ExistingVmCard
+          vmData={vmExistsQuery.data!}
+          subscriptionId={savedConfig!.subscriptionId}
+          resourceGroup={savedConfig!.terminalResourceGroup ?? "rg-elb-terminal"}
+          vmName={savedConfig!.terminalVmName ?? "vm-elb-terminal"}
+          onRefresh={() => vmExistsQuery.refetch()}
+          onReprovision={() => setShowProvisionForm(true)}
+        />
+      )}
+
+      {/* ── Loading state for VM check ── */}
+      {!instanceId && vmExistsQuery.isLoading && !showProvisionForm && (
+        <section className="glass-card" style={{ textAlign: "center", padding: "var(--space-5)" }}>
+          <Loader2 size={24} className="spin" style={{ color: "var(--accent)" }} />
+          <div className="muted" style={{ marginTop: 8 }}>Checking for existing terminal VM...</div>
+        </section>
+      )}
+
+      {/* ── Provisioning Form — shown when VM not found or user clicks re-provision ── */}
+      {(vmNotFound || showProvisionForm || instanceId) && (
+      <>
       <section className="glass-card glass-card--strong">
         <h3 style={{ marginTop: 0, display: "flex", alignItems: "center", gap: 8 }}>
           <Shield size={18} strokeWidth={1.5} /> Provisioning
@@ -405,10 +451,185 @@ export function RemoteTerminal() {
           )}
         </section>
       )}
+      </>
+      )}
     </div>
   );
 }
 
+// ---------------------------------------------------------------------------
+// ExistingVmCard — shown when VM already exists (not provisioning)
+// ---------------------------------------------------------------------------
+import type { VmStatus } from "@/api/endpoints";
+
+function ExistingVmCard({
+  vmData,
+  subscriptionId,
+  resourceGroup,
+  vmName,
+  onRefresh,
+  onReprovision,
+}: {
+  vmData: VmStatus;
+  subscriptionId: string;
+  resourceGroup: string;
+  vmName: string;
+  onRefresh: () => void;
+  onReprovision: () => void;
+}) {
+  const [showPwd, setShowPwd] = useState(false);
+  const [pwd, setPwd] = useState<string | null>(null);
+  const [pwdLoading, setPwdLoading] = useState(false);
+  const [pwdError, setPwdError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [nsgStatus, setNsgStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [nsgError, setNsgError] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState<"starting" | "stopping" | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const isRunning = vmData.power_state === "VM running";
+  const isStopped = vmData.power_state === "VM deallocated" || vmData.power_state === "VM stopped";
+  const host = vmData.fqdn || vmData.public_ip || `${vmName}`;
+  const sshCmd = `ssh azureuser@${host}`;
+
+  const togglePwd = async () => {
+    if (showPwd) { setShowPwd(false); return; }
+    if (pwd) { setShowPwd(true); return; }
+    setPwdLoading(true);
+    try {
+      const r = await terminalApi.password(vmName);
+      setPwd(r.password);
+      setShowPwd(true);
+    } catch (e) { setPwdError((e as Error).message); }
+    finally { setPwdLoading(false); }
+  };
+
+  const copyText = (text: string, label: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(label);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  const handleOpenSsh = async () => {
+    setNsgStatus("loading");
+    setNsgError(null);
+    try {
+      const ipResp = await fetch("https://api.ipify.org?format=json").then(r => r.json());
+      await terminalApi.openSsh(vmName, ipResp.ip, subscriptionId, resourceGroup);
+      setNsgStatus("done");
+    } catch (e) { setNsgError((e as Error).message); setNsgStatus("error"); }
+  };
+
+  const handleStartStop = async (action: "start" | "stop") => {
+    setActionLoading(action === "start" ? "starting" : "stopping");
+    setActionError(null);
+    try {
+      if (action === "start") await terminalApi.startVm(vmName, subscriptionId, resourceGroup);
+      else await terminalApi.stopVm(vmName, subscriptionId, resourceGroup);
+      onRefresh();
+    } catch (e) { setActionError((e as Error).message); }
+    finally { setActionLoading(null); }
+  };
+
+  return (
+    <section className="glass-card glass-card--strong">
+      <h3 style={{ marginTop: 0, display: "flex", alignItems: "center", gap: 8 }}>
+        <Monitor size={18} strokeWidth={1.5} /> Remote Terminal — {vmName}
+        <span style={{ fontSize: 12, fontWeight: 400, color: isRunning ? "var(--success)" : "var(--warning)", marginLeft: 8 }}>
+          {isRunning ? "Running" : isStopped ? "Stopped" : vmData.power_state ?? "Unknown"}
+        </span>
+      </h3>
+
+      {/* Connection info */}
+      <div style={{ display: "grid", gridTemplateColumns: "120px 1fr auto", gap: "8px 12px", alignItems: "center", fontSize: 13 }}>
+        <span className="muted">Host</span>
+        <code style={{ overflowWrap: "anywhere" }}>{host}</code>
+        <button className="glass-button" onClick={() => copyText(host, "host")} style={{ fontSize: 11 }}>
+          <Copy size={12} /> {copied === "host" ? "Copied!" : "Copy"}
+        </button>
+
+        <span className="muted">Username</span>
+        <code>azureuser</code>
+        <button className="glass-button" onClick={() => copyText("azureuser", "user")} style={{ fontSize: 11 }}>
+          <Copy size={12} /> {copied === "user" ? "Copied!" : "Copy"}
+        </button>
+
+        <span className="muted">Password</span>
+        <code>{pwdLoading ? "Loading..." : showPwd ? pwd ?? "(unavailable)" : "••••••••••••"}</code>
+        <div style={{ display: "flex", gap: 4 }}>
+          <button className="glass-button" onClick={togglePwd} disabled={pwdLoading} style={{ fontSize: 11 }}>
+            {pwdLoading ? <Loader2 size={12} className="spin" /> : showPwd ? <EyeOff size={12} /> : <Eye size={12} />}
+            {showPwd ? "Hide" : "Reveal"}
+          </button>
+          {pwd && <button className="glass-button" onClick={() => copyText(pwd, "pwd")} style={{ fontSize: 11 }}><Copy size={12} /> {copied === "pwd" ? "Copied!" : "Copy"}</button>}
+        </div>
+
+        <span className="muted">SSH</span>
+        <code style={{ overflowWrap: "anywhere" }}>{sshCmd}</code>
+        <button className="glass-button" onClick={() => copyText(sshCmd, "ssh")} style={{ fontSize: 11 }}>
+          <Copy size={12} /> {copied === "ssh" ? "Copied!" : "Copy"}
+        </button>
+
+        <span className="muted">VM Size</span>
+        <span>{vmData.vm_size ?? "?"}</span>
+        <span />
+
+        <span className="muted">Region</span>
+        <span>{vmData.region}</span>
+        <span />
+
+        {vmData.os_disk_gb && <>
+          <span className="muted">Disk</span>
+          <span>{vmData.os_disk_gb} GB</span>
+          <span />
+        </>}
+      </div>
+
+      {pwdError && <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)" }}><AlertTriangle size={12} style={{ verticalAlign: "middle" }} /> {pwdError}</div>}
+
+      {/* Actions */}
+      <div style={{ marginTop: "var(--space-4)", display: "flex", gap: "var(--space-3)", alignItems: "center", flexWrap: "wrap" }}>
+        {isRunning && (
+          <button className="glass-button glass-button--primary" onClick={handleOpenSsh} disabled={nsgStatus === "loading" || nsgStatus === "done"}
+            style={nsgStatus === "done" ? { background: "var(--success)", borderColor: "var(--success)" } : undefined}>
+            {nsgStatus === "loading" ? <Loader2 size={14} className="spin" /> : <Shield size={14} strokeWidth={1.5} />}
+            {nsgStatus === "done" ? "SSH Port Opened" : "Open SSH Port (NSG)"}
+          </button>
+        )}
+        {nsgStatus === "done" && <span style={{ fontSize: 12, color: "var(--success)" }}><CheckCircle2 size={12} style={{ verticalAlign: "middle" }} /> NSG rule added</span>}
+        {nsgError && <span style={{ fontSize: 12, color: "var(--danger)" }}>{nsgError}</span>}
+
+        {isStopped && (
+          <button className="glass-button" onClick={() => handleStartStop("start")} disabled={actionLoading !== null} style={{ color: "var(--success)" }}>
+            {actionLoading === "starting" ? <Loader2 size={14} className="spin" /> : <Play size={14} />} Start VM
+          </button>
+        )}
+        {isRunning && (
+          <button className="glass-button" onClick={() => handleStartStop("stop")} disabled={actionLoading !== null} style={{ color: "var(--warning)" }}>
+            {actionLoading === "stopping" ? <Loader2 size={14} className="spin" /> : <Monitor size={14} />} Stop VM
+          </button>
+        )}
+
+        <button className="glass-button" onClick={onRefresh} style={{ fontSize: 11 }}>
+          <RefreshCw size={12} /> Refresh
+        </button>
+        <button className="glass-button" onClick={onReprovision} style={{ fontSize: 11, color: "var(--text-faint)" }}>
+          Re-provision
+        </button>
+      </div>
+
+      {actionError && <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)" }}>{actionError}</div>}
+
+      <div className="muted" style={{ marginTop: "var(--space-4)", fontSize: 12, lineHeight: 1.6 }}>
+        Run <code>az login --use-device-code</code> after connecting via SSH to authenticate.
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionCard — shown after fresh provisioning completes
+// ---------------------------------------------------------------------------
 function ConnectionCard({
   info,
 }: {

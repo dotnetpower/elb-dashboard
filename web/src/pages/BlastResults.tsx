@@ -272,20 +272,35 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
     return () => clearInterval(id);
   }, []);
 
+  const formatDuration = (ms: number): string => {
+    const s = Math.round(ms / 1000);
+    if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
+    return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+  };
+
   const getStepDuration = (key: string, state: StepState): string | null => {
     if (state === "pending" || state === "skipped") return null;
-    const dur = phaseDurations.current[key];
-    if (dur) {
-      const s = Math.round(dur / 1000);
-      return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+
+    // 1. Prefer server-side timestamps (available for completed jobs)
+    const sd = stepsData[key] as Record<string, unknown> | undefined;
+    if (sd?.started_at && sd?.completed_at) {
+      const ms = new Date(sd.completed_at as string).getTime() - new Date(sd.started_at as string).getTime();
+      if (ms >= 0) return formatDuration(ms);
     }
-    // Active step — show live elapsed
+    // Server-side started_at but no completed_at → live elapsed from server start
+    if (sd?.started_at && state === "active") {
+      const ms = Date.now() - new Date(sd.started_at as string).getTime();
+      return formatDuration(Math.max(0, ms));
+    }
+
+    // 2. Fall back to client-side tracking (live sessions)
+    const dur = phaseDurations.current[key];
+    if (dur) return formatDuration(dur);
+
+    // Active step — show live elapsed from client timestamp
     if (state === "active") {
       const start = phaseTimestamps.current[key];
-      if (start) {
-        const elapsed = Math.round((Date.now() - start) / 1000);
-        return elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`;
-      }
+      if (start) return formatDuration(Date.now() - start);
     }
     return null;
   };
@@ -340,14 +355,14 @@ function StepLogSection({ phase, job, subscriptionId, storageAccount, resourceGr
       case "warming_up": {
         const wo = sd.output as string;
         if (state === "error" && wo) return `✗ Warmup failed:\n${wo}`;
-        if (state === "done" && sd.success) return `✓ Cluster warmed up — DB shards loaded on local SSD.\n${wo ? `\n--- Console Output ---\n${(wo).slice(0, 800)}` : ""}`;
-        if (state === "done") return `✓ Warmup step completed.\n${wo ? `\n--- Console Output ---\n${wo.slice(0, 800)}` : ""}`;
+        if (state === "done" && sd.success) return `✓ Cluster warmed up — DB shards loaded on local SSD.\n${wo ? `\n--- Console Output ---\n${wo}` : ""}`;
+        if (state === "done") return `✓ Warmup step completed.\n${wo ? `\n--- Console Output ---\n${wo}` : ""}`;
         return "Running elastic-blast prepare — downloading DB shards to node SSDs...";
       }
       case "submitting": {
         const so = sd.output as string || (output as Record<string, unknown>)?.error as string;
         if (state === "error" && so) return `✗ Submit failed:\n${so}`;
-        if (state === "done" && sd.output) return `✓ Submitted successfully.\n\n--- Console Output ---\n${(sd.output as string).slice(0, 600)}`;
+        if (state === "done" && sd.output) return `✓ Submitted successfully.\n\n--- Console Output ---\n${sd.output as string}`;
         return state === "done" ? "✓ Job submitted to AKS cluster." : "Running elastic-blast submit on Remote Terminal VM...";
       }
       case "running": {

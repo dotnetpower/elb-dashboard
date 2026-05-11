@@ -217,7 +217,10 @@ export function Dashboard() {
 
       <div className="page-header">
         <div className="page-header__title">Dashboard</div>
-        <div className="page-header__desc">Your BLAST workspace at a glance</div>
+        <div className="page-header__desc">
+          Your BLAST workspace at a glance
+          <span className="muted" style={{ fontSize: 11, marginLeft: 12 }}>Auto-refresh: 30s</span>
+        </div>
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

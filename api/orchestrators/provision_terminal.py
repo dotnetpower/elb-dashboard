@@ -55,6 +55,21 @@ def provision_terminal_orchestrator(
     }
     vm = yield context.call_activity("create_vm_activity", vm_payload)
 
+    # 5b. Assign RBAC roles to VM managed identity (non-blocking)
+    vm_principal_id = vm.get("principal_id")
+    roles_assigned: list[str] = []
+    if vm_principal_id:
+        context.set_custom_status({"phase": "rbac", "step": 5, "description": "Assigning RBAC roles"})
+        try:
+            rbac_payload = {
+                **request,
+                "vm_principal_id": vm_principal_id,
+            }
+            rbac_result = yield context.call_activity("assign_vm_roles_activity", rbac_payload)
+            roles_assigned = rbac_result.get("roles_assigned", [])
+        except Exception as exc:
+            LOGGER.warning("VM RBAC assignment failed (non-fatal): %s", exc)
+
     # 6. Poll cloud-init (Run Command can fail before VM agent is ready, so tolerate errors)
     cloud_init_status = "unknown"
     for attempt in range(CLOUD_INIT_MAX_ATTEMPTS):
@@ -91,4 +106,5 @@ def provision_terminal_orchestrator(
         "password_secret_uri": password_info["secret_uri"],
         "cloud_init_status": cloud_init_status,
         "vm": vm,
+        "roles_assigned": roles_assigned,
     }

@@ -7,6 +7,7 @@ interface Props {
   title: string;
   subtitle?: ReactNode;
   status?: "idle" | "loading" | "ok" | "ready" | "not-provisioned" | "error";
+  fetching?: boolean;
   rightSlot?: ReactNode;
   lastRefreshed?: Date | null;
   refreshCountdown?: number | null;
@@ -39,6 +40,7 @@ export function MonitorCard({
   title,
   subtitle,
   status = "idle",
+  fetching = false,
   rightSlot,
   lastRefreshed,
   refreshCountdown,
@@ -61,12 +63,13 @@ export function MonitorCard({
     });
   }, [title]);
 
+  const showShimmer = status === "loading" || fetching;
   const panelCls = ["panel", accentColor ? `panel--accent-${accentColor}` : ""].filter(Boolean).join(" ");
   const hdCls = ["panel-hd", collapsible ? "panel-hd--collapsible" : ""].filter(Boolean).join(" ");
 
   return (
     <section className={panelCls}>
-      {status === "loading" && (
+      {showShimmer && (
         <div style={{
           position: "absolute", top: 0, left: 0, right: 0, height: 2,
           background: "rgba(122,167,255,0.15)", overflow: "hidden", zIndex: 1,
@@ -111,11 +114,11 @@ export function MonitorCard({
             <button
               className="glass-button"
               onClick={(e) => { e.stopPropagation(); onRefresh(); }}
-              disabled={status === "loading"}
+              disabled={status === "loading" || fetching}
               style={{ padding: "3px 6px" }}
               title="Refresh now"
             >
-              <RefreshCw size={11} strokeWidth={1.5} />
+              <RefreshCw size={11} strokeWidth={1.5} className={fetching ? "spin" : ""} />
             </button>
           )}
           {rightSlot && (

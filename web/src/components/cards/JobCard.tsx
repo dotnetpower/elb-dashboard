@@ -1,10 +1,15 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { ArrowRight } from "lucide-react";
 
 import { blastApi } from "@/api/endpoints";
 import { MonitorCard } from "@/components/MonitorCard";
 import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 import { statusColor } from "@/constants";
+
+const TERMINAL_PHASES = ["completed", "failed", "submit_failed", "error", "deleted"];
+const MAX_DASHBOARD_JOBS = 5;
 
 export function JobCard() {
   const query = useQuery({
@@ -14,10 +19,19 @@ export function JobCard() {
   });
 
   const jobs = query.data?.jobs ?? [];
-  const recent = [...jobs].reverse().slice(0, 5);
   const running = jobs.filter(
-    (j) => !["completed", "failed", "submit_failed", "error", "deleted"].includes(j.phase || j.status),
+    (j) => !TERMINAL_PHASES.includes(j.phase || j.status),
   ).length;
+
+  // Show running jobs first, then most recent, capped at MAX_DASHBOARD_JOBS
+  const displayed = useMemo(() => {
+    const reversed = [...jobs].reverse();
+    const active = reversed.filter((j) => !TERMINAL_PHASES.includes(j.phase || j.status));
+    const done = reversed.filter((j) => TERMINAL_PHASES.includes(j.phase || j.status));
+    return [...active, ...done].slice(0, MAX_DASHBOARD_JOBS);
+  }, [jobs]);
+
+  const hasMore = jobs.length > MAX_DASHBOARD_JOBS;
 
   const status = query.isLoading
     ? "loading"
@@ -30,6 +44,7 @@ export function JobCard() {
       title="BLAST Jobs"
       subtitle={`${jobs.length} total · ${running} active`}
       status={status}
+      fetching={query.isFetching}
       refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
       refreshInterval={30_000}
       onRefresh={() => query.refetch()}
@@ -51,10 +66,10 @@ export function JobCard() {
       {query.isLoading && (
         <div className="muted">Loading jobs...</div>
       )}
-      {!query.isLoading && recent.length === 0 && !query.isError && (
+      {!query.isLoading && jobs.length === 0 && !query.isError && (
         <div className="muted">No jobs yet.</div>
       )}
-      {recent.length > 0 && (
+      {displayed.length > 0 && (
         <ul
           style={{
             padding: 0,
@@ -65,7 +80,7 @@ export function JobCard() {
             gap: "var(--space-2)",
           }}
         >
-          {recent.map((job) => {
+          {displayed.map((job) => {
             const phase = job.phase || job.status;
             const color = statusColor(phase);
             return (
@@ -92,8 +107,13 @@ export function JobCard() {
                     }}
                   />
                   <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {job.job_title || job.job_id}
+                    {job.job_title || `${job.program ?? ""} · ${(job.db ?? "").split("/").pop() ?? job.job_id}`}
                   </span>
+                  {job.job_title && (
+                    <span className="muted" style={{ fontSize: 10, flexShrink: 0 }}>
+                      {job.job_id.slice(0, 12)}
+                    </span>
+                  )}
                   <span
                     className="muted"
                     style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}
@@ -106,13 +126,22 @@ export function JobCard() {
           })}
         </ul>
       )}
-      {jobs.length > 5 && (
+
+      {hasMore && (
         <Link
           to="/blast/jobs"
-          className="muted"
-          style={{ display: "block", marginTop: "var(--space-3)", fontSize: 12 }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 4,
+            marginTop: "var(--space-2)",
+            fontSize: 11,
+            color: "var(--accent)",
+            textDecoration: "none",
+          }}
         >
-          View all {jobs.length} jobs
+          View all {jobs.length} jobs <ArrowRight size={12} />
         </Link>
       )}
     </MonitorCard>

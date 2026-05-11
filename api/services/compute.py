@@ -25,6 +25,7 @@ class VmInfo:
     vm_id: str
     name: str
     provisioning_state: str
+    principal_id: str | None = None
 
 
 def create_terminal_vm(
@@ -49,6 +50,7 @@ def create_terminal_vm(
         vm_name,
         {
             "location": region,
+            "identity": {"type": "SystemAssigned"},
             "hardware_profile": {"vm_size": vm_size},
             "storage_profile": {
                 "image_reference": UBUNTU_IMAGE,
@@ -74,10 +76,15 @@ def create_terminal_vm(
         },
     )
     vm = poller.result()
+    # Extract SystemAssigned managed identity principal ID
+    principal_id = None
+    if vm.identity and vm.identity.principal_id:
+        principal_id = vm.identity.principal_id
     return VmInfo(
         vm_id=vm.id,
         name=vm.name,
         provisioning_state=vm.provisioning_state or "Unknown",
+        principal_id=principal_id,
     )
 
 

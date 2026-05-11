@@ -263,6 +263,35 @@ export function BlastSubmit() {
     },
   });
 
+  // Pre-flight readiness check
+  const [preFlightResult, setPreFlightResult] = useState<{
+    ready: boolean;
+    checks: Array<{ id: string; status: string; title: string; detail?: string; action?: string; action_type?: string; action_params?: Record<string, string>; severity?: string; suggested_dbs?: string[] }>;
+    critical_blockers: number;
+    summary: string;
+  } | null>(null);
+
+  const preFlightMutation = useMutation({
+    mutationFn: () => blastApi.preFlight({
+      subscription_id: subId,
+      resource_group: workloadRg,
+      acr_resource_group: acrRg || undefined,
+      acr_name: acrName || undefined,
+      storage_account: storageAccount,
+      aks_cluster_name: selectedCluster?.name || "",
+      terminal_resource_group: terminalRg,
+      terminal_vm_name: terminalVm,
+      db: form.db,
+      query_data: form.query_data || undefined,
+    }),
+    onSuccess: (result) => {
+      setPreFlightResult(result);
+      if (result.ready) {
+        toast("All pre-flight checks passed", "success");
+      }
+    },
+  });
+
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
@@ -276,6 +305,10 @@ export function BlastSubmit() {
     if (form.match_score) opts += ` -reward ${form.match_score}`;
     if (form.mismatch_score) opts += ` -penalty ${form.mismatch_score}`;
 
+    // Auto-generate job title if not provided
+    const dbShort = form.db.split("/").pop() || form.db;
+    const autoTitle = form.job_title || `${form.program} · ${dbShort}`;
+
     submitMutation.mutate({
       subscription_id: subId,
       resource_group: workloadRg,
@@ -283,7 +316,7 @@ export function BlastSubmit() {
       program: form.program,
       db: form.db,
       query_data: form.query_data || undefined,
-      job_title: form.job_title || undefined,
+      job_title: autoTitle,
       evalue: form.evalue,
       max_target_seqs: form.max_target_seqs,
       outfmt: form.outfmt,
@@ -730,6 +763,59 @@ export function BlastSubmit() {
             </ul>
           </div>
         )}
+
+        {/* Pre-flight readiness check results */}
+        {preFlightResult && (
+          <div style={{
+            background: preFlightResult.ready ? "rgba(115,191,105,0.06)" : "rgba(242,153,74,0.06)",
+            border: `1px solid ${preFlightResult.ready ? "rgba(115,191,105,0.2)" : "rgba(242,153,74,0.2)"}`,
+            borderRadius: 8, padding: "12px 16px", marginBottom: 8,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              {preFlightResult.ready
+                ? <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
+                : <AlertTriangle size={14} style={{ color: "var(--warning)" }} />}
+              <span style={{ fontSize: 12, fontWeight: 600 }}>{preFlightResult.summary}</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {preFlightResult.checks.map((c) => (
+                <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}>
+                  {c.status === "pass" ? <CheckCircle2 size={11} style={{ color: "var(--success)" }} />
+                    : c.status === "fail" ? <AlertTriangle size={11} style={{ color: c.severity === "critical" ? "var(--danger)" : "var(--warning)" }} />
+                    : c.status === "warn" ? <AlertTriangle size={11} style={{ color: "var(--warning)", opacity: 0.7 }} />
+                    : <Check size={11} style={{ color: "var(--text-faint)" }} />}
+                  <span style={{ color: c.status === "pass" ? "var(--text-muted)" : "var(--text-primary)" }}>
+                    {c.title}
+                  </span>
+                  {c.detail && <span className="muted" style={{ fontSize: 10 }}>— {c.detail}</span>}
+                  {c.action && c.status === "fail" && (
+                    <span style={{ fontSize: 10, color: "var(--accent)", marginLeft: "auto" }}>
+                      {c.action_type === "download_db" ? (
+                        <Link to="/" style={{ color: "var(--accent)" }}>{c.action} →</Link>
+                      ) : c.action}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+            {/* Suggested databases if DB not found */}
+            {preFlightResult.checks.some(c => c.id === "blast_db" && c.status === "fail" && c.suggested_dbs) && (
+              <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
+                <span style={{ fontWeight: 600 }}>Suggested databases to download: </span>
+                {preFlightResult.checks.find(c => c.id === "blast_db")?.suggested_dbs?.map((db, i) => (
+                  <span key={db}>
+                    {i > 0 && ", "}
+                    <button
+                      style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11, padding: 0, textDecoration: "underline" }}
+                      onClick={() => set("db", `blast-db/${db}/${db}`)}
+                    >{db}</button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Command preview — shown when ready to submit */}
         {canSubmit && <BlastCommandPreview form={form} programMeta={programMeta} toast={toast} />}
         <div className="blast-submit-bar">
@@ -743,14 +829,26 @@ export function BlastSubmit() {
               </span>
             )}
           </div>
-          <button className="blast-submit-btn" onClick={handleSubmit} disabled={!canSubmit}>
-            {submitMutation.isPending ? (
-              <Loader2 size={20} strokeWidth={1.5} className="spin" />
-            ) : (
-              <Play size={20} strokeWidth={1.5} />
+          <div style={{ display: "flex", gap: 8 }}>
+            {/* Pre-flight check button */}
+            {canSubmit && (
+              <button className="glass-button" onClick={() => preFlightMutation.mutate()}
+                disabled={preFlightMutation.isPending}
+                style={{ fontSize: 12, gap: 5 }}>
+                {preFlightMutation.isPending
+                  ? <><Loader2 size={13} className="spin" /> Checking...</>
+                  : <><CheckCircle2 size={13} /> Check Readiness</>}
+              </button>
             )}
-            <span>BLAST</span>
-          </button>
+            <button className="blast-submit-btn" onClick={handleSubmit} disabled={!canSubmit}>
+              {submitMutation.isPending ? (
+                <Loader2 size={20} strokeWidth={1.5} className="spin" />
+              ) : (
+                <Play size={20} strokeWidth={1.5} />
+              )}
+              <span>BLAST</span>
+            </button>
+          </div>
         </div>
         {submitMutation.isError && (
           <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 6 }}>

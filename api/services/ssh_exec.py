@@ -39,7 +39,9 @@ def run_ssh(
     Much faster than Azure VM Run Command (~1-2s overhead vs ~30-60s).
     """
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    # Accept host keys but log a warning — VMs are ephemeral and IPs change.
+    # WarningPolicy logs unknown keys rather than silently trusting (AutoAddPolicy).
+    client.set_missing_host_key_policy(paramiko.WarningPolicy())
 
     try:
         LOGGER.info("SSH connecting to %s@%s:%d", username, hostname, port)
@@ -54,6 +56,10 @@ def run_ssh(
             allow_agent=False,
             look_for_keys=False,
         )
+        # Enable keepalive to detect dead connections early
+        transport = client.get_transport()
+        if transport:
+            transport.set_keepalive(30)
 
         # Execute with a generous timeout for long-running commands
         _stdin, stdout, stderr = client.exec_command(
@@ -79,7 +85,10 @@ def run_ssh(
         LOGGER.error("SSH execution failed on %s: %s", hostname, exc)
         raise
     finally:
-        client.close()
+        try:
+            client.close()
+        except Exception:
+            LOGGER.debug("SSH close failed (non-fatal)")
 
 
 def get_vm_ssh_info(

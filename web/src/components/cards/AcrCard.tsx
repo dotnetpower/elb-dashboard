@@ -15,6 +15,9 @@ const SHORT_NAMES: Record<string, string> = {
   "elb-openapi": "openapi",
 };
 
+// Core images required for BLAST operations
+const CORE_IMAGES = new Set(["ncbi/elb", "ncbi/elasticblast-job-submit", "ncbi/elasticblast-query-split"]);
+
 interface Props {
   subscriptionId: string;
   resourceGroup: string;
@@ -53,7 +56,7 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
   }).length;
   const totalCount = expectedImages.length;
 
-  const [buildResults, setBuildResults] = useState<{ image: string; status: string; error?: string; run_id?: string }[]>([]);
+  const [buildResults, setBuildResults] = useState<{ image: string; status: string; error?: string; run_id?: string; acr_status?: string }[]>([]);
   const [buildError, setBuildError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
@@ -63,6 +66,26 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
     const t = setTimeout(() => setBuildStatus("idle"), 8000);
     return () => clearTimeout(t);
   }, [buildStatus]);
+
+  // Transition building → done when all scheduled builds complete in ACR
+  useEffect(() => {
+    if (buildStatus !== "building" || !buildResults.length) return;
+    const allScheduled = buildResults.every((r) => r.status === "scheduled" || r.status === "success");
+    if (!allScheduled) return;
+    // Check if none are still building in ACR
+    const stillBuilding = (query.data?.building_images ?? []).length > 0;
+    if (!stillBuilding && query.data) {
+      // All builds completed — check if they succeeded
+      const allBuilt = buildResults.every((r) => {
+        const [img, tag] = r.image.split(":");
+        return (query.data?.actual_tags?.[img] ?? []).includes(tag);
+      });
+      if (allBuilt) {
+        setBuildStatus("done");
+        setElapsed((prev) => prev);
+      }
+    }
+  }, [buildStatus, buildResults, query.data]);
 
   const handleBuild = async () => {
     setShowConfirm(false);
@@ -74,7 +97,13 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
     try {
       const resp = await monitoringApi.buildAcrImages(subscriptionId, resourceGroup, registryName);
       setBuildResults(resp.results);
-      setBuildStatus(resp.results.every((r) => r.status === "success") ? "done" : "error");
+      const allScheduled = resp.results.every((r) => r.status === "success" || r.status === "scheduled");
+      if (allScheduled) {
+        // Builds are scheduled in ACR — stay in "building" until monitor shows them completed
+        setBuildStatus("building");
+      } else {
+        setBuildStatus(resp.results.every((r) => r.status === "success") ? "done" : "error");
+      }
       query.refetch();
     } catch (e) {
       setBuildError(formatApiError(e, "acr"));
@@ -99,6 +128,7 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
       title="Azure Container Registry"
       subtitle={enabled ? `${registryName} · ${resourceGroup}` : "Configure ACR name"}
       status={buildStatus === "building" || hasServerBuilding ? "loading" : status}
+      fetching={query.isFetching}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
       refreshCountdown={refreshCountdown}
       refreshInterval={currentInterval}
@@ -165,27 +195,35 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
                 const result = buildResults.find((r) => r.image === `${img}:${tag}`);
                 const actualTags = query.data?.actual_tags?.[img] ?? [];
                 const isBuilt = actualTags.includes(tag);
-                const isBuilding = buildStatus === "building" || (query.data?.building_images ?? []).includes(`${img}:${tag}`);
+                const buildDetail = (query.data?.build_details ?? []).find((d: { image: string }) => d.image === `${img}:${tag}`);
+                const isBuilding = buildStatus === "building" || Boolean(buildDetail);
                 const shortName = SHORT_NAMES[img] || img.split("/").pop() || img;
                 const isFailed = result?.status === "failed";
+                const isCore = CORE_IMAGES.has(img);
+                const acrStatus = buildDetail?.status as string | undefined;
 
                 return (
-                  <tr key={img} style={{ borderBottom: "1px solid var(--border-weak)" }}>
+                  <tr key={img} style={{ borderBottom: "1px solid var(--border-weak)", opacity: isCore ? 1 : 0.55 }}>
                     {/* #14: Short name with full path as title */}
                     <td style={{ padding: "6px 0" }} title={img}>
                       <strong style={{ fontSize: 12 }}>{shortName}</strong>
+                      {!isCore && <span className="muted" style={{ fontSize: 9, marginLeft: 4 }}>(optional)</span>}
                     </td>
                     <td style={{ padding: "6px 0", textAlign: "center" }}>
                       <code style={{ fontSize: 11 }}>{tag}</code>
                     </td>
                     <td style={{ padding: "6px 0", textAlign: "right" }}>
-                      {/* #1: Multi-state badges */}
-                      {isBuilding && !result ? (
-                        <span style={{ color: "var(--accent)", fontSize: 10, display: "inline-flex", alignItems: "center", gap: 3 }}>
-                          <Loader2 size={10} className="spin" /> Building
-                        </span>
-                      ) : result?.status === "success" || isBuilt ? (
+                      {/* #1: Multi-state badges — Built takes priority over stale build results */}
+                      {isBuilt ? (
                         <span className="gt gt-g" style={{ fontSize: 9 }}>Built</span>
+                      ) : isBuilding && !result ? (
+                        <span style={{ color: acrStatus === "Running" ? "var(--accent)" : "var(--text-muted)", fontSize: 10, display: "inline-flex", alignItems: "center", gap: 3 }}>
+                          <Loader2 size={10} className="spin" /> {acrStatus || "Building"}
+                        </span>
+                      ) : (result?.status === "success" || result?.status === "scheduled") ? (
+                        <span style={{ color: "var(--accent)", fontSize: 10, display: "inline-flex", alignItems: "center", gap: 3 }}>
+                          <Loader2 size={10} className="spin" /> {result.acr_status || "Scheduled"}
+                        </span>
                       ) : isFailed ? (
                         <button
                           onClick={() => setExpandedError(expandedError === img ? null : img)}

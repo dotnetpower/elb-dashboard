@@ -8,6 +8,8 @@ import { monitoringApi, blastApi } from "@/api/endpoints";
 import { MonitorCard } from "@/components/MonitorCard";
 import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 
+const HNS_DISMISSED_KEY = "elb-hns-warning-dismissed";
+
 // ---------------------------------------------------------------------------
 // DB catalog with approximate sizes
 // ---------------------------------------------------------------------------
@@ -44,6 +46,9 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
   // --- Public access toggle ---
   const [showConfirmEnable, setShowConfirmEnable] = useState(false);
   const [toggleMsg, setToggleMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [hnsDismissed, setHnsDismissed] = useState(() => {
+    try { return localStorage.getItem(HNS_DISMISSED_KEY) === "1"; } catch { return false; }
+  });
 
   const toggle = useMutation({
     mutationFn: (next: boolean) =>
@@ -87,6 +92,7 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
       title="Storage Account"
       subtitle={enabled ? `${accountName} · ${resourceGroup}` : "Configure account name"}
       status={status}
+      fetching={query.isFetching}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
       refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
       refreshInterval={30_000}
@@ -123,11 +129,18 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
             </div>
           )}
 
-          {/* HNS disabled warning */}
-          {!query.data.is_hns_enabled && (
+          {/* HNS disabled warning — dismissible */}
+          {!query.data.is_hns_enabled && !hnsDismissed && (
             <div style={{ padding: "6px 10px", marginBottom: "var(--space-3)", background: "rgba(240,198,116,0.08)", border: "1px solid rgba(240,198,116,0.2)", borderRadius: 6, fontSize: 11, color: "var(--warning)", display: "flex", alignItems: "center", gap: 6 }}>
               <AlertTriangle size={13} strokeWidth={1.5} />
-              HNS (Data Lake Gen2) is disabled. ElasticBLAST works best with HNS enabled.
+              <span style={{ flex: 1 }}>HNS (Data Lake Gen2) is disabled. ElasticBLAST works best with HNS enabled.</span>
+              <button
+                onClick={() => { setHnsDismissed(true); try { localStorage.setItem(HNS_DISMISSED_KEY, "1"); } catch { /* noop */ } }}
+                style={{ background: "none", border: "none", color: "var(--text-faint)", cursor: "pointer", padding: 2 }}
+                title="Dismiss"
+              >
+                <X size={12} />
+              </button>
             </div>
           )}
 
@@ -163,7 +176,14 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
             <tbody>
               {query.data.containers.map((c) => (
                 <tr key={c.name} style={{ borderBottom: "1px solid var(--border-weak)" }}>
-                  <td style={{ padding: "6px 0" }}><strong>{c.name}</strong></td>
+                  <td style={{ padding: "6px 0" }}>
+                    <strong>{c.name}</strong>
+                    {c.last_modified_time && (
+                      <span className="muted" style={{ fontSize: 9, marginLeft: 6 }}>
+                        updated {new Date(c.last_modified_time).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                      </span>
+                    )}
+                  </td>
                   {/* #1: "None" → "Private" with lock icon */}
                   <td style={{ padding: "6px 0", textAlign: "right" }}>
                     <span style={{ fontSize: 10, color: "var(--text-muted)", display: "inline-flex", alignItems: "center", gap: 3 }}>
@@ -366,10 +386,9 @@ function BlastDbSection({
       {/* Inline summary — show downloaded DB names */}
       {downloadedDbs.size > 0 && (
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
-          {[...downloadedDbs.keys()].slice(0, 5).map((name) => (
+          {[...downloadedDbs.keys()].map((name) => (
             <span key={name} className="gt gt-g" style={{ fontSize: 9 }}>{name}</span>
           ))}
-          {downloadedDbs.size > 5 && <span style={{ fontSize: 10, color: "var(--text-faint)" }}>+{downloadedDbs.size - 5} more</span>}
         </div>
       )}
 

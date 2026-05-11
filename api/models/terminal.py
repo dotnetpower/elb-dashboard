@@ -19,6 +19,12 @@ class ProvisionTerminalRequest(BaseModel):
     allowed_ssh_cidr: str = Field(
         ..., description="Caller egress IP in CIDR form, e.g. 1.2.3.4/32."
     )
+    # Optional — for auto-assigning RBAC roles to VM managed identity
+    workload_resource_group: str = Field("", description="Workload RG for Contributor role.")
+    acr_resource_group: str = Field("", description="ACR RG for AcrPull role.")
+    acr_name: str = Field("", description="ACR name for AcrPull role.")
+    storage_account: str = Field("", description="Storage account for Blob Data Contributor role.")
+    storage_resource_group: str = Field("", description="Storage account RG.")
 
 
 class ProvisionTerminalStarted(BaseModel):

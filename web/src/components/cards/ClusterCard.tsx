@@ -226,6 +226,7 @@ export function ClusterCard({
       title="Azure Kubernetes Service Cluster"
       subtitle={enabled ? resourceGroup : "Configure subscription / RG"}
       status={provStatus === "creating" ? "loading" : status}
+      fetching={query.isFetching}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
       refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
       refreshInterval={30_000}
@@ -406,112 +407,7 @@ export function ClusterCard({
       {/* Existing clusters */}
       <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: "var(--space-3)" }}>
         {query.data?.clusters.map((c) => (
-          <li key={c.name} className="glass-card" style={{ padding: "var(--space-3)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <strong>{c.name}</strong>
-              <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "center" }}>
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {c.region} · {c.k8s_version ?? "?"}
-                </span>
-                {/* Start/Stop button — respect transition state */}
-                {(() => {
-                  const trans = transitioning.get(c.name);
-                  if (trans === "starting") {
-                    return (
-                      <span style={{ fontSize: 10, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
-                        <Loader2 size={10} className="spin" /> Starting...
-                      </span>
-                    );
-                  }
-                  if (trans === "stopping") {
-                    return (
-                      <span style={{ fontSize: 10, color: "var(--warning)", display: "flex", alignItems: "center", gap: 4 }}>
-                        <Loader2 size={10} className="spin" /> Stopping...
-                      </span>
-                    );
-                  }
-                  if (c.power_state === "Stopped") {
-                    return (
-                      <button
-                        className="glass-button"
-                        onClick={() => handleStartStop(c.name, "start")}
-                        disabled={actionLoading !== null}
-                        style={{ fontSize: 10, padding: "2px 8px", color: "var(--success)" }}
-                        title="Start cluster"
-                      >
-                        {actionLoading === `start-${c.name}` ? <Loader2 size={10} className="spin" /> : <Play size={10} strokeWidth={1.5} />}
-                        {" "}Start
-                      </button>
-                    );
-                  }
-                  if (c.power_state === "Running") {
-                    return (
-                      <button
-                        className="glass-button"
-                        onClick={() => handleStartStop(c.name, "stop")}
-                        disabled={actionLoading !== null}
-                        style={{ fontSize: 10, padding: "2px 8px", color: "var(--warning)" }}
-                        title="Stop cluster (saves cost)"
-                      >
-                        {actionLoading === `stop-${c.name}` ? <Loader2 size={10} className="spin" /> : <Square size={10} strokeWidth={1.5} />}
-                        {" "}Stop
-                      </button>
-                    );
-                  }
-                  return null;
-                })()}
-                <button
-                  className="glass-button"
-                  onClick={() => setDeleteTarget(c.name)}
-                  disabled={actionLoading !== null}
-                  style={{ fontSize: 10, padding: "2px 8px", color: "var(--danger)" }}
-                  title="Delete cluster"
-                >
-                  {actionLoading === `delete-${c.name}` ? <Loader2 size={10} className="spin" /> : <Trash2 size={10} strokeWidth={1.5} />}
-                </button>
-              </div>
-            </div>
-            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              Power: {(() => {
-                const trans = transitioning.get(c.name);
-                if (trans === "starting") return <span style={{ color: "var(--accent)" }}>Starting...</span>;
-                if (trans === "stopping") return <span style={{ color: "var(--warning)" }}>Stopping...</span>;
-                return <span style={{ color: c.power_state === "Running" ? "var(--success)" : "var(--warning)" }}>{c.power_state ?? "?"}</span>;
-              })()}
-              {" · "}State: {(() => {
-                const ps = c.provisioning_state ?? "?";
-                if (ps === "Succeeded") return <span style={{ color: "var(--success)" }}>{ps}</span>;
-                if (ps === "Creating" || ps === "Updating") return <span style={{ color: "var(--accent)", display: "inline-flex", alignItems: "center", gap: 3 }}><Loader2 size={10} className="spin" />{ps}</span>;
-                if (ps === "Deleting") return <span style={{ color: "var(--warning)", display: "inline-flex", alignItems: "center", gap: 3 }}><Loader2 size={10} className="spin" />{ps}</span>;
-                if (ps === "Failed") return <span style={{ color: "var(--danger)" }}>{ps}</span>;
-                return <span>{ps}</span>;
-              })()}
-              {" · "}Nodes: {c.node_count ?? "?"} {c.node_sku ? `(${c.node_sku})` : ""}
-            </div>
-            {c.kubelet_object_id && (
-              <div className="muted" style={{ fontSize: 11, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
-                Kubelet OID: <code style={{ fontSize: 10 }}>{c.kubelet_object_id}</code>
-                <button
-                  className="glass-button"
-                  style={{ padding: "1px 4px", border: "none", opacity: 0.6 }}
-                  onClick={() => navigator.clipboard.writeText(c.kubelet_object_id!)}
-                  title="Copy OID"
-                >
-                  <Copy size={9} />
-                </button>
-              </div>
-            )}
-            {/* Cluster details section */}
-            <ClusterDetails
-              clusterName={c.name}
-              powerState={c.power_state}
-              agentPools={c.agent_pools}
-              fqdn={c.fqdn}
-              networkPlugin={c.network_plugin}
-              subscriptionId={subscriptionId}
-              resourceGroup={resourceGroup}
-            />
-          </li>
+          <ClusterItem key={c.name} cluster={c} transitioning={transitioning} actionLoading={actionLoading} onStartStop={handleStartStop} onDelete={setDeleteTarget} subscriptionId={subscriptionId} resourceGroup={resourceGroup} />
         ))}
       </ul>
 
@@ -553,9 +449,145 @@ export function ClusterCard({
 }
 
 // ---------------------------------------------------------------------------
+// ClusterItem — collapsible per-cluster card (stopped clusters collapsed by default)
+// ---------------------------------------------------------------------------
+import type { AksClusterSummary, AksAgentPool } from "@/api/endpoints";
+
+const CLUSTER_COLLAPSED_KEY = "elb-cluster-collapsed-";
+
+function ClusterItem({
+  cluster: c,
+  transitioning,
+  actionLoading,
+  onStartStop,
+  onDelete,
+  subscriptionId,
+  resourceGroup,
+}: {
+  cluster: AksClusterSummary;
+  transitioning: Map<string, "starting" | "stopping">;
+  actionLoading: string | null;
+  onStartStop: (name: string, action: "start" | "stop") => void;
+  onDelete: (name: string) => void;
+  subscriptionId: string;
+  resourceGroup: string;
+}) {
+  const isStopped = c.power_state === "Stopped";
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      const v = localStorage.getItem(CLUSTER_COLLAPSED_KEY + c.name);
+      return v != null ? v === "1" : isStopped; // Stopped clusters collapsed by default
+    } catch { return isStopped; }
+  });
+
+  const toggleCollapse = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(CLUSTER_COLLAPSED_KEY + c.name, next ? "1" : "0"); } catch { /* noop */ }
+      return next;
+    });
+  };
+
+  return (
+    <li className="glass-card" style={{ padding: "var(--space-3)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={toggleCollapse}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ChevronDown size={14} style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(0)", transition: "transform 0.15s", color: "var(--text-faint)", flexShrink: 0 }} />
+          <strong>{c.name}</strong>
+          {/* Inline status badges for collapsed view */}
+          <span style={{ fontSize: 11, color: c.power_state === "Running" ? "var(--success)" : "var(--warning)", fontWeight: 600 }}>
+            {(() => {
+              const trans = transitioning.get(c.name);
+              if (trans === "starting") return "Starting...";
+              if (trans === "stopping") return "Stopping...";
+              return c.power_state ?? "?";
+            })()}
+          </span>
+          {collapsed && (
+            <span className="muted" style={{ fontSize: 11 }}>
+              · {c.node_count ?? "?"} nodes ({c.node_sku ?? "?"})
+            </span>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {c.region} · {c.k8s_version ?? "?"}
+          </span>
+          {(() => {
+            const trans = transitioning.get(c.name);
+            if (trans === "starting") {
+              return (
+                <span style={{ fontSize: 10, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
+                  <Loader2 size={10} className="spin" /> Starting...
+                </span>
+              );
+            }
+            if (trans === "stopping") {
+              return (
+                <span style={{ fontSize: 10, color: "var(--warning)", display: "flex", alignItems: "center", gap: 4 }}>
+                  <Loader2 size={10} className="spin" /> Stopping...
+                </span>
+              );
+            }
+            if (c.power_state === "Stopped") {
+              return (
+                <button className="glass-button" onClick={() => onStartStop(c.name, "start")} disabled={actionLoading !== null} style={{ fontSize: 10, padding: "2px 8px", color: "var(--success)" }} title="Start cluster">
+                  {actionLoading === `start-${c.name}` ? <Loader2 size={10} className="spin" /> : <Play size={10} strokeWidth={1.5} />} Start
+                </button>
+              );
+            }
+            if (c.power_state === "Running") {
+              return (
+                <button className="glass-button" onClick={() => onStartStop(c.name, "stop")} disabled={actionLoading !== null} style={{ fontSize: 10, padding: "2px 8px", color: "var(--warning)" }} title="Stop cluster (saves cost)">
+                  {actionLoading === `stop-${c.name}` ? <Loader2 size={10} className="spin" /> : <Square size={10} strokeWidth={1.5} />} Stop
+                </button>
+              );
+            }
+            return null;
+          })()}
+          <button className="glass-button" onClick={() => onDelete(c.name)} disabled={actionLoading !== null} style={{ fontSize: 10, padding: "2px 8px", color: "var(--danger)" }} title="Delete cluster">
+            {actionLoading === `delete-${c.name}` ? <Loader2 size={10} className="spin" /> : <Trash2 size={10} strokeWidth={1.5} />}
+          </button>
+        </div>
+      </div>
+
+      {!collapsed && (
+        <>
+          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+            Power: {(() => {
+              const trans = transitioning.get(c.name);
+              if (trans === "starting") return <span style={{ color: "var(--accent)" }}>Starting...</span>;
+              if (trans === "stopping") return <span style={{ color: "var(--warning)" }}>Stopping...</span>;
+              return <span style={{ color: c.power_state === "Running" ? "var(--success)" : "var(--warning)" }}>{c.power_state ?? "?"}</span>;
+            })()}
+            {" · "}State: {(() => {
+              const ps = c.provisioning_state ?? "?";
+              if (ps === "Succeeded") return <span style={{ color: "var(--success)" }}>{ps}</span>;
+              if (ps === "Creating" || ps === "Updating") return <span style={{ color: "var(--accent)", display: "inline-flex", alignItems: "center", gap: 3 }}><Loader2 size={10} className="spin" />{ps}</span>;
+              if (ps === "Deleting") return <span style={{ color: "var(--warning)", display: "inline-flex", alignItems: "center", gap: 3 }}><Loader2 size={10} className="spin" />{ps}</span>;
+              if (ps === "Failed") return <span style={{ color: "var(--danger)" }}>{ps}</span>;
+              return <span>{ps}</span>;
+            })()}
+            {" · "}Nodes: {c.node_count ?? "?"} {c.node_sku ? `(${c.node_sku})` : ""}
+          </div>
+          {c.kubelet_object_id && (
+            <div className="muted" style={{ fontSize: 11, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
+              Kubelet OID: <code style={{ fontSize: 10 }}>{c.kubelet_object_id}</code>
+              <button className="glass-button" style={{ padding: "1px 4px", border: "none", opacity: 0.6 }} onClick={() => navigator.clipboard.writeText(c.kubelet_object_id!)} title="Copy OID">
+                <Copy size={9} />
+              </button>
+            </div>
+          )}
+          <ClusterDetails clusterName={c.name} powerState={c.power_state} agentPools={c.agent_pools} fqdn={c.fqdn} networkPlugin={c.network_plugin} subscriptionId={subscriptionId} resourceGroup={resourceGroup} />
+        </>
+      )}
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Cluster Details — compact inline summary + modal for full details
 // ---------------------------------------------------------------------------
-import type { AksAgentPool } from "@/api/endpoints";
 
 function ClusterDetails({
   clusterName,
@@ -647,6 +679,7 @@ function ClusterDetails({
                       </div>
                       <code style={{ fontSize: 10, color: "var(--text-secondary)", minWidth: 50, textAlign: "right" }}>{n.mem}</code>
                       <span style={{ fontSize: 9, color: "var(--text-faint)", minWidth: 28, textAlign: "right" }}>{n.memPct}%</span>
+                      {n.memTotal && n.memTotal !== "?" && <span className="muted" style={{ fontSize: 8, minWidth: 30, textAlign: "right" }}>/ {n.memTotal}</span>}
                     </div>
                   </td>
                 </tr>

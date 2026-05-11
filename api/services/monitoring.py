@@ -337,6 +337,31 @@ def k8s_check_namespace_exists(
         session.close()
 
 
+def k8s_get_service_ip(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    service_name: str,
+    namespace: str = "default",
+) -> str | None:
+    """Get the external IP of a K8s LoadBalancer service. Returns None if not found."""
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        resp = session.get(f"{server}/api/v1/namespaces/{namespace}/services/{service_name}", timeout=10)
+        if resp.status_code != 200:
+            return None
+        svc = resp.json()
+        ingress = svc.get("status", {}).get("loadBalancer", {}).get("ingress", [])
+        if ingress:
+            return ingress[0].get("ip")
+        return None
+    except Exception:
+        return None
+    finally:
+        session.close()
+
+
 def k8s_get_pods(
     credential: TokenCredential,
     subscription_id: str,
@@ -561,6 +586,7 @@ def list_acr_repositories(
     # Check which expected images actually exist via ACR mgmt API
     actual_tags: dict[str, list[str]] = {}
     building_images: list[str] = []
+    build_details: list[dict[str, str]] = []
     try:
         from azure.mgmt.containerregistry import ContainerRegistryManagementClient
         acr_preview = ContainerRegistryManagementClient(
@@ -580,6 +606,11 @@ def list_acr_repositories(
                     full = f"{img.repository or ''}:{img.tag or ''}"
                     if full not in building_images:
                         building_images.append(full)
+                        build_details.append({
+                            "image": full,
+                            "status": run.status or "Unknown",
+                            "run_id": run.run_id or "",
+                        })
     except Exception as exc:
         LOGGER.warning("ACR runs query failed (non-fatal): %s", type(exc).__name__)
 
@@ -590,6 +621,7 @@ def list_acr_repositories(
         "expected_image_tags": IMAGE_TAGS,
         "actual_tags": actual_tags,
         "building_images": building_images,
+        "build_details": build_details,
     }
 
 

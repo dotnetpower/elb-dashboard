@@ -121,6 +121,7 @@ def activity_create_vm(payload: dict[str, Any]) -> dict[str, Any]:
         "vm_id": info.vm_id,
         "name": info.name,
         "provisioning_state": info.provisioning_state,
+        "principal_id": info.principal_id,
     }
 
 
@@ -147,3 +148,69 @@ def activity_check_cloud_init(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         status = "unknown"
     return {"status": status, "raw": sanitise(output)[:1000]}
+
+
+def activity_assign_vm_roles(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: assigns RBAC roles to the VM's managed identity.
+
+    Grants:
+    - Storage Blob Data Contributor on the storage account (azcopy, blob access)
+    - AcrPull on the ACR (container image pull)
+    - Contributor on the workload RG (elastic-blast needs to manage AKS resources)
+    """
+    import uuid
+
+    from azure.mgmt.authorization import AuthorizationManagementClient
+
+    cred = _credential(payload.get("user_assertion"))
+    sub = payload["subscription_id"]
+    principal_id = payload["vm_principal_id"]
+    if not principal_id:
+        LOGGER.warning("No VM principal_id — skipping role assignments")
+        return {"roles_assigned": [], "skipped": True}
+
+    auth_client = AuthorizationManagementClient(cred, sub)
+    assigned: list[str] = []
+
+    def _assign(scope: str, role_id: str, label: str) -> None:
+        role_def = f"{scope}/providers/Microsoft.Authorization/roleDefinitions/{role_id}"
+        name = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_id}"))
+        try:
+            auth_client.role_assignments.create(
+                scope, name,
+                {
+                    "role_definition_id": role_def,
+                    "principal_id": principal_id,
+                    "principal_type": "ServicePrincipal",
+                },
+            )
+            assigned.append(label)
+            LOGGER.info("Assigned %s to VM MI %s on %s", label, principal_id, scope)
+        except Exception as exc:
+            if "Conflict" in str(exc) or "RoleAssignmentExists" in str(exc):
+                assigned.append(f"{label} (exists)")
+                LOGGER.debug("Role %s already assigned", label)
+            else:
+                LOGGER.warning("Failed to assign %s: %s", label, exc)
+
+    # Storage Blob Data Contributor
+    storage_rg = payload.get("storage_resource_group") or payload.get("workload_resource_group", "")
+    storage_account = payload.get("storage_account", "")
+    if storage_rg and storage_account:
+        scope = f"/subscriptions/{sub}/resourceGroups/{storage_rg}/providers/Microsoft.Storage/storageAccounts/{storage_account}"
+        _assign(scope, "ba92f5b4-2d11-453d-a403-e96b0029c9fe", "StorageBlobDataContributor")
+
+    # AcrPull
+    acr_rg = payload.get("acr_resource_group", "")
+    acr_name = payload.get("acr_name", "")
+    if acr_rg and acr_name:
+        scope = f"/subscriptions/{sub}/resourceGroups/{acr_rg}/providers/Microsoft.ContainerRegistry/registries/{acr_name}"
+        _assign(scope, "7f951dda-4ed3-4680-a7ca-43fe172d538d", "AcrPull")
+
+    # Contributor on workload RG (elastic-blast manages AKS, storage, etc.)
+    workload_rg = payload.get("workload_resource_group", "")
+    if workload_rg:
+        scope = f"/subscriptions/{sub}/resourceGroups/{workload_rg}"
+        _assign(scope, "b24988ac-6180-42a0-ab88-20f7382dd24c", "Contributor")
+
+    return {"roles_assigned": assigned, "principal_id": principal_id}
