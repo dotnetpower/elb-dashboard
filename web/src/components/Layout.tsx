@@ -1,7 +1,7 @@
 import { type PropsWithChildren, useState, useRef, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
-import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus } from "lucide-react";
+import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { useTheme } from "@/hooks/useTheme";
@@ -187,8 +187,14 @@ export function Layout({ children }: PropsWithChildren) {
           <NavLink to="/blast/jobs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <List size={14} strokeWidth={1.5} /> Jobs
           </NavLink>
+          <NavLink to="/blast/databases/build" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+            <Database size={14} strokeWidth={1.5} /> Custom DB
+          </NavLink>
           <span className="layout__nav-sep" />
           <span className="layout__nav-group-label">Tools</span>
+          <NavLink to="/tools" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+            <ArrowRightLeft size={14} strokeWidth={1.5} /> Lab Tools
+          </NavLink>
           <NavLink to="/terminal" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <TerminalIcon size={14} strokeWidth={1.5} /> Terminal
           </NavLink>

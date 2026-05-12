@@ -344,7 +344,11 @@ export function RemoteTerminal() {
       {/* ── Connection Card — shown when provisioning completed ── */}
       {instanceId && isCompleted && output && (
         <section className="glass-card">
-          <ConnectionCard info={output} />
+          <ConnectionCard
+            info={output}
+            subscriptionId={form.subscription_id}
+            resourceGroup={form.resource_group}
+          />
           <div style={{ marginTop: "var(--space-3)" }}>
             <button
               className="glass-button"
@@ -497,7 +501,7 @@ function ExistingVmCard({
     if (pwd) { setShowPwd(true); return; }
     setPwdLoading(true);
     try {
-      const r = await terminalApi.password(vmName);
+      const r = await terminalApi.password(vmName, subscriptionId, resourceGroup);
       setPwd(r.password);
       setShowPwd(true);
     } catch (e) { setPwdError((e as Error).message); }
@@ -632,8 +636,12 @@ function ExistingVmCard({
 // ---------------------------------------------------------------------------
 function ConnectionCard({
   info,
+  subscriptionId,
+  resourceGroup,
 }: {
   info: NonNullable<Awaited<ReturnType<typeof terminalApi.status>>["output"]>;
+  subscriptionId?: string;
+  resourceGroup?: string;
 }) {
   const [showPwd, setShowPwd] = useState(false);
   const [pwd, setPwd] = useState<string | null>(null);
@@ -658,7 +666,7 @@ function ConnectionCard({
     }
     setPwdLoading(true);
     try {
-      const r = await terminalApi.password(info.vm_name);
+      const r = await terminalApi.password(info.vm_name, subscriptionId, resourceGroup);
       setPwd(r.password);
       setShowPwd(true);
     } catch (e) {

@@ -52,10 +52,15 @@ export const terminalApi = {
     api.get<OrchestrationStatus<TerminalConnectionInfo>>(
       `/terminal/status/${instanceId}`,
     ),
-  password: (vmName: string) =>
-    api.get<{ vm_name: string; password: string }>(
-      `/terminal/${encodeURIComponent(vmName)}/password`,
-    ),
+  password: (vmName: string, subscriptionId?: string, resourceGroup?: string) => {
+    const params = new URLSearchParams();
+    if (subscriptionId) params.set("subscription_id", subscriptionId);
+    if (resourceGroup) params.set("resource_group", resourceGroup);
+    const qs = params.toString();
+    return api.get<{ vm_name: string; password: string }>(
+      `/terminal/${encodeURIComponent(vmName)}/password${qs ? `?${qs}` : ""}`,
+    );
+  },
   openSsh: (vmName: string, callerIp: string, subscriptionId: string, resourceGroup: string) =>
     api.post<{ ok: boolean; nsg: string; allowed_ip: string }>(
       `/terminal/${encodeURIComponent(vmName)}/open-ssh?caller_ip=${encodeURIComponent(callerIp)}&subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(resourceGroup)}`,
@@ -427,6 +432,42 @@ export interface BlastDatabase {
   downloaded_at?: string;
 }
 
+export interface BlastHit {
+  qseqid: string;
+  sseqid: string;
+  pident: number;
+  length: number;
+  mismatch: number;
+  gapopen: number;
+  qstart: number;
+  qend: number;
+  sstart: number;
+  send: number;
+  evalue: number;
+  bitscore: number;
+  qseq?: string;
+  sseq?: string;
+  qlen?: number;
+  slen?: number;
+  ppos?: number;
+}
+
+export interface BlastAggregateStats {
+  total_hits: number;
+  unique_queries: number;
+  unique_subjects: number;
+  evalue_distribution: Record<string, number>;
+  identity_distribution: Record<string, number>;
+  top_subjects: Array<{ id: string; count: number }>;
+  avg_identity: number | null;
+  avg_bitscore: number | null;
+  avg_length: number | null;
+  max_bitscore: number | null;
+  min_evalue: number | null;
+  files_parsed?: number;
+  total_files?: number;
+}
+
 export const blastApi = {
   preFlight: (req: {
     subscription_id: string;
@@ -515,6 +556,56 @@ export const blastApi = {
 
   checkUpdates: () =>
     api.get<{ latest_version: string }>("/blast/databases/check-updates"),
+
+  buildCustomDb: (req: {
+    subscription_id: string;
+    resource_group: string;
+    storage_account: string;
+    terminal_resource_group?: string;
+    terminal_vm_name?: string;
+    db_name: string;
+    db_type: "nucl" | "prot";
+    title?: string;
+    fasta_data?: string;
+    fasta_blob_url?: string;
+  }) => api.post<{
+    db_name: string;
+    db_type: string;
+    title: string;
+    status: string;
+    file_count: number;
+    container: string;
+    path: string;
+  }>("/blast/databases/build", req),
+
+  resultsAggregate: (
+    jobId: string,
+    subscriptionId: string,
+    storageAccount: string,
+  ) => api.get<{
+    job_id: string;
+    status: string;
+    message?: string;
+    stats: BlastAggregateStats | null;
+  }>(
+    `/blast/jobs/${encodeURIComponent(jobId)}/results/aggregate?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}`,
+  ),
+
+  resultsAlignments: (
+    jobId: string,
+    subscriptionId: string,
+    storageAccount: string,
+    opts?: { blob_name?: string; max_alignments?: number; query_id?: string },
+  ) => api.get<{
+    job_id: string;
+    blob_name: string;
+    alignments: BlastHit[];
+    total_hits: number;
+    returned: number;
+    query_ids: string[];
+  }>(
+    `/blast/jobs/${encodeURIComponent(jobId)}/results/alignments?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}${opts?.blob_name ? `&blob_name=${encodeURIComponent(opts.blob_name)}` : ""}${opts?.max_alignments ? `&max_alignments=${opts.max_alignments}` : ""}${opts?.query_id ? `&query_id=${encodeURIComponent(opts.query_id)}` : ""}`,
+  ),
 };
 
 // ---------------------------------------------------------------------------
@@ -618,4 +709,228 @@ export const armProxyApi = {
       "/arm/resource-group/tags",
       { subscription_id: subscriptionId, resource_group: rg, tags },
     ),
+};
+
+// ---------------------------------------------------------------------------
+// P6 — Report export
+// ---------------------------------------------------------------------------
+export const reportApi = {
+  exportUrl: (jobId: string, subscriptionId: string, storageAccount: string, format: "csv" | "tsv" | "json") =>
+    `${import.meta.env.VITE_API_BASE_URL ?? ""}/blast/jobs/${encodeURIComponent(jobId)}/results/export?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&format=${format}`,
+};
+
+// ---------------------------------------------------------------------------
+// P9 — Audit trail
+// ---------------------------------------------------------------------------
+export interface AuditEvent {
+  action: string;
+  timestamp: string;
+  user?: string;
+  job_id?: string;
+  details?: Record<string, unknown>;
+}
+
+export const auditApi = {
+  listEvents: (limit = 100, action?: string) =>
+    api.get<{ events: AuditEvent[]; total: number }>(
+      `/audit/log?limit=${limit}${action ? `&action=${encodeURIComponent(action)}` : ""}`,
+    ),
+};
+
+// ---------------------------------------------------------------------------
+// P11 — Cost estimator
+// ---------------------------------------------------------------------------
+export interface CostEstimate {
+  compute_usd: number;
+  disk_usd: number;
+  storage_usd: number;
+  total_usd: number;
+}
+
+export const costApi = {
+  estimate: (params: {
+    machine_type?: string;
+    num_nodes?: number;
+    estimated_hours?: number;
+    pd_size_gb?: number;
+    db_size_gb?: number;
+  }) => api.post<{
+    estimate: CostEstimate;
+    params: Record<string, unknown>;
+    note: string;
+  }>("/blast/cost-estimate", params),
+};
+
+// ---------------------------------------------------------------------------
+// P8 — Multi-DB search
+// ---------------------------------------------------------------------------
+export const multiBlastApi = {
+  submit: (req: Record<string, unknown> & { databases: string[] }) =>
+    api.post<{
+      group_id: string;
+      jobs: Array<{ job_id: string; db: string; instance_id: string }>;
+      total: number;
+    }>("/blast/multi-submit", req),
+};
+
+// ---------------------------------------------------------------------------
+// P4 — Taxonomy annotation
+// ---------------------------------------------------------------------------
+export interface TaxonomyInfo {
+  accession: string;
+  title: string;
+  organism: string;
+  taxid: string;
+  source_db?: string;
+  seq_length?: string;
+  mol_type?: string;
+  update_date?: string;
+}
+
+export const taxonomyApi = {
+  lookup: (accessions: string[]) =>
+    api.post<{
+      annotations: Record<string, TaxonomyInfo>;
+      found: number;
+      requested: number;
+    }>("/blast/taxonomy", { accessions }),
+};
+
+// ---------------------------------------------------------------------------
+// P5 — Query preprocessor
+// ---------------------------------------------------------------------------
+export interface PreprocessStats {
+  input_sequences: number;
+  output_sequences: number;
+  total_bases: number;
+  filtered_short: number;
+  filtered_quality: number;
+  avg_length: number;
+  min_len: number;
+  max_len: number;
+  gc_content: number;
+}
+
+export const preprocessApi = {
+  process: (params: {
+    input_data: string;
+    format?: "auto" | "fastq" | "fasta";
+    min_length?: number;
+    min_quality?: number;
+  }) => api.post<{
+    fasta_output: string;
+    stats: PreprocessStats;
+    detected_format: string;
+  }>("/blast/preprocess", params),
+};
+
+// ---------------------------------------------------------------------------
+// P2 — DB version registry
+// ---------------------------------------------------------------------------
+export interface DbVersionMeta {
+  db_name: string;
+  db_type?: string;
+  title?: string;
+  source?: string;
+  source_version?: string;
+  version_tag?: string;
+  notes?: string;
+  created_at?: string;
+  created_by?: string;
+  _blob_path?: string;
+  _last_modified?: string;
+}
+
+export const dbVersionApi = {
+  list: (subscriptionId: string, storageAccount: string, resourceGroup: string) =>
+    api.get<{ versions: DbVersionMeta[]; total: number }>(
+      `/blast/databases/versions?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&resource_group=${encodeURIComponent(resourceGroup)}`,
+    ),
+
+  save: (params: {
+    subscription_id: string;
+    storage_account: string;
+    db_name: string;
+    db_type?: string;
+    title?: string;
+    source?: string;
+    source_version?: string;
+    version_tag?: string;
+    notes?: string;
+  }) => api.post<{ db_name: string; status: string; metadata: DbVersionMeta }>(
+    "/blast/databases/versions", params,
+  ),
+};
+
+// ---------------------------------------------------------------------------
+// P7 — Scheduled BLAST
+// ---------------------------------------------------------------------------
+export interface BlastSchedule {
+  schedule_id: string;
+  name: string;
+  trigger_type: "manual" | "cron" | "on_upload";
+  cron_expression?: string;
+  watch_container?: string;
+  watch_prefix?: string;
+  blast_params: Record<string, unknown>;
+  enabled: boolean;
+  created_at?: string;
+  last_run?: string;
+  run_count: number;
+  owner_upn?: string;
+}
+
+export const scheduleApi = {
+  list: () => api.get<{ schedules: BlastSchedule[] }>("/blast/schedules"),
+
+  create: (params: Record<string, unknown> & { name: string; trigger_type: string }) =>
+    api.post<{ status: string; schedule: BlastSchedule }>("/blast/schedules", params),
+
+  remove: (scheduleId: string) =>
+    api.del<{ status: string; schedule_id: string }>(
+      `/blast/schedules/${encodeURIComponent(scheduleId)}`,
+    ),
+
+  run: (scheduleId: string) =>
+    api.post<{ job_id: string; instance_id: string; schedule_id: string }>(
+      `/blast/schedules/${encodeURIComponent(scheduleId)}/run`, {},
+    ),
+};
+
+// ---------------------------------------------------------------------------
+// P12 — Primer design
+// ---------------------------------------------------------------------------
+export interface PrimerPair {
+  pair_index: number;
+  left_sequence: string;
+  right_sequence: string;
+  left_tm: number | null;
+  right_tm: number | null;
+  left_gc: number | null;
+  right_gc: number | null;
+  product_size: number | null;
+  pair_penalty: number | null;
+  left_start?: number;
+  left_length?: number;
+  right_start?: number;
+  right_length?: number;
+}
+
+export const primerApi = {
+  design: (params: {
+    sequence: string;
+    subscription_id: string;
+    terminal_resource_group?: string;
+    terminal_vm_name?: string;
+    target_start?: number;
+    target_length?: number;
+    product_size_min?: number;
+    product_size_max?: number;
+    num_return?: number;
+  }) => api.post<{
+    primers: PrimerPair[];
+    target: { start: number; length: number };
+    product_size_range: string;
+    sequence_length: number;
+  }>("/blast/primer-design", params),
 };

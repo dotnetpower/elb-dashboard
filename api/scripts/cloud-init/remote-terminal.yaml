@@ -44,55 +44,125 @@ write_files:
       ============================================================
 
 runcmd:
-  # Azure CLI
+  # Helper: retry a command up to N times with backoff. Used because Defender
+  # for Endpoint (MDE.Linux extension) blocks outbound network for ~5-10 min
+  # while it onboards, causing apt/snap/curl/pip to fail intermittently in
+  # the early cloud-init phase. Without retry, the silently-guarded `if !
+  # command -v X; then install; fi` blocks below would mark the VM "ready"
+  # with missing tools.
+  - |
+    cat > /usr/local/bin/elb-retry <<'EOF'
+    #!/bin/bash
+    # Usage: elb-retry <max-attempts> <sleep-seconds> -- <command...>
+    set -o pipefail
+    max=$1; delay=$2; shift 2
+    [ "$1" = "--" ] && shift
+    n=0
+    until [ $n -ge $max ]; do
+      "$@" && exit 0
+      n=$((n+1))
+      echo "elb-retry: attempt $n/$max failed, sleeping ${delay}s" >&2
+      sleep "$delay"
+    done
+    echo "elb-retry: command failed after $max attempts: $*" >&2
+    exit 1
+    EOF
+    chmod +x /usr/local/bin/elb-retry
+
+  # Wait for the package store to come back online (MDE blocks it during
+  # onboarding). If after ~10 min apt is still unreachable, abort loudly so
+  # the orchestrator's cloud-init poll surfaces the failure.
+  - |
+    elb-retry 30 30 -- bash -c 'apt-get update -qq && apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl gnupg lsb-release' \
+      || { echo "ELB-FATAL: apt-get update never succeeded — aborting cloud-init"; exit 1; }
+
+  # Azure CLI (apt). Retried because the Microsoft repo is fetched from
+  # packages.microsoft.com which is also blocked during MDE onboarding.
   - |
     if ! command -v az >/dev/null 2>&1; then
-      curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+      elb-retry 20 30 -- bash -c 'curl -sL https://aka.ms/InstallAzureCLIDeb -o /tmp/install-az.sh && bash /tmp/install-az.sh' \
+        || { echo "ELB-FATAL: azure-cli install failed"; exit 1; }
     fi
-  # kubectl
+
+  # kubectl (direct binary download, no snap dependency — snap store is the
+  # slowest to recover after MDE).
   - |
     if ! command -v kubectl >/dev/null 2>&1; then
-      snap install kubectl --classic
+      elb-retry 20 30 -- bash -c '
+        v=$(curl -sL https://dl.k8s.io/release/stable.txt) && \
+        curl -sL "https://dl.k8s.io/release/${v}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl && \
+        chmod +x /usr/local/bin/kubectl' \
+        || { echo "ELB-FATAL: kubectl install failed"; exit 1; }
     fi
+
   # azcopy
   - |
     if ! command -v azcopy >/dev/null 2>&1; then
-      curl -sL https://aka.ms/downloadazcopy-v10-linux -o /tmp/azcopy.tar.gz
-      tar -xf /tmp/azcopy.tar.gz -C /tmp
-      install -m 0755 /tmp/azcopy_linux_*/azcopy /usr/local/bin/azcopy
+      elb-retry 20 30 -- bash -c '
+        rm -rf /tmp/azcopy* && \
+        curl -sL https://aka.ms/downloadazcopy-v10-linux -o /tmp/azcopy.tar.gz && \
+        tar -xf /tmp/azcopy.tar.gz -C /tmp && \
+        install -m 0755 /tmp/azcopy_linux_*/azcopy /usr/local/bin/azcopy' \
+        || { echo "ELB-FATAL: azcopy install failed"; exit 1; }
       rm -rf /tmp/azcopy*
     fi
+
   # Clone elastic-blast-azure as the admin user
   - |
     if [ ! -d /home/azureuser/elastic-blast-azure ]; then
-      sudo -u azureuser git clone https://github.com/dotnetpower/elastic-blast-azure.git /home/azureuser/elastic-blast-azure
+      elb-retry 10 30 -- sudo -u azureuser git clone --depth 1 https://github.com/dotnetpower/elastic-blast-azure.git /home/azureuser/elastic-blast-azure \
+        || { echo "ELB-FATAL: git clone failed"; exit 1; }
     fi
-  # Create venv + install runtime deps
+  # Create venv + install runtime deps. pip downloads are also retried because
+  # PyPI may still be unreachable when Defender finishes very late.
   - |
     if [ ! -d /home/azureuser/elastic-blast-azure/venv ]; then
       sudo -u azureuser python3.11 -m venv /home/azureuser/elastic-blast-azure/venv
-      sudo -u azureuser /home/azureuser/elastic-blast-azure/venv/bin/pip install --upgrade pip wheel build
-      sudo -u azureuser /home/azureuser/elastic-blast-azure/venv/bin/pip install -r /home/azureuser/elastic-blast-azure/requirements/test.txt
+      PIP=/home/azureuser/elastic-blast-azure/venv/bin/pip
+      elb-retry 10 30 -- sudo -u azureuser $PIP install --upgrade pip wheel build \
+        || { echo "ELB-FATAL: pip self-upgrade failed"; exit 1; }
+      elb-retry 10 30 -- sudo -u azureuser $PIP install -r /home/azureuser/elastic-blast-azure/requirements/test.txt \
+        || { echo "ELB-FATAL: requirements/test.txt install failed"; exit 1; }
       # Azure mgmt SDKs not in base.txt but required by elastic_blast.azure_sdk
-      sudo -u azureuser /home/azureuser/elastic-blast-azure/venv/bin/pip install \
+      elb-retry 10 30 -- sudo -u azureuser $PIP install \
         azure-mgmt-resource azure-mgmt-network azure-mgmt-compute \
         azure-mgmt-storage azure-mgmt-containerregistry azure-mgmt-containerservice \
-        azure-mgmt-authorization azure-mgmt-msi azure-mgmt-monitor
+        azure-mgmt-authorization azure-mgmt-msi azure-mgmt-monitor \
+        || { echo "ELB-FATAL: azure-mgmt-* install failed"; exit 1; }
       # Install elastic_blast so bin/elastic-blast resolves package metadata.
       # The upstream setup.py uses NCBI's `packit` which pulls `pbr` → `pkg_resources`.
       # PEP 517 build isolation strips pkg_resources from the build env, so we
       # disable isolation. We also use a non-editable install (no `-e`) because
       # setuptools' `develop` command internally re-invokes pip with
-      # `--use-pep517` which fails inside the same isolated env. Errors are NOT
-      # silenced — failures here must surface to the orchestrator's cloud-init
-      # poll so the user knows the VM is unusable.
-      sudo -u azureuser /home/azureuser/elastic-blast-azure/venv/bin/pip install \
-        --no-build-isolation --no-deps \
-        /home/azureuser/elastic-blast-azure
+      # `--use-pep517` which fails inside the same isolated env.
+      elb-retry 5 15 -- sudo -u azureuser $PIP install --no-build-isolation --no-deps \
+        /home/azureuser/elastic-blast-azure \
+        || { echo "ELB-FATAL: elastic_blast install failed"; exit 1; }
     fi
   # Persist env for interactive shells
   - |
     grep -q 'elb-env.sh' /home/azureuser/.bashrc || echo 'source /etc/profile.d/elb-env.sh' >> /home/azureuser/.bashrc
-  # Mark cloud-init as ready for the orchestrator to detect
+  # Final readiness check — every required tool must be present BEFORE the
+  # orchestrator marks the VM ready. If any tool is missing we deliberately
+  # do NOT touch the .done sentinel so the cloud-init poll keeps failing and
+  # the user sees a clear bootstrap failure instead of a silently broken VM.
   - |
+    fail=0
+    for tool in az kubectl azcopy git python3.11; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "ELB-FATAL: required tool '$tool' missing after bootstrap" >&2
+        fail=1
+      fi
+    done
+    if [ ! -x /home/azureuser/elastic-blast-azure/venv/bin/python ]; then
+      echo "ELB-FATAL: venv python missing" >&2
+      fail=1
+    fi
+    if ! /home/azureuser/elastic-blast-azure/venv/bin/python -c 'from importlib import metadata; metadata.version("elastic_blast")' 2>/dev/null; then
+      echo "ELB-FATAL: elastic_blast package metadata missing" >&2
+      fail=1
+    fi
+    if [ "$fail" = "1" ]; then
+      exit 1
+    fi
     touch /var/lib/cloud/elb-bootstrap.done
