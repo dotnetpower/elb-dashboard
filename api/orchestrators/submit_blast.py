@@ -27,6 +27,8 @@ STATUS_POLL_MAX_ATTEMPTS = 720  # 720 * 30s = 6 hours max
 RESULTS_VERIFY_INTERVAL_SECONDS = 15
 RESULTS_VERIFY_MAX_ATTEMPTS = 8  # 8 * 15s = 2 min max waiting for .out files
 STORAGE_PROPAGATION_SECONDS = 10  # VNet rules require ~10-30s propagation after defaultAction toggle
+WARMUP_POLL_INTERVAL_SECONDS = 30  # poll background `elastic-blast prepare` every 30s
+WARMUP_POLL_MAX_ATTEMPTS = 120  # 120 * 30s = 60 min ceiling for prepare
 
 
 def submit_blast_orchestrator(
@@ -164,14 +166,29 @@ def submit_blast_orchestrator(
 
                 steps["warming_up"] = {"started_at": _ts()}
                 context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
-                prepare_result = yield context.call_activity("run_elastic_blast_prepare_activity", request)
-                prepare_output = prepare_result.get("output", "")
+                # Fire-and-poll: prepare runs detached on the VM. Activity
+                # returns within seconds; orchestrator polls the marker file.
+                yield context.call_activity("run_elastic_blast_prepare_activity", request)
+                prepare_status = "running"
+                prepare_output = ""
+                for attempt in range(WARMUP_POLL_MAX_ATTEMPTS):
+                    next_check = context.current_utc_datetime + timedelta(seconds=WARMUP_POLL_INTERVAL_SECONDS)
+                    yield context.create_timer(next_check)
+                    check = yield context.call_activity("check_elastic_blast_prepare_activity", request)
+                    prepare_status = check.get("status", "running")
+                    prepare_output = check.get("output", "")
+                    steps["warming_up"]["poll_attempt"] = attempt + 1
+                    steps["warming_up"]["output"] = prepare_output[:4000]
+                    context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
+                    if prepare_status in ("succeeded", "failed", "lost"):
+                        break
                 steps["warming_up"].update({
-                    "success": prepare_result.get("success"),
+                    "success": prepare_status == "succeeded",
+                    "status": prepare_status,
                     "output": prepare_output[:4000],
                     "completed_at": _ts(),
                 })
-                if not prepare_result.get("success"):
+                if prepare_status != "succeeded":
                     context.set_custom_status({"phase": "warmup_failed", "job_id": job_id, "steps": steps})
                     yield context.call_activity("set_storage_public_access_activity", disable_payload)
                     context.signal_entity(entity_id, "update_job",
@@ -185,14 +202,27 @@ def submit_blast_orchestrator(
             # No AKS cluster name — fall back to always warmup
             steps["warming_up"] = {"started_at": _ts()}
             context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
-            prepare_result = yield context.call_activity("run_elastic_blast_prepare_activity", request)
-            prepare_output = prepare_result.get("output", "")
+            yield context.call_activity("run_elastic_blast_prepare_activity", request)
+            prepare_status = "running"
+            prepare_output = ""
+            for attempt in range(WARMUP_POLL_MAX_ATTEMPTS):
+                next_check = context.current_utc_datetime + timedelta(seconds=WARMUP_POLL_INTERVAL_SECONDS)
+                yield context.create_timer(next_check)
+                check = yield context.call_activity("check_elastic_blast_prepare_activity", request)
+                prepare_status = check.get("status", "running")
+                prepare_output = check.get("output", "")
+                steps["warming_up"]["poll_attempt"] = attempt + 1
+                steps["warming_up"]["output"] = prepare_output[:4000]
+                context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
+                if prepare_status in ("succeeded", "failed", "lost"):
+                    break
             steps["warming_up"].update({
-                "success": prepare_result.get("success"),
+                "success": prepare_status == "succeeded",
+                "status": prepare_status,
                 "output": prepare_output[:4000],
                 "completed_at": _ts(),
             })
-            if not prepare_result.get("success"):
+            if prepare_status != "succeeded":
                 context.set_custom_status({"phase": "warmup_failed", "job_id": job_id, "steps": steps})
                 yield context.call_activity("set_storage_public_access_activity", disable_payload)
                 context.signal_entity(entity_id, "update_job",

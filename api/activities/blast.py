@@ -210,11 +210,22 @@ def _parse_exit_code(output: str) -> int:
 
 
 def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any]:
-    """side-effect: runs elastic-blast prepare on the Remote Terminal VM.
+    """side-effect: starts elastic-blast prepare on the Remote Terminal VM (background).
 
-    Prepares the AKS cluster with DB shards for warm execution.
-    This creates the cluster, downloads DB shards to local SSDs, but does NOT
-    run BLAST jobs. Use submit with reuse=true afterwards.
+    Prepares the AKS cluster with DB shards for warm execution. This creates
+    the cluster, downloads DB shards to local SSDs, but does NOT run BLAST
+    jobs. Use submit with reuse=true afterwards.
+
+    The actual `elastic-blast prepare` can take 10–30 minutes for large DBs,
+    well beyond the Consumption-plan activity timeout (5 min hard cap on Y1).
+    To stay within the timeout we **launch the prepare as a detached nohup
+    process** on the VM and return immediately. The orchestrator then polls
+    `activity_check_elastic_blast_prepare` (cheap, sub-30s) until a marker
+    file (`/tmp/elb-<job_id>.done`) appears.
+
+    Returns:
+      {"started": True, "marker_path": "/tmp/elb-<job_id>.done",
+       "log_path": "/tmp/elb-<job_id>.log", "pid_path": "/tmp/elb-<job_id>.pid"}
     """
     cred = credential_for_caller(payload.get("user_assertion"))
     job_id = _validate_job_id(payload["job_id"])
@@ -226,26 +237,52 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
     import base64
     config_b64 = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
 
-    # Single Run Command: write config + run prepare (saves ~30-60s overhead)
-    # ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1 ensures prepare doesn't
-    # set up the submit-jobs K8s pod path (consistent with submit activity).
+    marker = f"/tmp/elb-{job_id}.done"
+    log_path = f"/tmp/elb-{job_id}.log"
+    pid_path = f"/tmp/elb-{job_id}.pid"
+    cfg_path = f"/tmp/elb-{job_id}.ini"
+
+    # Fire-and-forget: write config, then launch prepare under nohup. The
+    # outer `setsid` detaches from the SSH session; `&> log` captures both
+    # streams. We write the marker file with the exit status so the poller
+    # can detect both completion and error path.
     combined_script = (
         f"#!/bin/bash\n"
         f"set -o pipefail\n"
-        f"printf '%s' '{config_b64}' | base64 -d > /tmp/elb-{job_id}.ini\n"
-        f"chmod 644 /tmp/elb-{job_id}.ini\n"
-        f"chown azureuser:azureuser /tmp/elb-{job_id}.ini\n"
-        f"chown -R azureuser:azureuser /home/azureuser/.azcopy /home/azureuser/.azure 2>/dev/null\n"
-        f"sudo -u azureuser bash -c '"
-        f"set -o pipefail && "
-        f"export HOME=/home/azureuser && "
-        f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
-        f"export ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1 && "
-        f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
-        f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
-        f"source venv/bin/activate && "
-        f"python bin/elastic-blast prepare --cfg /tmp/elb-{job_id}.ini 2>&1 | tail -80; "
-        f"echo EXIT_CODE=$?'"
+        f"printf '%s' '{config_b64}' | base64 -d > {cfg_path}\n"
+        f"chmod 644 {cfg_path}\n"
+        f"chown azureuser:azureuser {cfg_path}\n"
+        f"chown -R azureuser:azureuser /home/azureuser/.azcopy /home/azureuser/.azure 2>/dev/null || true\n"
+        f"# Skip if already running for this job\n"
+        f"if [ -f {pid_path} ] && kill -0 \"$(cat {pid_path})\" 2>/dev/null; then\n"
+        f"  echo ALREADY_RUNNING pid=$(cat {pid_path})\n"
+        f"  exit 0\n"
+        f"fi\n"
+        f"# Launch prepare detached. The runner script writes its own PID and\n"
+        f"# the marker on completion (with EXIT_CODE=N inside the marker).\n"
+        f"sudo -u azureuser bash -c 'cat > /tmp/elb-{job_id}.runner.sh' <<'RUNNER'\n"
+        f"#!/bin/bash\n"
+        f"set -o pipefail\n"
+        f"echo $$ > {pid_path}\n"
+        f"export HOME=/home/azureuser\n"
+        f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI\n"
+        f"export ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1\n"
+        f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi\n"
+        f"cd /home/azureuser/elastic-blast-azure\n"
+        f"export PYTHONPATH=src:$PYTHONPATH\n"
+        f"source venv/bin/activate\n"
+        f"python bin/elastic-blast prepare --cfg {cfg_path} 2>&1\n"
+        f"RC=$?\n"
+        f"echo EXIT_CODE=$RC\n"
+        f"echo EXIT_CODE=$RC > {marker}\n"
+        f"exit $RC\n"
+        f"RUNNER\n"
+        f"chmod +x /tmp/elb-{job_id}.runner.sh\n"
+        f"chown azureuser:azureuser /tmp/elb-{job_id}.runner.sh\n"
+        f"# Detach: setsid + nohup + close fds. Output goes to {log_path}.\n"
+        f"sudo -u azureuser bash -c 'rm -f {marker}; setsid nohup /tmp/elb-{job_id}.runner.sh </dev/null > {log_path} 2>&1 & echo START_PID=$!'\n"
+        f"sleep 1\n"
+        f"echo LAUNCHED job={job_id} marker={marker} log={log_path}\n"
     )
     ssh_pw = _get_vm_ssh_password(cred, payload)
     output = compute_svc.run_shell(
@@ -256,21 +293,83 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
         combined_script,
         ssh_password=ssh_pw,
     )
-    sanitised = sanitise(output)[:2000]
-    LOGGER.info("elastic-blast prepare output: %s", sanitised[:500])
-
-    exit_code = _parse_exit_code(output)
-    # Also detect ERROR lines in output (exit code from piped commands may be 0)
-    has_error = any(
-        line.strip().startswith("ERROR:") for line in output.split("\n")
-        if line.strip().startswith("ERROR:")
-    )
-    success = exit_code == 0 and not has_error
+    sanitised = sanitise(output)[:1000]
+    LOGGER.info("elastic-blast prepare launched: %s", sanitised[:500])
     return {
+        "started": True,
         "output": sanitised,
-        "success": success,
-        "job_id": job_id,
+        "marker_path": marker,
+        "log_path": log_path,
+        "pid_path": pid_path,
     }
+
+
+def activity_check_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: read-only check whether the background prepare has finished.
+
+    Polled by the orchestrator. Returns one of:
+      {"status": "running"}                      — pid alive, no marker yet
+      {"status": "succeeded", "output": "..."}    — marker says EXIT_CODE=0
+      {"status": "failed", "output": "...",
+       "exit_code": N}                           — marker says EXIT_CODE!=0
+      {"status": "lost"}                          — pid dead and no marker
+                                                    (worker crashed before
+                                                    writing exit code)
+    """
+    cred = credential_for_caller(payload.get("user_assertion"))
+    job_id = _validate_job_id(payload["job_id"])
+
+    marker = f"/tmp/elb-{job_id}.done"
+    log_path = f"/tmp/elb-{job_id}.log"
+    pid_path = f"/tmp/elb-{job_id}.pid"
+
+    # Cheap probe: check marker first, fall back to pid liveness, then read
+    # last 80 lines of the log for the orchestrator's UI surface.
+    probe = (
+        f"#!/bin/bash\n"
+        f"if [ -f {marker} ]; then\n"
+        f"  echo MARKER\n"
+        f"  cat {marker}\n"
+        f"  echo ---LOG---\n"
+        f"  tail -100 {log_path} 2>/dev/null || true\n"
+        f"  exit 0\n"
+        f"fi\n"
+        f"if [ -f {pid_path} ] && kill -0 \"$(cat {pid_path})\" 2>/dev/null; then\n"
+        f"  echo RUNNING pid=$(cat {pid_path})\n"
+        f"  echo ---LOG---\n"
+        f"  tail -40 {log_path} 2>/dev/null || true\n"
+        f"  exit 0\n"
+        f"fi\n"
+        f"echo LOST\n"
+        f"echo ---LOG---\n"
+        f"tail -100 {log_path} 2>/dev/null || true\n"
+    )
+    ssh_pw = _get_vm_ssh_password(cred, payload)
+    output = compute_svc.run_shell(
+        cred,
+        payload["subscription_id"],
+        payload["terminal_resource_group"],
+        payload["terminal_vm_name"],
+        probe,
+        ssh_password=ssh_pw,
+    )
+    head = output.splitlines()[0].strip() if output else ""
+    sanitised = sanitise(output)[:4000]
+    if head == "MARKER":
+        # Look for EXIT_CODE=N in the marker section
+        exit_code = _parse_exit_code(output)
+        # Also detect ERROR lines in the log section
+        log_section = output.split("---LOG---", 1)[1] if "---LOG---" in output else ""
+        has_error = any(
+            line.strip().startswith("ERROR:") for line in log_section.split("\n")
+            if line.strip().startswith("ERROR:")
+        )
+        if exit_code == 0 and not has_error:
+            return {"status": "succeeded", "output": sanitised, "exit_code": 0}
+        return {"status": "failed", "output": sanitised, "exit_code": exit_code}
+    if head.startswith("RUNNING"):
+        return {"status": "running", "output": sanitised}
+    return {"status": "lost", "output": sanitised}
 
 
 def activity_run_elastic_blast_delete(payload: dict[str, Any]) -> dict[str, Any]:
