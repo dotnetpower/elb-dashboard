@@ -5,7 +5,7 @@ import {
   Download, ArrowLeft, RefreshCw, Copy, Check, CheckCircle2, Loader2,
   Server, HardDrive, Upload, Settings, Send, Dna, Package, Trophy,
   Clock, XCircle, FileText, AlertTriangle, Unlock, FolderOpen,
-  ChevronRight, ChevronDown, StopCircle,
+  ChevronRight, ChevronDown, StopCircle, BarChart3,
 } from "lucide-react";
 
 import { blastApi, type BlastResultFile } from "@/api/endpoints";
@@ -1004,24 +1004,55 @@ export function BlastResults() {
 
         {/* Summary metric cards for completed jobs */}
         {job && phase === "completed" && !effectiveIsFailed && files.length > 0 && (
-          <div className="metric-grid" style={{ marginTop: "var(--space-3)" }}>
-            <div className="metric-block">
-              <div className="mv">{files.length}</div>
-              <div className="mu">Result files</div>
-            </div>
-            <div className="metric-block">
-              <div className="mv">{formatBytes(files.reduce((sum, f) => sum + (f.size || 0), 0))}</div>
-              <div className="mu">Total size</div>
-            </div>
-            <div className="metric-block">
-              <div className="mv" style={{ color: completedButFailed ? "var(--danger)" : "var(--success)" }}>
-                {completedButFailed
-                  ? <><XCircle size={18} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />failed</>
-                  : <><CheckCircle2 size={18} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />{phase}</>}
+          <>
+            <div className="metric-grid" style={{ marginTop: "var(--space-3)" }}>
+              <div className="metric-block">
+                <div className="mv">{files.length}</div>
+                <div className="mu">Result files</div>
+              </div>
+              <div className="metric-block">
+                <div className="mv">{formatBytes(files.reduce((sum, f) => sum + (f.size || 0), 0))}</div>
+                <div className="mu">Total size</div>
+              </div>
+              <div className="metric-block">
+                <div className="mv" style={{ color: completedButFailed ? "var(--danger)" : "var(--success)" }}>
+                  {completedButFailed
+                    ? <><XCircle size={18} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />failed</>
+                    : <><CheckCircle2 size={18} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />{phase}</>}
               </div>
               <div className="mu">Status</div>
             </div>
           </div>
+          <div style={{ marginTop: "var(--space-3)", display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Link
+              to={`/blast/jobs/${jobId}/analytics`}
+              className="btn btn--primary btn--sm"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            >
+              <BarChart3 size={14} strokeWidth={1.5} /> View Analytics &amp; Alignments
+            </Link>
+            {subscriptionId && storageAccount && (
+              <>
+                <a
+                  href={`${import.meta.env.VITE_API_BASE_URL ?? ""}/blast/jobs/${encodeURIComponent(jobId!)}/results/export?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&format=csv`}
+                  className="btn btn--ghost btn--sm"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                  target="_blank" rel="noreferrer"
+                >
+                  <Download size={12} /> CSV
+                </a>
+                <a
+                  href={`${import.meta.env.VITE_API_BASE_URL ?? ""}/blast/jobs/${encodeURIComponent(jobId!)}/results/export?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&format=json`}
+                  className="btn btn--ghost btn--sm"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                  target="_blank" rel="noreferrer"
+                >
+                  <Download size={12} /> JSON
+                </a>
+              </>
+            )}
+          </div>
+          </>
         )}
 
         {job?.error && phase !== "failed" && phase !== "error" && (

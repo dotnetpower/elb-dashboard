@@ -343,8 +343,25 @@ export function BlastSubmit() {
     });
   };
 
+  // Hard guard: if we have a successful database listing AND the user-typed
+  // db path doesn't match any returned database, the submission will fail at
+  // the warmup step (`elastic-blast prepare` returns ERROR + EXIT_CODE=2).
+  // Block submission proactively so the user gets a clear blocker instead of
+  // wasting a 5-10min provision cycle.
+  // Match by the final path segment (the BLAST db basename) — `includes`
+  // on the full path would false-positive when one db name is a substring
+  // of another (e.g. "nt" vs "core_nt").
+  const knownDbs = dbQuery.data?.databases ?? [];
+  const dbListResolved = dbQuery.isSuccess && knownDbs.length > 0;
+  const dbBaseName = form.db ? form.db.split("/").filter(Boolean).pop() ?? "" : "";
+  const dbMissingFromStorage =
+    Boolean(form.db) &&
+    dbListResolved &&
+    !knownDbs.some((d) => d.name === dbBaseName);
+
   const canSubmit = subId && workloadRg && form.program && form.db && form.query_data
     && storageAccount && selectedCluster && selectedCluster.power_state === "Running"
+    && !dbMissingFromStorage
     && !submitMutation.isPending;
 
   const missing: { text: string; link?: string }[] = [];
@@ -352,6 +369,10 @@ export function BlastSubmit() {
   if (!form.query_data) missing.push({ text: "Query sequence" });
   else if (!form.query_data.trim().startsWith(">")) missing.push({ text: "Query must be in FASTA format (start with '>')" });
   if (!form.db) missing.push({ text: "Database" });
+  else if (dbMissingFromStorage) missing.push({
+    text: `Database '${form.db.split("/").pop()}' is not in storage — download it from the Dashboard first`,
+    link: "/",
+  });
   if (!storageAccount) missing.push({ text: "Storage account", link: "/" });
   if (!selectedCluster) missing.push({ text: "AKS cluster — create one on the Dashboard", link: "/" });
   else if (selectedCluster.power_state !== "Running") missing.push({ text: "AKS cluster must be running" });
@@ -541,7 +562,11 @@ export function BlastSubmit() {
                 {dbQuery.data.databases.map((d) => {
                   const info = DB_DESCRIPTIONS[d.name];
                   const label = info ? `${info.label} (${d.name}) — ${info.size}` : d.name;
-                  return <option key={d.name} value={`${d.container}/${d.name}`}>{label}</option>;
+                  // Upstream `elastic-blast` (azure-prereq.md §9.2) expects the
+                  // canonical Azure URL form `<container>/<db_name>/<db_name>`,
+                  // i.e. the basename is duplicated. The download path mirrors
+                  // it: files live in `blast-db/<db_name>/<files>`.
+                  return <option key={d.name} value={`${d.container}/${d.name}/${d.name}`}>{label}</option>;
                 })}
               </select>
               {/* Quick-pick chips */}

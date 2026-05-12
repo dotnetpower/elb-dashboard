@@ -9,6 +9,9 @@ import { RemoteTerminal } from "@/pages/RemoteTerminal";
 import { BlastSubmit } from "@/pages/BlastSubmit";
 import { BlastJobs } from "@/pages/BlastJobs";
 import { BlastResults } from "@/pages/BlastResults";
+import { BlastAnalytics } from "@/pages/BlastAnalytics";
+import { DatabaseBuilder } from "@/pages/DatabaseBuilder";
+import { ToolsPage } from "@/pages/ToolsPage";
 import { ApiReference } from "@/pages/ApiReference";
 
 const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
@@ -24,6 +27,9 @@ function AppRoutes() {
           <Route path="/blast/submit" element={<BlastSubmit />} />
           <Route path="/blast/jobs" element={<BlastJobs />} />
           <Route path="/blast/jobs/:jobId" element={<BlastResults />} />
+          <Route path="/blast/jobs/:jobId/analytics" element={<BlastAnalytics />} />
+          <Route path="/blast/databases/build" element={<DatabaseBuilder />} />
+          <Route path="/tools" element={<ToolsPage />} />
           <Route path="/docs" element={<ApiReference />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
