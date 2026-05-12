@@ -1,12 +1,17 @@
-"""Helpers for instantiating Azure SDK management clients with a caller credential.
+"""Helpers for instantiating Azure SDK management clients with a credential.
 
-Orchestrator activities pass the caller's bearer token in via input; this
-module creates an OBO credential and the typed mgmt clients on demand. We
-deliberately do not cache clients per-process because each invocation may
-target a different subscription / caller.
+All Azure operations use the Function App's Managed Identity. The user's
+identity is verified via JWT (token.py) for authorization, but the MI
+performs the actual ARM/storage/ACR calls. This avoids OBO consent issues
+and removes the need for API_CLIENT_SECRET.
+
+For local development with AUTH_DEV_BYPASS=true, DefaultAzureCredential
+picks up the developer's local `az login` session.
 """
 
 from __future__ import annotations
+
+import logging
 
 from azure.core.credentials import TokenCredential
 from azure.identity import DefaultAzureCredential
@@ -19,21 +24,28 @@ from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.storage import StorageManagementClient
 
-from auth.obo import caller_credential
-from auth.token import DEV_BYPASS_TOKEN
+LOGGER = logging.getLogger(__name__)
+
+# Singleton MI credential — reused across all calls (safe, thread-safe)
+_MI_CREDENTIAL: DefaultAzureCredential | None = None
 
 
-def credential_for_caller(user_assertion: str | None) -> TokenCredential:
-    """Return a TokenCredential for the caller.
+def _get_mi_credential() -> DefaultAzureCredential:
+    """Return a cached DefaultAzureCredential (Managed Identity in Azure, az login locally)."""
+    global _MI_CREDENTIAL
+    if _MI_CREDENTIAL is None:
+        _MI_CREDENTIAL = DefaultAzureCredential(exclude_interactive_browser_credential=True)
+    return _MI_CREDENTIAL
 
-    When `user_assertion` is a real bearer token we use OBO so downstream
-    Azure calls run as the signed-in user. When AUTH_DEV_BYPASS is enabled
-    the activity sees a sentinel token and we transparently fall back to
-    DefaultAzureCredential (which picks up the developer's local az login).
+
+def credential_for_caller(user_assertion: str | None = None) -> TokenCredential:
+    """Return a TokenCredential for Azure operations.
+
+    Always uses Managed Identity (DefaultAzureCredential). The user_assertion
+    parameter is accepted for API compatibility but not used for OBO.
+    User authorization is handled by JWT validation in token.py.
     """
-    if user_assertion and user_assertion != DEV_BYPASS_TOKEN:
-        return caller_credential(user_assertion)
-    return DefaultAzureCredential(exclude_interactive_browser_credential=True)
+    return _get_mi_credential()
 
 
 # Alias for activities that receive assertion from orchestrator input
