@@ -32,10 +32,33 @@ def _credential(user_assertion: str | None):
     return credential_for_caller(user_assertion)
 
 
+def _default_vault_name(subscription_id: str, resource_group: str, vm_name: str) -> str:
+    """Compute a globally-unique Key Vault name.
+
+    Key Vault names are unique across the entire Azure cloud, so deriving
+    it from the VM name alone collides as soon as two resource groups try
+    to provision a terminal with the default name. Suffix with a short
+    stable hash of the (sub, RG, VM) tuple. Vault names must be 3..24
+    chars, lowercase alphanumeric or '-'.
+    """
+    import hashlib
+    import re
+
+    base = re.sub(r"[^a-z0-9-]", "-", vm_name.lower()).strip("-") or "vm"
+    digest = hashlib.sha256(
+        f"{subscription_id}|{resource_group}|{vm_name}".lower().encode("utf-8")
+    ).hexdigest()[:6]
+    # Reserve 4 chars for "kv-" prefix and "-" between base and hash.
+    # Total budget = 24, hash = 6, prefix = 3, separator = 1 → base ≤ 14.
+    return f"kv-{base[:14].rstrip('-')}-{digest}"[:24]
+
+
 def activity_ensure_keyvault(payload: dict[str, Any]) -> dict[str, Any]:
     """side-effect: creates Key Vault if missing. Returns vault URI."""
     cred = _credential(payload.get("user_assertion"))
-    vault_name = payload.get("vault_name") or f"kv-elb-{payload['vm_name'][-8:]}"
+    vault_name = payload.get("vault_name") or _default_vault_name(
+        payload["subscription_id"], payload["resource_group"], payload["vm_name"]
+    )
     vault_uri = kv_svc.ensure_keyvault(
         cred,
         payload["subscription_id"],

@@ -229,7 +229,7 @@ export const monitoringApi = {
       `/monitor/aks/service-ip?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&service_name=${encodeURIComponent(serviceName)}`,
     ),
   prepareBlastDb: (subscriptionId: string, storageRg: string, accountName: string, dbName: string) =>
-    api.post<{ ok: boolean; db_name: string; files_copied?: number; files_already_copying?: number; source_version?: string; output: string }>(
+    api.post<{ ok: boolean; db_name: string; files_copied?: number; files_already_copying?: number; files_total?: number; source_version?: string; output: string; async?: boolean }>(
       "/storage/prepare-db",
       { subscription_id: subscriptionId, storage_resource_group: storageRg, account_name: accountName, db_name: dbName },
     ),

@@ -14,21 +14,73 @@ const HNS_DISMISSED_KEY = "elb-hns-warning-dismissed";
 // DB catalog with approximate sizes
 // ---------------------------------------------------------------------------
 const DB_CATALOG = [
-  { value: "16S_ribosomal_RNA", label: "16S ribosomal RNA", desc: "Prokaryotic small subunit rRNA — ideal for microbial ID and metagenomics.", size: "~18 MB", category: "Small / Test", type: "nucl" as const },
-  { value: "18S_fungal_sequences", label: "18S fungal sequences", desc: "Fungal small subunit rRNA for fungal taxonomy.", size: "~3 MB", category: "Small / Test", type: "nucl" as const },
-  { value: "ITS_RefSeq_Fungi", label: "ITS RefSeq Fungi", desc: "Internal Transcribed Spacer regions for fungal species-level ID.", size: "~8 MB", category: "Small / Test", type: "nucl" as const },
-  { value: "pdbnt", label: "PDB nucleotide", desc: "Nucleotide sequences from the Protein Data Bank (3D structures).", size: "~200 MB", category: "Medium", type: "nucl" as const },
-  { value: "swissprot", label: "SwissProt", desc: "Curated, high-quality protein sequences from UniProt/Swiss-Prot.", size: "~300 MB", category: "Medium", type: "prot" as const },
-  { value: "core_nt", label: "Core nucleotide", desc: "Curated subset of nt — major organisms, smaller and faster than full nt.", size: "~250 GB", category: "Large", type: "nucl" as const },
-  { value: "nt", label: "Nucleotide collection", desc: "All GenBank + RefSeq nucleotide sequences. Comprehensive but very large.", size: "~400 GB", category: "Large", type: "nucl" as const },
-  { value: "nr", label: "Non-redundant protein", desc: "All non-redundant GenBank protein translations + RefSeq + PDB + SwissProt.", size: "~300 GB", category: "Large", type: "prot" as const },
-  { value: "refseq_protein", label: "RefSeq protein", desc: "NCBI Reference Sequence protein database — curated and non-redundant.", size: "~100 GB", category: "Large", type: "prot" as const },
+  { value: "16S_ribosomal_RNA", label: "16S ribosomal RNA", desc: "Prokaryotic small subunit rRNA — ideal for microbial ID and metagenomics.", size: "~18 MB", estFiles: 12, estMinutes: "< 1 min", category: "Small / Test", type: "nucl" as const },
+  { value: "18S_fungal_sequences", label: "18S fungal sequences", desc: "Fungal small subunit rRNA for fungal taxonomy.", size: "~3 MB", estFiles: 10, estMinutes: "< 1 min", category: "Small / Test", type: "nucl" as const },
+  { value: "ITS_RefSeq_Fungi", label: "ITS RefSeq Fungi", desc: "Internal Transcribed Spacer regions for fungal species-level ID.", size: "~8 MB", estFiles: 10, estMinutes: "< 1 min", category: "Small / Test", type: "nucl" as const },
+  { value: "pdbnt", label: "PDB nucleotide", desc: "Nucleotide sequences from the Protein Data Bank (3D structures).", size: "~200 MB", estFiles: 15, estMinutes: "~2 min", category: "Medium", type: "nucl" as const },
+  { value: "swissprot", label: "SwissProt", desc: "Curated, high-quality protein sequences from UniProt/Swiss-Prot.", size: "~300 MB", estFiles: 15, estMinutes: "~3 min", category: "Medium", type: "prot" as const },
+  { value: "core_nt", label: "Core nucleotide", desc: "Curated subset of nt — major organisms, smaller and faster than full nt.", size: "~250 GB", estFiles: 600, estMinutes: "~2-4 hours", category: "Large", type: "nucl" as const },
+  { value: "nt", label: "Nucleotide collection", desc: "All GenBank + RefSeq nucleotide sequences. Comprehensive but very large.", size: "~400 GB", estFiles: 900, estMinutes: "~4-8 hours", category: "Large", type: "nucl" as const },
+  { value: "nr", label: "Non-redundant protein", desc: "All non-redundant GenBank protein translations + RefSeq + PDB + SwissProt.", size: "~300 GB", estFiles: 700, estMinutes: "~3-6 hours", category: "Large", type: "prot" as const },
+  { value: "refseq_protein", label: "RefSeq protein", desc: "NCBI Reference Sequence protein database — curated and non-redundant.", size: "~100 GB", estFiles: 300, estMinutes: "~1-3 hours", category: "Large", type: "prot" as const },
 ];
 
 interface Props {
   subscriptionId: string;
   resourceGroup: string;
   accountName: string;
+}
+
+// Convert NCBI version dir like "2026-05-09-01-05-02" → "2026-05-09 01:05:02"
+function formatNcbiVersionShared(v: string | null | undefined): string {
+  if (!v) return "";
+  const m = v.match(/^(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})$/);
+  if (!m) return v;
+  return `${m[1]} ${m[2]}:${m[3]}:${m[4]}`;
+}
+
+// Toast banner shown at top of DB popup — fades out after 3s
+function DownloadResultBanner({ result, onDismiss }: {
+  result: { db: string; msg: string; version?: string; type: "ok" | "err" };
+  onDismiss: () => void;
+}) {
+  const [fading, setFading] = useState(false);
+
+  useEffect(() => {
+    if (result.type === "err") return; // Errors don't auto-dismiss
+    const fadeTimer = setTimeout(() => setFading(true), 3000);
+    const removeTimer = setTimeout(onDismiss, 3500);
+    return () => { clearTimeout(fadeTimer); clearTimeout(removeTimer); };
+  }, [result, onDismiss]);
+
+  return (
+    <div style={{
+      marginBottom: "var(--space-3)", padding: "8px 12px", borderRadius: 8, fontSize: 12,
+      background: result.type === "ok" ? "rgba(115,191,105,0.08)" : "rgba(242,114,111,0.08)",
+      border: `1px solid ${result.type === "ok" ? "rgba(115,191,105,0.25)" : "rgba(242,114,111,0.25)"}`,
+      color: result.type === "ok" ? "var(--success)" : "var(--danger)",
+      display: "flex", alignItems: "center", gap: 8,
+      opacity: fading ? 0 : 1, transition: "opacity 0.5s ease-out",
+    }}>
+      {result.type === "ok"
+        ? <CheckCircle2 size={14} style={{ flexShrink: 0 }} />
+        : <AlertTriangle size={14} style={{ flexShrink: 0 }} />}
+      <div style={{ flex: 1 }}>
+        <strong>{result.db}</strong>: {result.msg}
+        {result.version && (
+          <span style={{ marginLeft: 8, fontSize: 10, color: "var(--text-faint)", fontWeight: 400 }}>
+            Version: {formatNcbiVersionShared(result.version)}
+          </span>
+        )}
+      </div>
+      <button
+        onClick={onDismiss}
+        style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 2, opacity: 0.6 }}
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
 }
 
 export function StorageCard({ subscriptionId, resourceGroup, accountName }: Props) {
@@ -72,7 +124,8 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
     return () => clearTimeout(t);
   }, [toggleMsg]);
 
-  // --- Prepare DB (state moved to BlastDbSection) ---
+  // --- Prepare DB (state moved to BlastDbSection, but we track 'downloading' here for shimmer) ---
+  const [dbDownloading, setDbDownloading] = useState<string | null>(null);
 
   const status = !enabled ? "idle" : query.isLoading ? "loading" : query.isError ? "error" : "ok";
   const publicAccess = query.data?.public_network_access ?? null;
@@ -92,7 +145,7 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
       title="Storage Account"
       subtitle={enabled ? `${accountName} · ${resourceGroup}` : "Configure account name"}
       status={status}
-      fetching={query.isFetching}
+      fetching={query.isFetching || dbDownloading !== null}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
       refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
       refreshInterval={30_000}
@@ -233,6 +286,7 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
             subscriptionId={subscriptionId}
             resourceGroup={resourceGroup}
             accountName={accountName}
+            onDownloadingChange={setDbDownloading}
           />
         </>
       )}
@@ -247,13 +301,25 @@ function BlastDbSection({
   subscriptionId,
   resourceGroup,
   accountName,
+  onDownloadingChange,
 }: {
   subscriptionId: string;
   resourceGroup: string;
   accountName: string;
+  onDownloadingChange?: (db: string | null) => void;
 }) {
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadResult, setDownloadResult] = useState<{ db: string; msg: string; version?: string; type: "ok" | "err" } | null>(null);
+  // Track in-progress downloads (after API returns, polling continues): { dbName -> { expectedFiles, startTime, version } }
+  const [inProgress, setInProgress] = useState<Map<string, { expectedFiles: number; startTime: number; sourceVersion?: string }>>(new Map());
+  // Track locally-completed downloads (survive until refetch succeeds)
+  const [locallyDownloaded, setLocallyDownloaded] = useState<Map<string, { source_version?: string }>>(new Map());
+
+  // Notify parent when downloading state changes (active OR in-progress)
+  useEffect(() => {
+    const active = downloading || (inProgress.size > 0 ? [...inProgress.keys()][0] : null);
+    onDownloadingChange?.(active);
+  }, [downloading, inProgress, onDownloadingChange]);
   const [customDb, setCustomDb] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -298,6 +364,12 @@ function BlastDbSection({
   for (const d of (dbQuery.data?.databases ?? []) as { name: string; file_count?: number; total_bytes?: number; last_modified?: string; source_version?: string; downloaded_at?: string }[]) {
     downloadedDbs.set(d.name, d);
   }
+  // Merge locally-completed downloads (show as "Ready" even before refetch succeeds)
+  for (const [name, meta] of locallyDownloaded) {
+    if (!downloadedDbs.has(name)) {
+      downloadedDbs.set(name, { source_version: meta.source_version, downloaded_at: new Date().toISOString() });
+    }
+  }
 
   const updatesAvailable = latestVersion
     ? [...downloadedDbs.values()].filter(d => d.source_version && d.source_version !== latestVersion).length
@@ -311,16 +383,50 @@ function BlastDbSection({
     return () => clearInterval(t);
   }, [downloading]);
 
+  // Poll database list while there are in-progress downloads (every 10s)
+  useEffect(() => {
+    if (inProgress.size === 0) return;
+    const t = setInterval(() => dbQuery.refetch(), 10_000);
+    return () => clearInterval(t);
+  }, [inProgress.size, dbQuery]);
+
+  // Mark downloads as complete when actual file count reaches expected
+  useEffect(() => {
+    if (inProgress.size === 0) return;
+    setInProgress(prev => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const [name, info] of prev) {
+        const actual = downloadedDbs.get(name);
+        if (actual?.file_count && actual.file_count >= info.expectedFiles * 0.9) {
+          // 90% threshold for "complete" (some files may be in pending state)
+          next.delete(name);
+          changed = true;
+          setLocallyDownloaded(p => new Map(p).set(name, { source_version: info.sourceVersion }));
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [downloadedDbs, inProgress]);
+
   const handleDownload = async (dbName: string) => {
     setDownloading(dbName);
     setDownloadResult(null);
+    const startTime = Date.now();
     try {
       const resp = await monitoringApi.prepareBlastDb(subscriptionId, resourceGroup, accountName, dbName);
-      const copied = resp.files_copied ?? 0;
-      const skipped = resp.files_already_copying ?? 0;
+      const total = resp.files_total ?? (resp.files_copied ?? 0) + (resp.files_already_copying ?? 0);
+      // Track as in-progress (polling will mark as Ready when complete)
+      setInProgress(prev => {
+        const next = new Map(prev);
+        next.set(dbName, { expectedFiles: total, startTime, sourceVersion: resp.source_version });
+        return next;
+      });
       setDownloadResult({
         db: dbName,
-        msg: `${copied} files started${skipped ? `, ${skipped} already in progress` : ""}`,
+        msg: resp.async
+          ? `Started copying ${total} files in background. Status will update as files arrive.`
+          : `${resp.files_copied ?? 0} files started${resp.files_already_copying ? `, ${resp.files_already_copying} already in progress` : ""}`,
         version: resp.source_version,
         type: "ok",
       });
@@ -342,9 +448,15 @@ function BlastDbSection({
 
   const formatDate = (iso: string | null | undefined) => {
     if (!iso) return "";
-    try { return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }); }
-    catch { return ""; }
+    try {
+      const d = new Date(iso);
+      const pad = (n: number) => n.toString().padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    } catch { return ""; }
   };
+
+  // Convert NCBI version dir like "2026-05-09-01-05-02" → "2026-05-09 01:05:02"
+  const formatNcbiVersion = formatNcbiVersionShared;
 
   // Group catalog by category
   const categories = ["Small / Test", "Medium", "Large"] as const;
@@ -444,7 +556,7 @@ function BlastDbSection({
                 </span>
               )}
               {latestVersion && (
-                <span>NCBI latest: <code style={{ fontSize: 9 }}>{latestVersion}</code></span>
+                <span>NCBI latest: <code style={{ fontSize: 9 }}>{formatNcbiVersion(latestVersion)}</code></span>
               )}
               <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
                 <span className="gt gt-b" style={{ fontSize: 8 }}>N</span> = nucleotide
@@ -453,6 +565,10 @@ function BlastDbSection({
                 <span className="gt gt-p" style={{ fontSize: 8 }}>P</span> = protein
               </span>
             </div>
+            {/* Download result toast — shown at top, fades out after 5s */}
+            {downloadResult && (
+              <DownloadResultBanner result={downloadResult} onDismiss={() => setDownloadResult(null)} />
+            )}
             {/* Public access disabled warning */}
             {publicAccessDisabled && (
               <div style={{
@@ -480,9 +596,15 @@ function BlastDbSection({
                 {cat === "Large" && <span style={{ marginLeft: 6, fontSize: 8, color: "var(--warning)", textTransform: "none", letterSpacing: 0 }}>⚠ Large downloads may take hours</span>}
               </div>
               {dbs.map((db) => {
-                const isDownloaded = downloadedDbs.has(db.value);
+                const inProgressInfo = inProgress.get(db.value);
+                const isCopying = Boolean(inProgressInfo);
+                // While copying, don't show as downloaded — show progress
+                const isDownloaded = !isCopying && downloadedDbs.has(db.value);
                 const isDownloading = downloading === db.value;
                 const meta = downloadedDbs.get(db.value);
+                const copyProgress = inProgressInfo
+                  ? Math.min(100, Math.round(((meta?.file_count ?? 0) / inProgressInfo.expectedFiles) * 100))
+                  : 0;
                 return (
                   <div
                     key={db.value}
@@ -515,6 +637,44 @@ function BlastDbSection({
                         <code style={{ fontSize: 9, color: "var(--text-faint)", background: "var(--bg-tertiary)", padding: "1px 4px", borderRadius: 3 }}>{db.value}</code>
                       </div>
                       <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>{db.desc}</div>
+                      {/* Download estimate for not-yet-downloaded DBs */}
+                      {!isDownloaded && !isDownloading && (
+                        <div style={{ fontSize: 9, color: "var(--text-faint)", marginTop: 2 }}>
+                          Est. {db.estFiles} files · {db.estMinutes}
+                        </div>
+                      )}
+                      {/* Downloading progress */}
+                      {isDownloading && (
+                        <div style={{ fontSize: 10, color: "var(--accent)", marginTop: 2, display: "flex", alignItems: "center", gap: 6 }}>
+                          <span>Initiating copy...</span>
+                          <span style={{ fontFamily: "var(--font-mono)" }}>{elapsed}s</span>
+                        </div>
+                      )}
+                      {/* In-progress copy (after API returned) */}
+                      {isCopying && inProgressInfo && (
+                        <div style={{ marginTop: 4 }}>
+                          <div style={{ fontSize: 10, color: "var(--accent)", display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+                            <Loader2 size={10} className="spin" />
+                            <span>Copying {meta?.file_count ?? 0} / {inProgressInfo.expectedFiles} files</span>
+                            <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-faint)" }}>
+                              · {Math.floor((Date.now() - inProgressInfo.startTime) / 1000)}s
+                            </span>
+                            {db.estMinutes && (
+                              <span style={{ color: "var(--text-faint)", fontSize: 9 }}>
+                                · est. {db.estMinutes}
+                              </span>
+                            )}
+                          </div>
+                          {/* Progress bar */}
+                          <div style={{ height: 3, background: "var(--bg-tertiary)", borderRadius: 2, overflow: "hidden" }}>
+                            <div style={{
+                              width: `${copyProgress}%`, height: "100%",
+                              background: "var(--accent)", borderRadius: 2,
+                              transition: "width 0.5s ease",
+                            }} />
+                          </div>
+                        </div>
+                      )}
                       {/* Downloaded metadata: actual size, file count, date, version */}
                       {isDownloaded && meta && (
                         <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -523,7 +683,7 @@ function BlastDbSection({
                           {meta.last_modified ? <span>{formatDate(meta.last_modified)}</span> : null}
                           {meta.source_version && (
                             <code style={{ fontSize: 9, background: "var(--bg-tertiary)", padding: "1px 4px", borderRadius: 3 }}>
-                              v:{meta.source_version}
+                              v:{formatNcbiVersion(meta.source_version)}
                             </code>
                           )}
                           {meta.source_version && latestVersion && meta.source_version !== latestVersion && (
@@ -549,7 +709,7 @@ function BlastDbSection({
                                 }
                               }}
                               disabled={downloading !== null}
-                              title={`Update from ${meta.source_version} to ${latestVersion}`}
+                              title={`Update from ${formatNcbiVersion(meta.source_version)} to ${formatNcbiVersion(latestVersion)}`}
                             >
                               <Download size={10} /> Update
                             </button>
@@ -559,6 +719,10 @@ function BlastDbSection({
                         </>
                       ) : isDownloading ? (
                         <span style={{ fontSize: 10, color: "var(--accent)" }}>{elapsed}s</span>
+                      ) : isCopying ? (
+                        <span style={{ fontSize: 10, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
+                          <Loader2 size={10} className="spin" /> {copyProgress}%
+                        </span>
                       ) : (
                         <button
                           className="glass-button glass-button--primary"
@@ -657,22 +821,6 @@ function BlastDbSection({
       })()}
 
       {/* Download result message */}
-      {downloadResult && (
-        <div style={{
-          marginTop: "var(--space-2)", padding: "6px 10px", borderRadius: 6, fontSize: 11,
-          background: downloadResult.type === "ok" ? "rgba(115,191,105,0.06)" : "rgba(242,114,111,0.06)",
-          border: `1px solid ${downloadResult.type === "ok" ? "rgba(115,191,105,0.15)" : "rgba(242,114,111,0.15)"}`,
-          color: downloadResult.type === "ok" ? "var(--success)" : "var(--danger)",
-        }}>
-          {downloadResult.type === "ok" ? <CheckCircle2 size={11} style={{ verticalAlign: "middle", marginRight: 4 }} /> : <AlertTriangle size={11} style={{ verticalAlign: "middle", marginRight: 4 }} />}
-          <strong>{downloadResult.db}</strong>: {downloadResult.msg}
-          {downloadResult.version && (
-            <span style={{ marginLeft: 8, fontSize: 10, color: "var(--text-faint)" }}>
-              Version: {downloadResult.version}
-            </span>
-          )}
-        </div>
-      )}
 
       {/* Info footer */}
       <div className="muted" style={{ fontSize: 10, marginTop: "var(--space-2)" }}>

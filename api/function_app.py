@@ -521,6 +521,7 @@ def prepare_blast_db(req: func.HttpRequest) -> func.HttpResponse:
     # H7: Validate account_name
     if err := _validate_name(account_name, _RE_STORAGE_ACCOUNT, "account_name"):
         return _error_response(400, err)
+
     cred = credential_for_caller(identity.raw_token)
     try:
         from xml.etree import ElementTree
@@ -559,54 +560,101 @@ def prepare_blast_db(req: func.HttpRequest) -> func.HttpResponse:
         if not all_keys:
             return _error_response(404, f"No files found for database '{db_name}' in NCBI S3 (dir: {latest_dir})")
 
-        # 3. Copy each file to Azure Blob via start_copy_from_url (server-side)
-        #    Uses the caller's credential (needs Storage Blob Data Contributor on the account)
+        # 2.5 Enable public network access (required for start_copy_from_url from NCBI S3)
+        try:
+            from azure.mgmt.storage import StorageManagementClient
+            storage_mgmt = StorageManagementClient(cred, sub)
+            storage_mgmt.storage_accounts.update(
+                storage_rg, account_name,
+                {"properties": {"public_network_access": "Enabled"}},
+            )
+            LOGGER.info("Temporarily enabled public access on %s for DB download", account_name)
+            import time as _time
+            _time.sleep(10)  # wait for propagation
+        except Exception as toggle_exc:
+            LOGGER.warning("Could not enable public access (may already be enabled): %s", str(toggle_exc)[:100])
+
+        # 3. Background-start all copies. For large DBs (100s of files), this would
+        #    exceed the 4-min SWA proxy timeout if done synchronously. Spawn a thread
+        #    that fires all start_copy_from_url calls in parallel, returns immediately.
         from azure.storage.blob import BlobServiceClient
         blob_svc = BlobServiceClient(
             account_url=f"https://{account_name}.blob.core.windows.net",
             credential=cred,
         )
         container = blob_svc.get_container_client("blast-db")
-        copied = []
-        skipped = []
-        for key in all_keys:
-            source_url = f"{s3_base}/{key}"
-            blob_name = key.split("/")[-1]  # strip date prefix dir
-            blob_client = container.get_blob_client(blob_name)
+
+        def _do_copies():
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import json as _json_mod
+            from datetime import datetime as _dt, timezone as _tz
+
+            def _copy_one(key: str) -> tuple[str, str]:
+                source_url = f"{s3_base}/{key}"
+                blob_name = key.split("/")[-1]
+                try:
+                    container.get_blob_client(blob_name).start_copy_from_url(source_url)
+                    return (blob_name, "started")
+                except Exception as e:
+                    if "PendingCopyOperation" in str(e):
+                        return (blob_name, "skipped")
+                    LOGGER.warning("Copy failed for %s: %s", blob_name, str(e)[:200])
+                    return (blob_name, "error")
+
+            started = 0
+            skipped = 0
+            errors = 0
+            with ThreadPoolExecutor(max_workers=20) as ex:
+                futures = [ex.submit(_copy_one, k) for k in all_keys]
+                for f in as_completed(futures):
+                    _, status = f.result()
+                    if status == "started":
+                        started += 1
+                    elif status == "skipped":
+                        skipped += 1
+                    else:
+                        errors += 1
+
+            LOGGER.info("DB prepare done for %s: %d started, %d skipped, %d errors", db_name, started, skipped, errors)
+
+            # Write metadata blob
             try:
-                blob_client.start_copy_from_url(source_url)
-                copied.append(blob_name)
-                LOGGER.info("Started copy: %s -> blast-db/%s", source_url, blob_name)
-            except Exception as copy_exc:
-                if "PendingCopyOperation" in str(copy_exc):
-                    skipped.append(blob_name)
-                    LOGGER.info("Copy already in progress for %s, skipping", blob_name)
-                else:
-                    raise
+                metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
+                metadata_blob.upload_blob(
+                    _json_mod.dumps({
+                        "db_name": db_name,
+                        "source_version": latest_dir,
+                        "downloaded_at": _dt.now(_tz.utc).isoformat(),
+                        "file_count": started + skipped,
+                    }).encode("utf-8"),
+                    overwrite=True,
+                )
+            except Exception as e:
+                LOGGER.warning("metadata write failed: %s", str(e)[:100])
 
-        LOGGER.info("DB prepare initiated for %s: %d files from %s (%d skipped/in-progress)", db_name, len(copied), latest_dir, len(skipped))
+            # Re-disable public access
+            try:
+                from azure.mgmt.storage import StorageManagementClient as _SM
+                _sm = _SM(cred, sub)
+                _sm.storage_accounts.update(
+                    storage_rg, account_name,
+                    {"properties": {"public_network_access": "Disabled"}},
+                )
+                LOGGER.info("Re-disabled public access on %s", account_name)
+            except Exception as e:
+                LOGGER.warning("Could not re-disable public access on %s: %s", account_name, str(e)[:100])
 
-        # Write version metadata blob so we can detect updates later
-        import json as _json_mod
-        from datetime import datetime as _dt, timezone as _tz
-        metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
-        metadata_blob.upload_blob(
-            _json_mod.dumps({
-                "db_name": db_name,
-                "source_version": latest_dir,
-                "downloaded_at": _dt.now(_tz.utc).isoformat(),
-                "file_count": len(copied) + len(skipped),
-            }).encode("utf-8"),
-            overwrite=True,
-        )
+        from threading import Thread
+        Thread(target=_do_copies, daemon=True).start()
 
         return _json_response({
             "ok": True,
             "db_name": db_name,
-            "files_copied": len(copied),
-            "files_already_copying": len(skipped),
+            "files_copied": 0,  # async — actual count tracked by client polling list_databases
+            "files_total": len(all_keys),
             "source_version": latest_dir,
-            "output": f"Server-side copy: {len(copied)} started, {len(skipped)} already in progress ({latest_dir}).",
+            "output": f"Started background copy of {len(all_keys)} files from {latest_dir}. Poll /blast/databases for progress.",
+            "async": True,
         })
     except Exception as exc:
         LOGGER.warning("DB prepare failed: %s", exc)
@@ -2190,6 +2238,7 @@ def list_blast_databases(req: func.HttpRequest) -> func.HttpResponse:
         return err
 
     cred = credential_for_caller(identity.raw_token)
+
     try:
         # Check public network access state first
         from azure.mgmt.storage import StorageManagementClient as _StorageMgmt
@@ -2207,7 +2256,7 @@ def list_blast_databases(req: func.HttpRequest) -> func.HttpResponse:
                            "Enable it temporarily to scan for databases.",
             })
 
-        # Try Data Plane access with caller's credential
+        # Try Data Plane access
         dbs = storage_data_svc.list_databases(
             cred,
             params["storage_account"],
