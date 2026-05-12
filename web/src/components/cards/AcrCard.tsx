@@ -149,7 +149,7 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
       }
     >
       {!enabled && <div className="muted">Set Subscription ID, ACR RG, and ACR Name above.</div>}
-      {query.isError && <div className="muted">Failed: {(query.error as Error).message}</div>}
+      {query.isError && <div className="muted" style={{ color: "var(--danger)" }}>Failed to load ACR: {formatApiError(query.error, "acr")}</div>}
 
       {query.data && (
         <>

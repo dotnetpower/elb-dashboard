@@ -115,6 +115,21 @@ export function formatApiError(err: unknown, context?: string): string {
   if (apiErr.status === 401) {
     return "Session expired. Please sign in again.";
   }
+  if (apiErr.status === 404) {
+    return "Resource not found. It may have been deleted or not yet created.";
+  }
+  if (apiErr.status === 500) {
+    // Hide internal details; show a clean message with the original reason if short enough
+    const clean = base.replace(/^HTTP 500:\s*/, "").replace(/Traceback.*$/s, "").trim();
+    return clean.length > 200 ? "An internal error occurred. Please try again or check Azure Portal for details." : clean;
+  }
+  if (apiErr.status === 503) {
+    return "Service temporarily unavailable. The Function App may be starting up — try again in a moment.";
+  }
+  // Network errors
+  if (base.includes("Failed to fetch") || base.includes("NetworkError")) {
+    return "Network error — check your internet connection or try again.";
+  }
   return base;
 }
 

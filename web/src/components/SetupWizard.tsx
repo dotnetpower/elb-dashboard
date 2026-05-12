@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2, AlertTriangle, CheckCircle2, Plus } from "lucide-react";
 
 import { armProxyApi, resourceApi } from "@/api/endpoints";
+import { listSubscriptions as armListSubs } from "@/api/arm";
 import { Tooltip } from "@/components/Tooltip";
 import { AZURE_REGIONS } from "@/constants";
 
@@ -106,17 +107,28 @@ function ErrorMsg({ msg }: { msg?: string }) {
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
-interface Props { onComplete: (config: ResourceConfig) => void }
+interface Props { onComplete: (config: ResourceConfig) => void; onClose?: () => void }
 type Step = 1 | 2 | 3 | 4;
 
-export function SetupWizard({ onComplete }: Props) {
+export function SetupWizard({ onComplete, onClose }: Props) {
   const [step, setStep] = useState<Step>(1);
   const [config, setConfig] = useState<ResourceConfig>(DEFAULTS);
   const [errors, setErrors] = useState<ValidationErrors>({});
   const [attempted, setAttempted] = useState(false);
 
   // ── Step 1: Subscriptions (via backend → az login) ──
-  const subsQuery = useQuery({ queryKey: ["wizard-subs"], queryFn: armProxyApi.listSubscriptions, staleTime: 5 * 60_000, retry: 1 });
+  const subsQuery = useQuery({
+    queryKey: ["wizard-subs"],
+    queryFn: async () => {
+      try {
+        const subs = await armListSubs();
+        return subs.map(s => ({ subscriptionId: s.subscriptionId, displayName: s.displayName }));
+      } catch {
+        return armProxyApi.listSubscriptions();
+      }
+    },
+    staleTime: 5 * 60_000, retry: 1,
+  });
   useEffect(() => {
     if (!config.subscriptionId && subsQuery.data?.length)
       setConfig((c) => ({ ...c, subscriptionId: subsQuery.data[0].subscriptionId }));
@@ -221,10 +233,21 @@ export function SetupWizard({ onComplete }: Props) {
         {/* Header */}
         <div style={{ padding: "24px 32px 0", display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 36, height: 36, borderRadius: 10, background: "linear-gradient(135deg, #6e9fff, #b877d9)", boxShadow: "0 2px 12px rgba(110,159,255,0.25)" }} />
-          <div>
+          <div style={{ flex: 1 }}>
             <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Set up your BLAST workspace</h1>
             <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 1 }}>Connect to Azure and configure resources for running BLAST searches</div>
           </div>
+          {onClose && (
+            <button
+              onClick={onClose}
+              style={{ width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-faint)", cursor: "pointer", border: "1px solid var(--border-weak)", background: "none", flexShrink: 0, transition: "all 0.15s" }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--border-medium)"; e.currentTarget.style.color = "var(--text-muted)"; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border-weak)"; e.currentTarget.style.color = "var(--text-faint)"; }}
+              title="Close wizard"
+            >
+              ✕
+            </button>
+          )}
         </div>
 
         {/* Stepper */}

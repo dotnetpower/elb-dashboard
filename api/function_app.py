@@ -101,6 +101,8 @@ def _json_response(body: Any, status: int = 200) -> func.HttpResponse:
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return resp
 
 
@@ -1766,6 +1768,7 @@ def ensure_storage_account(req: func.HttpRequest) -> func.HttpResponse:
             body["resource_group"],
             body["account_name"],
             body["region"],
+            caller_oid=identity.object_id,
         )
     except Exception as exc:
         LOGGER.warning("ensure_storage_account failed: %s", exc)
@@ -1808,6 +1811,7 @@ def ensure_acr(req: func.HttpRequest) -> func.HttpResponse:
             body["resource_group"],
             body["registry_name"],
             body["region"],
+            caller_oid=identity.object_id,
         )
     except Exception as exc:
         LOGGER.warning("ensure_acr failed: %s", exc)

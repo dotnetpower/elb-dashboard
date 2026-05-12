@@ -10,6 +10,7 @@ import { AcrCard } from "@/components/cards/AcrCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
 import { JobCard } from "@/components/cards/JobCard";
 import { armProxyApi } from "@/api/endpoints";
+import { listSubscriptions as armListSubs, listResourceGroups as armListRGs } from "@/api/arm";
 import { Loader2, Search } from "lucide-react";
 
 export type MonitoringConfig = ResourceConfig;
@@ -66,7 +67,15 @@ export function Dashboard() {
 
   const subsQuery = useQuery({
     queryKey: ["auto-discover-subs"],
-    queryFn: armProxyApi.listSubscriptions,
+    queryFn: async () => {
+      // Try direct ARM call first (no OBO needed), fall back to backend proxy
+      try {
+        const subs = await armListSubs();
+        return subs.map(s => ({ subscriptionId: s.subscriptionId, displayName: s.displayName }));
+      } catch {
+        return armProxyApi.listSubscriptions();
+      }
+    },
     enabled: needsDiscovery,
     staleTime: 5 * 60_000,
     retry: 1,
@@ -80,7 +89,9 @@ export function Dashboard() {
       const results: { subscriptionId: string; rgs: { name: string; location: string; tags?: Record<string, string> }[] }[] = [];
       for (const sub of subs) {
         try {
-          const rgs = await armProxyApi.listResourceGroups(sub.subscriptionId);
+          // Direct ARM call — no OBO needed
+          const rgList = await armListRGs(sub.subscriptionId);
+          const rgs = rgList.map(r => ({ name: r.name, location: r.location, tags: r.tags }));
           results.push({ subscriptionId: sub.subscriptionId, rgs });
         } catch { /* skip inaccessible subs */ }
       }
@@ -155,6 +166,14 @@ export function Dashboard() {
         </div>
         <div style={{ fontSize: 14, color: "var(--text-primary)" }}>Discovering existing BLAST workspaces…</div>
         <div className="muted" style={{ fontSize: 12 }}>Scanning resource groups for workspace configuration</div>
+        <button
+          onClick={() => { setDiscoveryDone(true); setShowWizard(true); }}
+          style={{ marginTop: 12, background: "none", border: "1px solid var(--border-medium)", borderRadius: 8, color: "var(--text-muted)", cursor: "pointer", padding: "6px 16px", fontSize: 12, transition: "all 0.15s" }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.color = "var(--accent)"; }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border-medium)"; e.currentTarget.style.color = "var(--text-muted)"; }}
+        >
+          Skip discovery — set up manually
+        </button>
       </div>
     );
   }
@@ -204,7 +223,7 @@ export function Dashboard() {
   }
 
   if (showWizard) {
-    return <SetupWizard onComplete={handleWizardComplete} />;
+    return <SetupWizard onComplete={handleWizardComplete} onClose={() => setShowWizard(false)} />;
   }
 
   return (

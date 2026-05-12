@@ -118,7 +118,7 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
       }
     >
       {!enabled && <div className="muted">Set Subscription ID, Workload RG, and Storage Account above.</div>}
-      {query.isError && <div className="muted">Failed: {(query.error as Error).message}</div>}
+      {query.isError && <div className="muted" style={{ color: "var(--danger)" }}>Failed to load storage: {formatApiError(query.error, "storage")}</div>}
       {query.data && (
         <>
           {/* #5: Public access warning banner */}

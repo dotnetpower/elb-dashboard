@@ -235,7 +235,7 @@ export function ClusterCard({
       collapsible
     >
       {!enabled && <div className="muted">Set Subscription ID and Workload RG above.</div>}
-      {query.isError && <div className="muted">Failed: {(query.error as Error).message}</div>}
+      {query.isError && <div className="muted" style={{ color: "var(--danger)" }}>Failed to load clusters: {formatApiError(query.error, "aks")}</div>}
 
       {/* Loading skeleton */}
       {enabled && query.isLoading && (
@@ -1024,7 +1024,7 @@ function NodeResourcesSection({ query }: { query: { isLoading: boolean; isError:
           </div>
         )}
         {query.isError && (
-          <div style={{ fontSize: 11, color: "var(--danger)" }}>Failed to load: {(query.error as Error)?.message}</div>
+          <div style={{ fontSize: 11, color: "var(--danger)" }}>Failed to load: {formatApiError(query.error, "aks")}</div>
         )}
         {metrics.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1096,7 +1096,7 @@ function K8sNodesSection({ query }: { query: { isLoading: boolean; isError: bool
       {!collapsed && (
         <div style={{ borderTop: "1px solid var(--border-weak)", overflowX: "auto" }}>
           {query.isLoading && <div style={{ padding: 16, textAlign: "center" }} className="muted"><Loader2 size={14} className="spin" /> Loading...</div>}
-          {query.isError && <div style={{ padding: 12, fontSize: 11, color: "var(--danger)" }}>Error: {(query.error as Error)?.message}</div>}
+          {query.isError && <div style={{ padding: 12, fontSize: 11, color: "var(--danger)" }}>{formatApiError(query.error, "aks")}</div>}
           {nodes.length > 0 && (
             <table style={{ width: "100%", fontSize: 10, borderCollapse: "collapse", fontFamily: "var(--font-mono)" }}>
               <thead><tr style={{ background: "var(--bg-tertiary)" }}>
@@ -1151,7 +1151,7 @@ function K8sPodsSection({ query, subscriptionId, resourceGroup, clusterName }: {
       {!collapsed && (
         <div style={{ borderTop: "1px solid var(--border-weak)", overflowX: "auto" }}>
           {query.isLoading && <div style={{ padding: 16, textAlign: "center" }} className="muted"><Loader2 size={14} className="spin" /> Loading...</div>}
-          {query.isError && <div style={{ padding: 12, fontSize: 11, color: "var(--danger)" }}>Error: {(query.error as Error)?.message}</div>}
+          {query.isError && <div style={{ padding: 12, fontSize: 11, color: "var(--danger)" }}>{formatApiError(query.error, "aks")}</div>}
           {pods.length > 0 && (
             <table style={{ width: "100%", fontSize: 10, borderCollapse: "collapse", fontFamily: "var(--font-mono)" }}>
               <thead><tr style={{ background: "var(--bg-tertiary)" }}>
