@@ -13,7 +13,6 @@ function resolveRedirectUri(): string {
 const redirectUri = resolveRedirectUri();
 
 if (!clientId) {
-  // eslint-disable-next-line no-console
   console.warn(
     "VITE_AZURE_CLIENT_ID is not set — MSAL will fail to initialise. Configure web/.env.local.",
   );
@@ -35,9 +34,7 @@ export const msalConfig: Configuration = {
 /** Scope for talking to our own Function App API.
  *  The App Registration must expose a scope named `user_impersonation`. */
 export const apiLoginRequest = {
-  scopes: [
-    `api://${clientId}/user_impersonation`,
-  ],
+  scopes: [`api://${clientId}/user_impersonation`],
 };
 
 /** Scope for downstream ARM calls — the same access token is forwarded by

@@ -1,7 +1,14 @@
 import { useState, useMemo, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Trash2, RefreshCw, AlertTriangle, Search, ChevronDown, Server } from "lucide-react";
+import {
+  Trash2,
+  RefreshCw,
+  AlertTriangle,
+  Search,
+  ChevronDown,
+  Server,
+} from "lucide-react";
 
 import { blastApi, type BlastJobSummary } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
@@ -63,19 +70,57 @@ function JobRow({
       {/* Status dot + Title + subtitle */}
       <td style={{ padding: "8px 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ width: 7, height: 7, borderRadius: 999, background: color, flexShrink: 0 }} />
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: 999,
+              background: color,
+              flexShrink: 0,
+            }}
+          />
           <div style={{ minWidth: 0 }}>
             <Link
               to={`/blast/jobs/${encodeURIComponent(job.job_id)}`}
-              style={{ textDecoration: "none", color: "inherit", fontWeight: 600, fontSize: 13, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              style={{
+                textDecoration: "none",
+                color: "inherit",
+                fontWeight: 600,
+                fontSize: 13,
+                display: "block",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
               title={job.job_title || job.job_id}
             >
               {job.job_title || job.job_id}
             </Link>
-            <div className="muted" style={{ fontSize: 10, marginTop: 1, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-              <span>{job.program} · {(job.db ?? "").split("/").pop()}</span>
+            <div
+              className="muted"
+              style={{
+                fontSize: 10,
+                marginTop: 1,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                flexWrap: "wrap",
+              }}
+            >
+              <span>
+                {job.program} · {(job.db ?? "").split("/").pop()}
+              </span>
               {cluster && (
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 2, padding: "0 4px", borderRadius: 3, background: "var(--glass-bg-strong)" }}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 2,
+                    padding: "0 4px",
+                    borderRadius: 3,
+                    background: "var(--glass-bg-strong)",
+                  }}
+                >
                   <Server size={8} strokeWidth={1.5} /> {cluster}
                 </span>
               )}
@@ -84,24 +129,42 @@ function JobRow({
         </div>
       </td>
       {/* User */}
-      <td style={{ padding: "8px 6px", fontSize: 11, whiteSpace: "nowrap" }} className="muted" title={upn || ""}>
+      <td
+        style={{ padding: "8px 6px", fontSize: 11, whiteSpace: "nowrap" }}
+        className="muted"
+        title={upn || ""}
+      >
         {shortUser || "—"}
       </td>
       {/* Status badge */}
       <td style={{ padding: "8px 6px", textAlign: "center" }}>
         <span
           style={{
-            fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em",
-            padding: "2px 6px", borderRadius: 4,
-            background: `${color}18`, color,
-            fontWeight: 600, whiteSpace: "nowrap",
+            fontSize: 10,
+            textTransform: "uppercase",
+            letterSpacing: "0.04em",
+            padding: "2px 6px",
+            borderRadius: 4,
+            background: `${color}18`,
+            color,
+            fontWeight: 600,
+            whiteSpace: "nowrap",
           }}
         >
           {phase}
         </span>
       </td>
       {/* Time */}
-      <td style={{ padding: "8px 6px", fontSize: 11, whiteSpace: "nowrap", textAlign: "right" }} className="muted" title={job.created_at ? new Date(job.created_at).toLocaleString() : ""}>
+      <td
+        style={{
+          padding: "8px 6px",
+          fontSize: 11,
+          whiteSpace: "nowrap",
+          textAlign: "right",
+        }}
+        className="muted"
+        title={job.created_at ? new Date(job.created_at).toLocaleString() : ""}
+      >
         {job.created_at ? timeAgo(job.created_at) : "—"}
       </td>
       {/* Actions */}
@@ -137,16 +200,24 @@ function DateGroupSection({
   deleting: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
-  const runningCount = jobs.filter((j) => !TERMINAL_PHASES.includes(j.phase || j.status)).length;
+  const runningCount = jobs.filter(
+    (j) => !TERMINAL_PHASES.includes(j.phase || j.status),
+  ).length;
 
   return (
     <div>
       <button
         onClick={() => setOpen((o) => !o)}
         style={{
-          display: "flex", alignItems: "center", gap: 8, width: "100%",
-          background: "none", border: "none", cursor: "pointer",
-          padding: "6px 0", color: "var(--text-primary)",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "100%",
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          padding: "6px 0",
+          color: "var(--text-primary)",
         }}
       >
         <ChevronDown
@@ -160,7 +231,11 @@ function DateGroupSection({
         <span style={{ fontSize: 12, fontWeight: 600 }}>{label}</span>
         <span className="muted" style={{ fontSize: 11 }}>
           {jobs.length} job{jobs.length !== 1 ? "s" : ""}
-          {runningCount > 0 && <span style={{ color: "var(--warning)", marginLeft: 6 }}>{runningCount} active</span>}
+          {runningCount > 0 && (
+            <span style={{ color: "var(--warning)", marginLeft: 6 }}>
+              {runningCount} active
+            </span>
+          )}
         </span>
       </button>
       {open && (
@@ -168,16 +243,65 @@ function DateGroupSection({
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
-                <th style={{ textAlign: "left", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>Job</th>
-                <th style={{ textAlign: "left", padding: "4px 6px", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>User</th>
-                <th style={{ textAlign: "center", padding: "4px 6px", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>Status</th>
-                <th style={{ textAlign: "right", padding: "4px 6px", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>Time</th>
+                <th
+                  style={{
+                    textAlign: "left",
+                    padding: "4px 0",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
+                  Job
+                </th>
+                <th
+                  style={{
+                    textAlign: "left",
+                    padding: "4px 6px",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
+                  User
+                </th>
+                <th
+                  style={{
+                    textAlign: "center",
+                    padding: "4px 6px",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
+                  Status
+                </th>
+                <th
+                  style={{
+                    textAlign: "right",
+                    padding: "4px 6px",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
+                  Time
+                </th>
                 <th style={{ width: 36 }} />
               </tr>
             </thead>
             <tbody>
               {jobs.map((job) => (
-                <JobRow key={job.job_id} job={job} onDelete={onDelete} deleting={deleting} />
+                <JobRow
+                  key={job.job_id}
+                  job={job}
+                  onDelete={onDelete}
+                  deleting={deleting}
+                />
               ))}
             </tbody>
           </table>
@@ -209,7 +333,7 @@ export function BlastJobs() {
     },
   });
 
-  const allJobs = jobsQuery.data?.jobs ?? [];
+  const allJobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data?.jobs]);
 
   // Filter + search
   const filtered = useMemo(() => {
@@ -224,12 +348,13 @@ export function BlastJobs() {
     }
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter((j) =>
-        (j.job_title ?? "").toLowerCase().includes(q) ||
-        j.job_id.toLowerCase().includes(q) ||
-        (j.program ?? "").toLowerCase().includes(q) ||
-        (j.db ?? "").toLowerCase().includes(q) ||
-        (j.infrastructure?.cluster_name ?? "").toLowerCase().includes(q),
+      list = list.filter(
+        (j) =>
+          (j.job_title ?? "").toLowerCase().includes(q) ||
+          j.job_id.toLowerCase().includes(q) ||
+          (j.program ?? "").toLowerCase().includes(q) ||
+          (j.db ?? "").toLowerCase().includes(q) ||
+          (j.infrastructure?.cluster_name ?? "").toLowerCase().includes(q),
       );
     }
     return list;
@@ -243,9 +368,10 @@ export function BlastJobs() {
       const group = job.created_at ? getDateGroup(job.created_at) : "Earlier";
       map.get(group)!.push(job);
     }
-    return GROUP_ORDER
-      .filter((g) => (map.get(g)?.length ?? 0) > 0)
-      .map((g) => ({ label: g, jobs: map.get(g)! }));
+    return GROUP_ORDER.filter((g) => (map.get(g)?.length ?? 0) > 0).map((g) => ({
+      label: g,
+      jobs: map.get(g)!,
+    }));
   }, [filtered]);
 
   const counts = useMemo(() => {
@@ -263,24 +389,54 @@ export function BlastJobs() {
 
   return (
     <div className="page-stack">
-      <header style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+      <header
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 16,
+          flexWrap: "wrap",
+        }}
+      >
         <div className="page-header" style={{ marginBottom: 0 }}>
           <div className="page-header__title">BLAST Jobs</div>
           <div className="page-header__desc">
-            {allJobs.length} total · {counts.running} running · {counts.completed} completed · {counts.failed} failed
+            {allJobs.length} total · {counts.running} running · {counts.completed}{" "}
+            completed · {counts.failed} failed
           </div>
           {allJobs.length > 0 && (
             <div className="prog" style={{ width: 200, height: 6, marginTop: 6 }}>
               <div style={{ display: "flex", height: "100%" }}>
-                <div style={{ width: `${(counts.completed / allJobs.length) * 100}%`, background: "var(--success)", borderRadius: "2px 0 0 2px" }} />
-                <div style={{ width: `${(counts.running / allJobs.length) * 100}%`, background: "var(--warning)" }} />
-                <div style={{ width: `${(counts.failed / allJobs.length) * 100}%`, background: "var(--danger)", borderRadius: "0 2px 2px 0" }} />
+                <div
+                  style={{
+                    width: `${(counts.completed / allJobs.length) * 100}%`,
+                    background: "var(--success)",
+                    borderRadius: "2px 0 0 2px",
+                  }}
+                />
+                <div
+                  style={{
+                    width: `${(counts.running / allJobs.length) * 100}%`,
+                    background: "var(--warning)",
+                  }}
+                />
+                <div
+                  style={{
+                    width: `${(counts.failed / allJobs.length) * 100}%`,
+                    background: "var(--danger)",
+                    borderRadius: "0 2px 2px 0",
+                  }}
+                />
               </div>
             </div>
           )}
         </div>
         <div style={{ display: "flex", gap: "var(--space-3)" }}>
-          <Link to="/blast/submit" className="glass-button glass-button--primary" style={{ textDecoration: "none" }}>
+          <Link
+            to="/blast/submit"
+            className="glass-button glass-button--primary"
+            style={{ textDecoration: "none" }}
+          >
             New search
           </Link>
           <button
@@ -297,14 +453,25 @@ export function BlastJobs() {
       {jobsQuery.isLoading && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {[1, 2, 3].map((i) => (
-            <div key={i} className="skeleton skeleton-line" style={{ height: 40, width: "100%" }} />
+            <div
+              key={i}
+              className="skeleton skeleton-line"
+              style={{ height: 40, width: "100%" }}
+            />
           ))}
         </div>
       )}
 
       {/* Filter bar + Search */}
       {allJobs.length > 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)", flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "var(--space-3)",
+            flexWrap: "wrap",
+          }}
+        >
           <div style={{ display: "flex", gap: "var(--space-2)" }}>
             {(["all", "running", "completed", "failed"] as const).map((f) => (
               <button
@@ -318,16 +485,30 @@ export function BlastJobs() {
             ))}
           </div>
           <div style={{ position: "relative", flex: "1 1 180px", maxWidth: 280 }}>
-            <Search size={13} style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "var(--text-faint)", pointerEvents: "none" }} />
+            <Search
+              size={13}
+              style={{
+                position: "absolute",
+                left: 8,
+                top: "50%",
+                transform: "translateY(-50%)",
+                color: "var(--text-faint)",
+                pointerEvents: "none",
+              }}
+            />
             <input
               type="text"
               placeholder="Search jobs…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               style={{
-                width: "100%", padding: "5px 8px 5px 26px",
-                background: "var(--glass-bg)", border: "1px solid var(--border-weak)",
-                borderRadius: 6, color: "var(--text-primary)", fontSize: 12,
+                width: "100%",
+                padding: "5px 8px 5px 26px",
+                background: "var(--glass-bg)",
+                border: "1px solid var(--border-weak)",
+                borderRadius: 6,
+                color: "var(--text-primary)",
+                fontSize: 12,
                 outline: "none",
               }}
             />
@@ -337,7 +518,16 @@ export function BlastJobs() {
 
       {/* Delete error */}
       {deleteMutation.isError && (
-        <div style={{ padding: "8px 12px", background: "rgba(224,123,138,0.08)", border: "1px solid rgba(224,123,138,0.2)", borderRadius: 6, fontSize: 12, color: "var(--danger)" }}>
+        <div
+          style={{
+            padding: "8px 12px",
+            background: "rgba(224,123,138,0.08)",
+            border: "1px solid rgba(224,123,138,0.2)",
+            borderRadius: 6,
+            fontSize: 12,
+            color: "var(--danger)",
+          }}
+        >
           <AlertTriangle size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />
           Delete failed: {formatApiError(deleteMutation.error, "blast")}
         </div>
@@ -345,16 +535,28 @@ export function BlastJobs() {
 
       {/* Empty states */}
       {allJobs.length === 0 && !jobsQuery.isLoading && (
-        <section className="glass-card" style={{ textAlign: "center", padding: "var(--space-7)" }}>
+        <section
+          className="glass-card"
+          style={{ textAlign: "center", padding: "var(--space-7)" }}
+        >
           <p className="muted">No BLAST jobs yet.</p>
-          <Link to="/blast/submit" className="glass-button glass-button--primary" style={{ marginTop: "var(--space-4)", textDecoration: "none" }}>
+          <Link
+            to="/blast/submit"
+            className="glass-button glass-button--primary"
+            style={{ marginTop: "var(--space-4)", textDecoration: "none" }}
+          >
             Submit your first search
           </Link>
         </section>
       )}
       {filtered.length === 0 && allJobs.length > 0 && !jobsQuery.isLoading && (
-        <section className="glass-card" style={{ textAlign: "center", padding: "var(--space-5)" }}>
-          <p className="muted">{search ? `No jobs matching "${search}"` : `No ${filter} jobs.`}</p>
+        <section
+          className="glass-card"
+          style={{ textAlign: "center", padding: "var(--space-5)" }}
+        >
+          <p className="muted">
+            {search ? `No jobs matching "${search}"` : `No ${filter} jobs.`}
+          </p>
         </section>
       )}
 

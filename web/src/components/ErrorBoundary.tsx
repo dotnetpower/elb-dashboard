@@ -12,7 +12,6 @@ export class ErrorBoundary extends Component<PropsWithChildren, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    // eslint-disable-next-line no-console
     console.error("ErrorBoundary caught:", error, info.componentStack);
   }
 
@@ -21,6 +20,7 @@ export class ErrorBoundary extends Component<PropsWithChildren, State> {
       const errorText = `${this.state.error.name}: ${this.state.error.message}\n${this.state.error.stack ?? ""}`;
       return (
         <div
+          role="alert"
           style={{
             minHeight: "100vh",
             display: "grid",
@@ -32,26 +32,38 @@ export class ErrorBoundary extends Component<PropsWithChildren, State> {
             className="glass-card glass-card--strong"
             style={{ width: "min(520px, 90vw)", textAlign: "center" }}
           >
-            <h2 style={{ marginTop: 0, color: "var(--danger)" }}>
-              Something went wrong
-            </h2>
+            <h2 style={{ marginTop: 0, color: "var(--danger)" }}>Something went wrong</h2>
             <p className="muted" style={{ lineHeight: 1.6, wordBreak: "break-word" }}>
               {this.state.error.message}
             </p>
-            <div style={{
-              marginTop: "var(--space-3)", padding: "12px", borderRadius: 6,
-              background: "var(--bg-tertiary)", fontSize: 12, color: "var(--text-muted)",
-              textAlign: "left", lineHeight: 1.5,
-            }}>
+            <div
+              style={{
+                marginTop: "var(--space-3)",
+                padding: "12px",
+                borderRadius: 6,
+                background: "var(--bg-tertiary)",
+                fontSize: 12,
+                color: "var(--text-muted)",
+                textAlign: "left",
+                lineHeight: 1.5,
+              }}
+            >
               <strong>If this keeps happening, try:</strong>
               <ol style={{ margin: "8px 0 0", paddingLeft: 20 }}>
-                <li>Clear your browser cache and cookies</li>
                 <li>Sign out and sign back in</li>
-                <li>Try a different browser</li>
-                <li>Contact your administrator with the error details below</li>
+                <li>Reload the current page</li>
+                <li>Contact your administrator with the copied error details</li>
               </ol>
             </div>
-            <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: "var(--space-4)" }}>
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                justifyContent: "center",
+                marginTop: "var(--space-4)",
+                flexWrap: "wrap",
+              }}
+            >
               <button
                 className="glass-button"
                 onClick={() => {
@@ -61,13 +73,27 @@ export class ErrorBoundary extends Component<PropsWithChildren, State> {
                 Copy error details
               </button>
               <button
-                className="glass-button glass-button--primary"
+                className="glass-button"
+                onClick={() => this.setState({ error: null })}
+              >
+                Try again
+              </button>
+              <button
+                className="glass-button"
                 onClick={() => {
                   this.setState({ error: null });
                   window.location.reload();
                 }}
               >
                 Reload
+              </button>
+              <button
+                className="glass-button glass-button--primary"
+                onClick={() => {
+                  window.location.assign("/");
+                }}
+              >
+                Dashboard
               </button>
             </div>
           </div>

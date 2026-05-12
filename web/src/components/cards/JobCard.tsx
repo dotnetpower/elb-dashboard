@@ -19,7 +19,7 @@ export function JobCard() {
     refetchInterval: 30_000,
   });
 
-  const jobs = query.data?.jobs ?? [];
+  const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
   const running = jobs.filter(
     (j) => !TERMINAL_PHASES.includes(j.phase || j.status),
   ).length;
@@ -34,11 +34,7 @@ export function JobCard() {
 
   const hasMore = jobs.length > MAX_DASHBOARD_JOBS;
 
-  const status = query.isLoading
-    ? "loading"
-    : query.isError
-      ? "error"
-      : "ok";
+  const status = query.isLoading ? "loading" : query.isError ? "error" : "ok";
 
   return (
     <MonitorCard
@@ -62,11 +58,11 @@ export function JobCard() {
       }
     >
       {query.isError && (
-        <div className="muted" style={{ color: "var(--danger)" }}>Failed to load jobs: {formatApiError(query.error, "blast")}</div>
+        <div className="muted" style={{ color: "var(--danger)" }}>
+          Failed to load jobs: {formatApiError(query.error, "blast")}
+        </div>
       )}
-      {query.isLoading && (
-        <div className="muted">Loading jobs...</div>
-      )}
+      {query.isLoading && <div className="muted">Loading jobs...</div>}
       {!query.isLoading && jobs.length === 0 && !query.isError && (
         <div className="muted">No jobs yet.</div>
       )}
@@ -107,8 +103,17 @@ export function JobCard() {
                       flexShrink: 0,
                     }}
                   />
-                  <span style={{ flex: 1, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {job.job_title || `${job.program ?? ""} · ${(job.db ?? "").split("/").pop() ?? job.job_id}`}
+                  <span
+                    style={{
+                      flex: 1,
+                      fontSize: 13,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {job.job_title ||
+                      `${job.program ?? ""} · ${(job.db ?? "").split("/").pop() ?? job.job_id}`}
                   </span>
                   {job.job_title && (
                     <span className="muted" style={{ fontSize: 10, flexShrink: 0 }}>
@@ -117,7 +122,11 @@ export function JobCard() {
                   )}
                   <span
                     className="muted"
-                    style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}
+                    style={{
+                      fontSize: 11,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                    }}
                   >
                     {phase}
                   </span>

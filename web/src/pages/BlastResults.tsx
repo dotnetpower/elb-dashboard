@@ -505,13 +505,11 @@ function StepLogSection({
   job,
   subscriptionId,
   storageAccount,
-  resourceGroup: _resourceGroup,
 }: {
   phase: string;
   job: Record<string, unknown>;
   subscriptionId: string;
   storageAccount: string;
-  resourceGroup: string;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [, setTick] = useState(0);
@@ -1889,7 +1887,6 @@ export function BlastResults() {
             job={job as unknown as Record<string, unknown>}
             subscriptionId={subscriptionId}
             storageAccount={storageAccount}
-            resourceGroup={resourceGroup}
           />
         </section>
       )}

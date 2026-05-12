@@ -1,6 +1,28 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Play, Upload, ChevronDown, ChevronUp, Loader2, Server, HelpCircle, RotateCcw, X, Dna, Database, Zap, Gauge, FlaskConical, BookOpen, CheckCircle2, AlertTriangle, ArrowRight, Copy, Terminal, Check } from "lucide-react";
+import {
+  Play,
+  Upload,
+  ChevronDown,
+  ChevronUp,
+  Loader2,
+  Server,
+  HelpCircle,
+  RotateCcw,
+  X,
+  Dna,
+  Database,
+  Zap,
+  Gauge,
+  FlaskConical,
+  BookOpen,
+  CheckCircle2,
+  AlertTriangle,
+  ArrowRight,
+  Copy,
+  Terminal,
+  Check,
+} from "lucide-react";
 import { useNavigate, Link } from "react-router-dom";
 import { useToast } from "@/components/Toast";
 import { formatApiError } from "@/api/client";
@@ -26,38 +48,116 @@ const PROGRAMS: {
   dbType: "nucl" | "prot";
   defaultWordSize: number;
 }[] = [
-  { value: "blastn", label: "blastn", desc: "Nucleotide → Nucleotide", longDesc: "Search nucleotide databases using a nucleotide query.", dbType: "nucl", defaultWordSize: 28 },
-  { value: "blastp", label: "blastp", desc: "Protein → Protein", longDesc: "Search protein databases using a protein query.", dbType: "prot", defaultWordSize: 6 },
-  { value: "blastx", label: "blastx", desc: "Translated Nucleotide → Protein", longDesc: "Search protein databases using a translated nucleotide query.", dbType: "prot", defaultWordSize: 6 },
-  { value: "tblastn", label: "tblastn", desc: "Protein → Translated Nucleotide", longDesc: "Search translated nucleotide databases using a protein query.", dbType: "nucl", defaultWordSize: 6 },
-  { value: "tblastx", label: "tblastx", desc: "Translated Nucl. → Translated Nucl.", longDesc: "Search translated nucleotide databases using a translated nucleotide query.", dbType: "nucl", defaultWordSize: 3 },
+  {
+    value: "blastn",
+    label: "blastn",
+    desc: "Nucleotide → Nucleotide",
+    longDesc: "Search nucleotide databases using a nucleotide query.",
+    dbType: "nucl",
+    defaultWordSize: 28,
+  },
+  {
+    value: "blastp",
+    label: "blastp",
+    desc: "Protein → Protein",
+    longDesc: "Search protein databases using a protein query.",
+    dbType: "prot",
+    defaultWordSize: 6,
+  },
+  {
+    value: "blastx",
+    label: "blastx",
+    desc: "Translated Nucleotide → Protein",
+    longDesc: "Search protein databases using a translated nucleotide query.",
+    dbType: "prot",
+    defaultWordSize: 6,
+  },
+  {
+    value: "tblastn",
+    label: "tblastn",
+    desc: "Protein → Translated Nucleotide",
+    longDesc: "Search translated nucleotide databases using a protein query.",
+    dbType: "nucl",
+    defaultWordSize: 6,
+  },
+  {
+    value: "tblastx",
+    label: "tblastx",
+    desc: "Translated Nucl. → Translated Nucl.",
+    longDesc:
+      "Search translated nucleotide databases using a translated nucleotide query.",
+    dbType: "nucl",
+    defaultWordSize: 3,
+  },
 ];
 
 // NCBI-style optimization presets for blastn
-const BLASTN_OPTIMIZE: { value: string; label: string; desc: string; wordSize: number; evalue: number }[] = [
-  { value: "megablast", label: "Highly similar sequences (megablast)", desc: "Best for intra-species comparisons", wordSize: 28, evalue: 0.05 },
-  { value: "dc-megablast", label: "More dissimilar sequences (discontiguous megablast)", desc: "Best for cross-species searches", wordSize: 11, evalue: 0.05 },
-  { value: "blastn", label: "Somewhat similar sequences (blastn)", desc: "Best for inter-species comparisons", wordSize: 7, evalue: 0.05 },
+const BLASTN_OPTIMIZE: {
+  value: string;
+  label: string;
+  desc: string;
+  wordSize: number;
+  evalue: number;
+}[] = [
+  {
+    value: "megablast",
+    label: "Highly similar sequences (megablast)",
+    desc: "Best for intra-species comparisons",
+    wordSize: 28,
+    evalue: 0.05,
+  },
+  {
+    value: "dc-megablast",
+    label: "More dissimilar sequences (discontiguous megablast)",
+    desc: "Best for cross-species searches",
+    wordSize: 11,
+    evalue: 0.05,
+  },
+  {
+    value: "blastn",
+    label: "Somewhat similar sequences (blastn)",
+    desc: "Best for inter-species comparisons",
+    wordSize: 7,
+    evalue: 0.05,
+  },
 ];
 
 // #32: Parameter presets
-const PRESETS: { label: string; desc: string; evalue: number; max_target_seqs: number }[] = [
+const PRESETS: {
+  label: string;
+  desc: string;
+  evalue: number;
+  max_target_seqs: number;
+}[] = [
   { label: "Quick scan", desc: "Fast, fewer results", evalue: 10, max_target_seqs: 50 },
   { label: "Standard", desc: "Balanced (default)", evalue: 0.05, max_target_seqs: 100 },
-  { label: "Thorough", desc: "Low E-value, more targets", evalue: 1e-5, max_target_seqs: 500 },
-  { label: "Publication", desc: "Stringent parameters", evalue: 1e-10, max_target_seqs: 1000 },
+  {
+    label: "Thorough",
+    desc: "Low E-value, more targets",
+    evalue: 1e-5,
+    max_target_seqs: 500,
+  },
+  {
+    label: "Publication",
+    desc: "Stringent parameters",
+    evalue: 1e-10,
+    max_target_seqs: 1000,
+  },
 ];
 
 // #31: Human-friendly database descriptions
-const DB_DESCRIPTIONS: Record<string, { label: string; size: string; type: "nucl" | "prot" }> = {
-  "core_nt": { label: "Core Nucleotide", size: "~250 GB", type: "nucl" },
-  "nt": { label: "Nucleotide collection", size: "~400 GB", type: "nucl" },
-  "nr": { label: "Non-redundant protein", size: "~300 GB", type: "prot" },
-  "swissprot": { label: "SwissProt", size: "~300 MB", type: "prot" },
-  "pdbnt": { label: "PDB nucleotide", size: "~200 MB", type: "nucl" },
-  "refseq_protein": { label: "RefSeq protein", size: "~100 GB", type: "prot" },
+const DB_DESCRIPTIONS: Record<
+  string,
+  { label: string; size: string; type: "nucl" | "prot" }
+> = {
+  core_nt: { label: "Core Nucleotide", size: "~250 GB", type: "nucl" },
+  nt: { label: "Nucleotide collection", size: "~400 GB", type: "nucl" },
+  nr: { label: "Non-redundant protein", size: "~300 GB", type: "prot" },
+  swissprot: { label: "SwissProt", size: "~300 MB", type: "prot" },
+  pdbnt: { label: "PDB nucleotide", size: "~200 MB", type: "nucl" },
+  refseq_protein: { label: "RefSeq protein", size: "~100 GB", type: "prot" },
   "16S_ribosomal_RNA": { label: "16S ribosomal RNA", size: "~18 MB", type: "nucl" },
-  "ITS_RefSeq_Fungi": { label: "ITS RefSeq Fungi", size: "~8 MB", type: "nucl" },
+  ITS_RefSeq_Fungi: { label: "ITS RefSeq Fungi", size: "~8 MB", type: "nucl" },
 };
 
 const EXAMPLE_FASTA = `>example_16S_rRNA Escherichia coli 16S ribosomal RNA partial sequence
@@ -118,13 +218,31 @@ const INITIAL: FormState = {
 
 function Tip({ text }: { text: string }) {
   return (
-    <span title={text} style={{ cursor: "help", marginLeft: 4, color: "var(--text-faint)", verticalAlign: "middle" }}>
+    <span
+      title={text}
+      style={{
+        cursor: "help",
+        marginLeft: 4,
+        color: "var(--text-faint)",
+        verticalAlign: "middle",
+      }}
+    >
       <HelpCircle size={12} strokeWidth={1.5} />
     </span>
   );
 }
 
-function SectionHeader({ step, icon, title, subtitle }: { step: number; icon: React.ReactNode; title: string; subtitle?: string }) {
+function SectionHeader({
+  step,
+  icon,
+  title,
+  subtitle,
+}: {
+  step: number;
+  icon: React.ReactNode;
+  title: string;
+  subtitle?: string;
+}) {
   return (
     <div className="blast-section-hd">
       <span className="blast-step-badge">{step}</span>
@@ -137,7 +255,7 @@ function SectionHeader({ step, icon, title, subtitle }: { step: number; icon: Re
   );
 }
 
-function buildCommandString(form: FormState, programMeta: typeof PROGRAMS[0]): string {
+function buildCommandString(form: FormState, programMeta: (typeof PROGRAMS)[0]): string {
   const dbName = form.db.split("/").pop() || form.db;
   const parts = [form.program, "-db", dbName, "-evalue", String(form.evalue)];
   if (form.word_size) parts.push("-word_size", form.word_size);
@@ -146,16 +264,27 @@ function buildCommandString(form: FormState, programMeta: typeof PROGRAMS[0]): s
   parts.push("-outfmt", String(form.outfmt));
   if (form.gap_open) parts.push("-gapopen", form.gap_open);
   if (form.gap_extend) parts.push("-gapextend", form.gap_extend);
-  if (form.match_score && form.program === "blastn") parts.push("-reward", form.match_score);
-  if (form.mismatch_score && form.program === "blastn") parts.push("-penalty", form.mismatch_score);
+  if (form.match_score && form.program === "blastn")
+    parts.push("-reward", form.match_score);
+  if (form.mismatch_score && form.program === "blastn")
+    parts.push("-penalty", form.mismatch_score);
   if (form.low_complexity_filter && form.program === "blastn") parts.push("-dust", "yes");
-  if (form.query_from && form.query_to) parts.push("-query_loc", `${form.query_from}-${form.query_to}`);
+  if (form.query_from && form.query_to)
+    parts.push("-query_loc", `${form.query_from}-${form.query_to}`);
   if (form.additional_options?.trim()) parts.push(form.additional_options.trim());
   parts.push("-query", "query.fasta", "-out", "results.out");
   return parts.join(" ");
 }
 
-function BlastCommandPreview({ form, programMeta, toast }: { form: FormState; programMeta: typeof PROGRAMS[0]; toast: (msg: string, type: "info" | "success" | "error") => void }) {
+function BlastCommandPreview({
+  form,
+  programMeta,
+  toast,
+}: {
+  form: FormState;
+  programMeta: (typeof PROGRAMS)[0];
+  toast: (msg: string, type: "info" | "success" | "error") => void;
+}) {
   const [copied, setCopied] = useState(false);
   const cmd = buildCommandString(form, programMeta);
 
@@ -173,7 +302,11 @@ function BlastCommandPreview({ form, programMeta, toast }: { form: FormState; pr
         <Terminal size={13} strokeWidth={1.5} />
         <span>Command Preview</span>
         <button className="blast-cmd-copy" onClick={handleCopy} title="Copy command">
-          {copied ? <Check size={12} strokeWidth={2} /> : <Copy size={12} strokeWidth={1.5} />}
+          {copied ? (
+            <Check size={12} strokeWidth={2} />
+          ) : (
+            <Copy size={12} strokeWidth={1.5} />
+          )}
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
@@ -189,7 +322,9 @@ export function BlastSubmit() {
     try {
       const saved = sessionStorage.getItem("elb-blast-draft");
       if (saved) return { ...INITIAL, ...JSON.parse(saved) };
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     return INITIAL;
   });
   const [showParams, setShowParams] = useState(false);
@@ -220,7 +355,10 @@ export function BlastSubmit() {
     refetchInterval: 30_000,
   });
 
-  const clusters = clusterQuery.data?.clusters ?? [];
+  const clusters = useMemo(
+    () => clusterQuery.data?.clusters ?? [],
+    [clusterQuery.data?.clusters],
+  );
   const selectedCluster: AksClusterSummary | undefined = clusters.find(
     (c) => c.name === form.selectedCluster,
   );
@@ -266,24 +404,35 @@ export function BlastSubmit() {
   // Pre-flight readiness check
   const [preFlightResult, setPreFlightResult] = useState<{
     ready: boolean;
-    checks: Array<{ id: string; status: string; title: string; detail?: string; action?: string; action_type?: string; action_params?: Record<string, string>; severity?: string; suggested_dbs?: string[] }>;
+    checks: Array<{
+      id: string;
+      status: string;
+      title: string;
+      detail?: string;
+      action?: string;
+      action_type?: string;
+      action_params?: Record<string, string>;
+      severity?: string;
+      suggested_dbs?: string[];
+    }>;
     critical_blockers: number;
     summary: string;
   } | null>(null);
 
   const preFlightMutation = useMutation({
-    mutationFn: () => blastApi.preFlight({
-      subscription_id: subId,
-      resource_group: workloadRg,
-      acr_resource_group: acrRg || undefined,
-      acr_name: acrName || undefined,
-      storage_account: storageAccount,
-      aks_cluster_name: selectedCluster?.name || "",
-      terminal_resource_group: terminalRg,
-      terminal_vm_name: terminalVm,
-      db: form.db,
-      query_data: form.query_data || undefined,
-    }),
+    mutationFn: () =>
+      blastApi.preFlight({
+        subscription_id: subId,
+        resource_group: workloadRg,
+        acr_resource_group: acrRg || undefined,
+        acr_name: acrName || undefined,
+        storage_account: storageAccount,
+        aks_cluster_name: selectedCluster?.name || "",
+        terminal_resource_group: terminalRg,
+        terminal_vm_name: terminalVm,
+        db: form.db,
+        query_data: form.query_data || undefined,
+      }),
     onSuccess: (result) => {
       setPreFlightResult(result);
       if (result.ready) {
@@ -303,8 +452,14 @@ export function BlastSubmit() {
     // Refresh VM status before submitting to ensure it's still running
     vmQuery.refetch();
     let opts = form.additional_options || "";
-    if (form.low_complexity_filter && form.program === "blastn" && !opts.includes("-dust")) opts += " -dust yes";
-    if (form.query_from && form.query_to) opts += ` -query_loc ${form.query_from}-${form.query_to}`;
+    if (
+      form.low_complexity_filter &&
+      form.program === "blastn" &&
+      !opts.includes("-dust")
+    )
+      opts += " -dust yes";
+    if (form.query_from && form.query_to)
+      opts += ` -query_loc ${form.query_from}-${form.query_to}`;
     if (form.match_score) opts += ` -reward ${form.match_score}`;
     if (form.mismatch_score) opts += ` -penalty ${form.mismatch_score}`;
 
@@ -353,43 +508,63 @@ export function BlastSubmit() {
   // of another (e.g. "nt" vs "core_nt").
   const knownDbs = dbQuery.data?.databases ?? [];
   const dbListResolved = dbQuery.isSuccess && knownDbs.length > 0;
-  const dbBaseName = form.db ? form.db.split("/").filter(Boolean).pop() ?? "" : "";
+  const dbBaseName = form.db ? (form.db.split("/").filter(Boolean).pop() ?? "") : "";
   const dbMissingFromStorage =
-    Boolean(form.db) &&
-    dbListResolved &&
-    !knownDbs.some((d) => d.name === dbBaseName);
+    Boolean(form.db) && dbListResolved && !knownDbs.some((d) => d.name === dbBaseName);
 
-  const canSubmit = subId && workloadRg && form.program && form.db && form.query_data
-    && storageAccount && selectedCluster && selectedCluster.power_state === "Running"
-    && !dbMissingFromStorage
-    && !submitMutation.isPending;
+  const canSubmit =
+    subId &&
+    workloadRg &&
+    form.program &&
+    form.db &&
+    form.query_data &&
+    storageAccount &&
+    selectedCluster &&
+    selectedCluster.power_state === "Running" &&
+    !dbMissingFromStorage &&
+    !submitMutation.isPending;
 
   const missing: { text: string; link?: string }[] = [];
-  if (!subId || !workloadRg) missing.push({ text: "Azure resources not configured", link: "/" });
+  if (!subId || !workloadRg)
+    missing.push({ text: "Azure resources not configured", link: "/" });
   if (!form.query_data) missing.push({ text: "Query sequence" });
-  else if (!form.query_data.trim().startsWith(">")) missing.push({ text: "Query must be in FASTA format (start with '>')" });
+  else if (!form.query_data.trim().startsWith(">"))
+    missing.push({ text: "Query must be in FASTA format (start with '>')" });
   if (!form.db) missing.push({ text: "Database" });
-  else if (dbMissingFromStorage) missing.push({
-    text: `Database '${form.db.split("/").pop()}' is not in storage — download it from the Dashboard first`,
-    link: "/",
-  });
+  else if (dbMissingFromStorage)
+    missing.push({
+      text: `Database '${form.db.split("/").pop()}' is not in storage — download it from the Dashboard first`,
+      link: "/",
+    });
   if (!storageAccount) missing.push({ text: "Storage account", link: "/" });
-  if (!selectedCluster) missing.push({ text: "AKS cluster — create one on the Dashboard", link: "/" });
-  else if (selectedCluster.power_state !== "Running") missing.push({ text: "AKS cluster must be running" });
-  if (!vmRunning) missing.push({ text: "Remote Terminal VM must be running — go to Terminal page", link: "/terminal" });
+  if (!selectedCluster)
+    missing.push({ text: "AKS cluster — create one on the Dashboard", link: "/" });
+  else if (selectedCluster.power_state !== "Running")
+    missing.push({ text: "AKS cluster must be running" });
+  if (!vmRunning)
+    missing.push({
+      text: "Remote Terminal VM must be running — go to Terminal page",
+      link: "/terminal",
+    });
 
   const isNuclDb = form.db && /\b(nt|core_nt)\b/.test(form.db);
   const isProtDb = form.db && /\b(nr|swissprot|refseq_protein|pdb)\b/.test(form.db);
   const dbWarning =
-    (programMeta.dbType === "prot" && isNuclDb) ? `${form.program} expects a protein database, but "${form.db.split("/").pop()}" appears to be nucleotide.` :
-    (programMeta.dbType === "nucl" && isProtDb) ? `${form.program} expects a nucleotide database, but "${form.db.split("/").pop()}" appears to be protein.` :
-    null;
+    programMeta.dbType === "prot" && isNuclDb
+      ? `${form.program} expects a protein database, but "${form.db.split("/").pop()}" appears to be nucleotide.`
+      : programMeta.dbType === "nucl" && isProtDb
+        ? `${form.program} expects a nucleotide database, but "${form.db.split("/").pop()}" appears to be protein.`
+        : null;
 
   const paramsSummary = `E-value: ${form.evalue} · Max: ${form.max_target_seqs} · Fmt: ${form.outfmt}`;
-  const searchSummary = form.db ? `Search ${form.db.split("/").pop() || form.db} using ${programMeta.label}` : "";
+  const searchSummary = form.db
+    ? `Search ${form.db.split("/").pop() || form.db} using ${programMeta.label}`
+    : "";
 
   // Sequence stats
-  const seqCount = form.query_data ? form.query_data.split("\n").filter((l) => l.startsWith(">")).length : 0;
+  const seqCount = form.query_data
+    ? form.query_data.split("\n").filter((l) => l.startsWith(">")).length
+    : 0;
   const charCount = form.query_data.length;
   const isFasta = form.query_data.trim().startsWith(">");
 
@@ -410,7 +585,12 @@ export function BlastSubmit() {
           <div className="blast-header__title">
             <Dna size={24} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
             <h1 style={{ margin: 0 }}>
-              {programMeta.label === "blastn" ? "Standard Nucleotide" : programMeta.label === "blastp" ? "Standard Protein" : programMeta.label.toUpperCase()} BLAST
+              {programMeta.label === "blastn"
+                ? "Standard Nucleotide"
+                : programMeta.label === "blastp"
+                  ? "Standard Protein"
+                  : programMeta.label.toUpperCase()}{" "}
+              BLAST
             </h1>
           </div>
           <p className="muted" style={{ marginTop: 4, fontSize: 13 }}>
@@ -421,11 +601,21 @@ export function BlastSubmit() {
           {/* Readiness indicator */}
           <div className="blast-readiness">
             {readySteps.map((s) => (
-              <span key={s.label} className={`blast-readiness__dot${s.ok ? " blast-readiness__dot--ok" : ""}`} title={s.label} />
+              <span
+                key={s.label}
+                className={`blast-readiness__dot${s.ok ? " blast-readiness__dot--ok" : ""}`}
+                title={s.label}
+              />
             ))}
-            <span className="muted" style={{ fontSize: 10 }}>{readyCount}/{readySteps.length}</span>
+            <span className="muted" style={{ fontSize: 10 }}>
+              {readyCount}/{readySteps.length}
+            </span>
           </div>
-          <button className="glass-button" onClick={() => setForm(INITIAL)} style={{ fontSize: 11 }}>
+          <button
+            className="glass-button"
+            onClick={() => setForm(INITIAL)}
+            style={{ fontSize: 11 }}
+          >
             <RotateCcw size={12} strokeWidth={1.5} /> Reset
           </button>
         </div>
@@ -433,7 +623,12 @@ export function BlastSubmit() {
 
       {/* ── Step 1: Program Selection ── */}
       <section className="glass-card blast-section">
-        <SectionHeader step={1} icon={<FlaskConical size={16} strokeWidth={1.5} />} title="Program Selection" subtitle="Choose a BLAST algorithm" />
+        <SectionHeader
+          step={1}
+          icon={<FlaskConical size={16} strokeWidth={1.5} />}
+          title="Program Selection"
+          subtitle="Choose a BLAST algorithm"
+        />
         <div className="blast-program-tabs">
           {PROGRAMS.map((p) => (
             <button
@@ -447,27 +642,43 @@ export function BlastSubmit() {
           ))}
         </div>
         <div className="blast-program-info">
-          <BookOpen size={14} strokeWidth={1.5} style={{ color: "var(--accent)", flexShrink: 0 }} />
+          <BookOpen
+            size={14}
+            strokeWidth={1.5}
+            style={{ color: "var(--accent)", flexShrink: 0 }}
+          />
           <span>{programMeta.longDesc}</span>
         </div>
 
         {/* NCBI-style Optimize for — blastn only */}
         {form.program === "blastn" && (
           <div style={{ marginTop: 12 }}>
-            <span className="glass-label" style={{ marginBottom: 6 }}>Optimize for</span>
+            <span className="glass-label" style={{ marginBottom: 6 }}>
+              Optimize for
+            </span>
             <div className="blast-optimize-group">
               {BLASTN_OPTIMIZE.map((opt) => (
-                <label key={opt.value} className={`blast-optimize-option${form.optimize === opt.value ? " blast-optimize-option--active" : ""}`}>
+                <label
+                  key={opt.value}
+                  className={`blast-optimize-option${form.optimize === opt.value ? " blast-optimize-option--active" : ""}`}
+                >
                   <input
-                    type="radio" name="optimize" value={opt.value}
+                    type="radio"
+                    name="optimize"
+                    value={opt.value}
                     checked={form.optimize === opt.value}
-                    onChange={() => { set("optimize", opt.value); set("word_size", String(opt.wordSize)); }}
+                    onChange={() => {
+                      set("optimize", opt.value);
+                      set("word_size", String(opt.wordSize));
+                    }}
                     style={{ display: "none" }}
                   />
                   <span className="blast-optimize-radio" />
                   <div>
                     <div style={{ fontSize: 12 }}>{opt.label}</div>
-                    <div className="muted" style={{ fontSize: 10 }}>{opt.desc}</div>
+                    <div className="muted" style={{ fontSize: 10 }}>
+                      {opt.desc}
+                    </div>
                   </div>
                 </label>
               ))}
@@ -478,25 +689,40 @@ export function BlastSubmit() {
 
       {/* ── Step 2: Enter Query Sequence ── */}
       <section className="glass-card glass-card--strong blast-section">
-        <SectionHeader step={2} icon={<Dna size={16} strokeWidth={1.5} />} title="Enter Query Sequence" subtitle="Paste FASTA sequence(s) or upload a file" />
+        <SectionHeader
+          step={2}
+          icon={<Dna size={16} strokeWidth={1.5} />}
+          title="Enter Query Sequence"
+          subtitle="Paste FASTA sequence(s) or upload a file"
+        />
 
         <div className="blast-textarea-wrap">
           <textarea
-            className="glass-input blast-textarea" rows={10} value={form.query_data}
+            className="glass-input blast-textarea"
+            rows={10}
+            value={form.query_data}
             onChange={(e) => set("query_data", e.target.value)}
-            placeholder={">sequence_id description\nATCGATCG...\n\nPaste your FASTA sequence here, or click 'Load example' below."}
+            placeholder={
+              ">sequence_id description\nATCGATCG...\n\nPaste your FASTA sequence here, or click 'Load example' below."
+            }
             spellCheck={false}
           />
           {/* Live stats ribbon */}
           {form.query_data && (
             <div className="blast-textarea-stats">
               {isFasta ? (
-                <span style={{ color: "var(--success)" }}><CheckCircle2 size={10} /> Valid FASTA</span>
+                <span style={{ color: "var(--success)" }}>
+                  <CheckCircle2 size={10} /> Valid FASTA
+                </span>
               ) : (
-                <span style={{ color: "var(--warning)" }}><AlertTriangle size={10} /> Not FASTA format</span>
+                <span style={{ color: "var(--warning)" }}>
+                  <AlertTriangle size={10} /> Not FASTA format
+                </span>
               )}
               <span className="blast-textarea-stats__sep" />
-              <span>{seqCount} sequence{seqCount !== 1 ? "s" : ""}</span>
+              <span>
+                {seqCount} sequence{seqCount !== 1 ? "s" : ""}
+              </span>
               <span className="blast-textarea-stats__sep" />
               <span>{charCount.toLocaleString()} characters</span>
             </div>
@@ -506,26 +732,49 @@ export function BlastSubmit() {
         <div className="blast-query-actions">
           <label className="glass-button blast-action-btn" style={{ cursor: "pointer" }}>
             <Upload size={13} strokeWidth={1.5} /> Upload file
-            <input ref={fileInputRef} type="file" accept=".fa,.fasta,.fna,.faa" style={{ display: "none" }}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".fa,.fasta,.fna,.faa"
+              style={{ display: "none" }}
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
-                if (file.size > MAX_UPLOAD_BYTES) { toast(`File too large. Max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`, "error"); return; }
+                if (file.size > MAX_UPLOAD_BYTES) {
+                  toast(
+                    `File too large. Max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`,
+                    "error",
+                  );
+                  return;
+                }
                 const reader = new FileReader();
-                reader.onload = () => { if (typeof reader.result === "string") set("query_data", reader.result); };
+                reader.onload = () => {
+                  if (typeof reader.result === "string") set("query_data", reader.result);
+                };
                 reader.readAsText(file);
               }}
             />
           </label>
-          <button className="glass-button blast-action-btn" onClick={() => {
-            set("query_data", EXAMPLE_FASTA);
-            set("program", "blastn");
-            toast("Example loaded — E. coli 16S rRNA (matches 16S_ribosomal_RNA DB)", "info");
-          }} type="button">
+          <button
+            className="glass-button blast-action-btn"
+            onClick={() => {
+              set("query_data", EXAMPLE_FASTA);
+              set("program", "blastn");
+              toast(
+                "Example loaded — E. coli 16S rRNA (matches 16S_ribosomal_RNA DB)",
+                "info",
+              );
+            }}
+            type="button"
+          >
             <Dna size={13} /> Load example
           </button>
           {form.query_data && (
-            <button className="glass-button blast-action-btn" onClick={() => set("query_data", "")} type="button">
+            <button
+              className="glass-button blast-action-btn"
+              onClick={() => set("query_data", "")}
+              type="button"
+            >
               <X size={13} strokeWidth={1.5} /> Clear
             </button>
           )}
@@ -533,47 +782,86 @@ export function BlastSubmit() {
 
         {/* Query Subrange */}
         <div className="blast-subrange-row">
-          <span className="glass-label" style={{ fontSize: 11, minWidth: "fit-content", marginBottom: 0 }}>
-            Query subrange <Tip text="Restrict search to a range of the query (1-based)." />
+          <span
+            className="glass-label"
+            style={{ fontSize: 11, minWidth: "fit-content", marginBottom: 0 }}
+          >
+            Query subrange{" "}
+            <Tip text="Restrict search to a range of the query (1-based)." />
           </span>
-          <input className="glass-input blast-small-input" value={form.query_from} onChange={(e) => set("query_from", e.target.value)}
-            placeholder="From" type="number" min={1} />
+          <input
+            className="glass-input blast-small-input"
+            value={form.query_from}
+            onChange={(e) => set("query_from", e.target.value)}
+            placeholder="From"
+            type="number"
+            min={1}
+          />
           <ArrowRight size={12} style={{ color: "var(--text-faint)" }} />
-          <input className="glass-input blast-small-input" value={form.query_to} onChange={(e) => set("query_to", e.target.value)}
-            placeholder="To" type="number" min={1} />
+          <input
+            className="glass-input blast-small-input"
+            value={form.query_to}
+            onChange={(e) => set("query_to", e.target.value)}
+            placeholder="To"
+            type="number"
+            min={1}
+          />
         </div>
 
         <label style={{ marginTop: 12, display: "block" }}>
           <span className="glass-label">Job Title</span>
-          <input className="glass-input" value={form.job_title} onChange={(e) => set("job_title", e.target.value)}
-            placeholder="Enter a descriptive title for your BLAST search" maxLength={200} />
+          <input
+            className="glass-input"
+            value={form.job_title}
+            onChange={(e) => set("job_title", e.target.value)}
+            placeholder="Enter a descriptive title for your BLAST search"
+            maxLength={200}
+          />
         </label>
       </section>
 
       {/* ── Step 3: Choose Search Set ── */}
       <section className="glass-card blast-section">
-        <SectionHeader step={3} icon={<Database size={16} strokeWidth={1.5} />} title="Choose Search Set" subtitle="Select a BLAST database from your storage" />
+        <SectionHeader
+          step={3}
+          icon={<Database size={16} strokeWidth={1.5} />}
+          title="Choose Search Set"
+          subtitle="Select a BLAST database from your storage"
+        />
         <label>
-          <span className="glass-label">Database <Tip text="Select a BLAST database from your storage account." /></span>
+          <span className="glass-label">
+            Database <Tip text="Select a BLAST database from your storage account." />
+          </span>
           {dbQuery.data?.databases && dbQuery.data.databases.length > 0 ? (
             <>
-              <select className="glass-input" value={form.db} onChange={(e) => set("db", e.target.value)}>
+              <select
+                className="glass-input"
+                value={form.db}
+                onChange={(e) => set("db", e.target.value)}
+              >
                 <option value="">— Select a database —</option>
                 {dbQuery.data.databases.map((d) => {
                   const info = DB_DESCRIPTIONS[d.name];
-                  const label = info ? `${info.label} (${d.name}) — ${info.size}` : d.name;
+                  const label = info
+                    ? `${info.label} (${d.name}) — ${info.size}`
+                    : d.name;
                   // Upstream `elastic-blast` (azure-prereq.md §9.2) expects the
                   // canonical Azure URL form `<container>/<db_name>/<db_name>`,
                   // i.e. the basename is duplicated. The download path mirrors
                   // it: files live in `blast-db/<db_name>/<files>`.
-                  return <option key={d.name} value={`${d.container}/${d.name}/${d.name}`}>{label}</option>;
+                  return (
+                    <option key={d.name} value={`${d.container}/${d.name}/${d.name}`}>
+                      {label}
+                    </option>
+                  );
                 })}
               </select>
               {/* Quick-pick chips */}
               {!form.db && (
                 <div className="blast-db-chips">
                   <span className="muted" style={{ fontSize: 11 }}>
-                    Suggested for {form.program} ({programMeta.dbType === "nucl" ? "nucleotide" : "protein"}):
+                    Suggested for {form.program} (
+                    {programMeta.dbType === "nucl" ? "nucleotide" : "protein"}):
                   </span>
                   {dbQuery.data.databases
                     .filter((d) => DB_DESCRIPTIONS[d.name]?.type === programMeta.dbType)
@@ -581,11 +869,16 @@ export function BlastSubmit() {
                     .map((d) => {
                       const info = DB_DESCRIPTIONS[d.name];
                       return (
-                        <button key={d.name} className="blast-db-chip"
-                          onClick={() => set("db", `${d.container}/${d.name}/${d.name}`)}>
+                        <button
+                          key={d.name}
+                          className="blast-db-chip"
+                          onClick={() => set("db", `${d.container}/${d.name}/${d.name}`)}
+                        >
                           <Database size={10} />
                           <span>{d.name}</span>
-                          {info && <span className="blast-db-chip__size">{info.size}</span>}
+                          {info && (
+                            <span className="blast-db-chip__size">{info.size}</span>
+                          )}
                         </button>
                       );
                     })}
@@ -593,18 +886,28 @@ export function BlastSubmit() {
               )}
             </>
           ) : (
-            <input className="glass-input" value={form.db} onChange={(e) => set("db", e.target.value)}
-              placeholder="blast-db/core_nt/core_nt" spellCheck={false} />
+            <input
+              className="glass-input"
+              value={form.db}
+              onChange={(e) => set("db", e.target.value)}
+              placeholder="blast-db/core_nt/core_nt"
+              spellCheck={false}
+            />
           )}
         </label>
         {/* Warning if DB not in storage */}
-        {form.db && dbQuery.data?.databases && !dbQuery.data.databases.some((d) => form.db.includes(d.name)) && (
-          <div className="blast-warning-box">
-            <AlertTriangle size={14} />
-            This database doesn't appear to be downloaded yet.{" "}
-            <Link to="/" style={{ color: "var(--accent)" }}>Download it from the Dashboard</Link>.
-          </div>
-        )}
+        {form.db &&
+          dbQuery.data?.databases &&
+          !dbQuery.data.databases.some((d) => form.db.includes(d.name)) && (
+            <div className="blast-warning-box">
+              <AlertTriangle size={14} />
+              This database doesn't appear to be downloaded yet.{" "}
+              <Link to="/" style={{ color: "var(--accent)" }}>
+                Download it from the Dashboard
+              </Link>
+              .
+            </div>
+          )}
         {dbWarning && (
           <div className="blast-warning-box">
             <AlertTriangle size={14} />
@@ -615,62 +918,159 @@ export function BlastSubmit() {
 
       {/* ── Step 4: Program Selection / AKS Cluster ── */}
       <section className="glass-card blast-section">
-        <SectionHeader step={4} icon={<Server size={16} strokeWidth={1.5} />} title="Compute Environment" subtitle="Select an AKS cluster to run the search" />
-        {!subId && <div className="muted">Configure your Azure resources on the Dashboard first.</div>}
+        <SectionHeader
+          step={4}
+          icon={<Server size={16} strokeWidth={1.5} />}
+          title="Compute Environment"
+          subtitle="Select an AKS cluster to run the search"
+        />
+        {!subId && (
+          <div className="muted">
+            Configure your Azure resources on the Dashboard first.
+          </div>
+        )}
         {subId && clusterQuery.isLoading && (
-          <div className="muted"><Loader2 size={12} className="spin" style={{ display: "inline", verticalAlign: "middle" }} /> Loading clusters...</div>
+          <div className="muted">
+            <Loader2
+              size={12}
+              className="spin"
+              style={{ display: "inline", verticalAlign: "middle" }}
+            />{" "}
+            Loading clusters...
+          </div>
         )}
         {subId && clusters.length === 0 && !clusterQuery.isLoading && (
           <div className="muted">
             No AKS clusters in <strong>{workloadRg}</strong>.{" "}
-            <Link to="/" style={{ color: "var(--accent)" }}>Create one on the Dashboard</Link>.
+            <Link to="/" style={{ color: "var(--accent)" }}>
+              Create one on the Dashboard
+            </Link>
+            .
           </div>
         )}
-        {clusters.length > 0 && (<>
-          <select className="glass-input" value={form.selectedCluster}
-            onChange={(e) => set("selectedCluster", e.target.value)} style={{ marginBottom: 12 }}>
-            <option value="">— Select cluster —</option>
-            {clusters.map((c) => (
-              <option key={c.name} value={c.name}>{c.name} — {c.region} ({c.power_state ?? "?"})</option>
-            ))}
-          </select>
-          {selectedCluster && (
-            <div className="blast-cluster-info">
-              {([
-                ["Status", selectedCluster.power_state, selectedCluster.power_state === "Running" ? "var(--success)" : "var(--warning)"],
-                ["State", selectedCluster.provisioning_state, undefined],
-                ["SKU", selectedCluster.node_sku, undefined],
-                ["Nodes", String(selectedCluster.node_count), undefined],
-                ["K8s", selectedCluster.k8s_version, undefined],
-                ["Region", selectedCluster.region, undefined],
-              ] as [string, string | undefined, string | undefined][]).map(([label, val, color]) => (
-                <div key={label} className="blast-cluster-info__cell">
-                  <div className="blast-cluster-info__label">{label}</div>
-                  <div className="blast-cluster-info__value" style={color ? { fontWeight: 600, color } : undefined}>{val ?? "?"}</div>
-                </div>
+        {clusters.length > 0 && (
+          <>
+            <select
+              className="glass-input"
+              value={form.selectedCluster}
+              onChange={(e) => set("selectedCluster", e.target.value)}
+              style={{ marginBottom: 12 }}
+            >
+              <option value="">— Select cluster —</option>
+              {clusters.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name} — {c.region} ({c.power_state ?? "?"})
+                </option>
               ))}
-            </div>
-          )}
-        </>)}
+            </select>
+            {selectedCluster && (
+              <div className="blast-cluster-info">
+                {(
+                  [
+                    [
+                      "Status",
+                      selectedCluster.power_state,
+                      selectedCluster.power_state === "Running"
+                        ? "var(--success)"
+                        : "var(--warning)",
+                    ],
+                    ["State", selectedCluster.provisioning_state, undefined],
+                    ["SKU", selectedCluster.node_sku, undefined],
+                    ["Nodes", String(selectedCluster.node_count), undefined],
+                    ["K8s", selectedCluster.k8s_version, undefined],
+                    ["Region", selectedCluster.region, undefined],
+                  ] as [string, string | undefined, string | undefined][]
+                ).map(([label, val, color]) => (
+                  <div key={label} className="blast-cluster-info__cell">
+                    <div className="blast-cluster-info__label">{label}</div>
+                    <div
+                      className="blast-cluster-info__value"
+                      style={color ? { fontWeight: 600, color } : undefined}
+                    >
+                      {val ?? "?"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
 
         {/* Warmup & DB Sharding */}
         {selectedCluster && (
-          <div style={{ marginTop: 12, padding: "10px 14px", background: "var(--glass-bg)", border: "1px solid var(--glass-border)", borderRadius: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+          <div
+            style={{
+              marginTop: 12,
+              padding: "10px 14px",
+              background: "var(--glass-bg)",
+              border: "1px solid var(--glass-border)",
+              borderRadius: 8,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                marginBottom: 8,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
               <Zap size={14} style={{ color: "var(--warning)" }} />
               Performance
             </div>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginBottom: 6 }}>
-              <input type="checkbox" checked={form.enable_warmup} onChange={(e) => set("enable_warmup", e.target.checked)} style={{ accentColor: "var(--accent)" }} />
-              <span>Warmup cluster <span className="muted">(prepare DB shards on local SSD before BLAST)</span></span>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                cursor: "pointer",
+                fontSize: 12,
+                marginBottom: 6,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={form.enable_warmup}
+                onChange={(e) => set("enable_warmup", e.target.checked)}
+                style={{ accentColor: "var(--accent)" }}
+              />
+              <span>
+                Warmup cluster{" "}
+                <span className="muted">
+                  (prepare DB shards on local SSD before BLAST)
+                </span>
+              </span>
             </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12 }}>
-              <input type="checkbox" checked={form.db_auto_partition} onChange={(e) => set("db_auto_partition", e.target.checked)} style={{ accentColor: "var(--accent)" }} />
-              <span>DB auto-partition <span className="muted">(split DB into shards for parallel search)</span></span>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                cursor: "pointer",
+                fontSize: 12,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={form.db_auto_partition}
+                onChange={(e) => set("db_auto_partition", e.target.checked)}
+                style={{ accentColor: "var(--accent)" }}
+              />
+              <span>
+                DB auto-partition{" "}
+                <span className="muted">(split DB into shards for parallel search)</span>
+              </span>
             </label>
             {form.enable_warmup && (
-              <div className="muted" style={{ fontSize: 10, marginTop: 6, lineHeight: 1.5 }}>
-                The prepare step will create the cluster, download DB shards to node SSDs, then submit BLAST with reuse=true. This adds ~5-10 min setup but significantly improves search performance for large databases.
+              <div
+                className="muted"
+                style={{ fontSize: 10, marginTop: 6, lineHeight: 1.5 }}
+              >
+                The prepare step will create the cluster, download DB shards to node SSDs,
+                then submit BLAST with reuse=true. This adds ~5-10 min setup but
+                significantly improves search performance for large databases.
               </div>
             )}
           </div>
@@ -681,13 +1081,24 @@ export function BlastSubmit() {
       <section className="glass-card blast-section">
         <button onClick={() => setShowParams((v) => !v)} className="blast-params-toggle">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span className="blast-step-badge" style={{ fontSize: 10, width: 20, height: 20 }}>5</span>
+            <span
+              className="blast-step-badge"
+              style={{ fontSize: 10, width: 20, height: 20 }}
+            >
+              5
+            </span>
             <Gauge size={16} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
             <span style={{ fontWeight: 600, fontSize: 14 }}>Algorithm Parameters</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span className="muted" style={{ fontSize: 11 }}>{!showParams && paramsSummary}</span>
-            {showParams ? <ChevronUp size={16} strokeWidth={1.5} /> : <ChevronDown size={16} strokeWidth={1.5} />}
+            <span className="muted" style={{ fontSize: 11 }}>
+              {!showParams && paramsSummary}
+            </span>
+            {showParams ? (
+              <ChevronUp size={16} strokeWidth={1.5} />
+            ) : (
+              <ChevronDown size={16} strokeWidth={1.5} />
+            )}
           </div>
         </button>
         {showParams && (
@@ -695,15 +1106,23 @@ export function BlastSubmit() {
             {/* Presets */}
             <div className="blast-presets">
               {PRESETS.map((p) => {
-                const active = form.evalue === p.evalue && form.max_target_seqs === p.max_target_seqs;
+                const active =
+                  form.evalue === p.evalue && form.max_target_seqs === p.max_target_seqs;
                 return (
-                  <button key={p.label}
+                  <button
+                    key={p.label}
                     className={`blast-preset${active ? " blast-preset--active" : ""}`}
-                    onClick={() => { set("evalue", p.evalue); set("max_target_seqs", p.max_target_seqs); }}>
+                    onClick={() => {
+                      set("evalue", p.evalue);
+                      set("max_target_seqs", p.max_target_seqs);
+                    }}
+                  >
                     <Zap size={12} />
                     <div>
                       <div style={{ fontWeight: 500 }}>{p.label}</div>
-                      <div className="muted" style={{ fontSize: 10 }}>{p.desc}</div>
+                      <div className="muted" style={{ fontSize: 10 }}>
+                        {p.desc}
+                      </div>
                     </div>
                   </button>
                 );
@@ -712,64 +1131,150 @@ export function BlastSubmit() {
 
             <div className="blast-params-grid">
               <label>
-                <span className="glass-label">E-value <Tip text="Expected number of chance matches. Lower = more stringent." /></span>
-                <input className="glass-input" type="number" step="any" value={form.evalue}
-                  onChange={(e) => set("evalue", parseFloat(e.target.value) || 0.05)} />
+                <span className="glass-label">
+                  E-value{" "}
+                  <Tip text="Expected number of chance matches. Lower = more stringent." />
+                </span>
+                <input
+                  className="glass-input"
+                  type="number"
+                  step="any"
+                  value={form.evalue}
+                  onChange={(e) => set("evalue", parseFloat(e.target.value) || 0.05)}
+                />
               </label>
               <label>
-                <span className="glass-label">Max target seqs <Tip text="Maximum number of aligned sequences to keep." /></span>
-                <input className="glass-input" type="number" value={form.max_target_seqs}
-                  onChange={(e) => set("max_target_seqs", parseInt(e.target.value, 10) || 100)} />
+                <span className="glass-label">
+                  Max target seqs{" "}
+                  <Tip text="Maximum number of aligned sequences to keep." />
+                </span>
+                <input
+                  className="glass-input"
+                  type="number"
+                  value={form.max_target_seqs}
+                  onChange={(e) =>
+                    set("max_target_seqs", parseInt(e.target.value, 10) || 100)
+                  }
+                />
               </label>
               <label>
-                <span className="glass-label">Word size <Tip text="Length of initial exact match." /></span>
-                <input className="glass-input" type="number" value={form.word_size}
-                  onChange={(e) => set("word_size", e.target.value)} placeholder={String(programMeta.defaultWordSize)} />
+                <span className="glass-label">
+                  Word size <Tip text="Length of initial exact match." />
+                </span>
+                <input
+                  className="glass-input"
+                  type="number"
+                  value={form.word_size}
+                  onChange={(e) => set("word_size", e.target.value)}
+                  placeholder={String(programMeta.defaultWordSize)}
+                />
               </label>
               <label>
                 <span className="glass-label">Output format</span>
-                <select className="glass-input" value={form.outfmt} onChange={(e) => set("outfmt", parseInt(e.target.value, 10))}>
+                <select
+                  className="glass-input"
+                  value={form.outfmt}
+                  onChange={(e) => set("outfmt", parseInt(e.target.value, 10))}
+                >
                   <option value={7}>7 — Tabular + comments</option>
                   <option value={6}>6 — Tabular</option>
                   <option value={0}>0 — Pairwise text</option>
                   <option value={11}>11 — ASN.1 (archive)</option>
                 </select>
               </label>
-              {form.program === "blastn" && (<>
-                <label>
-                  <span className="glass-label">Match score <Tip text="Reward for a nucleotide match. Default: 1" /></span>
-                  <input className="glass-input" type="number" value={form.match_score}
-                    onChange={(e) => set("match_score", e.target.value)} placeholder="1" />
-                </label>
-                <label>
-                  <span className="glass-label">Mismatch score <Tip text="Penalty for a mismatch. Default: -2" /></span>
-                  <input className="glass-input" type="number" value={form.mismatch_score}
-                    onChange={(e) => set("mismatch_score", e.target.value)} placeholder="-2" />
-                </label>
-              </>)}
+              {form.program === "blastn" && (
+                <>
+                  <label>
+                    <span className="glass-label">
+                      Match score <Tip text="Reward for a nucleotide match. Default: 1" />
+                    </span>
+                    <input
+                      className="glass-input"
+                      type="number"
+                      value={form.match_score}
+                      onChange={(e) => set("match_score", e.target.value)}
+                      placeholder="1"
+                    />
+                  </label>
+                  <label>
+                    <span className="glass-label">
+                      Mismatch score <Tip text="Penalty for a mismatch. Default: -2" />
+                    </span>
+                    <input
+                      className="glass-input"
+                      type="number"
+                      value={form.mismatch_score}
+                      onChange={(e) => set("mismatch_score", e.target.value)}
+                      placeholder="-2"
+                    />
+                  </label>
+                </>
+              )}
               <label>
-                <span className="glass-label">Gap open <Tip text="Cost to open a gap." /></span>
-                <input className="glass-input" type="number" value={form.gap_open}
-                  onChange={(e) => set("gap_open", e.target.value)} placeholder="Auto" />
+                <span className="glass-label">
+                  Gap open <Tip text="Cost to open a gap." />
+                </span>
+                <input
+                  className="glass-input"
+                  type="number"
+                  value={form.gap_open}
+                  onChange={(e) => set("gap_open", e.target.value)}
+                  placeholder="Auto"
+                />
               </label>
               <label>
-                <span className="glass-label">Gap extend <Tip text="Cost to extend a gap." /></span>
-                <input className="glass-input" type="number" value={form.gap_extend}
-                  onChange={(e) => set("gap_extend", e.target.value)} placeholder="Auto" />
+                <span className="glass-label">
+                  Gap extend <Tip text="Cost to extend a gap." />
+                </span>
+                <input
+                  className="glass-input"
+                  type="number"
+                  value={form.gap_extend}
+                  onChange={(e) => set("gap_extend", e.target.value)}
+                  placeholder="Auto"
+                />
               </label>
-              <div style={{ gridColumn: "1 / -1", display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-                <span className="glass-label" style={{ marginBottom: 0 }}>Filters:</span>
-                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12 }}>
-                  <input type="checkbox" checked={form.low_complexity_filter}
-                    onChange={(e) => set("low_complexity_filter", e.target.checked)} />
-                  Low complexity filter <Tip text="Mask low-complexity regions (DUST for nucleotide, SEG for protein)." />
+              <div
+                style={{
+                  gridColumn: "1 / -1",
+                  display: "flex",
+                  gap: 16,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                }}
+              >
+                <span className="glass-label" style={{ marginBottom: 0 }}>
+                  Filters:
+                </span>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    cursor: "pointer",
+                    fontSize: 12,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={form.low_complexity_filter}
+                    onChange={(e) => set("low_complexity_filter", e.target.checked)}
+                  />
+                  Low complexity filter{" "}
+                  <Tip text="Mask low-complexity regions (DUST for nucleotide, SEG for protein)." />
                 </label>
               </div>
               <label style={{ gridColumn: "1 / -1" }}>
-                <span className="glass-label">Additional options <Tip text="Extra command-line flags for BLAST." /></span>
-                <input className="glass-input" value={form.additional_options}
+                <span className="glass-label">
+                  Additional options <Tip text="Extra command-line flags for BLAST." />
+                </span>
+                <input
+                  className="glass-input"
+                  value={form.additional_options}
                   onChange={(e) => set("additional_options", e.target.value)}
-                  placeholder="-max_hsps 1 -num_threads 4" spellCheck={false} />
+                  placeholder="-max_hsps 1 -num_threads 4"
+                  spellCheck={false}
+                />
               </label>
             </div>
           </div>
@@ -785,7 +1290,14 @@ export function BlastSubmit() {
               {missing.map((m) => (
                 <li key={m.text}>
                   {m.text}
-                  {m.link && <Link to={m.link} style={{ marginLeft: 6, color: "var(--accent)", fontSize: 11 }}>Go →</Link>}
+                  {m.link && (
+                    <Link
+                      to={m.link}
+                      style={{ marginLeft: 6, color: "var(--accent)", fontSize: 11 }}
+                    >
+                      Go →
+                    </Link>
+                  )}
                 </li>
               ))}
             </ul>
@@ -794,65 +1306,129 @@ export function BlastSubmit() {
 
         {/* Pre-flight readiness check results */}
         {preFlightResult && (
-          <div style={{
-            background: preFlightResult.ready ? "rgba(115,191,105,0.06)" : "rgba(242,153,74,0.06)",
-            border: `1px solid ${preFlightResult.ready ? "rgba(115,191,105,0.2)" : "rgba(242,153,74,0.2)"}`,
-            borderRadius: 8, padding: "12px 16px", marginBottom: 8,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              {preFlightResult.ready
-                ? <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
-                : <AlertTriangle size={14} style={{ color: "var(--warning)" }} />}
-              <span style={{ fontSize: 12, fontWeight: 600 }}>{preFlightResult.summary}</span>
+          <div
+            style={{
+              background: preFlightResult.ready
+                ? "rgba(115,191,105,0.06)"
+                : "rgba(242,153,74,0.06)",
+              border: `1px solid ${preFlightResult.ready ? "rgba(115,191,105,0.2)" : "rgba(242,153,74,0.2)"}`,
+              borderRadius: 8,
+              padding: "12px 16px",
+              marginBottom: 8,
+            }}
+          >
+            <div
+              style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}
+            >
+              {preFlightResult.ready ? (
+                <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
+              ) : (
+                <AlertTriangle size={14} style={{ color: "var(--warning)" }} />
+              )}
+              <span style={{ fontSize: 12, fontWeight: 600 }}>
+                {preFlightResult.summary}
+              </span>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {preFlightResult.checks.map((c) => (
-                <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}>
-                  {c.status === "pass" ? <CheckCircle2 size={11} style={{ color: "var(--success)" }} />
-                    : c.status === "fail" ? <AlertTriangle size={11} style={{ color: c.severity === "critical" ? "var(--danger)" : "var(--warning)" }} />
-                    : c.status === "warn" ? <AlertTriangle size={11} style={{ color: "var(--warning)", opacity: 0.7 }} />
-                    : <Check size={11} style={{ color: "var(--text-faint)" }} />}
-                  <span style={{ color: c.status === "pass" ? "var(--text-muted)" : "var(--text-primary)" }}>
+                <div
+                  key={c.id}
+                  style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}
+                >
+                  {c.status === "pass" ? (
+                    <CheckCircle2 size={11} style={{ color: "var(--success)" }} />
+                  ) : c.status === "fail" ? (
+                    <AlertTriangle
+                      size={11}
+                      style={{
+                        color:
+                          c.severity === "critical" ? "var(--danger)" : "var(--warning)",
+                      }}
+                    />
+                  ) : c.status === "warn" ? (
+                    <AlertTriangle
+                      size={11}
+                      style={{ color: "var(--warning)", opacity: 0.7 }}
+                    />
+                  ) : (
+                    <Check size={11} style={{ color: "var(--text-faint)" }} />
+                  )}
+                  <span
+                    style={{
+                      color:
+                        c.status === "pass" ? "var(--text-muted)" : "var(--text-primary)",
+                    }}
+                  >
                     {c.title}
                   </span>
-                  {c.detail && <span className="muted" style={{ fontSize: 10 }}>— {c.detail}</span>}
+                  {c.detail && (
+                    <span className="muted" style={{ fontSize: 10 }}>
+                      — {c.detail}
+                    </span>
+                  )}
                   {c.action && c.status === "fail" && (
-                    <span style={{ fontSize: 10, color: "var(--accent)", marginLeft: "auto" }}>
+                    <span
+                      style={{ fontSize: 10, color: "var(--accent)", marginLeft: "auto" }}
+                    >
                       {c.action_type === "download_db" ? (
-                        <Link to="/" style={{ color: "var(--accent)" }}>{c.action} →</Link>
-                      ) : c.action}
+                        <Link to="/" style={{ color: "var(--accent)" }}>
+                          {c.action} →
+                        </Link>
+                      ) : (
+                        c.action
+                      )}
                     </span>
                   )}
                 </div>
               ))}
             </div>
             {/* Suggested databases if DB not found */}
-            {preFlightResult.checks.some(c => c.id === "blast_db" && c.status === "fail" && c.suggested_dbs) && (
+            {preFlightResult.checks.some(
+              (c) => c.id === "blast_db" && c.status === "fail" && c.suggested_dbs,
+            ) && (
               <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
                 <span style={{ fontWeight: 600 }}>Suggested databases to download: </span>
-                {preFlightResult.checks.find(c => c.id === "blast_db")?.suggested_dbs?.map((db, i) => (
-                  <span key={db}>
-                    {i > 0 && ", "}
-                    <button
-                      style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11, padding: 0, textDecoration: "underline" }}
-                      onClick={() => set("db", `blast-db/${db}/${db}`)}
-                    >{db}</button>
-                  </span>
-                ))}
+                {preFlightResult.checks
+                  .find((c) => c.id === "blast_db")
+                  ?.suggested_dbs?.map((db, i) => (
+                    <span key={db}>
+                      {i > 0 && ", "}
+                      <button
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "var(--accent)",
+                          cursor: "pointer",
+                          fontSize: 11,
+                          padding: 0,
+                          textDecoration: "underline",
+                        }}
+                        onClick={() => set("db", `blast-db/${db}/${db}`)}
+                      >
+                        {db}
+                      </button>
+                    </span>
+                  ))}
               </div>
             )}
           </div>
         )}
 
         {/* Command preview — shown when ready to submit */}
-        {canSubmit && <BlastCommandPreview form={form} programMeta={programMeta} toast={toast} />}
+        {canSubmit && (
+          <BlastCommandPreview form={form} programMeta={programMeta} toast={toast} />
+        )}
         <div className="blast-submit-bar">
           <div className="blast-submit-summary">
             {searchSummary && (
               <span className="blast-submit-summary__text">
                 {searchSummary}
                 {form.optimize && form.program === "blastn" && (
-                  <span className="muted"> · {BLASTN_OPTIMIZE.find((o) => o.value === form.optimize)?.value ?? ""}</span>
+                  <span className="muted">
+                    {" "}
+                    ·{" "}
+                    {BLASTN_OPTIMIZE.find((o) => o.value === form.optimize)?.value ?? ""}
+                  </span>
                 )}
               </span>
             )}
@@ -860,15 +1436,28 @@ export function BlastSubmit() {
           <div style={{ display: "flex", gap: 8 }}>
             {/* Pre-flight check button */}
             {canSubmit && (
-              <button className="glass-button" onClick={() => preFlightMutation.mutate()}
+              <button
+                className="glass-button"
+                onClick={() => preFlightMutation.mutate()}
                 disabled={preFlightMutation.isPending}
-                style={{ fontSize: 12, gap: 5 }}>
-                {preFlightMutation.isPending
-                  ? <><Loader2 size={13} className="spin" /> Checking...</>
-                  : <><CheckCircle2 size={13} /> Check Readiness</>}
+                style={{ fontSize: 12, gap: 5 }}
+              >
+                {preFlightMutation.isPending ? (
+                  <>
+                    <Loader2 size={13} className="spin" /> Checking...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 size={13} /> Check Readiness
+                  </>
+                )}
               </button>
             )}
-            <button className="blast-submit-btn" onClick={handleSubmit} disabled={!canSubmit}>
+            <button
+              className="blast-submit-btn"
+              onClick={handleSubmit}
+              disabled={!canSubmit}
+            >
               {submitMutation.isPending ? (
                 <Loader2 size={20} strokeWidth={1.5} className="spin" />
               ) : (

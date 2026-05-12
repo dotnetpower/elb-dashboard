@@ -1,7 +1,20 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Database, Loader2, CheckCircle2, AlertTriangle, Lock, Globe, ShieldAlert, Download, Circle, Maximize2, X, RefreshCw } from "lucide-react";
+import {
+  Database,
+  Loader2,
+  CheckCircle2,
+  AlertTriangle,
+  Lock,
+  Globe,
+  ShieldAlert,
+  Download,
+  Circle,
+  Maximize2,
+  X,
+  RefreshCw,
+} from "lucide-react";
 
 import { api, formatApiError } from "@/api/client";
 import { monitoringApi, blastApi } from "@/api/endpoints";
@@ -14,15 +27,96 @@ const HNS_DISMISSED_KEY = "elb-hns-warning-dismissed";
 // DB catalog with approximate sizes
 // ---------------------------------------------------------------------------
 const DB_CATALOG = [
-  { value: "16S_ribosomal_RNA", label: "16S ribosomal RNA", desc: "Prokaryotic small subunit rRNA — ideal for microbial ID and metagenomics.", size: "~18 MB", estFiles: 12, estMinutes: "< 1 min", category: "Small / Test", type: "nucl" as const },
-  { value: "18S_fungal_sequences", label: "18S fungal sequences", desc: "Fungal small subunit rRNA for fungal taxonomy.", size: "~3 MB", estFiles: 10, estMinutes: "< 1 min", category: "Small / Test", type: "nucl" as const },
-  { value: "ITS_RefSeq_Fungi", label: "ITS RefSeq Fungi", desc: "Internal Transcribed Spacer regions for fungal species-level ID.", size: "~8 MB", estFiles: 10, estMinutes: "< 1 min", category: "Small / Test", type: "nucl" as const },
-  { value: "pdbnt", label: "PDB nucleotide", desc: "Nucleotide sequences from the Protein Data Bank (3D structures).", size: "~200 MB", estFiles: 15, estMinutes: "~2 min", category: "Medium", type: "nucl" as const },
-  { value: "swissprot", label: "SwissProt", desc: "Curated, high-quality protein sequences from UniProt/Swiss-Prot.", size: "~300 MB", estFiles: 15, estMinutes: "~3 min", category: "Medium", type: "prot" as const },
-  { value: "core_nt", label: "Core nucleotide", desc: "Curated subset of nt — major organisms, smaller and faster than full nt.", size: "~250 GB", estFiles: 600, estMinutes: "~2-4 hours", category: "Large", type: "nucl" as const },
-  { value: "nt", label: "Nucleotide collection", desc: "All GenBank + RefSeq nucleotide sequences. Comprehensive but very large.", size: "~400 GB", estFiles: 900, estMinutes: "~4-8 hours", category: "Large", type: "nucl" as const },
-  { value: "nr", label: "Non-redundant protein", desc: "All non-redundant GenBank protein translations + RefSeq + PDB + SwissProt.", size: "~300 GB", estFiles: 700, estMinutes: "~3-6 hours", category: "Large", type: "prot" as const },
-  { value: "refseq_protein", label: "RefSeq protein", desc: "NCBI Reference Sequence protein database — curated and non-redundant.", size: "~100 GB", estFiles: 300, estMinutes: "~1-3 hours", category: "Large", type: "prot" as const },
+  {
+    value: "16S_ribosomal_RNA",
+    label: "16S ribosomal RNA",
+    desc: "Prokaryotic small subunit rRNA — ideal for microbial ID and metagenomics.",
+    size: "~18 MB",
+    estFiles: 12,
+    estMinutes: "< 1 min",
+    category: "Small / Test",
+    type: "nucl" as const,
+  },
+  {
+    value: "18S_fungal_sequences",
+    label: "18S fungal sequences",
+    desc: "Fungal small subunit rRNA for fungal taxonomy.",
+    size: "~3 MB",
+    estFiles: 10,
+    estMinutes: "< 1 min",
+    category: "Small / Test",
+    type: "nucl" as const,
+  },
+  {
+    value: "ITS_RefSeq_Fungi",
+    label: "ITS RefSeq Fungi",
+    desc: "Internal Transcribed Spacer regions for fungal species-level ID.",
+    size: "~8 MB",
+    estFiles: 10,
+    estMinutes: "< 1 min",
+    category: "Small / Test",
+    type: "nucl" as const,
+  },
+  {
+    value: "pdbnt",
+    label: "PDB nucleotide",
+    desc: "Nucleotide sequences from the Protein Data Bank (3D structures).",
+    size: "~200 MB",
+    estFiles: 15,
+    estMinutes: "~2 min",
+    category: "Medium",
+    type: "nucl" as const,
+  },
+  {
+    value: "swissprot",
+    label: "SwissProt",
+    desc: "Curated, high-quality protein sequences from UniProt/Swiss-Prot.",
+    size: "~300 MB",
+    estFiles: 15,
+    estMinutes: "~3 min",
+    category: "Medium",
+    type: "prot" as const,
+  },
+  {
+    value: "core_nt",
+    label: "Core nucleotide",
+    desc: "Curated subset of nt — major organisms, smaller and faster than full nt.",
+    size: "~250 GB",
+    estFiles: 600,
+    estMinutes: "~2-4 hours",
+    category: "Large",
+    type: "nucl" as const,
+  },
+  {
+    value: "nt",
+    label: "Nucleotide collection",
+    desc: "All GenBank + RefSeq nucleotide sequences. Comprehensive but very large.",
+    size: "~400 GB",
+    estFiles: 900,
+    estMinutes: "~4-8 hours",
+    category: "Large",
+    type: "nucl" as const,
+  },
+  {
+    value: "nr",
+    label: "Non-redundant protein",
+    desc: "All non-redundant GenBank protein translations + RefSeq + PDB + SwissProt.",
+    size: "~300 GB",
+    estFiles: 700,
+    estMinutes: "~3-6 hours",
+    category: "Large",
+    type: "prot" as const,
+  },
+  {
+    value: "refseq_protein",
+    label: "RefSeq protein",
+    desc: "NCBI Reference Sequence protein database — curated and non-redundant.",
+    size: "~100 GB",
+    estFiles: 300,
+    estMinutes: "~1-3 hours",
+    category: "Large",
+    type: "prot" as const,
+  },
 ];
 
 interface Props {
@@ -40,7 +134,10 @@ function formatNcbiVersionShared(v: string | null | undefined): string {
 }
 
 // Toast banner shown at top of DB popup — fades out after 3s
-function DownloadResultBanner({ result, onDismiss }: {
+function DownloadResultBanner({
+  result,
+  onDismiss,
+}: {
   result: { db: string; msg: string; version?: string; type: "ok" | "err" };
   onDismiss: () => void;
 }) {
@@ -50,32 +147,60 @@ function DownloadResultBanner({ result, onDismiss }: {
     if (result.type === "err") return; // Errors don't auto-dismiss
     const fadeTimer = setTimeout(() => setFading(true), 3000);
     const removeTimer = setTimeout(onDismiss, 3500);
-    return () => { clearTimeout(fadeTimer); clearTimeout(removeTimer); };
+    return () => {
+      clearTimeout(fadeTimer);
+      clearTimeout(removeTimer);
+    };
   }, [result, onDismiss]);
 
   return (
-    <div style={{
-      marginBottom: "var(--space-3)", padding: "8px 12px", borderRadius: 8, fontSize: 12,
-      background: result.type === "ok" ? "rgba(115,191,105,0.08)" : "rgba(242,114,111,0.08)",
-      border: `1px solid ${result.type === "ok" ? "rgba(115,191,105,0.25)" : "rgba(242,114,111,0.25)"}`,
-      color: result.type === "ok" ? "var(--success)" : "var(--danger)",
-      display: "flex", alignItems: "center", gap: 8,
-      opacity: fading ? 0 : 1, transition: "opacity 0.5s ease-out",
-    }}>
-      {result.type === "ok"
-        ? <CheckCircle2 size={14} style={{ flexShrink: 0 }} />
-        : <AlertTriangle size={14} style={{ flexShrink: 0 }} />}
+    <div
+      style={{
+        marginBottom: "var(--space-3)",
+        padding: "8px 12px",
+        borderRadius: 8,
+        fontSize: 12,
+        background:
+          result.type === "ok" ? "rgba(115,191,105,0.08)" : "rgba(242,114,111,0.08)",
+        border: `1px solid ${result.type === "ok" ? "rgba(115,191,105,0.25)" : "rgba(242,114,111,0.25)"}`,
+        color: result.type === "ok" ? "var(--success)" : "var(--danger)",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        opacity: fading ? 0 : 1,
+        transition: "opacity 0.5s ease-out",
+      }}
+    >
+      {result.type === "ok" ? (
+        <CheckCircle2 size={14} style={{ flexShrink: 0 }} />
+      ) : (
+        <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+      )}
       <div style={{ flex: 1 }}>
         <strong>{result.db}</strong>: {result.msg}
         {result.version && (
-          <span style={{ marginLeft: 8, fontSize: 10, color: "var(--text-faint)", fontWeight: 400 }}>
+          <span
+            style={{
+              marginLeft: 8,
+              fontSize: 10,
+              color: "var(--text-faint)",
+              fontWeight: 400,
+            }}
+          >
             Version: {formatNcbiVersionShared(result.version)}
           </span>
         )}
       </div>
       <button
         onClick={onDismiss}
-        style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 2, opacity: 0.6 }}
+        style={{
+          background: "none",
+          border: "none",
+          color: "inherit",
+          cursor: "pointer",
+          padding: 2,
+          opacity: 0.6,
+        }}
       >
         <X size={12} />
       </button>
@@ -97,20 +222,34 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
 
   // --- Public access toggle ---
   const [showConfirmEnable, setShowConfirmEnable] = useState(false);
-  const [toggleMsg, setToggleMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [toggleMsg, setToggleMsg] = useState<{ type: "ok" | "err"; text: string } | null>(
+    null,
+  );
   const [hnsDismissed, setHnsDismissed] = useState(() => {
-    try { return localStorage.getItem(HNS_DISMISSED_KEY) === "1"; } catch { return false; }
+    try {
+      return localStorage.getItem(HNS_DISMISSED_KEY) === "1";
+    } catch {
+      return false;
+    }
   });
 
   const toggle = useMutation({
     mutationFn: (next: boolean) =>
       api.post<{ public_network_access: string | null }>(
         "/monitor/storage/public-access",
-        { subscription_id: subscriptionId, resource_group: resourceGroup, account_name: accountName, enabled: next },
+        {
+          subscription_id: subscriptionId,
+          resource_group: resourceGroup,
+          account_name: accountName,
+          enabled: next,
+        },
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-      setToggleMsg({ type: "ok", text: "Change applied. Propagation may take a few seconds." });
+      setToggleMsg({
+        type: "ok",
+        text: "Change applied. Propagation may take a few seconds.",
+      });
     },
     onError: (e) => {
       setToggleMsg({ type: "err", text: formatApiError(e, "storage") });
@@ -127,7 +266,13 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
   // --- Prepare DB (state moved to BlastDbSection, but we track 'downloading' here for shimmer) ---
   const [dbDownloading, setDbDownloading] = useState<string | null>(null);
 
-  const status = !enabled ? "idle" : query.isLoading ? "loading" : query.isError ? "error" : "ok";
+  const status = !enabled
+    ? "idle"
+    : query.isLoading
+      ? "loading"
+      : query.isError
+        ? "error"
+        : "ok";
   const publicAccess = query.data?.public_network_access ?? null;
   const isPublic = publicAccess === "Enabled";
 
@@ -161,7 +306,11 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
               onClick={() => handleToggleClick(!isPublic)}
               disabled={toggle.isPending}
               style={{ fontSize: 10, padding: "3px 8px" }}
-              title={isPublic ? "Disable public access (recommended when not running BLAST)" : "Enable public access (required for BLAST searches)"}
+              title={
+                isPublic
+                  ? "Disable public access (recommended when not running BLAST)"
+                  : "Enable public access (required for BLAST searches)"
+              }
             >
               {isPublic ? <Lock size={10} /> : <Globe size={10} />}
               {isPublic ? "Lock" : "Unlock"}
@@ -170,13 +319,34 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
         )
       }
     >
-      {!enabled && <div className="muted">Set Subscription ID, Workload RG, and Storage Account above.</div>}
-      {query.isError && <div className="muted" style={{ color: "var(--danger)" }}>Failed to load storage: {formatApiError(query.error, "storage")}</div>}
+      {!enabled && (
+        <div className="muted">
+          Set Subscription ID, Workload RG, and Storage Account above.
+        </div>
+      )}
+      {query.isError && (
+        <div className="muted" style={{ color: "var(--danger)" }}>
+          Failed to load storage: {formatApiError(query.error, "storage")}
+        </div>
+      )}
       {query.data && (
         <>
           {/* #5: Public access warning banner */}
           {isPublic && (
-            <div style={{ padding: "6px 10px", marginBottom: "var(--space-3)", background: "rgba(240,198,116,0.08)", border: "1px solid rgba(240,198,116,0.2)", borderRadius: 6, fontSize: 11, color: "var(--warning)", display: "flex", alignItems: "center", gap: 6 }}>
+            <div
+              style={{
+                padding: "6px 10px",
+                marginBottom: "var(--space-3)",
+                background: "rgba(240,198,116,0.08)",
+                border: "1px solid rgba(240,198,116,0.2)",
+                borderRadius: 6,
+                fontSize: 11,
+                color: "var(--warning)",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
               <ShieldAlert size={13} strokeWidth={1.5} />
               Public network access is enabled. Disable after BLAST operations complete.
             </div>
@@ -184,12 +354,41 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
 
           {/* HNS disabled warning — dismissible */}
           {!query.data.is_hns_enabled && !hnsDismissed && (
-            <div style={{ padding: "6px 10px", marginBottom: "var(--space-3)", background: "rgba(240,198,116,0.08)", border: "1px solid rgba(240,198,116,0.2)", borderRadius: 6, fontSize: 11, color: "var(--warning)", display: "flex", alignItems: "center", gap: 6 }}>
+            <div
+              style={{
+                padding: "6px 10px",
+                marginBottom: "var(--space-3)",
+                background: "rgba(240,198,116,0.08)",
+                border: "1px solid rgba(240,198,116,0.2)",
+                borderRadius: 6,
+                fontSize: 11,
+                color: "var(--warning)",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
               <AlertTriangle size={13} strokeWidth={1.5} />
-              <span style={{ flex: 1 }}>HNS (Data Lake Gen2) is disabled. ElasticBLAST works best with HNS enabled.</span>
+              <span style={{ flex: 1 }}>
+                HNS (Data Lake Gen2) is disabled. ElasticBLAST works best with HNS
+                enabled.
+              </span>
               <button
-                onClick={() => { setHnsDismissed(true); try { localStorage.setItem(HNS_DISMISSED_KEY, "1"); } catch { /* noop */ } }}
-                style={{ background: "none", border: "none", color: "var(--text-faint)", cursor: "pointer", padding: 2 }}
+                onClick={() => {
+                  setHnsDismissed(true);
+                  try {
+                    localStorage.setItem(HNS_DISMISSED_KEY, "1");
+                  } catch {
+                    /* noop */
+                  }
+                }}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--text-faint)",
+                  cursor: "pointer",
+                  padding: 2,
+                }}
                 title="Dismiss"
               >
                 <X size={12} />
@@ -198,32 +397,92 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
           )}
 
           {/* #4: Grid layout for status info */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: "var(--space-2)", fontSize: 12, marginBottom: "var(--space-3)" }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))",
+              gap: "var(--space-2)",
+              fontSize: 12,
+              marginBottom: "var(--space-3)",
+            }}
+          >
             <div>
-              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>Region</div>
+              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                Region
+              </div>
               <div>{query.data.region}</div>
             </div>
             <div>
-              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>SKU</div>
+              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                SKU
+              </div>
               <div>{query.data.sku}</div>
             </div>
             <div>
-              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>HNS</div>
+              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                HNS
+              </div>
               {/* #3: HNS neutral color */}
-              <div style={{ color: query.data.is_hns_enabled ? "var(--text-muted)" : "var(--warning)" }}>{query.data.is_hns_enabled ? "Enabled" : "Disabled"}</div>
+              <div
+                style={{
+                  color: query.data.is_hns_enabled
+                    ? "var(--text-muted)"
+                    : "var(--warning)",
+                }}
+              >
+                {query.data.is_hns_enabled ? "Enabled" : "Disabled"}
+              </div>
             </div>
             <div>
-              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>Public</div>
-              <div style={{ color: isPublic ? "var(--warning)" : "var(--success)", fontWeight: 600 }}>{isPublic ? "Enabled" : "Disabled"}</div>
+              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>
+                Public
+              </div>
+              <div
+                style={{
+                  color: isPublic ? "var(--warning)" : "var(--success)",
+                  fontWeight: 600,
+                }}
+              >
+                {isPublic ? "Enabled" : "Disabled"}
+              </div>
             </div>
           </div>
 
           {/* #16: Compact container table */}
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginBottom: "var(--space-3)" }}>
+          <table
+            style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              fontSize: 12,
+              marginBottom: "var(--space-3)",
+            }}
+          >
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
-                <th style={{ textAlign: "left", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>Container</th>
-                <th style={{ textAlign: "right", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>Access</th>
+                <th
+                  style={{
+                    textAlign: "left",
+                    padding: "4px 0",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
+                  Container
+                </th>
+                <th
+                  style={{
+                    textAlign: "right",
+                    padding: "4px 0",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
+                  Access
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -233,13 +492,25 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
                     <strong>{c.name}</strong>
                     {c.last_modified_time && (
                       <span className="muted" style={{ fontSize: 9, marginLeft: 6 }}>
-                        updated {new Date(c.last_modified_time).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                        updated{" "}
+                        {new Date(c.last_modified_time).toLocaleDateString(undefined, {
+                          month: "short",
+                          day: "numeric",
+                        })}
                       </span>
                     )}
                   </td>
                   {/* #1: "None" → "Private" with lock icon */}
                   <td style={{ padding: "6px 0", textAlign: "right" }}>
-                    <span style={{ fontSize: 10, color: "var(--text-muted)", display: "inline-flex", alignItems: "center", gap: 3 }}>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: "var(--text-muted)",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 3,
+                      }}
+                    >
                       <Lock size={9} /> {c.public_access || "Private"}
                     </span>
                   </td>
@@ -250,31 +521,79 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
 
           {/* Toggle status messages */}
           {toggle.isPending && (
-            <div className="muted" style={{ fontSize: 11, color: "var(--accent)", marginBottom: "var(--space-2)" }}>
-              <Loader2 size={10} className="spin" style={{ display: "inline", verticalAlign: "middle" }} /> Toggling...
+            <div
+              className="muted"
+              style={{
+                fontSize: 11,
+                color: "var(--accent)",
+                marginBottom: "var(--space-2)",
+              }}
+            >
+              <Loader2
+                size={10}
+                className="spin"
+                style={{ display: "inline", verticalAlign: "middle" }}
+              />{" "}
+              Toggling...
             </div>
           )}
           {toggleMsg && (
-            <div style={{ fontSize: 11, color: toggleMsg.type === "ok" ? "var(--success)" : "var(--danger)", marginBottom: "var(--space-2)" }}>
-              {toggleMsg.type === "ok" ? <CheckCircle2 size={10} style={{ verticalAlign: "middle" }} /> : <AlertTriangle size={10} style={{ verticalAlign: "middle" }} />} {toggleMsg.text}
+            <div
+              style={{
+                fontSize: 11,
+                color: toggleMsg.type === "ok" ? "var(--success)" : "var(--danger)",
+                marginBottom: "var(--space-2)",
+              }}
+            >
+              {toggleMsg.type === "ok" ? (
+                <CheckCircle2 size={10} style={{ verticalAlign: "middle" }} />
+              ) : (
+                <AlertTriangle size={10} style={{ verticalAlign: "middle" }} />
+              )}{" "}
+              {toggleMsg.text}
             </div>
           )}
 
           {/* #14: Confirmation dialog for enabling public access */}
           {showConfirmEnable && (
-            <div style={{ padding: "10px 14px", marginBottom: "var(--space-3)", background: "rgba(240,198,116,0.08)", border: "1px solid rgba(240,198,116,0.25)", borderRadius: 8, fontSize: 12 }}>
+            <div
+              style={{
+                padding: "10px 14px",
+                marginBottom: "var(--space-3)",
+                background: "rgba(240,198,116,0.08)",
+                border: "1px solid rgba(240,198,116,0.25)",
+                borderRadius: 8,
+                fontSize: 12,
+              }}
+            >
               <div style={{ color: "var(--warning)", fontWeight: 600, marginBottom: 6 }}>
-                <ShieldAlert size={14} style={{ verticalAlign: "middle", marginRight: 4 }} />
+                <ShieldAlert
+                  size={14}
+                  style={{ verticalAlign: "middle", marginRight: 4 }}
+                />
                 Enable public network access?
               </div>
               <div className="muted" style={{ fontSize: 11, marginBottom: 8 }}>
-                This allows anyone on the internet to access your storage. ElasticBLAST requires this during submit/status/delete operations. Remember to disable it after.
+                This allows anyone on the internet to access your storage. ElasticBLAST
+                requires this during submit/status/delete operations. Remember to disable
+                it after.
               </div>
               <div style={{ display: "flex", gap: "var(--space-2)" }}>
-                <button className="glass-button glass-button--primary" onClick={() => { toggle.mutate(true); setShowConfirmEnable(false); }} style={{ fontSize: 11 }}>
+                <button
+                  className="glass-button glass-button--primary"
+                  onClick={() => {
+                    toggle.mutate(true);
+                    setShowConfirmEnable(false);
+                  }}
+                  style={{ fontSize: 11 }}
+                >
                   Enable
                 </button>
-                <button className="glass-button" onClick={() => setShowConfirmEnable(false)} style={{ fontSize: 11 }}>
+                <button
+                  className="glass-button"
+                  onClick={() => setShowConfirmEnable(false)}
+                  style={{ fontSize: 11 }}
+                >
                   Cancel
                 </button>
               </div>
@@ -309,15 +628,25 @@ function BlastDbSection({
   onDownloadingChange?: (db: string | null) => void;
 }) {
   const [downloading, setDownloading] = useState<string | null>(null);
-  const [downloadResult, setDownloadResult] = useState<{ db: string; msg: string; version?: string; type: "ok" | "err" } | null>(null);
+  const [downloadResult, setDownloadResult] = useState<{
+    db: string;
+    msg: string;
+    version?: string;
+    type: "ok" | "err";
+  } | null>(null);
   // Track in-progress downloads (after API returns, polling continues): { dbName -> { expectedFiles, startTime, version } }
-  const [inProgress, setInProgress] = useState<Map<string, { expectedFiles: number; startTime: number; sourceVersion?: string }>>(new Map());
+  const [inProgress, setInProgress] = useState<
+    Map<string, { expectedFiles: number; startTime: number; sourceVersion?: string }>
+  >(new Map());
   // Track locally-completed downloads (survive until refetch succeeds)
-  const [locallyDownloaded, setLocallyDownloaded] = useState<Map<string, { source_version?: string }>>(new Map());
+  const [locallyDownloaded, setLocallyDownloaded] = useState<
+    Map<string, { source_version?: string }>
+  >(new Map());
 
   // Notify parent when downloading state changes (active OR in-progress)
   useEffect(() => {
-    const active = downloading || (inProgress.size > 0 ? [...inProgress.keys()][0] : null);
+    const active =
+      downloading || (inProgress.size > 0 ? [...inProgress.keys()][0] : null);
     onDownloadingChange?.(active);
   }, [downloading, inProgress, onDownloadingChange]);
   const [customDb, setCustomDb] = useState("");
@@ -329,7 +658,12 @@ function BlastDbSection({
   // ESC key to close popup
   useEffect(() => {
     if (!showPopup) return;
-    const handleEsc = (e: KeyboardEvent) => { if (e.key === "Escape") { setShowPopup(false); setConfirmLargeDb(null); } };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowPopup(false);
+        setConfirmLargeDb(null);
+      }
+    };
     window.addEventListener("keydown", handleEsc);
     return () => window.removeEventListener("keydown", handleEsc);
   }, [showPopup]);
@@ -339,7 +673,9 @@ function BlastDbSection({
     if (!showPopup) return;
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = prev; };
+    return () => {
+      document.body.style.overflow = prev;
+    };
   }, [showPopup]);
 
   // Query downloaded databases from storage
@@ -360,26 +696,56 @@ function BlastDbSection({
   });
   const latestVersion = latestQuery.data?.latest_version ?? null;
 
-  const downloadedDbs = new Map<string, { file_count?: number; total_bytes?: number; last_modified?: string; source_version?: string; downloaded_at?: string }>();
-  for (const d of (dbQuery.data?.databases ?? []) as { name: string; file_count?: number; total_bytes?: number; last_modified?: string; source_version?: string; downloaded_at?: string }[]) {
-    downloadedDbs.set(d.name, d);
-  }
-  // Merge locally-completed downloads (show as "Ready" even before refetch succeeds)
-  for (const [name, meta] of locallyDownloaded) {
-    if (!downloadedDbs.has(name)) {
-      downloadedDbs.set(name, { source_version: meta.source_version, downloaded_at: new Date().toISOString() });
+  const downloadedDbs = useMemo(() => {
+    const next = new Map<
+      string,
+      {
+        file_count?: number;
+        total_bytes?: number;
+        last_modified?: string;
+        source_version?: string;
+        downloaded_at?: string;
+      }
+    >();
+    for (const d of (dbQuery.data?.databases ?? []) as {
+      name: string;
+      file_count?: number;
+      total_bytes?: number;
+      last_modified?: string;
+      source_version?: string;
+      downloaded_at?: string;
+    }[]) {
+      next.set(d.name, d);
     }
-  }
+    // Merge locally-completed downloads (show as "Ready" even before refetch succeeds)
+    for (const [name, meta] of locallyDownloaded) {
+      if (!next.has(name)) {
+        next.set(name, {
+          source_version: meta.source_version,
+          downloaded_at: new Date().toISOString(),
+        });
+      }
+    }
+    return next;
+  }, [dbQuery.data?.databases, locallyDownloaded]);
 
   const updatesAvailable = latestVersion
-    ? [...downloadedDbs.values()].filter(d => d.source_version && d.source_version !== latestVersion).length
+    ? [...downloadedDbs.values()].filter(
+        (d) => d.source_version && d.source_version !== latestVersion,
+      ).length
     : 0;
 
   // Track elapsed time during download
   useEffect(() => {
-    if (!downloading) { setElapsed(0); return; }
+    if (!downloading) {
+      setElapsed(0);
+      return;
+    }
     const start = Date.now();
-    const t = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    const t = setInterval(
+      () => setElapsed(Math.floor((Date.now() - start) / 1000)),
+      1000,
+    );
     return () => clearInterval(t);
   }, [downloading]);
 
@@ -393,7 +759,7 @@ function BlastDbSection({
   // Mark downloads as complete when actual file count reaches expected
   useEffect(() => {
     if (inProgress.size === 0) return;
-    setInProgress(prev => {
+    setInProgress((prev) => {
       let changed = false;
       const next = new Map(prev);
       for (const [name, info] of prev) {
@@ -402,7 +768,9 @@ function BlastDbSection({
           // 90% threshold for "complete" (some files may be in pending state)
           next.delete(name);
           changed = true;
-          setLocallyDownloaded(p => new Map(p).set(name, { source_version: info.sourceVersion }));
+          setLocallyDownloaded((p) =>
+            new Map(p).set(name, { source_version: info.sourceVersion }),
+          );
         }
       }
       return changed ? next : prev;
@@ -414,12 +782,22 @@ function BlastDbSection({
     setDownloadResult(null);
     const startTime = Date.now();
     try {
-      const resp = await monitoringApi.prepareBlastDb(subscriptionId, resourceGroup, accountName, dbName);
-      const total = resp.files_total ?? (resp.files_copied ?? 0) + (resp.files_already_copying ?? 0);
+      const resp = await monitoringApi.prepareBlastDb(
+        subscriptionId,
+        resourceGroup,
+        accountName,
+        dbName,
+      );
+      const total =
+        resp.files_total ?? (resp.files_copied ?? 0) + (resp.files_already_copying ?? 0);
       // Track as in-progress (polling will mark as Ready when complete)
-      setInProgress(prev => {
+      setInProgress((prev) => {
         const next = new Map(prev);
-        next.set(dbName, { expectedFiles: total, startTime, sourceVersion: resp.source_version });
+        next.set(dbName, {
+          expectedFiles: total,
+          startTime,
+          sourceVersion: resp.source_version,
+        });
         return next;
       });
       setDownloadResult({
@@ -452,7 +830,9 @@ function BlastDbSection({
       const d = new Date(iso);
       const pad = (n: number) => n.toString().padStart(2, "0");
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-    } catch { return ""; }
+    } catch {
+      return "";
+    }
   };
 
   // Convert NCBI version dir like "2026-05-09-01-05-02" → "2026-05-09 01:05:02"
@@ -462,24 +842,48 @@ function BlastDbSection({
   const categories = ["Small / Test", "Medium", "Large"] as const;
 
   return (
-    <div style={{ marginTop: "var(--space-3)", paddingTop: "var(--space-3)", borderTop: "1px solid var(--border-weak)" }}>
+    <div
+      style={{
+        marginTop: "var(--space-3)",
+        paddingTop: "var(--space-3)",
+        borderTop: "1px solid var(--border-weak)",
+      }}
+    >
       {/* Header — always visible */}
       <div
         style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          width: "100%", padding: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          width: "100%",
+          padding: 0,
         }}
       >
-        <h4 style={{ margin: 0, fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+        <h4
+          style={{
+            margin: 0,
+            fontSize: 13,
+            fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
           <Database size={14} strokeWidth={1.5} /> BLAST Databases
         </h4>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {dbQuery.isLoading && <Loader2 size={12} className="spin" style={{ color: "var(--text-faint)" }} />}
+          {dbQuery.isLoading && (
+            <Loader2 size={12} className="spin" style={{ color: "var(--text-faint)" }} />
+          )}
           {downloadedDbs.size > 0 && (
-            <span className="gt gt-g" style={{ fontSize: 9 }}>{downloadedDbs.size} ready</span>
+            <span className="gt gt-g" style={{ fontSize: 9 }}>
+              {downloadedDbs.size} ready
+            </span>
           )}
           {updatesAvailable > 0 && (
-            <span className="gt gt-o" style={{ fontSize: 9 }}>{updatesAvailable} update{updatesAvailable > 1 ? "s" : ""}</span>
+            <span className="gt gt-o" style={{ fontSize: 9 }}>
+              {updatesAvailable} update{updatesAvailable > 1 ? "s" : ""}
+            </span>
           )}
           <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
             {downloadedDbs.size}/{DB_CATALOG.length}
@@ -487,7 +891,10 @@ function BlastDbSection({
           <button
             className="glass-button"
             style={{ padding: "3px 6px", border: "none" }}
-            onClick={() => { setShowPopup(true); dbQuery.refetch(); }}
+            onClick={() => {
+              setShowPopup(true);
+              dbQuery.refetch();
+            }}
             title="Open database manager"
           >
             <Maximize2 size={12} strokeWidth={1.5} />
@@ -499,338 +906,650 @@ function BlastDbSection({
       {downloadedDbs.size > 0 && (
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
           {[...downloadedDbs.keys()].map((name) => (
-            <span key={name} className="gt gt-g" style={{ fontSize: 9 }}>{name}</span>
+            <span key={name} className="gt gt-g" style={{ fontSize: 9 }}>
+              {name}
+            </span>
           ))}
         </div>
       )}
 
       {/* Popup modal for full database list */}
-      {showPopup && createPortal(
-        <div
-          className="glass-dialog-backdrop"
-          onClick={(e) => { if (e.target === e.currentTarget) setShowPopup(false); }}
-          role="dialog"
-          aria-modal="true"
-          aria-label="BLAST Databases"
-        >
+      {showPopup &&
+        createPortal(
           <div
-            className="glass-card glass-card--strong glass-dialog"
-            onClick={(e) => e.stopPropagation()}
-            style={{ maxWidth: 640, width: "90vw", maxHeight: "80vh", display: "flex", flexDirection: "column" }}
+            className="glass-dialog-backdrop"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowPopup(false);
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="BLAST Databases"
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "var(--space-3)" }}>
-              <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
-                <Database size={18} strokeWidth={1.5} /> BLAST Databases
-              </h3>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <button
-                  className="glass-button"
-                  onClick={() => dbQuery.refetch()}
-                  disabled={dbQuery.isFetching}
-                  style={{ padding: "4px 6px", border: "none" }}
-                  title="Refresh database status"
-                >
-                  <RefreshCw size={14} strokeWidth={1.5} className={dbQuery.isFetching ? "spin" : ""} />
-                </button>
-                <button
-                  className="glass-button"
-                  onClick={() => { setShowPopup(false); setConfirmLargeDb(null); }}
-                  style={{ padding: "4px 6px", border: "none" }}
-                  title="Close"
-                >
-                  <X size={16} strokeWidth={1.5} />
-                </button>
-              </div>
-            </div>
-            {/* Summary stats */}
-            <div style={{ display: "flex", gap: 12, marginBottom: "var(--space-3)", fontSize: 11, color: "var(--text-muted)", flexWrap: "wrap" }}>
-              <span>{downloadedDbs.size}/{DB_CATALOG.length} downloaded</span>
-              {downloadedDbs.size > 0 && (
-                <span>
-                  {formatBytes([...downloadedDbs.values()].reduce((s, d) => s + (d.total_bytes ?? 0), 0))} used
-                </span>
-              )}
-              {updatesAvailable > 0 && (
-                <span style={{ color: "var(--warning)", fontWeight: 600 }}>
-                  {updatesAvailable} update{updatesAvailable > 1 ? "s" : ""} available
-                </span>
-              )}
-              {latestVersion && (
-                <span>NCBI latest: <code style={{ fontSize: 9 }}>{formatNcbiVersion(latestVersion)}</code></span>
-              )}
-              <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                <span className="gt gt-b" style={{ fontSize: 8 }}>N</span> = nucleotide
-              </span>
-              <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                <span className="gt gt-p" style={{ fontSize: 8 }}>P</span> = protein
-              </span>
-            </div>
-            {/* Download result toast — shown at top, fades out after 5s */}
-            {downloadResult && (
-              <DownloadResultBanner result={downloadResult} onDismiss={() => setDownloadResult(null)} />
-            )}
-            {/* Public access disabled warning */}
-            {publicAccessDisabled && (
-              <div style={{
-                padding: "8px 12px", marginBottom: "var(--space-3)", borderRadius: 6, fontSize: 11,
-                background: "rgba(240,198,116,0.08)", border: "1px solid rgba(240,198,116,0.2)",
-                color: "var(--warning)", display: "flex", alignItems: "flex-start", gap: 8,
-              }}>
-                <Lock size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                <div>
-                  <strong>Storage public access is disabled.</strong> Database scan is unavailable.
-                  Enable public access on the Storage card (Unlock button) to see which databases are downloaded.
-                  The catalog below still shows all available databases.
+            <div
+              className="glass-card glass-card--strong glass-dialog"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                maxWidth: 640,
+                width: "90vw",
+                maxHeight: "80vh",
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  marginBottom: "var(--space-3)",
+                }}
+              >
+                <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Database size={18} strokeWidth={1.5} /> BLAST Databases
+                </h3>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <button
+                    className="glass-button"
+                    onClick={() => dbQuery.refetch()}
+                    disabled={dbQuery.isFetching}
+                    style={{ padding: "4px 6px", border: "none" }}
+                    title="Refresh database status"
+                  >
+                    <RefreshCw
+                      size={14}
+                      strokeWidth={1.5}
+                      className={dbQuery.isFetching ? "spin" : ""}
+                    />
+                  </button>
+                  <button
+                    className="glass-button"
+                    onClick={() => {
+                      setShowPopup(false);
+                      setConfirmLargeDb(null);
+                    }}
+                    style={{ padding: "4px 6px", border: "none" }}
+                    title="Close"
+                  >
+                    <X size={16} strokeWidth={1.5} />
+                  </button>
                 </div>
               </div>
-            )}
-            <div style={{ overflowY: "auto", flex: 1, paddingRight: 4 }}>
-            {/* ── Full database list ── */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {categories.map((cat) => {
-          const dbs = DB_CATALOG.filter((d) => d.category === cat);
-          return (
-            <div key={cat}>
-              <div style={{ fontSize: 9, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.06em", padding: "4px 0 2px", borderBottom: "1px solid var(--border-weak)", marginBottom: 4 }}>
-                {cat}
-                {cat === "Large" && <span style={{ marginLeft: 6, fontSize: 8, color: "var(--warning)", textTransform: "none", letterSpacing: 0 }}>⚠ Large downloads may take hours</span>}
-              </div>
-              {dbs.map((db) => {
-                const inProgressInfo = inProgress.get(db.value);
-                const isCopying = Boolean(inProgressInfo);
-                // While copying, don't show as downloaded — show progress
-                const isDownloaded = !isCopying && downloadedDbs.has(db.value);
-                const isDownloading = downloading === db.value;
-                const meta = downloadedDbs.get(db.value);
-                const copyProgress = inProgressInfo
-                  ? Math.min(100, Math.round(((meta?.file_count ?? 0) / inProgressInfo.expectedFiles) * 100))
-                  : 0;
-                return (
-                  <div
-                    key={db.value}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 8,
-                      padding: "6px 8px", borderRadius: 6,
-                      background: isDownloaded ? "rgba(115,191,105,0.04)" : "transparent",
-                      border: `1px solid ${isDownloaded ? "rgba(115,191,105,0.1)" : "var(--border-weak)"}`,
-                      marginBottom: 3,
-                    }}
-                  >
-                    {/* Status icon */}
-                    <div style={{ flexShrink: 0 }}>
-                      {isDownloaded ? (
-                        <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
-                      ) : isDownloading ? (
-                        <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
-                      ) : (
-                        <Circle size={14} style={{ color: "var(--text-faint)", opacity: 0.3 }} />
-                      )}
-                    </div>
-                    {/* Info — stacked vertically */}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 12, fontWeight: isDownloaded ? 600 : 400 }}>{db.label}</span>
-                        <span className={`gt ${db.type === "nucl" ? "gt-b" : "gt-p"}`} style={{ fontSize: 8 }}>
-                          {db.type === "nucl" ? "N" : "P"}
-                        </span>
-                        <span style={{ fontSize: 10, color: "var(--text-faint)" }}>{db.size}</span>
-                        <code style={{ fontSize: 9, color: "var(--text-faint)", background: "var(--bg-tertiary)", padding: "1px 4px", borderRadius: 3 }}>{db.value}</code>
-                      </div>
-                      <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>{db.desc}</div>
-                      {/* Download estimate for not-yet-downloaded DBs */}
-                      {!isDownloaded && !isDownloading && (
-                        <div style={{ fontSize: 9, color: "var(--text-faint)", marginTop: 2 }}>
-                          Est. {db.estFiles} files · {db.estMinutes}
-                        </div>
-                      )}
-                      {/* Downloading progress */}
-                      {isDownloading && (
-                        <div style={{ fontSize: 10, color: "var(--accent)", marginTop: 2, display: "flex", alignItems: "center", gap: 6 }}>
-                          <span>Initiating copy...</span>
-                          <span style={{ fontFamily: "var(--font-mono)" }}>{elapsed}s</span>
-                        </div>
-                      )}
-                      {/* In-progress copy (after API returned) */}
-                      {isCopying && inProgressInfo && (
-                        <div style={{ marginTop: 4 }}>
-                          <div style={{ fontSize: 10, color: "var(--accent)", display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
-                            <Loader2 size={10} className="spin" />
-                            <span>Copying {meta?.file_count ?? 0} / {inProgressInfo.expectedFiles} files</span>
-                            <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-faint)" }}>
-                              · {Math.floor((Date.now() - inProgressInfo.startTime) / 1000)}s
-                            </span>
-                            {db.estMinutes && (
-                              <span style={{ color: "var(--text-faint)", fontSize: 9 }}>
-                                · est. {db.estMinutes}
-                              </span>
-                            )}
-                          </div>
-                          {/* Progress bar */}
-                          <div style={{ height: 3, background: "var(--bg-tertiary)", borderRadius: 2, overflow: "hidden" }}>
-                            <div style={{
-                              width: `${copyProgress}%`, height: "100%",
-                              background: "var(--accent)", borderRadius: 2,
-                              transition: "width 0.5s ease",
-                            }} />
-                          </div>
-                        </div>
-                      )}
-                      {/* Downloaded metadata: actual size, file count, date, version */}
-                      {isDownloaded && meta && (
-                        <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                          {meta.total_bytes ? <span style={{ color: "var(--success)" }}>{formatBytes(meta.total_bytes)}</span> : null}
-                          {meta.file_count ? <span style={{ color: "var(--success)" }}>{meta.file_count} files</span> : null}
-                          {meta.last_modified ? <span>{formatDate(meta.last_modified)}</span> : null}
-                          {meta.source_version && (
-                            <code style={{ fontSize: 9, background: "var(--bg-tertiary)", padding: "1px 4px", borderRadius: 3 }}>
-                              v:{formatNcbiVersion(meta.source_version)}
-                            </code>
-                          )}
-                          {meta.source_version && latestVersion && meta.source_version !== latestVersion && (
-                            <span style={{ color: "var(--warning)", fontWeight: 600, fontSize: 9 }}>Update available</span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                    {/* Action */}
-                    <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-                      {isDownloaded ? (
-                        <>
-                          {meta?.source_version && latestVersion && meta.source_version !== latestVersion ? (
-                            <button
-                              className="glass-button"
-                              style={{ fontSize: 10, padding: "2px 8px", color: "var(--warning)", borderColor: "rgba(240,198,116,0.3)" }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (db.category === "Large") {
-                                  setConfirmLargeDb(db.value);
-                                } else {
-                                  handleDownload(db.value);
-                                }
-                              }}
-                              disabled={downloading !== null}
-                              title={`Update from ${formatNcbiVersion(meta.source_version)} to ${formatNcbiVersion(latestVersion)}`}
-                            >
-                              <Download size={10} /> Update
-                            </button>
-                          ) : (
-                            <span style={{ fontSize: 10, color: "var(--success)", fontWeight: 500 }}>Ready</span>
-                          )}
-                        </>
-                      ) : isDownloading ? (
-                        <span style={{ fontSize: 10, color: "var(--accent)" }}>{elapsed}s</span>
-                      ) : isCopying ? (
-                        <span style={{ fontSize: 10, color: "var(--accent)", display: "flex", alignItems: "center", gap: 4 }}>
-                          <Loader2 size={10} className="spin" /> {copyProgress}%
-                        </span>
-                      ) : (
-                        <button
-                          className="glass-button glass-button--primary"
-                          style={{ fontSize: 10, padding: "2px 8px" }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (db.category === "Large") {
-                              setConfirmLargeDb(db.value);
-                            } else {
-                              handleDownload(db.value);
-                            }
-                          }}
-                          disabled={downloading !== null}
-                          title={downloading !== null ? "Another download is in progress" : `Download ${db.value}`}
-                        >
-                          <Download size={10} /> Get
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Custom DB name */}
-      <div style={{ marginTop: "var(--space-2)" }}>
-        {!showCustom ? (
-          <button
-            className="glass-button"
-            style={{ fontSize: 10, padding: "2px 8px" }}
-            onClick={() => setShowCustom(true)}
-          >
-            + Custom database
-          </button>
-        ) : (
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <input
-              className="glass-input"
-              value={customDb}
-              onChange={(e) => setCustomDb(e.target.value)}
-              placeholder="e.g. refseq_rna"
-              style={{ width: 160, fontSize: 11, padding: "4px 8px" }}
-              spellCheck={false}
-            />
-            <button
-              className="glass-button glass-button--primary"
-              style={{ fontSize: 10, padding: "2px 8px" }}
-              onClick={() => { if (customDb) handleDownload(customDb); }}
-              disabled={!customDb || downloading !== null}
-            >
-              <Download size={10} /> Get
-            </button>
-            <button
-              className="glass-button"
-              style={{ fontSize: 10, padding: "2px 8px" }}
-              onClick={() => { setShowCustom(false); setCustomDb(""); }}
-            >
-              Cancel
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Large DB download confirmation */}
-      {confirmLargeDb && (() => {
-        const db = DB_CATALOG.find(d => d.value === confirmLargeDb);
-        return (
-          <div style={{
-            marginTop: "var(--space-2)", padding: "10px 14px", borderRadius: 8, fontSize: 12,
-            background: "rgba(240,198,116,0.08)", border: "1px solid rgba(240,198,116,0.25)",
-          }}>
-            <div style={{ color: "var(--warning)", fontWeight: 600, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-              <AlertTriangle size={14} /> Download {db?.label ?? confirmLargeDb}?
-            </div>
-            <div className="muted" style={{ fontSize: 11, marginBottom: 8 }}>
-              This database is <strong>{db?.size}</strong> and may take hours to copy from NCBI.
-              Ensure your storage account has sufficient space and that public access is enabled.
-            </div>
-            <div style={{ display: "flex", gap: "var(--space-2)" }}>
-              <button
-                className="glass-button glass-button--primary"
-                onClick={() => { handleDownload(confirmLargeDb); setConfirmLargeDb(null); }}
-                style={{ fontSize: 11 }}
+              {/* Summary stats */}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  marginBottom: "var(--space-3)",
+                  fontSize: 11,
+                  color: "var(--text-muted)",
+                  flexWrap: "wrap",
+                }}
               >
-                <Download size={10} /> Start Download
-              </button>
-              <button className="glass-button" onClick={() => setConfirmLargeDb(null)} style={{ fontSize: 11 }}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        );
-      })()}
+                <span>
+                  {downloadedDbs.size}/{DB_CATALOG.length} downloaded
+                </span>
+                {downloadedDbs.size > 0 && (
+                  <span>
+                    {formatBytes(
+                      [...downloadedDbs.values()].reduce(
+                        (s, d) => s + (d.total_bytes ?? 0),
+                        0,
+                      ),
+                    )}{" "}
+                    used
+                  </span>
+                )}
+                {updatesAvailable > 0 && (
+                  <span style={{ color: "var(--warning)", fontWeight: 600 }}>
+                    {updatesAvailable} update{updatesAvailable > 1 ? "s" : ""} available
+                  </span>
+                )}
+                {latestVersion && (
+                  <span>
+                    NCBI latest:{" "}
+                    <code style={{ fontSize: 9 }}>
+                      {formatNcbiVersion(latestVersion)}
+                    </code>
+                  </span>
+                )}
+                <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                  <span className="gt gt-b" style={{ fontSize: 8 }}>
+                    N
+                  </span>{" "}
+                  = nucleotide
+                </span>
+                <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                  <span className="gt gt-p" style={{ fontSize: 8 }}>
+                    P
+                  </span>{" "}
+                  = protein
+                </span>
+              </div>
+              {/* Download result toast — shown at top, fades out after 5s */}
+              {downloadResult && (
+                <DownloadResultBanner
+                  result={downloadResult}
+                  onDismiss={() => setDownloadResult(null)}
+                />
+              )}
+              {/* Public access disabled warning */}
+              {publicAccessDisabled && (
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    marginBottom: "var(--space-3)",
+                    borderRadius: 6,
+                    fontSize: 11,
+                    background: "rgba(240,198,116,0.08)",
+                    border: "1px solid rgba(240,198,116,0.2)",
+                    color: "var(--warning)",
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 8,
+                  }}
+                >
+                  <Lock size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <div>
+                    <strong>Storage public access is disabled.</strong> Database scan is
+                    unavailable. Enable public access on the Storage card (Unlock button)
+                    to see which databases are downloaded. The catalog below still shows
+                    all available databases.
+                  </div>
+                </div>
+              )}
+              <div style={{ overflowY: "auto", flex: 1, paddingRight: 4 }}>
+                {/* ── Full database list ── */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {categories.map((cat) => {
+                    const dbs = DB_CATALOG.filter((d) => d.category === cat);
+                    return (
+                      <div key={cat}>
+                        <div
+                          style={{
+                            fontSize: 9,
+                            color: "var(--text-faint)",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            padding: "4px 0 2px",
+                            borderBottom: "1px solid var(--border-weak)",
+                            marginBottom: 4,
+                          }}
+                        >
+                          {cat}
+                          {cat === "Large" && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                fontSize: 8,
+                                color: "var(--warning)",
+                                textTransform: "none",
+                                letterSpacing: 0,
+                              }}
+                            >
+                              ⚠ Large downloads may take hours
+                            </span>
+                          )}
+                        </div>
+                        {dbs.map((db) => {
+                          const inProgressInfo = inProgress.get(db.value);
+                          const isCopying = Boolean(inProgressInfo);
+                          // While copying, don't show as downloaded — show progress
+                          const isDownloaded = !isCopying && downloadedDbs.has(db.value);
+                          const isDownloading = downloading === db.value;
+                          const meta = downloadedDbs.get(db.value);
+                          const copyProgress = inProgressInfo
+                            ? Math.min(
+                                100,
+                                Math.round(
+                                  ((meta?.file_count ?? 0) /
+                                    inProgressInfo.expectedFiles) *
+                                    100,
+                                ),
+                              )
+                            : 0;
+                          return (
+                            <div
+                              key={db.value}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                padding: "6px 8px",
+                                borderRadius: 6,
+                                background: isDownloaded
+                                  ? "rgba(115,191,105,0.04)"
+                                  : "transparent",
+                                border: `1px solid ${isDownloaded ? "rgba(115,191,105,0.1)" : "var(--border-weak)"}`,
+                                marginBottom: 3,
+                              }}
+                            >
+                              {/* Status icon */}
+                              <div style={{ flexShrink: 0 }}>
+                                {isDownloaded ? (
+                                  <CheckCircle2
+                                    size={14}
+                                    style={{ color: "var(--success)" }}
+                                  />
+                                ) : isDownloading ? (
+                                  <Loader2
+                                    size={14}
+                                    className="spin"
+                                    style={{ color: "var(--accent)" }}
+                                  />
+                                ) : (
+                                  <Circle
+                                    size={14}
+                                    style={{ color: "var(--text-faint)", opacity: 0.3 }}
+                                  />
+                                )}
+                              </div>
+                              {/* Info — stacked vertically */}
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      fontSize: 12,
+                                      fontWeight: isDownloaded ? 600 : 400,
+                                    }}
+                                  >
+                                    {db.label}
+                                  </span>
+                                  <span
+                                    className={`gt ${db.type === "nucl" ? "gt-b" : "gt-p"}`}
+                                    style={{ fontSize: 8 }}
+                                  >
+                                    {db.type === "nucl" ? "N" : "P"}
+                                  </span>
+                                  <span
+                                    style={{ fontSize: 10, color: "var(--text-faint)" }}
+                                  >
+                                    {db.size}
+                                  </span>
+                                  <code
+                                    style={{
+                                      fontSize: 9,
+                                      color: "var(--text-faint)",
+                                      background: "var(--bg-tertiary)",
+                                      padding: "1px 4px",
+                                      borderRadius: 3,
+                                    }}
+                                  >
+                                    {db.value}
+                                  </code>
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: 10,
+                                    color: "var(--text-muted)",
+                                    marginTop: 2,
+                                  }}
+                                >
+                                  {db.desc}
+                                </div>
+                                {/* Download estimate for not-yet-downloaded DBs */}
+                                {!isDownloaded && !isDownloading && (
+                                  <div
+                                    style={{
+                                      fontSize: 9,
+                                      color: "var(--text-faint)",
+                                      marginTop: 2,
+                                    }}
+                                  >
+                                    Est. {db.estFiles} files · {db.estMinutes}
+                                  </div>
+                                )}
+                                {/* Downloading progress */}
+                                {isDownloading && (
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: "var(--accent)",
+                                      marginTop: 2,
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                    }}
+                                  >
+                                    <span>Initiating copy...</span>
+                                    <span style={{ fontFamily: "var(--font-mono)" }}>
+                                      {elapsed}s
+                                    </span>
+                                  </div>
+                                )}
+                                {/* In-progress copy (after API returned) */}
+                                {isCopying && inProgressInfo && (
+                                  <div style={{ marginTop: 4 }}>
+                                    <div
+                                      style={{
+                                        fontSize: 10,
+                                        color: "var(--accent)",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 6,
+                                        marginBottom: 3,
+                                      }}
+                                    >
+                                      <Loader2 size={10} className="spin" />
+                                      <span>
+                                        Copying {meta?.file_count ?? 0} /{" "}
+                                        {inProgressInfo.expectedFiles} files
+                                      </span>
+                                      <span
+                                        style={{
+                                          fontFamily: "var(--font-mono)",
+                                          color: "var(--text-faint)",
+                                        }}
+                                      >
+                                        ·{" "}
+                                        {Math.floor(
+                                          (Date.now() - inProgressInfo.startTime) / 1000,
+                                        )}
+                                        s
+                                      </span>
+                                      {db.estMinutes && (
+                                        <span
+                                          style={{
+                                            color: "var(--text-faint)",
+                                            fontSize: 9,
+                                          }}
+                                        >
+                                          · est. {db.estMinutes}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {/* Progress bar */}
+                                    <div
+                                      style={{
+                                        height: 3,
+                                        background: "var(--bg-tertiary)",
+                                        borderRadius: 2,
+                                        overflow: "hidden",
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          width: `${copyProgress}%`,
+                                          height: "100%",
+                                          background: "var(--accent)",
+                                          borderRadius: 2,
+                                          transition: "width 0.5s ease",
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                )}
+                                {/* Downloaded metadata: actual size, file count, date, version */}
+                                {isDownloaded && meta && (
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: "var(--text-muted)",
+                                      marginTop: 2,
+                                      display: "flex",
+                                      gap: 8,
+                                      flexWrap: "wrap",
+                                      alignItems: "center",
+                                    }}
+                                  >
+                                    {meta.total_bytes ? (
+                                      <span style={{ color: "var(--success)" }}>
+                                        {formatBytes(meta.total_bytes)}
+                                      </span>
+                                    ) : null}
+                                    {meta.file_count ? (
+                                      <span style={{ color: "var(--success)" }}>
+                                        {meta.file_count} files
+                                      </span>
+                                    ) : null}
+                                    {meta.last_modified ? (
+                                      <span>{formatDate(meta.last_modified)}</span>
+                                    ) : null}
+                                    {meta.source_version && (
+                                      <code
+                                        style={{
+                                          fontSize: 9,
+                                          background: "var(--bg-tertiary)",
+                                          padding: "1px 4px",
+                                          borderRadius: 3,
+                                        }}
+                                      >
+                                        v:{formatNcbiVersion(meta.source_version)}
+                                      </code>
+                                    )}
+                                    {meta.source_version &&
+                                      latestVersion &&
+                                      meta.source_version !== latestVersion && (
+                                        <span
+                                          style={{
+                                            color: "var(--warning)",
+                                            fontWeight: 600,
+                                            fontSize: 9,
+                                          }}
+                                        >
+                                          Update available
+                                        </span>
+                                      )}
+                                  </div>
+                                )}
+                              </div>
+                              {/* Action */}
+                              <div
+                                style={{
+                                  flexShrink: 0,
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  alignItems: "flex-end",
+                                  gap: 3,
+                                }}
+                              >
+                                {isDownloaded ? (
+                                  <>
+                                    {meta?.source_version &&
+                                    latestVersion &&
+                                    meta.source_version !== latestVersion ? (
+                                      <button
+                                        className="glass-button"
+                                        style={{
+                                          fontSize: 10,
+                                          padding: "2px 8px",
+                                          color: "var(--warning)",
+                                          borderColor: "rgba(240,198,116,0.3)",
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (db.category === "Large") {
+                                            setConfirmLargeDb(db.value);
+                                          } else {
+                                            handleDownload(db.value);
+                                          }
+                                        }}
+                                        disabled={downloading !== null}
+                                        title={`Update from ${formatNcbiVersion(meta.source_version)} to ${formatNcbiVersion(latestVersion)}`}
+                                      >
+                                        <Download size={10} /> Update
+                                      </button>
+                                    ) : (
+                                      <span
+                                        style={{
+                                          fontSize: 10,
+                                          color: "var(--success)",
+                                          fontWeight: 500,
+                                        }}
+                                      >
+                                        Ready
+                                      </span>
+                                    )}
+                                  </>
+                                ) : isDownloading ? (
+                                  <span style={{ fontSize: 10, color: "var(--accent)" }}>
+                                    {elapsed}s
+                                  </span>
+                                ) : isCopying ? (
+                                  <span
+                                    style={{
+                                      fontSize: 10,
+                                      color: "var(--accent)",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 4,
+                                    }}
+                                  >
+                                    <Loader2 size={10} className="spin" /> {copyProgress}%
+                                  </span>
+                                ) : (
+                                  <button
+                                    className="glass-button glass-button--primary"
+                                    style={{ fontSize: 10, padding: "2px 8px" }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (db.category === "Large") {
+                                        setConfirmLargeDb(db.value);
+                                      } else {
+                                        handleDownload(db.value);
+                                      }
+                                    }}
+                                    disabled={downloading !== null}
+                                    title={
+                                      downloading !== null
+                                        ? "Another download is in progress"
+                                        : `Download ${db.value}`
+                                    }
+                                  >
+                                    <Download size={10} /> Get
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
 
-      {/* Download result message */}
+                {/* Custom DB name */}
+                <div style={{ marginTop: "var(--space-2)" }}>
+                  {!showCustom ? (
+                    <button
+                      className="glass-button"
+                      style={{ fontSize: 10, padding: "2px 8px" }}
+                      onClick={() => setShowCustom(true)}
+                    >
+                      + Custom database
+                    </button>
+                  ) : (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input
+                        className="glass-input"
+                        value={customDb}
+                        onChange={(e) => setCustomDb(e.target.value)}
+                        placeholder="e.g. refseq_rna"
+                        style={{ width: 160, fontSize: 11, padding: "4px 8px" }}
+                        spellCheck={false}
+                      />
+                      <button
+                        className="glass-button glass-button--primary"
+                        style={{ fontSize: 10, padding: "2px 8px" }}
+                        onClick={() => {
+                          if (customDb) handleDownload(customDb);
+                        }}
+                        disabled={!customDb || downloading !== null}
+                      >
+                        <Download size={10} /> Get
+                      </button>
+                      <button
+                        className="glass-button"
+                        style={{ fontSize: 10, padding: "2px 8px" }}
+                        onClick={() => {
+                          setShowCustom(false);
+                          setCustomDb("");
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
 
-      {/* Info footer */}
-      <div className="muted" style={{ fontSize: 10, marginTop: "var(--space-2)" }}>
-        Server-side copy from NCBI S3 → <code style={{ fontSize: 10 }}>blast-db</code> container. No local download required.
-      </div>
+                {/* Large DB download confirmation */}
+                {confirmLargeDb &&
+                  (() => {
+                    const db = DB_CATALOG.find((d) => d.value === confirmLargeDb);
+                    return (
+                      <div
+                        style={{
+                          marginTop: "var(--space-2)",
+                          padding: "10px 14px",
+                          borderRadius: 8,
+                          fontSize: 12,
+                          background: "rgba(240,198,116,0.08)",
+                          border: "1px solid rgba(240,198,116,0.25)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            color: "var(--warning)",
+                            fontWeight: 600,
+                            marginBottom: 6,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                          }}
+                        >
+                          <AlertTriangle size={14} /> Download{" "}
+                          {db?.label ?? confirmLargeDb}?
+                        </div>
+                        <div className="muted" style={{ fontSize: 11, marginBottom: 8 }}>
+                          This database is <strong>{db?.size}</strong> and may take hours
+                          to copy from NCBI. Ensure your storage account has sufficient
+                          space and that public access is enabled.
+                        </div>
+                        <div style={{ display: "flex", gap: "var(--space-2)" }}>
+                          <button
+                            className="glass-button glass-button--primary"
+                            onClick={() => {
+                              handleDownload(confirmLargeDb);
+                              setConfirmLargeDb(null);
+                            }}
+                            style={{ fontSize: 11 }}
+                          >
+                            <Download size={10} /> Start Download
+                          </button>
+                          <button
+                            className="glass-button"
+                            onClick={() => setConfirmLargeDb(null)}
+                            style={{ fontSize: 11 }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                {/* Download result message */}
+
+                {/* Info footer */}
+                <div
+                  className="muted"
+                  style={{ fontSize: 10, marginTop: "var(--space-2)" }}
+                >
+                  Server-side copy from NCBI S3 →{" "}
+                  <code style={{ fontSize: 10 }}>blast-db</code> container. No local
+                  download required.
+                </div>
+              </div>
             </div>
-          </div>
-        </div>,
-        document.body,
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

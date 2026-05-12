@@ -1,4 +1,5 @@
 import { msalInstance, apiLoginRequest } from "@/auth/msal";
+import { fetchWithRetry, makeRequestId } from "@/api/resilience";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
@@ -54,7 +55,13 @@ async function fetchApi(path: string, init: RequestInit = {}): Promise<Response>
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(`${API_BASE}/api${path}`, { ...init, headers });
+  if (!headers.has("x-client-request-id")) {
+    headers.set("x-client-request-id", makeRequestId());
+  }
+  const response = await fetchWithRetry(`${API_BASE}/api${path}`, {
+    ...init,
+    headers,
+  });
   // #44: Auto-handle 401 — trigger re-authentication
   if (response.status === 401 && !DEV_BYPASS) {
     const account = msalInstance.getActiveAccount();

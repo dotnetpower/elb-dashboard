@@ -28,7 +28,6 @@ async function bootstrap() {
     // Must be awaited before any other MSAL call (msal-browser v3 requirement).
     await msalInstance.initialize();
   } catch (err) {
-    // eslint-disable-next-line no-console
     console.warn("MSAL initialize failed:", err);
   }
 
@@ -60,7 +59,6 @@ async function bootstrap() {
         msalInstance.setActiveAccount(redirectResult.account);
       }
     } catch (err) {
-      // eslint-disable-next-line no-console
       console.warn("MSAL redirect handling failed:", err);
     }
   }
