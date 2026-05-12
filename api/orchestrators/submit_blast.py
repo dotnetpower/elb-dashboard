@@ -134,6 +134,34 @@ def submit_blast_orchestrator(
                 request["config_text"] = config_result.get("config_text", "")
                 steps["warming_up"] = {"skipped": True, "reason": "cluster already warm", "started_at": _ts(), "completed_at": _ts()}
             else:
+                # Best-effort: ensure the AKS kubelet identity has AcrPull on
+                # the configured ACR and Storage Blob Data Contributor on the
+                # storage account. The activity is idempotent — `Conflict` is
+                # silently swallowed by `_assign_role`. When the Function App
+                # MI lacks `roleAssignments/write`, `_assign_role` logs a
+                # one-line `az role assignment create` recovery hint instead
+                # of raising, so we don't block warmup.
+                roles_payload = {
+                    "subscription_id": request["subscription_id"],
+                    "resource_group": request["resource_group"],
+                    "cluster_name": aks_cluster,
+                    "acr_resource_group": request.get("acr_resource_group", ""),
+                    "acr_name": request.get("acr_name", ""),
+                    "storage_resource_group": request.get("storage_resource_group", request["resource_group"]),
+                    "storage_account": request["storage_account"],
+                    "user_assertion": request.get("user_assertion"),
+                }
+                try:
+                    roles_res = yield context.call_activity("assign_aks_roles_activity", roles_payload)
+                    steps["assigning_roles"] = {
+                        "kubelet_oid": roles_res.get("kubelet_oid", ""),
+                        "roles_assigned": roles_res.get("roles_assigned", []),
+                        "completed_at": _ts(),
+                    }
+                except Exception as exc:
+                    LOGGER.warning("Pre-warmup role assignment failed (non-fatal): %s", exc)
+                    steps["assigning_roles"] = {"error": str(exc)[:200]}
+
                 steps["warming_up"] = {"started_at": _ts()}
                 context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
                 prepare_result = yield context.call_activity("run_elastic_blast_prepare_activity", request)
