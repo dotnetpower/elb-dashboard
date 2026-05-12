@@ -78,8 +78,17 @@ runcmd:
         azure-mgmt-resource azure-mgmt-network azure-mgmt-compute \
         azure-mgmt-storage azure-mgmt-containerregistry azure-mgmt-containerservice \
         azure-mgmt-authorization azure-mgmt-msi azure-mgmt-monitor
-      # Build + install elastic-blast wheel so the bin/elastic-blast script can find package metadata.
-      sudo -u azureuser bash -c "cd /home/azureuser/elastic-blast-azure && /home/azureuser/elastic-blast-azure/venv/bin/python setup.py sdist bdist_wheel >/dev/null 2>&1 && /home/azureuser/elastic-blast-azure/venv/bin/pip install --no-deps --force-reinstall dist/elastic_blast-*.whl"
+      # Install elastic_blast so bin/elastic-blast resolves package metadata.
+      # The upstream setup.py uses NCBI's `packit` which pulls `pbr` → `pkg_resources`.
+      # PEP 517 build isolation strips pkg_resources from the build env, so we
+      # disable isolation. We also use a non-editable install (no `-e`) because
+      # setuptools' `develop` command internally re-invokes pip with
+      # `--use-pep517` which fails inside the same isolated env. Errors are NOT
+      # silenced — failures here must surface to the orchestrator's cloud-init
+      # poll so the user knows the VM is unusable.
+      sudo -u azureuser /home/azureuser/elastic-blast-azure/venv/bin/pip install \
+        --no-build-isolation --no-deps \
+        /home/azureuser/elastic-blast-azure
     fi
   # Persist env for interactive shells
   - |
