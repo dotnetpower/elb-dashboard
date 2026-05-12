@@ -1959,6 +1959,55 @@ async def provision_aks_cluster(
     return client.create_check_status_response(req, instance_id)
 
 
+@app.route(route="aks/openapi/deploy", methods=["POST"])
+@app.durable_client_input(client_name="client")
+async def deploy_openapi(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
+    """Re-deploy the OpenAPI service to an existing AKS cluster.
+
+    Body: {subscription_id, resource_group, cluster_name, acr_name?,
+           storage_account?}.
+    Returns the standard Durable Functions check-status response.
+    """
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+    raw = req.get_body()
+    if not raw:
+        return _error_response(400, "request body required")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        return _error_response(400, f"invalid JSON: {exc}")
+
+    required = {"subscription_id", "resource_group", "cluster_name"}
+    missing = required - body.keys()
+    if missing:
+        return _error_response(400, f"missing fields: {sorted(missing)}")
+    if err := _validate_sub(body["subscription_id"]):
+        return _error_response(400, err)
+    if err := _validate_rg(body["resource_group"]):
+        return _error_response(400, err)
+    if err := _validate_name(body["cluster_name"], _RE_CLUSTER_NAME, "cluster_name"):
+        return _error_response(400, err)
+
+    orchestration_input = {
+        **body,
+        "user_assertion": identity.raw_token,
+        "owner_oid": identity.object_id,
+    }
+    instance_id = await client.start_new(
+        "deploy_openapi_orchestrator", None, orchestration_input
+    )
+    LOGGER.info(
+        "started deploy_openapi_orchestrator instance=%s cluster=%s",
+        instance_id, body["cluster_name"],
+    )
+    return client.create_check_status_response(req, instance_id)
+
+
 @app.route(route="aks/delete", methods=["POST"])
 def delete_aks_cluster(req: func.HttpRequest) -> func.HttpResponse:
     """Delete an AKS cluster."""
@@ -2330,6 +2379,13 @@ def provision_aks_orchestrator(context):
     """Create AKS cluster + assign roles as a Durable orchestrator."""
     from orchestrators import provision_aks as _prov_aks
     return _prov_aks.provision_aks_orchestrator(context)
+
+
+@app.orchestration_trigger(context_name="context")
+def deploy_openapi_orchestrator(context):
+    """Re-deploy the OpenAPI service to an existing AKS cluster."""
+    from orchestrators import provision_aks as _prov_aks
+    return _prov_aks.deploy_openapi_orchestrator(context)
 
 
 @app.entity_trigger(context_name="context")

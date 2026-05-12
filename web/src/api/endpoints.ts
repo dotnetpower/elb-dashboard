@@ -310,6 +310,24 @@ export const aksApi = {
         storage_account: storageAccount,
       },
     ),
+
+  deployOpenApi: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    acrName?: string,
+    storageAccount?: string,
+  ) =>
+    api.post<{ id: string; statusQueryGetUri?: string }>(
+      "/aks/openapi/deploy",
+      {
+        subscription_id: subscriptionId,
+        resource_group: rg,
+        cluster_name: clusterName,
+        acr_name: acrName,
+        storage_account: storageAccount,
+      },
+    ),
 };
 
 // ---------------------------------------------------------------------------

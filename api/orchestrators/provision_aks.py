@@ -78,3 +78,50 @@ def provision_aks_orchestrator(
         "workload_identity": wi_result,
         "openapi_deploy": deploy_result,
     }
+
+
+def deploy_openapi_orchestrator(
+    context: df.DurableOrchestrationContext,
+) -> dict[str, Any]:
+    """Re-deploy the OpenAPI service to an existing AKS cluster.
+
+    Runs only the workload-identity setup (idempotent) and the OpenAPI
+    deployment activity. Use this when the cluster already exists but
+    the OpenAPI image was built / re-built after the initial provision.
+    """
+    request: dict[str, Any] = context.get_input() or {}
+    cluster_name = request.get("cluster_name", "")
+
+    context.set_custom_status({"phase": "setup_workload_identity", "cluster_name": cluster_name})
+    wi_payload = {
+        **request,
+        "mi_name": MI_NAME,
+        "k8s_sa_name": K8S_SA_NAME,
+        "k8s_namespace": K8S_NAMESPACE,
+        "fed_cred_name": FED_CRED_NAME,
+    }
+    try:
+        wi_result = yield context.call_activity("setup_workload_identity_activity", wi_payload)
+    except Exception as exc:
+        LOGGER.warning("Workload identity setup failed: %s", exc)
+        wi_result = {"error": str(exc)}
+
+    context.set_custom_status({"phase": "deploying_openapi", "cluster_name": cluster_name})
+    deploy_payload = {
+        **request,
+        "k8s_sa_name": K8S_SA_NAME,
+        "mi_client_id": wi_result.get("mi_client_id", ""),
+    }
+    try:
+        deploy_result = yield context.call_activity("deploy_openapi_activity", deploy_payload)
+    except Exception as exc:
+        LOGGER.warning("OpenAPI deployment failed: %s", exc)
+        deploy_result = {"error": str(exc)}
+
+    return {
+        "cluster_name": cluster_name,
+        "resource_group": request.get("resource_group"),
+        "workload_identity": wi_result,
+        "openapi_deploy": deploy_result,
+        "status": "succeeded" if "error" not in deploy_result else "failed",
+    }
