@@ -9,7 +9,8 @@ import { StorageCard } from "@/components/cards/StorageCard";
 import { AcrCard } from "@/components/cards/AcrCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
 import { JobCard } from "@/components/cards/JobCard";
-import { armProxyApi } from "@/api/endpoints";
+import { GettingStartedGuide } from "@/components/GettingStartedGuide";
+import { armProxyApi, monitoringApi } from "@/api/endpoints";
 import { listSubscriptions as armListSubs, listResourceGroups as armListRGs } from "@/api/arm";
 import { Loader2, Search } from "lucide-react";
 
@@ -42,6 +43,10 @@ export function Dashboard() {
   const savedIsComplete = !!(hasSaved?.acrName && hasSaved?.storageAccountName);
   const [showWizard, setShowWizard] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showGettingStarted, setShowGettingStarted] = useState(false);
+  const [gettingStartedDismissed, setGettingStartedDismissed] = useState(
+    () => sessionStorage.getItem("elb-getting-started-dismissed") === "true"
+  );
   const [discoveryDone, setDiscoveryDone] = useState(savedIsComplete);
   const [discoveredWorkspaces, setDiscoveredWorkspaces] = useState<
     { config: ResourceConfig; rgName: string }[]
@@ -148,6 +153,53 @@ export function Dashboard() {
     setShowSettings(false);
     setShowWizard(true);
     setDiscoveredWorkspaces([]);
+  }, []);
+
+  // --- Workspace readiness detection for Getting Started guide ---
+  const hasConfig = Boolean(config.subscriptionId && config.workloadResourceGroup && config.acrName && config.storageAccountName);
+
+  const aksQuery = useQuery({
+    queryKey: ["gs-aks", config.subscriptionId, config.workloadResourceGroup],
+    queryFn: () => monitoringApi.aks(config.subscriptionId, config.workloadResourceGroup),
+    enabled: hasConfig && !gettingStartedDismissed,
+    staleTime: 60_000,
+    retry: 1,
+  });
+
+  const acrQuery = useQuery({
+    queryKey: ["gs-acr", config.subscriptionId, config.acrResourceGroup, config.acrName],
+    queryFn: () => monitoringApi.acr(config.subscriptionId, config.acrResourceGroup, config.acrName),
+    enabled: hasConfig && !gettingStartedDismissed,
+    staleTime: 60_000,
+    retry: 1,
+  });
+
+  const terminalQuery = useQuery({
+    queryKey: ["gs-terminal", config.subscriptionId, config.terminalResourceGroup, config.terminalVmName],
+    queryFn: () => monitoringApi.terminal(config.subscriptionId, config.terminalResourceGroup, config.terminalVmName),
+    enabled: hasConfig && !gettingStartedDismissed,
+    staleTime: 60_000,
+    retry: 1,
+  });
+
+  // Detect "needs setup" state: has base config but missing key resources
+  const hasCluster = (aksQuery.data?.clusters?.length ?? 0) > 0;
+  const hasImages = acrQuery.data?.actual_tags ? Object.keys(acrQuery.data.actual_tags).length >= 4 : false;
+  const hasTerminal = terminalQuery.data?.power_state != null;
+  const needsSetup = hasConfig && !gettingStartedDismissed && (!hasCluster || !hasImages || !hasTerminal);
+  const queriesLoaded = aksQuery.isFetched && acrQuery.isFetched && terminalQuery.isFetched;
+
+  // Auto-show Getting Started when workspace needs setup
+  useEffect(() => {
+    if (queriesLoaded && needsSetup && !showGettingStarted && !showWizard) {
+      setShowGettingStarted(true);
+    }
+  }, [queriesLoaded, needsSetup, showGettingStarted, showWizard]);
+
+  const handleDismissGettingStarted = useCallback(() => {
+    setShowGettingStarted(false);
+    setGettingStartedDismissed(true);
+    sessionStorage.setItem("elb-getting-started-dismissed", "true");
   }, []);
 
   const handlePickWorkspace = useCallback((ws: ResourceConfig) => {
@@ -279,6 +331,17 @@ export function Dashboard() {
         onClose={() => setShowSettings(false)}
         onRerunWizard={handleRerunWizard}
       />
+
+      {showGettingStarted && (
+        <GettingStartedGuide
+          hasCluster={hasCluster}
+          hasImages={hasImages}
+          hasTerminal={hasTerminal}
+          clusterRunning={aksQuery.data?.clusters?.some(c => c.power_state === "Running") ?? false}
+          acrName={config.acrName}
+          onDismiss={handleDismissGettingStarted}
+        />
+      )}
     </>
   );
 }
