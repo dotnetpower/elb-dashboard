@@ -26,13 +26,23 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
         "dockerfile": "Dockerfile",
     },
     "ncbi/elasticblast-job-submit": {
-        # Dockerfile.azure COPYs templates/pvc-rwm-aks.yaml.template which
-        # lives at src/elastic_blast/templates/. We use the repo root as
-        # context and the Dockerfile path relative to root. The Makefile's
-        # pre_cmd rsync copies templates into docker-job-submit/templates/.
-        # For ACR Build, we use a special context that includes both dirs.
+        # Dockerfile.azure COPYs both files local to docker-job-submit/ and
+        # templates/pvc-rwm-aks.yaml.template which lives at
+        # src/elastic_blast/templates/. The upstream Makefile rsyncs the
+        # templates into docker-job-submit/ and then runs `az acr build … .`
+        # from inside docker-job-submit/, so the build context is the
+        # subdirectory itself.
+        #
+        # For ACR Build Tasks we mirror that: source upload is the repo
+        # root (so `cp -r src/elastic_blast/templates docker-job-submit/`
+        # has access to both source and destination), but the actual
+        # `docker build` step uses docker-job-submit/ as its context. ACR
+        # Tasks scans the Dockerfile path relative to the source root
+        # before the build step runs, so `dockerfile` must be the full
+        # repo-relative path even when `build_context_dir` is set.
         "context": "",
         "dockerfile": "docker-job-submit/Dockerfile.azure",
+        "build_context_dir": "docker-job-submit",
         "pre_build_cmd": "cp -r src/elastic_blast/templates docker-job-submit/",
     },
     "ncbi/elasticblast-query-split": {

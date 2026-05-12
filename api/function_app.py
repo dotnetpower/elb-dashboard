@@ -458,10 +458,15 @@ def build_acr_images(req: func.HttpRequest) -> func.HttpResponse:
         try:
             pre_build = build_info.get("pre_build_cmd", "")
             if pre_build:
+                # Build context for the docker step — defaults to "." (the
+                # uploaded source root). When build_context_dir is set the
+                # build step descends into that subdirectory so Dockerfile
+                # COPY directives resolve against subdir-local files.
+                build_context_dir = build_info.get("build_context_dir", ".")
                 task_yaml = f"""version: v1.1.0
 steps:
   - cmd: bash -c "{pre_build}"
-  - build: -f {dockerfile} -t $Registry/{full_image} .
+  - build: -f {dockerfile} -t $Registry/{full_image} {build_context_dir}
   - push:
     - $Registry/{full_image}
 """
