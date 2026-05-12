@@ -18,6 +18,10 @@ param tenantId string = subscription().tenantId
 @description('Application (client) id of the App Registration used by the SPA + Function App.')
 param apiClientId string = ''
 
+@secure()
+@description('Application (client) secret for OBO flow. Stored in Key Vault.')
+param apiClientSecret string = ''
+
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = {
   'azd-env-name': environmentName
@@ -39,6 +43,7 @@ module platform 'modules/platform.bicep' = {
     environmentName: environmentName
     tenantId: tenantId
     apiClientId: apiClientId
+    apiClientSecret: apiClientSecret
     principalId: principalId
     tags: tags
   }

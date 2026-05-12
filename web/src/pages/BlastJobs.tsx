@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { Trash2, RefreshCw, AlertTriangle, Search, ChevronDown, Server } from "lucide-react";
 
 import { blastApi, type BlastJobSummary } from "@/api/endpoints";
+import { formatApiError } from "@/api/client";
 import { statusColor } from "@/constants";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
@@ -338,7 +339,7 @@ export function BlastJobs() {
       {deleteMutation.isError && (
         <div style={{ padding: "8px 12px", background: "rgba(224,123,138,0.08)", border: "1px solid rgba(224,123,138,0.2)", borderRadius: 6, fontSize: 12, color: "var(--danger)" }}>
           <AlertTriangle size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />
-          Delete failed: {(deleteMutation.error as Error).message}
+          Delete failed: {formatApiError(deleteMutation.error, "blast")}
         </div>
       )}
 

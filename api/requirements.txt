@@ -15,6 +15,7 @@ azure-storage-blob==12.23.1
 azure-mgmt-containerregistry==10.3.0
 azure-containerregistry==1.2.0
 azure-mgmt-containerservice==34.0.0
+azure-mgmt-msi==7.0.0
 
 # JWT validation
 PyJWT[crypto]==2.9.0

@@ -114,16 +114,17 @@ async function armPagedList<T>(initialUrl: string): Promise<T[]> {
 export interface ResourceGroupSummary {
   name: string;
   location: string;
+  tags?: Record<string, string>;
 }
 
 export async function listResourceGroups(
   subscriptionId: string,
 ): Promise<ResourceGroupSummary[]> {
-  const items = await armPagedList<{ name: string; location: string }>(
+  const items = await armPagedList<{ name: string; location: string; tags?: Record<string, string> }>(
     `https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resourcegroups?api-version=2022-09-01`,
   );
   return items
-    .map((g) => ({ name: g.name, location: g.location }))
+    .map((g) => ({ name: g.name, location: g.location, tags: g.tags }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

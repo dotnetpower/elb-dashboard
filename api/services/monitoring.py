@@ -696,14 +696,46 @@ def get_vm_status(
 # ---------------------------------------------------------------------------
 # Resource creation (idempotent)
 # ---------------------------------------------------------------------------
+
+def _auto_assign_role(
+    credential: TokenCredential,
+    subscription_id: str,
+    principal_id: str,
+    scope: str,
+    role_definition_id: str,
+) -> None:
+    """Assign a role to a principal. Idempotent — ignores conflict."""
+    import uuid as _uuid
+    from azure.mgmt.authorization import AuthorizationManagementClient
+    auth_client = AuthorizationManagementClient(credential, subscription_id)
+    role_def = f"{scope}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
+    assignment_name = str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_definition_id}"))
+    try:
+        auth_client.role_assignments.create(
+            scope, assignment_name,
+            {
+                "role_definition_id": role_def,
+                "principal_id": principal_id,
+                "principal_type": "User",
+            },
+        )
+        LOGGER.info("RBAC assigned role=%s principal=%s scope=%s", role_definition_id[:8], principal_id[:8], scope.split("/")[-1])
+    except Exception as exc:
+        if "Conflict" in str(exc) or "RoleAssignmentExists" in str(exc):
+            LOGGER.debug("Role already assigned, skipping")
+        else:
+            LOGGER.warning("RBAC assignment failed (non-fatal): %s", str(exc)[:200])
+
+
 def ensure_storage_account(
     credential: TokenCredential,
     subscription_id: str,
     resource_group: str,
     account_name: str,
     region: str,
+    caller_oid: str = "",
 ) -> None:
-    """Create a Standard_LRS HNS-enabled storage account. Idempotent."""
+    """Create a Standard_LRS HNS-enabled storage account + assign caller RBAC. Idempotent."""
     client = storage_client(credential, subscription_id)
     LOGGER.info("ensure_storage_account account=%s rg=%s", account_name, resource_group)
     poller = client.storage_accounts.begin_create(
@@ -713,11 +745,9 @@ def ensure_storage_account(
             "location": region,
             "sku": {"name": "Standard_LRS"},
             "kind": "StorageV2",
-            "properties": {
-                "is_hns_enabled": True,
-                "public_network_access": "Disabled",
-                "minimum_tls_version": "TLS1_2",
-            },
+            "is_hns_enabled": True,
+            "public_network_access": "Disabled",
+            "minimum_tls_version": "TLS1_2",
             "tags": {"managed-by": "elastic-blast-azure-functionapp"},
         },
     )
@@ -731,6 +761,14 @@ def ensure_storage_account(
         except Exception:
             pass  # container may already exist
 
+    # Auto-assign Storage Blob Data Contributor to the caller
+    if caller_oid:
+        _auto_assign_role(
+            credential, subscription_id, caller_oid,
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.Storage/storageAccounts/{account_name}",
+            "ba92f5b4-2d11-453d-a403-e96b0029c9fe",  # Storage Blob Data Contributor
+        )
+
 
 def ensure_acr(
     credential: TokenCredential,
@@ -738,8 +776,9 @@ def ensure_acr(
     resource_group: str,
     registry_name: str,
     region: str,
+    caller_oid: str = "",
 ) -> None:
-    """Create a Standard SKU ACR. Idempotent."""
+    """Create a Standard SKU ACR + assign caller RBAC. Idempotent."""
     client = acr_client(credential, subscription_id)
     LOGGER.info("ensure_acr registry=%s rg=%s", registry_name, resource_group)
     poller = client.registries.begin_create(
@@ -753,3 +792,11 @@ def ensure_acr(
         },
     )
     poller.result()
+
+    # Auto-assign AcrPush to the caller
+    if caller_oid:
+        _auto_assign_role(
+            credential, subscription_id, caller_oid,
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.ContainerRegistry/registries/{registry_name}",
+            "8311e382-0749-4cb8-b61a-304f252e45ec",  # AcrPush
+        )

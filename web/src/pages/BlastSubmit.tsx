@@ -290,6 +290,9 @@ export function BlastSubmit() {
         toast("All pre-flight checks passed", "success");
       }
     },
+    onError: (err: Error) => {
+      toast(`Pre-flight check failed: ${formatApiError(err, "blast")}`, "error");
+    },
   });
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>

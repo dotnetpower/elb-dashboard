@@ -134,7 +134,7 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
         <div className="muted">VM not found — click Provision to create one.</div>
       )}
       {otherError && (
-        <div className="muted" style={{ color: "var(--danger)" }}>Monitoring error: {(query.error as Error).message}</div>
+        <div className="muted" style={{ color: "var(--danger)" }}>Monitoring error: {formatApiError(query.error, "terminal")}</div>
       )}
 
       {query.data && (

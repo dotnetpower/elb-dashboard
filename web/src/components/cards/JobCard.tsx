@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { ArrowRight } from "lucide-react";
 
 import { blastApi } from "@/api/endpoints";
+import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
 import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 import { statusColor } from "@/constants";
@@ -61,7 +62,7 @@ export function JobCard() {
       }
     >
       {query.isError && (
-        <div className="muted">Failed: {(query.error as Error).message}</div>
+        <div className="muted" style={{ color: "var(--danger)" }}>Failed to load jobs: {formatApiError(query.error, "blast")}</div>
       )}
       {query.isLoading && (
         <div className="muted">Loading jobs...</div>

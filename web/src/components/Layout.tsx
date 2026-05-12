@@ -1,12 +1,143 @@
-import { type PropsWithChildren, useState } from "react";
+import { type PropsWithChildren, useState, useRef, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
-import { Activity, Terminal as TerminalIcon, LogOut, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2 } from "lucide-react";
+import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { useTheme } from "@/hooks/useTheme";
+import { loadSavedConfig } from "@/components/SetupWizard";
 
 import "./Layout.css";
+
+// ---------------------------------------------------------------------------
+// UserMenuDropdown — avatar click → popover with user info + sign out
+// ---------------------------------------------------------------------------
+function UserMenuDropdown({ account, initials, onSignOut }: {
+  account: { name?: string; username?: string; tenantId?: string } | undefined;
+  initials: string;
+  onSignOut: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const savedConfig = loadSavedConfig();
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", handler); document.removeEventListener("keydown", esc); };
+  }, [open]);
+
+  const { instance } = useMsal();
+
+  const handleSwitchDirectory = () => {
+    setOpen(false);
+    instance.loginRedirect({ scopes: [], prompt: "select_account" }).catch(() => {});
+  };
+
+  const handleSignInDifferent = () => {
+    setOpen(false);
+    instance.loginRedirect({ scopes: [], prompt: "login" }).catch(() => {});
+  };
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        className="layout__avatar"
+        onClick={() => setOpen(o => !o)}
+        style={{ cursor: "pointer", border: "none" }}
+        aria-label="User menu"
+      >
+        {initials}
+      </button>
+
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 8px)", right: 0,
+          width: 380, background: "var(--bg-primary)",
+          border: "1px solid var(--border-medium)", borderRadius: 12,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.4)", zIndex: 200,
+          overflow: "hidden",
+        }}>
+          {/* Top bar — tenant name + sign out link */}
+          <div style={{
+            padding: "10px 18px", display: "flex", justifyContent: "space-between", alignItems: "center",
+            borderBottom: "1px solid var(--border-weak)", background: "var(--bg-tertiary)",
+          }}>
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              {account?.tenantId ? `Directory: ${account.tenantId}` : "Microsoft Entra"}
+            </span>
+            <button
+              onClick={() => { setOpen(false); onSignOut(); }}
+              style={{
+                background: "none", border: "none", color: "var(--accent)",
+                cursor: "pointer", fontSize: 11, padding: 0,
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+
+          {/* User info */}
+          <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--border-weak)" }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+              <div style={{
+                width: 48, height: 48, borderRadius: 50, fontSize: 18, fontWeight: 700,
+                display: "grid", placeItems: "center", flexShrink: 0,
+                background: "linear-gradient(135deg, var(--accent), var(--purple))",
+                color: "#fff",
+              }}>
+                {initials}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.3 }}>
+                  {account?.name || "User"}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2, wordBreak: "break-all" }}>
+                  {account?.username || ""}
+                </div>
+                {savedConfig?.workloadResourceGroup && (
+                  <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 4 }}>
+                    Workspace: {savedConfig.workloadResourceGroup}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Actions — Azure Portal style */}
+          <div style={{ padding: "6px 0" }}>
+            <MenuAction icon={<ArrowRightLeft size={14} />} label="Switch directory" onClick={handleSwitchDirectory} />
+            <MenuAction icon={<UserPlus size={14} />} label="Sign in with a different account" onClick={handleSignInDifferent} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MenuAction({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        width: "100%", display: "flex", alignItems: "center", gap: 10,
+        padding: "10px 18px", background: "none", border: "none",
+        color: "var(--text-muted)", cursor: "pointer", fontSize: 12,
+        transition: "background 0.12s, color 0.12s", textAlign: "left",
+      }}
+      onMouseEnter={e => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-primary)"; }}
+      onMouseLeave={e => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+    >
+      <span style={{ color: "var(--text-faint)", display: "flex" }}>{icon}</span>
+      {label}
+    </button>
+  );
+}
 
 export function Layout({ children }: PropsWithChildren) {
   const { instance, accounts } = useMsal();
@@ -94,33 +225,23 @@ export function Layout({ children }: PropsWithChildren) {
           {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
         </button>
 
-        <div className="layout__user-menu">
-          <div
-            className="layout__avatar"
-            title={account?.username ?? "User"}
-          >
-            {initials}
-          </div>
-          <button
-            className="glass-button"
-            onClick={() => {
-              try {
-                instance.logoutRedirect().catch(() => {
-                  sessionStorage.clear();
-                  localStorage.removeItem("elb-resource-config");
-                  window.location.href = "/";
-                });
-              } catch {
+        <UserMenuDropdown
+          account={account}
+          initials={initials}
+          onSignOut={() => {
+            try {
+              instance.logoutRedirect().catch(() => {
                 sessionStorage.clear();
                 localStorage.removeItem("elb-resource-config");
                 window.location.href = "/";
-              }
-            }}
-            style={{ padding: "4px 10px", fontSize: 11 }}
-          >
-            <LogOut size={12} strokeWidth={1.5} /> Sign out
-          </button>
-        </div>
+              });
+            } catch {
+              sessionStorage.clear();
+              localStorage.removeItem("elb-resource-config");
+              window.location.href = "/";
+            }
+          }}
+        />
       </header>
 
       <main className="layout__main">

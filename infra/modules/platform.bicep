@@ -13,6 +13,10 @@ param tenantId string
 @description('Application (client) id of the App Registration used by the SPA + Function App.')
 param apiClientId string
 
+@secure()
+@description('Application (client) secret for OBO flow. Store in Key Vault after first deploy.')
+param apiClientSecret string = ''
+
 @description('Object id of the user running azd up. Empty when running unattended.')
 param principalId string
 
@@ -178,17 +182,40 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'PYTHON_ENABLE_WORKER_EXTENSIONS'
           value: '1'
         }
+        {
+          name: 'API_CLIENT_SECRET'
+          value: !empty(apiClientSecret) ? '@Microsoft.KeyVault(SecretUri=${apiClientSecretKv.properties.secretUri})' : ''
+        }
       ]
     }
   }
 }
 
+// Store the client secret in Key Vault (only if provided)
+resource apiClientSecretKv 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(apiClientSecret)) {
+  parent: keyVault
+  name: 'api-client-secret'
+  properties: {
+    value: apiClientSecret
+    contentType: 'text/plain'
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Auth note: Easy Auth is NOT used. Our custom token.py validates JWT tokens
+// directly. Easy Auth's audience validation conflicts with MSAL.js tokens
+// that carry the api://{clientId}/user_impersonation scope.
+// ----------------------------------------------------------------------------
+
 // ----------------------------------------------------------------------------
 // Static Web App (hosts the SPA, proxies /api -> Function App)
+// SWA is not available in all regions; use East Asia as closest to Korea Central.
 // ----------------------------------------------------------------------------
+var swaLocation = location == 'koreacentral' ? 'eastasia' : location
+
 resource staticWebApp 'Microsoft.Web/staticSites@2024-04-01' = {
   name: 'stapp-${environmentName}-${resourceToken}'
-  location: location
+  location: swaLocation
   tags: union(tags, {
     'azd-service-name': 'web'
   })

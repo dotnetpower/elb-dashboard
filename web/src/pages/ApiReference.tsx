@@ -3,8 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Loader2, ChevronDown, Play, Copy, Check, ExternalLink,
   Server, Shield, Briefcase, AlertTriangle, RefreshCw, Zap,
-  Clock, Hash, BookOpen, CircleDot,
+  Clock, Hash, BookOpen, CircleDot, Power, Package,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { monitoringApi } from "@/api/endpoints";
 import { loadSavedConfig } from "@/components/SetupWizard";
@@ -774,6 +775,22 @@ export function ApiReference() {
     staleTime: 300_000,
   });
   const clusterName = clustersQuery.data?.clusters?.[0]?.name ?? "";
+  const clusters = clustersQuery.data?.clusters ?? [];
+  const firstCluster = clusters[0];
+  const clusterStopped = firstCluster && firstCluster.power_state !== "Running";
+
+  // Check ACR for elb-openapi image
+  const acrRg = savedConfig?.acrResourceGroup ?? "";
+  const acrName = savedConfig?.acrName ?? "";
+  const acrQuery = useQuery({
+    queryKey: ["acr", sub, acrRg, acrName],
+    queryFn: () => monitoringApi.acr(sub, acrRg, acrName),
+    enabled: Boolean(sub && acrRg && acrName),
+    staleTime: 300_000,
+  });
+  const hasOpenApiImage = acrQuery.data?.actual_tags
+    ? "elb-openapi" in acrQuery.data.actual_tags
+    : false;
 
   // 2. Discover service IP
   const svcQuery = useQuery({
@@ -822,7 +839,7 @@ export function ApiReference() {
       />
 
       {/* Loading / Error states */}
-      {(!enabled || svcQuery.isLoading || clustersQuery.isLoading) && enabled && (
+      {(!enabled || svcQuery.isLoading || clustersQuery.isLoading) && enabled && !clusterStopped && (
         <div style={{
           display: "flex", flexDirection: "column", alignItems: "center",
           padding: "48px 0", gap: 12,
@@ -844,7 +861,82 @@ export function ApiReference() {
         </div>
       )}
 
-      {svcQuery.isError && (
+      {/* Smart diagnostics: AKS stopped */}
+      {enabled && clusterStopped && (
+        <div style={{
+          background: "var(--bg-primary)", border: "1px solid rgba(242,153,74,0.2)",
+          borderRadius: 10, padding: "24px 28px",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 10,
+              background: "rgba(242,153,74,0.1)", display: "grid", placeItems: "center",
+            }}>
+              <Power size={18} style={{ color: "var(--warning)" }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>AKS cluster is stopped</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                The OpenAPI service runs inside the AKS cluster. Start the cluster to access the API.
+              </div>
+            </div>
+          </div>
+          <div style={{
+            display: "flex", gap: 8, flexWrap: "wrap",
+            padding: "12px 16px", background: "var(--bg-secondary)",
+            borderRadius: 8, fontSize: 12, color: "var(--text-muted)",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <Server size={12} style={{ color: "var(--text-faint)" }} />
+              <span>{firstCluster?.name}</span>
+            </div>
+            <span style={{ color: "var(--border-medium)" }}>·</span>
+            <span style={{ color: "var(--warning)", fontWeight: 600 }}>
+              {firstCluster?.power_state}
+            </span>
+            <span style={{ color: "var(--border-medium)" }}>·</span>
+            <span>{firstCluster?.region}</span>
+          </div>
+          <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
+            <Link to="/" className="glass-button glass-button--primary" style={{ fontSize: 12, textDecoration: "none" }}>
+              <Power size={12} /> Go to Dashboard to start cluster
+            </Link>
+            <button className="glass-button" onClick={() => clustersQuery.refetch()} disabled={clustersQuery.isFetching} style={{ fontSize: 12 }}>
+              <RefreshCw size={12} className={clustersQuery.isFetching ? "spin" : ""} /> Refresh
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Smart diagnostics: OpenAPI image not built */}
+      {enabled && !clusterStopped && acrQuery.isSuccess && !hasOpenApiImage && (
+        <div style={{
+          background: "var(--bg-primary)", border: "1px solid rgba(184,119,217,0.2)",
+          borderRadius: 10, padding: "24px 28px",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 10,
+              background: "rgba(184,119,217,0.1)", display: "grid", placeItems: "center",
+            }}>
+              <Package size={18} style={{ color: "var(--purple)" }} />
+            </div>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>OpenAPI image not built</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                The <code style={{ fontFamily: "var(--font-mono)", background: "var(--bg-tertiary)", padding: "1px 5px", borderRadius: 3 }}>elb-openapi</code> container image
+                needs to be built in your ACR before deploying the API service.
+              </div>
+            </div>
+          </div>
+          <Link to="/" className="glass-button glass-button--primary" style={{ fontSize: 12, textDecoration: "none" }}>
+            <Package size={12} /> Build images from Dashboard ACR card
+          </Link>
+        </div>
+      )}
+
+      {/* Service not found — cluster running but service not deployed */}
+      {svcQuery.isError && !clusterStopped && (
         <div style={{
           background: "var(--bg-primary)", border: "1px solid rgba(242,153,74,0.2)",
           borderRadius: 10, padding: "20px 24px",
