@@ -1,0 +1,89 @@
+#cloud-config
+# Remote Terminal bootstrap for ElasticBLAST on Azure.
+# Completes azure-prereq.md Step 1 (tools), Step 5 (clone + venv) without az login.
+# Steps 3/4/6/7 (RG, ACR, image build, Storage) are performed by the backend.
+package_update: true
+package_upgrade: true
+
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - git
+  - gnupg
+  - jq
+  - lsb-release
+  - make
+  - python3.11
+  - python3.11-venv
+  - python3-pip
+  - software-properties-common
+  - tmux
+  - unzip
+
+write_files:
+  - path: /etc/profile.d/elb-env.sh
+    permissions: '0644'
+    content: |
+      export PYTHONPATH=src:$PYTHONPATH
+      export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+      export ELB_SKIP_DB_VERIFY=true
+      export ELB_DISABLE_AUTO_SHUTDOWN=1
+  - path: /etc/motd
+    permissions: '0644'
+    content: |
+      ============================================================
+       ElasticBLAST on Azure — Remote Terminal
+      ============================================================
+       Next step: run
+           az login --use-device-code
+       Then:
+           cd ~/elastic-blast-azure
+           source venv/bin/activate
+           PYTHONPATH=src:$PYTHONPATH python bin/elastic-blast --help
+      ============================================================
+
+runcmd:
+  # Azure CLI
+  - |
+    if ! command -v az >/dev/null 2>&1; then
+      curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+    fi
+  # kubectl
+  - |
+    if ! command -v kubectl >/dev/null 2>&1; then
+      snap install kubectl --classic
+    fi
+  # azcopy
+  - |
+    if ! command -v azcopy >/dev/null 2>&1; then
+      curl -sL https://aka.ms/downloadazcopy-v10-linux -o /tmp/azcopy.tar.gz
+      tar -xf /tmp/azcopy.tar.gz -C /tmp
+      install -m 0755 /tmp/azcopy_linux_*/azcopy /usr/local/bin/azcopy
+      rm -rf /tmp/azcopy*
+    fi
+  # Clone elastic-blast-azure as the admin user
+  - |
+    if [ ! -d /home/azureuser/elastic-blast-azure ]; then
+      sudo -u azureuser git clone https://github.com/dotnetpower/elastic-blast-azure.git /home/azureuser/elastic-blast-azure
+    fi
+  # Create venv + install runtime deps
+  - |
+    if [ ! -d /home/azureuser/elastic-blast-azure/venv ]; then
+      sudo -u azureuser python3.11 -m venv /home/azureuser/elastic-blast-azure/venv
+      sudo -u azureuser /home/azureuser/elastic-blast-azure/venv/bin/pip install --upgrade pip wheel build
+      sudo -u azureuser /home/azureuser/elastic-blast-azure/venv/bin/pip install -r /home/azureuser/elastic-blast-azure/requirements/test.txt
+      # Azure mgmt SDKs not in base.txt but required by elastic_blast.azure_sdk
+      sudo -u azureuser /home/azureuser/elastic-blast-azure/venv/bin/pip install \
+        azure-mgmt-resource azure-mgmt-network azure-mgmt-compute \
+        azure-mgmt-storage azure-mgmt-containerregistry azure-mgmt-containerservice \
+        azure-mgmt-authorization azure-mgmt-msi azure-mgmt-monitor
+      # Build + install elastic-blast wheel so the bin/elastic-blast script can find package metadata.
+      sudo -u azureuser bash -c "cd /home/azureuser/elastic-blast-azure && /home/azureuser/elastic-blast-azure/venv/bin/python setup.py sdist bdist_wheel >/dev/null 2>&1 && /home/azureuser/elastic-blast-azure/venv/bin/pip install --no-deps --force-reinstall dist/elastic_blast-*.whl"
+    fi
+  # Persist env for interactive shells
+  - |
+    grep -q 'elb-env.sh' /home/azureuser/.bashrc || echo 'source /etc/profile.d/elb-env.sh' >> /home/azureuser/.bashrc
+  # Mark cloud-init as ready for the orchestrator to detect
+  - |
+    touch /var/lib/cloud/elb-bootstrap.done

@@ -20,8 +20,37 @@ from services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
+def _resolve_cloud_init_path() -> Path:
+    """Locate scripts/cloud-init/remote-terminal.yaml across layouts.
+
+    Checks (in order):
+    1. ``<api_dir>/scripts/cloud-init/remote-terminal.yaml`` — bundled inside
+       the deployment package (production: copied at build time).
+    2. ``<repo_root>/scripts/cloud-init/remote-terminal.yaml`` — local dev
+       layout where ``scripts/`` lives one level above ``api/``.
+    3. ``CLOUD_INIT_PATH`` environment variable override (escape hatch).
+
+    Raises FileNotFoundError with a helpful message if none of them exist.
+    """
+    api_dir = Path(__file__).resolve().parent.parent
+    candidates = [
+        api_dir / "scripts" / "cloud-init" / "remote-terminal.yaml",
+        api_dir.parent / "scripts" / "cloud-init" / "remote-terminal.yaml",
+    ]
+    override = os.environ.get("CLOUD_INIT_PATH", "").strip()
+    if override:
+        candidates.insert(0, Path(override))
+    for p in candidates:
+        if p.is_file():
+            return p
+    raise FileNotFoundError(
+        "remote-terminal.yaml not found. Searched: "
+        + ", ".join(str(p) for p in candidates)
+    )
+
+
 CLOUD_INIT_PATH = (
-    Path(__file__).resolve().parent.parent.parent
+    Path(__file__).resolve().parent.parent
     / "scripts"
     / "cloud-init"
     / "remote-terminal.yaml"
@@ -127,7 +156,7 @@ def activity_generate_password(payload: dict[str, Any]) -> dict[str, Any]:
 def activity_create_vm(payload: dict[str, Any]) -> dict[str, Any]:
     """side-effect: creates the Linux VM with cloud-init custom data."""
     cred = _credential(payload.get("user_assertion"))
-    cloud_init = CLOUD_INIT_PATH.read_text(encoding="utf-8")
+    cloud_init = _resolve_cloud_init_path().read_text(encoding="utf-8")
     info = compute_svc.create_terminal_vm(
         cred,
         payload["subscription_id"],
