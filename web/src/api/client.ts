@@ -39,10 +39,13 @@ export interface ApiError extends Error {
   body: unknown;
 }
 
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+export interface ApiTextResponse {
+  text: string;
+  contentType: string;
+  filename: string | null;
+}
+
+async function fetchApi(path: string, init: RequestInit = {}): Promise<Response> {
   const token = await getAccessToken();
   const headers = new Headers(init.headers);
   if (token) {
@@ -58,15 +61,38 @@ async function request<T>(
     if (account) {
       try {
         await msalInstance.acquireTokenRedirect({ ...apiLoginRequest, account });
-      } catch { /* redirect will handle it */ }
+      } catch {
+        /* redirect will handle it */
+      }
     }
     const err = new Error("Session expired. Signing in again…") as ApiError;
     err.status = 401;
     err.body = null;
     throw err;
   }
+  return response;
+}
+
+function parseBody(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function filenameFromDisposition(value: string | null): string | null {
+  if (!value) return null;
+  const match = value.match(/filename\*?=(?:UTF-8''|\")?([^";]+)/i);
+  if (!match) return null;
+  return decodeURIComponent(match[1].replace(/"$/, "").trim());
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetchApi(path, init);
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  const body = parseBody(text);
   if (!response.ok) {
     const err = new Error(
       typeof body === "object" && body && "error" in body
@@ -80,8 +106,33 @@ async function request<T>(
   return body as T;
 }
 
+async function requestText(
+  path: string,
+  init: RequestInit = {},
+): Promise<ApiTextResponse> {
+  const response = await fetchApi(path, init);
+  const text = await response.text();
+  if (!response.ok) {
+    const body = parseBody(text);
+    const err = new Error(
+      typeof body === "object" && body && "error" in body
+        ? String((body as { error: unknown }).error)
+        : `HTTP ${response.status}`,
+    ) as ApiError;
+    err.status = response.status;
+    err.body = body;
+    throw err;
+  }
+  return {
+    text,
+    contentType: response.headers.get("Content-Type") ?? "text/plain;charset=utf-8",
+    filename: filenameFromDisposition(response.headers.get("Content-Disposition")),
+  };
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
+  getText: (path: string) => requestText(path),
   post: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "POST", body: JSON.stringify(body) }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
@@ -91,12 +142,12 @@ export const api = {
 // RBAC-friendly error formatting
 // ---------------------------------------------------------------------------
 const RBAC_HINTS: Record<string, string> = {
-  "aks":     "Contributor on the workload resource group",
-  "acr":     "Contributor on the ACR resource group",
-  "storage": "Storage Blob Data Contributor on the storage account",
-  "terminal":"Contributor on the terminal resource group",
-  "blast":   "Contributor on the workload resource group",
-  "default": "appropriate RBAC role on the target resource",
+  aks: "Contributor on the workload resource group",
+  acr: "Contributor on the ACR resource group",
+  storage: "Storage Blob Data Contributor on the storage account",
+  terminal: "Contributor on the terminal resource group",
+  blast: "Contributor on the workload resource group",
+  default: "appropriate RBAC role on the target resource",
 };
 
 /**
@@ -120,8 +171,13 @@ export function formatApiError(err: unknown, context?: string): string {
   }
   if (apiErr.status === 500) {
     // Hide internal details; show a clean message with the original reason if short enough
-    const clean = base.replace(/^HTTP 500:\s*/, "").replace(/Traceback.*$/s, "").trim();
-    return clean.length > 200 ? "An internal error occurred. Please try again or check Azure Portal for details." : clean;
+    const clean = base
+      .replace(/^HTTP 500:\s*/, "")
+      .replace(/Traceback.*$/s, "")
+      .trim();
+    return clean.length > 200
+      ? "An internal error occurred. Please try again or check Azure Portal for details."
+      : clean;
   }
   if (apiErr.status === 503) {
     return "Service temporarily unavailable. The Function App may be starting up — try again in a moment.";
@@ -135,5 +191,5 @@ export function formatApiError(err: unknown, context?: string): string {
 
 /** Check if an error is a 403 Forbidden. */
 export function isForbidden(err: unknown): boolean {
-  return (err instanceof Error) && (err as Partial<ApiError>).status === 403;
+  return err instanceof Error && (err as Partial<ApiError>).status === 403;
 }
