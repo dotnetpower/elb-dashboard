@@ -424,10 +424,14 @@ def build_acr_images(req: func.HttpRequest) -> func.HttpResponse:
         return _error_response(400, err)
     if err := _validate_name(registry, _RE_ACR_NAME, "registry_name"):
         return _error_response(400, err)
+
     cred = credential_for_caller(identity.raw_token)
 
     from services.image_tags import IMAGE_TAGS, IMAGE_BUILD_INFO, SOURCE_REPO, SOURCE_BRANCH
     from azure.mgmt.containerregistry import ContainerRegistryManagementClient
+
+    # Optional: filter to specific images (e.g. ["ncbi/elasticblast-job-submit"])
+    requested_images = body.get("images", [])  # empty = all
     from azure.mgmt.containerregistry.models import (
         DockerBuildRequest,
         PlatformProperties,
@@ -439,6 +443,9 @@ def build_acr_images(req: func.HttpRequest) -> func.HttpResponse:
     # Schedule all builds first (fire pollers in parallel)
     pollers: list[tuple[str, Any]] = []
     for image, tag in IMAGE_TAGS.items():
+        # Skip if specific images requested and this one isn't in the list
+        if requested_images and image not in requested_images:
+            continue
         full_image = f"{image}:{tag}"
         build_info = IMAGE_BUILD_INFO.get(image, {})
         context_path = build_info.get("context", "")

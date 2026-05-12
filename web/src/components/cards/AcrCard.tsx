@@ -15,8 +15,13 @@ const SHORT_NAMES: Record<string, string> = {
   "elb-openapi": "openapi",
 };
 
-// Core images required for BLAST operations
-const CORE_IMAGES = new Set(["ncbi/elb", "ncbi/elasticblast-job-submit", "ncbi/elasticblast-query-split"]);
+// All required images (worker, job-submit, query-split, openapi)
+const CORE_IMAGES = new Set([
+  "ncbi/elb",
+  "ncbi/elasticblast-job-submit",
+  "ncbi/elasticblast-query-split",
+  "elb-openapi",
+]);
 
 interface Props {
   subscriptionId: string;
@@ -43,6 +48,7 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
   });
 
   const hasServerBuilding = (query.data?.building_images ?? []).length > 0;
+
   const currentInterval = useMemo(() => {
     if (buildStatus === "building") return 10_000;
     if (hasServerBuilding) return 10_000;
@@ -59,6 +65,17 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
   const [buildResults, setBuildResults] = useState<{ image: string; status: string; error?: string; run_id?: string; acr_status?: string }[]>([]);
   const [buildError, setBuildError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [buildStartTime, setBuildStartTime] = useState<number | null>(null);
+
+  // Elapsed timer — runs whenever buildStatus === "building"
+  useEffect(() => {
+    if (buildStatus !== "building") { return; }
+    const start = buildStartTime ?? Date.now();
+    if (!buildStartTime) setBuildStartTime(start);
+    setElapsed(0);
+    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [buildStatus, buildStartTime]);
 
   // #18: Auto-dismiss success after 8s
   useEffect(() => {
@@ -92,8 +109,7 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
     setBuildStatus("building");
     setBuildError(null);
     setBuildResults([]);
-    const start = Date.now();
-    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    setBuildStartTime(Date.now());
     try {
       const resp = await monitoringApi.buildAcrImages(subscriptionId, resourceGroup, registryName);
       setBuildResults(resp.results);
@@ -108,12 +124,55 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
     } catch (e) {
       setBuildError(formatApiError(e, "acr"));
       setBuildStatus("error");
-    } finally {
-      clearInterval(timer);
     }
   };
 
-  const formatTime = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
+  const [singleBuilding, setSingleBuilding] = useState<string | null>(null);
+
+  // Auto-sync: if server shows builds in progress after page refresh, adopt the state
+  useEffect(() => {
+    if (hasServerBuilding && buildStatus === "idle") {
+      setBuildStatus("building");
+      if (!buildStartTime) setBuildStartTime(Date.now());
+    }
+    if (!hasServerBuilding && buildStatus === "building" && !singleBuilding) {
+      const allBuilt = expectedImages.every(([img, tag]) => {
+        return (query.data?.actual_tags?.[img] ?? []).includes(tag as string);
+      });
+      if (allBuilt) setBuildStatus("done");
+    }
+  }, [hasServerBuilding, buildStatus, singleBuilding, query.data]);
+
+  const handleBuildSingle = async (imageName: string) => {
+    setSingleBuilding(imageName);
+    setBuildStatus("building");
+    setBuildError(null);
+    setBuildStartTime(Date.now());
+    try {
+      const resp = await monitoringApi.buildAcrImages(subscriptionId, resourceGroup, registryName, [imageName]);
+      setBuildResults(prev => {
+        const filtered = prev.filter(r => !r.image.startsWith(imageName));
+        return [...filtered, ...resp.results];
+      });
+      if (resp.results.some(r => r.status === "scheduled")) {
+        setBuildStatus("building");
+      } else {
+        setBuildStatus(resp.results.every(r => r.status === "success") ? "done" : "error");
+      }
+      query.refetch();
+    } catch (e) {
+      setBuildError(formatApiError(e, "acr"));
+      setBuildStatus("error");
+    } finally {
+      setSingleBuilding(null);
+    }
+  };
+
+  const formatTime = (s: number) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+  };
 
   const status = !enabled
     ? "idle"
@@ -214,26 +273,45 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
                     </td>
                     <td style={{ padding: "6px 0", textAlign: "right" }}>
                       {/* #1: Multi-state badges — Built takes priority over stale build results */}
-                      {isBuilt ? (
-                        <span className="gt gt-g" style={{ fontSize: 9 }}>Built</span>
-                      ) : isBuilding && !result ? (
-                        <span style={{ color: acrStatus === "Running" ? "var(--accent)" : "var(--text-muted)", fontSize: 10, display: "inline-flex", alignItems: "center", gap: 3 }}>
-                          <Loader2 size={10} className="spin" /> {acrStatus || "Building"}
-                        </span>
-                      ) : (result?.status === "success" || result?.status === "scheduled") ? (
-                        <span style={{ color: "var(--accent)", fontSize: 10, display: "inline-flex", alignItems: "center", gap: 3 }}>
-                          <Loader2 size={10} className="spin" /> {result.acr_status || "Scheduled"}
-                        </span>
-                      ) : isFailed ? (
-                        <button
-                          onClick={() => setExpandedError(expandedError === img ? null : img)}
-                          style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
-                        >
-                          <span className="gt gt-r" style={{ fontSize: 9 }}>Failed ▾</span>
-                        </button>
-                      ) : (
-                        <span className="gt gt-m" style={{ fontSize: 9 }}>Not Built</span>
-                      )}
+                      {(() => {
+                        // Server-side build status (most accurate)
+                        const liveStatus = buildDetail?.status as string | undefined;
+                        // Map ACR status → user-friendly label
+                        const statusLabel = (s: string | undefined) => {
+                          if (!s) return "Building";
+                          if (s === "Queued") return "Starting";
+                          if (s === "Running") return "Building";
+                          return s;
+                        };
+                        return isBuilt ? (
+                          <span className="gt gt-g" style={{ fontSize: 9 }}>Built</span>
+                        ) : (isBuilding || liveStatus) && liveStatus !== "Failed" ? (
+                          <span style={{ color: liveStatus === "Running" || liveStatus === "Queued" ? "var(--accent)" : "var(--text-muted)", fontSize: 10, display: "inline-flex", alignItems: "center", gap: 3 }}>
+                            <Loader2 size={10} className="spin" /> {statusLabel(liveStatus || acrStatus || result?.acr_status)}
+                          </span>
+                        ) : isFailed ? (
+                          <button
+                            onClick={() => setExpandedError(expandedError === img ? null : img)}
+                            style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                          >
+                            <span className="gt gt-r" style={{ fontSize: 9 }}>Failed ▾</span>
+                          </button>
+                        ) : singleBuilding === img ? (
+                          <span style={{ fontSize: 10, color: "var(--accent)", display: "inline-flex", alignItems: "center", gap: 3 }}>
+                            <Loader2 size={10} className="spin" /> Starting
+                          </span>
+                        ) : (
+                          <button
+                            className="glass-button glass-button--primary"
+                            style={{ fontSize: 9, padding: "2px 8px", gap: 3 }}
+                            onClick={() => handleBuildSingle(img)}
+                            disabled={buildStatus === "building" || singleBuilding !== null}
+                            title={`Build ${shortName}`}
+                          >
+                            Build
+                          </button>
+                        );
+                      })()}
                     </td>
                   </tr>
                 );
@@ -277,7 +355,10 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
       {buildStatus === "building" && (
         <div style={{ marginTop: "var(--space-3)", padding: "6px 10px", background: "rgba(110,159,255,0.06)", border: "1px solid rgba(110,159,255,0.15)", borderRadius: 6, fontSize: 11, color: "var(--accent)" }}>
           <Loader2 size={11} className="spin" style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
-          Building via ACR... {formatTime(elapsed)}
+          {singleBuilding
+            ? `Building ${singleBuilding.split("/").pop()}... ${formatTime(elapsed)}`
+            : `Building via ACR... ${formatTime(elapsed)}`
+          }
         </div>
       )}
 
@@ -295,11 +376,16 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
         </div>
       )}
 
-      {/* #10: Server-side build in progress message */}
-      {hasServerBuilding && buildStatus === "idle" && (
+      {/* #10: Server-side build in progress — shown after page refresh */}
+      {hasServerBuilding && buildStatus === "building" && !singleBuilding && (
         <div style={{ marginTop: "var(--space-3)", padding: "6px 10px", background: "rgba(110,159,255,0.06)", border: "1px solid rgba(110,159,255,0.15)", borderRadius: 6, fontSize: 11, color: "var(--accent)" }}>
           <Loader2 size={11} className="spin" style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
-          Build in progress (started externally). Auto-refreshing...
+          Building in ACR... {formatTime(elapsed)}
+          {query.data?.building_images && (
+            <span style={{ marginLeft: 8, color: "var(--text-faint)" }}>
+              ({(query.data.building_images as string[]).map(s => s.split(":")[0].split("/").pop()).join(", ")})
+            </span>
+          )}
         </div>
       )}
     </MonitorCard>

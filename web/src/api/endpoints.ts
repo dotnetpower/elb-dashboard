@@ -219,10 +219,10 @@ export const monitoringApi = {
       `/monitor/aks/pod-logs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&pod_name=${encodeURIComponent(podName)}&tail=${tail ?? 200}`,
     ),
 
-  buildAcrImages: (subscriptionId: string, rg: string, registryName: string) =>
-    api.post<{ results: { image: string; status: string; run_id?: string; error?: string; output?: string }[] }>(
+  buildAcrImages: (subscriptionId: string, rg: string, registryName: string, images?: string[]) =>
+    api.post<{ results: { image: string; status: string; run_id?: string; error?: string; output?: string; acr_status?: string }[] }>(
       "/acr/build-images",
-      { subscription_id: subscriptionId, resource_group: rg, registry_name: registryName },
+      { subscription_id: subscriptionId, resource_group: rg, registry_name: registryName, ...(images?.length ? { images } : {}) },
     ),
   serviceIp: (subscriptionId: string, rg: string, clusterName: string, serviceName: string) =>
     api.get<{ service_name: string; external_ip: string }>(

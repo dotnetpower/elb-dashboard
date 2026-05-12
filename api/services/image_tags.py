@@ -33,7 +33,7 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
         # For ACR Build, we use a special context that includes both dirs.
         "context": "",
         "dockerfile": "docker-job-submit/Dockerfile.azure",
-        "pre_build_cmd": "rsync -a src/elastic_blast/templates docker-job-submit/",
+        "pre_build_cmd": "cp -r src/elastic_blast/templates docker-job-submit/",
     },
     "ncbi/elasticblast-query-split": {
         "context": "docker-qs",
