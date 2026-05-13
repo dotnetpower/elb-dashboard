@@ -16,10 +16,14 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from _http_utils import (
+    _RE_CLUSTER_NAME,
+    _RE_DB_NAME,
     _RE_INSTANCE_ID,
+    _RE_STORAGE_ACCOUNT,
     _error_response,
     _json_response,
     _require_query,
+    _validate_name,
     _validate_rg,
     _validate_sub,
 )
@@ -151,18 +155,57 @@ async def start_warmup(
     except json.JSONDecodeError:
         return _error_response(400, "invalid JSON")
 
-    required = ["subscription_id", "resource_group", "storage_account", "db", "aks_cluster_name"]
-    missing = [k for k in required if not body.get(k)]
-    if missing:
-        return _error_response(400, f"missing fields: {', '.join(missing)}")
+    # Validate required fields with regex
+    sub = body.get("subscription_id", "")
+    rg = body.get("resource_group", "")
+    storage_account = body.get("storage_account", "")
+    db = body.get("db", "")
+    cluster_name = body.get("aks_cluster_name", "")
+    if err := _validate_sub(sub):
+        return _error_response(400, err)
+    if err := _validate_rg(rg):
+        return _error_response(400, err)
+    if err := _validate_name(storage_account, _RE_STORAGE_ACCOUNT, "storage_account"):
+        return _error_response(400, err)
+    if err := _validate_name(cluster_name, _RE_CLUSTER_NAME, "aks_cluster_name"):
+        return _error_response(400, err)
+    if not db:
+        return _error_response(400, "db is required")
+    # db is a path like "blast-db/core_nt" or a full URL — reject shell metacharacters
+    import re as _re
+    if _re.search(r"[;&|`$(){}\\!\n\r<>~\[\]?*]", db):
+        return _error_response(400, "db contains invalid characters")
 
-    body["user_assertion"] = identity.raw_token
-    body["owner_oid"] = identity.object_id
+    # Whitelist only known fields — never pass raw client body to orchestrator
+    storage_rg = body.get("storage_resource_group", rg)
+    if err := _validate_rg(storage_rg):
+        return _error_response(400, f"storage_resource_group: {err}")
+    safe_input = {
+        "subscription_id": sub,
+        "resource_group": rg,
+        "storage_account": storage_account,
+        "storage_resource_group": storage_rg,
+        "region": body.get("region", "koreacentral"),
+        "db": db,
+        "db_display_name": body.get("db_display_name", db),
+        "program": body.get("program", "blastn") if body.get("program") in (
+            "blastn", "blastp", "blastx", "tblastn", "tblastx", None, ""
+        ) else "blastn",
+        "aks_cluster_name": cluster_name,
+        "machine_type": body.get("machine_type", ""),
+        "num_nodes": body.get("num_nodes"),
+        "acr_resource_group": body.get("acr_resource_group", ""),
+        "acr_name": body.get("acr_name", ""),
+        "terminal_resource_group": body.get("terminal_resource_group", ""),
+        "terminal_vm_name": body.get("terminal_vm_name", ""),
+        "user_assertion": identity.raw_token,
+        "owner_oid": identity.object_id,
+    }
 
-    instance_id = await client.start_new("warmup_db_orchestrator", None, body)
+    instance_id = await client.start_new("warmup_db_orchestrator", None, safe_input)
     LOGGER.info("Started warmup_db_orchestrator db=%s cluster=%s instance=%s",
-                body.get("db"), body.get("aks_cluster_name"), instance_id)
-    return _json_response({"instance_id": instance_id, "db": body.get("db")}, status=202)
+                sanitise(db), sanitise(cluster_name), instance_id)
+    return _json_response({"instance_id": instance_id, "db": safe_input["db_display_name"]}, status=202)
 
 
 @bp.route(route="warmup/{instance_id}/status", methods=["GET"])

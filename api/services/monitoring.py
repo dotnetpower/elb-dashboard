@@ -392,9 +392,9 @@ def k8s_warmup_status(
             if result["vmtouch_ready"] > 0:
                 result["warm"] = True
 
-        # 3. Detect loaded DBs from init-ssd-* Jobs
+        # 3. Detect loaded DBs from init-ssd-* Jobs (created in default namespace)
         resp = session.get(
-            f"{server}/apis/batch/v1/jobs",
+            f"{server}/apis/batch/v1/namespaces/default/jobs",
             params={"labelSelector": "app=setup"},
             timeout=10,
         )
@@ -451,13 +451,15 @@ def k8s_warmup_status(
                     info["status"] = "Unknown"
             result["databases"] = list(db_map.values())
 
-        # 4. Find elastic-blast namespaces
+        # 4. Find elastic-blast namespaces (limit to 20 to prevent oversized responses)
         resp = session.get(f"{server}/api/v1/namespaces", timeout=10)
         if resp.status_code == 200:
             for ns in resp.json().get("items", []):
                 ns_name = ns.get("metadata", {}).get("name", "")
                 if ns_name.startswith("elastic-blast-"):
                     result["namespaces"].append(ns_name)
+                    if len(result["namespaces"]) >= 20:
+                        break
 
         return result
     except Exception as exc:

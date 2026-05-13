@@ -16,12 +16,14 @@ import { formatApiError } from "@/api/client";
 // Databases that make sense to warmup (must be downloaded to storage first)
 const WARMUP_CANDIDATES = [
   { value: "16S_ribosomal_RNA", label: "16S ribosomal RNA", program: "blastn", size: "~18 MB" },
+  { value: "18S_fungal_sequences", label: "18S fungal sequences", program: "blastn", size: "~3 MB" },
+  { value: "ITS_RefSeq_Fungi", label: "ITS RefSeq Fungi", program: "blastn", size: "~8 MB" },
+  { value: "pdbnt", label: "PDB nucleotide", program: "blastn", size: "~200 MB" },
+  { value: "swissprot", label: "SwissProt", program: "blastp", size: "~300 MB" },
   { value: "core_nt", label: "Core nucleotide", program: "blastn", size: "~250 GB" },
   { value: "nt", label: "Nucleotide collection", program: "blastn", size: "~400 GB" },
   { value: "nr", label: "Non-redundant protein", program: "blastp", size: "~300 GB" },
-  { value: "swissprot", label: "SwissProt", program: "blastp", size: "~300 MB" },
   { value: "refseq_protein", label: "RefSeq protein", program: "blastp", size: "~100 GB" },
-  { value: "pdbnt", label: "PDB nucleotide", program: "blastn", size: "~200 MB" },
 ] as const;
 
 interface Props {
@@ -35,6 +37,8 @@ interface Props {
   acrResourceGroup?: string;
   acrName?: string;
   region?: string;
+  nodeSku?: string | null;
+  nodeCount?: number | null;
 }
 
 export function WarmupSection({
@@ -48,6 +52,8 @@ export function WarmupSection({
   acrResourceGroup,
   acrName,
   region,
+  nodeSku,
+  nodeCount,
 }: Props) {
   const [selectedDb, setSelectedDb] = useState("");
   const [warmupInstanceId, setWarmupInstanceId] = useState<string | null>(() => {
@@ -79,8 +85,21 @@ export function WarmupSection({
     queryFn: () => monitoringApi.warmupOrchStatus(warmupInstanceId!),
     enabled: Boolean(warmupInstanceId),
     refetchInterval: 5_000,
-    retry: 2,
+    retry: 1, // fail fast on stale instance_id
   });
+
+  // Clear stale instance_id on persistent 404/error
+  useEffect(() => {
+    if (orchQuery.isError && warmupInstanceId) {
+      // Orchestrator not found — stale localStorage. Clear it.
+      setWarmupInstanceId(null);
+      try {
+        localStorage.removeItem(`elb-warmup-${clusterName}`);
+      } catch {
+        /* */
+      }
+    }
+  }, [orchQuery.isError, warmupInstanceId, clusterName]);
 
   // Clear instance ID when orchestrator finishes
   useEffect(() => {
@@ -117,6 +136,8 @@ export function WarmupSection({
         db_display_name: selectedDb,
         program: candidate?.program || "blastn",
         aks_cluster_name: clusterName,
+        machine_type: nodeSku || undefined,
+        num_nodes: nodeCount || undefined,
         acr_resource_group: acrResourceGroup,
         acr_name: acrName,
       });

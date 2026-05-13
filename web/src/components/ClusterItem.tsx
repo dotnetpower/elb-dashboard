@@ -368,6 +368,8 @@ export function ClusterItem({
             acrResourceGroup={acrResourceGroup}
             acrName={acrName}
             region={region}
+            nodeSku={c.node_sku}
+            nodeCount={c.node_count}
           />
         </>
       )}

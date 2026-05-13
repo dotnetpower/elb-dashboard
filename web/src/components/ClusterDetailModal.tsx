@@ -24,6 +24,8 @@ export function ClusterDetails({
   acrResourceGroup,
   acrName,
   region,
+  nodeSku,
+  nodeCount,
 }: {
   clusterName: string;
   powerState: string | null;
@@ -40,6 +42,8 @@ export function ClusterDetails({
   acrResourceGroup?: string;
   acrName?: string;
   region?: string;
+  nodeSku?: string | null;
+  nodeCount?: number | null;
 }) {
   const isRunning = powerState === "Running" && !isTransitioning;
   const [showModal, setShowModal] = useState(false);
@@ -746,6 +750,8 @@ export function ClusterDetails({
                     acrResourceGroup={acrResourceGroup}
                     acrName={acrName}
                     region={region}
+                    nodeSku={nodeSku}
+                    nodeCount={nodeCount}
                   />
                 )}
               </div>

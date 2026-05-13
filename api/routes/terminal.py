@@ -25,6 +25,7 @@ from _http_utils import (
     _validate_name,
     _validate_rg,
     _validate_sub,
+    resolve_terminal_secret,
 )
 from auth.token import AuthError, validate_bearer_token
 from models.terminal import ProvisionTerminalRequest
@@ -130,29 +131,10 @@ def reveal_terminal_password(req: func.HttpRequest) -> func.HttpResponse:
     rg = req.params.get("resource_group") or os.environ.get("TERMINAL_DEFAULT_RG", "")
     cred = credential_for_caller(identity.raw_token)
 
-    candidate_uris: list[str] = []
-    env_uri = os.environ.get("KEY_VAULT_URI")
-    if env_uri:
-        candidate_uris.append(env_uri.rstrip("/") + "/")
-    if sub and rg:
-        try:
-            from activities.terminal import _default_vault_name
-            canonical = _default_vault_name(sub, rg, vm_name)
-            candidate_uris.append(f"https://{canonical}.vault.azure.net/")
-        except Exception as exc:  # pragma: no cover
-            LOGGER.warning("could not derive canonical vault name: %s", exc)
-    legacy_suffix = vm_name[-8:] if len(vm_name) >= 8 else vm_name
-    candidate_uris.append(f"https://kv-elb-{legacy_suffix}.vault.azure.net/")
-
-    last_exc: Exception | None = None
-    for vault_uri in candidate_uris:
-        try:
-            password = kv_svc.get_secret(cred, vault_uri, f"vm-{vm_name}-password")
-            return _json_response({"vm_name": vm_name, "password": password})
-        except Exception as exc:
-            last_exc = exc
-            LOGGER.info("secret lookup miss on %s: %s", vault_uri, str(exc)[:120])
-    LOGGER.warning("secret read failed for vm=%s on all candidates: %s", vm_name, last_exc)
+    secret_name = f"vm-{vm_name}-password"
+    password, _ = resolve_terminal_secret(cred, sub, rg, vm_name, secret_name)
+    if password:
+        return _json_response({"vm_name": vm_name, "password": password})
     return _error_response(404, "password secret not found")
 
 

@@ -89,7 +89,15 @@ def warmup_db_orchestrator(
         job_id = f"warmup-{instance_id[:8]}"
         request["job_id"] = job_id
         request["enable_warmup"] = True
-        request["reuse"] = False
+        # CRITICAL: reuse=True — we are warming an EXISTING cluster, not creating a new one.
+        # reuse=False would cause elastic-blast to try creating a new AKS cluster.
+        request["reuse"] = True
+        # Use cluster's actual node config if available (passed from frontend)
+        if not request.get("machine_type"):
+            request["machine_type"] = "Standard_E32s_v5"
+        if not request.get("num_nodes"):
+            request["num_nodes"] = 3
+        request["reuse"] = True
         # Dummy query/results — prepare only downloads DB, doesn't need real ones
         if not request.get("query_blob_url"):
             request["query_blob_url"] = f"https://{request['storage_account']}.blob.core.windows.net/queries/dummy.fa"

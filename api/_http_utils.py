@@ -89,3 +89,65 @@ def _require_query(
             return None, _error_response(400, f"missing query param '{name}'")
         values[name] = v
     return values, None
+
+
+# ---------------------------------------------------------------------------
+# Key Vault fallback helper — try multiple candidate vault URIs
+# ---------------------------------------------------------------------------
+import logging as _logging
+import os as _os
+
+from azure.core.credentials import TokenCredential as _TokenCredential
+
+_KV_LOGGER = _logging.getLogger(__name__)
+
+
+def resolve_terminal_secret(
+    credential: _TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    vm_name: str,
+    secret_name: str,
+) -> tuple[str | None, str | None]:
+    """Try to read *secret_name* from candidate Key Vaults.
+
+    Returns ``(value, vault_uri)`` on success or ``(None, None)`` if all fail.
+
+    Candidate order:
+      1. ``KEY_VAULT_URI`` environment variable (prod KV).
+      2. Canonical per-terminal KV derived from subscription/rg/vm_name.
+      3. Legacy ``kv-elb-<suffix>`` pattern.
+    """
+    from services import keyvault as kv_svc
+
+    candidate_uris: list[str] = []
+    env_uri = _os.environ.get("KEY_VAULT_URI")
+    if env_uri:
+        candidate_uris.append(env_uri.rstrip("/") + "/")
+    if subscription_id and resource_group:
+        try:
+            from activities.terminal import _default_vault_name
+            canonical = _default_vault_name(subscription_id, resource_group, vm_name)
+            canonical_uri = f"https://{canonical}.vault.azure.net/"
+            if canonical_uri not in candidate_uris:
+                candidate_uris.append(canonical_uri)
+        except Exception as exc:
+            _KV_LOGGER.warning("could not derive canonical vault name: %s", exc)
+    legacy_suffix = vm_name[-8:] if len(vm_name) >= 8 else vm_name
+    legacy_uri = f"https://kv-elb-{legacy_suffix}.vault.azure.net/"
+    if legacy_uri not in candidate_uris:
+        candidate_uris.append(legacy_uri)
+
+    last_exc: Exception | None = None
+    for vault_uri in candidate_uris:
+        try:
+            value = kv_svc.get_secret(credential, vault_uri, secret_name)
+            return value, vault_uri
+        except Exception as exc:
+            last_exc = exc
+            _KV_LOGGER.info("secret lookup miss on %s: %s", vault_uri, str(exc)[:120])
+    _KV_LOGGER.warning(
+        "secret %s not found in any candidate vault (%s): %s",
+        secret_name, [u.split("//")[1].split(".")[0] for u in candidate_uris], last_exc,
+    )
+    return None, None

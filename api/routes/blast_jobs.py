@@ -21,6 +21,7 @@ from _http_utils import (
     _validate_name,
     _validate_rg,
     _validate_sub,
+    resolve_terminal_secret,
 )
 from auth.token import AuthError, validate_bearer_token
 from services import compute as compute_svc
@@ -408,11 +409,10 @@ def build_custom_database(req: func.HttpRequest) -> func.HttpResponse:
                 400, "Terminal VM has no public IP. Provision and start it first."
             )
 
-        vault_url = os.environ.get("ELB_KEYVAULT_URL") or os.environ.get("KEY_VAULT_URI", "")
-        if not vault_url:
-            return _error_response(500, "Key Vault URL not configured")
-
-        password = kv_svc.get_secret(cred, vault_url, f"vm-{terminal_vm}-password")
+        secret_name = f"vm-{terminal_vm}-password"
+        password, _ = resolve_terminal_secret(cred, sub, terminal_rg, terminal_vm, secret_name)
+        if not password:
+            return _error_response(404, "VM password not found in Key Vault")
 
         # Step 3: Run makeblastdb on the VM via SSH
         from services.ssh_exec import run_ssh
