@@ -1008,6 +1008,7 @@ function ClusterItem({
           <ClusterDetails
             clusterName={c.name}
             powerState={c.power_state}
+            isTransitioning={!!trans}
             agentPools={c.agent_pools}
             fqdn={c.fqdn}
             networkPlugin={c.network_plugin}
@@ -1027,6 +1028,7 @@ function ClusterItem({
 function ClusterDetails({
   clusterName,
   powerState,
+  isTransitioning,
   agentPools,
   fqdn,
   networkPlugin,
@@ -1035,13 +1037,14 @@ function ClusterDetails({
 }: {
   clusterName: string;
   powerState: string | null;
+  isTransitioning: boolean;
   agentPools?: AksAgentPool[];
   fqdn?: string | null;
   networkPlugin?: string | null;
   subscriptionId: string;
   resourceGroup: string;
 }) {
-  const isRunning = powerState === "Running";
+  const isRunning = powerState === "Running" && !isTransitioning;
   const [showModal, setShowModal] = useState(false);
 
   // Fast K8s metrics API — direct access (~1-3s instead of ~30s)
@@ -1050,6 +1053,7 @@ function ClusterDetails({
     queryFn: () => monitoringApi.k8sTopNodes(subscriptionId, resourceGroup, clusterName),
     enabled: isRunning,
     staleTime: 30_000,
+    retry: 1,
     refetchInterval: isRunning ? 60_000 : false,
   });
 
@@ -1685,20 +1689,41 @@ function ClusterDetails({
                   </div>
                 )}
 
-                {/* kubectl sections — only when running */}
+                {/* kubectl sections — only when fully running */}
                 {!isRunning && (
                   <div
                     style={{
-                      padding: "20px",
+                      padding: "24px 20px",
                       borderRadius: 8,
                       textAlign: "center",
                       background: "rgba(255,255,255,0.02)",
                       border: "1px dashed var(--border-weak)",
                       color: "var(--text-faint)",
                       fontSize: 12,
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      gap: 8,
                     }}
                   >
-                    Start the cluster to view diagnostics and run kubectl commands.
+                    {isTransitioning ||
+                    (powerState !== "Stopped" && powerState !== "Running") ? (
+                      <>
+                        <Loader2
+                          size={18}
+                          className="spin"
+                          style={{ color: "var(--accent)" }}
+                        />
+                        <span>
+                          Cluster is <strong>{powerState ?? "transitioning"}</strong> —
+                          diagnostics will be available once it finishes starting.
+                        </span>
+                      </>
+                    ) : (
+                      <span>
+                        Start the cluster to view diagnostics and run kubectl commands.
+                      </span>
+                    )}
                   </div>
                 )}
 
@@ -1743,12 +1768,14 @@ function ClusterModalKubectl({
     queryKey: ["aks-nodes-fast", subscriptionId, resourceGroup, clusterName],
     queryFn: () => monitoringApi.k8sNodes(subscriptionId, resourceGroup, clusterName),
     staleTime: 60_000,
+    retry: 1,
   });
 
   const podsQuery = useQuery({
     queryKey: ["aks-pods-fast", subscriptionId, resourceGroup, clusterName],
     queryFn: () => monitoringApi.k8sPods(subscriptionId, resourceGroup, clusterName),
     staleTime: 60_000,
+    retry: 1,
   });
 
   const [customCmd, setCustomCmd] = useState("");
@@ -1974,8 +2001,18 @@ function NodeResourcesSection({
           </div>
         )}
         {query.isError && (
-          <div style={{ fontSize: 11, color: "var(--danger)" }}>
-            Failed to load: {formatApiError(query.error, "aks")}
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <AlertTriangle size={12} style={{ color: "var(--warning)" }} />
+            Node metrics unavailable — the cluster API may still be warming up. Try
+            Refresh All in a moment.
           </div>
         )}
         {metrics.length > 0 && (
