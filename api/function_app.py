@@ -430,10 +430,14 @@ def setup_workload_identity_activity(payload: dict) -> dict:
 def deploy_openapi_activity(payload: dict) -> dict:
     """Activity: deploy elb-openapi to AKS with Workload Identity ServiceAccount.
 
-    Creates a K8s ServiceAccount annotated with the MI client-id, then applies
-    the Deployment + Service manifest. Idempotent.
+    Uses AKS Run Command (begin_run_command) instead of local kubectl so it
+    works from any environment including Azure Functions consumption plan.
     """
     import json as _json
+    import time
+
+    from azure.mgmt.containerservice import ContainerServiceClient
+    from azure.mgmt.containerservice.models import RunCommandRequest
 
     from services.azure_clients import credential_for_assertion
     from services.image_tags import IMAGE_TAGS
@@ -451,182 +455,121 @@ def deploy_openapi_activity(payload: dict) -> dict:
         f"{acr_name}.azurecr.io/elb-openapi:{image_tag}" if acr_name else f"elb-openapi:{image_tag}"
     )
 
-    from azure.mgmt.containerservice import ContainerServiceClient
-
     aks_client = ContainerServiceClient(cred, sub)
 
-    # Get admin kubeconfig to apply manifests
-    cred_result = aks_client.managed_clusters.list_cluster_admin_credentials(rg, cluster_name)
-    kubeconfig = cred_result.kubeconfigs[0].value.decode("utf-8")
+    def _run_kubectl(command: str, timeout: int = 60) -> str:
+        """Execute a kubectl command on AKS via Run Command API."""
+        poller = aks_client.managed_clusters.begin_run_command(
+            rg, cluster_name, RunCommandRequest(command=command)
+        )
+        result = poller.result(timeout=timeout)
+        if result.exit_code != 0:
+            LOGGER.warning("AKS run-command failed (exit %d): %s", result.exit_code, (result.logs or "")[:300])
+        return result.logs or ""
 
-    import subprocess
-    import tempfile
+    # Build all manifests as a single multi-document YAML
+    sa_manifest = {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {
+            "name": k8s_sa_name,
+            "namespace": "default",
+            "annotations": ({"azure.workload.identity/client-id": mi_client_id} if mi_client_id else {}),
+            "labels": {"azure.workload.identity/use": "true"},
+        },
+    }
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as kf:
-        kf.write(kubeconfig)
-        kubeconfig_path = kf.name
-
-    try:
-        env = {**dict(__import__("os").environ), "KUBECONFIG": kubeconfig_path}
-
-        # ServiceAccount with Workload Identity annotation
-        sa_manifest = {
-            "apiVersion": "v1",
-            "kind": "ServiceAccount",
-            "metadata": {
-                "name": k8s_sa_name,
-                "namespace": "default",
-                "annotations": {"azure.workload.identity/client-id": mi_client_id}
-                if mi_client_id
-                else {},
-                "labels": {"azure.workload.identity/use": "true"},
-            },
-        }
-
-        # Deployment
-        deploy_manifest = {
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {"name": "elb-openapi", "namespace": "default"},
-            "spec": {
-                "replicas": 1,
-                "selector": {"matchLabels": {"app": "elb-openapi"}},
-                "template": {
-                    "metadata": {
-                        "labels": {
-                            "app": "elb-openapi",
-                            "azure.workload.identity/use": "true",
-                        },
-                    },
-                    "spec": {
-                        "serviceAccountName": k8s_sa_name,
-                        "containers": [
-                            {
-                                "name": "openapi",
-                                "image": image,
-                                "imagePullPolicy": "Always",
-                                "ports": [{"containerPort": 8000}],
-                                "env": [
-                                    {"name": "ELB_CLUSTER_NAME", "value": cluster_name},
-                                    {"name": "ELB_STORAGE_ACCOUNT", "value": storage_account},
-                                    {"name": "ELB_RESOURCE_GROUP", "value": rg},
-                                    {
-                                        "name": "ELB_AZURE_REGION",
-                                        "value": payload.get("region", "koreacentral"),
-                                    },
-                                    {"name": "AZURE_CLIENT_ID", "value": mi_client_id},
-                                    {"name": "AZCOPY_AUTO_LOGIN_TYPE", "value": "AZCLI"},
-                                    {
-                                        "name": "AZCOPY_TENANT_ID",
-                                        "value": payload.get("tenant_id", ""),
-                                    },
-                                ],
-                                "resources": {
-                                    "requests": {"cpu": "100m", "memory": "256Mi"},
-                                    "limits": {"cpu": "500m", "memory": "512Mi"},
-                                },
-                            }
+    deploy_manifest = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "elb-openapi", "namespace": "default"},
+        "spec": {
+            "replicas": 1,
+            "selector": {"matchLabels": {"app": "elb-openapi"}},
+            "template": {
+                "metadata": {
+                    "labels": {"app": "elb-openapi", "azure.workload.identity/use": "true"},
+                },
+                "spec": {
+                    "serviceAccountName": k8s_sa_name,
+                    "containers": [{
+                        "name": "openapi",
+                        "image": image,
+                        "imagePullPolicy": "Always",
+                        "ports": [{"containerPort": 8000}],
+                        "env": [
+                            {"name": "ELB_CLUSTER_NAME", "value": cluster_name},
+                            {"name": "ELB_STORAGE_ACCOUNT", "value": storage_account},
+                            {"name": "ELB_RESOURCE_GROUP", "value": rg},
+                            {"name": "ELB_AZURE_REGION", "value": payload.get("region", "koreacentral")},
+                            {"name": "AZURE_CLIENT_ID", "value": mi_client_id},
+                            {"name": "AZCOPY_AUTO_LOGIN_TYPE", "value": "AZCLI"},
+                            {"name": "AZCOPY_TENANT_ID", "value": payload.get("tenant_id", "")},
                         ],
-                    },
+                        "resources": {
+                            "requests": {"cpu": "100m", "memory": "256Mi"},
+                            "limits": {"cpu": "500m", "memory": "512Mi"},
+                        },
+                    }],
                 },
             },
-        }
+        },
+    }
 
-        # Service
-        svc_manifest = {
-            "apiVersion": "v1",
-            "kind": "Service",
-            "metadata": {"name": "elb-openapi", "namespace": "default"},
-            "spec": {
-                "type": "LoadBalancer",
-                "selector": {"app": "elb-openapi"},
-                "ports": [{"port": 80, "targetPort": 8000}],
-            },
-        }
+    svc_manifest = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": "elb-openapi", "namespace": "default"},
+        "spec": {
+            "type": "LoadBalancer",
+            "selector": {"app": "elb-openapi"},
+            "ports": [{"port": 80, "targetPort": 8000}],
+        },
+    }
 
-        # ClusterRole for OpenAPI pod K8s access
-        role_manifest = {
-            "apiVersion": "rbac.authorization.k8s.io/v1",
-            "kind": "ClusterRole",
-            "metadata": {"name": "elb-openapi-role"},
-            "rules": [
-                {
-                    "apiGroups": [""],
-                    "resources": ["nodes", "pods", "configmaps", "services"],
-                    "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
-                },
-                {
-                    "apiGroups": ["batch"],
-                    "resources": ["jobs"],
-                    "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
-                },
-                {
-                    "apiGroups": ["apps"],
-                    "resources": ["deployments"],
-                    "verbs": ["get", "list", "watch"],
-                },
-            ],
-        }
+    role_manifest = {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "metadata": {"name": "elb-openapi-role"},
+        "rules": [
+            {"apiGroups": [""], "resources": ["nodes", "pods", "configmaps", "services"],
+             "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]},
+            {"apiGroups": ["batch"], "resources": ["jobs"],
+             "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"]},
+            {"apiGroups": ["apps"], "resources": ["deployments"],
+             "verbs": ["get", "list", "watch"]},
+        ],
+    }
 
-        # ClusterRoleBinding
-        binding_manifest = {
-            "apiVersion": "rbac.authorization.k8s.io/v1",
-            "kind": "ClusterRoleBinding",
-            "metadata": {"name": "elb-openapi-binding"},
-            "subjects": [{"kind": "ServiceAccount", "name": k8s_sa_name, "namespace": "default"}],
-            "roleRef": {
-                "kind": "ClusterRole",
-                "name": "elb-openapi-role",
-                "apiGroup": "rbac.authorization.k8s.io",
-            },
-        }
+    binding_manifest = {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding",
+        "metadata": {"name": "elb-openapi-binding"},
+        "subjects": [{"kind": "ServiceAccount", "name": k8s_sa_name, "namespace": "default"}],
+        "roleRef": {"kind": "ClusterRole", "name": "elb-openapi-role", "apiGroup": "rbac.authorization.k8s.io"},
+    }
 
-        # Apply all manifests
-        for manifest in [
-            sa_manifest,
-            role_manifest,
-            binding_manifest,
-            deploy_manifest,
-            svc_manifest,
-        ]:
-            proc = subprocess.run(
-                ["kubectl", "apply", "-f", "-"],  # noqa: S607
-                input=_json.dumps(manifest),
-                capture_output=True,
-                text=True,
-                timeout=30,
-                env=env,
-            )
-            if proc.returncode != 0:
-                LOGGER.warning("kubectl apply warning: %s", proc.stderr[:200])
+    # Apply all manifests via AKS Run Command (no local kubectl needed)
+    all_manifests = [sa_manifest, role_manifest, binding_manifest, deploy_manifest, svc_manifest]
+    combined_json = "\n---\n".join(_json.dumps(m) for m in all_manifests)
+    apply_cmd = f"cat <<'MANIFEST_EOF' | kubectl apply -f -\n{combined_json}\nMANIFEST_EOF"
+    apply_output = _run_kubectl(apply_cmd, timeout=120)
+    LOGGER.info("OpenAPI manifests applied: %s", apply_output[:300])
 
-        # Wait for external IP (up to 120s)
-        import time
+    # Wait for external IP (poll via Run Command, up to 120s)
+    external_ip = ""
+    for _ in range(6):
+        time.sleep(20)
+        ip_output = _run_kubectl(
+            "kubectl get svc elb-openapi -o jsonpath='{.status.loadBalancer.ingress[0].ip}'",
+            timeout=30,
+        )
+        ip = ip_output.strip().strip("'")
+        if ip and ip != "<pending>":
+            external_ip = ip
+            break
 
-        external_ip = ""
-        for _ in range(12):
-            proc = subprocess.run(
-                [  # noqa: S607
-                    "kubectl",
-                    "get",
-                    "svc",
-                    "elb-openapi",
-                    "-o",
-                    "jsonpath={.status.loadBalancer.ingress[0].ip}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=env,
-            )
-            if proc.stdout.strip():
-                external_ip = proc.stdout.strip()
-                break
-            time.sleep(10)
-
-        return {"status": "deployed", "image": image, "external_ip": external_ip}
-    finally:
-        __import__("os").unlink(kubeconfig_path)
+    return {"status": "deployed", "image": image, "external_ip": external_ip}
 
 
 # ═══════════════════════════════════════════════════════════════════════
