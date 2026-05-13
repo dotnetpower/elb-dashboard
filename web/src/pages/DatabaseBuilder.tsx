@@ -11,7 +11,6 @@ import {
   FlaskConical,
   HardDrive,
   Settings,
-  Sparkles,
   RefreshCw,
   Copy,
   Check,
@@ -23,19 +22,8 @@ import { blastApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { useToast } from "@/components/Toast";
-
-const EXAMPLE_NUCL_FASTA = `>my_seq_1 Example nucleotide sequence
-ATGCGATCGATCGATCGATCGATCGATCGATCGATCGATCG
-ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGA
->my_seq_2 Another sequence
-GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAG
-CTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGC`;
-
-const EXAMPLE_PROT_FASTA = `>protein_1 Example protein sequence
-MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTK
-TYFPHFDLSHGSAQVKGHGKKVADALTNAVAHVDDMPNALS
->protein_2 Another protein
-MGLSDGEWQLVLNVWGKVEADIPGHGQEVLIRLFKGHPETL`;
+import { ExamplePicker } from "@/components/ExamplePicker";
+import { CUSTOM_DB_EXAMPLES, type CustomDbExampleValues } from "@/data/labToolExamples";
 
 const MAX_INLINE_BYTES = 50 * 1024 * 1024;
 
@@ -340,6 +328,17 @@ export function DatabaseBuilder() {
           subtitle="Paste sequences or upload a FASTA file (≤ 50 MB inline)"
         />
 
+        <ExamplePicker<CustomDbExampleValues>
+          examples={CUSTOM_DB_EXAMPLES}
+          label="Load an example database"
+          onSelect={(v) => {
+            setDbName(v.dbName);
+            setDbType(v.dbType);
+            setTitle(v.title);
+            setFastaData(v.fastaData);
+          }}
+        />
+
         <div className="blast-program-tabs db-input-mode">
           <button
             type="button"
@@ -393,17 +392,6 @@ export function DatabaseBuilder() {
                 <span>Paste a FASTA-formatted sequence to begin.</span>
               )}
               <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <button
-                  type="button"
-                  className="btn btn--ghost btn--sm"
-                  onClick={() =>
-                    setFastaData(
-                      dbType === "nucl" ? EXAMPLE_NUCL_FASTA : EXAMPLE_PROT_FASTA,
-                    )
-                  }
-                >
-                  <Sparkles size={12} /> Load example
-                </button>
                 {fastaData && (
                   <button
                     type="button"

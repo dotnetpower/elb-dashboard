@@ -35,6 +35,17 @@ import {
 import { formatApiError } from "@/api/client";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { useToast } from "@/components/Toast";
+import { ExamplePicker } from "@/components/ExamplePicker";
+import {
+  COST_EXAMPLES,
+  PREPROCESS_EXAMPLES,
+  PRIMER_EXAMPLES,
+  TAXONOMY_EXAMPLES,
+  type CostExampleValues,
+  type PreprocessExampleValues,
+  type PrimerExampleValues,
+  type TaxonomyExampleValues,
+} from "@/data/labToolExamples";
 
 // ───────────────────────────────────────────────────────────────
 // Tab definitions, grouped into premium categories
@@ -365,6 +376,18 @@ function CostEstimatorTab({ meta }: { meta: TabMeta }) {
         subtitle={meta.desc}
       />
 
+      <ExamplePicker<CostExampleValues>
+        examples={COST_EXAMPLES}
+        label="Load a scenario"
+        onSelect={(v) => {
+          setSku(v.sku);
+          setNodes(v.nodes);
+          setHours(v.hours);
+          setPdSize(v.pdSize);
+          setDbSize(v.dbSize);
+        }}
+      />
+
       <div className="form-grid form-grid--cols-5" style={{ marginBottom: 16 }}>
         <div className="form-row">
           <label className="form-label">Node SKU</label>
@@ -495,6 +518,16 @@ function PreprocessorTab({ meta }: { meta: TabMeta }) {
         icon={<Scissors size={16} strokeWidth={1.5} />}
         title={meta.label}
         subtitle={meta.desc}
+      />
+
+      <ExamplePicker<PreprocessExampleValues>
+        examples={PREPROCESS_EXAMPLES}
+        onSelect={(v) => {
+          setInputData(v.inputData);
+          setFormat(v.format);
+          setMinLength(v.minLength);
+          setMinQuality(v.minQuality);
+        }}
       />
 
       <div className="form-row" style={{ marginBottom: 16 }}>
@@ -659,6 +692,17 @@ function PrimerDesignTab({ meta, hasConfig }: { meta: TabMeta; hasConfig: boolea
         subtitle={meta.desc}
       />
 
+      <ExamplePicker<PrimerExampleValues>
+        examples={PRIMER_EXAMPLES}
+        onSelect={(v) => {
+          setSequence(v.sequence);
+          setTargetStart(v.targetStart);
+          setTargetLength(v.targetLength);
+          setProductMin(v.productMin);
+          setProductMax(v.productMax);
+        }}
+      />
+
       <div className="form-row" style={{ marginBottom: 16 }}>
         <label className="form-label">Template sequence (nucleotide, min 50 bp)</label>
         <textarea
@@ -803,6 +847,11 @@ function TaxonomyTab({ meta }: { meta: TabMeta }) {
         icon={<Search size={16} strokeWidth={1.5} />}
         title={meta.label}
         subtitle={meta.desc}
+      />
+
+      <ExamplePicker<TaxonomyExampleValues>
+        examples={TAXONOMY_EXAMPLES}
+        onSelect={(v) => setAccInput(v.accessions)}
       />
 
       <div className="form-row" style={{ marginBottom: 16 }}>
