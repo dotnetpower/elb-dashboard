@@ -345,3 +345,53 @@ def _assign_role(auth_client: Any, scope: str, principal_id: str, role_definitio
             )
             return
         raise
+
+
+@bp.route(route="aks/openapi/spec", methods=["GET"])
+def proxy_openapi_spec(req: func.HttpRequest) -> func.HttpResponse:
+    """Proxy the openapi.json from the AKS-hosted elb-openapi service.
+
+    The SWA's CSP blocks direct fetch to the AKS LoadBalancer IP (http://,
+    not in connect-src). This route fetches the spec server-side and returns
+    it, so the browser only talks to the same-origin /api/ endpoint.
+    """
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    sub = req.params.get("subscription_id", "")
+    rg = req.params.get("resource_group", "")
+    cluster_name = req.params.get("cluster_name", "")
+    if not all([sub, rg, cluster_name]):
+        return _error_response(400, "subscription_id, resource_group, cluster_name required")
+
+    cred = credential_for_caller(identity.raw_token)
+
+    # 1. Discover the service external IP
+    try:
+        from services import monitoring as monitoring_svc
+
+        external_ip = monitoring_svc.k8s_get_service_ip(
+            cred, sub, rg, cluster_name, "elb-openapi",
+        )
+        if not external_ip:
+            return _error_response(404, "elb-openapi service has no external IP yet")
+    except Exception as exc:
+        return _error_response(404, f"elb-openapi service not found: {sanitise(str(exc)[:200])}")
+
+    # 2. Fetch openapi.json from the service
+    import requests as _requests
+
+    try:
+        resp = _requests.get(f"http://{external_ip}/openapi.json", timeout=10)
+        resp.raise_for_status()
+    except Exception as exc:
+        return _error_response(502, f"Failed to fetch openapi.json from {external_ip}: {sanitise(str(exc)[:200])}")
+
+    return func.HttpResponse(
+        body=resp.text,
+        status_code=200,
+        mimetype="application/json",
+        headers={"Cache-Control": "no-cache"},
+    )

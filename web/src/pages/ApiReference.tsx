@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 
-import { monitoringApi } from "@/api/endpoints";
+import { monitoringApi, aksApi } from "@/api/endpoints";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { OpenApiDeployPanel } from "@/components/OpenApiDeployPanel";
 
@@ -1232,14 +1232,10 @@ export function ApiReference() {
   });
   const baseUrl = svcQuery.data ? `http://${svcQuery.data.external_ip}` : null;
 
-  // 3. Fetch openapi.json dynamically
+  // 3. Fetch openapi.json via backend proxy (avoids CSP / mixed-content block)
   const specQuery = useQuery({
-    queryKey: ["openapi-spec", baseUrl],
-    queryFn: async () => {
-      const resp = await fetch(`${baseUrl}/openapi.json`);
-      if (!resp.ok) throw new Error(`Failed: ${resp.status}`);
-      return resp.json();
-    },
+    queryKey: ["openapi-spec", sub, rg, clusterName],
+    queryFn: () => aksApi.proxyOpenApiSpec(sub, rg, clusterName),
     enabled: Boolean(baseUrl),
     staleTime: 60_000,
   });
