@@ -77,40 +77,39 @@ export function ClusterItem({
       <div
         style={{
           display: "flex",
-          justifyContent: "space-between",
           alignItems: "center",
+          gap: 8,
           cursor: "pointer",
+          flexWrap: "wrap",
         }}
         onClick={toggleCollapse}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <ChevronDown
-            size={14}
-            style={{
-              transform: collapsed ? "rotate(-90deg)" : "rotate(0)",
-              transition: "transform 0.15s",
-              color: "var(--text-faint)",
-              flexShrink: 0,
-            }}
-          />
-          <strong
-            style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-          >
-            {c.name}
-          </strong>
-          <span
-            style={{ fontSize: 11, color: powerColor, fontWeight: 600, flexShrink: 0 }}
-          >
-            {(trans === "starting" || trans === "stopping") && (
-              <Loader2
-                size={10}
-                className="spin"
-                style={{ verticalAlign: "middle", marginRight: 3 }}
-              />
-            )}
-            {powerLabel}
-          </span>
-        </div>
+        <ChevronDown
+          size={14}
+          style={{
+            transform: collapsed ? "rotate(-90deg)" : "rotate(0)",
+            transition: "transform 0.15s",
+            color: "var(--text-faint)",
+            flexShrink: 0,
+          }}
+        />
+        <strong
+          style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+        >
+          {c.name}
+        </strong>
+        <span
+          style={{ fontSize: 11, color: powerColor, fontWeight: 600, flexShrink: 0 }}
+        >
+          {(trans === "starting" || trans === "stopping") && (
+            <Loader2
+              size={10}
+              className="spin"
+              style={{ verticalAlign: "middle", marginRight: 3 }}
+            />
+          )}
+          {powerLabel}
+        </span>
         <div
           style={{
             display: "flex",
