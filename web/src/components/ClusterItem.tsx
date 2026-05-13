@@ -236,19 +236,19 @@ export function ClusterItem({
                     ? "rgba(106,214,163,0.12)"
                     : db.status === "Loading"
                       ? "rgba(122,167,255,0.12)"
-                      : "rgba(224,123,138,0.12)",
+                      : "rgba(255,200,60,0.12)",
                 color:
                   db.status === "Ready"
                     ? "var(--success)"
                     : db.status === "Loading"
                       ? "var(--accent)"
-                      : "var(--danger)",
+                      : "#f0c050",
                 border: `1px solid ${
                   db.status === "Ready"
                     ? "rgba(106,214,163,0.25)"
                     : db.status === "Loading"
                       ? "rgba(122,167,255,0.25)"
-                      : "rgba(224,123,138,0.25)"
+                      : "rgba(255,200,60,0.25)"
                 }`,
               }}
               title={`${db.name}: ${db.nodes_ready}/${db.total_jobs} nodes ready`}

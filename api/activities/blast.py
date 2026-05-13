@@ -19,6 +19,17 @@ from services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
+_DEFAULT_TERMINAL_RG = "rg-elb-terminal"
+_DEFAULT_TERMINAL_VM = "vm-elb-terminal"
+
+
+def _terminal_rg(payload: dict[str, Any]) -> str:
+    return payload.get("terminal_resource_group") or os.environ.get("TERMINAL_DEFAULT_RG", _DEFAULT_TERMINAL_RG)
+
+
+def _terminal_vm(payload: dict[str, Any]) -> str:
+    return payload.get("terminal_vm_name") or _DEFAULT_TERMINAL_VM
+
 _SAFE_JOB_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -138,8 +149,8 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
-        payload["terminal_resource_group"],
-        payload["terminal_vm_name"],
+        _terminal_rg(payload),
+        _terminal_vm(payload),
         combined_script,
         ssh_password=ssh_pw,
     )
@@ -176,8 +187,8 @@ def activity_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
-        payload["terminal_resource_group"],
-        payload["terminal_vm_name"],
+        _terminal_rg(payload),
+        _terminal_vm(payload),
         script,
         ssh_password=ssh_pw,
     )
@@ -288,8 +299,8 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
-        payload["terminal_resource_group"],
-        payload["terminal_vm_name"],
+        _terminal_rg(payload),
+        _terminal_vm(payload),
         combined_script,
         ssh_password=ssh_pw,
     )
@@ -348,8 +359,8 @@ def activity_check_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, A
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
-        payload["terminal_resource_group"],
-        payload["terminal_vm_name"],
+        _terminal_rg(payload),
+        _terminal_vm(payload),
         probe,
         ssh_password=ssh_pw,
     )
@@ -389,8 +400,8 @@ def activity_run_elastic_blast_delete(payload: dict[str, Any]) -> dict[str, Any]
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
-        payload["terminal_resource_group"],
-        payload["terminal_vm_name"],
+        _terminal_rg(payload),
+        _terminal_vm(payload),
         script,
         ssh_password=ssh_pw,
     )
@@ -517,8 +528,8 @@ def activity_export_blast_results(payload: dict[str, Any]) -> dict[str, Any]:
     output = compute_svc.run_shell(
         cred,
         payload["subscription_id"],
-        payload["terminal_resource_group"],
-        payload["terminal_vm_name"],
+        _terminal_rg(payload),
+        _terminal_vm(payload),
         export_script,
         ssh_password=ssh_pw,
     )

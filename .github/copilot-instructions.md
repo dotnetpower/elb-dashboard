@@ -50,7 +50,7 @@ Provide a **browser-only** control plane for ElasticBLAST on Azure so a research
 | Long-running     | **Durable Functions** (orchestrator + activity + entity)                     | VM provisioning, ACR builds, job-status polling all exceed HTTP limits. |
 | Frontend         | **React + Vite + TypeScript**, deployed as Functions static assets or SWA    | Single bundle, glassmorphism is straightforward in CSS.               |
 | Browser auth     | **MSAL.js (`@azure/msal-browser`) → Auth Code + PKCE**                       | Mirrors `az login` UX; backend validates the bearer token.            |
-| Backend auth     | **`azure-identity` `OnBehalfOfCredential`** to call ARM as the signed-in user | Honors the user's RBAC; no shared secrets.                            |
+| Backend auth     | **`azure-identity` `DefaultAzureCredential`** (Function App system-assigned MI) | All Azure SDK calls use MI; bearer token is for identity verification only. |
 | Browser shell    | **xterm.js + WebSocket proxy → SSH** (or Azure Bastion tunneling)            | Lets the user run `az login` and `elastic-blast` from the browser.    |
 | IaC              | **Bicep** (`infra/`)                                                         | Idiomatic for Azure Functions / SWA / VM / Vault.                     |
 | Deploy tooling   | **Azure Developer CLI (`azd`)**                                              | Single `azd up` to stand the platform up.                             |
@@ -76,7 +76,7 @@ Create directories on demand; do not scaffold empty folders speculatively.
 │   ├── activities/              # Activity functions (single-purpose)
 │   ├── entities/                # Durable entities for state (e.g. TerminalState)
 │   ├── services/                # Pure-Python wrappers around Azure SDK
-│   ├── auth/                    # Token validation + OBO helpers
+│   ├── auth/                    # Token validation helpers
 │   ├── models/                  # Pydantic models for request/response
 │   ├── host.json
 │   └── requirements.txt
@@ -112,15 +112,16 @@ Create directories on demand; do not scaffold empty folders speculatively.
 
 ---
 
-## 5. Authentication Flow (must be interactive `az login`-equivalent)
+## 5. Authentication Flow
 
-1. SPA loads → MSAL acquires an **ID token + access token for the ARM resource** (`https://management.azure.com/.default`) via Auth Code + PKCE.
+1. SPA loads → MSAL acquires an **ID token + access token** for the app's API audience via Auth Code + PKCE.
 2. SPA calls `/api/*` with `Authorization: Bearer <access_token>`.
 3. The Function App validates the JWT (issuer, audience, signing keys cached from the tenant's OpenID metadata) **before** any business logic runs. Reject all unauthenticated requests with 401.
-4. For ARM calls, the backend uses `OnBehalfOfCredential` to exchange the user's token for a downstream ARM token — every Azure mutation runs with the user's identity, so RBAC failures surface to the user instead of silently succeeding under a privileged SP.
-5. The Remote Terminal VM never holds a long-lived Azure credential. The user runs `az login --use-device-code` *inside the SSH session* the first time they connect. This is intentional and matches `azure-prereq.md` Step 2.
+4. For ARM and data-plane calls, the backend uses the **Function App's system-assigned Managed Identity** (`DefaultAzureCredential`). The bearer token is used only for identity verification (who is calling), not for downstream Azure calls. This avoids OBO consent issues and removes the need for `API_CLIENT_SECRET`.
+5. The MI must be pre-granted sufficient RBAC roles (see `docs/auth.md` §1 for the full matrix). Runtime role assignments (e.g. granting AcrPull to AKS kubelet) are best-effort — if the MI lacks `User Access Administrator`, the code logs a one-line `az role assignment create` recovery hint instead of failing.
+6. The Remote Terminal VM never holds a long-lived Azure credential. The user runs `az login --use-device-code` *inside the SSH session* the first time they connect. This is intentional and matches `azure-prereq.md` Step 2.
 
-> Do **not** add a "service principal" / "client credentials" / "stored Azure password" code path. If you find yourself reaching for one, stop and ask.
+> **Design choice**: We intentionally use Managed Identity instead of OBO. OBO requires `API_CLIENT_SECRET` and multi-resource consent, which are fragile in single-tenant research environments. MI simplifies deployment at the cost of the MI needing broad permissions — acceptable because the MI is scoped to the Function App and auditable via Azure Monitor.
 
 ---
 

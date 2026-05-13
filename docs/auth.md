@@ -1,218 +1,221 @@
-# Authentication & Required Permissions
+# Authentication & Authorization
 
-This document lists every Azure RBAC role the signed-in user needs to
-operate the ElasticBLAST control plane. All Azure mutations run under the
-user's own identity via **On-Behalf-Of (OBO)** — no service-principal
-secrets are stored.
+This document describes the authentication flow and every RBAC role
+required by the ElasticBLAST control plane.
 
 ---
 
-## Quick Start — Minimum Viable Setup
+## Architecture Overview
 
-If you want a single command that covers everything:
-
-```bash
-# Owner at subscription level (covers ARM management + RBAC assignment)
-az role assignment create \
-  --assignee <user-email-or-oid> \
-  --role Owner \
-  --scope /subscriptions/<subscription-id>
-
-# Data-plane roles must be assigned separately (Owner alone is NOT enough)
-az role assignment create \
-  --assignee <user-email-or-oid> \
-  --role "Storage Blob Data Contributor" \
-  --scope /subscriptions/<subscription-id>
-
-az role assignment create \
-  --assignee <user-email-or-oid> \
-  --role "Storage Blob Delegator" \
-  --scope /subscriptions/<subscription-id>
-
-az role assignment create \
-  --assignee <user-email-or-oid> \
-  --role "Key Vault Secrets Officer" \
-  --scope /subscriptions/<subscription-id>
+```
+Browser (SPA)               Function App                    Azure Resources
+┌──────────┐  Bearer JWT    ┌──────────────┐  Managed ID    ┌──────────────┐
+│ MSAL.js  │───────────────>│ Validate JWT │───────────────>│ ARM / Data   │
+│ Auth Code │                │ (who called) │  DefaultAzure  │ Plane APIs   │
+│ + PKCE   │                │              │  Credential()  │              │
+└──────────┘                └──────────────┘                └──────────────┘
 ```
 
-> **Note**: RBAC propagation can take up to 5 minutes after assignment.
+**Key design choice**: All Azure SDK calls use the **Function App's
+system-assigned Managed Identity (MI)**, not On-Behalf-Of (OBO).
+The bearer token from the SPA is used only to verify the caller's
+identity (JWT validation) — it is never exchanged for a downstream
+ARM token.
+
+**Why MI instead of OBO?**
+- OBO requires `API_CLIENT_SECRET` and multi-resource consent, which are
+  fragile in single-tenant research environments.
+- MI simplifies deployment — no secrets to rotate.
+- Acceptable trade-off: the MI needs broad permissions, but it is scoped
+  to the Function App and auditable via Azure Monitor.
 
 ---
 
-## Detailed Role Matrix
+## §1 Function App Managed Identity — Required RBAC Roles
 
-### 1. Subscription / Resource Group (ARM Management Plane)
+The Function App's **system-assigned Managed Identity** is the principal
+that performs all Azure operations. It must be granted the following roles.
 
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| List subscriptions | `SubscriptionClient.subscriptions.list()` | **Reader** | Tenant |
-| List resource groups | `resource_groups.list()` | **Reader** | Subscription |
-| Create resource group | `resource_groups.create_or_update()` | **Contributor** | Subscription |
-| Delete resource group | `resource_groups.begin_delete()` | **Contributor** | Resource Group |
-| Set resource group tags | `resource_groups.create_or_update()` (tag merge) | **Contributor** | Resource Group |
-| Assign RBAC roles | `role_assignments.create()` | **User Access Administrator** | Target scope |
+### Subscription / Resource Group (ARM Management Plane)
 
-### 2. Virtual Machines (Remote Terminal)
+| Role | Scope | Purpose |
+|------|-------|---------|
+| **Contributor** | Subscription or workload RGs | Create/delete VMs, VNets, AKS, ACR, Storage accounts |
+| **User Access Administrator** | Subscription or workload RGs | Assign RBAC roles at runtime (AcrPull to kubelet, Storage roles to VM, etc.) |
 
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| List VMs | `virtual_machines.list()` | **Reader** | Resource Group |
-| Get VM status | `virtual_machines.get(expand=instanceView)` | **Reader** | Resource Group |
-| Create VM | `virtual_machines.begin_create_or_update()` | **Virtual Machine Contributor** | Resource Group |
-| Start VM | `virtual_machines.begin_start()` | **Virtual Machine Contributor** | Resource Group |
-| Stop (deallocate) VM | `virtual_machines.begin_deallocate()` | **Virtual Machine Contributor** | Resource Group |
-| Delete VM | `virtual_machines.begin_delete()` | **Virtual Machine Contributor** | Resource Group |
-| Run command on VM | `virtual_machines.begin_run_command()` | **Virtual Machine Contributor** | Resource Group |
+> **Least-privilege alternative**: Instead of Subscription-level, grant
+> Contributor + User Access Administrator on each resource group:
+> `rg-elb`, `rg-elbacr`, `rg-elb-terminal`, `rg-elb-prod`.
 
-### 3. Networking
+### Data Plane — Deployed by Bicep (automatic)
 
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| Create VNet / Subnet / NSG / NIC / Public IP | `begin_create_or_update()` | **Network Contributor** | Resource Group |
-| Add SSH rule to NSG | `security_rules.begin_create_or_update()` | **Network Contributor** | Resource Group |
-| Delete NIC / Public IP / NSG | `begin_delete()` | **Network Contributor** | Resource Group |
-| Read NIC / Public IP | `.get()` | **Reader** | Resource Group |
+These are assigned by `infra/modules/platform.bicep` during `azd up`:
 
-### 4. Storage Account (Management Plane)
+| Role | Scope | Purpose |
+|------|-------|---------|
+| Key Vault Secrets Officer | Platform Key Vault | Store/read VM passwords |
+| Storage Blob Data Owner | Platform Storage Account | Durable Functions state |
+| Storage Queue Data Contributor | Platform Storage Account | Durable Functions queues |
+| Storage Table Data Contributor | Platform Storage Account | Durable Functions tables |
 
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| List storage accounts | `storage_accounts.list_by_resource_group()` | **Reader** | Resource Group |
-| Get storage properties | `storage_accounts.get_properties()` | **Reader** | Resource Group |
-| Create storage account | `storage_accounts.begin_create()` | **Storage Account Contributor** | Resource Group |
-| Toggle public network access | `storage_accounts.update()` | **Storage Account Contributor** | Storage Account |
-| Create blob container | `blob_containers.create()` | **Storage Account Contributor** | Storage Account |
+### Data Plane — User-Created Resources (manual or runtime)
 
-### 5. Storage Account (Data Plane) ⚠️
+These must be assigned on user-created storage accounts, ACRs, etc.:
 
-> **These are data-plane roles and must be assigned explicitly.** ARM-level
-> Owner/Contributor does NOT grant data-plane access.
+| Role | Scope | Purpose |
+|------|-------|---------|
+| **Storage Blob Data Contributor** | User storage account (e.g. `stgelbdemo`) | Upload queries, copy DBs from NCBI, list blobs |
+| **Storage Blob Delegator** | User storage account | Generate SAS download URLs for results |
+| **AcrPush** | User ACR | Build ElasticBLAST images via ACR Build Tasks |
+| **Azure Kubernetes Service Cluster User Role** | AKS clusters | Get kubeconfig, run commands |
 
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| List BLAST databases | `list_blobs()` | **Storage Blob Data Reader** | Storage Account |
-| Upload query FASTA | `upload_blob()` | **Storage Blob Data Contributor** | Storage Account |
-| Download/read blob | `download_blob()` | **Storage Blob Data Reader** | Storage Account |
-| Copy DB from NCBI S3 | `start_copy_from_url()` | **Storage Blob Data Contributor** | Storage Account |
-| Generate SAS download URL | `get_user_delegation_key()` | **Storage Blob Delegator** | Storage Account |
+> The control plane attempts to assign these at runtime via `_assign_role()`.
+> If the MI lacks `User Access Administrator`, the assignment soft-fails
+> and logs a one-line `az role assignment create` recovery command.
 
-**Recommended**: Assign **Storage Blob Data Contributor** + **Storage Blob Delegator**
-at the storage account scope (covers all of the above).
-
-### 6. Azure Container Registry (ACR)
-
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| List registries | `registries.list_by_resource_group()` | **Reader** | Resource Group |
-| Get registry info | `registries.get()` | **Reader** | Registry |
-| List build runs | `runs.list()` | **Reader** | Registry |
-| Create registry | `registries.begin_create()` | **Contributor** | Resource Group |
-| Schedule ACR build | `registries.begin_schedule_run()` | **Contributor** | Registry |
-
-### 7. Azure Kubernetes Service (AKS)
-
-**ARM roles**:
-
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| List clusters | `managed_clusters.list_by_resource_group()` | **Reader** | Resource Group |
-| Get cluster | `managed_clusters.get()` | **Reader** | Resource Group |
-| Create cluster | `managed_clusters.begin_create_or_update()` | **Contributor** | Resource Group |
-| Delete cluster | `managed_clusters.begin_delete()` | **Contributor** | Resource Group |
-| Start / stop cluster | `begin_start()` / `begin_stop()` | **Contributor** | Cluster |
-| Get kubeconfig | `list_cluster_user_credentials()` | **Azure Kubernetes Service Cluster User Role** | Cluster |
-| Run AKS command | `begin_run_command()` | **Azure Kubernetes Service Cluster User Role** | Cluster |
-
-**Kubernetes RBAC** (inside the cluster):
-
-| Feature | K8s API | Minimum K8s ClusterRole |
-|---|---|---|
-| List nodes, pods | `GET /api/v1/nodes`, `/pods` | `view` |
-| List jobs | `GET /apis/batch/v1/namespaces/{ns}/jobs` | `view` |
-| Get pod logs | `GET /api/v1/.../pods/{pod}/log` | `view` |
-| Get node metrics | `GET /apis/metrics.k8s.io/v1beta1/nodes` | `view` + metrics-server |
-
-> If AKS uses AAD-integrated RBAC, also assign
-> **Azure Kubernetes Service RBAC Reader** at the cluster scope.
-
-### 8. Key Vault ⚠️
-
-> **Data-plane roles must be assigned explicitly** (same as Storage).
-
-**Management plane**:
-
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| Get vault config | `vaults.get()` | **Reader** | Resource Group |
-| Create / update vault | `vaults.begin_create_or_update()` | **Contributor** | Resource Group |
-
-**Data plane**:
-
-| Feature | Azure Operation | Minimum Role | Scope |
-|---|---|---|---|
-| Store VM password | `set_secret()` | **Key Vault Secrets Officer** | Vault |
-| Reveal VM password | `get_secret()` | **Key Vault Secrets User** | Vault |
-| Delete secret (teardown) | `begin_delete_secret()` | **Key Vault Secrets Officer** | Vault |
-
----
-
-## Summary — Roles by Scope
-
-| Scope | Role | Purpose |
-|---|---|---|
-| **Subscription** | Contributor | Create/delete resource groups & resources |
-| **Subscription** | User Access Administrator | Assign RBAC roles (e.g. AcrPull to AKS kubelet) |
-| **Storage Account** | Storage Blob Data Contributor | Upload queries, copy DBs, list blobs |
-| **Storage Account** | Storage Blob Delegator | Generate SAS download URLs |
-| **Key Vault** | Key Vault Secrets Officer | Store/delete VM passwords |
-| **AKS Cluster** | Azure Kubernetes Service Cluster User Role | Get kubeconfig, run commands |
-
-> **Least-privilege alternative to Subscription Contributor**: assign
-> Contributor only on the specific resource groups used by ElasticBLAST
-> (e.g. `rg-elb`, `rg-elbacr`, `rg-elb-terminal`).
-
----
-
-## Assignment Commands (per resource)
+### Quick Setup — MI Role Assignment Commands
 
 ```bash
-USER="<user-email-or-object-id>"
-SUB="<subscription-id>"
+MI_OID="<function-app-mi-object-id>"  # Portal → Function App → Identity
+SUB="/subscriptions/<subscription-id>"
 
-# --- Subscription-level ---
-az role assignment create --assignee "$USER" --role Contributor \
-  --scope "/subscriptions/$SUB"
-az role assignment create --assignee "$USER" --role "User Access Administrator" \
-  --scope "/subscriptions/$SUB"
+# Subscription-level (simplest)
+az role assignment create --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role Contributor --scope "$SUB"
 
-# --- Storage Account data plane ---
-STORAGE_ID="/subscriptions/$SUB/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>"
-az role assignment create --assignee "$USER" --role "Storage Blob Data Contributor" \
-  --scope "$STORAGE_ID"
-az role assignment create --assignee "$USER" --role "Storage Blob Delegator" \
-  --scope "$STORAGE_ID"
+az role assignment create --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "User Access Administrator" --scope "$SUB"
 
-# --- Key Vault data plane ---
-KV_ID="/subscriptions/$SUB/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<name>"
-az role assignment create --assignee "$USER" --role "Key Vault Secrets Officer" \
-  --scope "$KV_ID"
+# User data storage
+STORAGE_ID="$SUB/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>"
+az role assignment create --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Contributor" --scope "$STORAGE_ID"
 
-# --- AKS cluster ---
-AKS_ID="/subscriptions/$SUB/resourceGroups/<rg>/providers/Microsoft.ContainerService/managedClusters/<name>"
-az role assignment create --assignee "$USER" \
-  --role "Azure Kubernetes Service Cluster User Role" \
-  --scope "$AKS_ID"
+az role assignment create --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Delegator" --scope "$STORAGE_ID"
 ```
 
 ---
 
-## Troubleshooting
+## §2 Runtime Role Assignments (Best-Effort)
 
-| Error Message | Cause | Fix |
+The Function App MI performs RBAC assignments for other principals at
+runtime. All are idempotent and soft-fail if the MI lacks
+`Microsoft.Authorization/roleAssignments/write`.
+
+### AKS Kubelet Identity
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| AcrPull | ACR | Pull ElasticBLAST container images |
+| Storage Blob Data Contributor | User storage account | Download BLAST DB shards to nodes |
+
+### Remote Terminal VM Managed Identity
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| Storage Blob Data Contributor | User storage account | `azcopy` for DB downloads |
+| AcrPull | ACR | Pull images if needed |
+| Contributor | Workload resource group | `az aks get-credentials`, `kubectl` |
+
+### Signed-In User (convenience)
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| Storage Blob Data Contributor | User storage account | Direct blob access |
+| AcrPush | ACR | Trigger ACR builds |
+| Key Vault Secrets Officer | Key Vault | Access VM passwords |
+
+> If any assignment fails, the UI shows a toast with the manual
+> `az role assignment create` command.
+
+---
+
+## §3 Signed-In User — Required Roles
+
+The signed-in user needs minimal roles since all Azure operations go
+through the Function App MI:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| **Reader** | Subscription | See resources in the UI (cosmetic) |
+
+All data-plane and mutation operations are performed by the MI.
+
+---
+
+## §4 Detailed Role Matrix by Feature
+
+### Virtual Machines (Remote Terminal)
+
+| Feature | MI Role | Scope |
 |---|---|---|
-| `AuthorizationFailure` on blob operations | Missing **Storage Blob Data Reader/Contributor** | Assign data-plane role on the storage account |
-| `AuthorizationPermissionMismatch` | Wrong scope (e.g. RG-level instead of account-level) | Re-assign at correct scope |
-| `ForbiddenByRbac` on Key Vault | Missing **Key Vault Secrets User/Officer** | Assign data-plane role on the vault |
-| `does not have authorization to perform action` on RBAC | Missing **User Access Administrator** | Assign at the target resource scope |
-| `Forbidden` on AKS kubeconfig | Missing **AKS Cluster User Role** | Assign on the cluster |
-| RBAC role assigned but still failing | Propagation delay (up to 5 min) | Wait and retry |
+| Create/Start/Stop/Delete VM | Contributor | Resource Group |
+| Run command on VM | Contributor | VM |
+
+### Networking
+
+| Feature | MI Role | Scope |
+|---|---|---|
+| Create VNet/Subnet/NSG/NIC/PublicIP | Contributor | Resource Group |
+
+### Storage Account
+
+| Feature | MI Role | Scope |
+|---|---|---|
+| Create/toggle public access | Contributor | Resource Group / Storage Account |
+| List/upload/copy blobs | Storage Blob Data Contributor | Storage Account |
+| Generate SAS URL | Storage Blob Delegator | Storage Account |
+
+### Azure Container Registry
+
+| Feature | MI Role | Scope |
+|---|---|---|
+| Create registry | Contributor | Resource Group |
+| Schedule ACR build | AcrPush or Contributor | Registry |
+
+### Azure Kubernetes Service
+
+| Feature | MI Role | Scope |
+|---|---|---|
+| Create/delete/start/stop cluster | Contributor | Resource Group |
+| Get kubeconfig, run command | AKS Cluster User Role | Cluster |
+| Direct K8s API (pods, jobs, metrics) | AKS Cluster User Role | Cluster |
+
+### Key Vault
+
+| Feature | MI Role | Scope |
+|---|---|---|
+| Create/update vault | Contributor | Resource Group |
+| Store/read/delete secrets | Key Vault Secrets Officer | Vault |
+
+---
+
+## §5 Troubleshooting
+
+| Error | Cause | Fix |
+|---|---|---|
+| `AuthorizationFailed` on ARM operations | MI lacks **Contributor** | Assign Contributor on the target RG or subscription |
+| `AuthorizationPermissionMismatch` on blobs | MI lacks **Storage Blob Data Contributor** | Assign data-plane role on the storage account |
+| `ForbiddenByRbac` on Key Vault | MI lacks **Key Vault Secrets Officer** | Assign on the vault |
+| `does not have authorization` on RBAC | MI lacks **User Access Administrator** | Assign at target scope; or run the logged `az` command manually |
+| `Forbidden` on AKS kubeconfig | MI lacks **AKS Cluster User Role** | Assign on the cluster |
+| RBAC assigned but still failing | Propagation delay (up to 5 min) | Wait and retry |
+| `No identity found` | MI not enabled | Portal → Function App → Identity → System-assigned → On |
+
+---
+
+## §6 Security Notes
+
+- The MI has broad permissions by design — acceptable for a single-tenant
+  research deployment where the MI is scoped to one Function App.
+- `api/auth/obo.py` exists but is **dead code** (never imported). All
+  auth goes through MI via `DefaultAzureCredential`.
+- The bearer token is validated but never used for downstream calls.
+- NSG on the Remote Terminal restricts SSH to the caller's IP.
+- Storage `publicNetworkAccess` is `Enabled` (Y1 plan limitation) but
+  secured via RBAC — no anonymous access.
