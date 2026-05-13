@@ -103,19 +103,52 @@ def run_shell(
     Strategy: SSH first (1-2s overhead), fallback to Run Command (30-60s) if SSH fails.
     Pass ssh_password to enable SSH. Without it, falls back to Run Command directly.
     """
-    # Try SSH first if password is available
+    # Try SSH first if password is available.
     if ssh_password:
         try:
-            from services.ssh_exec import run_ssh, get_vm_ssh_info
+            import time as _time
+
+            from services.ssh_exec import get_vm_ssh_info, run_ssh
+
+            start_time = _time.time()
             ip = get_vm_ssh_info(credential, subscription_id, resource_group, vm_name)
+            ip_lookup_time = _time.time()
             if ip:
-                return run_ssh(ip, ssh_password, script)
+                last_ssh_exc: Exception | None = None
+                for port in (443, 22):
+                    try:
+                        result = run_ssh(ip, ssh_password, script, port=port)
+                        end_time = _time.time()
+                        LOGGER.info(
+                            "SSH succeeded for %s on port %d "
+                            "(ip_lookup=%.1fs, exec=%.1fs, total=%.1fs)",
+                            vm_name,
+                            port,
+                            ip_lookup_time - start_time,
+                            end_time - ip_lookup_time,
+                            end_time - start_time,
+                        )
+                        return result
+                    except Exception as exc:
+                        last_ssh_exc = exc
+                        LOGGER.warning("SSH failed for %s on port %d (%s)", vm_name, port, exc)
+                if last_ssh_exc:
+                    raise last_ssh_exc
             else:
-                LOGGER.warning("No public IP for %s — falling back to Run Command", vm_name)
+                LOGGER.warning(
+                    "No public IP for %s (%.1fs) - falling back to Run Command",
+                    vm_name,
+                    ip_lookup_time - start_time,
+                )
         except Exception as exc:
-            LOGGER.warning("SSH failed for %s (%s) — falling back to Run Command", vm_name, exc)
+            LOGGER.warning("SSH failed for %s (%s) - falling back to Run Command", vm_name, exc)
 
     # Fallback: Run Command
+    LOGGER.info(
+        "Using Run Command for %s (ssh_password=%s)",
+        vm_name,
+        "yes" if ssh_password else "no",
+    )
     return _run_command(credential, subscription_id, resource_group, vm_name, script, max_retries)
 
 
@@ -148,7 +181,13 @@ def _run_command(
             last_exc = exc
             if "Conflict" in str(exc) or "in progress" in str(exc):
                 wait = (attempt + 1) * 15  # 15s, 30s, 45s
-                LOGGER.warning("Run Command conflict on %s, retrying in %ds (attempt %d/%d)", vm_name, wait, attempt + 1, max_retries)
+                LOGGER.warning(
+                    "Run Command conflict on %s, retrying in %ds (attempt %d/%d)",
+                    vm_name,
+                    wait,
+                    attempt + 1,
+                    max_retries,
+                )
                 _time.sleep(wait)
             else:
                 raise

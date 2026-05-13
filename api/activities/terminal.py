@@ -266,3 +266,18 @@ def activity_assign_vm_roles(payload: dict[str, Any]) -> dict[str, Any]:
         _assign(scope, "b24988ac-6180-42a0-ab88-20f7382dd24c", "Contributor")
 
     return {"roles_assigned": assigned, "principal_id": principal_id}
+
+
+def activity_ensure_ssh_nsg(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: ensures NSG allows SSH from Function App outbound IPs.
+
+    Idempotent — skips if rule already exists.
+    """
+    cred = _credential(payload.get("user_assertion"))
+    sub = payload["subscription_id"]
+    rg = payload["resource_group"]
+    vm_name = payload.get("vm_name", "vm-elb-terminal")
+    nsg_name = f"nsg-{vm_name}"
+
+    created = net_svc.ensure_ssh_from_function_app(cred, sub, rg, nsg_name)
+    return {"created": created, "nsg_name": nsg_name}

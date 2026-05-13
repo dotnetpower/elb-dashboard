@@ -14,6 +14,8 @@ import { armProxyApi, monitoringApi } from "@/api/endpoints";
 import { listSubscriptions as armListSubs, listResourceGroups as armListRGs } from "@/api/arm";
 import { Loader2, Search } from "lucide-react";
 
+const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
+
 export type MonitoringConfig = ResourceConfig;
 
 /** Try to build a ResourceConfig from elb-* tags on a resource group. */
@@ -73,6 +75,7 @@ export function Dashboard() {
   const subsQuery = useQuery({
     queryKey: ["auto-discover-subs"],
     queryFn: async () => {
+      if (DEV_BYPASS) return armProxyApi.listSubscriptions();
       // Try direct ARM call first (no OBO needed), fall back to backend proxy
       try {
         const subs = await armListSubs();
@@ -94,8 +97,9 @@ export function Dashboard() {
       const results: { subscriptionId: string; rgs: { name: string; location: string; tags?: Record<string, string> }[] }[] = [];
       for (const sub of subs) {
         try {
-          // Direct ARM call — no OBO needed
-          const rgList = await armListRGs(sub.subscriptionId);
+          const rgList = DEV_BYPASS
+            ? await armProxyApi.listResourceGroups(sub.subscriptionId)
+            : await armListRGs(sub.subscriptionId);
           const rgs = rgList.map(r => ({ name: r.name, location: r.location, tags: r.tags }));
           results.push({ subscriptionId: sub.subscriptionId, rgs });
         } catch { /* skip inaccessible subs */ }
@@ -304,6 +308,8 @@ export function Dashboard() {
             acrName={config.acrName}
             storageResourceGroup={config.workloadResourceGroup}
             storageAccount={config.storageAccountName}
+            terminalResourceGroup={config.terminalResourceGroup}
+            terminalVmName={config.terminalVmName}
           />
           <AcrCard
             subscriptionId={config.subscriptionId}

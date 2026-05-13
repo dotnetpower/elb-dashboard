@@ -11,7 +11,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "3.3",
+    "elb-openapi": "3.4",
 }
 
 # GitHub source repo for ACR Build Tasks.

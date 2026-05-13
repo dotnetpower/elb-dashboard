@@ -1252,6 +1252,9 @@ export function ApiReference() {
     staleTime: 300_000,
     retry: 1,
   });
+  const retryOpenApiService = useCallback(() => {
+    void svcQuery.refetch();
+  }, [svcQuery.refetch]);
   const baseUrl = svcQuery.data ? `http://${svcQuery.data.external_ip}` : null;
 
   // 3. Fetch openapi.json via backend proxy (avoids CSP / mixed-content block)
@@ -1475,7 +1478,7 @@ export function ApiReference() {
           acrName={acrName}
           storageAccount={savedConfig?.storageAccountName ?? ""}
           imageBuilt={hasOpenApiImage}
-          onRetry={() => svcQuery.refetch()}
+          onRetry={retryOpenApiService}
           retrying={svcQuery.isFetching}
         />
       )}

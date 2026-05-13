@@ -49,7 +49,7 @@ az account set --subscription "<your-subscription>"
 ### 1. One-shot local bootstrap
 
 Creates the App Registration (with `user_impersonation` scope + ARM permission),
-a Key Vault for VM passwords, a client secret for OBO, and writes both
+a Key Vault for VM passwords, and writes both
 `web/.env.local` and `api/local.settings.json`.
 
 ```bash
@@ -145,8 +145,9 @@ sshpass -p "$PWD" ssh \
   azureuser@elb-term-vm-elb-test.koreacentral.cloudapp.azure.com
 ```
 
-> Once on the VM, the only manual step is `az login --use-device-code` —
-> the MOTD reminds you. Everything else is preinstalled.
+> The VM uses its system-assigned Managed Identity for Azure CLI and azcopy.
+> If the session is not active, run `elb-az-login-mi`. Everything else is
+> preinstalled.
 
 ### 4. Provision the ElasticBLAST resource plane
 
@@ -211,7 +212,7 @@ az storage account update -n $SA_NAME --public-network-access Enabled -o none
 sleep 15
 
 # Upload pdbnt (~15 MB, ~10s) directly from NCBI S3 to Azure Blob
-export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+export AZCOPY_AUTO_LOGIN_TYPE=MSI
 LATEST=$(curl -s "https://ncbi-blast-databases.s3.amazonaws.com/latest-dir")
 azcopy cp \
   "https://ncbi-blast-databases.s3.amazonaws.com/${LATEST}/*" \
@@ -351,10 +352,12 @@ In production (`AUTH_DEV_BYPASS=false`):
 
 1. SPA acquires an MSAL access token for `api://<client-id>/user_impersonation`.
 2. Function App validates the JWT against the tenant's OIDC discovery + JWKS.
-3. Backend uses `OnBehalfOfCredential` to exchange that token for downstream
-   ARM tokens — every Azure mutation runs as the signed-in user.
-4. The Remote Terminal VM never holds a long-lived Azure credential. The user
-   runs `az login --use-device-code` once over SSH.
+3. Backend uses its system-assigned Managed Identity for downstream ARM and
+  data-plane calls. The browser token proves who called; it is not exchanged
+  for Azure resource tokens.
+4. The Remote Terminal VM uses its system-assigned Managed Identity for Azure
+  CLI and azcopy. Device-code login is only needed when a user intentionally
+  wants a personal Azure CLI session.
 
 `AUTH_DEV_BYPASS=true` short-circuits step 2 and lets the API call Azure
 with whatever credential `DefaultAzureCredential` finds (typically your

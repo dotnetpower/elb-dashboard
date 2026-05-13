@@ -214,8 +214,8 @@ export function RemoteTerminal() {
       <header>
         <h1 style={{ margin: 0 }}>Remote Terminal</h1>
         <p className="muted" style={{ marginTop: "var(--space-2)" }}>
-          Provision a VM with elastic-blast preinstalled. After it boots, run{" "}
-          <code>az login --use-device-code</code> over SSH and you are ready.
+          Provision a VM with elastic-blast preinstalled. The VM uses Managed
+          Identity for Azure CLI and azcopy by default.
         </p>
       </header>
 
@@ -625,7 +625,8 @@ function ExistingVmCard({
       {actionError && <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)" }}>{actionError}</div>}
 
       <div className="muted" style={{ marginTop: "var(--space-4)", fontSize: 12, lineHeight: 1.6 }}>
-        Run <code>az login --use-device-code</code> after connecting via SSH to authenticate.
+        Azure CLI authenticates with the VM Managed Identity. If needed, run{" "}
+        <code>elb-az-login-mi</code> after connecting via SSH.
       </div>
     </section>
   );
@@ -805,8 +806,8 @@ function ConnectionCard({
         className="muted"
         style={{ marginTop: "var(--space-4)", fontSize: 12, lineHeight: 1.6 }}
       >
-        Once connected, run <code>az login --use-device-code</code> to authenticate
-        the VM. The cloud-init script has already installed Azure CLI, kubectl,
+        The VM authenticates Azure CLI with Managed Identity. If the session is
+        inactive, run <code>elb-az-login-mi</code>. The cloud-init script has already installed Azure CLI, kubectl,
         azcopy, Python 3.11 + venv, and cloned <code>elastic-blast-azure</code>.
         cloud-init status: <strong>{info.cloud_init_status}</strong>.
       </div>

@@ -385,6 +385,29 @@ export function BlastSubmit() {
   });
   const vmRunning = vmQuery.data?.power_state?.toLowerCase().includes("running") ?? false;
 
+  // Warmup status — which DBs are already cached on cluster nodes
+  const warmupQuery = useQuery({
+    queryKey: ["warmup-status-submit", subId, workloadRg, form.selectedCluster],
+    queryFn: () => monitoringApi.warmupStatus(subId, workloadRg, form.selectedCluster!),
+    enabled: Boolean(subId && workloadRg && form.selectedCluster && selectedCluster?.power_state === "Running"),
+    staleTime: 30_000,
+  });
+  const warmDbs = useMemo(() => {
+    const dbs = warmupQuery.data?.databases ?? [];
+    return new Map(dbs.filter((d) => d.status === "Ready").map((d) => [d.name, d]));
+  }, [warmupQuery.data]);
+
+  // Derive the short DB name from the form.db path (e.g. "blast-db/core_nt" → "core_nt")
+  const selectedDbShortName = useMemo(() => {
+    const db = form.db;
+    if (!db) return "";
+    const parts = db.split("/");
+    return parts[parts.length - 1];
+  }, [form.db]);
+
+  const isDbAlreadyWarm = warmDbs.has(selectedDbShortName);
+  const warmDbInfo = warmDbs.get(selectedDbShortName);
+
   const submitMutation = useMutation({
     mutationFn: (req: BlastSubmitRequest) => blastApi.submit(req),
     onSuccess: (resp) => {
@@ -1028,22 +1051,30 @@ export function BlastSubmit() {
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
-                cursor: "pointer",
+                cursor: isDbAlreadyWarm ? "default" : "pointer",
                 fontSize: 12,
                 marginBottom: 6,
+                opacity: isDbAlreadyWarm ? 0.8 : 1,
               }}
             >
               <input
                 type="checkbox"
-                checked={form.enable_warmup}
+                checked={isDbAlreadyWarm || form.enable_warmup}
+                disabled={isDbAlreadyWarm}
                 onChange={(e) => set("enable_warmup", e.target.checked)}
-                style={{ accentColor: "var(--accent)" }}
+                style={{ accentColor: isDbAlreadyWarm ? "var(--success)" : "var(--accent)" }}
               />
               <span>
                 Warmup cluster{" "}
-                <span className="muted">
-                  (prepare DB shards on local SSD before BLAST)
-                </span>
+                {isDbAlreadyWarm ? (
+                  <span style={{ color: "var(--success)", fontWeight: 500 }}>
+                    — cached on {warmDbInfo?.nodes_ready}/{warmDbInfo?.total_jobs} nodes
+                  </span>
+                ) : (
+                  <span className="muted">
+                    (prepare DB shards on local SSD before BLAST)
+                  </span>
+                )}
               </span>
             </label>
             <label
@@ -1066,14 +1097,14 @@ export function BlastSubmit() {
                 <span className="muted">(split DB into shards for parallel search)</span>
               </span>
             </label>
-            {form.enable_warmup && (
+            {(form.enable_warmup || isDbAlreadyWarm) && (
               <div
                 className="muted"
                 style={{ fontSize: 10, marginTop: 6, lineHeight: 1.5 }}
               >
-                The prepare step will create the cluster, download DB shards to node SSDs,
-                then submit BLAST with reuse=true. This adds ~5-10 min setup but
-                significantly improves search performance for large databases.
+                {isDbAlreadyWarm
+                  ? `${selectedDbShortName} is already loaded on all cluster nodes. BLAST will start immediately without download delay.`
+                  : "The prepare step will create the cluster, download DB shards to node SSDs, then submit BLAST with reuse=true. This adds ~5-10 min setup but significantly improves search performance for large databases."}
               </div>
             )}
           </div>

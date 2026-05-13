@@ -237,7 +237,7 @@ def start_terminal_vm(req: func.HttpRequest) -> func.HttpResponse:
 
 @bp.route(route="terminal/{vm_name}/health", methods=["GET"])
 def terminal_health_check(req: func.HttpRequest) -> func.HttpResponse:
-    """Check az login status and installed tool versions on the terminal VM."""
+    """Check managed identity login status and installed tool versions on the terminal VM."""
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
     except AuthError as exc:
@@ -252,6 +252,12 @@ def terminal_health_check(req: func.HttpRequest) -> func.HttpResponse:
     cred = credential_for_caller(identity.raw_token)
     script = (
         "#!/bin/bash\n"
+        "sudo -Hu azureuser bash -lc 'export AZCOPY_AUTO_LOGIN_TYPE=MSI; "
+        "if command -v elb-az-login-mi >/dev/null 2>&1; then "
+        "elb-az-login-mi >/tmp/elb-az-login-mi.$(id -u).log 2>&1 || true; "
+        "elif ! az account show -o none 2>/dev/null; then "
+        "az login --identity --allow-no-subscriptions -o none >/dev/null 2>&1 || true; "
+        "fi' >/dev/null 2>&1 || true\n"
         "echo AZ_VERSION=$(az version -o tsv --query '\"azure-cli\"' 2>/dev/null || echo 'not installed')\n"
         "echo KUBECTL_VERSION=$(kubectl version --client -o yaml 2>/dev/null | grep gitVersion | head -1 | sed 's/.*: //' || kubectl version --client 2>/dev/null | head -1 || echo 'not installed')\n"
         "echo AZCOPY_VERSION=$(azcopy --version 2>/dev/null | head -1 || echo 'not installed')\n"

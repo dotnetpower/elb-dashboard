@@ -1,4 +1,5 @@
 import { msalInstance, armLoginRequest } from "@/auth/msal";
+import { notifyAuthSessionIssue } from "@/auth/sessionEvents";
 import {
   InteractionRequiredAuthError,
   BrowserAuthError,
@@ -24,7 +25,8 @@ interface ArmSubscriptionListResponse {
 async function getArmAccessToken(): Promise<string> {
   const account = msalInstance.getActiveAccount();
   if (!account) {
-    throw new Error("not signed in");
+    notifyAuthSessionIssue("not_signed_in");
+    throw new Error("Session expired. Please sign in again.");
   }
   try {
     const result = await msalInstance.acquireTokenSilent({
@@ -46,12 +48,14 @@ async function getArmAccessToken(): Promise<string> {
       return retry.accessToken;
     }
     if (err instanceof InteractionRequiredAuthError) {
+      notifyAuthSessionIssue("interaction_required");
       await msalInstance.acquireTokenRedirect({
         ...armLoginRequest,
         account,
       });
       throw new Error("redirecting for ARM consent");
     }
+    notifyAuthSessionIssue("token_refresh_failed");
     throw err;
   }
 }
@@ -68,6 +72,7 @@ export async function listSubscriptions(): Promise<SubscriptionSummary[]> {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) {
+      if (resp.status === 401) notifyAuthSessionIssue("arm_unauthorized");
       throw new Error(
         `ARM subscriptions list failed: HTTP ${resp.status} ${await resp.text()}`,
       );
@@ -100,6 +105,7 @@ async function armPagedList<T>(initialUrl: string): Promise<T[]> {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) {
+      if (resp.status === 401) notifyAuthSessionIssue("arm_unauthorized");
       throw new Error(
         `ARM list failed: HTTP ${resp.status} ${await resp.text()}`,
       );

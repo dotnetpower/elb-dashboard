@@ -49,7 +49,7 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
     query.data?.power_state === "VM deallocated" ||
     query.data?.power_state === "VM stopped";
 
-  // Health check (az login + tool versions) — only when VM is running
+  // Health check (Managed Identity + tool versions) — only when VM is running
   const healthQuery = useQuery({
     queryKey: ["terminal-health", subscriptionId, resourceGroup, vmName],
     queryFn: () => terminalApi.health(vmName, subscriptionId, resourceGroup),
@@ -310,7 +310,7 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
             </tbody>
           </table>
 
-          {/* az login status */}
+          {/* Managed Identity status */}
           {isRunning && healthQuery.data && (
             <div style={{ marginTop: 8 }}>
               <div
@@ -324,7 +324,7 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
                   gap: 4,
                 }}
               >
-                az login {healthQuery.isFetching && <Loader2 size={8} className="spin" />}
+                Managed Identity {healthQuery.isFetching && <Loader2 size={8} className="spin" />}
               </div>
               <div
                 style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}
@@ -347,8 +347,7 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
                   </span>
                 ) : (
                   <span style={{ color: "var(--warning)" }}>
-                    Expired — run{" "}
-                    <code style={{ fontSize: 10 }}>az login --use-device-code</code>
+                    Inactive — run <code style={{ fontSize: 10 }}>elb-az-login-mi</code>
                   </span>
                 )}
               </div>
@@ -415,7 +414,7 @@ export function TerminalCard({ subscriptionId, resourceGroup, vmName }: Props) {
                 gap: 4,
               }}
             >
-              <Loader2 size={10} className="spin" /> Checking tools & az login...
+              <Loader2 size={10} className="spin" /> Checking tools & identity...
             </div>
           )}
 

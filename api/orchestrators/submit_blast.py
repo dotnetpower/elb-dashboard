@@ -29,6 +29,8 @@ RESULTS_VERIFY_MAX_ATTEMPTS = 8  # 8 * 15s = 2 min max waiting for .out files
 STORAGE_PROPAGATION_SECONDS = 10  # VNet rules require ~10-30s propagation after defaultAction toggle
 WARMUP_POLL_INTERVAL_SECONDS = 30  # poll background `elastic-blast prepare` every 30s
 WARMUP_POLL_MAX_ATTEMPTS = 120  # 120 * 30s = 60 min ceiling for prepare
+SUBMIT_POLL_INTERVAL_SECONDS = 5
+SUBMIT_POLL_MAX_ATTEMPTS = 120  # 120 * 5s = 10 min ceiling for submit helper job
 
 
 def submit_blast_orchestrator(
@@ -56,43 +58,133 @@ def submit_blast_orchestrator(
             """Replay-safe ISO timestamp from the orchestrator clock."""
             return context.current_utc_datetime.isoformat()
 
+        def _step_log(lines: list[str]) -> str:
+            return "\n".join(line for line in lines if line)
+
         # 0. Ensure Remote Terminal VM is running
-        steps["checking_vm"] = {"started_at": _ts()}
+        steps["checking_vm"] = {
+            "started_at": _ts(),
+            "last_output": _step_log([
+                "Checking Remote Terminal VM before BLAST orchestration.",
+                f"vm={request.get('terminal_vm_name') or 'vm-elb-terminal'}",
+                f"resource_group={request.get('terminal_resource_group') or 'rg-elb-terminal'}",
+            ]),
+        }
         context.set_custom_status({"phase": "checking_vm", "job_id": job_id, "steps": steps})
         vm_payload = {
             "subscription_id": request["subscription_id"],
-            "resource_group": request.get("terminal_resource_group", "rg-elb-terminal"),
-            "vm_name": request.get("terminal_vm_name", "vm-elb-terminal"),
+            "resource_group": request.get("terminal_resource_group") or "rg-elb-terminal",
+            "vm_name": request.get("terminal_vm_name") or "vm-elb-terminal",
             "user_assertion": request.get("user_assertion"),
         }
         vm_status = yield context.call_activity("ensure_vm_running_activity", vm_payload)
-        steps["checking_vm"].update({"power_state": vm_status.get("power_state"), "started": vm_status.get("started"), "completed_at": _ts()})
+        steps["checking_vm"].update({
+            "power_state": vm_status.get("power_state"),
+            "started": vm_status.get("started"),
+            "last_output": _step_log([
+                "Remote Terminal VM check completed.",
+                f"power_state={vm_status.get('power_state') or 'unknown'}",
+                f"started_now={bool(vm_status.get('started'))}",
+                "waiting 30s for boot" if vm_status.get("started") else "VM was already available",
+            ]),
+            "completed_at": _ts(),
+        })
         if vm_status.get("started"):
             boot_wait = context.current_utc_datetime + timedelta(seconds=30)
             yield context.create_timer(boot_wait)
 
+        # 0b. Ensure Function App can SSH to the VM (NSG rule)
+        try:
+            nsg_result = yield context.call_activity("ensure_ssh_nsg_activity", vm_payload)
+            steps["checking_vm"]["output"] = _step_log([
+                str(steps["checking_vm"].get("last_output", "")),
+                f"ssh_nsg={nsg_result.get('nsg_name', 'unknown')}",
+                f"ssh_rule_ensured={bool(nsg_result.get('created'))}",
+            ])
+        except Exception as exc:
+            LOGGER.warning("NSG SSH rule creation failed (non-fatal): %s", exc)
+            steps["checking_vm"]["output"] = _step_log([
+                str(steps["checking_vm"].get("last_output", "")),
+                f"ssh_nsg_warning={str(exc)[:180]}",
+            ])
+
         # 1. Enable storage access
-        steps["enabling_storage"] = {"started_at": _ts()}
+        steps["enabling_storage"] = {
+            "started_at": _ts(),
+            "last_output": _step_log([
+                "Opening storage network access for ElasticBLAST data transfer.",
+                f"storage_account={request['storage_account']}",
+                f"resource_group={request['resource_group']}",
+            ]),
+        }
         context.set_custom_status({"phase": "enabling_storage", "job_id": job_id, "steps": steps})
-        yield context.call_activity("set_storage_public_access_activity", storage_payload)
-        steps["enabling_storage"].update({"done": True, "completed_at": _ts()})
+        storage_open_result = yield context.call_activity("set_storage_public_access_activity", storage_payload)
+        steps["enabling_storage"].update({
+            "done": True,
+            "public_network_access": storage_open_result.get("public_network_access"),
+            "default_action": storage_open_result.get("default_action"),
+            "output": _step_log([
+                "Storage access update completed.",
+                f"public_network_access={storage_open_result.get('public_network_access') or 'unknown'}",
+                f"default_action={storage_open_result.get('default_action') or 'unchanged'}",
+                f"propagation_wait_seconds={STORAGE_PROPAGATION_SECONDS}",
+            ]),
+            "completed_at": _ts(),
+        })
+        context.set_custom_status({"phase": "uploading", "job_id": job_id, "steps": steps})
 
         # 2. Wait for propagation (short — Azure propagation is usually fast)
         propagation = context.current_utc_datetime + timedelta(seconds=STORAGE_PROPAGATION_SECONDS)
         yield context.create_timer(propagation)
 
         # 3. Upload query
-        steps["uploading"] = {"started_at": _ts()}
+        query_data = request.get("query_data", "")
+        steps["uploading"] = {
+            "started_at": _ts(),
+            "last_output": _step_log([
+                "Preparing query upload.",
+                f"target=queries/{job_id}/input.fa",
+                f"bytes={len(query_data.encode('utf-8'))}" if query_data else "inline_query=false",
+                f"lines={len(query_data.splitlines())}" if query_data else "",
+            ]),
+        }
         context.set_custom_status({"phase": "uploading", "job_id": job_id, "steps": steps})
         if request.get("query_data"):
             upload_result = yield context.call_activity("upload_query_activity", request)
             request["query_blob_url"] = upload_result["query_blob_url"]
-            steps["uploading"].update({"blob_url": upload_result.get("query_blob_url"), "blob_path": upload_result.get("blob_path"), "completed_at": _ts()})
+            steps["uploading"].update({
+                "blob_url": upload_result.get("query_blob_url"),
+                "blob_path": upload_result.get("blob_path"),
+                "query_size_bytes": upload_result.get("query_size_bytes"),
+                "query_line_count": upload_result.get("query_line_count"),
+                "attempts": upload_result.get("attempts"),
+                "output": _step_log([
+                    "Query upload completed.",
+                    f"blob=queries/{upload_result.get('blob_path')}",
+                    f"bytes={upload_result.get('query_size_bytes')}",
+                    f"lines={upload_result.get('query_line_count')}",
+                    f"attempts={upload_result.get('attempts')}",
+                ]),
+                "completed_at": _ts(),
+            })
         else:
-            steps["uploading"].update({"skipped": True, "completed_at": _ts()})
+            steps["uploading"].update({
+                "skipped": True,
+                "output": "Inline query upload skipped; using the query URL already present in the request.",
+                "completed_at": _ts(),
+            })
 
         # 4. Generate and upload config
-        steps["configuring"] = {"started_at": _ts()}
+        steps["configuring"] = {
+            "started_at": _ts(),
+            "last_output": _step_log([
+                "Generating ElasticBLAST INI config.",
+                f"cluster={request.get('aks_cluster_name') or request.get('cluster_name') or 'auto'}",
+                f"program={request.get('program', 'blastn')}",
+                f"db={request.get('db', '')}",
+                f"results=results/{job_id}/",
+            ]),
+        }
         context.set_custom_status({"phase": "configuring", "job_id": job_id, "steps": steps})
         account = request["storage_account"]
         request["results_url"] = f"https://{account}.blob.core.windows.net/results/{job_id}"
@@ -107,17 +199,29 @@ def submit_blast_orchestrator(
 
         config_result = yield context.call_activity("generate_blast_config_activity", request)
         request["config_text"] = config_result.get("config_text", "")
-        steps["configuring"].update({"config_url": config_result.get("config_blob_url"), "completed_at": _ts()})
+        steps["configuring"].update({
+            "config_url": config_result.get("config_blob_url"),
+            "config_blob_path": config_result.get("config_blob_path"),
+            "config_size_bytes": config_result.get("config_size_bytes"),
+            "output": _step_log([
+                "ElasticBLAST config uploaded.",
+                f"blob=queries/{config_result.get('config_blob_path') or f'{job_id}/elastic-blast.ini'}",
+                f"bytes={config_result.get('config_size_bytes')}",
+                f"reuse={request.get('reuse')}",
+                f"results={request.get('results_url')}",
+            ]),
+            "completed_at": _ts(),
+        })
 
         # 5. Warmup / Prepare (optional — enabled by default for DB sharding)
-        #    Smart skip: if cluster already has pods in the elastic-blast namespace,
-        #    the cluster is already warm and prepare can be skipped (~66s saved).
+        #    Smart skip: check if DB is already cached on nodes via DaemonSet warmup,
+        #    or if cluster already has pods in the elastic-blast namespace.
         enable_warmup = request.get("enable_warmup", True)
         elb_namespace = f"elastic-blast-{job_id[:12]}"
         aks_cluster = request.get("aks_cluster_name", "")
 
         if enable_warmup and aks_cluster:
-            # Fast K8s API check (~1-3s) to see if cluster is already warm
+            # Fast K8s API check (~1-3s): is this DB already cached via DaemonSet warmup?
             warmup_check_payload = {
                 "subscription_id": request["subscription_id"],
                 "resource_group": request["resource_group"],
@@ -127,14 +231,41 @@ def submit_blast_orchestrator(
             }
             warmup_check = yield context.call_activity("k8s_check_warmup_ready_activity", warmup_check_payload)
             already_warm = warmup_check.get("warm", False)
+
+            # Also check DaemonSet-based warmup for the selected DB
+            if not already_warm:
+                db_short = request.get("db_display_name", "")
+                if not db_short:
+                    db_raw = request.get("db", "")
+                    db_short = db_raw.rsplit("/", 1)[-1] if "/" in db_raw else db_raw
+                if db_short:
+                    ds_check_payload = {
+                        "subscription_id": request["subscription_id"],
+                        "resource_group": request["resource_group"],
+                        "cluster_name": aks_cluster,
+                        "db_name": db_short,
+                        "user_assertion": request.get("user_assertion"),
+                    }
+                    ds_check = yield context.call_activity("k8s_check_warmup_db_activity", ds_check_payload)
+                    if ds_check.get("status") == "succeeded":
+                        already_warm = True
+
             steps["warmup_check"] = {"already_warm": already_warm}
 
             if already_warm:
                 LOGGER.info("Cluster %s/%s already warm — skipping prepare", aks_cluster, elb_namespace)
                 request["reuse"] = True
-                config_result = yield context.call_activity("generate_blast_config_activity", request)
-                request["config_text"] = config_result.get("config_text", "")
-                steps["warming_up"] = {"skipped": True, "reason": "cluster already warm", "started_at": _ts(), "completed_at": _ts()}
+                steps["warming_up"] = {
+                    "skipped": True,
+                    "reason": "DB already cached on nodes",
+                    "started_at": _ts(),
+                    "output": _step_log([
+                        "Warmup skipped.",
+                        "DB is already cached on AKS nodes.",
+                        f"cluster={aks_cluster}",
+                    ]),
+                    "completed_at": _ts(),
+                }
             else:
                 # Best-effort: ensure the AKS kubelet identity has AcrPull on
                 # the configured ACR and Storage Blob Data Contributor on the
@@ -178,7 +309,7 @@ def submit_blast_orchestrator(
                     prepare_status = check.get("status", "running")
                     prepare_output = check.get("output", "")
                     steps["warming_up"]["poll_attempt"] = attempt + 1
-                    steps["warming_up"]["output"] = prepare_output[:4000]
+                    steps["warming_up"]["last_output"] = prepare_output[:4000]
                     context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
                     if prepare_status in ("succeeded", "failed", "lost"):
                         break
@@ -186,6 +317,7 @@ def submit_blast_orchestrator(
                     "success": prepare_status == "succeeded",
                     "status": prepare_status,
                     "output": prepare_output[:4000],
+                    "last_output": prepare_output[:4000],
                     "completed_at": _ts(),
                 })
                 if prepare_status != "succeeded":
@@ -212,7 +344,7 @@ def submit_blast_orchestrator(
                 prepare_status = check.get("status", "running")
                 prepare_output = check.get("output", "")
                 steps["warming_up"]["poll_attempt"] = attempt + 1
-                steps["warming_up"]["output"] = prepare_output[:4000]
+                steps["warming_up"]["last_output"] = prepare_output[:4000]
                 context.set_custom_status({"phase": "warming_up", "job_id": job_id, "steps": steps})
                 if prepare_status in ("succeeded", "failed", "lost"):
                     break
@@ -220,6 +352,7 @@ def submit_blast_orchestrator(
                 "success": prepare_status == "succeeded",
                 "status": prepare_status,
                 "output": prepare_output[:4000],
+                "last_output": prepare_output[:4000],
                 "completed_at": _ts(),
             })
             if prepare_status != "succeeded":
@@ -234,11 +367,52 @@ def submit_blast_orchestrator(
             request["config_text"] = config_result.get("config_text", "")
 
         # 6. Submit
-        steps["submitting"] = {"started_at": _ts()}
+        steps["submitting"] = {"started_at": _ts(), "status": "starting"}
         context.set_custom_status({"phase": "submitting", "job_id": job_id, "steps": steps})
-        submit_result = yield context.call_activity("run_elastic_blast_submit_activity", request)
+        submit_result = yield context.call_activity("start_elastic_blast_submit_activity", request)
+        steps["submitting"].update({
+            "status": submit_result.get("status", "running"),
+            "method": submit_result.get("method"),
+            "submit_job_name": submit_result.get("submit_job_name"),
+            "last_output": str(submit_result.get("output", ""))[:4000],
+        })
+        context.set_custom_status({"phase": "submitting", "job_id": job_id, "steps": steps})
+
+        for submit_attempt in range(SUBMIT_POLL_MAX_ATTEMPTS):
+            if submit_result.get("done"):
+                break
+            next_submit_check = context.current_utc_datetime + timedelta(seconds=SUBMIT_POLL_INTERVAL_SECONDS)
+            yield context.create_timer(next_submit_check)
+            submit_result = yield context.call_activity(
+                "check_elastic_blast_submit_activity",
+                {**request, **submit_result},
+            )
+            submit_output_live = str(submit_result.get("output", ""))
+            steps["submitting"].update({
+                "status": submit_result.get("status", "running"),
+                "poll_attempt": submit_attempt + 1,
+                "last_output": submit_output_live[:4000],
+                "submit_job_name": submit_result.get("submit_job_name") or steps["submitting"].get("submit_job_name"),
+                "method": submit_result.get("method") or steps["submitting"].get("method"),
+            })
+            context.set_custom_status({"phase": "submitting", "job_id": job_id, "steps": steps})
+
+        if not submit_result.get("done"):
+            submit_result = {
+                **submit_result,
+                "done": True,
+                "success": False,
+                "status": "timeout",
+                "output": str(submit_result.get("output", "")) + "\nSubmit helper job timed out before completion.",
+            }
         submit_output = submit_result.get("output", "")
-        steps["submitting"].update({"success": submit_result.get("success"), "output": submit_output[:4000], "completed_at": _ts()})
+        steps["submitting"].update({
+            "success": submit_result.get("success"),
+            "status": submit_result.get("status"),
+            "output": submit_output[:4000],
+            "last_output": submit_output[:4000],
+            "completed_at": _ts(),
+        })
         if not submit_result.get("success"):
             context.set_custom_status({"phase": "submit_failed", "job_id": job_id, "steps": steps})
             yield context.call_activity("set_storage_public_access_activity", disable_payload)
@@ -252,11 +426,12 @@ def submit_blast_orchestrator(
         final_status = "unknown"
         last_check_output = ""
         enable_warmup = request.get("enable_warmup", True)
-        # Always require at least 3 polls before trusting "completed" status.
-        # elastic-blast can return EXIT_CODE=0 before jobs are fully submitted.
-        MIN_POLLS_BEFORE_COMPLETE = 3
-        poll_interval = 10 if (enable_warmup and aks_cluster) else STATUS_POLL_INTERVAL_SECONDS
+        # Always require at least N polls before trusting "completed" status.
         use_k8s_check = bool(aks_cluster)
+        # K8s API reports actual pod/job status (trustworthy after 1 poll).
+        # VM Run Command path needs more polls (elastic-blast CLI may exit early).
+        MIN_POLLS_BEFORE_COMPLETE = 1 if use_k8s_check else 3
+        poll_interval = 10 if use_k8s_check else STATUS_POLL_INTERVAL_SECONDS
         for attempt in range(STATUS_POLL_MAX_ATTEMPTS):
             next_poll = context.current_utc_datetime + timedelta(seconds=poll_interval)
             yield context.create_timer(next_poll)
@@ -281,6 +456,12 @@ def submit_blast_orchestrator(
                 LOGGER.warning("status check failed attempt=%d: %s", attempt + 1, exc)
                 final_status = "unknown"
 
+            steps["running"].update({
+                "status": final_status,
+                "poll_attempt": attempt + 1,
+                "last_output": last_check_output[:4000],
+            })
+
             context.set_custom_status({
                 "phase": "running", "job_id": job_id,
                 "blast_status": final_status, "poll_attempt": attempt + 1,
@@ -302,7 +483,13 @@ def submit_blast_orchestrator(
 
         # 7. Export results — verify .out files actually exist in blob
         if final_status == "completed":
-            steps["exporting_results"] = {"started_at": _ts()}
+            steps["exporting_results"] = {
+                "started_at": _ts(),
+                "last_output": _step_log([
+                    "Waiting for result blobs written by ElasticBLAST.",
+                    f"prefix=results/{job_id}/",
+                ]),
+            }
             context.set_custom_status({"phase": "exporting_results", "job_id": job_id, "steps": steps})
 
             # 7a. Wait for results-export pod to finish writing
@@ -327,6 +514,17 @@ def submit_blast_orchestrator(
                     )
                     blobs = blob_list.get("blobs", [])
                     out_files = [b for b in blobs if b.get("name", "").endswith(".out")]
+                    steps["exporting_results"].update({
+                        "verify_attempt": verify_attempt + 1,
+                        "blob_count": len(blobs),
+                        "out_file_count": len(out_files),
+                        "last_output": _step_log([
+                            "Verifying result blobs.",
+                            f"attempt={verify_attempt + 1}",
+                            f"blob_count={len(blobs)}",
+                            f"out_file_count={len(out_files)}",
+                        ]),
+                    })
                     context.set_custom_status({
                         "phase": "exporting_results", "job_id": job_id,
                         "verify_attempt": verify_attempt + 1,

@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
-from typing import Any
 
 import azure.durable_functions as df
 import azure.functions as func
+import requests as _requests
 
 from _http_utils import (
     _RE_BLOB_NAME,
     _RE_DB_NAME,
     _RE_STORAGE_ACCOUNT,
+    _RE_VM_NAME,
     _error_response,
     _json_response,
     _require_query,
@@ -24,16 +26,72 @@ from _http_utils import (
     resolve_terminal_secret,
 )
 from auth.token import AuthError, validate_bearer_token
+from routes.blast import _toggle_public_access
 from services import compute as compute_svc
-from services import keyvault as kv_svc
+from services import network as network_svc
 from services import storage_data as storage_data_svc
 from services.azure_clients import credential_for_caller
 from services.sanitise import sanitise
-from routes.blast import _toggle_public_access
 
 LOGGER = logging.getLogger(__name__)
 
+MAX_LIST_STATUS_REFRESHES = 8
+LIST_STATUS_REFRESH_TIMEOUT_SECONDS = 3
+_RE_JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$")
+_RE_CUSTOM_DB_TITLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()/-]{0,199}$")
+MAX_CUSTOM_FASTA_BYTES = 20 * 1024 * 1024
+
 bp = df.Blueprint()
+
+
+def _normalise_job_registry_state(raw_jobs: object) -> list[dict]:
+    if isinstance(raw_jobs, list):
+        candidates = raw_jobs
+    elif isinstance(raw_jobs, dict) and isinstance(raw_jobs.get("jobs"), list):
+        candidates = raw_jobs["jobs"]
+    else:
+        LOGGER.warning("Unexpected job registry state type: %s", type(raw_jobs).__name__)
+        return []
+    return [job for job in candidates if isinstance(job, dict)]
+
+
+async def _read_job_registry(client: df.DurableOrchestrationClient) -> list[dict]:
+    entity_id = df.EntityId("job_registry_entity", "default")
+    state = await client.read_entity_state(entity_id)
+    raw_jobs = state.entity_state if state.entity_exists else []
+    return _normalise_job_registry_state(raw_jobs)
+
+
+def _validate_job_id_param(job_id: str | None) -> str | None:
+    if not job_id or not _RE_JOB_ID.match(job_id):
+        return None
+    return job_id
+
+
+async def _find_job_for_caller(
+    client: df.DurableOrchestrationClient,
+    job_id: str,
+    caller_oid: str,
+) -> tuple[dict | None, func.HttpResponse | None]:
+    jobs = await _read_job_registry(client)
+    job = next((item for item in jobs if item.get("job_id") == job_id), None)
+    if not job:
+        return None, _error_response(404, "job not found")
+    owner_oid = job.get("owner_oid")
+    if not owner_oid or owner_oid != caller_oid:
+        return None, _error_response(403, "not authorized for this job")
+    return job, None
+
+
+def _validate_result_blob_name(blob_name: str, job_id: str) -> str | None:
+    if ".." in blob_name or blob_name.startswith("/"):
+        return "invalid blob_name"
+    if not blob_name.startswith(f"{job_id}/"):
+        return "blob_name must be under this job's result prefix"
+    if err := _validate_name(blob_name, _RE_BLOB_NAME, "blob_name"):
+        return err
+    return None
+
 
 @bp.route(route="blast/jobs", methods=["GET"])
 @bp.durable_client_input(client_name="client")
@@ -45,38 +103,47 @@ async def list_blast_jobs(
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    entity_id = df.EntityId("job_registry_entity", "default")
-    state = await client.read_entity_state(entity_id)
-    all_jobs = state.entity_state if state.entity_exists else []
+    all_jobs = await _read_job_registry(client)
+
     # C5: Filter jobs by owner — only return jobs belonging to the caller
     caller_oid = identity.object_id
-    jobs = [j for j in (all_jobs or []) if j.get("owner_oid") == caller_oid]
+    jobs = [j for j in all_jobs if j.get("owner_oid") == caller_oid]
 
-    # Enrich with orchestrator status — fix stale entity states
-    for job in jobs:
+    async def refresh_job_status(job: dict) -> None:
         instance_id = job.get("instance_id")
-        if instance_id and job.get("status") in ("submitted", "uploading"):
-            try:
-                orch = await client.get_status(instance_id, show_input=False)
-                if orch and orch.runtime_status:
-                    rt = orch.runtime_status.name
-                    if rt == "Failed":
-                        job["status"] = "failed"
-                        job["phase"] = "error"
-                        # Extract error from output
-                        out = orch.output or ""
-                        if isinstance(out, str) and out:
-                            job["error"] = out[:300]
-                    elif rt == "Completed":
-                        out = orch.output if isinstance(orch.output, dict) else {}
-                        job["status"] = out.get("status", "completed")
-                        job["phase"] = out.get("phase", "completed")
-                    if orch.custom_status:
-                        cs = orch.custom_status if isinstance(orch.custom_status, dict) else {}
-                        if cs.get("phase") and job.get("phase") == "uploading":
-                            job["phase"] = cs["phase"]
-            except Exception:
-                LOGGER.debug("failed to refresh stale blast job state", exc_info=True)
+        if not instance_id or job.get("status") not in ("submitted", "uploading"):
+            return
+        try:
+            orch = await asyncio.wait_for(
+                client.get_status(instance_id, show_input=False),
+                timeout=LIST_STATUS_REFRESH_TIMEOUT_SECONDS,
+            )
+            if orch and orch.runtime_status:
+                rt = orch.runtime_status.name
+                if rt == "Failed":
+                    job["status"] = "failed"
+                    job["phase"] = "error"
+                    out = orch.output or ""
+                    if isinstance(out, str) and out:
+                        job["error"] = out[:300]
+                elif rt == "Completed":
+                    out = orch.output if isinstance(orch.output, dict) else {}
+                    job["status"] = out.get("status", "completed")
+                    job["phase"] = out.get("phase", "completed")
+                if orch.custom_status:
+                    cs = orch.custom_status if isinstance(orch.custom_status, dict) else {}
+                    if cs.get("phase") and job.get("phase") == "uploading":
+                        job["phase"] = cs["phase"]
+        except Exception:
+            LOGGER.debug("failed to refresh stale blast job state", exc_info=True)
+
+    refresh_candidates = [
+        job
+        for job in jobs
+        if job.get("instance_id") and job.get("status") in ("submitted", "uploading")
+    ][:MAX_LIST_STATUS_REFRESHES]
+    if refresh_candidates:
+        await asyncio.gather(*(refresh_job_status(job) for job in refresh_candidates))
 
     return _json_response({"jobs": jobs})
 
@@ -91,20 +158,13 @@ async def get_blast_job(
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    job_id = req.route_params.get("job_id")
+    job_id = _validate_job_id_param(req.route_params.get("job_id"))
     if not job_id:
-        return _error_response(400, "job_id missing")
+        return _error_response(400, "invalid job_id")
 
-    entity_id = df.EntityId("job_registry_entity", "default")
-    state = await client.read_entity_state(entity_id)
-    jobs = state.entity_state if state.entity_exists else []
-    job = next((j for j in (jobs or []) if j.get("job_id") == job_id), None)
-    if not job:
-        return _error_response(404, "job not found")
-
-    # Ownership check — only the job owner can view details
-    if job.get("owner_oid") and job["owner_oid"] != identity.object_id:
-        return _error_response(403, "not authorized to view this job")
+    job, err = await _find_job_for_caller(client, job_id, identity.object_id)
+    if err:
+        return err
 
     # Enrich with orchestrator status if instance_id is known
     instance_id = job.get("instance_id")
@@ -138,21 +198,15 @@ async def delete_blast_job(
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    job_id = req.route_params.get("job_id")
+    job_id = _validate_job_id_param(req.route_params.get("job_id"))
     if not job_id:
-        return _error_response(400, "job_id missing")
+        return _error_response(400, "invalid job_id")
 
     # Get job details for deletion
     entity_id = df.EntityId("job_registry_entity", "default")
-    state = await client.read_entity_state(entity_id)
-    jobs = state.entity_state if state.entity_exists else []
-    job = next((j for j in (jobs or []) if j.get("job_id") == job_id), None)
-    if not job:
-        return _error_response(404, "job not found")
-
-    # Ownership check
-    if job.get("owner_oid") and job["owner_oid"] != identity.object_id:
-        return _error_response(403, "not authorized to delete this job")
+    job, err = await _find_job_for_caller(client, job_id, identity.object_id)
+    if err:
+        return err
 
     # Update status to deleting
     await client.signal_entity(
@@ -201,20 +255,14 @@ async def cancel_blast_job(
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    job_id = req.route_params.get("job_id")
+    job_id = _validate_job_id_param(req.route_params.get("job_id"))
     if not job_id:
-        return _error_response(400, "job_id missing")
+        return _error_response(400, "invalid job_id")
 
     entity_id = df.EntityId("job_registry_entity", "default")
-    state = await client.read_entity_state(entity_id)
-    jobs = state.entity_state if state.entity_exists else []
-    job = next((j for j in (jobs or []) if j.get("job_id") == job_id), None)
-    if not job:
-        return _error_response(404, "job not found")
-
-    # Ownership check
-    if job.get("owner_oid") and job["owner_oid"] != identity.object_id:
-        return _error_response(403, "not authorized to cancel this job")
+    job, err = await _find_job_for_caller(client, job_id, identity.object_id)
+    if err:
+        return err
 
     instance_id = job.get("instance_id")
     if not instance_id:
@@ -239,15 +287,22 @@ async def cancel_blast_job(
 # BLAST — results
 # ---------------------------------------------------------------------------
 @bp.route(route="blast/jobs/{job_id}/results", methods=["GET"])
-def list_blast_results(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def list_blast_results(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    job_id = req.route_params.get("job_id")
+    job_id = _validate_job_id_param(req.route_params.get("job_id"))
     if not job_id:
-        return _error_response(400, "job_id missing")
+        return _error_response(400, "invalid job_id")
+
+    _, auth_err = await _find_job_for_caller(client, job_id, identity.object_id)
+    if auth_err:
+        return auth_err
 
     params, err = _require_query(req, "subscription_id", "storage_account")
     if err:
@@ -281,7 +336,7 @@ def list_blast_results(req: func.HttpRequest) -> func.HttpResponse:
             cred,
             params["storage_account"],
             "results",
-            job_id,
+            f"{job_id}/",
         )
     except Exception as exc:
         return _error_response(500, sanitise(str(exc)))
@@ -289,24 +344,29 @@ def list_blast_results(req: func.HttpRequest) -> func.HttpResponse:
 
 
 @bp.route(route="blast/jobs/{job_id}/results/download", methods=["GET"])
-def download_blast_result(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def download_blast_result(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    job_id = req.route_params.get("job_id")
+    job_id = _validate_job_id_param(req.route_params.get("job_id"))
     if not job_id:
-        return _error_response(400, "job_id missing")
+        return _error_response(400, "invalid job_id")
+
+    _, auth_err = await _find_job_for_caller(client, job_id, identity.object_id)
+    if auth_err:
+        return auth_err
 
     params, err = _require_query(req, "subscription_id", "storage_account", "blob_name")
     if err:
         return err
     # C7: Validate blob_name — reject path traversal
     blob_name = params["blob_name"]
-    if ".." in blob_name or blob_name.startswith("/"):
-        return _error_response(400, "Invalid blob_name")
-    if err := _validate_name(blob_name, _RE_BLOB_NAME, "blob_name"):
+    if err := _validate_result_blob_name(blob_name, job_id):
         return _error_response(400, err)
     # Validate storage account name
     if err := _validate_name(params["storage_account"], _RE_STORAGE_ACCOUNT, "storage_account"):
@@ -363,9 +423,9 @@ def build_custom_database(req: func.HttpRequest) -> func.HttpResponse:
     db_type = body.get("db_type", "nucl")
     if db_type not in ("nucl", "prot"):
         return _error_response(400, "db_type must be 'nucl' or 'prot'")
-    title = body.get("title", db_name)
-    if len(title) > 200:
-        return _error_response(400, "title too long (max 200)")
+    title = body.get("title") or db_name
+    if not isinstance(title, str) or not _RE_CUSTOM_DB_TITLE.match(title):
+        return _error_response(400, "invalid title")
 
     fasta_data = body.get("fasta_data")
     fasta_blob_url = body.get("fasta_blob_url")
@@ -373,6 +433,14 @@ def build_custom_database(req: func.HttpRequest) -> func.HttpResponse:
         return _error_response(400, "provide fasta_data or fasta_blob_url")
     if fasta_data and fasta_blob_url:
         return _error_response(400, "provide fasta_data OR fasta_blob_url, not both")
+    if fasta_data and not isinstance(fasta_data, str):
+        return _error_response(400, "fasta_data must be a string")
+    if isinstance(fasta_data, str) and len(fasta_data.encode("utf-8")) > MAX_CUSTOM_FASTA_BYTES:
+        return _error_response(400, "fasta_data too large (max 20 MB)")
+    if fasta_blob_url and not isinstance(fasta_blob_url, str):
+        return _error_response(400, "fasta_blob_url must be a blob path")
+    if fasta_blob_url and not _RE_BLOB_NAME.match(fasta_blob_url):
+        return _error_response(400, "invalid fasta_blob_url")
 
     cred = credential_for_caller(identity.raw_token)
 
@@ -380,6 +448,10 @@ def build_custom_database(req: func.HttpRequest) -> func.HttpResponse:
         "terminal_resource_group", os.environ.get("TERMINAL_DEFAULT_RG", "rg-elb-terminal")
     )
     terminal_vm = body.get("terminal_vm_name", "vm-elb-terminal")
+    if err := _validate_rg(terminal_rg):
+        return _error_response(400, err)
+    if err := _validate_name(terminal_vm, _RE_VM_NAME, "terminal_vm_name"):
+        return _error_response(400, err)
 
     try:
         # Step 0: Enable public network access on the storage account.
@@ -402,27 +474,28 @@ def build_custom_database(req: func.HttpRequest) -> func.HttpResponse:
         else:
             blob_path = fasta_blob_url  # type: ignore[assignment]
 
-        # Step 2: Get VM SSH details
-        vm_ip = compute_svc.get_vm_public_ip(cred, sub, terminal_rg, terminal_vm)
-        if not vm_ip:
-            return _error_response(
-                400, "Terminal VM has no public IP. Provision and start it first."
-            )
-
+        # Step 2: Run makeblastdb on the VM via SSH, with Azure Run Command as fallback.
         secret_name = f"vm-{terminal_vm}-password"
         password, _ = resolve_terminal_secret(cred, sub, terminal_rg, terminal_vm, secret_name)
-        if not password:
-            return _error_response(404, "VM password not found in Key Vault")
+        if password:
+            try:
+                network_svc.ensure_ssh_from_function_app(
+                    cred,
+                    sub,
+                    terminal_rg,
+                    f"nsg-{terminal_vm}",
+                )
+            except Exception:
+                LOGGER.debug("failed to ensure Function App SSH NSG rule", exc_info=True)
 
-        # Step 3: Run makeblastdb on the VM via SSH
-        from services.ssh_exec import run_ssh
-
-        # Build the script to download FASTA from blob, run makeblastdb, upload results
         safe_db_name = db_name.replace("'", "")
         safe_title = title.replace("'", "").replace('"', "")
         safe_db_type = db_type
 
         script = f"""set -euo pipefail
+export HOME=/home/azureuser
+if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi
+
 WORK_DIR=$(mktemp -d /tmp/makeblastdb-XXXXXX)
 cd "$WORK_DIR"
 
@@ -492,7 +565,15 @@ az storage blob delete \\
 rm -rf "$WORK_DIR"
 echo "MAKEBLASTDB_DONE"
 """
-        output = run_ssh(vm_ip, password, script, timeout=600)
+        output = compute_svc.run_shell(
+            cred,
+            sub,
+            terminal_rg,
+            terminal_vm,
+            script,
+            max_retries=3,
+            ssh_password=password,
+        )
 
         if "MAKEBLASTDB_DONE" not in output:
             return _error_response(500, f"makeblastdb failed: {sanitise(output[-500:])}")
@@ -524,14 +605,19 @@ echo "MAKEBLASTDB_DONE"
         try:
             _toggle_public_access(cred, sub, rg, storage_account, enabled=False)
         except Exception:
-            LOGGER.warning("Could not re-disable public access on %s after custom DB build", storage_account)
+            LOGGER.warning(
+                "Could not re-disable public access on %s after custom DB build", storage_account
+            )
 
 
 # ---------------------------------------------------------------------------
 # BLAST — results aggregation / analytics
 # ---------------------------------------------------------------------------
 @bp.route(route="blast/jobs/{job_id}/results/aggregate", methods=["GET"])
-def blast_results_aggregate(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def blast_results_aggregate(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     """Parse BLAST tabular output (outfmt 7) and return aggregated statistics.
 
     Returns: hit count, unique subject count, E-value distribution,
@@ -542,9 +628,13 @@ def blast_results_aggregate(req: func.HttpRequest) -> func.HttpResponse:
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    job_id = req.route_params.get("job_id", "")
-    if not job_id or not _RE_DB_NAME.match(job_id):
+    job_id = _validate_job_id_param(req.route_params.get("job_id"))
+    if not job_id:
         return _error_response(400, "invalid job_id")
+
+    _, auth_err = await _find_job_for_caller(client, job_id, identity.object_id)
+    if auth_err:
+        return auth_err
 
     params, err = _require_query(req, "subscription_id", "storage_account")
     if err:
@@ -624,7 +714,10 @@ def blast_results_aggregate(req: func.HttpRequest) -> func.HttpResponse:
 # BLAST — alignment detail
 # ---------------------------------------------------------------------------
 @bp.route(route="blast/jobs/{job_id}/results/alignments", methods=["GET"])
-def blast_results_alignments(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def blast_results_alignments(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     """Return parsed pairwise alignments from BLAST output for visualization.
 
     Query params:
@@ -638,16 +731,23 @@ def blast_results_alignments(req: func.HttpRequest) -> func.HttpResponse:
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    job_id = req.route_params.get("job_id", "")
-    if not job_id or not _RE_DB_NAME.match(job_id):
+    job_id = _validate_job_id_param(req.route_params.get("job_id"))
+    if not job_id:
         return _error_response(400, "invalid job_id")
+
+    _, auth_err = await _find_job_for_caller(client, job_id, identity.object_id)
+    if auth_err:
+        return auth_err
 
     params, err = _require_query(req, "subscription_id", "storage_account")
     if err:
         return err
 
     blob_name = req.params.get("blob_name", "")
-    max_alignments = min(int(req.params.get("max_alignments", "50")), 200)
+    try:
+        max_alignments = min(max(int(req.params.get("max_alignments", "50")), 1), 200)
+    except ValueError:
+        return _error_response(400, "invalid max_alignments")
     query_id_filter = req.params.get("query_id", "")
 
     cred = credential_for_caller(identity.raw_token)
@@ -668,9 +768,8 @@ def blast_results_alignments(req: func.HttpRequest) -> func.HttpResponse:
                 )
             blob_name = out_blobs[0]["name"]
         else:
-            # Validate blob_name
-            if ".." in blob_name or blob_name.startswith("/"):
-                return _error_response(400, "invalid blob_name")
+            if err := _validate_result_blob_name(blob_name, job_id):
+                return _error_response(400, err)
 
         # Read the result file
         content = storage_data_svc.read_blob_text(
@@ -962,16 +1061,23 @@ def check_blast_db_updates(req: func.HttpRequest) -> func.HttpResponse:
 # P6 — Report Generator (CSV / JSON export)
 # ═══════════════════════════════════════════════════════════════════════
 @bp.route(route="blast/jobs/{job_id}/results/export", methods=["GET"])
-def blast_results_export(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def blast_results_export(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     """Export BLAST results as CSV or JSON for reports."""
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    job_id = req.route_params.get("job_id", "")
-    if not job_id or not _RE_DB_NAME.match(job_id):
+    job_id = _validate_job_id_param(req.route_params.get("job_id"))
+    if not job_id:
         return _error_response(400, "invalid job_id")
+
+    _, auth_err = await _find_job_for_caller(client, job_id, identity.object_id)
+    if auth_err:
+        return auth_err
 
     params, err = _require_query(req, "subscription_id", "storage_account")
     if err:
@@ -1071,5 +1177,3 @@ _AZURE_VM_HOURLY_USD: dict[str, float] = {
 }
 _STORAGE_GB_MONTH_USD = 0.018  # Hot tier
 _PD_GB_MONTH_USD = 0.040  # Managed SSD
-
-

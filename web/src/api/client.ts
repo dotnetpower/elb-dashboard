@@ -1,4 +1,5 @@
 import { msalInstance, apiLoginRequest } from "@/auth/msal";
+import { notifyAuthSessionIssue } from "@/auth/sessionEvents";
 import { fetchWithRetry, makeRequestId } from "@/api/resilience";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -8,7 +9,8 @@ async function getAccessToken(): Promise<string | null> {
   if (DEV_BYPASS) return null;
   const account = msalInstance.getActiveAccount();
   if (!account) {
-    throw new Error("not signed in");
+    notifyAuthSessionIssue("not_signed_in");
+    throw new Error("Session expired. Please sign in again.");
   }
   // #20: Exponential backoff retry (up to 3 attempts)
   let lastError: unknown;
@@ -22,6 +24,7 @@ async function getAccessToken(): Promise<string | null> {
     } catch (err) {
       lastError = err;
       if (err instanceof Error && err.name === "InteractionRequiredAuthError") {
+        notifyAuthSessionIssue("interaction_required");
         // Redirect to login — cannot be retried silently
         await msalInstance.acquireTokenRedirect({ ...apiLoginRequest, account });
         throw err;
@@ -32,6 +35,7 @@ async function getAccessToken(): Promise<string | null> {
       }
     }
   }
+  notifyAuthSessionIssue("token_refresh_failed");
   throw lastError;
 }
 
@@ -64,6 +68,7 @@ async function fetchApi(path: string, init: RequestInit = {}): Promise<Response>
   });
   // #44: Auto-handle 401 — trigger re-authentication
   if (response.status === 401 && !DEV_BYPASS) {
+    notifyAuthSessionIssue("api_unauthorized");
     const account = msalInstance.getActiveAccount();
     if (account) {
       try {

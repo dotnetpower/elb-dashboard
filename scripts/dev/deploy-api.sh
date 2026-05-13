@@ -19,6 +19,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 API_DIR="$(cd "$SCRIPT_DIR/../../api" && pwd)"
 
 echo "==> Ensuring .python_packages is up to date..."
+rm -rf \
+  "$API_DIR/.python_packages/lib/site-packages/paramiko" \
+  "$API_DIR/.python_packages/lib/site-packages/paramiko-"*.dist-info \
+  "$API_DIR/.python_packages/lib/site-packages/bcrypt" \
+  "$API_DIR/.python_packages/lib/site-packages/bcrypt-"*.dist-info \
+  "$API_DIR/.python_packages/lib/site-packages/nacl" \
+  "$API_DIR/.python_packages/lib/site-packages/PyNaCl-"*.dist-info \
+  "$API_DIR/.python_packages/lib/site-packages/pynacl-"*.dist-info \
+  "$API_DIR/.python_packages/lib/site-packages/cryptography" \
+  "$API_DIR/.python_packages/lib/site-packages/cryptography-"*.dist-info \
+  2>/dev/null || true
 pip install -r "$API_DIR/requirements.txt" \
   --target "$API_DIR/.python_packages/lib/site-packages" -q 2>&1 | tail -3
 

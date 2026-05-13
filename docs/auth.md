@@ -116,11 +116,24 @@ runtime. All are idempotent and soft-fail if the MI lacks
 
 ### Remote Terminal VM Managed Identity
 
+The Remote Terminal VM is created with a system-assigned Managed Identity.
+Cloud-init configures Azure CLI and azcopy to use that identity by default;
+`az login --use-device-code` is only for intentionally switching to a personal
+Azure CLI session.
+
 | Role | Scope | Purpose |
 |------|-------|---------|
 | Storage Blob Data Contributor | User storage account | `azcopy` for DB downloads |
 | AcrPull | ACR | Pull images if needed |
 | Contributor | Workload resource group | `az aks get-credentials`, `kubectl` |
+
+### OpenAPI / Submit Workload Identity
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| Contributor | Workload resource group | Run `elastic-blast submit`, including AKS cluster create/read/update operations |
+| Storage Blob Data Contributor | User storage account | Upload query/config files and read BLAST DB blobs |
+| Azure Kubernetes Service Cluster User Role | AKS cluster | Run Kubernetes API operations from the submit helper job |
 
 ### Signed-In User (convenience)
 

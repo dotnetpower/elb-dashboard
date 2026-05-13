@@ -451,6 +451,41 @@ def k8s_warmup_status(
                     info["status"] = "Unknown"
             result["databases"] = list(db_map.values())
 
+        # 3b. Detect DBs from db-warmup DaemonSets (created by the control plane)
+        resp = session.get(
+            f"{server}/apis/apps/v1/namespaces/default/daemonsets",
+            params={"labelSelector": "app=db-warmup"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            existing_db_names = {d["name"] for d in result["databases"]}
+            for ds in resp.json().get("items", []):
+                db_label = ds.get("metadata", {}).get("labels", {}).get("db", "")
+                if not db_label or db_label in existing_db_names:
+                    continue
+                ds_status = ds.get("status", {})
+                desired = ds_status.get("desiredNumberScheduled", 0)
+                ready = ds_status.get("numberReady", 0)
+                if desired == 0:
+                    continue
+                if ready == desired:
+                    status_str = "Ready"
+                elif ready > 0:
+                    status_str = "Loading"
+                else:
+                    status_str = "Loading"
+                result["databases"].append({
+                    "name": db_label,
+                    "mol_type": "",
+                    "nodes_ready": ready,
+                    "nodes_failed": 0,
+                    "nodes_active": desired - ready,
+                    "total_jobs": desired,
+                    "status": status_str,
+                })
+                if ready > 0:
+                    result["warm"] = True
+
         # 4. Find elastic-blast namespaces (limit to 20 to prevent oversized responses)
         resp = session.get(f"{server}/api/v1/namespaces", timeout=10)
         if resp.status_code == 200:

@@ -32,6 +32,8 @@ export function ClusterItem({
   acrResourceGroup,
   acrName,
   region,
+  terminalResourceGroup,
+  terminalVmName,
 }: {
   cluster: AksClusterSummary;
   transitioning: Map<string, "starting" | "stopping">;
@@ -45,6 +47,8 @@ export function ClusterItem({
   acrResourceGroup?: string;
   acrName?: string;
   region?: string;
+  terminalResourceGroup?: string;
+  terminalVmName?: string;
 }) {
   const isStopped = c.power_state === "Stopped";
   const isRunning = c.power_state === "Running";
@@ -370,6 +374,8 @@ export function ClusterItem({
             region={region}
             nodeSku={c.node_sku}
             nodeCount={c.node_count}
+            terminalResourceGroup={terminalResourceGroup}
+            terminalVmName={terminalVmName}
           />
         </>
       )}

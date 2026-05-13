@@ -18,6 +18,7 @@ SUBNET_NAME = "default"
 NSG_NAME_TEMPLATE = "nsg-{vm_name}"
 PIP_NAME_TEMPLATE = "pip-{vm_name}"
 NIC_NAME_TEMPLATE = "nic-{vm_name}"
+MAX_FUNCTION_SSH_SOURCE_IPS = 64
 
 
 def _dns_label(subscription_id: str, resource_group: str, vm_name: str) -> str:
@@ -79,7 +80,11 @@ def ensure_network(
 
     LOGGER.info(
         "ensure_network vnet=%s nsg=%s pip=%s nic=%s dns=%s",
-        vnet_name, nsg_name, pip_name, nic_name, dns_label,
+        vnet_name,
+        nsg_name,
+        pip_name,
+        nic_name,
+        dns_label,
     )
 
     nsg_poller = nc.network_security_groups.begin_create_or_update(
@@ -146,7 +151,9 @@ def ensure_network(
             existing_pip.dns_settings.domain_name_label if existing_pip.dns_settings else None
         )
         if existing_label == dns_label and existing_pip.location == region:
-            LOGGER.info("ensure_network reusing existing public IP %s (label=%s)", pip_name, dns_label)
+            LOGGER.info(
+                "ensure_network reusing existing public IP %s (label=%s)", pip_name, dns_label
+            )
             pip = existing_pip
     except ResourceNotFoundError:
         pass
@@ -198,7 +205,9 @@ def create_ssh_rule(
     """Create or update an NSG rule to allow SSH from a specific IP."""
     nc = network_client(credential, subscription_id)
     nc.security_rules.begin_create_or_update(
-        resource_group, nsg_name, "AllowSSH",
+        resource_group,
+        nsg_name,
+        "AllowSSH",
         {
             "protocol": "Tcp",
             "source_port_range": "*",
@@ -210,6 +219,171 @@ def create_ssh_rule(
             "direction": "Inbound",
         },
     ).result()
+
+
+def ensure_ssh_from_function_app(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    nsg_name: str,
+) -> bool:
+    """Ensure NSG allows SSH from this Function App's outbound IPs.
+
+    Creates or updates SSH rules for Function App egress. Idempotent.
+    Returns True if at least one rule was ensured.
+    """
+    import ipaddress
+    import os
+
+    import requests as _req
+
+    nc = network_client(credential, subscription_id)
+    outbound_ip_candidates: list[str] = []
+    for env_name in ("WEBSITE_OUTBOUND_IPS", "WEBSITE_POSSIBLE_OUTBOUND_IPS"):
+        outbound_ip_candidates.extend(
+            ip.strip() for ip in os.environ.get(env_name, "").split(",") if ip.strip()
+        )
+
+    try:
+        resp = _req.get(
+            "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text",
+            headers={"Metadata": "true"},
+            timeout=2,
+        )
+        if resp.status_code == 200 and resp.text.strip():
+            outbound_ip_candidates.append(resp.text.strip())
+    except Exception as exc:
+        LOGGER.info("Could not resolve metadata public IP for Function App egress: %s", exc)
+
+    try:
+        resp = _req.get("https://api.ipify.org", timeout=3)
+        if resp.status_code == 200 and resp.text.strip():
+            outbound_ip_candidates.append(resp.text.strip())
+    except Exception as exc:
+        LOGGER.info("Could not resolve live Function App egress IP: %s", exc)
+
+    ip_list: list[str] = []
+    seen_ips: set[str] = set()
+    for ip in outbound_ip_candidates:
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            LOGGER.info("Ignoring invalid Function App outbound IP candidate: %s", ip)
+            continue
+        if address.version != 4 or not address.is_global:
+            LOGGER.info("Ignoring non-public Function App outbound IP candidate: %s", ip)
+            continue
+        normalised = str(address)
+        if normalised not in seen_ips:
+            seen_ips.add(normalised)
+            ip_list.append(normalised)
+
+    if not ip_list:
+        LOGGER.warning("Cannot determine Function App outbound IPs for SSH NSG rule")
+        return False
+
+    def existing_rule_sources(rule_name: str, destination_port: str) -> set[str]:
+        try:
+            rule = nc.security_rules.get(resource_group, nsg_name, rule_name)
+        except Exception:
+            return set()
+        if rule.destination_port_range != destination_port:
+            return set()
+        existing_sources = set(rule.source_address_prefixes or [])
+        if rule.source_address_prefix:
+            existing_sources.add(rule.source_address_prefix)
+        return {source for source in existing_sources if _is_public_ipv4(source)}
+
+    def _is_public_ipv4(source: str) -> bool:
+        try:
+            address = ipaddress.ip_address(source)
+        except ValueError:
+            return False
+        return address.version == 4 and address.is_global
+
+    def merge_sources(existing_sources: set[str]) -> list[str]:
+        merged: list[str] = []
+        for source in [*sorted(existing_sources), *ip_list]:
+            if source not in merged:
+                merged.append(source)
+        if len(merged) <= MAX_FUNCTION_SSH_SOURCE_IPS:
+            return merged
+
+        required = [source for source in ip_list if source in merged]
+        retained: list[str] = []
+        for source in required:
+            if source not in retained:
+                retained.append(source)
+        for source in reversed(merged):
+            if len(retained) >= MAX_FUNCTION_SSH_SOURCE_IPS:
+                break
+            if source not in retained:
+                retained.append(source)
+        LOGGER.warning(
+            "Trimming Function App SSH NSG sources from %d to %d entries",
+            len(merged),
+            len(retained),
+        )
+        return sorted(retained)
+
+    ensured = False
+    try:
+        existing_port22_sources = existing_rule_sources("AllowSSH-FunctionApp", "22")
+        desired_port22_sources = merge_sources(existing_port22_sources)
+        if (
+            not set(ip_list).issubset(existing_port22_sources)
+            or len(existing_port22_sources) > MAX_FUNCTION_SSH_SOURCE_IPS
+        ):
+            nc.security_rules.begin_create_or_update(
+                resource_group,
+                nsg_name,
+                "AllowSSH-FunctionApp",
+                {
+                    "protocol": "Tcp",
+                    "source_port_range": "*",
+                    "destination_port_range": "22",
+                    "source_address_prefixes": desired_port22_sources,
+                    "destination_address_prefix": "*",
+                    "access": "Allow",
+                    "priority": 110,
+                    "direction": "Inbound",
+                },
+            ).result()
+            LOGGER.info(
+                "Ensured AllowSSH-FunctionApp NSG rule with %d IPs on port 22",
+                len(desired_port22_sources),
+            )
+        ensured = True
+
+        existing_port443_sources = existing_rule_sources("AllowSSH443-FunctionApp", "443")
+        desired_port443_sources = merge_sources(existing_port443_sources)
+        if (
+            not set(ip_list).issubset(existing_port443_sources)
+            or len(existing_port443_sources) > MAX_FUNCTION_SSH_SOURCE_IPS
+        ):
+            nc.security_rules.begin_create_or_update(
+                resource_group,
+                nsg_name,
+                "AllowSSH443-FunctionApp",
+                {
+                    "protocol": "Tcp",
+                    "source_port_range": "*",
+                    "destination_port_range": "443",
+                    "source_address_prefixes": desired_port443_sources,
+                    "destination_address_prefix": "*",
+                    "access": "Allow",
+                    "priority": 111,
+                    "direction": "Inbound",
+                },
+            ).result()
+            LOGGER.info(
+                "Ensured AllowSSH443-FunctionApp NSG rule with %d IPs", len(desired_port443_sources)
+            )
+        ensured = True
+        return ensured
+    except Exception as exc:
+        LOGGER.warning("Failed to create SSH NSG rule: %s", exc)
+        return ensured
 
 
 def delete_resource(

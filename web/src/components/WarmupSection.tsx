@@ -39,6 +39,8 @@ interface Props {
   region?: string;
   nodeSku?: string | null;
   nodeCount?: number | null;
+  terminalResourceGroup?: string;
+  terminalVmName?: string;
 }
 
 export function WarmupSection({
@@ -54,6 +56,8 @@ export function WarmupSection({
   region,
   nodeSku,
   nodeCount,
+  terminalResourceGroup,
+  terminalVmName,
 }: Props) {
   const [selectedDb, setSelectedDb] = useState("");
   const [warmupInstanceId, setWarmupInstanceId] = useState<string | null>(() => {
@@ -140,6 +144,8 @@ export function WarmupSection({
         num_nodes: nodeCount || undefined,
         acr_resource_group: acrResourceGroup,
         acr_name: acrName,
+        terminal_resource_group: terminalResourceGroup,
+        terminal_vm_name: terminalVmName,
       });
       setWarmupInstanceId(resp.instance_id);
       try {
@@ -292,19 +298,17 @@ export function WarmupSection({
           )}
           <div>
             <strong>Warmup {orchDb ? `(${orchDb})` : ""}</strong>:{" "}
-            {orchPhase === "checking_vm"
-              ? "Checking VM..."
-              : orchPhase === "enabling_storage"
-                ? "Enabling storage access..."
-                : orchPhase === "configuring"
-                  ? "Generating config..."
-                  : orchPhase === "warming_up"
-                    ? "Loading DB to nodes..."
-                    : orchPhase === "completed"
-                      ? "Completed"
-                      : orchPhase === "failed"
-                        ? `Failed: ${orchQuery.data?.output?.error?.slice(0, 100) ?? "unknown"}`
-                        : orchPhase ?? orchQuery.data.runtime_status}
+            {orchPhase === "enabling_storage"
+              ? "Enabling storage access..."
+              : orchPhase === "configuring"
+                ? "Preparing..."
+                : orchPhase === "warming_up"
+                  ? `Loading DB to nodes... (${(orchQuery.data?.custom_status?.steps?.warming_up as Record<string, number> | undefined)?.ready ?? 0}/${(orchQuery.data?.custom_status?.steps?.warming_up as Record<string, number> | undefined)?.total ?? "?"})`
+                  : orchPhase === "completed"
+                    ? "Completed"
+                    : orchPhase === "failed"
+                      ? `Failed: ${orchQuery.data?.output?.error?.slice(0, 100) ?? "unknown"}`
+                      : orchPhase ?? orchQuery.data.runtime_status}
           </div>
         </div>
       )}

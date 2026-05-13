@@ -201,6 +201,11 @@ def ensure_vm_running_activity(payload: dict) -> dict:
 
 
 @app.activity_trigger(input_name="payload")
+def ensure_ssh_nsg_activity(payload: dict) -> dict:
+    return terminal_activities.activity_ensure_ssh_nsg(payload)
+
+
+@app.activity_trigger(input_name="payload")
 def generate_blast_config_activity(payload: dict) -> dict:
     return blast_activities.activity_generate_blast_config(payload)
 
@@ -208,6 +213,16 @@ def generate_blast_config_activity(payload: dict) -> dict:
 @app.activity_trigger(input_name="payload")
 def run_elastic_blast_submit_activity(payload: dict) -> dict:
     return blast_activities.activity_run_elastic_blast_submit(payload)
+
+
+@app.activity_trigger(input_name="payload")
+def start_elastic_blast_submit_activity(payload: dict) -> dict:
+    return blast_activities.activity_start_elastic_blast_submit(payload)
+
+
+@app.activity_trigger(input_name="payload")
+def check_elastic_blast_submit_activity(payload: dict) -> dict:
+    return blast_activities.activity_check_elastic_blast_submit(payload)
 
 
 @app.activity_trigger(input_name="payload")
@@ -248,6 +263,16 @@ def k8s_check_blast_status_activity(payload: dict) -> dict:
 @app.activity_trigger(input_name="payload")
 def k8s_check_warmup_ready_activity(payload: dict) -> dict:
     return blast_activities.activity_k8s_check_warmup_ready(payload)
+
+
+@app.activity_trigger(input_name="payload")
+def k8s_warmup_db_activity(payload: dict) -> dict:
+    return blast_activities.activity_k8s_warmup_db(payload)
+
+
+@app.activity_trigger(input_name="payload")
+def k8s_check_warmup_db_activity(payload: dict) -> dict:
+    return blast_activities.activity_k8s_check_warmup_db(payload)
 
 
 @app.activity_trigger(input_name="payload")
@@ -332,19 +357,19 @@ def assign_aks_roles_activity(payload: dict) -> dict:
             f"/subscriptions/{sub}/resourceGroups/{acr_rg}/providers/"
             f"Microsoft.ContainerRegistry/registries/{acr_name}"
         )
-        _aks_routes._assign_role(
+        if _aks_routes._assign_role(
             auth_client, scope, kubelet_oid, "7f951dda-4ed3-4680-a7ca-43fe172d538d"
-        )
-        assigned.append("AcrPull")
+        ):
+            assigned.append("AcrPull")
     if storage_rg and storage_account:
         scope = (
             f"/subscriptions/{sub}/resourceGroups/{storage_rg}/providers/"
             f"Microsoft.Storage/storageAccounts/{storage_account}"
         )
-        _aks_routes._assign_role(
+        if _aks_routes._assign_role(
             auth_client, scope, kubelet_oid, "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
-        )
-        assigned.append("StorageBlobDataContributor")
+        ):
+            assigned.append("StorageBlobDataContributor")
 
     return {"kubelet_oid": kubelet_oid, "roles_assigned": assigned}
 
@@ -407,6 +432,18 @@ def setup_workload_identity_activity(payload: dict) -> dict:
     from azure.mgmt.authorization import AuthorizationManagementClient
 
     auth_client = AuthorizationManagementClient(cred, sub)
+    roles_assigned: list[str] = []
+    roles_failed: list[str] = []
+
+    def _record_role(scope: str, role_id: str, label: str) -> None:
+        if _aks_routes._assign_role(auth_client, scope, mi_principal_id, role_id):
+            roles_assigned.append(label)
+        else:
+            roles_failed.append(label)
+
+    # Contributor on workload RG (elastic-blast submit creates/reads AKS resources)
+    workload_scope = f"/subscriptions/{sub}/resourceGroups/{rg}"
+    _record_role(workload_scope, "b24988ac-6180-42a0-ab88-20f7382dd24c", "Contributor")
 
     # Storage Blob Data Contributor on workload RG (for azcopy/blob access)
     storage_account = payload.get("storage_account", "")
@@ -416,18 +453,14 @@ def setup_workload_identity_activity(payload: dict) -> dict:
             f"/subscriptions/{sub}/resourceGroups/{storage_rg}/providers/"
             f"Microsoft.Storage/storageAccounts/{storage_account}"
         )
-        _aks_routes._assign_role(
-            auth_client, scope, mi_principal_id, "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
-        )
+        _record_role(scope, "ba92f5b4-2d11-453d-a403-e96b0029c9fe", "StorageBlobDataContributor")
 
     # Azure Kubernetes Service Cluster User Role on the cluster (for kubectl)
     cluster_scope = (
         f"/subscriptions/{sub}/resourceGroups/{rg}/providers/"
         f"Microsoft.ContainerService/managedClusters/{cluster_name}"
     )
-    _aks_routes._assign_role(
-        auth_client, cluster_scope, mi_principal_id, "4abbcc35-e782-43d8-92c5-2d3f1bd2253f"
-    )
+    _record_role(cluster_scope, "4abbcc35-e782-43d8-92c5-2d3f1bd2253f", "AzureKubernetesServiceClusterUserRole")
 
     return {
         "mi_name": mi_name,
@@ -435,6 +468,8 @@ def setup_workload_identity_activity(payload: dict) -> dict:
         "mi_principal_id": mi_principal_id,
         "oidc_issuer": oidc_url,
         "federated_credential": fed_cred_name,
+        "roles_assigned": roles_assigned,
+        "roles_failed": roles_failed,
     }
 
 
@@ -466,6 +501,19 @@ def deploy_openapi_activity(payload: dict) -> dict:
     image = (
         f"{acr_name}.azurecr.io/elb-openapi:{image_tag}" if acr_name else f"elb-openapi:{image_tag}"
     )
+
+    # Fail loudly if Workload Identity setup did not produce an MI client id.
+    # Deploying with an empty AZURE_CLIENT_ID silently breaks the pod: azcopy
+    # falls back to anonymous auth and every Mode B job submit fails with
+    # "Auto-login failed". Surfacing this here makes the orchestrator status
+    # show the real problem instead of "succeeded" with broken downstream.
+    if not mi_client_id:
+        raise RuntimeError(
+            "Workload Identity setup did not return an MI client id — refusing "
+            "to deploy elb-openapi with an empty AZURE_CLIENT_ID. Re-run the "
+            "AKS provision flow or invoke 'POST /api/aks/deploy-openapi' once "
+            "the MI is in place."
+        )
 
     aks_client = ContainerServiceClient(cred, sub)
 
@@ -514,8 +562,15 @@ def deploy_openapi_activity(payload: dict) -> dict:
                             {"name": "ELB_STORAGE_ACCOUNT", "value": storage_account},
                             {"name": "ELB_RESOURCE_GROUP", "value": rg},
                             {"name": "ELB_AZURE_REGION", "value": payload.get("region", "koreacentral")},
+                            {"name": "PATH", "value": "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
                             {"name": "AZURE_CLIENT_ID", "value": mi_client_id},
-                            {"name": "AZCOPY_AUTO_LOGIN_TYPE", "value": "AZCLI"},
+                            # WORKLOAD mode tells azcopy to read the AKS-injected
+                            # federated token directly (AZURE_CLIENT_ID + token
+                            # file). AZCLI mode would require an active `az login`
+                            # session AND a subscription role on the MI; the WI
+                            # MI typically only has data-plane RBAC, so AZCLI
+                            # auth fails with "No subscriptions found".
+                            {"name": "AZCOPY_AUTO_LOGIN_TYPE", "value": "WORKLOAD"},
                             {"name": "AZCOPY_TENANT_ID", "value": payload.get("tenant_id", "")},
                         ],
                         "resources": {
