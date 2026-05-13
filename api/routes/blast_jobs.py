@@ -918,7 +918,7 @@ def list_blast_databases(req: func.HttpRequest) -> func.HttpResponse:
     cred = credential_for_caller(identity.raw_token)
 
     try:
-        # Check public network access state first
+        # Check public network access state — if disabled, temporarily enable
         from azure.mgmt.storage import StorageManagementClient as _StorageMgmt
 
         storage_mgmt = _StorageMgmt(cred, params["subscription_id"])
@@ -927,22 +927,38 @@ def list_blast_databases(req: func.HttpRequest) -> func.HttpResponse:
             params["storage_account"],
         )
         public_access = getattr(acct, "public_network_access", "Enabled")
+        toggled = False
 
         if public_access != "Enabled":
-            return _json_response(
-                {
-                    "databases": [],
-                    "public_access_disabled": True,
-                    "message": "Storage public network access is disabled. "
-                    "Enable it temporarily to scan for databases.",
-                }
-            )
+            try:
+                _toggle_public_access(
+                    cred, params["subscription_id"], params["resource_group"],
+                    params["storage_account"], enabled=True,
+                )
+                toggled = True
+            except Exception:
+                return _json_response(
+                    {
+                        "databases": [],
+                        "public_access_disabled": True,
+                        "message": "Storage public network access is disabled and could not be enabled automatically.",
+                    }
+                )
 
-        # Try Data Plane access
-        dbs = storage_data_svc.list_databases(
-            cred,
-            params["storage_account"],
-        )
+        try:
+            dbs = storage_data_svc.list_databases(
+                cred,
+                params["storage_account"],
+            )
+        finally:
+            if toggled:
+                try:
+                    _toggle_public_access(
+                        cred, params["subscription_id"], params["resource_group"],
+                        params["storage_account"], enabled=False,
+                    )
+                except Exception:
+                    LOGGER.warning("Could not re-disable public access on %s after listing databases", params["storage_account"])
     except Exception as exc:
         msg = str(exc)
         if "AuthorizationFailure" in msg or "AuthorizationPermissionMismatch" in msg:
