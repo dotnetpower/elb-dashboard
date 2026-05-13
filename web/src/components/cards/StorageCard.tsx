@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -221,6 +221,13 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
 
   // --- Public access toggle ---
   const [showConfirmEnable, setShowConfirmEnable] = useState(false);
+  const [keepAlive, setKeepAlive] = useState(() => {
+    try {
+      return localStorage.getItem("elb-storage-keep-alive") === "1";
+    } catch {
+      return false;
+    }
+  });
   const [toggleMsg, setToggleMsg] = useState<{ type: "ok" | "err"; text: string } | null>(
     null,
   );
@@ -261,6 +268,43 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
     const t = setTimeout(() => setToggleMsg(null), 5000);
     return () => clearTimeout(t);
   }, [toggleMsg]);
+
+  // Keep-alive: when enabled, check every 30s and re-enable if tenant policy disabled it
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  const toggleRef = useRef(toggle);
+  toggleRef.current = toggle;
+
+  useEffect(() => {
+    if (!keepAlive || !enabled) return;
+    const check = () => {
+      queryRef.current.refetch().then(() => {
+        const cur = queryRef.current.data?.public_network_access;
+        if (cur && cur !== "Enabled" && !toggleRef.current.isPending) {
+          toggleRef.current.mutate(true);
+        }
+      });
+    };
+    check(); // immediate
+    const interval = setInterval(check, 30_000);
+    return () => clearInterval(interval);
+  }, [keepAlive, enabled]);
+
+  const handleKeepAliveToggle = () => {
+    const next = !keepAlive;
+    setKeepAlive(next);
+    try {
+      localStorage.setItem("elb-storage-keep-alive", next ? "1" : "0");
+    } catch {
+      /* noop */
+    }
+    if (next) {
+      const cur = queryRef.current.data?.public_network_access;
+      if (cur && cur !== "Enabled" && !toggleRef.current.isPending) {
+        toggleRef.current.mutate(true);
+      }
+    }
+  };
 
   // --- Prepare DB (state moved to BlastDbSection, but we track 'downloading' here for shimmer) ---
   const [dbDownloading, setDbDownloading] = useState<string | null>(null);
@@ -311,6 +355,20 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
             >
               {isPublic ? <Lock size={10} /> : <Globe size={10} />}
               {isPublic ? "Lock" : "Unlock"}
+            </button>
+            {/* Keep-alive toggle */}
+            <button
+              className={`glass-button ${keepAlive ? "glass-button--primary" : ""}`}
+              onClick={handleKeepAliveToggle}
+              style={{ fontSize: 10, padding: "3px 8px" }}
+              title={
+                keepAlive
+                  ? "Auto-keep-enabled is ON — public access will be re-enabled if a tenant policy disables it"
+                  : "Enable auto-keep — automatically re-enables public access every 30s if it gets disabled"
+              }
+            >
+              <RefreshCw size={10} />
+              {keepAlive ? "Auto ✓" : "Auto"}
             </button>
           </div>
         )
