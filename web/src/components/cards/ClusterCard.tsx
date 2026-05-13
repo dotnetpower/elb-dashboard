@@ -377,8 +377,8 @@ export function ClusterCard({
                 border: "1px solid var(--border-medium)",
                 borderRadius: 16,
                 boxShadow: "0 8px 48px rgba(0,0,0,0.5)",
-                width: 520,
-                maxHeight: "85vh",
+                width: "min(760px, calc(100vw - 32px))",
+                maxHeight: "90vh",
                 overflow: "auto",
               }}
             >

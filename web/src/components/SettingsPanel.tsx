@@ -50,7 +50,8 @@ export function SettingsPanel({ open, config, onClose, onRerunWizard }: Props) {
         aria-label="Resource Settings"
         ref={trapRef}
         style={{
-          position: "fixed", top: 0, right: 0, bottom: 0, width: 360,
+          position: "fixed", top: 0, right: 0, bottom: 0,
+          width: "min(520px, calc(100vw - 24px))",
           background: "var(--bg-primary)", borderLeft: "1px solid var(--border-medium)",
           boxShadow: "-8px 0 32px rgba(0,0,0,0.4)", zIndex: 60,
           display: "flex", flexDirection: "column",

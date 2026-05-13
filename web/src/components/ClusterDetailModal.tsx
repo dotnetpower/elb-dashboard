@@ -333,9 +333,9 @@ export function ClusterDetails({
               className="glass-card glass-card--strong glass-dialog"
               onClick={(e) => e.stopPropagation()}
               style={{
-                maxWidth: 780,
-                width: "94vw",
-                maxHeight: "88vh",
+                maxWidth: 1180,
+                width: "calc(100vw - 48px)",
+                maxHeight: "92vh",
                 display: "flex",
                 flexDirection: "column",
                 padding: 0,

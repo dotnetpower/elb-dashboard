@@ -834,9 +834,9 @@ function K8sPodsSection({
               className="glass-card glass-card--strong glass-dialog"
               onClick={(e) => e.stopPropagation()}
               style={{
-                maxWidth: 820,
-                width: "94vw",
-                maxHeight: "85vh",
+                maxWidth: 1100,
+                width: "calc(100vw - 48px)",
+                maxHeight: "90vh",
                 display: "flex",
                 flexDirection: "column",
                 padding: 0,

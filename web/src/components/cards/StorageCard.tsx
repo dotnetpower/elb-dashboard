@@ -985,9 +985,9 @@ function BlastDbSection({
               className="glass-card glass-card--strong glass-dialog"
               onClick={(e) => e.stopPropagation()}
               style={{
-                maxWidth: 640,
-                width: "90vw",
-                maxHeight: "80vh",
+                maxWidth: 900,
+                width: "calc(100vw - 48px)",
+                maxHeight: "86vh",
                 display: "flex",
                 flexDirection: "column",
               }}

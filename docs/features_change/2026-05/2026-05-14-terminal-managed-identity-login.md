@@ -18,9 +18,11 @@ Remote Terminal shells now use the VM Managed Identity by default. New VMs confi
 
 ## Validation evidence
 
-Pending final validation in this change set:
-
-- Backend lint and focused syntax checks.
-- Frontend production build.
-- Current production terminal VM bootstrap helper installation and `az account show` via Managed Identity.
-- Production API/web deployment if validation passes.
+- `ruff check api/routes/terminal.py` passed.
+- `python -m py_compile api/activities/blast.py api/routes/terminal.py` passed.
+- `npm run build` passed.
+- Current production terminal VM was patched with `elb-az-login-mi`; `az account show` as `azureuser` returned `user: systemAssignedIdentity`.
+- Deployed production API package `funcapp-202605140128.zip`; `/api/health` returned HTTP 200 after restart.
+- Deployed the production Static Web App with `azd deploy web --no-prompt`.
+- SWA-origin terminal health validation returned HTTP 200 with `az_login_active: true` and `az_login_user: systemAssignedIdentity`.
+- Production `/terminal` page renders Managed Identity guidance instead of device-code login instructions.

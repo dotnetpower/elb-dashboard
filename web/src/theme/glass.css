@@ -913,11 +913,12 @@ textarea.form-input {
   background: rgba(0, 0, 0, 0.5);
   display: grid;
   place-items: center;
+  padding: 16px;
   z-index: 1000;
 }
 
 .glass-dialog {
-  width: min(400px, 90vw);
+  width: min(520px, calc(100vw - 32px));
   text-align: center;
 }
 
