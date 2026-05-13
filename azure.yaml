@@ -4,6 +4,9 @@ metadata:
   template: elastic-blast-azure-functionapp@0.1.0
 
 services:
+  # Backend: `azd deploy api` does NOT work for this Function App because it
+  # omits .python_packages from the zip. Use `./scripts/dev/deploy-api.sh` instead.
+  # For web-only changes, `azd deploy web --no-prompt` works fine.
   api:
     project: ./api
     language: python
