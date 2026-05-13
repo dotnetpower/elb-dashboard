@@ -156,6 +156,52 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
     return _submit_via_vm(cred, payload, job_id, config_b64)
 
 
+def _build_submit_args(config_b64: str, job_id: str) -> str:
+    """Compose the bash one-liner that runs `elastic-blast submit` inside a pod.
+
+    Hardened against the failure modes we hit in production:
+    * Workload Identity federated token race on first scheduling — retry az
+      login 5×5s.
+    * elastic-blast lives in /usr/local/lib (system python) but azure.mgmt.*
+      lives in /opt/venv. PYTHONPATH bridges the two.
+    * Print EXIT_CODE marker so the polling activity can parse it from logs.
+    """
+    return (
+        f'set -o pipefail; '
+        f'printf "%s" "{config_b64}" | base64 -d > /tmp/elb-{job_id}.ini && '
+        f'export PATH=/opt/venv/bin:$PATH && '
+        f'AZ_OK=0; for i in 1 2 3 4 5; do '
+        f'  if az login --service-principal -u "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID" --federated-token "$(cat \"$AZURE_FEDERATED_TOKEN_FILE\")" -o none; then '
+        f'    AZ_OK=1; break; '
+        f'  fi; echo "az login attempt $i failed — sleeping 5s"; sleep 5; '
+        f'done; '
+        f'if [ "$AZ_OK" -ne 1 ]; then echo "az login failed after 5 attempts"; exit 2; fi; '
+        f'export PYTHONPATH=/opt/venv/lib/python3.11/site-packages; '
+        f'/usr/local/bin/elastic-blast submit --cfg /tmp/elb-{job_id}.ini 2>&1; '
+        f'echo EXIT_CODE=$?'
+    )
+
+
+def _cleanup_stale_blast_jobs(session, server: str) -> None:
+    """Best-effort: delete leftover blast/submit/setup/finalizer Jobs in default ns.
+
+    elastic-blast's reuse-mode cleanup only runs when its `_db_already_loaded()`
+    check passes. If a previous submit failed mid-flight (e.g. YAML parse
+    error, OOM, network blip) the BLAST/setup/finalizer Jobs survive but the
+    DB-loaded marker may not exist, so the next submit hits
+    `field is immutable` on the Job names. Force-clean as a safety net.
+    """
+    for label in ("app=blast", "app=submit", "app=setup", "app=finalizer"):
+        try:
+            session.delete(
+                f"{server}/apis/batch/v1/namespaces/default/jobs",
+                params={"labelSelector": label, "propagationPolicy": "Background"},
+                timeout=15,
+            )
+        except Exception as exc:
+            LOGGER.debug("stale-job cleanup label=%s: %s", label, exc)
+
+
 def activity_start_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]:
     """side-effect: starts elastic-blast submit and returns immediately when possible."""
     cred = credential_for_caller(payload.get("user_assertion"))
@@ -280,13 +326,23 @@ def _start_submit_via_k8s_job(
             timeout=10,
         )
 
+        # Pre-clean stale BLAST/submit jobs left from a previous incomplete
+        # submit on this reused cluster. Without this, kubectl apply hits
+        # `field is immutable` because the same Job names already exist.
+        _cleanup_stale_blast_jobs(session, server)
+
         elb_image = pods[0]["spec"]["containers"][0]["image"]
         sa_name = pods[0]["spec"].get("serviceAccountName", "default")
+        # Copy Workload Identity + ELB context env vars from the running pod.
+        # Without ELB_AZURE_REGION / ELB_RESOURCE_GROUP / ELB_STORAGE_ACCOUNT
+        # the elastic-blast CLI falls back to discovery code that fails inside
+        # the submit pod (no IMDS for pod identity).
         pod_env: dict[str, str] = {}
         for container in pods[0]["spec"].get("containers", []):
             for env in container.get("env", []):
-                if env.get("name", "").startswith(("AZURE_", "AZCOPY_")):
-                    pod_env[env["name"]] = env.get("value", "")
+                name = env.get("name", "")
+                if name.startswith(("AZURE_", "AZCOPY_", "ELB_")):
+                    pod_env[name] = env.get("value", "")
 
         submit_env = [
             {"name": "ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD", "value": "1"},
@@ -315,14 +371,7 @@ def _start_submit_via_k8s_job(
                             "name": "submit",
                             "image": elb_image,
                             "command": ["bash", "-c"],
-                            "args": [
-                                f'printf "%s" "{config_b64}" | base64 -d > /tmp/elb-{job_id}.ini && '
-                                f'export PATH=/opt/venv/bin:$PATH && '
-                                f'az login --service-principal -u "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID" --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" -o none && '
-                                f'export PYTHONPATH=$(/opt/venv/bin/python3 -c "import site; print(site.getsitepackages()[0])") && '
-                                f'/usr/local/bin/elastic-blast submit --cfg /tmp/elb-{job_id}.ini 2>&1; '
-                                f'echo EXIT_CODE=$?'
-                            ],
+                            "args": [_build_submit_args(config_b64, job_id)],
                             "env": submit_env,
                             "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}},
                         }],
@@ -434,6 +483,11 @@ def _submit_via_k8s_exec(
             timeout=10,
         )
 
+        # Pre-clean stale BLAST/submit/setup/finalizer Jobs from earlier failed
+        # submits on this reused cluster. Without this, kubectl apply hits
+        # `field is immutable` because the same Job names already exist.
+        _cleanup_stale_blast_jobs(session, server)
+
         # Get the elb-openapi image and auth config from the running pod
         elb_image = pods[0]["spec"]["containers"][0]["image"]
         sa_name = pods[0]["spec"].get("serviceAccountName", "default")
@@ -476,25 +530,7 @@ def _submit_via_k8s_exec(
                             "name": "submit",
                             "image": elb_image,
                             "command": ["bash", "-c"],
-                            "args": [
-                                f'set -o pipefail; '
-                                f'printf "%s" "{config_b64}" | base64 -d > /tmp/elb-{job_id}.ini && '
-                                f'export PATH=/opt/venv/bin:$PATH && '
-                                # Workload Identity → az login. Retry to ride
-                                # out federated token race on first scheduling.
-                                f'AZ_OK=0; for i in 1 2 3 4 5; do '
-                                f'  if az login --service-principal -u "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID" --federated-token "$(cat \"$AZURE_FEDERATED_TOKEN_FILE\")" -o none; then '
-                                f'    AZ_OK=1; break; '
-                                f'  fi; echo "az login attempt $i failed — sleeping 5s"; sleep 5; '
-                                f'done; '
-                                f'if [ "$AZ_OK" -ne 1 ]; then echo "az login failed after 5 attempts"; exit 2; fi; '
-                                # elastic-blast lives in system python (/usr/local/lib),
-                                # but azure.mgmt.* lives in /opt/venv. Add venv site-packages
-                                # to PYTHONPATH so the system python can import both.
-                                f'export PYTHONPATH=/opt/venv/lib/python3.11/site-packages; '
-                                f'/usr/local/bin/elastic-blast submit --cfg /tmp/elb-{job_id}.ini 2>&1; '
-                                f'echo EXIT_CODE=$?'
-                            ],
+                            "args": [_build_submit_args(config_b64, job_id)],
                             "env": submit_env,
                             "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}},
                         }],

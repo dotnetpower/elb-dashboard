@@ -87,7 +87,15 @@ def generate_config(params: dict[str, Any]) -> str:
         options_parts.append(f"-max_target_seqs {max_target_seqs}")
     outfmt = params.get("outfmt")
     if outfmt is not None:
-        options_parts.append(f"-outfmt {outfmt}")
+        # outfmt is rendered into the generated K8s Job YAML by elastic-blast.
+        # Quotes / shell metas inside the value break that YAML (kubectl apply
+        # → "did not find expected key"). Reject them at the boundary so the
+        # error surfaces here, not 60 s later in the cluster.
+        outfmt_str = str(outfmt).strip()
+        import re as _re_outfmt
+        if _re_outfmt.search(r'["\'`;&|$(){}\\\n\r]', outfmt_str):
+            raise ValueError(f"outfmt contains forbidden characters: {outfmt_str[:50]}")
+        options_parts.append(f"-outfmt {outfmt_str}")
     word_size = params.get("word_size")
     if word_size is not None:
         options_parts.append(f"-word_size {word_size}")
