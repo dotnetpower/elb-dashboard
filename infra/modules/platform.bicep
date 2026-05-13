@@ -24,7 +24,44 @@ param principalId string
 param tags object
 
 // ----------------------------------------------------------------------------
+// Virtual Network — Function App outbound + Storage Service Endpoint
+// ----------------------------------------------------------------------------
+resource vnet 'Microsoft.Network/virtualNetworks@2024-05-01' = {
+  name: 'vnet-${environmentName}-${resourceToken}'
+  location: location
+  tags: tags
+  properties: {
+    addressSpace: {
+      addressPrefixes: ['10.0.0.0/16']
+    }
+    subnets: [
+      {
+        name: 'snet-func'
+        properties: {
+          addressPrefix: '10.0.1.0/24'
+          delegations: [
+            {
+              name: 'delegation-func'
+              properties: {
+                serviceName: 'Microsoft.Web/serverFarms'
+              }
+            }
+          ]
+          serviceEndpoints: [
+            {
+              service: 'Microsoft.Storage'
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+
+// ----------------------------------------------------------------------------
 // Storage Account (required by Azure Functions runtime + Durable Functions)
+// Allows traffic from the Function App subnet via Service Endpoint, plus
+// AzureServices bypass for Durable Functions task-hub and diagnostics.
 // ----------------------------------------------------------------------------
 resource functionStorage 'Microsoft.Storage/storageAccounts@2024-01-01' = {
   name: 'stelb${resourceToken}'
@@ -40,8 +77,14 @@ resource functionStorage 'Microsoft.Storage/storageAccounts@2024-01-01' = {
     publicNetworkAccess: 'Enabled'
     supportsHttpsTrafficOnly: true
     networkAcls: {
-      defaultAction: 'Allow'
+      defaultAction: 'Deny'
       bypass: 'AzureServices'
+      virtualNetworkRules: [
+        {
+          id: vnet.properties.subnets[0].id
+          action: 'Allow'
+        }
+      ]
     }
   }
 }
@@ -127,6 +170,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   properties: {
     serverFarmId: hostingPlan.id
     httpsOnly: true
+    virtualNetworkSubnetId: vnet.properties.subnets[0].id
     siteConfig: {
       linuxFxVersion: 'Python|3.11'
       ftpsState: 'Disabled'
@@ -180,6 +224,10 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         }
         {
           name: 'PYTHON_ENABLE_WORKER_EXTENSIONS'
+          value: '1'
+        }
+        {
+          name: 'WEBSITE_VNET_ROUTE_ALL'
           value: '1'
         }
         {
@@ -298,6 +346,7 @@ resource userKvRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!
 // ----------------------------------------------------------------------------
 // Outputs
 // ----------------------------------------------------------------------------
+
 output functionAppName string = functionApp.name
 output functionAppHostname string = functionApp.properties.defaultHostName
 output staticWebAppName string = staticWebApp.name
@@ -306,3 +355,5 @@ output keyVaultName string = keyVault.name
 output keyVaultUri string = keyVault.properties.vaultUri
 output storageAccountName string = functionStorage.name
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
+output vnetName string = vnet.name
+output funcSubnetId string = vnet.properties.subnets[0].id
