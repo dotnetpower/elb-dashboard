@@ -12,6 +12,7 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from _http_utils import (
+    _RE_DB_NAME,
     _RE_STORAGE_ACCOUNT,
     _error_response,
     _json_response,
@@ -21,10 +22,15 @@ from _http_utils import (
     _validate_sub,
 )
 from auth.token import AuthError, validate_bearer_token
+from models.blast import BlastSubmitRequest
+from services import compute as compute_svc
+from services import keyvault as kv_svc
 from services import storage_data as storage_data_svc
 from services.azure_clients import credential_for_caller
 from services.sanitise import sanitise
 from services.blast_config import AZURE_VM_HOURLY_USD as _AZURE_VM_HOURLY_USD
+from services.blast_config import PD_GB_MONTH_USD as _PD_GB_MONTH_USD
+from services.blast_config import STORAGE_GB_MONTH_USD as _STORAGE_GB_MONTH_USD
 
 LOGGER = logging.getLogger(__name__)
 

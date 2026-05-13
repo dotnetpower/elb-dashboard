@@ -13,6 +13,7 @@ import azure.functions as func
 
 from _http_utils import (
     _RE_BLOB_NAME,
+    _RE_DB_NAME,
     _RE_STORAGE_ACCOUNT,
     _error_response,
     _json_response,
@@ -22,6 +23,8 @@ from _http_utils import (
     _validate_sub,
 )
 from auth.token import AuthError, validate_bearer_token
+from services import compute as compute_svc
+from services import keyvault as kv_svc
 from services import storage_data as storage_data_svc
 from services.azure_clients import credential_for_caller
 from services.sanitise import sanitise
