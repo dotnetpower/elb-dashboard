@@ -241,7 +241,7 @@ button {
 
 /* #30 Card body min height */
 .panel-bd {
-  padding: 14px;
+  padding: 14px 14px 22px;
   min-height: 120px;
 }
 
