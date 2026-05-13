@@ -150,7 +150,7 @@ export function DatabaseBuilder() {
   const readyCount = readiness.filter((r) => r.ok).length;
   const allReady = readyCount === readiness.length && !buildMutation.isPending;
   const successPath = buildMutation.data
-    ? `blast-db/${buildMutation.data.db_name}/${buildMutation.data.db_name}`
+    ? `blast-db/custom_db/${buildMutation.data.db_name}/${buildMutation.data.db_name}`
     : "";
 
   const handleCopyPath = () => {
@@ -681,9 +681,13 @@ export function DatabaseBuilder() {
                     </td>
                     <td>
                       <span
-                        className={`badge badge--${db.source_version ? "info" : "muted"}`}
+                        className={`badge badge--${db.source === "custom" ? "warning" : db.source_version ? "info" : "muted"}`}
                       >
-                        {db.source_version ?? "custom"}
+                        {db.source === "custom"
+                          ? "Custom"
+                          : db.source_version
+                            ? `NCBI ${db.source_version}`
+                            : "NCBI"}
                       </span>
                     </td>
                   </tr>

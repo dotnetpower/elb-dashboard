@@ -486,6 +486,8 @@ export interface BlastResultFile {
 export interface BlastDatabase {
   name: string;
   container: string;
+  prefix?: string;
+  source?: string;
   file_count?: number;
   total_bytes?: number;
   last_modified?: string;
