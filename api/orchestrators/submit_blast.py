@@ -398,6 +398,24 @@ def submit_blast_orchestrator(
             context.set_custom_status({"phase": "submitting", "job_id": job_id, "steps": steps})
 
         if not submit_result.get("done"):
+            # Submit poll loop ran out of attempts. Tear down the helper Job
+            # so it doesn't sit around as "stale" and trip up the next submit.
+            timed_out_job = submit_result.get("submit_job_name") or steps["submitting"].get("submit_job_name")
+            if timed_out_job and aks_cluster:
+                try:
+                    cancel = yield context.call_activity(
+                        "cancel_elastic_blast_submit_activity",
+                        {
+                            "subscription_id": request["subscription_id"],
+                            "resource_group": request["resource_group"],
+                            "aks_cluster_name": aks_cluster,
+                            "submit_job_name": timed_out_job,
+                            "user_assertion": request.get("user_assertion"),
+                        },
+                    )
+                    LOGGER.info("submit timeout cleanup: %s", cancel)
+                except Exception as exc:
+                    LOGGER.warning("submit timeout cleanup failed: %s", exc)
             submit_result = {
                 **submit_result,
                 "done": True,
@@ -444,6 +462,7 @@ def submit_blast_orchestrator(
                         "resource_group": request["resource_group"],
                         "cluster_name": aks_cluster,
                         "namespace": elb_namespace,
+                        "job_id": job_id,
                         "user_assertion": request.get("user_assertion"),
                     }
                     check = yield context.call_activity("k8s_check_blast_status_activity", k8s_payload)

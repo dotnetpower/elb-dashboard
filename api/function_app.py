@@ -226,6 +226,11 @@ def check_elastic_blast_submit_activity(payload: dict) -> dict:
 
 
 @app.activity_trigger(input_name="payload")
+def cancel_elastic_blast_submit_activity(payload: dict) -> dict:
+    return blast_activities.activity_cancel_elastic_blast_submit(payload)
+
+
+@app.activity_trigger(input_name="payload")
 def run_elastic_blast_prepare_activity(payload: dict) -> dict:
     return blast_activities.activity_run_elastic_blast_prepare(payload)
 

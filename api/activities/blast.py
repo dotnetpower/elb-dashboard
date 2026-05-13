@@ -182,24 +182,56 @@ def _build_submit_args(config_b64: str, job_id: str) -> str:
     )
 
 
-def _cleanup_stale_blast_jobs(session, server: str) -> None:
-    """Best-effort: delete leftover blast/submit/setup/finalizer Jobs in default ns.
+def _cleanup_stale_blast_jobs(session, server: str, *, max_age_seconds: int = 1800) -> None:
+    """Best-effort: delete blast/submit/setup/finalizer Jobs older than ``max_age_seconds``.
 
     elastic-blast's reuse-mode cleanup only runs when its `_db_already_loaded()`
-    check passes. If a previous submit failed mid-flight (e.g. YAML parse
-    error, OOM, network blip) the BLAST/setup/finalizer Jobs survive but the
+    check passes. If a previous submit failed mid-flight (YAML parse error,
+    OOM, network blip) the BLAST/setup/finalizer Jobs survive but the
     DB-loaded marker may not exist, so the next submit hits
     `field is immutable` on the Job names. Force-clean as a safety net.
+
+    The age filter (default 30 min) protects against a concurrent submit
+    racing in the same cluster: another submit's freshly-created Jobs are
+    skipped, only the truly stale ones are deleted.
     """
+    import datetime as _dt
+    now = _dt.datetime.now(tz=_dt.timezone.utc)
+    cutoff = now - _dt.timedelta(seconds=max_age_seconds)
     for label in ("app=blast", "app=submit", "app=setup", "app=finalizer"):
         try:
-            session.delete(
+            list_resp = session.get(
                 f"{server}/apis/batch/v1/namespaces/default/jobs",
-                params={"labelSelector": label, "propagationPolicy": "Background"},
-                timeout=15,
+                params={"labelSelector": label},
+                timeout=10,
             )
+            if list_resp.status_code != 200:
+                continue
+            for job in list_resp.json().get("items", []):
+                meta = job.get("metadata", {})
+                name = meta.get("name", "")
+                ts_raw = meta.get("creationTimestamp", "")
+                try:
+                    created = _dt.datetime.strptime(ts_raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+                except ValueError:
+                    LOGGER.debug("stale-job cleanup: unparseable timestamp on %s", name)
+                    continue
+                if created > cutoff:
+                    LOGGER.debug("stale-job cleanup: skipping fresh %s age=%s",
+                                 name, now - created)
+                    continue
+                try:
+                    session.delete(
+                        f"{server}/apis/batch/v1/namespaces/default/jobs/{name}",
+                        params={"propagationPolicy": "Background"},
+                        timeout=10,
+                    )
+                    LOGGER.info("stale-job cleanup: deleted %s (age=%s)",
+                                name, now - created)
+                except Exception as exc:
+                    LOGGER.debug("stale-job cleanup: delete %s: %s", name, exc)
         except Exception as exc:
-            LOGGER.debug("stale-job cleanup label=%s: %s", label, exc)
+            LOGGER.debug("stale-job cleanup: list label=%s: %s", label, exc)
 
 
 def activity_start_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]:
@@ -258,7 +290,11 @@ def activity_check_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, An
 
         job_status = status_resp.json().get("status", {})
         logs = _get_submit_job_logs(session, server, submit_job_name)
-        output = sanitise(logs)[:6000]
+        # Bigger tail than UI — _parse_exit_code reads the full string,
+        # only the UI-facing `output` is trimmed. This guarantees we can
+        # always recover the EXIT_CODE marker even if a 400-line traceback
+        # was printed before it.
+        output = sanitise(logs)[:8000]
         if job_status.get("succeeded", 0) > 0:
             exit_code = _parse_exit_code(logs)
             return {
@@ -291,6 +327,46 @@ def activity_check_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, An
         session.close()
 
 
+def activity_cancel_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: deletes the submit helper Job and its pods.
+
+    Called by the orchestrator after the submit poll loop times out so the
+    Job + pods don't accumulate forever. Returns
+    ``{"deleted": bool, "submit_job_name": str}``. Idempotent — already-gone
+    Jobs are reported as deleted=True.
+    """
+    submit_job_name = payload.get("submit_job_name", "")
+    if not submit_job_name:
+        return {"deleted": False, "reason": "no submit_job_name in payload"}
+    aks_cluster = payload.get("aks_cluster_name", "")
+    if not aks_cluster:
+        return {"deleted": False, "submit_job_name": submit_job_name,
+                "reason": "no aks_cluster_name in payload"}
+    cred = credential_for_caller(payload.get("user_assertion"))
+    try:
+        session, server = monitoring_svc._get_k8s_session(
+            cred,
+            payload["subscription_id"],
+            payload["resource_group"],
+            aks_cluster,
+        )
+    except Exception as exc:
+        return {"deleted": False, "submit_job_name": submit_job_name,
+                "error": sanitise(str(exc))[:200]}
+    try:
+        resp = session.delete(
+            f"{server}/apis/batch/v1/namespaces/default/jobs/{submit_job_name}",
+            params={"propagationPolicy": "Background"},
+            timeout=15,
+        )
+        # 200/202 = deleted, 404 = already gone (still success).
+        deleted = resp.status_code in (200, 202, 404)
+        return {"deleted": deleted, "submit_job_name": submit_job_name,
+                "http_status": resp.status_code}
+    finally:
+        session.close()
+
+
 def _submit_job_name(job_id: str) -> str:
     return re.sub(r"[^a-z0-9-]", "-", f"elb-submit-{job_id[:20]}".lower())[:63]
 
@@ -317,7 +393,11 @@ def _start_submit_via_k8s_job(
             raise RuntimeError(f"Failed to list elb-openapi pods: {resp.status_code}")
         pods = resp.json().get("items", [])
         if not pods:
-            raise RuntimeError("No elb-openapi pod found")
+            raise RuntimeError(
+                "No elb-openapi pod found in cluster. Deploy it from the AKS "
+                "card (Provision Cluster runs this automatically; for an "
+                "existing cluster use POST /api/aks/openapi/deploy)."
+            )
 
         submit_job_name = _submit_job_name(job_id)
         session.delete(
@@ -433,8 +513,8 @@ def _get_submit_job_logs(session, server: str, submit_job_name: str) -> str:
                 )
         log_resp = session.get(
             f"{server}/api/v1/namespaces/default/pods/{pod_name}/log",
-            params={"container": "submit", "tailLines": "120"},
-            timeout=10,
+            params={"container": "submit", "tailLines": "400"},
+            timeout=15,
         )
         if log_resp.status_code == 200 and log_resp.text:
             lines.append("--- Submit Console ---")
@@ -466,7 +546,11 @@ def _submit_via_k8s_exec(
             raise RuntimeError(f"Failed to list pods: {resp.status_code}")
         pods = resp.json().get("items", [])
         if not pods:
-            raise RuntimeError("No elb-openapi pod found")
+            raise RuntimeError(
+                "No elb-openapi pod found in cluster. Deploy it from the AKS "
+                "card (Provision Cluster runs this automatically; for an "
+                "existing cluster use POST /api/aks/openapi/deploy)."
+            )
         pod_name = pods[0]["metadata"]["name"]
         LOGGER.info("Using elb-openapi pod %s for submit", pod_name)
 
@@ -672,13 +756,27 @@ def activity_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_exit_code(output: str) -> int:
-    """Extract EXIT_CODE=N from shell output."""
-    for line in output.strip().split("\n"):
-        if line.startswith("EXIT_CODE="):
+    """Extract EXIT_CODE=N from the *tail* of shell output.
+
+    Scan from the end so that if elastic-blast prints multi-line tracebacks
+    (which sometimes contain digits matching '... = 0') we still pick up the
+    real shell-level marker. Returns 6 (UNKNOWN) when no marker is found,
+    which the caller treats as failure — the safer default than success.
+    """
+    if not output:
+        return 6
+    for line in reversed(output.strip().split("\n")):
+        stripped = line.strip()
+        if stripped.startswith("EXIT_CODE="):
             try:
-                return int(line.split("=", 1)[1])
+                return int(stripped.split("=", 1)[1].strip())
             except ValueError:
-                LOGGER.warning("failed to parse EXIT_CODE from line: %s", line[:80])
+                LOGGER.warning("failed to parse EXIT_CODE from line: %s", stripped[:80])
+                return 6
+    LOGGER.warning(
+        "EXIT_CODE marker missing from %d-byte submit output (treating as failure)",
+        len(output),
+    )
     return 6  # UNKNOWN
 
 
@@ -1024,10 +1122,13 @@ def activity_k8s_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
     """side-effect: none (read-only). Check BLAST job status via direct K8s API.
 
     ~1-3s vs ~30s for VM Run Command. Uses AKS kubeconfig to query pod/job status directly.
+    Pass ``job_id`` to scope the result to a single submit (concurrent submits
+    in the same cluster are otherwise indistinguishable by labels).
     """
     cred = credential_for_caller(payload.get("user_assertion"))
     namespace = payload.get("namespace", "")
     cluster_name = payload.get("cluster_name", "")
+    job_id = payload.get("job_id") or None
     if not namespace or not cluster_name:
         return {"status": "unknown", "error": "namespace or cluster_name missing"}
 
@@ -1037,8 +1138,10 @@ def activity_k8s_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
         payload["resource_group"],
         cluster_name,
         namespace,
+        job_id=job_id,
     )
-    LOGGER.info("K8s BLAST status for %s: %s", namespace, result.get("status"))
+    LOGGER.info("K8s BLAST status for %s job=%s: %s",
+                namespace, job_id, result.get("status"))
     return result
 
 

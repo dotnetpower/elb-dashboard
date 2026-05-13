@@ -143,41 +143,58 @@ def _get_k8s_session(
 
     session = _req.Session()
 
-    # Track temp files for cleanup
+    # Track temp files for cleanup. We populate this list as we write files,
+    # and clean them up on **any** failure path so a half-built session never
+    # leaks credential material on disk.
     _temp_files: list[str] = []
 
-    # Write CA cert (restricted permissions)
-    ca_file = None
-    if ca_data:
-        ca_bytes = base64.b64decode(ca_data)
-        ca_file = tempfile.NamedTemporaryFile(suffix=".crt", delete=False)
-        ca_file.write(ca_bytes)
-        ca_file.flush()
-        os.chmod(ca_file.name, 0o600)
-        _temp_files.append(ca_file.name)
-        session.verify = ca_file.name
-    else:
-        session.verify = True
+    def _cleanup_temp_files() -> None:
+        for f in _temp_files:
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
 
-    # Auth: client certificate or AAD token
-    client_cert = user_info.get("client-certificate-data")
-    client_key = user_info.get("client-key-data")
-    if client_cert and client_key:
-        cert_file = tempfile.NamedTemporaryFile(suffix=".crt", delete=False)
-        cert_file.write(base64.b64decode(client_cert))
-        cert_file.flush()
-        os.chmod(cert_file.name, 0o600)
-        _temp_files.append(cert_file.name)
-        key_file = tempfile.NamedTemporaryFile(suffix=".key", delete=False)
-        key_file.write(base64.b64decode(client_key))
-        key_file.flush()
-        os.chmod(key_file.name, 0o600)
-        _temp_files.append(key_file.name)
-        session.cert = (cert_file.name, key_file.name)
-    else:
-        # Fallback: AAD token
-        token = credential.get_token(f"{_AKS_SERVER_APP_ID}/.default")
-        session.headers["Authorization"] = f"Bearer {token.token}"
+    try:
+        # Write CA cert (restricted permissions)
+        ca_file = None
+        if ca_data:
+            ca_bytes = base64.b64decode(ca_data)
+            ca_file = tempfile.NamedTemporaryFile(suffix=".crt", delete=False)
+            ca_file.write(ca_bytes)
+            ca_file.flush()
+            os.chmod(ca_file.name, 0o600)
+            _temp_files.append(ca_file.name)
+            session.verify = ca_file.name
+        else:
+            session.verify = True
+
+        # Auth: client certificate or AAD token
+        client_cert = user_info.get("client-certificate-data")
+        client_key = user_info.get("client-key-data")
+        if client_cert and client_key:
+            cert_file = tempfile.NamedTemporaryFile(suffix=".crt", delete=False)
+            cert_file.write(base64.b64decode(client_cert))
+            cert_file.flush()
+            os.chmod(cert_file.name, 0o600)
+            _temp_files.append(cert_file.name)
+            key_file = tempfile.NamedTemporaryFile(suffix=".key", delete=False)
+            key_file.write(base64.b64decode(client_key))
+            key_file.flush()
+            os.chmod(key_file.name, 0o600)
+            _temp_files.append(key_file.name)
+            session.cert = (cert_file.name, key_file.name)
+        else:
+            # Fallback: AAD token
+            token = credential.get_token(f"{_AKS_SERVER_APP_ID}/.default")
+            session.headers["Authorization"] = f"Bearer {token.token}"
+    except Exception:
+        _cleanup_temp_files()
+        try:
+            session.close()
+        except Exception:
+            pass
+        raise
 
     # Register cleanup of temp files on session close
     _orig_close = session.close
@@ -185,11 +202,7 @@ def _get_k8s_session(
         try:
             _orig_close()
         finally:
-            for f in _temp_files:
-                try:
-                    os.unlink(f)
-                except OSError:
-                    pass
+            _cleanup_temp_files()
     session.close = _cleanup_close  # type: ignore[assignment]
 
     return session, server
@@ -235,29 +248,88 @@ def k8s_check_blast_status(
     resource_group: str,
     cluster_name: str,
     namespace: str,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     """Check elastic-blast job status via direct K8s API (~1-3s vs ~30s for VM Run Command).
 
-    Returns: {"status": "running"|"completed"|"failed"|"unknown", "pods": int, "succeeded": int, "failed": int}
+    Returns: {"status": "running"|"completed"|"failed"|"creating"|"unknown",
+              "pods": int, "succeeded": int, "failed": int}
+
+    Critical correctness rules:
+    * elastic-blast Azure backend creates BLAST jobs in the **default**
+      namespace and labels them `app=blast` (vs `app=submit` for our own
+      submit-helper Job and `app=setup`/`app=finalizer` for elastic-blast's
+      own scaffolding). We **only** count `app=blast` jobs as the actual
+      BLAST search, otherwise our own submit-helper completing causes a
+      false "completed" before BLAST has even started.
+    * When ``job_id`` is provided we additionally filter pods by the
+      ``BLAST_ELB_JOB_ID`` env var so concurrent submits to the same cluster
+      don't pollute each other's status. (elastic-blast does not put the
+      job-id in the Job labels itself, so we read it off the pod spec.)
+    * Empty `app=blast` set means BLAST hasn't been scheduled yet — return
+      "creating", not "completed".
     """
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
-        # elastic-blast creates jobs in the namespace OR in default namespace
-        # Try the specified namespace first, fallback to default
         target_ns = namespace
         ns_resp = session.get(f"{server}/api/v1/namespaces/{namespace}", timeout=10)
         if ns_resp.status_code == 404:
-            # Namespace doesn't exist — elastic-blast may use default namespace
             target_ns = "default"
 
-        # Get batch jobs in the target namespace
-        jobs_resp = session.get(f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs", timeout=10)
-        if jobs_resp.status_code != 200:
-            return {"status": "unknown", "pods": 0, "detail": f"jobs API error: {jobs_resp.status_code}"}
+        # BLAST pods carry the unique job_id in BLAST_ELB_JOB_ID env. Filter
+        # by it so concurrent submits don't bleed into each other's status.
+        pods_resp = session.get(
+            f"{server}/api/v1/namespaces/{target_ns}/pods",
+            params={"labelSelector": "app=blast"},
+            timeout=10,
+        )
+        if pods_resp.status_code != 200:
+            return {"status": "unknown", "pods": 0, "detail": f"pods API error: {pods_resp.status_code}"}
 
-        jobs = jobs_resp.json().get("items", [])
-        if not jobs:
-            return {"status": "creating", "pods": 0, "detail": "no jobs yet"}
+        all_pods = pods_resp.json().get("items", [])
+        if job_id:
+            scoped_pods = []
+            for pod in all_pods:
+                for container in pod.get("spec", {}).get("containers", []):
+                    for env in container.get("env", []) or []:
+                        if env.get("name") == "BLAST_ELB_JOB_ID" and env.get("value") == job_id:
+                            scoped_pods.append(pod)
+                            break
+                    else:
+                        continue
+                    break
+            blast_pods = scoped_pods
+        else:
+            blast_pods = all_pods
+
+        pod_count = len(blast_pods)
+
+        # Get BLAST batch jobs (label `app=blast`). When job_id is set we
+        # cross-reference job names from the scoped pods so a different
+        # submit's "succeeded" doesn't leak through.
+        jobs_resp = session.get(
+            f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs",
+            params={"labelSelector": "app=blast"},
+            timeout=10,
+        )
+        if jobs_resp.status_code != 200:
+            return {"status": "unknown", "pods": pod_count,
+                    "detail": f"jobs API error: {jobs_resp.status_code}"}
+
+        all_jobs = jobs_resp.json().get("items", [])
+        if job_id and blast_pods:
+            scoped_job_names = set()
+            for pod in blast_pods:
+                for owner in pod.get("metadata", {}).get("ownerReferences", []) or []:
+                    if owner.get("kind") == "Job":
+                        scoped_job_names.add(owner.get("name", ""))
+            jobs = [j for j in all_jobs if j.get("metadata", {}).get("name") in scoped_job_names]
+        else:
+            jobs = all_jobs
+
+        if not jobs and not blast_pods:
+            return {"status": "creating", "pods": 0, "jobs": 0,
+                    "detail": "no app=blast jobs/pods yet", "namespace": target_ns}
 
         total_succeeded = 0
         total_failed = 0
@@ -269,19 +341,19 @@ def k8s_check_blast_status(
             total_failed += status.get("failed", 0)
             total_active += status.get("active", 0)
 
-        # Get pods for more detail
-        pods_resp = session.get(f"{server}/api/v1/namespaces/{target_ns}/pods", timeout=10)
-        pod_count = len(pods_resp.json().get("items", [])) if pods_resp.status_code == 200 else 0
-
-        # Determine status
+        # A failed batch dominates because elastic-blast has no automatic
+        # retry — surface the failure even if other batches succeed.
         if total_failed > 0:
             blast_status = "failed"
         elif total_active > 0:
             blast_status = "running"
-        elif total_succeeded > 0 and total_active == 0:
+        elif total_succeeded > 0 and total_succeeded >= total_jobs:
             blast_status = "completed"
         else:
-            blast_status = "unknown"
+            # Jobs exist but show no progress (Pending, ImagePull) — keep
+            # "creating" so the orchestrator's MIN_POLLS guard doesn't lock
+            # in an empty "completed".
+            blast_status = "creating"
 
         return {
             "status": blast_status,
@@ -290,6 +362,8 @@ def k8s_check_blast_status(
             "succeeded": total_succeeded,
             "failed": total_failed,
             "active": total_active,
+            "namespace": target_ns,
+            "scoped_by_job_id": bool(job_id),
         }
     except Exception as e:
         return {"status": "unknown", "pods": 0, "detail": str(e)[:200]}
