@@ -365,21 +365,13 @@ function CostEstimatorTab({ meta }: { meta: TabMeta }) {
         subtitle={meta.desc}
       />
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-          gap: 16,
-          marginBottom: 16,
-        }}
-      >
-        <div>
+      <div className="form-grid form-grid--cols-5" style={{ marginBottom: 16 }}>
+        <div className="form-row">
           <label className="form-label">Node SKU</label>
           <select
             className="form-input"
             value={sku}
             onChange={(e) => setSku(e.target.value)}
-            style={{ width: "100%" }}
           >
             {[
               "Standard_D2s_v5",
@@ -397,7 +389,7 @@ function CostEstimatorTab({ meta }: { meta: TabMeta }) {
             ))}
           </select>
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Nodes</label>
           <input
             className="form-input"
@@ -406,10 +398,9 @@ function CostEstimatorTab({ meta }: { meta: TabMeta }) {
             max={100}
             value={nodes}
             onChange={(e) => setNodes(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Estimated hours</label>
           <input
             className="form-input"
@@ -419,10 +410,9 @@ function CostEstimatorTab({ meta }: { meta: TabMeta }) {
             step={0.5}
             value={hours}
             onChange={(e) => setHours(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Persistent disk (GB)</label>
           <input
             className="form-input"
@@ -431,10 +421,9 @@ function CostEstimatorTab({ meta }: { meta: TabMeta }) {
             max={10000}
             value={pdSize}
             onChange={(e) => setPdSize(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Database size (GB)</label>
           <input
             className="form-input"
@@ -443,7 +432,6 @@ function CostEstimatorTab({ meta }: { meta: TabMeta }) {
             max={5000}
             value={dbSize}
             onChange={(e) => setDbSize(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
       </div>
@@ -509,7 +497,7 @@ function PreprocessorTab({ meta }: { meta: TabMeta }) {
         subtitle={meta.desc}
       />
 
-      <div style={{ marginBottom: 16 }}>
+      <div className="form-row" style={{ marginBottom: 16 }}>
         <label className="form-label">Input sequences (FASTA or FASTQ)</label>
         <textarea
           className="form-input blast-textarea"
@@ -517,32 +505,23 @@ function PreprocessorTab({ meta }: { meta: TabMeta }) {
           value={inputData}
           onChange={(e) => setInputData(e.target.value)}
           placeholder="Paste FASTA (>header...) or FASTQ (@header...) sequences"
-          style={{ width: "100%" }}
         />
       </div>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
-        <div>
+      <div className="form-grid form-grid--cols-3" style={{ marginBottom: 16 }}>
+        <div className="form-row">
           <label className="form-label">Format</label>
           <select
             className="form-input"
             value={format}
             onChange={(e) => setFormat(e.target.value as typeof format)}
-            style={{ width: "100%" }}
           >
             <option value="auto">Auto-detect</option>
             <option value="fasta">FASTA</option>
             <option value="fastq">FASTQ</option>
           </select>
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Min length</label>
           <input
             className="form-input"
@@ -550,10 +529,9 @@ function PreprocessorTab({ meta }: { meta: TabMeta }) {
             min={0}
             value={minLength}
             onChange={(e) => setMinLength(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Min quality (FASTQ)</label>
           <input
             className="form-input"
@@ -562,7 +540,6 @@ function PreprocessorTab({ meta }: { meta: TabMeta }) {
             max={40}
             value={minQuality}
             onChange={(e) => setMinQuality(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
       </div>
@@ -682,7 +659,7 @@ function PrimerDesignTab({ meta, hasConfig }: { meta: TabMeta; hasConfig: boolea
         subtitle={meta.desc}
       />
 
-      <div style={{ marginBottom: 16 }}>
+      <div className="form-row" style={{ marginBottom: 16 }}>
         <label className="form-label">Template sequence (nucleotide, min 50 bp)</label>
         <textarea
           className="form-input blast-textarea"
@@ -690,56 +667,44 @@ function PrimerDesignTab({ meta, hasConfig }: { meta: TabMeta; hasConfig: boolea
           value={sequence}
           onChange={(e) => setSequence(e.target.value)}
           placeholder="ATGCGATCGATCGATCG..."
-          style={{ width: "100%" }}
         />
       </div>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
-        <div>
+      <div className="form-grid form-grid--cols-4" style={{ marginBottom: 16 }}>
+        <div className="form-row">
           <label className="form-label">Target start</label>
           <input
             className="form-input"
             type="number"
             value={targetStart}
             onChange={(e) => setTargetStart(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Target length</label>
           <input
             className="form-input"
             type="number"
             value={targetLength}
             onChange={(e) => setTargetLength(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Product min</label>
           <input
             className="form-input"
             type="number"
             value={productMin}
             onChange={(e) => setProductMin(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
-        <div>
+        <div className="form-row">
           <label className="form-label">Product max</label>
           <input
             className="form-input"
             type="number"
             value={productMax}
             onChange={(e) => setProductMax(+e.target.value)}
-            style={{ width: "100%" }}
           />
         </div>
       </div>
@@ -840,7 +805,7 @@ function TaxonomyTab({ meta }: { meta: TabMeta }) {
         subtitle={meta.desc}
       />
 
-      <div style={{ marginBottom: 16 }}>
+      <div className="form-row" style={{ marginBottom: 16 }}>
         <label className="form-label">
           Accessions (space, comma, or newline separated; max 50)
         </label>
@@ -850,7 +815,6 @@ function TaxonomyTab({ meta }: { meta: TabMeta }) {
           value={accInput}
           onChange={(e) => setAccInput(e.target.value)}
           placeholder="NR_123456.1 NR_789012.1 XP_001234.2"
-          style={{ width: "100%" }}
         />
       </div>
 
@@ -1220,10 +1184,9 @@ function AuditTrailTab({ meta }: { meta: TabMeta }) {
         rightSlot={
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <select
-              className="form-input"
+              className="form-input form-input--compact"
               value={actionFilter}
               onChange={(e) => setActionFilter(e.target.value)}
-              style={{ fontSize: 12, padding: "4px 8px" }}
             >
               <option value="">All actions</option>
               <option value="blast_submit">BLAST Submit</option>

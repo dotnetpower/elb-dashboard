@@ -254,8 +254,8 @@ export function DatabaseBuilder() {
           subtitle="Name, sequence type, and human-readable title"
         />
 
-        <div style={{ display: "grid", gap: 16 }}>
-          <div>
+        <div className="db-builder-grid">
+          <div className="form-row">
             <label className="form-label" htmlFor="db-name">
               Database name *
             </label>
@@ -267,27 +267,23 @@ export function DatabaseBuilder() {
               value={dbName}
               onChange={(e) => setDbName(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ""))}
               maxLength={50}
-              style={{ width: "100%", maxWidth: 420 }}
             />
             {dbName && !isValidDbName && (
-              <div className="form-hint" style={{ color: "var(--danger)", marginTop: 4 }}>
+              <span className="form-hint" style={{ color: "var(--danger)" }}>
                 Only letters, digits, _ and - allowed (1-50 chars)
-              </div>
+              </span>
             )}
             {nameClash && (
-              <div
-                className="form-hint"
-                style={{ color: "var(--warning)", marginTop: 4 }}
-              >
+              <span className="form-hint" style={{ color: "var(--warning)" }}>
                 A database with this name already exists — it will be overwritten on
                 rebuild.
-              </div>
+              </span>
             )}
           </div>
 
-          <div>
+          <div className="form-row">
             <label className="form-label">Sequence type *</label>
-            <div className="blast-program-tabs" style={{ maxWidth: 420 }}>
+            <div className="blast-program-tabs">
               <button
                 type="button"
                 onClick={() => setDbType("nucl")}
@@ -318,7 +314,7 @@ export function DatabaseBuilder() {
             </div>
           </div>
 
-          <div>
+          <div className="form-row" style={{ gridColumn: "1 / -1" }}>
             <label className="form-label" htmlFor="db-title">
               Title (optional)
             </label>
@@ -330,7 +326,6 @@ export function DatabaseBuilder() {
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               maxLength={200}
-              style={{ width: "100%", maxWidth: 520 }}
             />
           </div>
         </div>
@@ -345,7 +340,7 @@ export function DatabaseBuilder() {
           subtitle="Paste sequences or upload a FASTA file (≤ 50 MB inline)"
         />
 
-        <div className="blast-program-tabs" style={{ maxWidth: 360 }}>
+        <div className="blast-program-tabs db-input-mode">
           <button
             type="button"
             onClick={() => setInputMode("paste")}
