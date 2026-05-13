@@ -1248,12 +1248,22 @@ export function ApiReference() {
   // Group endpoints by tag
   const grouped = useMemo(() => {
     if (!spec) return [];
-    return spec.tags
+    const byTag = spec.tags
       .map((tag) => ({
         tag,
         endpoints: spec.endpoints.filter((ep) => ep.tags.includes(tag.name)),
       }))
       .filter((g) => g.endpoints.length > 0);
+    // Collect untagged endpoints into an "Other" group
+    const tagged = new Set(byTag.flatMap((g) => g.endpoints));
+    const untagged = spec.endpoints.filter((ep) => !tagged.has(ep));
+    if (untagged.length > 0) {
+      byTag.push({
+        tag: { name: "Other", description: "Ungrouped endpoints" },
+        endpoints: untagged,
+      });
+    }
+    return byTag;
   }, [spec]);
 
   return (
