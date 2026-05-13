@@ -34,11 +34,14 @@ from orchestrators import submit_blast as _sub_blast
 from routes import aks as _aks_routes
 from routes import arm as _arm_routes
 from routes import blast as _blast_routes
+from routes import blast_jobs as _blast_jobs_routes
+from routes import blast_tools as _blast_tools_routes
 from routes import data_plane as _data_plane_routes
 from routes import monitor as _monitor_routes
 from routes import resources as _resources_routes
 from routes import terminal as _terminal_routes
-from routes.blast import _AZURE_VM_HOURLY_USD, _parse_primer3_output
+from routes.blast_jobs import _AZURE_VM_HOURLY_USD
+from routes.blast_tools import _parse_primer3_output
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +58,8 @@ app.register_functions(_resources_routes.bp)
 app.register_functions(_aks_routes.bp)
 app.register_functions(_data_plane_routes.bp)
 app.register_functions(_blast_routes.bp)
+app.register_functions(_blast_jobs_routes.bp)
+app.register_functions(_blast_tools_routes.bp)
 
 
 # ---------------------------------------------------------------------------
