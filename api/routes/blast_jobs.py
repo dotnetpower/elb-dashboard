@@ -28,6 +28,7 @@ from services import keyvault as kv_svc
 from services import storage_data as storage_data_svc
 from services.azure_clients import credential_for_caller
 from services.sanitise import sanitise
+from routes.blast import _toggle_public_access
 
 LOGGER = logging.getLogger(__name__)
 
