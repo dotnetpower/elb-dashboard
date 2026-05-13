@@ -19,7 +19,6 @@ import {
 import { api, formatApiError } from "@/api/client";
 import { monitoringApi, blastApi } from "@/api/endpoints";
 import { MonitorCard } from "@/components/MonitorCard";
-import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 
 const HNS_DISMISSED_KEY = "elb-hns-warning-dismissed";
 
@@ -292,8 +291,6 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
       status={status}
       fetching={query.isFetching || dbDownloading !== null}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
-      refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
-      refreshInterval={30_000}
       onRefresh={() => query.refetch()}
       accentColor="storage"
       collapsible
