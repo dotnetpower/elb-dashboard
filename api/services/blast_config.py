@@ -126,3 +126,22 @@ def generate_config(params: dict[str, Any]) -> str:
     buf = io.StringIO()
     cfg.write(buf)
     return buf.getvalue()
+
+
+# Azure VM hourly cost estimates (Pay-As-You-Go, koreacentral)
+AZURE_VM_HOURLY_USD: dict[str, float] = {
+    "Standard_D2s_v5": 0.096,
+    "Standard_D4s_v5": 0.192,
+    "Standard_D8s_v5": 0.384,
+    "Standard_D16s_v5": 0.768,
+    "Standard_E4s_v5": 0.252,
+    "Standard_E8s_v5": 0.504,
+    "Standard_E16s_v5": 1.008,
+    "Standard_E32s_v5": 2.016,
+    "Standard_E48s_v5": 3.024,
+    "Standard_E64s_v5": 4.032,
+    "Standard_D2s_v3": 0.096,
+    "Standard_D4s_v3": 0.192,
+}
+STORAGE_GB_MONTH_USD = 0.018  # Hot tier
+PD_GB_MONTH_USD = 0.040  # Managed SSD

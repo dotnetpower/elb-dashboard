@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import uuid
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -23,7 +24,7 @@ from auth.token import AuthError, validate_bearer_token
 from services import storage_data as storage_data_svc
 from services.azure_clients import credential_for_caller
 from services.sanitise import sanitise
-from routes.blast_jobs import _AZURE_VM_HOURLY_USD
+from services.blast_config import AZURE_VM_HOURLY_USD as _AZURE_VM_HOURLY_USD
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,7 +80,8 @@ def blast_cost_estimate(req: func.HttpRequest) -> func.HttpResponse:
 # P8 — Multi-DB Search
 # ═══════════════════════════════════════════════════════════════════════
 @bp.route(route="blast/multi-submit", methods=["POST"])
-def blast_multi_db_submit(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def blast_multi_db_submit(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
     """Submit the same query against multiple databases simultaneously."""
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
@@ -103,7 +105,6 @@ def blast_multi_db_submit(req: func.HttpRequest) -> func.HttpResponse:
             return _error_response(400, f"invalid database name: {sanitise(db[:40])}")
 
     # Create a job for each database
-    client = df.DurableOrchestrationClient(req)
     group_id = f"multi-{uuid.uuid4().hex[:12]}"
     jobs: list[dict] = []
 
@@ -125,7 +126,7 @@ def blast_multi_db_submit(req: func.HttpRequest) -> func.HttpResponse:
         payload["owner_oid"] = identity.oid
         payload["group_id"] = group_id
 
-        instance_id = client.start_new("submit_blast_orchestrator", None, payload)
+        instance_id = await client.start_new("submit_blast_orchestrator", None, payload)
         jobs.append({"job_id": job_id, "db": db_name, "instance_id": instance_id})
 
     return _json_response(
@@ -442,7 +443,11 @@ def list_db_versions(req: func.HttpRequest) -> func.HttpResponse:
         )
         return _json_response({"versions": versions, "total": len(versions)})
     except Exception as exc:
-        return _error_response(500, sanitise(str(exc)[:500]))
+        msg = str(exc)
+        if "AuthorizationFailure" in msg or "PublicAccessNotPermitted" in msg or "AuthorizationPermission" in msg:
+            # Storage public access is disabled — return empty list with a note
+            return _json_response({"versions": [], "total": 0, "public_access_disabled": True})
+        return _error_response(500, sanitise(msg[:500]))
 
 
 @bp.route(route="blast/databases/versions", methods=["POST"])
@@ -501,17 +506,17 @@ def save_db_version_metadata(req: func.HttpRequest) -> func.HttpResponse:
 # P7 — Scheduled / Triggered BLAST routes
 # ═══════════════════════════════════════════════════════════════════════
 @bp.route(route="blast/schedules", methods=["GET"])
-def list_blast_schedules(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def list_blast_schedules(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
     """List all scheduled BLAST configurations."""
     try:
         validate_bearer_token(req.headers.get("Authorization"))
     except AuthError as exc:
         return _error_response(exc.status, exc.message)
 
-    client = df.DurableOrchestrationClient(req)
     try:
         entity_id = df.EntityId("scheduled_blast_entity", "global")
-        resp = client.read_entity_state(entity_id)
+        resp = await client.read_entity_state(entity_id)
         schedules = resp.entity_state if resp.entity_exists else []
     except Exception:
         schedules = []
@@ -520,7 +525,8 @@ def list_blast_schedules(req: func.HttpRequest) -> func.HttpResponse:
 
 
 @bp.route(route="blast/schedules", methods=["POST"])
-def create_blast_schedule(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def create_blast_schedule(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
     """Create a scheduled/triggered BLAST job configuration."""
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
@@ -556,15 +562,15 @@ def create_blast_schedule(req: func.HttpRequest) -> func.HttpResponse:
         "owner_upn": identity.upn,
     }
 
-    client = df.DurableOrchestrationClient(req)
     entity_id = df.EntityId("scheduled_blast_entity", "global")
-    client.signal_entity(entity_id, "add_schedule", schedule_config)
+    await client.signal_entity(entity_id, "add_schedule", schedule_config)
 
     return _json_response({"status": "created", "schedule": schedule_config})
 
 
 @bp.route(route="blast/schedules/{schedule_id}", methods=["DELETE"])
-def delete_blast_schedule(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def delete_blast_schedule(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
     """Delete a scheduled BLAST configuration."""
     try:
         validate_bearer_token(req.headers.get("Authorization"))
@@ -575,15 +581,15 @@ def delete_blast_schedule(req: func.HttpRequest) -> func.HttpResponse:
     if not schedule_id:
         return _error_response(400, "schedule_id required")
 
-    client = df.DurableOrchestrationClient(req)
     entity_id = df.EntityId("scheduled_blast_entity", "global")
-    client.signal_entity(entity_id, "remove_schedule", {"schedule_id": schedule_id})
+    await client.signal_entity(entity_id, "remove_schedule", {"schedule_id": schedule_id})
 
     return _json_response({"status": "deleted", "schedule_id": schedule_id})
 
 
 @bp.route(route="blast/schedules/{schedule_id}/run", methods=["POST"])
-def run_blast_schedule(req: func.HttpRequest) -> func.HttpResponse:
+@bp.durable_client_input(client_name="client")
+async def run_blast_schedule(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
     """Manually trigger a scheduled BLAST job."""
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
@@ -594,12 +600,11 @@ def run_blast_schedule(req: func.HttpRequest) -> func.HttpResponse:
     if not schedule_id:
         return _error_response(400, "schedule_id required")
 
-    client = df.DurableOrchestrationClient(req)
 
     # Read schedule config
     try:
         entity_id = df.EntityId("scheduled_blast_entity", "global")
-        resp = client.read_entity_state(entity_id)
+        resp = await client.read_entity_state(entity_id)
         schedules = resp.entity_state if resp.entity_exists else []
     except Exception:
         return _error_response(404, "no schedules found")
@@ -623,10 +628,10 @@ def run_blast_schedule(req: func.HttpRequest) -> func.HttpResponse:
     payload["owner_oid"] = identity.oid
     payload["schedule_id"] = schedule_id
 
-    instance_id = client.start_new("submit_blast_orchestrator", None, payload)
+    instance_id = await client.start_new("submit_blast_orchestrator", None, payload)
 
     # Mark run
-    client.signal_entity(entity_id, "mark_run", {"schedule_id": schedule_id})
+    await client.signal_entity(entity_id, "mark_run", {"schedule_id": schedule_id})
 
     return _json_response(
         {

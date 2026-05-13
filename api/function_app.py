@@ -40,8 +40,8 @@ from routes import data_plane as _data_plane_routes
 from routes import monitor as _monitor_routes
 from routes import resources as _resources_routes
 from routes import terminal as _terminal_routes
-from routes.blast_jobs import _AZURE_VM_HOURLY_USD
 from routes.blast_tools import _parse_primer3_output
+from services.blast_config import AZURE_VM_HOURLY_USD as _AZURE_VM_HOURLY_USD
 
 LOGGER = logging.getLogger(__name__)
 
@@ -603,7 +603,8 @@ def audit_trail_entity(context):
 
 
 @app.route(route="audit/log", methods=["GET"])
-def list_audit_log(req: func.HttpRequest) -> func.HttpResponse:
+@app.durable_client_input(client_name="client")
+async def list_audit_log(req: func.HttpRequest, client) -> func.HttpResponse:
     """List audit trail events."""
     try:
         validate_bearer_token(req.headers.get("Authorization"))
@@ -613,10 +614,9 @@ def list_audit_log(req: func.HttpRequest) -> func.HttpResponse:
     limit = min(int(req.params.get("limit", "100")), 500)
     action_filter = req.params.get("action", "")
 
-    client = df.DurableOrchestrationClient(req)
     try:
         entity_id = df.EntityId("audit_trail_entity", "global")
-        resp = client.read_entity_state(entity_id)
+        resp = await client.read_entity_state(entity_id)
         events: list = resp.entity_state if resp.entity_exists else []
     except Exception:
         events = []
