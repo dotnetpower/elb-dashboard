@@ -145,6 +145,12 @@ export const api = {
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
 
+/**
+ * Low-level authenticated fetch that returns the raw Response.
+ * Use for cases where the caller needs direct access to status/headers/body.
+ */
+export const fetchApiRaw = fetchApi;
+
 // ---------------------------------------------------------------------------
 // RBAC-friendly error formatting
 // ---------------------------------------------------------------------------

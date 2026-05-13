@@ -395,3 +395,69 @@ def proxy_openapi_spec(req: func.HttpRequest) -> func.HttpResponse:
         mimetype="application/json",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+@bp.route(route="aks/openapi/proxy", methods=["GET", "POST", "DELETE"])
+def proxy_openapi_request(req: func.HttpRequest) -> func.HttpResponse:
+    """Proxy arbitrary requests to the AKS-hosted elb-openapi service.
+
+    The SWA is served over HTTPS, but the AKS LoadBalancer exposes HTTP only.
+    Browsers block mixed-content requests, so we relay them server-side.
+
+    Query params:
+      subscription_id, resource_group, cluster_name — to discover the service IP.
+      path — the path on the target service (e.g. /healthz, /v1/health).
+    """
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    sub = req.params.get("subscription_id", "")
+    rg = req.params.get("resource_group", "")
+    cluster_name = req.params.get("cluster_name", "")
+    target_path = req.params.get("path", "/")
+    if not all([sub, rg, cluster_name]):
+        return _error_response(400, "subscription_id, resource_group, cluster_name required")
+
+    # Validate target_path to prevent SSRF — must start with /
+    if not target_path.startswith("/"):
+        target_path = "/" + target_path
+
+    cred = credential_for_caller(identity.raw_token)
+
+    # 1. Discover the service external IP
+    try:
+        from services import monitoring as monitoring_svc
+
+        external_ip = monitoring_svc.k8s_get_service_ip(
+            cred, sub, rg, cluster_name, "elb-openapi",
+        )
+        if not external_ip:
+            return _error_response(404, "elb-openapi service has no external IP yet")
+    except Exception as exc:
+        return _error_response(404, f"elb-openapi service not found: {sanitise(str(exc)[:200])}")
+
+    # 2. Forward the request
+    import requests as _requests
+
+    target_url = f"http://{external_ip}{target_path}"
+    method = req.method.upper()
+    headers = {"Content-Type": "application/json"}
+    body = None
+    if method in ("POST", "PUT", "PATCH"):
+        body = req.get_body() or None
+
+    try:
+        resp = _requests.request(
+            method, target_url, headers=headers, data=body, timeout=30,
+        )
+    except Exception as exc:
+        return _error_response(502, f"Proxy request failed: {sanitise(str(exc)[:200])}")
+
+    return func.HttpResponse(
+        body=resp.text,
+        status_code=resp.status_code,
+        mimetype=resp.headers.get("content-type", "application/json"),
+        headers={"Cache-Control": "no-cache"},
+    )

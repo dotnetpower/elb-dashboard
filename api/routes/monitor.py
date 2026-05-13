@@ -16,6 +16,7 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from _http_utils import (
+    _RE_INSTANCE_ID,
     _error_response,
     _json_response,
     _require_query,
@@ -105,6 +106,87 @@ def aks_get_service_ip(req: func.HttpRequest) -> func.HttpResponse:
         return _error_response(404, f"Service {params['service_name']} not found or has no external IP")
     except Exception as exc:
         return _error_response(500, sanitise(str(exc)))
+
+
+# ---------------------------------------------------------------------------
+# AKS — Warmup status (DB cache on nodes)
+# ---------------------------------------------------------------------------
+
+@bp.route(route="monitor/aks/warmup-status", methods=["GET"])
+def aks_warmup_status(req: func.HttpRequest) -> func.HttpResponse:
+    """Check warmup state: which DBs are loaded on AKS nodes."""
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+    params, err = _require_query(req, "subscription_id", "resource_group", "cluster_name")
+    if err:
+        return err
+    cred = credential_for_caller(identity.raw_token)
+    try:
+        status = monitoring_svc.k8s_warmup_status(
+            cred, params["subscription_id"], params["resource_group"],
+            params["cluster_name"],
+        )
+        return _json_response(status)
+    except Exception as exc:
+        return _error_response(500, sanitise(str(exc)))
+
+
+@bp.route(route="warmup/start", methods=["POST"])
+@bp.durable_client_input(client_name="client")
+async def start_warmup(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
+    """Start standalone DB warmup on an AKS cluster."""
+    try:
+        identity = validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+    raw = req.get_body()
+    if not raw:
+        return _error_response(400, "request body required")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError:
+        return _error_response(400, "invalid JSON")
+
+    required = ["subscription_id", "resource_group", "storage_account", "db", "aks_cluster_name"]
+    missing = [k for k in required if not body.get(k)]
+    if missing:
+        return _error_response(400, f"missing fields: {', '.join(missing)}")
+
+    body["user_assertion"] = identity.raw_token
+    body["owner_oid"] = identity.object_id
+
+    instance_id = await client.start_new("warmup_db_orchestrator", None, body)
+    LOGGER.info("Started warmup_db_orchestrator db=%s cluster=%s instance=%s",
+                body.get("db"), body.get("aks_cluster_name"), instance_id)
+    return _json_response({"instance_id": instance_id, "db": body.get("db")}, status=202)
+
+
+@bp.route(route="warmup/{instance_id}/status", methods=["GET"])
+@bp.durable_client_input(client_name="client")
+async def get_warmup_status(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
+    """Poll warmup orchestrator status."""
+    try:
+        validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+    instance_id = req.route_params.get("instance_id")
+    if not instance_id or not _RE_INSTANCE_ID.match(instance_id):
+        return _error_response(400, "invalid instance_id")
+    status = await client.get_status(instance_id, show_input=False)
+    if status is None or status.runtime_status is None:
+        return _error_response(404, "instance not found")
+    return _json_response({
+        "instance_id": status.instance_id,
+        "runtime_status": status.runtime_status.name,
+        "custom_status": status.custom_status,
+        "output": status.output,
+    })
 
 
 @bp.route(route="monitor/aks/nodes", methods=["GET"])

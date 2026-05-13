@@ -114,6 +114,26 @@ export interface AksClusterSummary {
   fqdn?: string | null;
 }
 
+export interface WarmupDbInfo {
+  name: string;
+  mol_type: string;
+  status: "Ready" | "Loading" | "Failed" | "Unknown";
+  nodes_ready: number;
+  nodes_failed: number;
+  nodes_active: number;
+  total_jobs: number;
+}
+
+export interface WarmupStatus {
+  warm: boolean;
+  workspace_ready: number;
+  workspace_desired: number;
+  databases: WarmupDbInfo[];
+  vmtouch_ready: number;
+  namespaces: string[];
+  error?: string;
+}
+
 export interface StorageSummary {
   name: string;
   region: string;
@@ -303,6 +323,44 @@ export const monitoringApi = {
       account_name: accountName,
       db_name: dbName,
     }),
+
+  // Warmup — direct K8s API check
+  warmupStatus: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<WarmupStatus>(
+      `/monitor/aks/warmup-status?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+
+  // Warmup — start standalone DB warmup orchestrator
+  startWarmup: (body: {
+    subscription_id: string;
+    resource_group: string;
+    storage_account: string;
+    storage_resource_group?: string;
+    region?: string;
+    db: string;
+    db_display_name?: string;
+    program?: string;
+    aks_cluster_name: string;
+    machine_type?: string;
+    num_nodes?: number;
+    acr_resource_group?: string;
+    acr_name?: string;
+    terminal_resource_group?: string;
+    terminal_vm_name?: string;
+  }) => api.post<{ instance_id: string; db: string }>("/warmup/start", body),
+
+  // Warmup — poll orchestrator status
+  warmupOrchStatus: (instanceId: string) =>
+    api.get<{
+      instance_id: string;
+      runtime_status: string;
+      custom_status: {
+        phase: string;
+        db: string;
+        steps?: Record<string, unknown>;
+      } | null;
+      output: { status: string; db: string; error?: string } | null;
+    }>(`/warmup/${encodeURIComponent(instanceId)}/status`),
 };
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ import {
 import { Link } from "react-router-dom";
 
 import { monitoringApi, aksApi } from "@/api/endpoints";
+import { fetchApiRaw } from "@/api/client";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { OpenApiDeployPanel } from "@/components/OpenApiDeployPanel";
 
@@ -389,10 +390,12 @@ function SectionLabel({
 function EndpointCard({
   ep,
   baseUrl,
+  proxyInfo,
   id,
 }: {
   ep: SpecEndpoint;
   baseUrl: string;
+  proxyInfo?: { sub: string; rg: string; clusterName: string };
   id: string;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -429,18 +432,34 @@ function EndpointCard({
   const handleExecute = useCallback(async () => {
     setLoading(true);
     setResponse(null);
-    let url = baseUrl + ep.path;
+    let targetPath = ep.path;
     for (const p of ep.parameters.filter((p) => p.in === "path")) {
-      url = url.replace(`{${p.name}}`, paramValues[p.name] || "");
+      targetPath = targetPath.replace(`{${p.name}}`, paramValues[p.name] || "");
     }
     const start = Date.now();
     try {
-      const opts: RequestInit = {
-        method: ep.method.toUpperCase(),
-        headers: { "Content-Type": "application/json" },
-      };
-      if (ep.requestBody && bodyText) opts.body = bodyText;
-      const resp = await fetch(url, opts);
+      let resp: Response;
+      if (proxyInfo) {
+        // Route through backend proxy to avoid mixed-content (HTTPS→HTTP) blocking
+        const qs =
+          `subscription_id=${encodeURIComponent(proxyInfo.sub)}` +
+          `&resource_group=${encodeURIComponent(proxyInfo.rg)}` +
+          `&cluster_name=${encodeURIComponent(proxyInfo.clusterName)}` +
+          `&path=${encodeURIComponent(targetPath)}`;
+        const proxyUrl = `/aks/openapi/proxy?${qs}`;
+        const opts: RequestInit = { method: ep.method.toUpperCase() };
+        if (ep.requestBody && bodyText) opts.body = bodyText;
+        resp = await fetchApiRaw(proxyUrl, opts);
+      } else {
+        // Direct fetch fallback
+        const url = baseUrl + targetPath;
+        const opts: RequestInit = {
+          method: ep.method.toUpperCase(),
+          headers: { "Content-Type": "application/json" },
+        };
+        if (ep.requestBody && bodyText) opts.body = bodyText;
+        resp = await fetch(url, opts);
+      }
       const text = await resp.text();
       let formatted = text;
       try {
@@ -454,7 +473,7 @@ function EndpointCard({
     } finally {
       setLoading(false);
     }
-  }, [baseUrl, ep, paramValues, bodyText]);
+  }, [baseUrl, ep, paramValues, bodyText, proxyInfo]);
 
   /** Try it: simple GET → expand + execute immediately. Others → expand for input. */
   const handleTryIt = () => {
@@ -911,10 +930,12 @@ function TagSection({
   tag,
   endpoints,
   baseUrl,
+  proxyInfo,
 }: {
   tag: { name: string; description?: string };
   endpoints: SpecEndpoint[];
   baseUrl: string;
+  proxyInfo?: { sub: string; rg: string; clusterName: string };
 }) {
   const [open, setOpen] = useState(true);
   const Icon = TAG_ICONS[tag.name] || Server;
@@ -985,6 +1006,7 @@ function TagSection({
               key={`${ep.method}-${ep.path}`}
               ep={ep}
               baseUrl={baseUrl}
+              proxyInfo={proxyInfo}
               id={`ep-${ep.method}-${ep.path.replace(/\//g, "-")}`}
             />
           ))}
@@ -1502,6 +1524,7 @@ export function ApiReference() {
             tag={tag}
             endpoints={endpoints}
             baseUrl={spec.baseUrl}
+            proxyInfo={{ sub, rg, clusterName }}
           />
         ))}
     </div>

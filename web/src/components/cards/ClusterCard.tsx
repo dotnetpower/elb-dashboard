@@ -694,6 +694,11 @@ export function ClusterCard({
             onDelete={setDeleteTarget}
             subscriptionId={subscriptionId}
             resourceGroup={resourceGroup}
+            storageAccount={storageAccount}
+            storageResourceGroup={storageResourceGroup}
+            acrResourceGroup={acrResourceGroup}
+            acrName={acrName}
+            region={region}
           />
         ))}
       </ul>

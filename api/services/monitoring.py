@@ -337,6 +337,144 @@ def k8s_check_namespace_exists(
         session.close()
 
 
+def k8s_warmup_status(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any]:
+    """Detect warmup state by inspecting K8s resources created by elastic-blast prepare.
+
+    Returns:
+      {
+        "warm": bool,
+        "workspace_ready": int,       # create-workspace DaemonSet numberReady
+        "workspace_desired": int,     # create-workspace DaemonSet desiredNumberScheduled
+        "databases": [                # DBs detected from init-ssd Job env vars
+          {"name": "core_nt", "mol_type": "nucl", "status": "Complete", "nodes_ready": 10}
+        ],
+        "vmtouch_ready": int,         # vmtouch-db-cache DaemonSet numberReady (PVC mode)
+        "namespaces": ["elastic-blast-abc123"],  # elastic-blast namespaces found
+      }
+    """
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        result: dict[str, Any] = {
+            "warm": False,
+            "workspace_ready": 0,
+            "workspace_desired": 0,
+            "databases": [],
+            "vmtouch_ready": 0,
+            "namespaces": [],
+        }
+
+        # 1. create-workspace DaemonSet in kube-system
+        resp = session.get(
+            f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            ds = resp.json()
+            status = ds.get("status", {})
+            result["workspace_ready"] = status.get("numberReady", 0)
+            result["workspace_desired"] = status.get("desiredNumberScheduled", 0)
+            if result["workspace_ready"] > 0:
+                result["warm"] = True
+
+        # 2. vmtouch-db-cache DaemonSet in default namespace
+        resp = session.get(
+            f"{server}/apis/apps/v1/namespaces/default/daemonsets/vmtouch-db-cache",
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            ds = resp.json()
+            result["vmtouch_ready"] = ds.get("status", {}).get("numberReady", 0)
+            if result["vmtouch_ready"] > 0:
+                result["warm"] = True
+
+        # 3. Detect loaded DBs from init-ssd-* Jobs
+        resp = session.get(
+            f"{server}/apis/batch/v1/jobs",
+            params={"labelSelector": "app=setup"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            db_map: dict[str, dict[str, Any]] = {}
+            for job in resp.json().get("items", []):
+                job_name = job.get("metadata", {}).get("name", "")
+                if not job_name.startswith("init-ssd-"):
+                    continue
+                job_status = job.get("status", {})
+                succeeded = job_status.get("succeeded", 0)
+                failed = job_status.get("failed", 0)
+                active = job_status.get("active", 0)
+                # Extract ELB_DB from env vars
+                containers = (
+                    job.get("spec", {})
+                    .get("template", {})
+                    .get("spec", {})
+                    .get("containers", [])
+                )
+                db_name = ""
+                mol_type = ""
+                for c in containers:
+                    for env in c.get("env", []):
+                        if env.get("name") == "ELB_DB":
+                            db_name = env.get("value", "")
+                        elif env.get("name") == "ELB_DB_MOL_TYPE":
+                            mol_type = env.get("value", "")
+                if not db_name:
+                    continue
+                if db_name not in db_map:
+                    db_map[db_name] = {
+                        "name": db_name,
+                        "mol_type": mol_type,
+                        "nodes_ready": 0,
+                        "nodes_failed": 0,
+                        "nodes_active": 0,
+                        "total_jobs": 0,
+                    }
+                db_map[db_name]["total_jobs"] += 1
+                db_map[db_name]["nodes_ready"] += succeeded
+                db_map[db_name]["nodes_failed"] += failed
+                db_map[db_name]["nodes_active"] += active
+
+            for info in db_map.values():
+                total = info["total_jobs"]
+                if info["nodes_ready"] == total and total > 0:
+                    info["status"] = "Ready"
+                elif info["nodes_active"] > 0:
+                    info["status"] = "Loading"
+                elif info["nodes_failed"] > 0:
+                    info["status"] = "Failed"
+                else:
+                    info["status"] = "Unknown"
+            result["databases"] = list(db_map.values())
+
+        # 4. Find elastic-blast namespaces
+        resp = session.get(f"{server}/api/v1/namespaces", timeout=10)
+        if resp.status_code == 200:
+            for ns in resp.json().get("items", []):
+                ns_name = ns.get("metadata", {}).get("name", "")
+                if ns_name.startswith("elastic-blast-"):
+                    result["namespaces"].append(ns_name)
+
+        return result
+    except Exception as exc:
+        LOGGER.warning("k8s_warmup_status failed for %s: %s", cluster_name, str(exc)[:200])
+        return {
+            "warm": False,
+            "workspace_ready": 0,
+            "workspace_desired": 0,
+            "databases": [],
+            "vmtouch_ready": 0,
+            "namespaces": [],
+            "error": str(exc)[:200],
+        }
+    finally:
+        session.close()
+
+
 def k8s_get_service_ip(
     credential: TokenCredential,
     subscription_id: str,

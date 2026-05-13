@@ -6,9 +6,12 @@ import {
   Copy,
   ChevronDown,
   Trash2,
+  Flame,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 
-import type { AksClusterSummary } from "@/api/endpoints";
+import type { AksClusterSummary, WarmupDbInfo } from "@/api/endpoints";
+import { monitoringApi } from "@/api/endpoints";
 import { ClusterDetails } from "@/components/ClusterDetailModal";
 
 const CLUSTER_COLLAPSED_KEY = "elb-cluster-collapsed-";
@@ -24,6 +27,11 @@ export function ClusterItem({
   onDelete,
   subscriptionId,
   resourceGroup,
+  storageAccount,
+  storageResourceGroup,
+  acrResourceGroup,
+  acrName,
+  region,
 }: {
   cluster: AksClusterSummary;
   transitioning: Map<string, "starting" | "stopping">;
@@ -32,8 +40,14 @@ export function ClusterItem({
   onDelete: (name: string) => void;
   subscriptionId: string;
   resourceGroup: string;
+  storageAccount?: string;
+  storageResourceGroup?: string;
+  acrResourceGroup?: string;
+  acrName?: string;
+  region?: string;
 }) {
   const isStopped = c.power_state === "Stopped";
+  const isRunning = c.power_state === "Running";
   const [collapsed, setCollapsed] = useState(() => {
     try {
       const v = localStorage.getItem(CLUSTER_COLLAPSED_KEY + c.name);
@@ -54,6 +68,18 @@ export function ClusterItem({
       return next;
     });
   };
+
+  // Warmup status — only poll when cluster is running
+  const warmupQuery = useQuery({
+    queryKey: ["warmup-status", subscriptionId, resourceGroup, c.name],
+    queryFn: () => monitoringApi.warmupStatus(subscriptionId, resourceGroup, c.name),
+    enabled: isRunning && !transitioning.has(c.name),
+    staleTime: 30_000,
+    refetchInterval: isRunning ? 60_000 : false,
+    retry: 1,
+  });
+  const warmupDbs: WarmupDbInfo[] = warmupQuery.data?.databases ?? [];
+  const isWarm = warmupQuery.data?.warm ?? false;
 
   const trans = transitioning.get(c.name);
   const powerLabel =
@@ -184,6 +210,84 @@ export function ClusterItem({
         <span>· {c.k8s_version ?? "?"}</span>
       </div>
 
+      {/* Warmup badges — always visible when warm */}
+      {isRunning && warmupDbs.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 6,
+            marginTop: 4,
+            marginLeft: 22,
+          }}
+        >
+          {warmupDbs.map((db) => (
+            <span
+              key={db.name}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 3,
+                fontSize: 10,
+                padding: "2px 8px",
+                borderRadius: 10,
+                background:
+                  db.status === "Ready"
+                    ? "rgba(106,214,163,0.12)"
+                    : db.status === "Loading"
+                      ? "rgba(122,167,255,0.12)"
+                      : "rgba(224,123,138,0.12)",
+                color:
+                  db.status === "Ready"
+                    ? "var(--success)"
+                    : db.status === "Loading"
+                      ? "var(--accent)"
+                      : "var(--danger)",
+                border: `1px solid ${
+                  db.status === "Ready"
+                    ? "rgba(106,214,163,0.25)"
+                    : db.status === "Loading"
+                      ? "rgba(122,167,255,0.25)"
+                      : "rgba(224,123,138,0.25)"
+                }`,
+              }}
+              title={`${db.name}: ${db.nodes_ready}/${db.total_jobs} nodes ready`}
+            >
+              {db.status === "Loading" ? (
+                <Loader2 size={9} className="spin" />
+              ) : (
+                <Flame size={9} strokeWidth={1.5} />
+              )}
+              {db.name}
+              {db.status === "Ready" && (
+                <span style={{ opacity: 0.7 }}>
+                  {db.nodes_ready}/{db.total_jobs}
+                </span>
+              )}
+              {db.status === "Loading" && (
+                <span style={{ opacity: 0.7 }}>
+                  {db.nodes_ready}/{db.total_jobs}
+                </span>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+      {isRunning && isWarm && warmupDbs.length === 0 && (
+        <div
+          style={{
+            display: "flex",
+            gap: 4,
+            marginTop: 4,
+            marginLeft: 22,
+            fontSize: 10,
+            color: "var(--success)",
+          }}
+        >
+          <Flame size={10} strokeWidth={1.5} /> Workspace ready
+        </div>
+      )}
+
       {!collapsed && (
         <>
           <div className="muted" style={{ fontSize: 11, marginTop: 4, marginLeft: 22 }}>
@@ -257,6 +361,13 @@ export function ClusterItem({
             networkPlugin={c.network_plugin}
             subscriptionId={subscriptionId}
             resourceGroup={resourceGroup}
+            warmupDbs={warmupDbs}
+            warmupQuery={warmupQuery}
+            storageAccount={storageAccount}
+            storageResourceGroup={storageResourceGroup}
+            acrResourceGroup={acrResourceGroup}
+            acrName={acrName}
+            region={region}
           />
         </>
       )}

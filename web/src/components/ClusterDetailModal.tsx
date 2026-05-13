@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { Loader2, Maximize2, X } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
-import type { AksAgentPool } from "@/api/endpoints";
+import type { AksAgentPool, WarmupDbInfo, WarmupStatus } from "@/api/endpoints";
 import { ClusterModalKubectl } from "@/components/ClusterDiagnostics";
+import { WarmupSection } from "@/components/WarmupSection";
 
 export function ClusterDetails({
   clusterName,
@@ -16,6 +17,13 @@ export function ClusterDetails({
   networkPlugin,
   subscriptionId,
   resourceGroup,
+  warmupDbs,
+  warmupQuery,
+  storageAccount,
+  storageResourceGroup,
+  acrResourceGroup,
+  acrName,
+  region,
 }: {
   clusterName: string;
   powerState: string | null;
@@ -25,6 +33,13 @@ export function ClusterDetails({
   networkPlugin?: string | null;
   subscriptionId: string;
   resourceGroup: string;
+  warmupDbs?: WarmupDbInfo[];
+  warmupQuery?: UseQueryResult<WarmupStatus>;
+  storageAccount?: string;
+  storageResourceGroup?: string;
+  acrResourceGroup?: string;
+  acrName?: string;
+  region?: string;
 }) {
   const isRunning = powerState === "Running" && !isTransitioning;
   const [showModal, setShowModal] = useState(false);
@@ -715,6 +730,22 @@ export function ClusterDetails({
                     resourceGroup={resourceGroup}
                     clusterName={clusterName}
                     topQuery={topQuery}
+                  />
+                )}
+
+                {/* Warmup section — DB cache management */}
+                {isRunning && (
+                  <WarmupSection
+                    subscriptionId={subscriptionId}
+                    resourceGroup={resourceGroup}
+                    clusterName={clusterName}
+                    warmupDbs={warmupDbs}
+                    warmupQuery={warmupQuery}
+                    storageAccount={storageAccount}
+                    storageResourceGroup={storageResourceGroup}
+                    acrResourceGroup={acrResourceGroup}
+                    acrName={acrName}
+                    region={region}
                   />
                 )}
               </div>

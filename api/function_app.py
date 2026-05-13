@@ -31,6 +31,7 @@ from orchestrators import delete_blast as _del_blast
 from orchestrators import provision_terminal as _prov_term
 from orchestrators import storage_window as _stor_win
 from orchestrators import submit_blast as _sub_blast
+from orchestrators import warmup_db as _warmup_db
 from routes import aks as _aks_routes
 from routes import arm as _arm_routes
 from routes import blast as _blast_routes
@@ -135,6 +136,12 @@ def deploy_openapi_orchestrator(context):
     from orchestrators import provision_aks as _prov_aks
 
     return _prov_aks.deploy_openapi_orchestrator(context)
+
+
+@app.orchestration_trigger(context_name="context")
+def warmup_db_orchestrator(context):
+    """Load a BLAST database onto AKS cluster nodes (standalone warmup)."""
+    return _warmup_db.warmup_db_orchestrator(context)
 
 
 @app.entity_trigger(context_name="context")

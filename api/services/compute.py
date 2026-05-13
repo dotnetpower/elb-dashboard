@@ -155,6 +155,33 @@ def _run_command(
     raise last_exc  # type: ignore[misc]
 
 
+def get_vm_public_ip(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    vm_name: str,
+) -> str | None:
+    """Return the public IP address of a VM, or None if unavailable."""
+    from services.azure_clients import network_client
+
+    cc = compute_client(credential, subscription_id)
+    nc = network_client(credential, subscription_id)
+    try:
+        vm = cc.virtual_machines.get(resource_group, vm_name)
+        nic_id = vm.network_profile.network_interfaces[0].id
+        nic_name = nic_id.split("/")[-1]
+        nic_rg = nic_id.split("/")[4]
+        nic = nc.network_interfaces.get(nic_rg, nic_name)
+        pip_id = nic.ip_configurations[0].public_ip_address.id
+        pip_name = pip_id.split("/")[-1]
+        pip_rg = pip_id.split("/")[4]
+        pip = nc.public_ip_addresses.get(pip_rg, pip_name)
+        return pip.ip_address
+    except Exception as exc:
+        LOGGER.warning("Could not get public IP for %s: %s", vm_name, exc)
+        return None
+
+
 def deallocate_vm(
     credential: TokenCredential,
     subscription_id: str,
