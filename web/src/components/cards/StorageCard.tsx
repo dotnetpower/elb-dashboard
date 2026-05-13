@@ -223,9 +223,10 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
   const [showConfirmEnable, setShowConfirmEnable] = useState(false);
   const [keepAlive, setKeepAlive] = useState(() => {
     try {
-      return localStorage.getItem("elb-storage-keep-alive") === "1";
+      const stored = localStorage.getItem("elb-storage-keep-alive");
+      return stored === null ? true : stored === "1";
     } catch {
-      return false;
+      return true;
     }
   });
   const [toggleMsg, setToggleMsg] = useState<{ type: "ok" | "err"; text: string } | null>(
