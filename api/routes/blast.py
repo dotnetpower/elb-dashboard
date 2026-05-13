@@ -41,6 +41,32 @@ from services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _toggle_public_access(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    account_name: str,
+    *,
+    enabled: bool,
+) -> None:
+    """Enable or disable publicNetworkAccess on a storage account."""
+    import time as _time
+
+    from azure.mgmt.storage import StorageManagementClient
+
+    mgmt = StorageManagementClient(cred, subscription_id)
+    target = "Enabled" if enabled else "Disabled"
+    mgmt.storage_accounts.update(
+        resource_group,
+        account_name,
+        {"properties": {"public_network_access": target}},
+    )
+    LOGGER.info("Set publicNetworkAccess=%s on %s", target, account_name)
+    if enabled:
+        _time.sleep(10)  # wait for propagation
+
+
 bp = df.Blueprint()
 
 
@@ -939,6 +965,11 @@ def build_custom_database(req: func.HttpRequest) -> func.HttpResponse:
     terminal_vm = body.get("terminal_vm_name", "vm-elb-terminal")
 
     try:
+        # Step 0: Enable public network access on the storage account.
+        # The account is kept with publicNetworkAccess=Disabled by default;
+        # we must open it for the data-plane upload/download to succeed.
+        _toggle_public_access(cred, sub, rg, storage_account, enabled=True)
+
         # Step 1: Upload FASTA to blob if inline
         # Temporary staging path — cleaned up after build completes.
         fasta_staging_path = f"custom_db/.staging/{db_name}/input.fa"
@@ -1072,6 +1103,12 @@ echo "MAKEBLASTDB_DONE"
         if "AuthorizationFailure" in msg or "AuthorizationPermissionMismatch" in msg:
             return _error_response(403, "Storage or VM access denied. Check RBAC roles.")
         return _error_response(500, sanitise(msg[:500]))
+    finally:
+        # Always re-disable public network access, even on failure.
+        try:
+            _toggle_public_access(cred, sub, rg, storage_account, enabled=False)
+        except Exception:
+            LOGGER.warning("Could not re-disable public access on %s after custom DB build", storage_account)
 
 
 # ---------------------------------------------------------------------------
