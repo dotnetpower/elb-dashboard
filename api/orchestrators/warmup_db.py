@@ -1,22 +1,23 @@
 """Standalone DB warmup orchestrator.
 
-Loads a BLAST database onto AKS cluster nodes without submitting a BLAST job.
-Reuses the existing elastic-blast prepare activities.
+Loads a BLAST database onto AKS cluster nodes via direct K8s API.
+Inspired by elastic-blast-azure benchmark v3 PreloadedStrategy — deploys
+K8s Jobs that use azcopy to download DB from blob to each node's local SSD.
+
+No VM SSH dependency. Uses K8s API directly for both apply and polling (~1-3s
+per call vs 30-60s for VM Run Command).
 
 Sequence:
-  1. Ensure VM is running
-  2. Enable storage public access
-  3. Wait for propagation
-  4. Generate config for prepare-only (dummy query/results)
-  5. Assign AKS RBAC roles (idempotent)
-  6. Run elastic-blast prepare (fire-and-poll)
-  7. Disable storage public access
+  1. Enable storage public access
+  2. Wait for propagation
+  3. Apply K8s warmup Jobs (one per node, azcopy blob→SSD)
+  4. Poll K8s Jobs until all nodes complete
+  5. Disable storage public access
 
 Input: {
   subscription_id, resource_group, storage_account, storage_resource_group,
-  region, db, program, aks_cluster_name, machine_type, num_nodes,
-  acr_resource_group, acr_name,
-  terminal_resource_group, terminal_vm_name,
+  region, db, db_display_name, program, aks_cluster_name,
+  machine_type, num_nodes, acr_resource_group, acr_name,
   user_assertion,
 }
 
@@ -33,9 +34,10 @@ import azure.durable_functions as df
 
 LOGGER = logging.getLogger(__name__)
 
-WARMUP_POLL_INTERVAL_SECONDS = 30
-WARMUP_POLL_MAX_ATTEMPTS = 120  # 120 * 30s = 60 min ceiling
+WARMUP_POLL_INTERVAL_SECONDS = 15  # K8s API is fast — poll every 15s
+WARMUP_POLL_MAX_ATTEMPTS = 480     # 480 * 15s = 120 min ceiling (core_nt is ~283GB)
 STORAGE_PROPAGATION_SECONDS = 10
+RBAC_PROPAGATION_SECONDS = 60      # AKS kubelet RBAC propagation grace period
 
 
 def warmup_db_orchestrator(
@@ -60,61 +62,28 @@ def warmup_db_orchestrator(
         def _ts() -> str:
             return context.current_utc_datetime.isoformat()
 
-        # 0. Ensure VM is running
-        steps["checking_vm"] = {"started_at": _ts()}
-        context.set_custom_status({"phase": "checking_vm", "db": db_name, "steps": steps})
-        vm_payload = {
-            "subscription_id": request["subscription_id"],
-            "resource_group": request.get("terminal_resource_group", "rg-elb-terminal"),
-            "vm_name": request.get("terminal_vm_name", "vm-elb-terminal"),
-            "user_assertion": request.get("user_assertion"),
-        }
-        vm_status = yield context.call_activity("ensure_vm_running_activity", vm_payload)
-        steps["checking_vm"].update({"completed_at": _ts(), "started": vm_status.get("started")})
-        if vm_status.get("started"):
-            yield context.create_timer(context.current_utc_datetime + timedelta(seconds=30))
-
-        # 1. Enable storage access
+        # 0. Enable storage access
         steps["enabling_storage"] = {"started_at": _ts()}
         context.set_custom_status({"phase": "enabling_storage", "db": db_name, "steps": steps})
         yield context.call_activity("set_storage_public_access_activity", storage_payload)
         steps["enabling_storage"].update({"done": True, "completed_at": _ts()})
         yield context.create_timer(context.current_utc_datetime + timedelta(seconds=STORAGE_PROPAGATION_SECONDS))
 
-        # 2. Generate config for prepare-only
+        # 1. Build DB URL
         steps["configuring"] = {"started_at": _ts()}
         context.set_custom_status({"phase": "configuring", "db": db_name, "steps": steps})
 
-        # Build a minimal job_id for the prepare run
-        job_id = f"warmup-{instance_id[:8]}"
-        request["job_id"] = job_id
-        request["enable_warmup"] = True
-        # CRITICAL: reuse=True — we are warming an EXISTING cluster, not creating a new one.
-        # reuse=False would cause elastic-blast to try creating a new AKS cluster.
-        request["reuse"] = True
-        # Use cluster's actual node config if available (passed from frontend)
-        if not request.get("machine_type"):
-            request["machine_type"] = "Standard_E32s_v5"
-        if not request.get("num_nodes"):
-            request["num_nodes"] = 3
-        request["reuse"] = True
-        # Dummy query/results — prepare only downloads DB, doesn't need real ones
-        if not request.get("query_blob_url"):
-            request["query_blob_url"] = f"https://{request['storage_account']}.blob.core.windows.net/queries/dummy.fa"
-        if not request.get("results_url"):
-            request["results_url"] = f"https://{request['storage_account']}.blob.core.windows.net/results/{job_id}"
-
-        # Set DB URL if not already a full URL
         db_raw = request.get("db", "")
         if db_raw and not db_raw.startswith("http"):
-            request["db"] = f"https://{request['storage_account']}.blob.core.windows.net/{db_raw}"
+            db_url = f"https://{request['storage_account']}.blob.core.windows.net/{db_raw}"
+        else:
+            db_url = db_raw
 
-        config_result = yield context.call_activity("generate_blast_config_activity", request)
-        request["config_text"] = config_result.get("config_text", "")
-        steps["configuring"].update({"completed_at": _ts()})
-
-        # 3. Assign RBAC roles (idempotent, non-fatal)
         aks_cluster = request.get("aks_cluster_name", "")
+        num_nodes = int(request.get("num_nodes") or 3)
+        steps["configuring"].update({"completed_at": _ts(), "db_url": db_url, "num_nodes": num_nodes})
+
+        # 2. Assign RBAC roles (idempotent, non-fatal)
         if aks_cluster:
             roles_payload = {
                 "subscription_id": request["subscription_id"],
@@ -127,42 +96,70 @@ def warmup_db_orchestrator(
                 "user_assertion": request.get("user_assertion"),
             }
             try:
-                yield context.call_activity("assign_aks_roles_activity", roles_payload)
+                roles_res = yield context.call_activity("assign_aks_roles_activity", roles_payload)
+                steps["roles"] = {"roles_assigned": roles_res.get("roles_assigned", [])}
             except Exception as exc:
                 LOGGER.warning("Warmup role assignment failed (non-fatal): %s", exc)
                 steps["roles"] = {"error": str(exc)[:200]}
 
-        # 4. Run elastic-blast prepare
+            # Brief pause to let kubelet RBAC (AcrPull, Storage Blob Data
+            # Contributor) propagate before the DaemonSet pods try to pull
+            # the warmup image / call azcopy. The init container itself also
+            # retries azcopy 6× with 30 s sleeps, so this is belt-and-braces.
+            yield context.create_timer(
+                context.current_utc_datetime + timedelta(seconds=RBAC_PROPAGATION_SECONDS)
+            )
+
+        # 3. Apply K8s warmup Jobs (one per node, azcopy blob→local SSD)
         steps["warming_up"] = {"started_at": _ts()}
         context.set_custom_status({"phase": "warming_up", "db": db_name, "steps": steps})
-        yield context.call_activity("run_elastic_blast_prepare_activity", request)
 
-        # 5. Poll until complete
-        prepare_status = "running"
-        prepare_output = ""
+        k8s_payload = {
+            "subscription_id": request["subscription_id"],
+            "resource_group": request["resource_group"],
+            "cluster_name": aks_cluster,
+            "db_url": db_url,
+            "db_name": db_name,
+            "num_nodes": num_nodes,
+            "acr_name": request.get("acr_name", ""),
+            "acr_resource_group": request.get("acr_resource_group", ""),
+            "user_assertion": request.get("user_assertion"),
+        }
+        apply_result = yield context.call_activity("k8s_warmup_db_activity", k8s_payload)
+        steps["warming_up"]["jobs_applied"] = len(apply_result.get("job_names", []))
+
+        # 4. Poll K8s Jobs until all nodes complete
+        check_payload = {
+            "subscription_id": request["subscription_id"],
+            "resource_group": request["resource_group"],
+            "cluster_name": aks_cluster,
+            "db_name": db_name,
+            "user_assertion": request.get("user_assertion"),
+        }
+        warmup_status = "running"
         for attempt in range(WARMUP_POLL_MAX_ATTEMPTS):
             yield context.create_timer(
                 context.current_utc_datetime + timedelta(seconds=WARMUP_POLL_INTERVAL_SECONDS)
             )
-            check = yield context.call_activity("check_elastic_blast_prepare_activity", request)
-            prepare_status = check.get("status", "running")
-            prepare_output = check.get("output", "")
+            check = yield context.call_activity("k8s_check_warmup_db_activity", check_payload)
+            warmup_status = check.get("status", "running")
             steps["warming_up"]["poll_attempt"] = attempt + 1
-            steps["warming_up"]["output"] = prepare_output[:4000]
+            steps["warming_up"]["ready"] = check.get("ready", 0)
+            steps["warming_up"]["total"] = check.get("total", num_nodes)
             context.set_custom_status({"phase": "warming_up", "db": db_name, "steps": steps})
-            if prepare_status in ("succeeded", "failed", "lost"):
+            if warmup_status in ("succeeded", "failed"):
                 break
 
         steps["warming_up"].update({
-            "success": prepare_status == "succeeded",
-            "status": prepare_status,
+            "success": warmup_status == "succeeded",
+            "status": warmup_status,
             "completed_at": _ts(),
         })
 
-        # 6. Disable storage access (always)
+        # 5. Disable storage access (always)
         yield context.call_activity("set_storage_public_access_activity", disable_payload)
 
-        if prepare_status == "succeeded":
+        if warmup_status == "succeeded":
             context.set_custom_status({"phase": "completed", "db": db_name, "steps": steps})
             return {
                 "status": "succeeded",
@@ -171,12 +168,33 @@ def warmup_db_orchestrator(
                 "steps": steps,
             }
         else:
+            if warmup_status == "failed":
+                # Surface the actual init container error from k8s_check_warmup_db_activity
+                logs = check.get("logs", "")
+                init_failed = check.get("init_failed", 0)
+                restart_max = check.get("restart_max", 0)
+                failed_pod = check.get("failed_pod", "")
+                if logs:
+                    error_msg = (
+                        f"Warmup init container failed on {init_failed} pod(s) "
+                        f"after {restart_max} retries (pod: {failed_pod}). "
+                        f"Last logs:\n{logs}"
+                    )[:4000]
+                else:
+                    error_msg = (
+                        f"Warmup init container failed on {init_failed} pod(s) "
+                        f"after {restart_max} retries (pod: {failed_pod}). "
+                        f"No logs captured."
+                    )[:2000]
+            else:
+                error_msg = f"Warmup polling timed out after {WARMUP_POLL_MAX_ATTEMPTS} attempts"
+            steps["warming_up"]["error"] = error_msg
             context.set_custom_status({"phase": "failed", "db": db_name, "steps": steps})
             return {
                 "status": "failed",
                 "db": db_name,
                 "cluster": aks_cluster,
-                "error": prepare_output[:4000],
+                "error": error_msg,
                 "steps": steps,
             }
 

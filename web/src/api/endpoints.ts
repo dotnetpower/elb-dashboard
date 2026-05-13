@@ -453,6 +453,17 @@ export const aksApi = {
       storage_account: storageAccount,
     }),
 
+  openApiDeployStatus: (instanceId: string) =>
+    api.get<
+      OrchestrationStatus<{
+        cluster_name?: string;
+        resource_group?: string;
+        status?: string;
+        openapi_deploy?: { error?: string };
+        workload_identity?: { error?: string };
+      }>
+    >(`/aks/openapi/deploy/${encodeURIComponent(instanceId)}/status`),
+
   proxyOpenApiSpec: (subscriptionId: string, rg: string, clusterName: string) =>
     api.get<Record<string, unknown>>(
       `/aks/openapi/spec?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,

@@ -26,6 +26,8 @@ export function ClusterDetails({
   region,
   nodeSku,
   nodeCount,
+  terminalResourceGroup,
+  terminalVmName,
 }: {
   clusterName: string;
   powerState: string | null;
@@ -44,6 +46,8 @@ export function ClusterDetails({
   region?: string;
   nodeSku?: string | null;
   nodeCount?: number | null;
+  terminalResourceGroup?: string;
+  terminalVmName?: string;
 }) {
   const isRunning = powerState === "Running" && !isTransitioning;
   const [showModal, setShowModal] = useState(false);
@@ -752,6 +756,8 @@ export function ClusterDetails({
                     region={region}
                     nodeSku={nodeSku}
                     nodeCount={nodeCount}
+                    terminalResourceGroup={terminalResourceGroup}
+                    terminalVmName={terminalVmName}
                   />
                 )}
               </div>

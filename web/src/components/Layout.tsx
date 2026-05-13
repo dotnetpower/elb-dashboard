@@ -1,11 +1,13 @@
 import { type PropsWithChildren, useState, useRef, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
-import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database } from "lucide-react";
+import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { useTheme } from "@/hooks/useTheme";
 import { loadSavedConfig } from "@/components/SetupWizard";
+import { apiLoginRequest } from "@/auth/msal";
+import { subscribeAuthSessionIssues, type AuthSessionIssue } from "@/auth/sessionEvents";
 
 import "./Layout.css";
 
@@ -142,6 +144,7 @@ function MenuAction({ icon, label, onClick }: { icon: React.ReactNode; label: st
 export function Layout({ children }: PropsWithChildren) {
   const { instance, accounts } = useMsal();
   const account = accounts[0];
+  const [sessionIssue, setSessionIssue] = useState<AuthSessionIssue | null>(null);
   const initials = (account?.name ?? account?.username ?? "U")
     .split(" ")
     .map((w) => w[0])
@@ -152,6 +155,23 @@ export function Layout({ children }: PropsWithChildren) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { showHelp, setShowHelp } = useKeyboardShortcuts();
   const { theme, toggle: toggleTheme } = useTheme();
+
+  useEffect(() => subscribeAuthSessionIssues(setSessionIssue), []);
+
+  const handleSignInAgain = () => {
+    const activeAccount = instance.getActiveAccount() ?? account;
+    setSessionIssue(null);
+    instance.loginRedirect({
+      ...apiLoginRequest,
+      account: activeAccount,
+      prompt: "login",
+    }).catch(() => {
+      setSessionIssue({
+        reason: "token_refresh_failed",
+        message: "Sign-in could not start. Refresh the browser and try again.",
+      });
+    });
+  };
 
   return (
     <div className="layout">
@@ -249,6 +269,43 @@ export function Layout({ children }: PropsWithChildren) {
           }}
         />
       </header>
+
+      {sessionIssue && (
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "10px 24px",
+            borderBottom: "1px solid var(--glass-border)",
+            background: "rgba(240, 198, 116, 0.12)",
+            color: "var(--text-primary)",
+          }}
+        >
+          <AlertTriangle size={16} strokeWidth={1.5} style={{ color: "var(--warning)", flexShrink: 0 }} />
+          <span style={{ flex: 1, fontSize: 13 }}>{sessionIssue.message}</span>
+          <button
+            onClick={handleSignInAgain}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              border: "1px solid var(--glass-border)",
+              borderRadius: 8,
+              padding: "6px 10px",
+              background: "var(--glass-bg-strong)",
+              color: "var(--text-primary)",
+              cursor: "pointer",
+              fontSize: 12,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <LogIn size={13} strokeWidth={1.5} />
+            Sign in again
+          </button>
+        </div>
+      )}
 
       <main className="layout__main">
         {/* #11 Breadcrumb */}

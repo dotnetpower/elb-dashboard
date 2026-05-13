@@ -17,6 +17,7 @@ packages:
   - python3.11
   - python3.11-venv
   - python3-pip
+  - primer3
   - software-properties-common
   - tmux
   - unzip
@@ -26,22 +27,60 @@ write_files:
     permissions: '0644'
     content: |
       export PYTHONPATH=src:$PYTHONPATH
-      export AZCOPY_AUTO_LOGIN_TYPE=AZCLI
+      export AZCOPY_AUTO_LOGIN_TYPE=MSI
       export ELB_SKIP_DB_VERIFY=true
       export ELB_DISABLE_AUTO_SHUTDOWN=1
+      if [ "$(id -u)" != "0" ] && command -v elb-az-login-mi >/dev/null 2>&1; then
+        elb-az-login-mi >/tmp/elb-az-login-mi.$(id -u).log 2>&1 || true
+      fi
+  - path: /usr/local/bin/elb-az-login-mi
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      export HOME="${HOME:-/home/azureuser}"
+      export AZURE_CONFIG_DIR="${AZURE_CONFIG_DIR:-$HOME/.azure}"
+      mkdir -p "$AZURE_CONFIG_DIR"
+
+      if az account show -o none >/dev/null 2>&1; then
+        exit 0
+      fi
+
+      imds_token_url='http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F'
+      if ! curl -fsS -H Metadata:true --connect-timeout 1 --max-time 2 "$imds_token_url" >/dev/null; then
+        echo "VM managed identity endpoint is unavailable. Use az login --use-device-code only if you need a personal identity session." >&2
+        exit 1
+      fi
+
+      az login --identity --allow-no-subscriptions -o none >/dev/null
+      sub_id=$(curl -fsS -H Metadata:true --connect-timeout 1 --max-time 2 \
+        'http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01' \
+        | jq -r '.subscriptionId // empty' 2>/dev/null || true)
+      if [ -n "$sub_id" ]; then
+        az account set --subscription "$sub_id" 2>/dev/null || true
+      fi
   - path: /etc/motd
     permissions: '0644'
     content: |
       ============================================================
        ElasticBLAST on Azure — Remote Terminal
       ============================================================
-       Next step: run
-           az login --use-device-code
+       Azure CLI uses this VM's Managed Identity by default.
+       If the session is not active, run:
+           elb-az-login-mi
        Then:
            cd ~/elastic-blast-azure
            source venv/bin/activate
            PYTHONPATH=src:$PYTHONPATH python bin/elastic-blast --help
       ============================================================
+  - path: /etc/ssh/sshd_config.d/99-elb-terminal.conf
+    permissions: '0644'
+    content: |
+      Port 22
+      Port 443
+      PasswordAuthentication yes
+      KbdInteractiveAuthentication no
+      UsePAM yes
 
 runcmd:
   # Helper: retry a command up to N times with backoff. Used because Defender
@@ -68,6 +107,10 @@ runcmd:
     exit 1
     EOF
     chmod +x /usr/local/bin/elb-retry
+
+  - |
+    sshd -t
+    systemctl restart ssh
 
   # Wait for the package store to come back online (MDE blocks it during
   # onboarding). If after ~10 min apt is still unreachable, abort loudly so
@@ -148,7 +191,7 @@ runcmd:
   # the user sees a clear bootstrap failure instead of a silently broken VM.
   - |
     fail=0
-    for tool in az kubectl azcopy git python3.11; do
+    for tool in az kubectl azcopy git python3.11 primer3_core; do
       if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ELB-FATAL: required tool '$tool' missing after bootstrap" >&2
         fail=1

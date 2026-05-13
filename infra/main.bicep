@@ -22,6 +22,9 @@ param apiClientId string = ''
 @description('Application (client) secret for OBO flow. Stored in Key Vault.')
 param apiClientSecret string = ''
 
+@description('Resource group name where the Remote Terminal VM lives.')
+param terminalResourceGroup string = 'rg-elb-terminal'
+
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = {
   'azd-env-name': environmentName
@@ -45,6 +48,7 @@ module platform 'modules/platform.bicep' = {
     apiClientId: apiClientId
     apiClientSecret: apiClientSecret
     principalId: principalId
+    terminalResourceGroup: terminalResourceGroup
     tags: tags
   }
 }

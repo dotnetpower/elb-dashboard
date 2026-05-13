@@ -13,9 +13,6 @@ Security:
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
-import paramiko
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,10 +35,12 @@ def run_ssh(
 
     Much faster than Azure VM Run Command (~1-2s overhead vs ~30-60s).
     """
+    import paramiko
+
     client = paramiko.SSHClient()
-    # Accept host keys but log a warning — VMs are ephemeral and IPs change.
+    # Accept host keys but log a warning: VMs are ephemeral and IPs change.
     # WarningPolicy logs unknown keys rather than silently trusting (AutoAddPolicy).
-    client.set_missing_host_key_policy(paramiko.WarningPolicy())
+    client.set_missing_host_key_policy(paramiko.WarningPolicy())  # noqa: S507
 
     try:
         LOGGER.info("SSH connecting to %s@%s:%d", username, hostname, port)
@@ -50,9 +49,9 @@ def run_ssh(
             port=port,
             username=username,
             password=password,
-            timeout=30,
-            banner_timeout=30,
-            auth_timeout=30,
+            timeout=5,
+            banner_timeout=10,
+            auth_timeout=10,
             allow_agent=False,
             look_for_keys=False,
         )
@@ -78,7 +77,12 @@ def run_ssh(
             combined += "\n" + err
         combined += f"\nEXIT_CODE={exit_code}"
 
-        LOGGER.info("SSH command completed on %s (exit=%d, out=%d bytes)", hostname, exit_code, len(out))
+        LOGGER.info(
+            "SSH command completed on %s (exit=%d, out=%d bytes)",
+            hostname,
+            exit_code,
+            len(out),
+        )
         return combined
 
     except Exception as exc:
@@ -96,8 +100,17 @@ def get_vm_ssh_info(
     subscription_id: str,
     resource_group: str,
     vm_name: str,
-) -> Optional[str]:
-    """Get the public IP address of a VM for SSH connection."""
+) -> str | None:
+    """Get the public IP address of a VM for SSH connection.
+
+    Caches the result in a module-level dict to avoid repeated Azure API calls
+    (~6s for vm.get + nic.get + pip.get).
+    """
+    cache_key = f"{subscription_id}/{resource_group}/{vm_name}"
+    if cache_key in _VM_IP_CACHE:
+        LOGGER.debug("SSH IP cache hit for %s: %s", vm_name, _VM_IP_CACHE[cache_key])
+        return _VM_IP_CACHE[cache_key]
+
     from services.azure_clients import compute_client, network_client
 
     cc = compute_client(credential, subscription_id)
@@ -105,19 +118,23 @@ def get_vm_ssh_info(
 
     try:
         vm = cc.virtual_machines.get(resource_group, vm_name)
-        # Get NIC
         nic_id = vm.network_profile.network_interfaces[0].id
         nic_name = nic_id.split("/")[-1]
         nic_rg = nic_id.split("/")[4]
         nic = nc.network_interfaces.get(nic_rg, nic_name)
 
-        # Get public IP
         pip_id = nic.ip_configurations[0].public_ip_address.id
         pip_name = pip_id.split("/")[-1]
         pip_rg = pip_id.split("/")[4]
         pip = nc.public_ip_addresses.get(pip_rg, pip_name)
 
-        return pip.ip_address
+        ip = pip.ip_address
+        _VM_IP_CACHE[cache_key] = ip
+        return ip
     except Exception as exc:
         LOGGER.warning("Could not get SSH info for %s: %s", vm_name, exc)
         return None
+
+
+# Module-level cache for VM IP addresses (cleared on Function App restart)
+_VM_IP_CACHE: dict[str, str] = {}

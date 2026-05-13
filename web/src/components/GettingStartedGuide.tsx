@@ -61,7 +61,7 @@ export function GettingStartedGuide({
       action: hasTerminal ? null : { label: "Go to Terminal page → Provision", to: "/terminal" },
       detail: hasTerminal
         ? "Terminal VM is provisioned"
-        : "Navigate to the Terminal page and click Provision. The VM will be created with all necessary tools (az CLI, kubectl, azcopy, elastic-blast). After provisioning, run `az login --use-device-code` in the terminal.",
+        : "Navigate to the Terminal page and click Provision. The VM will be created with all necessary tools (az CLI, kubectl, azcopy, elastic-blast) and uses Managed Identity for Azure CLI by default.",
     },
     {
       id: "database",

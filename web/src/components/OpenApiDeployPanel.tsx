@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Loader2, AlertTriangle, RefreshCw, Package, Rocket } from "lucide-react";
 
 import { aksApi } from "@/api/endpoints";
@@ -15,6 +16,52 @@ interface Props {
   retrying: boolean;
 }
 
+const FINISHED_STATUSES = new Set(["Completed", "Failed", "Terminated"]);
+const DEPLOY_DISCOVERY_TIMEOUT_MS = 180_000;
+
+function deployStorageKey(subscriptionId: string, resourceGroup: string, clusterName: string) {
+  return `elb-openapi-deploy-${subscriptionId}-${resourceGroup}-${clusterName}`;
+}
+
+function readStoredDeploy(key: string): { instanceId: string; startedAt: number } | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { instanceId?: string; startedAt?: number };
+    if (!parsed.instanceId || !parsed.startedAt) return null;
+    return { instanceId: parsed.instanceId, startedAt: parsed.startedAt };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredDeploy(key: string, instanceId: string, startedAt: number) {
+  try {
+    localStorage.setItem(key, JSON.stringify({ instanceId, startedAt }));
+  } catch {
+    /* best-effort */
+  }
+}
+
+function clearStoredDeploy(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* best-effort */
+  }
+}
+
+function formatDeployPhase(phase?: string) {
+  switch (phase) {
+    case "setup_workload_identity":
+      return "Setting up workload identity";
+    case "deploying_openapi":
+      return "Deploying OpenAPI service";
+    default:
+      return phase ?? "Deploying OpenAPI";
+  }
+}
+
 export function OpenApiDeployPanel({
   subscriptionId,
   resourceGroup,
@@ -25,47 +72,133 @@ export function OpenApiDeployPanel({
   onRetry,
   retrying,
 }: Props) {
-  const [deployState, setDeployState] = useState<
-    "idle" | "deploying" | "waiting" | "error"
-  >("idle");
+  const storageKey = useMemo(
+    () => deployStorageKey(subscriptionId, resourceGroup, clusterName),
+    [subscriptionId, resourceGroup, clusterName],
+  );
+  const [deployInstanceId, setDeployInstanceId] = useState<string | null>(() => {
+    return readStoredDeploy(storageKey)?.instanceId ?? null;
+  });
+  const [deployStartedAt, setDeployStartedAt] = useState<number>(() => {
+    return readStoredDeploy(storageKey)?.startedAt ?? Date.now();
+  });
+  const [startingDeploy, setStartingDeploy] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
-  const [waitElapsed, setWaitElapsed] = useState(0);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const stored = readStoredDeploy(storageKey);
+    setDeployInstanceId(stored?.instanceId ?? null);
+    setDeployStartedAt(stored?.startedAt ?? Date.now());
+    setDeployError(null);
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!deployInstanceId) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [deployInstanceId]);
+
+  const deployStatusQuery = useQuery({
+    queryKey: ["openapi-deploy-status", deployInstanceId],
+    queryFn: () => aksApi.openApiDeployStatus(deployInstanceId!),
+    enabled: Boolean(deployInstanceId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.runtime_status;
+      return status && FINISHED_STATUSES.has(status) ? false : 5_000;
+    },
+    retry: 1,
+  });
+
+  const waitElapsed = Math.max(0, Math.floor((now - deployStartedAt) / 1000));
+  const deployOutput = deployStatusQuery.data?.output;
+  const deployCustomStatus = deployStatusQuery.data?.custom_status as
+    | { phase?: string }
+    | null
+    | undefined;
+  const deploySucceeded =
+    deployStatusQuery.data?.runtime_status === "Completed" && deployOutput?.status === "succeeded";
+  const deployFailed =
+    deployStatusQuery.data?.runtime_status === "Failed" ||
+    deployStatusQuery.data?.runtime_status === "Terminated" ||
+    (deployStatusQuery.data?.runtime_status === "Completed" && deployOutput?.status === "failed");
+  const deployInProgress = Boolean(
+    deployInstanceId && !deploySucceeded && !deployFailed && !deployStatusQuery.isError,
+  );
+  const deployIsActive = startingDeploy || deployInProgress || deploySucceeded;
+  const deployState: "idle" | "deploying" | "waiting" | "error" = startingDeploy
+    ? "deploying"
+    : deployFailed || deployStatusQuery.isError || deployError
+      ? "error"
+      : deploySucceeded
+        ? "waiting"
+        : deployInProgress
+          ? "deploying"
+          : "idle";
+
+  useEffect(() => {
+    if (!deployInstanceId || !deploySucceeded) return undefined;
+    onRetry();
+    const interval = window.setInterval(() => {
+      if (Date.now() - deployStartedAt <= DEPLOY_DISCOVERY_TIMEOUT_MS) {
+        onRetry();
+      }
+    }, 5_000);
+    return () => window.clearInterval(interval);
+  }, [deployInstanceId, deployStartedAt, deploySucceeded, onRetry]);
+
+  useEffect(() => {
+    if (!deployFailed) return;
+    const message =
+      deployOutput?.openapi_deploy?.error ??
+      deployOutput?.workload_identity?.error ??
+      (deployStatusQuery.data?.runtime_status === "Terminated"
+        ? "OpenAPI deploy was terminated."
+        : "OpenAPI deploy failed.");
+    setDeployError(message);
+    clearStoredDeploy(storageKey);
+  }, [deployFailed, deployOutput, deployStatusQuery.data?.runtime_status, storageKey]);
+
+  useEffect(() => {
+    if (!deployInstanceId || !deploySucceeded) return;
+    if (now - deployStartedAt <= DEPLOY_DISCOVERY_TIMEOUT_MS) return;
+    setDeployInstanceId(null);
+    clearStoredDeploy(storageKey);
+  }, [deployInstanceId, deployStartedAt, deploySucceeded, now, storageKey]);
+
+  useEffect(() => {
+    if (!deployStatusQuery.isError || !deployInstanceId) return;
+    setDeployError("Previous OpenAPI deploy status could not be restored. Start deploy again.");
+    setDeployInstanceId(null);
+    clearStoredDeploy(storageKey);
+  }, [deployInstanceId, deployStatusQuery.isError, storageKey]);
 
   const canDeploy =
     Boolean(subscriptionId && resourceGroup && clusterName && acrName) &&
     imageBuilt &&
-    deployState !== "deploying" &&
-    deployState !== "waiting";
+    !deployIsActive;
 
   const handleDeploy = async () => {
-    setDeployState("deploying");
+    setStartingDeploy(true);
     setDeployError(null);
-    setWaitElapsed(0);
+    setDeployInstanceId(null);
+    clearStoredDeploy(storageKey);
     try {
-      await aksApi.deployOpenApi(
+      const response = await aksApi.deployOpenApi(
         subscriptionId,
         resourceGroup,
         clusterName,
         acrName,
         storageAccount,
       );
-      setDeployState("waiting");
-      const start = Date.now();
-      const timer = setInterval(() => {
-        setWaitElapsed(Math.floor((Date.now() - start) / 1000));
-      }, 1000);
-      const poll = () => {
-        if (Date.now() - start > 180_000) {
-          clearInterval(timer);
-          return;
-        }
-        onRetry();
-        setTimeout(poll, 10_000);
-      };
-      setTimeout(poll, 15_000);
+      const startedAt = Date.now();
+      setDeployStartedAt(startedAt);
+      setDeployInstanceId(response.id);
+      writeStoredDeploy(storageKey, response.id, startedAt);
     } catch (err: unknown) {
-      setDeployState("error");
       setDeployError(formatApiError(err));
+    } finally {
+      setStartingDeploy(false);
     }
   };
 
@@ -152,6 +285,28 @@ export function OpenApiDeployPanel({
         </div>
       )}
 
+      {deployState === "deploying" && deployInstanceId && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "10px 14px",
+            marginBottom: 12,
+            background: "rgba(122,167,255,0.06)",
+            border: "1px solid rgba(122,167,255,0.2)",
+            borderRadius: 6,
+            fontSize: 12,
+            color: "var(--accent)",
+          }}
+        >
+          <Loader2 size={13} className="spin" />
+          <span>
+            {formatDeployPhase(deployCustomStatus?.phase)} ({waitElapsed}s)
+          </span>
+        </div>
+      )}
+
       {deployState === "error" && deployError && (
         <div
           style={{
@@ -181,6 +336,7 @@ export function OpenApiDeployPanel({
         }}
       >
         <button
+          type="button"
           className="glass-button glass-button--primary"
           onClick={handleDeploy}
           disabled={!canDeploy}
@@ -208,6 +364,7 @@ export function OpenApiDeployPanel({
           )}
         </button>
         <button
+          type="button"
           className="glass-button"
           onClick={onRetry}
           disabled={retrying}

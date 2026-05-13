@@ -38,17 +38,22 @@ def _get_vm_ssh_password(credential, payload: dict[str, Any]) -> str | None:
 
     Returns password string or None if unavailable (falls back to Run Command).
     """
+    import time as _time
+    t0 = _time.time()
     vault_url = (payload.get("keyvault_url")
                 or os.environ.get("ELB_KEYVAULT_URL", "")
                 or os.environ.get("KEY_VAULT_URI", ""))
     vm_name = payload.get("terminal_vm_name", "vm-elb-terminal")
     if not vault_url:
+        LOGGER.info("No Key Vault URL — SSH password unavailable (%.1fms)", (_time.time() - t0) * 1000)
         return None
     try:
         from services.keyvault import get_secret
-        return get_secret(credential, vault_url, f"vm-{vm_name}-password")
+        pw = get_secret(credential, vault_url, f"vm-{vm_name}-password")
+        LOGGER.info("SSH password retrieved from KV in %.1fms", (_time.time() - t0) * 1000)
+        return pw
     except Exception as exc:
-        LOGGER.debug("Could not get SSH password from Key Vault: %s", exc)
+        LOGGER.warning("Could not get SSH password from Key Vault (%.1fms): %s", (_time.time() - t0) * 1000, exc)
         return None
 
 
@@ -69,15 +74,24 @@ def activity_upload_query(payload: dict[str, Any]) -> dict[str, Any]:
     account = payload["storage_account"]
     job_id = _validate_job_id(payload["job_id"])
     blob_path = f"{job_id}/input.fa"
+    query_data = payload["query_data"]
+    query_bytes = len(query_data.encode("utf-8"))
+    query_lines = len(query_data.splitlines())
 
     last_exc = None
     for attempt in range(3):
         try:
             url = storage_data_svc.upload_query_text(
-                cred, account, "queries", blob_path, payload["query_data"],
+                cred, account, "queries", blob_path, query_data,
             )
             LOGGER.info("uploaded query to %s", url)
-            return {"query_blob_url": url, "blob_path": blob_path}
+            return {
+                "query_blob_url": url,
+                "blob_path": blob_path,
+                "query_size_bytes": query_bytes,
+                "query_line_count": query_lines,
+                "attempts": attempt + 1,
+            }
         except Exception as exc:
             last_exc = exc
             if attempt < 2:
@@ -102,18 +116,22 @@ def activity_generate_blast_config(payload: dict[str, Any]) -> dict[str, Any]:
         config_text,
     )
     LOGGER.info("uploaded config to %s", url)
-    return {"config_blob_url": url, "config_text": config_text}
+    return {
+        "config_blob_url": url,
+        "config_blob_path": blob_path,
+        "config_text": config_text,
+        "config_size_bytes": len(config_text.encode("utf-8")),
+    }
 
 
 def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]:
-    """side-effect: runs elastic-blast submit on the Remote Terminal VM.
+    """side-effect: runs elastic-blast submit via K8s exec on elb-openapi pod.
 
-    Instead of using azcopy to download the config (which requires az login),
-    we write the config directly to the VM via Run Command. The config was
-    already generated and is available in the payload.
+    Fast path (~30s): K8s exec on the pre-booted elb-openapi pod in AKS.
+    Fallback (~60s): VM Run Command on the Remote Terminal VM.
 
-    Config write + submit are combined into a single Run Command to avoid
-    the ~30-60s Azure Run Command overhead per call.
+    The elb-openapi pod has elastic-blast CLI + kubectl + azcopy pre-installed,
+    eliminating VM Run Command overhead (~30s) and SSH GLIBC issues.
     """
     cred = credential_for_caller(payload.get("user_assertion"))
     job_id = _validate_job_id(payload["job_id"])
@@ -125,10 +143,422 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
     import base64
     config_b64 = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
 
-    # Single Run Command: write config + run submit (saves ~30-60s overhead)
-    # ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1 makes elastic-blast submit
-    # BLAST jobs directly via kubectl instead of creating a submit-jobs K8s pod.
-    # This avoids the batch_list.txt dependency that fails in warm-cluster mode.
+    aks_cluster = payload.get("aks_cluster_name", "")
+
+    # Fast path: K8s exec on elb-openapi pod (~1s overhead vs ~30s Run Command)
+    if aks_cluster:
+        try:
+            return _submit_via_k8s_exec(cred, payload, job_id, config_b64)
+        except Exception as exc:
+            LOGGER.warning("K8s exec submit failed (%s) — falling back to VM Run Command", exc)
+
+    # Fallback: VM Run Command
+    return _submit_via_vm(cred, payload, job_id, config_b64)
+
+
+def activity_start_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: starts elastic-blast submit and returns immediately when possible."""
+    cred = credential_for_caller(payload.get("user_assertion"))
+    job_id = _validate_job_id(payload["job_id"])
+
+    config_text = payload.get("config_text", "")
+    if not config_text:
+        config_text = generate_config(payload)
+
+    import base64
+
+    config_b64 = base64.b64encode(config_text.encode("utf-8")).decode("ascii")
+
+    aks_cluster = payload.get("aks_cluster_name", "")
+    if aks_cluster:
+        try:
+            return _start_submit_via_k8s_job(cred, payload, job_id, config_b64)
+        except Exception as exc:
+            LOGGER.warning("K8s submit start failed (%s) - falling back to VM Run Command", exc)
+
+    result = _submit_via_vm(cred, payload, job_id, config_b64)
+    return {**result, "done": True, "status": "succeeded" if result.get("success") else "failed"}
+
+
+def activity_check_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: none (read-only). Polls a submit helper K8s Job and returns tail logs."""
+    if payload.get("method") != "k8s_job":
+        return {"done": True, "success": False, "status": "unsupported", "output": "Unsupported submit method for live polling."}
+    cred = credential_for_caller(payload.get("user_assertion"))
+    submit_job_name = payload.get("submit_job_name", "")
+    if not submit_job_name:
+        return {"done": True, "success": False, "status": "failed", "output": "Submit helper job name missing."}
+
+    session, server = monitoring_svc._get_k8s_session(
+        cred,
+        payload["subscription_id"],
+        payload["resource_group"],
+        payload["aks_cluster_name"],
+    )
+    try:
+        status_resp = session.get(
+            f"{server}/apis/batch/v1/namespaces/default/jobs/{submit_job_name}",
+            timeout=10,
+        )
+        if status_resp.status_code == 404:
+            return {"done": True, "success": False, "status": "lost", "output": f"Submit helper job {submit_job_name} was not found."}
+        if status_resp.status_code != 200:
+            return {
+                "done": False,
+                "success": None,
+                "status": "unknown",
+                "output": f"Could not read submit helper job {submit_job_name}: HTTP {status_resp.status_code}",
+            }
+
+        job_status = status_resp.json().get("status", {})
+        logs = _get_submit_job_logs(session, server, submit_job_name)
+        output = sanitise(logs)[:6000]
+        if job_status.get("succeeded", 0) > 0:
+            exit_code = _parse_exit_code(logs)
+            return {
+                "done": True,
+                "success": exit_code == 0,
+                "status": "succeeded" if exit_code == 0 else "failed",
+                "output": output,
+                "submit_job_name": submit_job_name,
+                "exit_code": exit_code,
+                "method": "k8s_job",
+            }
+        if job_status.get("failed", 0) > 0:
+            return {
+                "done": True,
+                "success": False,
+                "status": "failed",
+                "output": output or f"Submit helper job {submit_job_name} failed without logs.",
+                "submit_job_name": submit_job_name,
+                "method": "k8s_job",
+            }
+        return {
+            "done": False,
+            "success": None,
+            "status": "running",
+            "output": output or f"Submit helper job {submit_job_name} is starting...",
+            "submit_job_name": submit_job_name,
+            "method": "k8s_job",
+        }
+    finally:
+        session.close()
+
+
+def _submit_job_name(job_id: str) -> str:
+    return re.sub(r"[^a-z0-9-]", "-", f"elb-submit-{job_id[:20]}".lower())[:63]
+
+
+def _start_submit_via_k8s_job(
+    cred, payload: dict[str, Any], job_id: str, config_b64: str,
+) -> dict[str, Any]:
+    import time as _time
+
+    t0 = _time.time()
+    session, server = monitoring_svc._get_k8s_session(
+        cred,
+        payload["subscription_id"],
+        payload["resource_group"],
+        payload["aks_cluster_name"],
+    )
+    try:
+        resp = session.get(
+            f"{server}/api/v1/namespaces/default/pods",
+            params={"labelSelector": "app=elb-openapi", "limit": "1"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Failed to list elb-openapi pods: {resp.status_code}")
+        pods = resp.json().get("items", [])
+        if not pods:
+            raise RuntimeError("No elb-openapi pod found")
+
+        submit_job_name = _submit_job_name(job_id)
+        session.delete(
+            f"{server}/apis/batch/v1/namespaces/default/jobs/{submit_job_name}",
+            params={"propagationPolicy": "Background"},
+            timeout=10,
+        )
+
+        elb_image = pods[0]["spec"]["containers"][0]["image"]
+        sa_name = pods[0]["spec"].get("serviceAccountName", "default")
+        pod_env: dict[str, str] = {}
+        for container in pods[0]["spec"].get("containers", []):
+            for env in container.get("env", []):
+                if env.get("name", "").startswith(("AZURE_", "AZCOPY_")):
+                    pod_env[env["name"]] = env.get("value", "")
+
+        submit_env = [
+            {"name": "ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD", "value": "1"},
+            {"name": "ELB_SKIP_DB_VERIFY", "value": "true"},
+            {"name": "PATH", "value": "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+        ]
+        for key, value in pod_env.items():
+            submit_env.append({"name": key, "value": value})
+
+        submit_job_body = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": submit_job_name,
+                "labels": {"app": "elb-submit", "job-id": job_id[:63]},
+            },
+            "spec": {
+                "backoffLimit": 0,
+                "ttlSecondsAfterFinished": 300,
+                "template": {
+                    "metadata": {"labels": {"app": "elb-submit", "azure.workload.identity/use": "true"}},
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "serviceAccountName": sa_name,
+                        "containers": [{
+                            "name": "submit",
+                            "image": elb_image,
+                            "command": ["bash", "-c"],
+                            "args": [
+                                f'printf "%s" "{config_b64}" | base64 -d > /tmp/elb-{job_id}.ini && '
+                                f'export PATH=/opt/venv/bin:$PATH && '
+                                f'az login --service-principal -u "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID" --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" -o none && '
+                                f'export PYTHONPATH=$(/opt/venv/bin/python3 -c "import site; print(site.getsitepackages()[0])") && '
+                                f'/usr/local/bin/elastic-blast submit --cfg /tmp/elb-{job_id}.ini 2>&1; '
+                                f'echo EXIT_CODE=$?'
+                            ],
+                            "env": submit_env,
+                            "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}},
+                        }],
+                    },
+                },
+            },
+        }
+        create_resp = session.post(
+            f"{server}/apis/batch/v1/namespaces/default/jobs",
+            json=submit_job_body,
+            timeout=15,
+        )
+        if create_resp.status_code not in (200, 201):
+            raise RuntimeError(f"Failed to create submit helper job: {create_resp.status_code} {create_resp.text[:200]}")
+        LOGGER.info("Created submit job %s (%.1fs)", submit_job_name, _time.time() - t0)
+        return {
+            "done": False,
+            "success": None,
+            "status": "running",
+            "method": "k8s_job",
+            "submit_job_name": submit_job_name,
+            "output": f"Created K8s submit helper job {submit_job_name}. Waiting for logs...",
+            "job_id": job_id,
+        }
+    finally:
+        session.close()
+
+
+def _get_submit_job_logs(session, server: str, submit_job_name: str) -> str:
+    pods_resp = session.get(
+        f"{server}/api/v1/namespaces/default/pods",
+        params={"labelSelector": f"job-name={submit_job_name}"},
+        timeout=10,
+    )
+    if pods_resp.status_code != 200:
+        return f"Waiting for submit pod list: HTTP {pods_resp.status_code}"
+
+    lines: list[str] = []
+    pods = pods_resp.json().get("items", [])
+    if not pods:
+        return "Waiting for submit pod to be scheduled..."
+
+    for pod in pods:
+        pod_name = pod.get("metadata", {}).get("name", "unknown")
+        pod_status = pod.get("status", {})
+        phase = pod_status.get("phase", "Unknown")
+        lines.append(f"pod={pod_name} phase={phase}")
+        for container_status in pod_status.get("containerStatuses", []) or []:
+            state = container_status.get("state", {})
+            waiting = state.get("waiting")
+            terminated = state.get("terminated")
+            if waiting:
+                lines.append(
+                    f"container={container_status.get('name', 'submit')} waiting={waiting.get('reason', 'Waiting')} {waiting.get('message', '')}".strip()
+                )
+            elif terminated:
+                lines.append(
+                    f"container={container_status.get('name', 'submit')} terminated={terminated.get('reason', 'Completed')} exit={terminated.get('exitCode', '?')}"
+                )
+        log_resp = session.get(
+            f"{server}/api/v1/namespaces/default/pods/{pod_name}/log",
+            params={"container": "submit", "tailLines": "120"},
+            timeout=10,
+        )
+        if log_resp.status_code == 200 and log_resp.text:
+            lines.append("--- Submit Console ---")
+            lines.append(log_resp.text)
+        elif log_resp.status_code not in (200, 400):
+            lines.append(f"log read returned HTTP {log_resp.status_code}")
+    return "\n".join(lines)
+
+
+def _submit_via_k8s_exec(
+    cred, payload: dict[str, Any], job_id: str, config_b64: str,
+) -> dict[str, Any]:
+    """Execute elastic-blast submit inside the elb-openapi pod via K8s API exec."""
+    import time as _time
+    t0 = _time.time()
+
+    session, server = monitoring_svc._get_k8s_session(
+        cred, payload["subscription_id"], payload["resource_group"],
+        payload["aks_cluster_name"],
+    )
+    try:
+        # Find elb-openapi pod
+        resp = session.get(
+            f"{server}/api/v1/namespaces/default/pods",
+            params={"labelSelector": "app=elb-openapi", "limit": "1"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Failed to list pods: {resp.status_code}")
+        pods = resp.json().get("items", [])
+        if not pods:
+            raise RuntimeError("No elb-openapi pod found")
+        pod_name = pods[0]["metadata"]["name"]
+        LOGGER.info("Using elb-openapi pod %s for submit", pod_name)
+
+        # Run submit as a short-lived K8s Job instead of using WebSocket exec.
+        # This keeps the Function App out of SPDY/WebSocket details and gives
+        # us normal pod logs for diagnostics.
+        submit_job_name = f"elb-submit-{job_id[:20]}"
+        submit_job_name = re.sub(r"[^a-z0-9-]", "-", submit_job_name.lower())[:63]
+
+        # Delete any previous submit job for this job_id
+        session.delete(
+            f"{server}/apis/batch/v1/namespaces/default/jobs/{submit_job_name}",
+            params={"propagationPolicy": "Background"},
+            timeout=10,
+        )
+
+        # Get the elb-openapi image and auth config from the running pod
+        elb_image = pods[0]["spec"]["containers"][0]["image"]
+        sa_name = pods[0]["spec"].get("serviceAccountName", "default")
+        # Copy Workload Identity + ELB context env vars from the running pod.
+        # Without ELB_AZURE_REGION / ELB_RESOURCE_GROUP / ELB_STORAGE_ACCOUNT
+        # the elastic-blast CLI falls back to its own discovery code path
+        # which fails inside the submit pod (no IMDS for the pod identity in
+        # the way it expects).
+        pod_env = {}
+        for c in pods[0]["spec"]["containers"]:
+            for env in c.get("env", []):
+                name = env.get("name", "")
+                if name.startswith(("AZURE_", "AZCOPY_", "ELB_")):
+                    pod_env[name] = env.get("value", "")
+
+        submit_env = [
+            {"name": "ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD", "value": "1"},
+            {"name": "ELB_SKIP_DB_VERIFY", "value": "true"},
+            {"name": "PATH", "value": "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+        ]
+        for k, v in pod_env.items():
+            submit_env.append({"name": k, "value": v})
+
+        submit_job_body = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": submit_job_name,
+                "labels": {"app": "elb-submit", "job-id": job_id[:63]},
+            },
+            "spec": {
+                "backoffLimit": 0,
+                "ttlSecondsAfterFinished": 300,
+                "template": {
+                    "metadata": {"labels": {"app": "elb-submit", "azure.workload.identity/use": "true"}},
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "serviceAccountName": sa_name,
+                        "containers": [{
+                            "name": "submit",
+                            "image": elb_image,
+                            "command": ["bash", "-c"],
+                            "args": [
+                                f'set -o pipefail; '
+                                f'printf "%s" "{config_b64}" | base64 -d > /tmp/elb-{job_id}.ini && '
+                                f'export PATH=/opt/venv/bin:$PATH && '
+                                # Workload Identity → az login. Retry to ride
+                                # out federated token race on first scheduling.
+                                f'AZ_OK=0; for i in 1 2 3 4 5; do '
+                                f'  if az login --service-principal -u "$AZURE_CLIENT_ID" --tenant "$AZURE_TENANT_ID" --federated-token "$(cat \"$AZURE_FEDERATED_TOKEN_FILE\")" -o none; then '
+                                f'    AZ_OK=1; break; '
+                                f'  fi; echo "az login attempt $i failed — sleeping 5s"; sleep 5; '
+                                f'done; '
+                                f'if [ "$AZ_OK" -ne 1 ]; then echo "az login failed after 5 attempts"; exit 2; fi; '
+                                # elastic-blast lives in system python (/usr/local/lib),
+                                # but azure.mgmt.* lives in /opt/venv. Add venv site-packages
+                                # to PYTHONPATH so the system python can import both.
+                                f'export PYTHONPATH=/opt/venv/lib/python3.11/site-packages; '
+                                f'/usr/local/bin/elastic-blast submit --cfg /tmp/elb-{job_id}.ini 2>&1; '
+                                f'echo EXIT_CODE=$?'
+                            ],
+                            "env": submit_env,
+                            "resources": {"requests": {"cpu": "500m", "memory": "512Mi"}},
+                        }],
+                    },
+                },
+            },
+        }
+        resp = session.post(
+            f"{server}/apis/batch/v1/namespaces/default/jobs",
+            json=submit_job_body,
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"Failed to create submit job: {resp.status_code} {resp.text[:200]}")
+
+        LOGGER.info("Created submit job %s (%.1fs)", submit_job_name, _time.time() - t0)
+
+        # Poll for completion (10s intervals, max 3 min)
+        for attempt in range(18):
+            import time
+            time.sleep(10)
+            resp = session.get(
+                f"{server}/apis/batch/v1/namespaces/default/jobs/{submit_job_name}",
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+            status = resp.json().get("status", {})
+            if status.get("succeeded", 0) > 0:
+                # Get logs
+                pods_resp = session.get(
+                    f"{server}/api/v1/namespaces/default/pods",
+                    params={"labelSelector": f"job-name={submit_job_name}"},
+                    timeout=10,
+                )
+                output = ""
+                if pods_resp.status_code == 200:
+                    for p in pods_resp.json().get("items", []):
+                        log_resp = session.get(
+                            f"{server}/api/v1/namespaces/default/pods/{p['metadata']['name']}/log",
+                            params={"container": "submit", "tailLines": "50"},
+                            timeout=10,
+                        )
+                        if log_resp.status_code == 200:
+                            output = log_resp.text
+
+                sanitised = sanitise(output)[:4000]
+                exit_code = _parse_exit_code(output)
+                elapsed = _time.time() - t0
+                LOGGER.info("K8s exec submit completed in %.1fs (exit=%d)", elapsed, exit_code)
+                return {"output": sanitised, "success": exit_code == 0, "job_id": job_id, "method": "k8s_exec"}
+
+            if status.get("failed", 0) > 0:
+                raise RuntimeError(f"Submit job {submit_job_name} failed")
+
+        raise RuntimeError(f"Submit job {submit_job_name} timed out")
+    finally:
+        session.close()
+
+
+def _submit_via_vm(
+    cred, payload: dict[str, Any], job_id: str, config_b64: str,
+) -> dict[str, Any]:
+    """Execute elastic-blast submit on the Remote Terminal VM via Run Command."""
     combined_script = (
         f"#!/bin/bash\n"
         f"printf '%s' '{config_b64}' | base64 -d > /tmp/elb-{job_id}.ini\n"
@@ -137,8 +567,9 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
         f"chown -R azureuser:azureuser /home/azureuser/.azcopy /home/azureuser/.azure 2>/dev/null\n"
         f"sudo -u azureuser bash -c '"
         f"export HOME=/home/azureuser && "
-        f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI && "
+        f"export AZCOPY_AUTO_LOGIN_TYPE=MSI && "
         f"export ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1 && "
+        f"export ELB_SKIP_DB_VERIFY=true && "
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi && "
         f"cd /home/azureuser/elastic-blast-azure && export PYTHONPATH=src:$PYTHONPATH && "
         f"source venv/bin/activate && "
@@ -155,17 +586,12 @@ def activity_run_elastic_blast_submit(payload: dict[str, Any]) -> dict[str, Any]
         ssh_password=ssh_pw,
     )
     sanitised = sanitise(output)[:4000]
-    LOGGER.info("elastic-blast submit output: %s", sanitised[:500])
-
+    LOGGER.info("VM submit output: %s", sanitised[:500])
     exit_code = _parse_exit_code(output)
     success = exit_code == 0
     if not success:
         LOGGER.warning("elastic-blast submit failed with EXIT_CODE=%d", exit_code)
-    return {
-        "output": sanitised,
-        "success": success,
-        "job_id": job_id,
-    }
+    return {"output": sanitised, "success": success, "job_id": job_id, "method": "vm_run_command"}
 
 
 def activity_check_blast_status(payload: dict[str, Any]) -> dict[str, Any]:
@@ -276,7 +702,7 @@ def activity_run_elastic_blast_prepare(payload: dict[str, Any]) -> dict[str, Any
         f"set -o pipefail\n"
         f"echo $$ > {pid_path}\n"
         f"export HOME=/home/azureuser\n"
-        f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI\n"
+        f"export AZCOPY_AUTO_LOGIN_TYPE=MSI\n"
         f"export ELB_DISABLE_JOB_SUBMISSION_ON_THE_CLOUD=1\n"
         f"if ! az account show -o none 2>/dev/null; then az login --identity -o none 2>/dev/null || true; fi\n"
         f"cd /home/azureuser/elastic-blast-azure\n"
@@ -420,12 +846,12 @@ def activity_export_blast_results(payload: dict[str, Any]) -> dict[str, Any]:
     job_id = _validate_job_id(payload["job_id"])
     account = payload["storage_account"]
 
-    # Export script: check az login, fallback to managed identity, list results, capture logs
+    # Export script: use managed identity, list results, capture logs.
     export_script = (
         f"#!/bin/bash\n"
         f"sudo -u azureuser bash -c '\n"
         f"export HOME=/home/azureuser\n"
-        f"export AZCOPY_AUTO_LOGIN_TYPE=AZCLI\n"
+        f"export AZCOPY_AUTO_LOGIN_TYPE=MSI\n"
         f"cd /home/azureuser/elastic-blast-azure\n"
         f"export PYTHONPATH=src:$PYTHONPATH\n"
         f"source venv/bin/activate\n"
@@ -436,7 +862,7 @@ def activity_export_blast_results(payload: dict[str, Any]) -> dict[str, Any]:
         f"mkdir -p $RESULTS_DIR\n"
         f"EXPORT_ERRORS=0\n"
         f"\n"
-        f"# 0. Check az login — fallback to managed identity if expired\n"
+        f"# 0. Check az login — use managed identity if expired\n"
         f"if ! az account show --query user.name -o tsv 2>/dev/null; then\n"
         f"  echo \"AZ_LOGIN=expired, trying managed identity...\"\n"
         f"  if az login --identity 2>/dev/null; then\n"
@@ -600,6 +1026,252 @@ def activity_k8s_check_warmup_ready(payload: dict[str, Any]) -> dict[str, Any]:
     )
     LOGGER.info("Warmup check for %s/%s: warm=%s", cluster_name, namespace, is_warm)
     return {"warm": is_warm}
+
+
+def activity_k8s_warmup_db(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: applies a K8s DaemonSet to download DB from blob to every node's local SSD.
+
+    Inspired by elastic-blast-azure benchmark v3 PreloadedStrategy.
+    Uses K8s API directly (no VM SSH required).
+    DaemonSet automatically runs on all nodes — no node-ordinal labels needed.
+
+    Input: subscription_id, resource_group, cluster_name, db_url, db_name,
+           acr_name, acr_resource_group, num_nodes
+    Returns: {"applied": True, "daemonset_name": str, "db_name": str}
+    """
+    cred = credential_for_caller(payload.get("user_assertion"))
+    sub = payload["subscription_id"]
+    rg = payload["resource_group"]
+    cluster = payload["cluster_name"]
+    db_url = payload["db_url"]          # e.g. https://stgelbdemo.blob.core.windows.net/blast-db/16S_ribosomal_RNA
+    db_name = payload["db_name"]        # e.g. 16S_ribosomal_RNA
+    acr_name = payload.get("acr_name", "")
+    elb_image = f"{acr_name}.azurecr.io/ncbi/elb:1.4.0" if acr_name else "mcr.microsoft.com/azure-cli:latest"
+
+    ds_name = f"warmup-{re.sub(r'[^a-z0-9-]', '-', db_name.lower())}"[:63]
+    safe_db_label = re.sub(r"[^a-zA-Z0-9._-]", "-", db_name)[:63]
+
+    session, server = monitoring_svc._get_k8s_session(cred, sub, rg, cluster)
+    try:
+        # Delete previous DaemonSet for this DB if exists
+        session.delete(
+            f"{server}/apis/apps/v1/namespaces/default/daemonsets/{ds_name}",
+            params={"propagationPolicy": "Background"},
+            timeout=10,
+        )
+        # Also clean up old Job-based warmups
+        resp = session.get(
+            f"{server}/apis/batch/v1/namespaces/default/jobs",
+            params={"labelSelector": f"app=db-warmup,db={safe_db_label}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            for old_job in resp.json().get("items", []):
+                old_name = old_job["metadata"]["name"]
+                session.delete(
+                    f"{server}/apis/batch/v1/namespaces/default/jobs/{old_name}",
+                    params={"propagationPolicy": "Background"},
+                    timeout=10,
+                )
+
+        # Create DaemonSet — runs initContainer on every node to download DB
+        ds_body = {
+            "apiVersion": "apps/v1",
+            "kind": "DaemonSet",
+            "metadata": {
+                "name": ds_name,
+                "labels": {"app": "db-warmup", "db": safe_db_label},
+            },
+            "spec": {
+                "selector": {"matchLabels": {"app": "db-warmup", "db": safe_db_label}},
+                "template": {
+                    "metadata": {"labels": {"app": "db-warmup", "db": safe_db_label}},
+                    "spec": {
+                        "initContainers": [{
+                            "name": "download-db",
+                            "image": elb_image,
+                            "command": ["bash", "-c"],
+                            "args": [
+                                f'set -e; '
+                                f'DB_DIR="/workspace/blast"; '
+                                f'mkdir -p "$DB_DIR"; '
+                                f'if compgen -G "$DB_DIR/{db_name}*.nsq" >/dev/null 2>&1 || '
+                                f'   compgen -G "$DB_DIR/{db_name}*.psq" >/dev/null 2>&1 || '
+                                f'   compgen -G "$DB_DIR/{db_name}*.nal" >/dev/null 2>&1 || '
+                                f'   compgen -G "$DB_DIR/{db_name}*.pal" >/dev/null 2>&1; then '
+                                f'  echo "DB already present at $DB_DIR ($(ls $DB_DIR/{db_name}* 2>/dev/null | wc -l) files)"; exit 0; '
+                                f'fi; '
+                                f'echo "Downloading {db_name} from blob to $DB_DIR ..."; '
+                                f'export AZCOPY_AUTO_LOGIN_TYPE=MSI; '
+                                f'TMP_DIR=$(mktemp -d); '
+                                # Retry azcopy up to 6 times with 30s sleep to ride out
+                                # AKS kubelet RBAC propagation (Storage Blob Data
+                                # Contributor) which can take 60-180s after cluster
+                                # creation. Without this the DaemonSet pod hits
+                                # CrashLoopBackOff (5min backoff) and the orchestrator
+                                # times out before the role is effective.
+                                f'AZCOPY_OK=0; '
+                                f'for attempt in 1 2 3 4 5 6; do '
+                                f'  echo "azcopy attempt $attempt/6 ..."; '
+                                f'  if azcopy cp "{db_url}/*" "$TMP_DIR/" '
+                                f'    --recursive --log-level=WARNING --output-level=essential; then '
+                                f'    AZCOPY_OK=1; break; '
+                                f'  fi; '
+                                f'  echo "azcopy failed (attempt $attempt) — sleeping 30s before retry"; '
+                                f'  sleep 30; '
+                                f'done; '
+                                f'if [ "$AZCOPY_OK" -ne 1 ]; then '
+                                f'  echo "ERROR: azcopy failed after 6 attempts (kubelet RBAC propagation)"; '
+                                f'  exit 1; '
+                                f'fi; '
+                                f'find "$TMP_DIR" -type f -name "{db_name}*" -exec mv {{}} "$DB_DIR/" \\; ; '
+                                f'rm -rf "$TMP_DIR"; '
+                                f'FILE_COUNT=$(ls "$DB_DIR/{db_name}"* 2>/dev/null | wc -l); '
+                                f'echo "Download complete: $FILE_COUNT files"; '
+                                f'if [ "$FILE_COUNT" -eq 0 ]; then echo "ERROR: no files downloaded"; exit 1; fi; '
+                                f'echo "Generating DB metadata..."; '
+                                f'cd "$DB_DIR" && blastdbcmd -db {db_name} -info -json > {db_name}.njs 2>/dev/null || true; '
+                            ],
+                            "volumeMounts": [{"name": "workspace", "mountPath": "/workspace"}],
+                            "resources": {
+                                "requests": {"cpu": "1", "memory": "1Gi"},
+                                "limits": {"memory": "4Gi"},
+                            },
+                        }],
+                        "containers": [{
+                            "name": "pause",
+                            "image": "registry.k8s.io/pause:3.9",
+                        }],
+                        "volumes": [{
+                            "name": "workspace",
+                            "hostPath": {"path": "/workspace", "type": "DirectoryOrCreate"},
+                        }],
+                    },
+                },
+            },
+        }
+        resp = session.post(
+            f"{server}/apis/apps/v1/namespaces/default/daemonsets",
+            json=ds_body,
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            LOGGER.info("Created warmup DaemonSet: %s", ds_name)
+        elif resp.status_code == 409:
+            LOGGER.info("Warmup DaemonSet already exists: %s", ds_name)
+        else:
+            LOGGER.error("Failed to create DaemonSet %s: %d %s", ds_name, resp.status_code, resp.text[:300])
+            return {"applied": False, "error": resp.text[:500], "db_name": db_name}
+
+        return {"applied": True, "daemonset_name": ds_name, "db_name": db_name}
+    finally:
+        session.close()
+
+
+def activity_k8s_check_warmup_db(payload: dict[str, Any]) -> dict[str, Any]:
+    """side-effect: none (read-only). Polls K8s warmup DaemonSet pod status.
+
+    Returns {"status": "running"|"succeeded"|"failed", "ready": N, "total": N,
+             "init_failed": int, "restart_max": int, "logs": str}
+
+    Failure semantics: only declared "failed" once a pod has accumulated
+    >= 5 init container restarts (k8s backoff peaks at 5 min, so this gives
+    ~10-15 min for transient RBAC propagation to clear). On declared failure
+    the most recent init container logs are surfaced for diagnostics.
+    """
+    cred = credential_for_caller(payload.get("user_assertion"))
+    sub = payload["subscription_id"]
+    rg = payload["resource_group"]
+    cluster = payload["cluster_name"]
+    db_name = payload["db_name"]
+    safe_db_label = re.sub(r"[^a-zA-Z0-9._-]", "-", db_name)[:63]
+    ds_name = f"warmup-{re.sub(r'[^a-z0-9-]', '-', db_name.lower())}"[:63]
+
+    session, server = monitoring_svc._get_k8s_session(cred, sub, rg, cluster)
+    try:
+        # Check DaemonSet status
+        resp = session.get(
+            f"{server}/apis/apps/v1/namespaces/default/daemonsets/{ds_name}",
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {"status": "unknown", "error": f"DaemonSet not found: {resp.status_code}"}
+
+        ds = resp.json()
+        status = ds.get("status", {})
+        desired = status.get("desiredNumberScheduled", 0)
+        ready = status.get("numberReady", 0)
+
+        if desired == 0:
+            return {"status": "running", "ready": 0, "total": 0}
+
+        # Inspect individual pod statuses
+        resp2 = session.get(
+            f"{server}/api/v1/namespaces/default/pods",
+            params={"labelSelector": f"app=db-warmup,db={safe_db_label}"},
+            timeout=10,
+        )
+        init_done = 0
+        init_failed_persistent = 0  # only counts pods stuck (>= 5 restarts)
+        restart_max = 0
+        failed_pod_name = ""
+        if resp2.status_code == 200:
+            for pod in resp2.json().get("items", []):
+                init_statuses = pod.get("status", {}).get("initContainerStatuses", [])
+                for cs in init_statuses:
+                    rc = int(cs.get("restartCount", 0))
+                    restart_max = max(restart_max, rc)
+                    term = cs.get("state", {}).get("terminated", {})
+                    last = cs.get("lastState", {}).get("terminated", {})
+                    if term.get("exitCode") == 0:
+                        init_done += 1
+                    elif rc >= 5 and (term.get("exitCode", 0) != 0 or last.get("exitCode", 0) != 0):
+                        # Stuck after 5 retries → declare persistent failure
+                        init_failed_persistent += 1
+                        if not failed_pod_name:
+                            failed_pod_name = pod.get("metadata", {}).get("name", "")
+
+        if ready == desired and desired > 0:
+            return {"status": "succeeded", "ready": ready, "total": desired,
+                    "restart_max": restart_max}
+
+        if init_failed_persistent > 0:
+            # Surface the init container logs for the first persistently-failed pod
+            logs = ""
+            if failed_pod_name:
+                try:
+                    log_resp = session.get(
+                        f"{server}/api/v1/namespaces/default/pods/{failed_pod_name}/log",
+                        params={"container": "download-db", "tailLines": "60", "previous": "true"},
+                        timeout=10,
+                    )
+                    if log_resp.status_code == 200:
+                        logs = log_resp.text[-3000:]
+                    else:
+                        # Fall back to current container logs
+                        log_resp = session.get(
+                            f"{server}/api/v1/namespaces/default/pods/{failed_pod_name}/log",
+                            params={"container": "download-db", "tailLines": "60"},
+                            timeout=10,
+                        )
+                        if log_resp.status_code == 200:
+                            logs = log_resp.text[-3000:]
+                except Exception:
+                    pass
+            return {
+                "status": "failed",
+                "ready": init_done,
+                "total": desired,
+                "init_failed": init_failed_persistent,
+                "restart_max": restart_max,
+                "failed_pod": failed_pod_name,
+                "logs": sanitise(logs) if logs else "",
+            }
+
+        return {"status": "running", "ready": init_done, "total": desired,
+                "restart_max": restart_max}
+    finally:
+        session.close()
 
 
 def activity_list_databases(payload: dict[str, Any]) -> dict[str, Any]:

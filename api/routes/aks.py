@@ -15,6 +15,7 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from _http_utils import (
+    _RE_INSTANCE_ID,
     _RE_CLUSTER_NAME,
     _error_response,
     _json_response,
@@ -144,6 +145,35 @@ async def deploy_openapi(
         instance_id, body["cluster_name"],
     )
     return client.create_check_status_response(req, instance_id)
+
+
+@bp.route(route="aks/openapi/deploy/{instance_id}/status", methods=["GET"])
+@bp.durable_client_input(client_name="client")
+async def get_deploy_openapi_status(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
+    """Poll the OpenAPI deployment orchestrator status."""
+    try:
+        validate_bearer_token(req.headers.get("Authorization"))
+    except AuthError as exc:
+        return _error_response(exc.status, exc.message)
+
+    instance_id = req.route_params.get("instance_id")
+    if not instance_id or not _RE_INSTANCE_ID.match(instance_id):
+        return _error_response(400, "invalid instance_id")
+    status = await client.get_status(instance_id, show_input=False)
+    if status is None or status.runtime_status is None:
+        return _error_response(404, "instance not found")
+    return _json_response(
+        {
+            "instance_id": status.instance_id,
+            "runtime_status": status.runtime_status.name,
+            "custom_status": status.custom_status,
+            "created_time": status.created_time,
+            "last_updated_time": status.last_updated_time,
+            "output": status.output,
+        }
+    )
 
 
 @bp.route(route="aks/delete", methods=["POST"])
@@ -296,13 +326,13 @@ def assign_aks_roles(req: func.HttpRequest) -> func.HttpResponse:
 
         if acr_rg and acr_name:
             scope = f"/subscriptions/{sub}/resourceGroups/{acr_rg}/providers/Microsoft.ContainerRegistry/registries/{acr_name}"
-            _assign_role(auth_client, scope, kubelet_oid, "7f951dda-4ed3-4680-a7ca-43fe172d538d")  # AcrPull
-            assigned.append("AcrPull")
+            if _assign_role(auth_client, scope, kubelet_oid, "7f951dda-4ed3-4680-a7ca-43fe172d538d"):
+                assigned.append("AcrPull")
 
         if storage_rg and storage_account:
             scope = f"/subscriptions/{sub}/resourceGroups/{storage_rg}/providers/Microsoft.Storage/storageAccounts/{storage_account}"
-            _assign_role(auth_client, scope, kubelet_oid, "ba92f5b4-2d11-453d-a403-e96b0029c9fe")  # Storage Blob Data Contributor
-            assigned.append("StorageBlobDataContributor")
+            if _assign_role(auth_client, scope, kubelet_oid, "ba92f5b4-2d11-453d-a403-e96b0029c9fe"):
+                assigned.append("StorageBlobDataContributor")
 
         return _json_response({"kubelet_oid": kubelet_oid, "roles_assigned": assigned})
     except Exception as exc:
@@ -310,14 +340,16 @@ def assign_aks_roles(req: func.HttpRequest) -> func.HttpResponse:
         return _error_response(500, sanitise(str(exc)))
 
 
-def _assign_role(auth_client: Any, scope: str, principal_id: str, role_definition_id: str) -> None:
+def _assign_role(auth_client: Any, scope: str, principal_id: str, role_definition_id: str) -> bool:
     """Assign a role to a principal. Idempotent — soft-fails on permission errors.
 
     The Function App MI usually has only Contributor at subscription scope,
     which does NOT include `Microsoft.Authorization/roleAssignments/write`.
     On `AuthorizationFailed` / `InsufficientPermissions` we log the exact
     `az role assignment create` an admin can run, but do NOT raise — callers
-    treat this as best-effort. Hard failures (network, throttling) bubble up.
+    treat this as best-effort. Returns True when the role was created or
+    already existed, False when permissions prevented assignment. Hard failures
+    (network, throttling) bubble up.
     """
     role_def = f"{scope}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
     assignment_name = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_definition_id}"))
@@ -330,11 +362,12 @@ def _assign_role(auth_client: Any, scope: str, principal_id: str, role_definitio
                 "principal_type": "ServicePrincipal",
             },
         )
+        return True
     except Exception as exc:
         msg = str(exc)
         if "Conflict" in msg or "RoleAssignmentExists" in msg:
             LOGGER.debug("Role already assigned, skipping: %s", assignment_name)
-            return
+            return True
         if "AuthorizationFailed" in msg or "InsufficientPermissions" in msg or "does not have authorization" in msg:
             LOGGER.warning(
                 "Cannot self-grant role %s to principal %s on %s. "
@@ -343,7 +376,7 @@ def _assign_role(auth_client: Any, scope: str, principal_id: str, role_definitio
                 role_definition_id, principal_id, scope,
                 principal_id, role_definition_id, scope,
             )
-            return
+            return False
         raise
 
 

@@ -43,6 +43,8 @@ interface Props {
   acrName?: string;
   storageResourceGroup?: string;
   storageAccount?: string;
+  terminalResourceGroup?: string;
+  terminalVmName?: string;
 }
 
 export function ClusterCard({
@@ -53,6 +55,8 @@ export function ClusterCard({
   acrName,
   storageResourceGroup,
   storageAccount,
+  terminalResourceGroup,
+  terminalVmName,
 }: Props) {
   const enabled = Boolean(subscriptionId && resourceGroup);
   const query = useQuery({
@@ -699,6 +703,8 @@ export function ClusterCard({
             acrResourceGroup={acrResourceGroup}
             acrName={acrName}
             region={region}
+            terminalResourceGroup={terminalResourceGroup}
+            terminalVmName={terminalVmName}
           />
         ))}
       </ul>

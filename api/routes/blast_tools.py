@@ -1,4 +1,7 @@
-"""BLAST utility routes — cost estimation, taxonomy, preprocess, primer design, schedules, DB versions."""
+"""BLAST utility routes.
+
+Includes cost estimation, taxonomy, preprocess, primer design, schedules, and DB versions.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +13,13 @@ import uuid
 
 import azure.durable_functions as df
 import azure.functions as func
+import requests as _requests
+from pydantic import ValidationError
 
 from _http_utils import (
     _RE_DB_NAME,
     _RE_STORAGE_ACCOUNT,
+    _RE_VM_NAME,
     _error_response,
     _json_response,
     _require_query,
@@ -25,17 +31,18 @@ from _http_utils import (
 from auth.token import AuthError, validate_bearer_token
 from models.blast import BlastSubmitRequest
 from services import compute as compute_svc
-from services import keyvault as kv_svc
+from services import network as network_svc
 from services import storage_data as storage_data_svc
 from services.azure_clients import credential_for_caller
-from services.sanitise import sanitise
 from services.blast_config import AZURE_VM_HOURLY_USD as _AZURE_VM_HOURLY_USD
 from services.blast_config import PD_GB_MONTH_USD as _PD_GB_MONTH_USD
 from services.blast_config import STORAGE_GB_MONTH_USD as _STORAGE_GB_MONTH_USD
+from services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
 bp = df.Blueprint()
+
 
 @bp.route(route="blast/cost-estimate", methods=["POST"])
 def blast_cost_estimate(req: func.HttpRequest) -> func.HttpResponse:
@@ -88,7 +95,9 @@ def blast_cost_estimate(req: func.HttpRequest) -> func.HttpResponse:
 # ═══════════════════════════════════════════════════════════════════════
 @bp.route(route="blast/multi-submit", methods=["POST"])
 @bp.durable_client_input(client_name="client")
-async def blast_multi_db_submit(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+async def blast_multi_db_submit(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     """Submit the same query against multiple databases simultaneously."""
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
@@ -451,7 +460,11 @@ def list_db_versions(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response({"versions": versions, "total": len(versions)})
     except Exception as exc:
         msg = str(exc)
-        if "AuthorizationFailure" in msg or "PublicAccessNotPermitted" in msg or "AuthorizationPermission" in msg:
+        if (
+            "AuthorizationFailure" in msg
+            or "PublicAccessNotPermitted" in msg
+            or "AuthorizationPermission" in msg
+        ):
             # Storage public access is disabled — return empty list with a note
             return _json_response({"versions": [], "total": 0, "public_access_disabled": True})
         return _error_response(500, sanitise(msg[:500]))
@@ -514,7 +527,9 @@ def save_db_version_metadata(req: func.HttpRequest) -> func.HttpResponse:
 # ═══════════════════════════════════════════════════════════════════════
 @bp.route(route="blast/schedules", methods=["GET"])
 @bp.durable_client_input(client_name="client")
-async def list_blast_schedules(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+async def list_blast_schedules(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     """List all scheduled BLAST configurations."""
     try:
         validate_bearer_token(req.headers.get("Authorization"))
@@ -533,7 +548,9 @@ async def list_blast_schedules(req: func.HttpRequest, client: df.DurableOrchestr
 
 @bp.route(route="blast/schedules", methods=["POST"])
 @bp.durable_client_input(client_name="client")
-async def create_blast_schedule(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+async def create_blast_schedule(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     """Create a scheduled/triggered BLAST job configuration."""
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
@@ -577,7 +594,9 @@ async def create_blast_schedule(req: func.HttpRequest, client: df.DurableOrchest
 
 @bp.route(route="blast/schedules/{schedule_id}", methods=["DELETE"])
 @bp.durable_client_input(client_name="client")
-async def delete_blast_schedule(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+async def delete_blast_schedule(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     """Delete a scheduled BLAST configuration."""
     try:
         validate_bearer_token(req.headers.get("Authorization"))
@@ -596,7 +615,9 @@ async def delete_blast_schedule(req: func.HttpRequest, client: df.DurableOrchest
 
 @bp.route(route="blast/schedules/{schedule_id}/run", methods=["POST"])
 @bp.durable_client_input(client_name="client")
-async def run_blast_schedule(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+async def run_blast_schedule(
+    req: func.HttpRequest, client: df.DurableOrchestrationClient
+) -> func.HttpResponse:
     """Manually trigger a scheduled BLAST job."""
     try:
         identity = validate_bearer_token(req.headers.get("Authorization"))
@@ -606,7 +627,6 @@ async def run_blast_schedule(req: func.HttpRequest, client: df.DurableOrchestrat
     schedule_id = req.route_params.get("schedule_id", "")
     if not schedule_id:
         return _error_response(400, "schedule_id required")
-
 
     # Read schedule config
     try:
@@ -676,11 +696,24 @@ def blast_primer_design(req: func.HttpRequest) -> func.HttpResponse:
     if not re.match(r"^[ATGCNRYSWKMBDHVU]+$", clean_seq):
         return _error_response(400, "invalid nucleotide characters in sequence")
 
-    target_start = int(body.get("target_start", max(1, len(clean_seq) // 4)))
-    target_length = int(body.get("target_length", min(200, len(clean_seq) // 2)))
-    product_min = int(body.get("product_size_min", 100))
-    product_max = int(body.get("product_size_max", 1000))
-    num_return = min(int(body.get("num_return", 5)), 10)
+    def parse_int(name: str, default: int, min_value: int, max_value: int) -> int | None:
+        try:
+            value = int(body.get(name, default))
+        except (TypeError, ValueError):
+            return None
+        if value < min_value or value > max_value:
+            return None
+        return value
+
+    target_start = parse_int("target_start", max(1, len(clean_seq) // 4), 0, len(clean_seq) - 1)
+    target_length = parse_int("target_length", min(200, len(clean_seq) // 2), 1, len(clean_seq))
+    product_min = parse_int("product_size_min", 100, 1, 10000)
+    product_max = parse_int("product_size_max", 1000, 1, 10000)
+    num_return = parse_int("num_return", 5, 1, 10)
+    if None in (target_start, target_length, product_min, product_max, num_return):
+        return _error_response(400, "invalid primer design numeric parameters")
+    if product_min > product_max:
+        return _error_response(400, "product_size_min must be <= product_size_max")
 
     sub = body.get("subscription_id", "")
     if err := _validate_sub(sub):
@@ -690,20 +723,26 @@ def blast_primer_design(req: func.HttpRequest) -> func.HttpResponse:
         "terminal_resource_group", os.environ.get("TERMINAL_DEFAULT_RG", "rg-elb-terminal")
     )
     terminal_vm = body.get("terminal_vm_name", "vm-elb-terminal")
+    if err := _validate_rg(terminal_rg):
+        return _error_response(400, err)
+    if err := _validate_name(terminal_vm, _RE_VM_NAME, "terminal_vm_name"):
+        return _error_response(400, err)
 
     cred = credential_for_caller(identity.raw_token)
 
     try:
-        vm_ip = compute_svc.get_vm_public_ip(cred, sub, terminal_rg, terminal_vm)
-        if not vm_ip:
-            return _error_response(400, "Terminal VM not available")
-
         secret_name = f"vm-{terminal_vm}-password"
         password, _ = resolve_terminal_secret(cred, sub, terminal_rg, terminal_vm, secret_name)
-        if not password:
-            return _error_response(404, "VM password not found in Key Vault")
-
-        from services.ssh_exec import run_ssh
+        if password:
+            try:
+                network_svc.ensure_ssh_from_function_app(
+                    cred,
+                    sub,
+                    terminal_rg,
+                    f"nsg-{terminal_vm}",
+                )
+            except Exception:
+                LOGGER.debug("failed to ensure Function App SSH NSG rule", exc_info=True)
 
         # Build Primer3 boulder-IO input
         primer3_input = f"""SEQUENCE_TEMPLATE={clean_seq}
@@ -732,7 +771,15 @@ fi
 # Run primer3
 echo '{primer3_input}' | primer3_core 2>&1
 """
-        output = run_ssh(vm_ip, password, script, timeout=120)
+        output = compute_svc.run_shell(
+            cred,
+            sub,
+            terminal_rg,
+            terminal_vm,
+            script,
+            max_retries=2,
+            ssh_password=password,
+        )
 
         # Parse Primer3 output
         primers = _parse_primer3_output(output)

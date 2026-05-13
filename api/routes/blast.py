@@ -100,8 +100,8 @@ def blast_pre_flight(req: func.HttpRequest) -> func.HttpResponse:
     acr_name = body.get("acr_name", "")
     storage_account = body.get("storage_account", "")
     cluster_name = body.get("aks_cluster_name", "")
-    terminal_rg = body.get("terminal_resource_group", "rg-elb-terminal")
-    terminal_vm = body.get("terminal_vm_name", "vm-elb-terminal")
+    terminal_rg = body.get("terminal_resource_group") or "rg-elb-terminal"
+    terminal_vm = body.get("terminal_vm_name") or "vm-elb-terminal"
     db_path = body.get("db", "")
     query_data = body.get("query_data", "")
 

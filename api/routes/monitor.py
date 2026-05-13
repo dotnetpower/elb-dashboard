@@ -196,8 +196,8 @@ async def start_warmup(
         "num_nodes": body.get("num_nodes"),
         "acr_resource_group": body.get("acr_resource_group", ""),
         "acr_name": body.get("acr_name", ""),
-        "terminal_resource_group": body.get("terminal_resource_group", ""),
-        "terminal_vm_name": body.get("terminal_vm_name", ""),
+        "terminal_resource_group": body.get("terminal_resource_group") or "rg-elb-terminal",
+        "terminal_vm_name": body.get("terminal_vm_name") or "vm-elb-terminal",
         "user_assertion": identity.raw_token,
         "owner_oid": identity.object_id,
     }

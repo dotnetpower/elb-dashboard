@@ -47,6 +47,10 @@
   --shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.15);
   --shadow-panel-hover: 0 2px 6px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.2);
   --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+  --font-size-body: 14px;
+  --font-size-control: 13px;
+  --font-size-small: 12px;
+  --font-size-caption: 12px;
 
   /* Card accent colors */
   --card-accent-cluster: var(--accent);
@@ -132,7 +136,8 @@ body,
     BlinkMacSystemFont,
     "Segoe UI",
     sans-serif;
-  font-size: 13px;
+  font-size: var(--font-size-body);
+  line-height: 1.45;
   color: var(--text-primary);
   background: var(--bg-canvas);
   background-image: radial-gradient(
@@ -256,13 +261,13 @@ button {
 
 /* #4 Panel header hierarchy */
 .panel-hd .title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .panel-hd .sub {
-  font-size: 11px;
+  font-size: var(--font-size-small);
   color: var(--text-faint);
   margin-top: 1px;
 }
@@ -291,7 +296,7 @@ button {
   border: 1px solid var(--border-medium);
   border-radius: 6px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-size-control);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--motion-fast);
@@ -353,7 +358,7 @@ button {
   border-radius: var(--radius);
   color: var(--text-primary);
   outline: none;
-  font-size: 13px;
+  font-size: var(--font-size-body);
   transition:
     border-color var(--motion-fast),
     box-shadow var(--motion-fast);
@@ -387,7 +392,7 @@ select.glass-input option {
 
 .glass-label {
   display: block;
-  font-size: 12px;
+  font-size: var(--font-size-small);
   color: var(--text-faint);
   margin-bottom: var(--space-1);
   letter-spacing: 0.02em;
@@ -407,7 +412,7 @@ textarea.form-input {
   border: 1px solid var(--border-weak);
   border-radius: var(--radius);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--font-size-body);
   font-family: inherit;
   outline: none;
   transition:
@@ -467,7 +472,7 @@ textarea.form-input {
 
 .form-label {
   display: block;
-  font-size: 12px;
+  font-size: var(--font-size-small);
   font-weight: 500;
   color: var(--text-muted);
   margin-bottom: var(--space-1);
@@ -476,7 +481,7 @@ textarea.form-input {
 
 .form-hint {
   display: block;
-  font-size: 11px;
+  font-size: var(--font-size-small);
   color: var(--text-faint);
   margin-top: var(--space-1);
   line-height: 1.45;
@@ -498,7 +503,7 @@ textarea.form-input {
   gap: 4px;
   padding: 2px 7px;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: var(--font-size-small);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -559,7 +564,7 @@ textarea.form-input {
   justify-content: space-between;
   padding: 6px 0;
   border-bottom: 1px solid var(--border-weak);
-  font-size: 12px;
+  font-size: var(--font-size-control);
 }
 
 .kv:last-child {
@@ -651,7 +656,7 @@ textarea.form-input {
 }
 
 .sub-panel .sp-title {
-  font-size: 10px;
+  font-size: var(--font-size-small);
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -685,7 +690,7 @@ textarea.form-input {
 }
 
 .metric-block .mu {
-  font-size: 10px;
+  font-size: var(--font-size-small);
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -693,7 +698,7 @@ textarea.form-input {
 }
 
 .metric-block .ms {
-  font-size: 10px;
+  font-size: var(--font-size-small);
   color: var(--text-muted);
   margin-top: 1px;
 }
@@ -719,7 +724,7 @@ textarea.form-input {
 
 .cfg-chip .lbl {
   padding: 5px 10px;
-  font-size: 11px;
+  font-size: var(--font-size-small);
   color: var(--text-faint);
   letter-spacing: 0.02em;
   display: flex;
@@ -735,7 +740,7 @@ textarea.form-input {
   background: transparent;
   border: none;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-size-control);
   font-family: inherit;
   padding: 4px 22px 4px 6px;
   cursor: pointer;
@@ -773,7 +778,7 @@ textarea.form-input {
   gap: 4px;
   padding: 3px 8px;
   border-radius: 5px;
-  font-size: 11px;
+  font-size: var(--font-size-small);
   background: var(--bg-tertiary);
   border: 1px solid var(--border-weak);
   color: var(--text-muted);
@@ -836,11 +841,11 @@ textarea.form-input {
   font-size: 30px;
   font-weight: 700;
   line-height: 1;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .stat-panel .stat-lbl {
-  font-size: 10px;
+  font-size: var(--font-size-small);
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -848,7 +853,7 @@ textarea.form-input {
 }
 
 .stat-panel .stat-sub {
-  font-size: 11px;
+  font-size: var(--font-size-small);
   margin-top: 3px;
 }
 
@@ -864,7 +869,7 @@ textarea.form-input {
 .gt-tbl {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: var(--font-size-control);
 }
 
 .gt-tbl th {
@@ -872,7 +877,7 @@ textarea.form-input {
   padding: 7px 12px;
   color: var(--text-faint);
   font-weight: 500;
-  font-size: 10px;
+  font-size: var(--font-size-small);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   border-bottom: 1px solid var(--border-weak);
@@ -893,7 +898,7 @@ textarea.form-input {
 }
 
 .glass-badge {
-  font-size: 11px;
+  font-size: var(--font-size-small);
   padding: 2px 8px;
   border-radius: 6px;
   background: var(--glass-bg);
@@ -2375,7 +2380,27 @@ textarea.form-input {
 
 .form-input--compact {
   padding: 4px 28px 4px 10px;
-  font-size: 11px;
+  font-size: var(--font-size-small);
   width: auto;
   min-width: 140px;
+}
+
+/* Accessibility typography floor for dense operational UI. */
+:where(
+  [style*="font-size: 8px"],
+  [style*="font-size: 9px"],
+  [style*="font-size: 10px"],
+  [style*="font-size: 11px"]
+) {
+  font-size: var(--font-size-small) !important;
+  line-height: 1.45;
+}
+
+:where(.glass-button, .gb, button.glass-button, a.glass-button, input, select, textarea) {
+  font-size: var(--font-size-control) !important;
+  line-height: 1.35;
+}
+
+:where(.panel-whisper, .panel-whisper span, .panel-whisper__btn) {
+  font-size: var(--font-size-small) !important;
 }

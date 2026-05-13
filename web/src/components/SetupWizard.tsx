@@ -8,6 +8,7 @@ import { Tooltip } from "@/components/Tooltip";
 import { AZURE_REGIONS } from "@/constants";
 
 const STORAGE_KEY = "elb-resource-config";
+const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
 
 export interface ResourceConfig {
   subscriptionId: string;
@@ -116,10 +117,11 @@ export function SetupWizard({ onComplete, onClose }: Props) {
   const [errors, setErrors] = useState<ValidationErrors>({});
   const [attempted, setAttempted] = useState(false);
 
-  // ── Step 1: Subscriptions (via backend → az login) ──
+  // ── Step 1: Subscriptions (direct ARM or backend MI proxy) ──
   const subsQuery = useQuery({
     queryKey: ["wizard-subs"],
     queryFn: async () => {
+      if (DEV_BYPASS) return armProxyApi.listSubscriptions();
       try {
         const subs = await armListSubs();
         return subs.map(s => ({ subscriptionId: s.subscriptionId, displayName: s.displayName }));
@@ -134,7 +136,7 @@ export function SetupWizard({ onComplete, onClose }: Props) {
       setConfig((c) => ({ ...c, subscriptionId: subsQuery.data[0].subscriptionId }));
   }, [config.subscriptionId, subsQuery.data]);
 
-  // ── Step 2: Resource groups (via backend → az login) ──
+  // ── Step 2: Resource groups (direct ARM or backend MI proxy) ──
   const rgQuery = useQuery({
     queryKey: ["wizard-rgs", config.subscriptionId],
     queryFn: () => armProxyApi.listResourceGroups(config.subscriptionId),
@@ -142,7 +144,7 @@ export function SetupWizard({ onComplete, onClose }: Props) {
     staleTime: 30_000, retry: 1,
   });
 
-  // ── Step 3: Discovery (via backend → az login) ──
+  // ── Step 3: Discovery (direct ARM or backend MI proxy) ──
   const storageQuery = useQuery({
     queryKey: ["wizard-storage", config.subscriptionId, config.workloadResourceGroup],
     queryFn: () => armProxyApi.listStorageAccounts(config.subscriptionId, config.workloadResourceGroup),
@@ -402,7 +404,7 @@ export function SetupWizard({ onComplete, onClose }: Props) {
                     <div className="tt-resource"><span className="tt-icon">🔧</span> Pre-installed: az CLI, kubectl, azcopy, Python 3.11</div>
                   </div>
                   <div className="tt-note">
-                    You SSH into this VM and run <code>az login --use-device-code</code> to start working.
+                    You SSH into this VM and use its Managed Identity session.
                     One terminal serves all your workloads.
                   </div>
                 </>}

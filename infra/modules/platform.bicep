@@ -20,6 +20,9 @@ param apiClientSecret string = ''
 @description('Object id of the user running azd up. Empty when running unattended.')
 param principalId string
 
+@description('Resource group name where the Remote Terminal VM lives.')
+param terminalResourceGroup string = 'rg-elb-terminal'
+
 @description('Resource tags applied to every resource.')
 param tags object
 
@@ -180,7 +183,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         }
         {
           name: 'TERMINAL_DEFAULT_RG'
-          value: 'rg-elb-terminal'
+          value: terminalResourceGroup
         }
         {
           name: 'TERMINAL_DEFAULT_REGION'
