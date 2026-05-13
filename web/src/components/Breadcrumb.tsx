@@ -3,11 +3,15 @@ import { ChevronRight } from "lucide-react";
 
 const ROUTE_LABELS: Record<string, string> = {
   "": "Dashboard",
-  "terminal": "Remote Terminal",
-  "blast": "BLAST",
-  "submit": "New Search",
-  "jobs": "Jobs",
-  "docs": "API Reference",
+  terminal: "Remote Terminal",
+  blast: "BLAST",
+  submit: "New Search",
+  jobs: "Jobs",
+  docs: "API Reference",
+  databases: "Databases",
+  build: "Custom DB",
+  tools: "Lab Tools",
+  analytics: "Analytics",
 };
 
 export function Breadcrumb() {
