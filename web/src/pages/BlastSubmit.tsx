@@ -842,15 +842,18 @@ export function BlastSubmit() {
                 <option value="">— Select a database —</option>
                 {dbQuery.data.databases.map((d) => {
                   const info = DB_DESCRIPTIONS[d.name];
+                  const isCustom = d.source === "custom";
                   const label = info
                     ? `${info.label} (${d.name}) — ${info.size}`
-                    : d.name;
-                  // Upstream `elastic-blast` (azure-prereq.md §9.2) expects the
-                  // canonical Azure URL form `<container>/<db_name>/<db_name>`,
-                  // i.e. the basename is duplicated. The download path mirrors
-                  // it: files live in `blast-db/<db_name>/<files>`.
+                    : isCustom
+                      ? `${d.name} [Custom]`
+                      : d.name;
+                  // Use the prefix returned by the API to build the canonical
+                  // path. NCBI DBs live at blast-db/{name}/, custom DBs at
+                  // blast-db/custom_db/{name}/.
+                  const prefix = d.prefix ?? d.name;
                   return (
-                    <option key={d.name} value={`${d.container}/${d.name}/${d.name}`}>
+                    <option key={d.name} value={`${d.container}/${prefix}/${d.name}`}>
                       {label}
                     </option>
                   );

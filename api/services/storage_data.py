@@ -126,14 +126,21 @@ def list_databases(
     db_info: dict[str, dict[str, Any]] = {}
     metadata_blobs: dict[str, str] = {}  # db_name -> metadata json content
     for blob in cc.list_blobs():
-        name = blob.name.split("/")[-1]  # strip any subdirectory
+        parts = blob.name.split("/")
+        name = parts[-1]  # file name without directory prefix
+        # Detect the prefix to distinguish NCBI (top-level) from custom (custom_db/)
+        is_custom = len(parts) >= 3 and parts[0] == "custom_db"
         # Collect metadata files separately
         if name.endswith("-metadata.json"):
+            meta_db_name = name.replace("-metadata.json", "")
             try:
                 bc = cc.get_blob_client(blob.name)
-                metadata_blobs[name.replace("-metadata.json", "")] = bc.download_blob().readall().decode("utf-8")
+                metadata_blobs[meta_db_name] = bc.download_blob().readall().decode("utf-8")
             except Exception:
                 pass
+            continue
+        # Skip staging artifacts
+        if parts[0] in ("custom-db-build",) or (len(parts) >= 2 and parts[1] == ".staging"):
             continue
         # Check if file has a known BLAST extension
         for ext in _DB_EXTS:
@@ -143,7 +150,17 @@ def list_databases(
                 base = re.sub(r"\.\d+$", "", base)
                 if base:
                     if base not in db_info:
-                        db_info[base] = {"name": base, "container": container, "file_count": 0, "total_bytes": 0, "last_modified": None}
+                        # Build the blob prefix so the frontend can reconstruct the full path
+                        prefix = f"custom_db/{base}" if is_custom else base
+                        db_info[base] = {
+                            "name": base,
+                            "container": container,
+                            "prefix": prefix,
+                            "source": "custom" if is_custom else "ncbi",
+                            "file_count": 0,
+                            "total_bytes": 0,
+                            "last_modified": None,
+                        }
                     db_info[base]["file_count"] += 1
                     db_info[base]["total_bytes"] += blob.size or 0
                     blob_modified = blob.last_modified

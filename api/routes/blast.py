@@ -940,15 +940,17 @@ def build_custom_database(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         # Step 1: Upload FASTA to blob if inline
-        blob_path = f"custom-db-build/{db_name}/input.fa"
+        # Temporary staging path — cleaned up after build completes.
+        fasta_staging_path = f"custom_db/.staging/{db_name}/input.fa"
         if fasta_data:
             storage_data_svc.upload_query_text(
                 cred,
                 storage_account,
                 "blast-db",
-                blob_path,
+                fasta_staging_path,
                 fasta_data,
             )
+            blob_path = fasta_staging_path
         else:
             blob_path = fasta_blob_url  # type: ignore[assignment]
 
@@ -998,12 +1000,12 @@ makeblastdb \\
 FILE_COUNT=$(ls -1 {safe_db_name}.* 2>/dev/null | wc -l)
 echo "MAKEBLASTDB_FILES=$FILE_COUNT"
 
-# Upload all DB files back to blob storage
+# Upload all DB files back to blob storage under custom_db/{db_name}/
 for f in {safe_db_name}.*; do
   az storage blob upload \\
     --account-name '{storage_account}' \\
     --container-name 'blast-db' \\
-    --name "{safe_db_name}/$f" \\
+    --name "custom_db/{safe_db_name}/$f" \\
     --file "$f" \\
     --auth-mode login \\
     --overwrite \\
@@ -1025,13 +1027,21 @@ METAEOF
 az storage blob upload \\
   --account-name '{storage_account}' \\
   --container-name 'blast-db' \\
-  --name "{safe_db_name}/{safe_db_name}-metadata.json" \\
+  --name "custom_db/{safe_db_name}/{safe_db_name}-metadata.json" \\
   --file metadata.json \\
   --auth-mode login \\
   --overwrite \\
   --output none 2>&1
 
-# Cleanup
+# Delete the staging FASTA blob
+az storage blob delete \\
+  --account-name '{storage_account}' \\
+  --container-name 'blast-db' \\
+  --name '{blob_path}' \\
+  --auth-mode login \\
+  --output none 2>&1 || true
+
+# Cleanup local temp
 rm -rf "$WORK_DIR"
 echo "MAKEBLASTDB_DONE"
 """
@@ -1054,7 +1064,7 @@ echo "MAKEBLASTDB_DONE"
                 "status": "completed",
                 "file_count": file_count,
                 "container": "blast-db",
-                "path": f"{db_name}/",
+                "path": f"custom_db/{db_name}/",
             }
         )
     except Exception as exc:
