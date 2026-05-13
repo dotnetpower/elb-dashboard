@@ -6,7 +6,6 @@ import { ArrowRight } from "lucide-react";
 import { blastApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
-import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 import { statusColor } from "@/constants";
 
 const TERMINAL_PHASES = ["completed", "failed", "submit_failed", "error", "deleted"];
@@ -42,8 +41,7 @@ export function JobCard() {
       subtitle={`${jobs.length} total · ${running} active`}
       status={status}
       fetching={query.isFetching}
-      refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
-      refreshInterval={30_000}
+      lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
       onRefresh={() => query.refetch()}
       accentColor="jobs"
       collapsible

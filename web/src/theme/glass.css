@@ -1417,6 +1417,46 @@ textarea.form-input {
 .panel-bd--collapsed {
   display: none;
 }
+
+/* Bottom-right whisper — subtle refresh timestamp */
+.panel-whisper {
+  position: absolute;
+  bottom: 6px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
+.panel:hover .panel-whisper {
+  opacity: 0.8;
+}
+.panel-whisper__btn {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 1px;
+  border-radius: 3px;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.panel-whisper__btn:hover {
+  color: var(--accent);
+  background: rgba(122, 167, 255, 0.08);
+}
+.panel-whisper__btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
 .panel-hd--collapsible {
   cursor: pointer;
   user-select: none;

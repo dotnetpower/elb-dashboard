@@ -5,7 +5,6 @@ import { Loader2, Hammer, CheckCircle2, AlertTriangle } from "lucide-react";
 import { monitoringApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
-import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 
 // Short display names for long image paths
 const SHORT_NAMES: Record<string, string> = {
@@ -51,12 +50,6 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
 
   const hasServerBuilding = (query.data?.building_images ?? []).length > 0;
 
-  const currentInterval = useMemo(() => {
-    if (buildStatus === "building") return 10_000;
-    if (hasServerBuilding) return 10_000;
-    return 60_000;
-  }, [buildStatus, hasServerBuilding]);
-  const refreshCountdown = useRefreshCountdown(query.dataUpdatedAt, currentInterval);
   const expectedImages = useMemo(
     () => Object.entries(query.data?.expected_image_tags ?? {}),
     [query.data?.expected_image_tags],
@@ -231,8 +224,6 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
       status={buildStatus === "building" || hasServerBuilding ? "loading" : status}
       fetching={query.isFetching}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
-      refreshCountdown={refreshCountdown}
-      refreshInterval={currentInterval}
       onRefresh={() => query.refetch()}
       accentColor="acr"
       collapsible

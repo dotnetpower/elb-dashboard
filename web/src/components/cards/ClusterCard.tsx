@@ -1,24 +1,49 @@
 import { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Loader2, Plus, Trash2, CheckCircle2, AlertTriangle, Play, Square, Copy, ChevronDown, Terminal, Maximize2, X, RefreshCw } from "lucide-react";
+import {
+  Loader2,
+  Plus,
+  Trash2,
+  CheckCircle2,
+  AlertTriangle,
+  Play,
+  Square,
+  Copy,
+  ChevronDown,
+  Terminal,
+  Maximize2,
+  X,
+  RefreshCw,
+} from "lucide-react";
 
 import { monitoringApi, aksApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { useRefreshCountdown } from "@/hooks/useRefreshCountdown";
 
 const DEFAULT_SKU = "Standard_E32s_v5";
 const DEFAULT_NODE_COUNT = 10;
 
 // #13: Human-readable SKU descriptions with approximate hourly cost
 const SKU_INFO: Record<string, { desc: string; costPerNode: number }> = {
-  "Standard_E16s_v5": { desc: "16 cores, 128 GB RAM — small databases", costPerNode: 0.67 },
-  "Standard_E20s_v5": { desc: "20 cores, 160 GB RAM — medium databases", costPerNode: 0.84 },
-  "Standard_E32s_v5": { desc: "32 cores, 256 GB RAM — large databases (recommended)", costPerNode: 1.34 },
-  "Standard_E48s_v5": { desc: "48 cores, 384 GB RAM — very large databases", costPerNode: 2.02 },
-  "Standard_E64s_v5": { desc: "64 cores, 512 GB RAM — maximum performance", costPerNode: 2.69 },
+  Standard_E16s_v5: { desc: "16 cores, 128 GB RAM — small databases", costPerNode: 0.67 },
+  Standard_E20s_v5: {
+    desc: "20 cores, 160 GB RAM — medium databases",
+    costPerNode: 0.84,
+  },
+  Standard_E32s_v5: {
+    desc: "32 cores, 256 GB RAM — large databases (recommended)",
+    costPerNode: 1.34,
+  },
+  Standard_E48s_v5: {
+    desc: "48 cores, 384 GB RAM — very large databases",
+    costPerNode: 2.02,
+  },
+  Standard_E64s_v5: {
+    desc: "64 cores, 512 GB RAM — maximum performance",
+    costPerNode: 2.69,
+  },
 };
 
 const CLUSTER_NAME_RE = /^[a-zA-Z][a-zA-Z0-9-]{1,62}$/;
@@ -57,7 +82,9 @@ export function ClusterCard({
   const [clusterName, setClusterName] = useState("elb-cluster");
   const [nodeSku, setNodeSku] = useState(DEFAULT_SKU);
   const [nodeCount, setNodeCount] = useState(DEFAULT_NODE_COUNT);
-  const [provStatus, setProvStatus] = useState<"idle" | "creating" | "done" | "error">("idle");
+  const [provStatus, setProvStatus] = useState<"idle" | "creating" | "done" | "error">(
+    "idle",
+  );
   const [provError, setProvError] = useState<string | null>(null);
   const [provStart, setProvStart] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -69,7 +96,9 @@ export function ClusterCard({
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Track clusters in transition (starting/stopping) until actual state changes
-  const [transitioning, setTransitioning] = useState<Map<string, "starting" | "stopping">>(new Map());
+  const [transitioning, setTransitioning] = useState<
+    Map<string, "starting" | "stopping">
+  >(new Map());
 
   // Available SKUs
   const skuQuery = useQuery({
@@ -81,14 +110,19 @@ export function ClusterCard({
 
   useEffect(() => {
     if (provStatus !== "creating") return;
-    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - (provStart ?? Date.now())) / 1000)), 1000);
+    const timer = setInterval(
+      () => setElapsed(Math.floor((Date.now() - (provStart ?? Date.now())) / 1000)),
+      1000,
+    );
     return () => clearInterval(timer);
   }, [provStatus, provStart]);
 
   // ESC to close provision modal
   useEffect(() => {
     if (!showProvision) return;
-    const handleEsc = (e: KeyboardEvent) => { if (e.key === "Escape") setShowProvision(false); };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowProvision(false);
+    };
     window.addEventListener("keydown", handleEsc);
     return () => window.removeEventListener("keydown", handleEsc);
   }, [showProvision]);
@@ -145,7 +179,9 @@ export function ClusterCard({
         await aksApi.stop(subscriptionId, resourceGroup, name);
       }
       // Mark cluster as transitioning
-      setTransitioning((prev) => new Map(prev).set(name, action === "start" ? "starting" : "stopping"));
+      setTransitioning((prev) =>
+        new Map(prev).set(name, action === "start" ? "starting" : "stopping"),
+      );
     } catch (e) {
       setActionError(`${action} failed: ${formatApiError(e, "aks")}`);
     } finally {
@@ -160,9 +196,19 @@ export function ClusterCard({
     let changed = false;
     for (const [name, expected] of transitioning) {
       const cluster = query.data.clusters.find((c) => c.name === name);
-      if (!cluster) { next.delete(name); changed = true; continue; }
-      const reached = expected === "starting" ? cluster.power_state === "Running" : cluster.power_state === "Stopped";
-      if (reached) { next.delete(name); changed = true; }
+      if (!cluster) {
+        next.delete(name);
+        changed = true;
+        continue;
+      }
+      const reached =
+        expected === "starting"
+          ? cluster.power_state === "Running"
+          : cluster.power_state === "Stopped";
+      if (reached) {
+        next.delete(name);
+        changed = true;
+      }
     }
     if (changed) setTransitioning(next);
   }, [query.data, transitioning]);
@@ -208,7 +254,6 @@ export function ClusterCard({
   const clusterNameValid = CLUSTER_NAME_RE.test(clusterName);
   const estimatedCost = (SKU_INFO[nodeSku]?.costPerNode ?? 1.34) * nodeCount;
 
-
   const formatTime = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
 
   const status = !enabled
@@ -228,186 +273,441 @@ export function ClusterCard({
       status={provStatus === "creating" ? "loading" : status}
       fetching={query.isFetching}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
-      refreshCountdown={useRefreshCountdown(query.dataUpdatedAt, 30_000)}
-      refreshInterval={30_000}
-      onRefresh={() => { setActionError(null); setProvError(null); query.refetch(); }}
+      onRefresh={() => {
+        setActionError(null);
+        setProvError(null);
+        query.refetch();
+      }}
       accentColor="cluster"
       collapsible
     >
-      {!enabled && <div className="muted">Set Subscription ID and Workload RG above.</div>}
-      {query.isError && <div className="muted" style={{ color: "var(--danger)" }}>Failed to load clusters: {formatApiError(query.error, "aks")}</div>}
+      {!enabled && (
+        <div className="muted">Set Subscription ID and Workload RG above.</div>
+      )}
+      {query.isError && (
+        <div className="muted" style={{ color: "var(--danger)" }}>
+          Failed to load clusters: {formatApiError(query.error, "aks")}
+        </div>
+      )}
 
       {/* Loading skeleton */}
       {enabled && query.isLoading && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {[1, 2].map((i) => (
             <div key={i} className="glass-card" style={{ padding: "var(--space-3)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ width: 140, height: 14, background: "var(--glass-bg-strong)", borderRadius: 4 }} />
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <div
+                  style={{
+                    width: 140,
+                    height: 14,
+                    background: "var(--glass-bg-strong)",
+                    borderRadius: 4,
+                  }}
+                />
                 <div style={{ display: "flex", gap: 8 }}>
-                  <div style={{ width: 80, height: 12, background: "var(--glass-bg-strong)", borderRadius: 4 }} />
-                  <div style={{ width: 50, height: 22, background: "var(--glass-bg-strong)", borderRadius: 4 }} />
+                  <div
+                    style={{
+                      width: 80,
+                      height: 12,
+                      background: "var(--glass-bg-strong)",
+                      borderRadius: 4,
+                    }}
+                  />
+                  <div
+                    style={{
+                      width: 50,
+                      height: 22,
+                      background: "var(--glass-bg-strong)",
+                      borderRadius: 4,
+                    }}
+                  />
                 </div>
               </div>
               <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                <div style={{ width: 200, height: 11, background: "var(--glass-bg)", borderRadius: 3 }} />
+                <div
+                  style={{
+                    width: 200,
+                    height: 11,
+                    background: "var(--glass-bg)",
+                    borderRadius: 3,
+                  }}
+                />
               </div>
               <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                <div style={{ width: 120, height: 10, background: "var(--glass-bg)", borderRadius: 3 }} />
+                <div
+                  style={{
+                    width: 120,
+                    height: 10,
+                    background: "var(--glass-bg)",
+                    borderRadius: 3,
+                  }}
+                />
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {query.data?.clusters.length === 0 && provStatus !== "creating" && provStatus !== "done" && (
-        <div className="muted">No AKS clusters found. Click "+ Add Cluster" below to provision one.</div>
-      )}
+      {query.data?.clusters.length === 0 &&
+        provStatus !== "creating" &&
+        provStatus !== "done" && (
+          <div className="muted">
+            No AKS clusters found. Click "+ Add Cluster" below to provision one.
+          </div>
+        )}
 
       {/* Provision modal */}
-      {showProvision && createPortal(
-        <div
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, backdropFilter: "blur(4px)" }}
-          onClick={(e) => { if (e.target === e.currentTarget) setShowProvision(false); }}
-        >
-          <div style={{ background: "var(--bg-primary)", border: "1px solid var(--border-medium)", borderRadius: 16, boxShadow: "0 8px 48px rgba(0,0,0,0.5)", width: 520, maxHeight: "85vh", overflow: "auto" }}>
-            <div style={{ padding: "20px 24px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>Create AKS Cluster</h2>
-              <button
-                onClick={() => setShowProvision(false)}
-                style={{ background: "none", border: "none", color: "var(--text-faint)", cursor: "pointer", padding: 4 }}
-                title="Close"
+      {showProvision &&
+        createPortal(
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 200,
+              backdropFilter: "blur(4px)",
+            }}
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowProvision(false);
+            }}
+          >
+            <div
+              style={{
+                background: "var(--bg-primary)",
+                border: "1px solid var(--border-medium)",
+                borderRadius: 16,
+                boxShadow: "0 8px 48px rgba(0,0,0,0.5)",
+                width: 520,
+                maxHeight: "85vh",
+                overflow: "auto",
+              }}
+            >
+              <div
+                style={{
+                  padding: "20px 24px 0",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
               >
-                <X size={18} />
-              </button>
-            </div>
-            <div style={{ padding: "16px 24px 24px", display: "grid", gap: 16 }}>
-              <div>
-                <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Cluster Name</label>
-                <input
-                  type="text"
-                  value={clusterName}
-                  onChange={(e) => setClusterName(e.target.value)}
-                  className="glass-input"
-                  style={{ width: "100%", fontSize: 13 }}
-                  placeholder="elb-cluster"
-                  autoFocus
-                />
-                {!clusterNameValid && clusterName.length > 0 && (
-                  <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 4 }}>
-                    Must start with a letter, contain only letters/digits/hyphens, 2–63 chars.
-                  </div>
-                )}
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                <div>
-                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Node SKU</label>
-                  <select
-                    value={nodeSku}
-                    onChange={(e) => setNodeSku(e.target.value)}
-                    className="glass-input"
-                    style={{ width: "100%", fontSize: 13 }}
-                  >
-                    {(skuQuery.data?.skus || [DEFAULT_SKU]).map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                  <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
-                    {SKU_INFO[nodeSku]?.desc || ""}
-                  </div>
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Node Count</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={nodeCount}
-                    onChange={(e) => setNodeCount(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
-                    className="glass-input"
-                    style={{ width: "100%", fontSize: 13 }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                <div>
-                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Region</label>
-                  <div style={{ fontSize: 13, color: "var(--text-primary)", padding: "6px 0" }}>{region || "Not set"}</div>
-                </div>
-                <div>
-                  <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>Resource Group</label>
-                  <div style={{ fontSize: 13, color: "var(--text-primary)", padding: "6px 0" }}>{resourceGroup}</div>
-                </div>
-              </div>
-
-              <div style={{ padding: "10px 14px", background: "var(--glass-bg)", border: "1px solid var(--glass-border)", borderRadius: 8, fontSize: 12, color: "var(--text-muted)" }}>
-                Est. cost: <strong style={{ color: "var(--text-primary)" }}>~${estimatedCost.toFixed(2)}/hr</strong>
-                <span style={{ margin: "0 8px" }}>·</span>
-                {nodeCount} × {nodeSku} nodes
-                {!region && <span style={{ color: "var(--danger)", marginLeft: 8 }}>Region required</span>}
-              </div>
-
-              {provError && (
-                <div style={{ fontSize: 12, color: "var(--danger)", display: "flex", alignItems: "center", gap: 6 }}>
-                  <AlertTriangle size={12} /> {provError}
-                </div>
-              )}
-
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <button className="glass-button" onClick={() => setShowProvision(false)} style={{ fontSize: 12, padding: "8px 16px" }}>Cancel</button>
+                <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>
+                  Create AKS Cluster
+                </h2>
                 <button
-                  className="glass-button glass-button--primary"
-                  onClick={handleProvision}
-                  disabled={provStatus === "creating" || !region || !clusterNameValid}
-                  style={{ fontSize: 12, padding: "8px 20px" }}
+                  onClick={() => setShowProvision(false)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "var(--text-faint)",
+                    cursor: "pointer",
+                    padding: 4,
+                  }}
+                  title="Close"
                 >
-                  {provStatus === "creating" ? <><Loader2 size={12} className="spin" /> Creating...</> : <><Plus size={12} /> Create Cluster</>}
+                  <X size={18} />
                 </button>
               </div>
+              <div style={{ padding: "16px 24px 24px", display: "grid", gap: 16 }}>
+                <div>
+                  <label
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-muted)",
+                      display: "block",
+                      marginBottom: 4,
+                    }}
+                  >
+                    Cluster Name
+                  </label>
+                  <input
+                    type="text"
+                    value={clusterName}
+                    onChange={(e) => setClusterName(e.target.value)}
+                    className="glass-input"
+                    style={{ width: "100%", fontSize: 13 }}
+                    placeholder="elb-cluster"
+                    autoFocus
+                  />
+                  {!clusterNameValid && clusterName.length > 0 && (
+                    <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 4 }}>
+                      Must start with a letter, contain only letters/digits/hyphens, 2–63
+                      chars.
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div>
+                    <label
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        display: "block",
+                        marginBottom: 4,
+                      }}
+                    >
+                      Node SKU
+                    </label>
+                    <select
+                      value={nodeSku}
+                      onChange={(e) => setNodeSku(e.target.value)}
+                      className="glass-input"
+                      style={{ width: "100%", fontSize: 13 }}
+                    >
+                      {(skuQuery.data?.skus || [DEFAULT_SKU]).map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+                      {SKU_INFO[nodeSku]?.desc || ""}
+                    </div>
+                  </div>
+                  <div>
+                    <label
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        display: "block",
+                        marginBottom: 4,
+                      }}
+                    >
+                      Node Count
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={nodeCount}
+                      onChange={(e) =>
+                        setNodeCount(
+                          Math.max(1, Math.min(100, parseInt(e.target.value) || 1)),
+                        )
+                      }
+                      className="glass-input"
+                      style={{ width: "100%", fontSize: 13 }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <div>
+                    <label
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        display: "block",
+                        marginBottom: 4,
+                      }}
+                    >
+                      Region
+                    </label>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: "var(--text-primary)",
+                        padding: "6px 0",
+                      }}
+                    >
+                      {region || "Not set"}
+                    </div>
+                  </div>
+                  <div>
+                    <label
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        display: "block",
+                        marginBottom: 4,
+                      }}
+                    >
+                      Resource Group
+                    </label>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        color: "var(--text-primary)",
+                        padding: "6px 0",
+                      }}
+                    >
+                      {resourceGroup}
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    padding: "10px 14px",
+                    background: "var(--glass-bg)",
+                    border: "1px solid var(--glass-border)",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  Est. cost:{" "}
+                  <strong style={{ color: "var(--text-primary)" }}>
+                    ~${estimatedCost.toFixed(2)}/hr
+                  </strong>
+                  <span style={{ margin: "0 8px" }}>·</span>
+                  {nodeCount} × {nodeSku} nodes
+                  {!region && (
+                    <span style={{ color: "var(--danger)", marginLeft: 8 }}>
+                      Region required
+                    </span>
+                  )}
+                </div>
+
+                {provError && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "var(--danger)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                    }}
+                  >
+                    <AlertTriangle size={12} /> {provError}
+                  </div>
+                )}
+
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button
+                    className="glass-button"
+                    onClick={() => setShowProvision(false)}
+                    style={{ fontSize: 12, padding: "8px 16px" }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="glass-button glass-button--primary"
+                    onClick={handleProvision}
+                    disabled={provStatus === "creating" || !region || !clusterNameValid}
+                    style={{ fontSize: 12, padding: "8px 20px" }}
+                  >
+                    {provStatus === "creating" ? (
+                      <>
+                        <Loader2 size={12} className="spin" /> Creating...
+                      </>
+                    ) : (
+                      <>
+                        <Plus size={12} /> Create Cluster
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>,
-        document.body,
-      )}
+          </div>,
+          document.body,
+        )}
 
       {/* Provisioning banner — persistent until cluster appears */}
       {provStatus === "creating" && (
-        <div className="glass-card" style={{ padding: "12px 16px", marginBottom: "var(--space-3)", border: "1px solid rgba(110,159,255,0.25)", background: "rgba(110,159,255,0.04)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div
+          className="glass-card"
+          style={{
+            padding: "12px 16px",
+            marginBottom: "var(--space-3)",
+            border: "1px solid rgba(110,159,255,0.25)",
+            background: "rgba(110,159,255,0.04)",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <Loader2 size={16} className="spin" style={{ color: "var(--accent)" }} />
               <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{clusterName}</div>
-                <div style={{ fontSize: 11, color: "var(--accent)" }}>Provisioning... {formatTime(elapsed)}</div>
+                <div
+                  style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}
+                >
+                  {clusterName}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--accent)" }}>
+                  Provisioning... {formatTime(elapsed)}
+                </div>
               </div>
             </div>
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{nodeSku} × {nodeCount} nodes</div>
-              <div style={{ fontSize: 10, color: "var(--text-faint)" }}>Est. 5–10 minutes</div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {nodeSku} × {nodeCount} nodes
+              </div>
+              <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
+                Est. 5–10 minutes
+              </div>
             </div>
           </div>
         </div>
       )}
       {provStatus === "done" && (
-        <div style={{ padding: "8px 12px", background: "rgba(106,214,163,0.06)", border: "1px solid rgba(106,214,163,0.2)", borderRadius: 8, fontSize: 12, color: "var(--success)", marginBottom: "var(--space-3)", display: "flex", alignItems: "center", gap: 6 }}>
+        <div
+          style={{
+            padding: "8px 12px",
+            background: "rgba(106,214,163,0.06)",
+            border: "1px solid rgba(106,214,163,0.2)",
+            borderRadius: 8,
+            fontSize: 12,
+            color: "var(--success)",
+            marginBottom: "var(--space-3)",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
           <CheckCircle2 size={14} /> Cluster <strong>{clusterName}</strong> is ready.
           {roleResult && roleResult.length > 0 && (
-            <span className="muted" style={{ fontSize: 11 }}> · Roles: {roleResult.join(", ")}</span>
+            <span className="muted" style={{ fontSize: 11 }}>
+              {" "}
+              · Roles: {roleResult.join(", ")}
+            </span>
           )}
         </div>
       )}
       {provError && (
-        <div style={{ fontSize: 12, color: "var(--danger)", marginBottom: "var(--space-3)" }}>
+        <div
+          style={{ fontSize: 12, color: "var(--danger)", marginBottom: "var(--space-3)" }}
+        >
           <AlertTriangle size={12} style={{ verticalAlign: "middle" }} /> {provError}
         </div>
       )}
 
       {/* Existing clusters */}
-      <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: "var(--space-3)" }}>
+      <ul
+        style={{
+          margin: 0,
+          padding: 0,
+          listStyle: "none",
+          display: "grid",
+          gap: "var(--space-3)",
+        }}
+      >
         {query.data?.clusters.map((c) => (
-          <ClusterItem key={c.name} cluster={c} transitioning={transitioning} actionLoading={actionLoading} onStartStop={handleStartStop} onDelete={setDeleteTarget} subscriptionId={subscriptionId} resourceGroup={resourceGroup} />
+          <ClusterItem
+            key={c.name}
+            cluster={c}
+            transitioning={transitioning}
+            actionLoading={actionLoading}
+            onStartStop={handleStartStop}
+            onDelete={setDeleteTarget}
+            subscriptionId={subscriptionId}
+            resourceGroup={resourceGroup}
+          />
         ))}
       </ul>
 
@@ -416,21 +716,38 @@ export function ClusterCard({
         <button
           onClick={() => setShowProvision(true)}
           style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            width: "100%", marginTop: 8, padding: "8px 0",
-            background: "none", border: "1px dashed var(--border-medium)", borderRadius: 8,
-            color: "var(--text-muted)", fontSize: 12, cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 6,
+            width: "100%",
+            marginTop: 8,
+            padding: "8px 0",
+            background: "none",
+            border: "1px dashed var(--border-medium)",
+            borderRadius: 8,
+            color: "var(--text-muted)",
+            fontSize: 12,
+            cursor: "pointer",
             transition: "border-color 0.15s, color 0.15s",
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; e.currentTarget.style.color = "var(--accent)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--border-medium)"; e.currentTarget.style.color = "var(--text-muted)"; }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.borderColor = "var(--accent)";
+            e.currentTarget.style.color = "var(--accent)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = "var(--border-medium)";
+            e.currentTarget.style.color = "var(--text-muted)";
+          }}
         >
           <Plus size={14} strokeWidth={1.5} /> Add Cluster
         </button>
       )}
 
       {actionError && (
-        <div style={{ marginTop: "var(--space-2)", fontSize: 11, color: "var(--danger)" }}>
+        <div
+          style={{ marginTop: "var(--space-2)", fontSize: 11, color: "var(--danger)" }}
+        >
           <AlertTriangle size={10} style={{ verticalAlign: "middle" }} /> {actionError}
         </div>
       )}
@@ -477,51 +794,147 @@ function ClusterItem({
     try {
       const v = localStorage.getItem(CLUSTER_COLLAPSED_KEY + c.name);
       return v != null ? v === "1" : isStopped; // Stopped clusters collapsed by default
-    } catch { return isStopped; }
+    } catch {
+      return isStopped;
+    }
   });
 
   const toggleCollapse = () => {
     setCollapsed((prev) => {
       const next = !prev;
-      try { localStorage.setItem(CLUSTER_COLLAPSED_KEY + c.name, next ? "1" : "0"); } catch { /* noop */ }
+      try {
+        localStorage.setItem(CLUSTER_COLLAPSED_KEY + c.name, next ? "1" : "0");
+      } catch {
+        /* noop */
+      }
       return next;
     });
   };
 
   const trans = transitioning.get(c.name);
-  const powerLabel = trans === "starting" ? "Starting..." : trans === "stopping" ? "Stopping..." : c.power_state ?? "?";
-  const powerColor = trans === "starting" ? "var(--accent)" : trans === "stopping" ? "var(--warning)" : c.power_state === "Running" ? "var(--success)" : "var(--warning)";
+  const powerLabel =
+    trans === "starting"
+      ? "Starting..."
+      : trans === "stopping"
+        ? "Stopping..."
+        : (c.power_state ?? "?");
+  const powerColor =
+    trans === "starting"
+      ? "var(--accent)"
+      : trans === "stopping"
+        ? "var(--warning)"
+        : c.power_state === "Running"
+          ? "var(--success)"
+          : "var(--warning)";
 
   return (
     <li className="glass-card" style={{ padding: "var(--space-3)" }}>
       {/* Row 1: name + status + actions */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={toggleCollapse}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          cursor: "pointer",
+        }}
+        onClick={toggleCollapse}
+      >
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <ChevronDown size={14} style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(0)", transition: "transform 0.15s", color: "var(--text-faint)", flexShrink: 0 }} />
-          <strong style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</strong>
-          <span style={{ fontSize: 11, color: powerColor, fontWeight: 600, flexShrink: 0 }}>
-            {(trans === "starting" || trans === "stopping") && <Loader2 size={10} className="spin" style={{ verticalAlign: "middle", marginRight: 3 }} />}
+          <ChevronDown
+            size={14}
+            style={{
+              transform: collapsed ? "rotate(-90deg)" : "rotate(0)",
+              transition: "transform 0.15s",
+              color: "var(--text-faint)",
+              flexShrink: 0,
+            }}
+          />
+          <strong
+            style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+          >
+            {c.name}
+          </strong>
+          <span
+            style={{ fontSize: 11, color: powerColor, fontWeight: 600, flexShrink: 0 }}
+          >
+            {(trans === "starting" || trans === "stopping") && (
+              <Loader2
+                size={10}
+                className="spin"
+                style={{ verticalAlign: "middle", marginRight: 3 }}
+              />
+            )}
             {powerLabel}
           </span>
         </div>
-        <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "center", flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+        <div
+          style={{
+            display: "flex",
+            gap: "var(--space-2)",
+            alignItems: "center",
+            flexShrink: 0,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
           {!trans && c.power_state === "Stopped" && (
-            <button className="glass-button" onClick={() => onStartStop(c.name, "start")} disabled={actionLoading !== null} style={{ fontSize: 10, padding: "2px 8px", color: "var(--success)" }} title="Start cluster">
-              {actionLoading === `start-${c.name}` ? <Loader2 size={10} className="spin" /> : <Play size={10} strokeWidth={1.5} />} Start
+            <button
+              className="glass-button"
+              onClick={() => onStartStop(c.name, "start")}
+              disabled={actionLoading !== null}
+              style={{ fontSize: 10, padding: "2px 8px", color: "var(--success)" }}
+              title="Start cluster"
+            >
+              {actionLoading === `start-${c.name}` ? (
+                <Loader2 size={10} className="spin" />
+              ) : (
+                <Play size={10} strokeWidth={1.5} />
+              )}{" "}
+              Start
             </button>
           )}
           {!trans && c.power_state === "Running" && (
-            <button className="glass-button" onClick={() => onStartStop(c.name, "stop")} disabled={actionLoading !== null} style={{ fontSize: 10, padding: "2px 8px", color: "var(--warning)" }} title="Stop cluster (saves cost)">
-              {actionLoading === `stop-${c.name}` ? <Loader2 size={10} className="spin" /> : <Square size={10} strokeWidth={1.5} />} Stop
+            <button
+              className="glass-button"
+              onClick={() => onStartStop(c.name, "stop")}
+              disabled={actionLoading !== null}
+              style={{ fontSize: 10, padding: "2px 8px", color: "var(--warning)" }}
+              title="Stop cluster (saves cost)"
+            >
+              {actionLoading === `stop-${c.name}` ? (
+                <Loader2 size={10} className="spin" />
+              ) : (
+                <Square size={10} strokeWidth={1.5} />
+              )}{" "}
+              Stop
             </button>
           )}
-          <button className="glass-button" onClick={() => onDelete(c.name)} disabled={actionLoading !== null} style={{ fontSize: 10, padding: "2px 8px", color: "var(--danger)" }} title="Delete cluster">
-            {actionLoading === `delete-${c.name}` ? <Loader2 size={10} className="spin" /> : <Trash2 size={10} strokeWidth={1.5} />}
+          <button
+            className="glass-button"
+            onClick={() => onDelete(c.name)}
+            disabled={actionLoading !== null}
+            style={{ fontSize: 10, padding: "2px 8px", color: "var(--danger)" }}
+            title="Delete cluster"
+          >
+            {actionLoading === `delete-${c.name}` ? (
+              <Loader2 size={10} className="spin" />
+            ) : (
+              <Trash2 size={10} strokeWidth={1.5} />
+            )}
           </button>
         </div>
       </div>
       {/* Row 2: metadata chips — always visible */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 10px", marginTop: 4, marginLeft: 22, fontSize: 11, color: "var(--text-muted)" }}>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "6px 10px",
+          marginTop: 4,
+          marginLeft: 22,
+          fontSize: 11,
+          color: "var(--text-muted)",
+        }}
+      >
         <span>· {c.node_count ?? "?"} nodes</span>
         <span>({c.node_sku ?? "?"})</span>
         <span>· {c.region}</span>
@@ -531,24 +944,76 @@ function ClusterItem({
       {!collapsed && (
         <>
           <div className="muted" style={{ fontSize: 11, marginTop: 4, marginLeft: 22 }}>
-            State: {(() => {
+            State:{" "}
+            {(() => {
               const ps = c.provisioning_state ?? "?";
-              if (ps === "Succeeded") return <span style={{ color: "var(--success)" }}>{ps}</span>;
-              if (ps === "Creating" || ps === "Updating") return <span style={{ color: "var(--accent)", display: "inline-flex", alignItems: "center", gap: 3 }}><Loader2 size={10} className="spin" />{ps}</span>;
-              if (ps === "Deleting") return <span style={{ color: "var(--warning)", display: "inline-flex", alignItems: "center", gap: 3 }}><Loader2 size={10} className="spin" />{ps}</span>;
-              if (ps === "Failed") return <span style={{ color: "var(--danger)" }}>{ps}</span>;
+              if (ps === "Succeeded")
+                return <span style={{ color: "var(--success)" }}>{ps}</span>;
+              if (ps === "Creating" || ps === "Updating")
+                return (
+                  <span
+                    style={{
+                      color: "var(--accent)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 3,
+                    }}
+                  >
+                    <Loader2 size={10} className="spin" />
+                    {ps}
+                  </span>
+                );
+              if (ps === "Deleting")
+                return (
+                  <span
+                    style={{
+                      color: "var(--warning)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 3,
+                    }}
+                  >
+                    <Loader2 size={10} className="spin" />
+                    {ps}
+                  </span>
+                );
+              if (ps === "Failed")
+                return <span style={{ color: "var(--danger)" }}>{ps}</span>;
               return <span>{ps}</span>;
             })()}
           </div>
           {c.kubelet_object_id && (
-            <div className="muted" style={{ fontSize: 11, marginTop: 2, marginLeft: 22, display: "flex", alignItems: "center", gap: 4 }}>
+            <div
+              className="muted"
+              style={{
+                fontSize: 11,
+                marginTop: 2,
+                marginLeft: 22,
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
               Kubelet OID: <code style={{ fontSize: 10 }}>{c.kubelet_object_id}</code>
-              <button className="glass-button" style={{ padding: "1px 4px", border: "none", opacity: 0.6 }} onClick={() => navigator.clipboard.writeText(c.kubelet_object_id!)} title="Copy OID">
+              <button
+                className="glass-button"
+                style={{ padding: "1px 4px", border: "none", opacity: 0.6 }}
+                onClick={() => navigator.clipboard.writeText(c.kubelet_object_id!)}
+                title="Copy OID"
+              >
                 <Copy size={9} />
               </button>
             </div>
           )}
-          <ClusterDetails clusterName={c.name} powerState={c.power_state} agentPools={c.agent_pools} fqdn={c.fqdn} networkPlugin={c.network_plugin} subscriptionId={subscriptionId} resourceGroup={resourceGroup} />
+          <ClusterDetails
+            clusterName={c.name}
+            powerState={c.power_state}
+            agentPools={c.agent_pools}
+            fqdn={c.fqdn}
+            networkPlugin={c.network_plugin}
+            subscriptionId={subscriptionId}
+            resourceGroup={resourceGroup}
+          />
         </>
       )}
     </li>
@@ -604,11 +1069,16 @@ function ClusterDetails({
   // ESC + body scroll lock for modal
   useEffect(() => {
     if (!showModal) return;
-    const handleEsc = (e: KeyboardEvent) => { if (e.key === "Escape") setShowModal(false); };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowModal(false);
+    };
     window.addEventListener("keydown", handleEsc);
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    return () => { window.removeEventListener("keydown", handleEsc); document.body.style.overflow = prev; };
+    return () => {
+      window.removeEventListener("keydown", handleEsc);
+      document.body.style.overflow = prev;
+    };
   }, [showModal]);
 
   return (
@@ -619,37 +1089,176 @@ function ClusterDetails({
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
-                <th style={{ textAlign: "left", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>
+                <th
+                  style={{
+                    textAlign: "left",
+                    padding: "4px 0",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
                   Node
-                  {topQuery.isFetching && <Loader2 size={9} className="spin" style={{ marginLeft: 4, verticalAlign: "middle" }} />}
+                  {topQuery.isFetching && (
+                    <Loader2
+                      size={9}
+                      className="spin"
+                      style={{ marginLeft: 4, verticalAlign: "middle" }}
+                    />
+                  )}
                 </th>
-                <th style={{ textAlign: "right", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>CPU</th>
-                <th style={{ textAlign: "right", padding: "4px 0", color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", fontWeight: 500 }}>Memory</th>
+                <th
+                  style={{
+                    textAlign: "right",
+                    padding: "4px 0",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
+                  CPU
+                </th>
+                <th
+                  style={{
+                    textAlign: "right",
+                    padding: "4px 0",
+                    color: "var(--text-faint)",
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    fontWeight: 500,
+                  }}
+                >
+                  Memory
+                </th>
               </tr>
             </thead>
             <tbody>
               {nodeMetrics.map((n) => (
-                <tr key={n.fullName} style={{ borderBottom: "1px solid var(--border-weak)" }}>
+                <tr
+                  key={n.fullName}
+                  style={{ borderBottom: "1px solid var(--border-weak)" }}
+                >
                   <td style={{ padding: "5px 0", fontSize: 11 }} title={n.fullName}>
                     <span className="muted">{n.name}</span>
                   </td>
                   <td style={{ padding: "5px 0", textAlign: "right" }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
-                      <div style={{ width: 48, height: 5, background: "var(--bg-tertiary)", borderRadius: 3, overflow: "hidden" }}>
-                        <div style={{ width: `${Math.max(n.cpuPct, 2)}%`, height: "100%", background: n.cpuPct > 80 ? "var(--danger)" : n.cpuPct > 50 ? "var(--warning)" : "var(--accent)", borderRadius: 3, transition: "width 0.6s ease" }} />
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "flex-end",
+                        gap: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 48,
+                          height: 5,
+                          background: "var(--bg-tertiary)",
+                          borderRadius: 3,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: `${Math.max(n.cpuPct, 2)}%`,
+                            height: "100%",
+                            background:
+                              n.cpuPct > 80
+                                ? "var(--danger)"
+                                : n.cpuPct > 50
+                                  ? "var(--warning)"
+                                  : "var(--accent)",
+                            borderRadius: 3,
+                            transition: "width 0.6s ease",
+                          }}
+                        />
                       </div>
-                      <code style={{ fontSize: 10, color: "var(--text-secondary)", minWidth: 50, textAlign: "right" }}>{n.cpu}</code>
-                      <span style={{ fontSize: 9, color: "var(--text-faint)", minWidth: 28, textAlign: "right" }}>{n.cpuPct}%</span>
+                      <code
+                        style={{
+                          fontSize: 10,
+                          color: "var(--text-secondary)",
+                          minWidth: 50,
+                          textAlign: "right",
+                        }}
+                      >
+                        {n.cpu}
+                      </code>
+                      <span
+                        style={{
+                          fontSize: 9,
+                          color: "var(--text-faint)",
+                          minWidth: 28,
+                          textAlign: "right",
+                        }}
+                      >
+                        {n.cpuPct}%
+                      </span>
                     </div>
                   </td>
                   <td style={{ padding: "5px 0", textAlign: "right" }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
-                      <div style={{ width: 48, height: 5, background: "var(--bg-tertiary)", borderRadius: 3, overflow: "hidden" }}>
-                        <div style={{ width: `${Math.max(n.memPct, 2)}%`, height: "100%", background: n.memPct > 80 ? "var(--danger)" : n.memPct > 50 ? "var(--warning)" : "var(--purple, #a78bfa)", borderRadius: 3, transition: "width 0.6s ease" }} />
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "flex-end",
+                        gap: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 48,
+                          height: 5,
+                          background: "var(--bg-tertiary)",
+                          borderRadius: 3,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: `${Math.max(n.memPct, 2)}%`,
+                            height: "100%",
+                            background:
+                              n.memPct > 80
+                                ? "var(--danger)"
+                                : n.memPct > 50
+                                  ? "var(--warning)"
+                                  : "var(--purple, #a78bfa)",
+                            borderRadius: 3,
+                            transition: "width 0.6s ease",
+                          }}
+                        />
                       </div>
-                      <code style={{ fontSize: 10, color: "var(--text-secondary)", minWidth: 50, textAlign: "right" }}>{n.mem}</code>
-                      <span style={{ fontSize: 9, color: "var(--text-faint)", minWidth: 28, textAlign: "right" }}>{n.memPct}%</span>
-                      {n.memTotal && n.memTotal !== "?" && <span className="muted" style={{ fontSize: 8, minWidth: 30, textAlign: "right" }}>/ {n.memTotal}</span>}
+                      <code
+                        style={{
+                          fontSize: 10,
+                          color: "var(--text-secondary)",
+                          minWidth: 50,
+                          textAlign: "right",
+                        }}
+                      >
+                        {n.mem}
+                      </code>
+                      <span
+                        style={{
+                          fontSize: 9,
+                          color: "var(--text-faint)",
+                          minWidth: 28,
+                          textAlign: "right",
+                        }}
+                      >
+                        {n.memPct}%
+                      </span>
+                      {n.memTotal && n.memTotal !== "?" && (
+                        <span
+                          className="muted"
+                          style={{ fontSize: 8, minWidth: 30, textAlign: "right" }}
+                        >
+                          / {n.memTotal}
+                        </span>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -660,7 +1269,16 @@ function ClusterDetails({
       )}
 
       {isRunning && topQuery.isLoading && nodeMetrics.length === 0 && (
-        <div className="muted" style={{ fontSize: 10, marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
+        <div
+          className="muted"
+          style={{
+            fontSize: 10,
+            marginTop: 4,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+          }}
+        >
           <Loader2 size={10} className="spin" /> Loading node metrics...
         </div>
       )}
@@ -675,172 +1293,428 @@ function ClusterDetails({
       <button
         onClick={() => setShowModal(true)}
         style={{
-          display: "flex", alignItems: "center", gap: 4, marginTop: 6,
-          background: "none", border: "none", color: "var(--accent)",
-          cursor: "pointer", padding: 0, fontSize: 10,
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          marginTop: 6,
+          background: "none",
+          border: "none",
+          color: "var(--accent)",
+          cursor: "pointer",
+          padding: 0,
+          fontSize: 10,
         }}
       >
         <Maximize2 size={10} /> View full details
       </button>
 
       {/* Full details modal */}
-      {showModal && createPortal(
-        <div
-          className="glass-dialog-backdrop"
-          onClick={(e) => { if (e.target === e.currentTarget) setShowModal(false); }}
-          role="dialog"
-          aria-modal="true"
-          aria-label={`${clusterName} Details`}
-        >
+      {showModal &&
+        createPortal(
           <div
-            className="glass-card glass-card--strong glass-dialog"
-            onClick={(e) => e.stopPropagation()}
-            style={{ maxWidth: 780, width: "94vw", maxHeight: "88vh", display: "flex", flexDirection: "column", padding: 0, overflow: "hidden" }}
+            className="glass-dialog-backdrop"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowModal(false);
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${clusterName} Details`}
           >
-            {/* ── Premium header with accent gradient ── */}
-            <div style={{
-              padding: "20px 24px 16px",
-              background: "linear-gradient(135deg, rgba(110,159,255,0.08) 0%, rgba(184,119,217,0.06) 100%)",
-              borderBottom: "1px solid var(--border-weak)",
-            }}>
-              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
-                <div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div style={{
-                      width: 36, height: 36, borderRadius: 10,
-                      background: "linear-gradient(135deg, var(--accent), var(--purple))",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      boxShadow: "0 4px 12px rgba(110,159,255,0.25)",
-                    }}>
-                      <span style={{ fontSize: 16 }}>⎈</span>
-                    </div>
-                    <div>
-                      <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em" }}>{clusterName}</h3>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
-                        <span style={{
-                          display: "inline-flex", alignItems: "center", gap: 4,
-                          fontSize: 11, fontWeight: 600,
-                          color: powerState === "Running" ? "var(--success)" : "var(--warning)",
-                        }}>
-                          <span style={{
-                            width: 6, height: 6, borderRadius: "50%",
-                            background: powerState === "Running" ? "var(--success)" : "var(--warning)",
-                            boxShadow: powerState === "Running" ? "0 0 8px var(--success)" : "none",
-                            animation: powerState === "Running" ? "blink 1.8s ease-in-out infinite" : "none",
-                          }} />
-                          {powerState ?? "Unknown"}
-                        </span>
-                        {fqdn && <span className="muted" style={{ fontSize: 10 }}>·</span>}
-                        {fqdn && <code style={{ fontSize: 9, color: "var(--text-faint)", background: "rgba(255,255,255,0.04)", padding: "2px 6px", borderRadius: 4 }}>{fqdn}</code>}
+            <div
+              className="glass-card glass-card--strong glass-dialog"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                maxWidth: 780,
+                width: "94vw",
+                maxHeight: "88vh",
+                display: "flex",
+                flexDirection: "column",
+                padding: 0,
+                overflow: "hidden",
+              }}
+            >
+              {/* ── Premium header with accent gradient ── */}
+              <div
+                style={{
+                  padding: "20px 24px 16px",
+                  background:
+                    "linear-gradient(135deg, rgba(110,159,255,0.08) 0%, rgba(184,119,217,0.06) 100%)",
+                  borderBottom: "1px solid var(--border-weak)",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: 10,
+                          background:
+                            "linear-gradient(135deg, var(--accent), var(--purple))",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          boxShadow: "0 4px 12px rgba(110,159,255,0.25)",
+                        }}
+                      >
+                        <span style={{ fontSize: 16 }}>⎈</span>
+                      </div>
+                      <div>
+                        <h3
+                          style={{
+                            margin: 0,
+                            fontSize: 18,
+                            fontWeight: 700,
+                            letterSpacing: "-0.02em",
+                          }}
+                        >
+                          {clusterName}
+                        </h3>
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            marginTop: 2,
+                          }}
+                        >
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 4,
+                              fontSize: 11,
+                              fontWeight: 600,
+                              color:
+                                powerState === "Running"
+                                  ? "var(--success)"
+                                  : "var(--warning)",
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 6,
+                                height: 6,
+                                borderRadius: "50%",
+                                background:
+                                  powerState === "Running"
+                                    ? "var(--success)"
+                                    : "var(--warning)",
+                                boxShadow:
+                                  powerState === "Running"
+                                    ? "0 0 8px var(--success)"
+                                    : "none",
+                                animation:
+                                  powerState === "Running"
+                                    ? "blink 1.8s ease-in-out infinite"
+                                    : "none",
+                              }}
+                            />
+                            {powerState ?? "Unknown"}
+                          </span>
+                          {fqdn && (
+                            <span className="muted" style={{ fontSize: 10 }}>
+                              ·
+                            </span>
+                          )}
+                          {fqdn && (
+                            <code
+                              style={{
+                                fontSize: 9,
+                                color: "var(--text-faint)",
+                                background: "rgba(255,255,255,0.04)",
+                                padding: "2px 6px",
+                                borderRadius: 4,
+                              }}
+                            >
+                              {fqdn}
+                            </code>
+                          )}
+                        </div>
                       </div>
                     </div>
                   </div>
+                  <button
+                    className="glass-button"
+                    onClick={() => setShowModal(false)}
+                    style={{
+                      padding: "6px 8px",
+                      border: "none",
+                      background: "rgba(255,255,255,0.05)",
+                    }}
+                    title="Close (Esc)"
+                  >
+                    <X size={16} strokeWidth={1.5} />
+                  </button>
                 </div>
-                <button
-                  className="glass-button"
-                  onClick={() => setShowModal(false)}
-                  style={{ padding: "6px 8px", border: "none", background: "rgba(255,255,255,0.05)" }}
-                  title="Close (Esc)"
+
+                {/* ── Stat cards row ── */}
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))",
+                    gap: 10,
+                    marginTop: 16,
+                  }}
                 >
-                  <X size={16} strokeWidth={1.5} />
-                </button>
+                  {[
+                    {
+                      label: "Nodes",
+                      value: agentPools?.[0]?.count ?? "—",
+                      sub: agentPools?.[0]?.vm_size ?? "",
+                    },
+                    { label: "K8s", value: networkPlugin ?? "—", sub: "network" },
+                    {
+                      label: "Pools",
+                      value: String(agentPools?.length ?? 0),
+                      sub: agentPools?.map((p) => p.name).join(", ") ?? "",
+                    },
+                    {
+                      label: "OS",
+                      value: agentPools?.[0]?.os_type ?? "—",
+                      sub: agentPools?.[0]?.mode ?? "",
+                    },
+                  ].map((s) => (
+                    <div
+                      key={s.label}
+                      style={{
+                        padding: "10px 12px",
+                        borderRadius: 8,
+                        background: "rgba(255,255,255,0.03)",
+                        border: "1px solid var(--border-weak)",
+                      }}
+                    >
+                      <div
+                        className="muted"
+                        style={{
+                          fontSize: 9,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.06em",
+                        }}
+                      >
+                        {s.label}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 16,
+                          fontWeight: 700,
+                          marginTop: 2,
+                          letterSpacing: "-0.02em",
+                        }}
+                      >
+                        {s.value}
+                      </div>
+                      <div
+                        className="muted"
+                        style={{
+                          fontSize: 9,
+                          marginTop: 1,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {s.sub}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
 
-              {/* ── Stat cards row ── */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 10, marginTop: 16 }}>
-                {[
-                  { label: "Nodes", value: agentPools?.[0]?.count ?? "—", sub: agentPools?.[0]?.vm_size ?? "" },
-                  { label: "K8s", value: networkPlugin ?? "—", sub: "network" },
-                  { label: "Pools", value: String(agentPools?.length ?? 0), sub: agentPools?.map(p => p.name).join(", ") ?? "" },
-                  { label: "OS", value: agentPools?.[0]?.os_type ?? "—", sub: agentPools?.[0]?.mode ?? "" },
-                ].map((s) => (
-                  <div key={s.label} style={{
-                    padding: "10px 12px", borderRadius: 8,
-                    background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-weak)",
-                  }}>
-                    <div className="muted" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.06em" }}>{s.label}</div>
-                    <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2, letterSpacing: "-0.02em" }}>{s.value}</div>
-                    <div className="muted" style={{ fontSize: 9, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.sub}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* ── Scrollable body ── */}
-            <div style={{ overflowY: "auto", flex: 1, padding: "16px 24px 24px" }}>
-
-              {/* ── Node Pools table ── */}
-              {agentPools && agentPools.length > 0 && (
-                <div style={{ marginBottom: 20 }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ width: 3, height: 14, borderRadius: 2, background: "var(--accent)" }} />
-                    Node Pools
-                  </div>
-                  <div style={{ borderRadius: 8, border: "1px solid var(--border-weak)", overflow: "hidden" }}>
-                    <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
-                      <thead>
-                        <tr style={{ background: "var(--bg-tertiary)" }}>
-                          {["Pool", "SKU", "Nodes", "OS", "Mode", "Autoscale", "State"].map((h) => (
-                            <th key={h} style={{ textAlign: h === "Nodes" ? "center" : "left", padding: "8px 10px", color: "var(--text-faint)", fontSize: 9, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 500 }}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {agentPools.map((p, i) => (
-                          <tr key={p.name} style={{ background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)", borderTop: "1px solid var(--border-weak)" }}>
-                            <td style={{ padding: "8px 10px", fontWeight: 600 }}>{p.name}</td>
-                            <td style={{ padding: "8px 10px" }}><code style={{ fontSize: 10 }}>{p.vm_size}</code></td>
-                            <td style={{ padding: "8px 10px", textAlign: "center", fontWeight: 600 }}>{p.count}</td>
-                            <td style={{ padding: "8px 10px" }}>{p.os_type}</td>
-                            <td style={{ padding: "8px 10px" }}>
-                              <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: p.mode === "System" ? "rgba(110,159,255,0.1)" : "rgba(115,191,105,0.1)", color: p.mode === "System" ? "var(--accent)" : "var(--success)" }}>
-                                {p.mode}
-                              </span>
-                            </td>
-                            <td style={{ padding: "8px 10px", fontSize: 10 }}>
-                              {p.enable_auto_scaling ? <span style={{ color: "var(--success)" }}>{p.min_count}–{p.max_count}</span> : <span className="muted">Off</span>}
-                            </td>
-                            <td style={{ padding: "8px 10px" }}>
-                              <span style={{
-                                display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 500,
-                                color: p.power_state === "Running" ? "var(--success)" : "var(--warning)",
-                              }}>
-                                <span style={{ width: 5, height: 5, borderRadius: "50%", background: p.power_state === "Running" ? "var(--success)" : "var(--warning)" }} />
-                                {p.power_state ?? "?"}
-                              </span>
-                            </td>
+              {/* ── Scrollable body ── */}
+              <div style={{ overflowY: "auto", flex: 1, padding: "16px 24px 24px" }}>
+                {/* ── Node Pools table ── */}
+                {agentPools && agentPools.length > 0 && (
+                  <div style={{ marginBottom: 20 }}>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        marginBottom: 8,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 3,
+                          height: 14,
+                          borderRadius: 2,
+                          background: "var(--accent)",
+                        }}
+                      />
+                      Node Pools
+                    </div>
+                    <div
+                      style={{
+                        borderRadius: 8,
+                        border: "1px solid var(--border-weak)",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <table
+                        style={{
+                          width: "100%",
+                          fontSize: 11,
+                          borderCollapse: "collapse",
+                        }}
+                      >
+                        <thead>
+                          <tr style={{ background: "var(--bg-tertiary)" }}>
+                            {[
+                              "Pool",
+                              "SKU",
+                              "Nodes",
+                              "OS",
+                              "Mode",
+                              "Autoscale",
+                              "State",
+                            ].map((h) => (
+                              <th
+                                key={h}
+                                style={{
+                                  textAlign: h === "Nodes" ? "center" : "left",
+                                  padding: "8px 10px",
+                                  color: "var(--text-faint)",
+                                  fontSize: 9,
+                                  textTransform: "uppercase",
+                                  letterSpacing: "0.05em",
+                                  fontWeight: 500,
+                                }}
+                              >
+                                {h}
+                              </th>
+                            ))}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {agentPools.map((p, i) => (
+                            <tr
+                              key={p.name}
+                              style={{
+                                background:
+                                  i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)",
+                                borderTop: "1px solid var(--border-weak)",
+                              }}
+                            >
+                              <td style={{ padding: "8px 10px", fontWeight: 600 }}>
+                                {p.name}
+                              </td>
+                              <td style={{ padding: "8px 10px" }}>
+                                <code style={{ fontSize: 10 }}>{p.vm_size}</code>
+                              </td>
+                              <td
+                                style={{
+                                  padding: "8px 10px",
+                                  textAlign: "center",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {p.count}
+                              </td>
+                              <td style={{ padding: "8px 10px" }}>{p.os_type}</td>
+                              <td style={{ padding: "8px 10px" }}>
+                                <span
+                                  style={{
+                                    fontSize: 9,
+                                    padding: "2px 6px",
+                                    borderRadius: 4,
+                                    background:
+                                      p.mode === "System"
+                                        ? "rgba(110,159,255,0.1)"
+                                        : "rgba(115,191,105,0.1)",
+                                    color:
+                                      p.mode === "System"
+                                        ? "var(--accent)"
+                                        : "var(--success)",
+                                  }}
+                                >
+                                  {p.mode}
+                                </span>
+                              </td>
+                              <td style={{ padding: "8px 10px", fontSize: 10 }}>
+                                {p.enable_auto_scaling ? (
+                                  <span style={{ color: "var(--success)" }}>
+                                    {p.min_count}–{p.max_count}
+                                  </span>
+                                ) : (
+                                  <span className="muted">Off</span>
+                                )}
+                              </td>
+                              <td style={{ padding: "8px 10px" }}>
+                                <span
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: 4,
+                                    fontSize: 10,
+                                    fontWeight: 500,
+                                    color:
+                                      p.power_state === "Running"
+                                        ? "var(--success)"
+                                        : "var(--warning)",
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      width: 5,
+                                      height: 5,
+                                      borderRadius: "50%",
+                                      background:
+                                        p.power_state === "Running"
+                                          ? "var(--success)"
+                                          : "var(--warning)",
+                                    }}
+                                  />
+                                  {p.power_state ?? "?"}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {/* kubectl sections — only when running */}
-              {!isRunning && (
-                <div style={{
-                  padding: "20px", borderRadius: 8, textAlign: "center",
-                  background: "rgba(255,255,255,0.02)", border: "1px dashed var(--border-weak)",
-                  color: "var(--text-faint)", fontSize: 12,
-                }}>
-                  Start the cluster to view diagnostics and run kubectl commands.
-                </div>
-              )}
+                {/* kubectl sections — only when running */}
+                {!isRunning && (
+                  <div
+                    style={{
+                      padding: "20px",
+                      borderRadius: 8,
+                      textAlign: "center",
+                      background: "rgba(255,255,255,0.02)",
+                      border: "1px dashed var(--border-weak)",
+                      color: "var(--text-faint)",
+                      fontSize: 12,
+                    }}
+                  >
+                    Start the cluster to view diagnostics and run kubectl commands.
+                  </div>
+                )}
 
-              {isRunning && (
-                <ClusterModalKubectl
-                  subscriptionId={subscriptionId}
-                  resourceGroup={resourceGroup}
-                  clusterName={clusterName}
-                  topQuery={topQuery}
-                />
-              )}
+                {isRunning && (
+                  <ClusterModalKubectl
+                    subscriptionId={subscriptionId}
+                    resourceGroup={resourceGroup}
+                    clusterName={clusterName}
+                    topQuery={topQuery}
+                  />
+                )}
+              </div>
             </div>
-          </div>
-        </div>,
-        document.body,
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -857,7 +1731,13 @@ function ClusterModalKubectl({
   subscriptionId: string;
   resourceGroup: string;
   clusterName: string;
-  topQuery: { isLoading: boolean; isError: boolean; data?: { nodes: K8sNodeMetrics[] } | null; error?: unknown; refetch: () => void };
+  topQuery: {
+    isLoading: boolean;
+    isError: boolean;
+    data?: { nodes: K8sNodeMetrics[] } | null;
+    error?: unknown;
+    refetch: () => void;
+  };
 }) {
   const nodesQuery = useQuery({
     queryKey: ["aks-nodes-fast", subscriptionId, resourceGroup, clusterName],
@@ -872,14 +1752,22 @@ function ClusterModalKubectl({
   });
 
   const [customCmd, setCustomCmd] = useState("");
-  const [customResult, setCustomResult] = useState<{ output: string; exit_code: number } | null>(null);
+  const [customResult, setCustomResult] = useState<{
+    output: string;
+    exit_code: number;
+  } | null>(null);
   const [customLoading, setCustomLoading] = useState(false);
 
   const runCustom = useCallback(async () => {
     if (!customCmd.trim()) return;
     setCustomLoading(true);
     try {
-      const result = await monitoringApi.runAksCommand(subscriptionId, resourceGroup, clusterName, customCmd.trim());
+      const result = await monitoringApi.runAksCommand(
+        subscriptionId,
+        resourceGroup,
+        clusterName,
+        customCmd.trim(),
+      );
       setCustomResult(result);
     } catch (e) {
       setCustomResult({ output: (e as Error).message, exit_code: -1 });
@@ -891,15 +1779,37 @@ function ClusterModalKubectl({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* Section header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ fontSize: 11, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 3, height: 14, borderRadius: 2, background: "var(--teal)" }} />
+      <div
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}
+      >
+        <div
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          <span
+            style={{ width: 3, height: 14, borderRadius: 2, background: "var(--teal)" }}
+          />
           Cluster Diagnostics
         </div>
         <button
           className="glass-button"
-          onClick={() => { topQuery.refetch(); nodesQuery.refetch(); podsQuery.refetch(); }}
-          style={{ padding: "4px 10px", fontSize: 10, display: "flex", alignItems: "center", gap: 4 }}
+          onClick={() => {
+            topQuery.refetch();
+            nodesQuery.refetch();
+            podsQuery.refetch();
+          }}
+          style={{
+            padding: "4px 10px",
+            fontSize: 10,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+          }}
           title="Refresh all diagnostics"
         >
           <RefreshCw size={10} strokeWidth={1.5} /> Refresh All
@@ -913,31 +1823,56 @@ function ClusterModalKubectl({
       <K8sNodesSection query={nodesQuery} />
 
       {/* Active Pods — fast direct API with logs */}
-      <K8sPodsSection query={podsQuery}
-        subscriptionId={subscriptionId} resourceGroup={resourceGroup} clusterName={clusterName}
+      <K8sPodsSection
+        query={podsQuery}
+        subscriptionId={subscriptionId}
+        resourceGroup={resourceGroup}
+        clusterName={clusterName}
       />
 
       {/* Custom command */}
-      <div style={{ borderRadius: 8, border: "1px solid var(--border-weak)", overflow: "hidden" }}>
-        <div style={{
-          padding: "8px 12px", background: "var(--bg-tertiary)",
-          fontSize: 10, fontWeight: 500, display: "flex", alignItems: "center", gap: 6,
-          borderBottom: "1px solid var(--border-weak)",
-        }}>
+      <div
+        style={{
+          borderRadius: 8,
+          border: "1px solid var(--border-weak)",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            padding: "8px 12px",
+            background: "var(--bg-tertiary)",
+            fontSize: 10,
+            fontWeight: 500,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            borderBottom: "1px solid var(--border-weak)",
+          }}
+        >
           <Terminal size={12} strokeWidth={1.5} /> Run kubectl command
-          <span className="muted" style={{ fontSize: 9, marginLeft: "auto" }}>read-only: get, top, describe, logs</span>
+          <span className="muted" style={{ fontSize: 9, marginLeft: "auto" }}>
+            read-only: get, top, describe, logs
+          </span>
         </div>
         <div style={{ padding: "10px 12px", display: "flex", gap: 8 }}>
           <input
             type="text"
             value={customCmd}
             onChange={(e) => setCustomCmd(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") runCustom(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runCustom();
+            }}
             placeholder="kubectl get svc -A"
             style={{
-              flex: 1, fontSize: 12, padding: "7px 10px",
-              background: "var(--bg-canvas)", border: "1px solid var(--border-weak)",
-              borderRadius: 6, color: "var(--text-primary)", fontFamily: "var(--font-mono)",
+              flex: 1,
+              fontSize: 12,
+              padding: "7px 10px",
+              background: "var(--bg-canvas)",
+              border: "1px solid var(--border-weak)",
+              borderRadius: 6,
+              color: "var(--text-primary)",
+              fontFamily: "var(--font-mono)",
             }}
             spellCheck={false}
           />
@@ -951,13 +1886,23 @@ function ClusterModalKubectl({
           </button>
         </div>
         {customResult && (
-          <pre style={{
-            margin: 0, padding: "10px 12px", fontSize: 11, lineHeight: 1.5,
-            background: "var(--bg-canvas)", borderTop: "1px solid var(--border-weak)",
-            overflow: "auto", maxHeight: 250, whiteSpace: "pre-wrap", wordBreak: "break-all",
-            color: customResult.exit_code === 0 ? "var(--text-primary)" : "var(--danger)",
-            fontFamily: "var(--font-mono)",
-          }}>
+          <pre
+            style={{
+              margin: 0,
+              padding: "10px 12px",
+              fontSize: 11,
+              lineHeight: 1.5,
+              background: "var(--bg-canvas)",
+              borderTop: "1px solid var(--border-weak)",
+              overflow: "auto",
+              maxHeight: 250,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              color:
+                customResult.exit_code === 0 ? "var(--text-primary)" : "var(--danger)",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
             {customResult.output || "(no output)"}
           </pre>
         )}
@@ -971,71 +1916,222 @@ function ClusterModalKubectl({
 // ---------------------------------------------------------------------------
 import type { K8sNodeMetrics, K8sNode, K8sPod } from "@/api/endpoints";
 
-function NodeResourcesSection({ query }: { query: { isLoading: boolean; isError: boolean; data?: { nodes: K8sNodeMetrics[] } | null; error?: unknown } }) {
+function NodeResourcesSection({
+  query,
+}: {
+  query: {
+    isLoading: boolean;
+    isError: boolean;
+    data?: { nodes: K8sNodeMetrics[] } | null;
+    error?: unknown;
+  };
+}) {
   const metrics = query.data?.nodes ?? [];
 
   const shortName = (n: string) => n.replace(/^aks-/, "").replace(/-vmss/, "-");
 
   return (
-    <div style={{ borderRadius: 8, border: "1px solid var(--border-weak)", overflow: "hidden" }}>
-      <div style={{
-        padding: "8px 12px", background: "var(--bg-tertiary)",
-        fontSize: 11, fontWeight: 500, display: "flex", alignItems: "center", gap: 6,
-        borderBottom: "1px solid var(--border-weak)",
-      }}>
+    <div
+      style={{
+        borderRadius: 8,
+        border: "1px solid var(--border-weak)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "8px 12px",
+          background: "var(--bg-tertiary)",
+          fontSize: 11,
+          fontWeight: 500,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          borderBottom: "1px solid var(--border-weak)",
+        }}
+      >
         Node Resources
-        {query.isLoading && <Loader2 size={10} className="spin" style={{ marginLeft: "auto", color: "var(--accent)" }} />}
-        {!query.isLoading && metrics.length > 0 && <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--success)" }}>✓</span>}
+        {query.isLoading && (
+          <Loader2
+            size={10}
+            className="spin"
+            style={{ marginLeft: "auto", color: "var(--accent)" }}
+          />
+        )}
+        {!query.isLoading && metrics.length > 0 && (
+          <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--success)" }}>
+            ✓
+          </span>
+        )}
       </div>
       <div style={{ padding: "12px 14px" }}>
         {query.isLoading && metrics.length === 0 && (
-          <div className="muted" style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}>
+          <div
+            className="muted"
+            style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}
+          >
             <Loader2 size={12} className="spin" /> Fetching node metrics...
           </div>
         )}
         {query.isError && (
-          <div style={{ fontSize: 11, color: "var(--danger)" }}>Failed to load: {formatApiError(query.error, "aks")}</div>
+          <div style={{ fontSize: 11, color: "var(--danger)" }}>
+            Failed to load: {formatApiError(query.error, "aks")}
+          </div>
         )}
         {metrics.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {/* Header */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, paddingLeft: 140 }}>
-              <div className="muted" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.05em", display: "flex", alignItems: "center", gap: 4 }}>
-                <span style={{ width: 8, height: 8, borderRadius: 2, background: "var(--accent)" }} /> CPU
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 16,
+                paddingLeft: 140,
+              }}
+            >
+              <div
+                className="muted"
+                style={{
+                  fontSize: 9,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: "var(--accent)",
+                  }}
+                />{" "}
+                CPU
               </div>
-              <div className="muted" style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.05em", display: "flex", alignItems: "center", gap: 4 }}>
-                <span style={{ width: 8, height: 8, borderRadius: 2, background: "var(--purple)" }} /> Memory
+              <div
+                className="muted"
+                style={{
+                  fontSize: 9,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: "var(--purple)",
+                  }}
+                />{" "}
+                Memory
               </div>
             </div>
             {metrics.map((n) => (
-              <div key={n.name} style={{ display: "grid", gridTemplateColumns: "140px 1fr 1fr", gap: 16, alignItems: "center" }}>
-                <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={n.name}>
+              <div
+                key={n.name}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "140px 1fr 1fr",
+                  gap: 16,
+                  alignItems: "center",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontFamily: "var(--font-mono)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                  title={n.name}
+                >
                   {shortName(n.name)}
                 </span>
                 {/* CPU bar */}
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ flex: 1, height: 8, background: "var(--bg-tertiary)", borderRadius: 4, overflow: "hidden", position: "relative" }}>
-                    <div style={{
-                      width: `${Math.max(n.cpu_pct, 2)}%`, height: "100%", borderRadius: 4,
-                      background: n.cpu_pct > 80 ? "var(--danger)" : n.cpu_pct > 50 ? "var(--warning)" : "var(--accent)",
-                      transition: "width 0.5s ease-out",
-                    }} />
+                  <div
+                    style={{
+                      flex: 1,
+                      height: 8,
+                      background: "var(--bg-tertiary)",
+                      borderRadius: 4,
+                      overflow: "hidden",
+                      position: "relative",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${Math.max(n.cpu_pct, 2)}%`,
+                        height: "100%",
+                        borderRadius: 4,
+                        background:
+                          n.cpu_pct > 80
+                            ? "var(--danger)"
+                            : n.cpu_pct > 50
+                              ? "var(--warning)"
+                              : "var(--accent)",
+                        transition: "width 0.5s ease-out",
+                      }}
+                    />
                   </div>
-                  <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", minWidth: 50, textAlign: "right", color: "var(--text-muted)" }}>
-                    {n.cpu} <span style={{ color: "var(--text-faint)" }}>({n.cpu_pct}%)</span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontFamily: "var(--font-mono)",
+                      minWidth: 50,
+                      textAlign: "right",
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    {n.cpu}{" "}
+                    <span style={{ color: "var(--text-faint)" }}>({n.cpu_pct}%)</span>
                   </span>
                 </div>
                 {/* Memory bar */}
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ flex: 1, height: 8, background: "var(--bg-tertiary)", borderRadius: 4, overflow: "hidden", position: "relative" }}>
-                    <div style={{
-                      width: `${Math.max(n.memory_pct, 2)}%`, height: "100%", borderRadius: 4,
-                      background: n.memory_pct > 80 ? "var(--danger)" : n.memory_pct > 50 ? "var(--warning)" : "var(--purple)",
-                      transition: "width 0.5s ease-out",
-                    }} />
+                  <div
+                    style={{
+                      flex: 1,
+                      height: 8,
+                      background: "var(--bg-tertiary)",
+                      borderRadius: 4,
+                      overflow: "hidden",
+                      position: "relative",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${Math.max(n.memory_pct, 2)}%`,
+                        height: "100%",
+                        borderRadius: 4,
+                        background:
+                          n.memory_pct > 80
+                            ? "var(--danger)"
+                            : n.memory_pct > 50
+                              ? "var(--warning)"
+                              : "var(--purple)",
+                        transition: "width 0.5s ease-out",
+                      }}
+                    />
                   </div>
-                  <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", minWidth: 60, textAlign: "right", color: "var(--text-muted)" }}>
-                    {n.memory} <span style={{ color: "var(--text-faint)" }}>({n.memory_pct}%)</span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontFamily: "var(--font-mono)",
+                      minWidth: 60,
+                      textAlign: "right",
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    {n.memory}{" "}
+                    <span style={{ color: "var(--text-faint)" }}>({n.memory_pct}%)</span>
                   </span>
                 </div>
               </div>
@@ -1050,38 +2146,144 @@ function NodeResourcesSection({ query }: { query: { isLoading: boolean; isError:
 // ---------------------------------------------------------------------------
 // K8s Nodes Section — typed data from direct K8s API
 // ---------------------------------------------------------------------------
-function K8sNodesSection({ query }: { query: { isLoading: boolean; isError: boolean; data?: { nodes: K8sNode[] } | null; error?: unknown } }) {
+function K8sNodesSection({
+  query,
+}: {
+  query: {
+    isLoading: boolean;
+    isError: boolean;
+    data?: { nodes: K8sNode[] } | null;
+    error?: unknown;
+  };
+}) {
   const [collapsed, setCollapsed] = useState(true);
   const nodes = query.data?.nodes ?? [];
-  const sc = (s: string) => s === "Ready" ? "var(--success)" : "var(--danger)";
+  const sc = (s: string) => (s === "Ready" ? "var(--success)" : "var(--danger)");
   return (
-    <div style={{ borderRadius: 8, border: "1px solid var(--border-weak)", overflow: "hidden" }}>
-      <button onClick={() => { setCollapsed(!collapsed); }} style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", background: collapsed ? "transparent" : "var(--bg-tertiary)", border: "none", color: "var(--text-primary)", cursor: "pointer", padding: "8px 12px", fontSize: 11, textAlign: "left", fontWeight: 500 }}>
-        <ChevronDown size={12} style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)", color: "var(--text-faint)", transition: "transform 0.15s" }} />
+    <div
+      style={{
+        borderRadius: 8,
+        border: "1px solid var(--border-weak)",
+        overflow: "hidden",
+      }}
+    >
+      <button
+        onClick={() => {
+          setCollapsed(!collapsed);
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          width: "100%",
+          background: collapsed ? "transparent" : "var(--bg-tertiary)",
+          border: "none",
+          color: "var(--text-primary)",
+          cursor: "pointer",
+          padding: "8px 12px",
+          fontSize: 11,
+          textAlign: "left",
+          fontWeight: 500,
+        }}
+      >
+        <ChevronDown
+          size={12}
+          style={{
+            transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)",
+            color: "var(--text-faint)",
+            transition: "transform 0.15s",
+          }}
+        />
         Nodes
-        {nodes.length > 0 && <span className="muted" style={{ fontSize: 9 }}>{nodes.length}</span>}
-        {query.isLoading && <Loader2 size={10} className="spin" style={{ marginLeft: "auto", color: "var(--accent)" }} />}
-        {!query.isLoading && nodes.length > 0 && <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--success)" }}>✓</span>}
+        {nodes.length > 0 && (
+          <span className="muted" style={{ fontSize: 9 }}>
+            {nodes.length}
+          </span>
+        )}
+        {query.isLoading && (
+          <Loader2
+            size={10}
+            className="spin"
+            style={{ marginLeft: "auto", color: "var(--accent)" }}
+          />
+        )}
+        {!query.isLoading && nodes.length > 0 && (
+          <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--success)" }}>
+            ✓
+          </span>
+        )}
       </button>
       {!collapsed && (
         <div style={{ borderTop: "1px solid var(--border-weak)", overflowX: "auto" }}>
-          {query.isLoading && <div style={{ padding: 16, textAlign: "center" }} className="muted"><Loader2 size={14} className="spin" /> Loading...</div>}
-          {query.isError && <div style={{ padding: 12, fontSize: 11, color: "var(--danger)" }}>{formatApiError(query.error, "aks")}</div>}
+          {query.isLoading && (
+            <div style={{ padding: 16, textAlign: "center" }} className="muted">
+              <Loader2 size={14} className="spin" /> Loading...
+            </div>
+          )}
+          {query.isError && (
+            <div style={{ padding: 12, fontSize: 11, color: "var(--danger)" }}>
+              {formatApiError(query.error, "aks")}
+            </div>
+          )}
           {nodes.length > 0 && (
-            <table style={{ width: "100%", fontSize: 10, borderCollapse: "collapse", fontFamily: "var(--font-mono)" }}>
-              <thead><tr style={{ background: "var(--bg-tertiary)" }}>
-                {["NAME","STATUS","VERSION","IP","OS","RUNTIME"].map(h=><th key={h} style={{ textAlign: "left", padding: "6px 8px", color: "var(--text-faint)", fontSize: 9, textTransform: "uppercase", fontWeight: 500 }}>{h}</th>)}
-              </tr></thead>
-              <tbody>{nodes.map((n,i)=>(
-                <tr key={n.name} style={{ background: i%2===0 ? "transparent" : "rgba(255,255,255,0.012)", borderTop: "1px solid var(--border-weak)" }}>
-                  <td style={{ padding: "5px 8px", fontWeight: 500 }}>{n.name}</td>
-                  <td style={{ padding: "5px 8px", color: sc(n.status) }}><span style={{ display: "inline-block", width: 5, height: 5, borderRadius: "50%", background: sc(n.status), marginRight: 4, verticalAlign: "middle" }}/>{n.status}</td>
-                  <td style={{ padding: "5px 8px" }}>{n.version}</td>
-                  <td style={{ padding: "5px 8px" }}>{n.internal_ip}</td>
-                  <td style={{ padding: "5px 8px" }}>{n.os_image}</td>
-                  <td style={{ padding: "5px 8px" }}>{n.runtime}</td>
+            <table
+              style={{
+                width: "100%",
+                fontSize: 10,
+                borderCollapse: "collapse",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              <thead>
+                <tr style={{ background: "var(--bg-tertiary)" }}>
+                  {["NAME", "STATUS", "VERSION", "IP", "OS", "RUNTIME"].map((h) => (
+                    <th
+                      key={h}
+                      style={{
+                        textAlign: "left",
+                        padding: "6px 8px",
+                        color: "var(--text-faint)",
+                        fontSize: 9,
+                        textTransform: "uppercase",
+                        fontWeight: 500,
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
-              ))}</tbody>
+              </thead>
+              <tbody>
+                {nodes.map((n, i) => (
+                  <tr
+                    key={n.name}
+                    style={{
+                      background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.012)",
+                      borderTop: "1px solid var(--border-weak)",
+                    }}
+                  >
+                    <td style={{ padding: "5px 8px", fontWeight: 500 }}>{n.name}</td>
+                    <td style={{ padding: "5px 8px", color: sc(n.status) }}>
+                      <span
+                        style={{
+                          display: "inline-block",
+                          width: 5,
+                          height: 5,
+                          borderRadius: "50%",
+                          background: sc(n.status),
+                          marginRight: 4,
+                          verticalAlign: "middle",
+                        }}
+                      />
+                      {n.status}
+                    </td>
+                    <td style={{ padding: "5px 8px" }}>{n.version}</td>
+                    <td style={{ padding: "5px 8px" }}>{n.internal_ip}</td>
+                    <td style={{ padding: "5px 8px" }}>{n.os_image}</td>
+                    <td style={{ padding: "5px 8px" }}>{n.runtime}</td>
+                  </tr>
+                ))}
+              </tbody>
             </table>
           )}
         </div>
@@ -1093,74 +2295,333 @@ function K8sNodesSection({ query }: { query: { isLoading: boolean; isError: bool
 // ---------------------------------------------------------------------------
 // K8s Pods Section — typed data with fast log viewing
 // ---------------------------------------------------------------------------
-function K8sPodsSection({ query, subscriptionId, resourceGroup, clusterName }: {
-  query: { isLoading: boolean; isError: boolean; data?: { pods: K8sPod[] } | null; error?: unknown };
-  subscriptionId: string; resourceGroup: string; clusterName: string;
+function K8sPodsSection({
+  query,
+  subscriptionId,
+  resourceGroup,
+  clusterName,
+}: {
+  query: {
+    isLoading: boolean;
+    isError: boolean;
+    data?: { pods: K8sPod[] } | null;
+    error?: unknown;
+  };
+  subscriptionId: string;
+  resourceGroup: string;
+  clusterName: string;
 }) {
   const [collapsed, setCollapsed] = useState(true);
-  const [logTarget, setLogTarget] = useState<{ namespace: string; pod: string } | null>(null);
+  const [logTarget, setLogTarget] = useState<{ namespace: string; pod: string } | null>(
+    null,
+  );
   const [logOutput, setLogOutput] = useState<string | null>(null);
   const [logLoading, setLogLoading] = useState(false);
   const pods = query.data?.pods ?? [];
-  const sc = (s: string) => { const v=s.toLowerCase(); return v==="running" ? "var(--success)" : v.includes("error")||v.includes("crash") ? "var(--danger)" : "var(--warning)"; };
-  const fetchLogs = useCallback(async (ns: string, pod: string) => {
-    setLogTarget({ namespace: ns, pod }); setLogOutput(null); setLogLoading(true);
-    try { const r = await monitoringApi.k8sPodLogs(subscriptionId, resourceGroup, clusterName, ns, pod, 200); setLogOutput(r.logs || "(empty)"); }
-    catch (e) { setLogOutput(`Error: ${(e as Error).message}`); }
-    finally { setLogLoading(false); }
-  }, [subscriptionId, resourceGroup, clusterName]);
+  const sc = (s: string) => {
+    const v = s.toLowerCase();
+    return v === "running"
+      ? "var(--success)"
+      : v.includes("error") || v.includes("crash")
+        ? "var(--danger)"
+        : "var(--warning)";
+  };
+  const fetchLogs = useCallback(
+    async (ns: string, pod: string) => {
+      setLogTarget({ namespace: ns, pod });
+      setLogOutput(null);
+      setLogLoading(true);
+      try {
+        const r = await monitoringApi.k8sPodLogs(
+          subscriptionId,
+          resourceGroup,
+          clusterName,
+          ns,
+          pod,
+          200,
+        );
+        setLogOutput(r.logs || "(empty)");
+      } catch (e) {
+        setLogOutput(`Error: ${(e as Error).message}`);
+      } finally {
+        setLogLoading(false);
+      }
+    },
+    [subscriptionId, resourceGroup, clusterName],
+  );
   return (
-    <div style={{ borderRadius: 8, border: "1px solid var(--border-weak)", overflow: "hidden" }}>
-      <button onClick={() => { setCollapsed(!collapsed); }} style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", background: collapsed ? "transparent" : "var(--bg-tertiary)", border: "none", color: "var(--text-primary)", cursor: "pointer", padding: "8px 12px", fontSize: 11, textAlign: "left", fontWeight: 500 }}>
-        <ChevronDown size={12} style={{ transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)", color: "var(--text-faint)", transition: "transform 0.15s" }} />
+    <div
+      style={{
+        borderRadius: 8,
+        border: "1px solid var(--border-weak)",
+        overflow: "hidden",
+      }}
+    >
+      <button
+        onClick={() => {
+          setCollapsed(!collapsed);
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          width: "100%",
+          background: collapsed ? "transparent" : "var(--bg-tertiary)",
+          border: "none",
+          color: "var(--text-primary)",
+          cursor: "pointer",
+          padding: "8px 12px",
+          fontSize: 11,
+          textAlign: "left",
+          fontWeight: 500,
+        }}
+      >
+        <ChevronDown
+          size={12}
+          style={{
+            transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)",
+            color: "var(--text-faint)",
+            transition: "transform 0.15s",
+          }}
+        />
         Active Pods
-        {pods.length > 0 && <span className="muted" style={{ fontSize: 9 }}>{pods.length}</span>}
-        {query.isLoading && <Loader2 size={10} className="spin" style={{ marginLeft: "auto", color: "var(--accent)" }} />}
-        {!query.isLoading && pods.length > 0 && <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--success)" }}>✓</span>}
+        {pods.length > 0 && (
+          <span className="muted" style={{ fontSize: 9 }}>
+            {pods.length}
+          </span>
+        )}
+        {query.isLoading && (
+          <Loader2
+            size={10}
+            className="spin"
+            style={{ marginLeft: "auto", color: "var(--accent)" }}
+          />
+        )}
+        {!query.isLoading && pods.length > 0 && (
+          <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--success)" }}>
+            ✓
+          </span>
+        )}
       </button>
       {!collapsed && (
         <div style={{ borderTop: "1px solid var(--border-weak)", overflowX: "auto" }}>
-          {query.isLoading && <div style={{ padding: 16, textAlign: "center" }} className="muted"><Loader2 size={14} className="spin" /> Loading...</div>}
-          {query.isError && <div style={{ padding: 12, fontSize: 11, color: "var(--danger)" }}>{formatApiError(query.error, "aks")}</div>}
+          {query.isLoading && (
+            <div style={{ padding: 16, textAlign: "center" }} className="muted">
+              <Loader2 size={14} className="spin" /> Loading...
+            </div>
+          )}
+          {query.isError && (
+            <div style={{ padding: 12, fontSize: 11, color: "var(--danger)" }}>
+              {formatApiError(query.error, "aks")}
+            </div>
+          )}
           {pods.length > 0 && (
-            <table style={{ width: "100%", fontSize: 10, borderCollapse: "collapse", fontFamily: "var(--font-mono)" }}>
-              <thead><tr style={{ background: "var(--bg-tertiary)" }}>
-                {["NS","NAME","READY","STATUS","RESTARTS","NODE",""].map(h=><th key={h} style={{ textAlign: "left", padding: "6px 8px", color: "var(--text-faint)", fontSize: 9, textTransform: "uppercase", fontWeight: 500 }}>{h}</th>)}
-              </tr></thead>
-              <tbody>{pods.map((p,i)=>(
-                <tr key={`${p.namespace}/${p.name}`} style={{ background: i%2===0 ? "transparent" : "rgba(255,255,255,0.012)", borderTop: "1px solid var(--border-weak)" }}>
-                  <td style={{ padding: "5px 8px", color: "var(--text-muted)", fontSize: 9 }}>{p.namespace}</td>
-                  <td style={{ padding: "5px 8px", fontWeight: 500 }}>{p.name}</td>
-                  <td style={{ padding: "5px 8px" }}>{p.ready}</td>
-                  <td style={{ padding: "5px 8px", color: sc(p.status) }}><span style={{ display: "inline-block", width: 5, height: 5, borderRadius: "50%", background: sc(p.status), marginRight: 4, verticalAlign: "middle" }}/>{p.status}</td>
-                  <td style={{ padding: "5px 8px" }}>{p.restarts}</td>
-                  <td style={{ padding: "5px 8px", color: "var(--text-muted)", fontSize: 9 }}>{p.node?.split("-vmss")[0]}</td>
-                  <td style={{ padding: "4px 8px" }}><button className="glass-button" onClick={()=>fetchLogs(p.namespace,p.name)} style={{ fontSize: 9, padding: "2px 6px", display: "flex", alignItems: "center", gap: 3 }} title={`Logs: ${p.name}`}><Terminal size={9}/> Logs</button></td>
+            <table
+              style={{
+                width: "100%",
+                fontSize: 10,
+                borderCollapse: "collapse",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              <thead>
+                <tr style={{ background: "var(--bg-tertiary)" }}>
+                  {["NS", "NAME", "READY", "STATUS", "RESTARTS", "NODE", ""].map((h) => (
+                    <th
+                      key={h}
+                      style={{
+                        textAlign: "left",
+                        padding: "6px 8px",
+                        color: "var(--text-faint)",
+                        fontSize: 9,
+                        textTransform: "uppercase",
+                        fontWeight: 500,
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
-              ))}</tbody>
+              </thead>
+              <tbody>
+                {pods.map((p, i) => (
+                  <tr
+                    key={`${p.namespace}/${p.name}`}
+                    style={{
+                      background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.012)",
+                      borderTop: "1px solid var(--border-weak)",
+                    }}
+                  >
+                    <td
+                      style={{
+                        padding: "5px 8px",
+                        color: "var(--text-muted)",
+                        fontSize: 9,
+                      }}
+                    >
+                      {p.namespace}
+                    </td>
+                    <td style={{ padding: "5px 8px", fontWeight: 500 }}>{p.name}</td>
+                    <td style={{ padding: "5px 8px" }}>{p.ready}</td>
+                    <td style={{ padding: "5px 8px", color: sc(p.status) }}>
+                      <span
+                        style={{
+                          display: "inline-block",
+                          width: 5,
+                          height: 5,
+                          borderRadius: "50%",
+                          background: sc(p.status),
+                          marginRight: 4,
+                          verticalAlign: "middle",
+                        }}
+                      />
+                      {p.status}
+                    </td>
+                    <td style={{ padding: "5px 8px" }}>{p.restarts}</td>
+                    <td
+                      style={{
+                        padding: "5px 8px",
+                        color: "var(--text-muted)",
+                        fontSize: 9,
+                      }}
+                    >
+                      {p.node?.split("-vmss")[0]}
+                    </td>
+                    <td style={{ padding: "4px 8px" }}>
+                      <button
+                        className="glass-button"
+                        onClick={() => fetchLogs(p.namespace, p.name)}
+                        style={{
+                          fontSize: 9,
+                          padding: "2px 6px",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 3,
+                        }}
+                        title={`Logs: ${p.name}`}
+                      >
+                        <Terminal size={9} /> Logs
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
             </table>
           )}
         </div>
       )}
-      {logTarget && createPortal(
-        <div className="glass-dialog-backdrop" onClick={(e)=>{if(e.target===e.currentTarget){setLogTarget(null);setLogOutput(null);}}} role="dialog" aria-modal="true" aria-label={`Logs: ${logTarget.pod}`}>
-          <div className="glass-card glass-card--strong glass-dialog" onClick={(e)=>e.stopPropagation()} style={{ maxWidth: 820, width: "94vw", maxHeight: "85vh", display: "flex", flexDirection: "column", padding: 0, overflow: "hidden", textAlign: "left" }}>
-            <div style={{ padding: "14px 20px", background: "linear-gradient(135deg, rgba(92,202,180,0.08) 0%, rgba(110,159,255,0.06) 100%)", borderBottom: "1px solid var(--border-weak)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ width: 28, height: 28, borderRadius: 8, background: "linear-gradient(135deg, var(--teal), var(--accent))", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 8px rgba(92,202,180,0.25)" }}><Terminal size={14} style={{ color: "#fff" }}/></div>
-                <div><div style={{ fontSize: 13, fontWeight: 600 }}>Pod Logs</div><div style={{ fontSize: 10, color: "var(--text-muted)" }}>{logTarget.namespace} / {logTarget.pod} · last 200 lines</div></div>
+      {logTarget &&
+        createPortal(
+          <div
+            className="glass-dialog-backdrop"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setLogTarget(null);
+                setLogOutput(null);
+              }
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Logs: ${logTarget.pod}`}
+          >
+            <div
+              className="glass-card glass-card--strong glass-dialog"
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                maxWidth: 820,
+                width: "94vw",
+                maxHeight: "85vh",
+                display: "flex",
+                flexDirection: "column",
+                padding: 0,
+                overflow: "hidden",
+                textAlign: "left",
+              }}
+            >
+              <div
+                style={{
+                  padding: "14px 20px",
+                  background:
+                    "linear-gradient(135deg, rgba(92,202,180,0.08) 0%, rgba(110,159,255,0.06) 100%)",
+                  borderBottom: "1px solid var(--border-weak)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 8,
+                      background: "linear-gradient(135deg, var(--teal), var(--accent))",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      boxShadow: "0 2px 8px rgba(92,202,180,0.25)",
+                    }}
+                  >
+                    <Terminal size={14} style={{ color: "#fff" }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>Pod Logs</div>
+                    <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                      {logTarget.namespace} / {logTarget.pod} · last 200 lines
+                    </div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    className="glass-button"
+                    onClick={() => fetchLogs(logTarget.namespace, logTarget.pod)}
+                    disabled={logLoading}
+                    style={{
+                      padding: "5px 10px",
+                      fontSize: 10,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                    }}
+                  >
+                    <RefreshCw size={11} className={logLoading ? "spin" : ""} /> Refresh
+                  </button>
+                  <button
+                    className="glass-button"
+                    onClick={() => {
+                      setLogTarget(null);
+                      setLogOutput(null);
+                    }}
+                    style={{ padding: "5px 8px", border: "none" }}
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button className="glass-button" onClick={()=>fetchLogs(logTarget.namespace,logTarget.pod)} disabled={logLoading} style={{ padding: "5px 10px", fontSize: 10, display: "flex", alignItems: "center", gap: 4 }}><RefreshCw size={11} className={logLoading?"spin":""}/> Refresh</button>
-                <button className="glass-button" onClick={()=>{setLogTarget(null);setLogOutput(null);}} style={{ padding: "5px 8px", border: "none" }}><X size={16}/></button>
+              <div
+                style={{
+                  margin: 0,
+                  padding: "14px 20px",
+                  flex: 1,
+                  overflow: "auto",
+                  fontSize: 11,
+                  lineHeight: 1.7,
+                  background: "#0d1117",
+                  fontFamily: "var(--font-mono)",
+                  color: "#c9d1d9",
+                  textAlign: "left",
+                }}
+              >
+                {logLoading ? (
+                  <span style={{ color: "var(--text-faint)" }}>Fetching logs...</span>
+                ) : (
+                  <LogHighlighter text={logOutput ?? ""} />
+                )}
               </div>
             </div>
-            <div style={{ margin: 0, padding: "14px 20px", flex: 1, overflow: "auto", fontSize: 11, lineHeight: 1.7, background: "#0d1117", fontFamily: "var(--font-mono)", color: "#c9d1d9", textAlign: "left" }}>
-              {logLoading ? <span style={{ color: "var(--text-faint)" }}>Fetching logs...</span> : <LogHighlighter text={logOutput ?? ""} />}
-            </div>
-          </div>
-        </div>, document.body,
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -1169,17 +2630,17 @@ function K8sPodsSection({ query, subscriptionId, resourceGroup, clusterName }: {
 // Log syntax highlighter — lnav-style colorized log output
 // ---------------------------------------------------------------------------
 const LOG_COLORS = {
-  timestamp: "#6cb6ff",   // blue — ISO dates, timestamps
-  error:     "#f47067",   // red — ERROR, FATAL, CRITICAL, panic, fail
-  warn:      "#f0c674",   // yellow — WARN, WARNING
-  info:      "#57ab5a",   // green — INFO
-  debug:     "#986ee2",   // purple — DEBUG, TRACE
-  number:    "#d2a8ff",   // light purple — numbers, durations
-  ip:        "#6cb6ff",   // blue — IP addresses
-  path:      "#96d0ff",   // light blue — file paths
-  key:       "#e3b341",   // golden — key= patterns
-  string:    "#a5d6ff",   // cyan — quoted strings
-  dim:       "#545d68",   // dim — separators, brackets
+  timestamp: "#6cb6ff", // blue — ISO dates, timestamps
+  error: "#f47067", // red — ERROR, FATAL, CRITICAL, panic, fail
+  warn: "#f0c674", // yellow — WARN, WARNING
+  info: "#57ab5a", // green — INFO
+  debug: "#986ee2", // purple — DEBUG, TRACE
+  number: "#d2a8ff", // light purple — numbers, durations
+  ip: "#6cb6ff", // blue — IP addresses
+  path: "#96d0ff", // light blue — file paths
+  key: "#e3b341", // golden — key= patterns
+  string: "#a5d6ff", // cyan — quoted strings
+  dim: "#545d68", // dim — separators, brackets
 } as const;
 
 function LogHighlighter({ text }: { text: string }) {
@@ -1190,7 +2651,17 @@ function LogHighlighter({ text }: { text: string }) {
     <>
       {lines.map((line, i) => (
         <div key={i} style={{ minHeight: "1.7em", display: "flex" }}>
-          <span style={{ color: LOG_COLORS.dim, userSelect: "none", minWidth: 36, textAlign: "right", paddingRight: 12, fontSize: 9, lineHeight: "1.7em" }}>
+          <span
+            style={{
+              color: LOG_COLORS.dim,
+              userSelect: "none",
+              minWidth: 36,
+              textAlign: "right",
+              paddingRight: 12,
+              fontSize: 9,
+              lineHeight: "1.7em",
+            }}
+          >
             {i + 1}
           </span>
           <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", flex: 1 }}>
@@ -1205,7 +2676,8 @@ function LogHighlighter({ text }: { text: string }) {
 // Pre-compiled regex patterns for log highlighting (avoid re-creation per line)
 const _LOG_ERROR_RE = /\b(error|fatal|critical|panic|exception|fail(ed|ure)?)\b/i;
 const _LOG_WARN_RE = /\b(warn(ing)?)\b/i;
-const _LOG_TOKEN_RE = /(\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)|(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?\b)|(\b(?:ERROR|FATAL|CRITICAL|PANIC|EXCEPTION)\b)|(\b(?:WARN(?:ING)?)\b)|(\b(?:INFO)\b)|(\b(?:DEBUG|TRACE)\b)|("[^"]*"|'[^']*')|(\/[\w./\-]+(?:\.\w+))|(\b\w+(?:[-_]\w+)*=)|(\b\d+(?:\.\d+)?(?:m|Mi|Gi|Ki|ms|s|%|ns|us|µs)?\b)/gi;
+const _LOG_TOKEN_RE =
+  /(\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)|(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?\b)|(\b(?:ERROR|FATAL|CRITICAL|PANIC|EXCEPTION)\b)|(\b(?:WARN(?:ING)?)\b)|(\b(?:INFO)\b)|(\b(?:DEBUG|TRACE)\b)|("[^"]*"|'[^']*')|(\/[\w./\-]+(?:\.\w+))|(\b\w+(?:[-_]\w+)*=)|(\b\d+(?:\.\d+)?(?:m|Mi|Gi|Ki|ms|s|%|ns|us|µs)?\b)/gi;
 
 function highlightLine(line: string): React.ReactNode[] {
   // Detect log level for full-line tinting
@@ -1225,7 +2697,20 @@ function highlightLine(line: string): React.ReactNode[] {
     // Push text before match
     if (match.index > lastIdx) {
       const before = line.slice(lastIdx, match.index);
-      parts.push(<span key={key++} style={isError ? { color: "#ffa198" } : isWarn ? { color: "#e3b341", opacity: 0.85 } : undefined}>{before}</span>);
+      parts.push(
+        <span
+          key={key++}
+          style={
+            isError
+              ? { color: "#ffa198" }
+              : isWarn
+                ? { color: "#e3b341", opacity: 0.85 }
+                : undefined
+          }
+        >
+          {before}
+        </span>,
+      );
     }
 
     const [fullMatch, ts, ip, err, warn, info, debug, str, path, kv, num] = match;
@@ -1234,23 +2719,44 @@ function highlightLine(line: string): React.ReactNode[] {
 
     if (ts) color = LOG_COLORS.timestamp;
     else if (ip) color = LOG_COLORS.ip;
-    else if (err) { color = LOG_COLORS.error; fontWeight = 700; }
-    else if (warn) { color = LOG_COLORS.warn; fontWeight = 600; }
-    else if (info) color = LOG_COLORS.info;
+    else if (err) {
+      color = LOG_COLORS.error;
+      fontWeight = 700;
+    } else if (warn) {
+      color = LOG_COLORS.warn;
+      fontWeight = 600;
+    } else if (info) color = LOG_COLORS.info;
     else if (debug) color = LOG_COLORS.debug;
     else if (str) color = LOG_COLORS.string;
     else if (path) color = LOG_COLORS.path;
     else if (kv) color = LOG_COLORS.key;
     else if (num) color = LOG_COLORS.number;
 
-    parts.push(<span key={key++} style={{ color, fontWeight }}>{fullMatch}</span>);
+    parts.push(
+      <span key={key++} style={{ color, fontWeight }}>
+        {fullMatch}
+      </span>,
+    );
     lastIdx = match.index + fullMatch!.length;
   }
 
   // Remaining text
   if (lastIdx < line.length) {
     const rest = line.slice(lastIdx);
-    parts.push(<span key={key++} style={isError ? { color: "#ffa198" } : isWarn ? { color: "#e3b341", opacity: 0.85 } : undefined}>{rest}</span>);
+    parts.push(
+      <span
+        key={key++}
+        style={
+          isError
+            ? { color: "#ffa198" }
+            : isWarn
+              ? { color: "#e3b341", opacity: 0.85 }
+              : undefined
+        }
+      >
+        {rest}
+      </span>,
+    );
   }
 
   return parts;
