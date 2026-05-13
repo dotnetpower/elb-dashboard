@@ -394,6 +394,11 @@ export const aksApi = {
       acr_name: acrName,
       storage_account: storageAccount,
     }),
+
+  proxyOpenApiSpec: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<Record<string, unknown>>(
+      `/aks/openapi/spec?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
 };
 
 // ---------------------------------------------------------------------------
