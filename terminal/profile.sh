@@ -15,9 +15,9 @@ export PATH="/opt/elb/venv/bin:$PATH"
 if [ -n "${IDENTITY_ENDPOINT:-}" ] && [ -n "${IDENTITY_HEADER:-}" ]; then
   if ! az account show -o none >/dev/null 2>&1; then
     if [ -n "${AZURE_CLIENT_ID:-}" ]; then
-      az login --identity --username "$AZURE_CLIENT_ID" --allow-no-subscriptions -o none >/dev/null 2>&1 || true
+      timeout 15 az login --identity --username "$AZURE_CLIENT_ID" --allow-no-subscriptions -o none >/dev/null 2>&1 || true
     else
-      az login --identity --allow-no-subscriptions -o none >/dev/null 2>&1 || true
+      timeout 15 az login --identity --allow-no-subscriptions -o none >/dev/null 2>&1 || true
     fi
   fi
 fi

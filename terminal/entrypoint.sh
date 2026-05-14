@@ -82,7 +82,7 @@ EXEC_PID=$!
   -W \
   -t enableZmodem=false \
   -t fontSize=14 \
-  bash -l &
+  /bin/bash --login &
 TTYD_PID=$!
 
 echo "elb-supervisor: ttyd pid=$TTYD_PID exec_server pid=$EXEC_PID reporter pid=$REPORTER_PID" >&2
