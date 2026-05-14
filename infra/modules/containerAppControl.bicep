@@ -195,9 +195,16 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'worker'
           image: apiImage
-          command: [ '/bin/sh', '-c' ]
+          command: [ 'python3', '/app/wait_redis.py' ]
           args: [
-            'echo Waiting for Redis; until python3 -c "import socket; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 6379)); s.close()" 2>/dev/null; do sleep 2; done; echo Redis ready; exec celery -A api.celery_app:celery_app worker --loglevel=info -Q default,azure,blast,storage --concurrency=2'
+            'celery'
+            '-A'
+            'api.celery_app:celery_app'
+            'worker'
+            '--loglevel=info'
+            '-Q'
+            'default,azure,blast,storage'
+            '--concurrency=2'
           ]
           resources: {
             cpu: json('0.5')
@@ -228,9 +235,16 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'beat'
           image: apiImage
-          command: [ '/bin/sh', '-c' ]
+          command: [ 'python3', '/app/wait_redis.py' ]
           args: [
-            'echo Waiting for Redis; until python3 -c "import socket; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 6379)); s.close()" 2>/dev/null; do sleep 2; done; echo Redis ready; exec celery -A api.celery_app:celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid'
+            'celery'
+            '-A'
+            'api.celery_app:celery_app'
+            'beat'
+            '--loglevel=info'
+            '--schedule=/tmp/celerybeat-schedule'
+            '--pidfile=/tmp/celerybeat.pid'
+          ]
           ]
           resources: {
             cpu: json('0.25')

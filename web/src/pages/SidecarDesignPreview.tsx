@@ -561,20 +561,42 @@ function TopoNode({
   );
 }
 
-function TopoArrow({ degraded = false }: { degraded?: boolean }) {
+function TopoArrow({
+  degraded = false,
+  animated = true,
+}: {
+  degraded?: boolean;
+  animated?: boolean;
+}) {
   return (
     <div
       aria-hidden
       style={{
-        flex: 1,
+        position: "relative",
         height: 2,
+        width: "100%",
         background: degraded
           ? "repeating-linear-gradient(90deg, var(--warning) 0 6px, transparent 6px 10px)"
           : "linear-gradient(90deg, transparent 0%, var(--text-faint) 50%, transparent 100%)",
-        position: "relative",
-        margin: "0 8px",
+        overflow: "visible",
       }}
     >
+      {!degraded && animated && (
+        <span
+          className="topo-arrow-pulse"
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: -3,
+            left: 0,
+            width: 8,
+            height: 8,
+            borderRadius: 999,
+            background: "var(--accent)",
+            boxShadow: "0 0 12px 2px rgba(122,167,255,0.55)",
+          }}
+        />
+      )}
       <ArrowRight
         size={12}
         style={{
@@ -597,6 +619,30 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
   const redis = get("redis");
   const terminal = get("terminal");
 
+  // 5-column grid: label · left-arrow · node-left · right-arrow · node-right
+  // The left/right node columns are fixed-width so frontend / redis / beat all
+  // share the same left edge, and api / worker / terminal share the right edge.
+  const NODE_W = 168;
+  const gridStyle: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: `90px minmax(40px, 1fr) ${NODE_W}px minmax(40px, 1fr) ${NODE_W}px`,
+    alignItems: "center",
+    columnGap: 8,
+    padding: "8px 4px",
+  };
+  const labelStyle: React.CSSProperties = {
+    fontSize: 10,
+    color: "var(--text-faint)",
+    textAlign: "right",
+  };
+  const midLabelStyle: React.CSSProperties = {
+    fontSize: 10,
+    color: "var(--text-faint)",
+    fontStyle: "italic",
+    whiteSpace: "nowrap",
+    padding: "0 6px",
+  };
+
   return (
     <MonitorCard
       title="Container App sidecars"
@@ -612,40 +658,42 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
         </span>
       }
     >
+      {/* Inject keyframes once for traffic animation. Defining via <style> here
+          so the page is self-contained for design review. When this graduates
+          into production, move the @keyframes into web/src/theme/glass.css. */}
+      <style>{`
+        @keyframes topoArrowPulse {
+          0%   { left: 0%;   opacity: 0; }
+          15%  { opacity: 1; }
+          85%  { opacity: 1; }
+          100% { left: calc(100% - 8px); opacity: 0; }
+        }
+        .topo-arrow-pulse {
+          animation: topoArrowPulse 2.4s linear infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .topo-arrow-pulse { animation: none; opacity: 0.6; }
+        }
+      `}</style>
+
       {/* Top row: HTTP path — application-level flow (browser loads SPA from
           frontend, SPA calls api). The actual public ingress is on api:8080
           and api reverse-proxies static assets to frontend; that fact is
           surfaced as a small caption below the row. */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          padding: "10px 4px",
-        }}
-      >
-        <div
-          style={{
-            fontSize: 10,
-            color: "var(--text-faint)",
-            width: 90,
-            textAlign: "right",
-          }}
-        >
-          Browser ↣
-        </div>
+      <div style={gridStyle}>
+        <div style={labelStyle}>Browser ↣</div>
         <TopoArrow />
-        <TopoNode s={fe} />
+        <TopoNode s={fe} width={NODE_W} />
         <TopoArrow />
-        <TopoNode s={api} />
+        <TopoNode s={api} width={NODE_W} />
       </div>
       <div
         style={{
           fontSize: 10,
           color: "var(--text-faint)",
           paddingLeft: 102,
-          marginTop: -6,
-          marginBottom: 6,
+          marginTop: -4,
+          marginBottom: 4,
           fontStyle: "italic",
         }}
       >
@@ -653,65 +701,34 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
         <code>/api/*</code> requests to <code>frontend:8081</code>.
       </div>
 
-      {/* Mid row: async path */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          padding: "10px 4px",
-        }}
-      >
-        <div
-          style={{
-            fontSize: 10,
-            color: "var(--text-faint)",
-            width: 90,
-            textAlign: "right",
-          }}
-        >
-          Async tasks
-        </div>
+      {/* Mid row: async path (SPA enqueue → redis broker → worker) */}
+      <div style={gridStyle}>
+        <div style={labelStyle}>Async tasks</div>
         <TopoArrow degraded={worker.health !== "ok" || redis.health !== "ok"} />
-        <TopoNode s={redis} />
+        <TopoNode s={redis} width={NODE_W} />
         <TopoArrow degraded={worker.health !== "ok"} />
-        <TopoNode s={worker} />
+        <TopoNode s={worker} width={NODE_W} />
       </div>
 
-      {/* Bottom row: scheduler + terminal */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          padding: "10px 4px",
-        }}
-      >
-        <div
-          style={{
-            fontSize: 10,
-            color: "var(--text-faint)",
-            width: 90,
-            textAlign: "right",
-          }}
-        >
-          Scheduled
-        </div>
+      {/* Bottom row: scheduler + terminal — beat anchored at the same left
+          column as frontend / redis; ws/exec caption pushed into the wide
+          mid-arrow so terminal aligns with api / worker on the right. */}
+      <div style={gridStyle}>
+        <div style={labelStyle}>Scheduled</div>
         <TopoArrow />
-        <TopoNode s={beat} />
-        <div style={{ width: 24 }} />
+        <TopoNode s={beat} width={NODE_W} />
         <div
           style={{
-            fontSize: 10,
-            color: "var(--text-faint)",
-            paddingLeft: 8,
-            paddingRight: 4,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            minWidth: 0,
           }}
         >
-          ws / exec ↣
+          <TopoArrow degraded={terminal.health !== "ok"} />
+          <span style={midLabelStyle}>ws / exec ↣</span>
         </div>
-        <TopoArrow degraded={terminal.health !== "ok"} />
-        <TopoNode s={terminal} />
+        <TopoNode s={terminal} width={NODE_W} />
       </div>
 
       {/* Legend */}
@@ -734,9 +751,8 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
         <span>
           <StatusDot health="down" /> Down
         </span>
-        <span style={{ color: "var(--warning)" }}>
-          ─ ─ ─ degraded link
-        </span>
+        <span style={{ color: "var(--warning)" }}>─ ─ ─ degraded link</span>
+        <span style={{ color: "var(--accent)" }}>● animated dot = live traffic</span>
       </div>
     </MonitorCard>
   );
