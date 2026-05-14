@@ -7,6 +7,7 @@ the JWT layer plus Azure RBAC on each downstream resource.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -36,6 +37,7 @@ from services.azure_clients import credential_for_caller
 from services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
+DURABLE_STATUS_TIMEOUT_SECONDS = 5
 
 bp = df.Blueprint()
 
@@ -97,7 +99,14 @@ async def get_provision_status(
     instance_id = req.route_params.get("instance_id")
     if not instance_id or not _RE_INSTANCE_ID.match(instance_id):
         return _error_response(400, "invalid instance_id")
-    status = await client.get_status(instance_id, show_input=False)
+    try:
+        status = await asyncio.wait_for(
+            client.get_status(instance_id, show_input=False),
+            timeout=DURABLE_STATUS_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        LOGGER.warning("terminal status query timed out instance=%s", instance_id)
+        return _error_response(504, "durable status query timed out")
     if status is None or status.runtime_status is None:
         return _error_response(404, "instance not found")
     return _json_response(
@@ -232,6 +241,7 @@ def start_terminal_vm(req: func.HttpRequest) -> func.HttpResponse:
     cred = credential_for_caller(identity.raw_token)
     try:
         from azure.mgmt.compute import ComputeManagementClient
+
         cc = ComputeManagementClient(cred, sub)
         cc.virtual_machines.begin_start(rg, vm_name).result()
         LOGGER.info("VM %s started in %s", vm_name, rg)
@@ -254,7 +264,11 @@ def terminal_health_check(req: func.HttpRequest) -> func.HttpResponse:
     if err := _validate_name(vm_name, _RE_VM_NAME, "vm_name"):
         return _error_response(400, err)
     rg = _terminal_rg(req)
+    if err := _validate_rg(rg):
+        return _error_response(400, err)
     sub = req.params.get("subscription_id") or os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+    if err := _validate_sub(sub):
+        return _error_response(400, err)
     cred = credential_for_caller(identity.raw_token)
     script = "\n".join(
         [
@@ -272,7 +286,7 @@ def terminal_health_check(req: func.HttpRequest) -> func.HttpResponse:
             "echo AZ_VERSION=$AZ_VERSION",
             "kubectl version --client -o yaml >/tmp/kubectl-version.yaml 2>/dev/null || true",
             "KUBECTL_VERSION=$(awk '/gitVersion/ {print $2; exit}' /tmp/kubectl-version.yaml)",
-            "if [ -z \"$KUBECTL_VERSION\" ]; then",
+            'if [ -z "$KUBECTL_VERSION" ]; then',
             "  KUBECTL_VERSION=$(kubectl version --client 2>/dev/null | head -1 || true)",
             "fi",
             "[ -n \"$KUBECTL_VERSION\" ] || KUBECTL_VERSION='not installed'",
@@ -282,7 +296,7 @@ def terminal_health_check(req: func.HttpRequest) -> func.HttpResponse:
             "AZ_LOGIN_USER=$(sudo -Hu azureuser bash -lc '",
             "  az account show --query user.name -o tsv 2>/dev/null || true",
             "')",
-            "if [ -n \"$AZ_LOGIN_USER\" ]; then",
+            'if [ -n "$AZ_LOGIN_USER" ]; then',
             "  echo AZ_LOGIN_OK=1",
             "  echo AZ_LOGIN_USER=$AZ_LOGIN_USER",
             "else",
@@ -313,15 +327,17 @@ def terminal_health_check(req: func.HttpRequest) -> func.HttpResponse:
         except ValueError:
             age = -1
         az_login_active = result.get("AZ_LOGIN_OK") == "1"
-        return _json_response({
-            "az_cli": result.get("AZ_VERSION", "unknown"),
-            "kubectl": result.get("KUBECTL_VERSION", "unknown"),
-            "azcopy": result.get("AZCOPY_VERSION", "unknown"),
-            "python": result.get("PYTHON_VERSION", "unknown"),
-            "az_login_active": az_login_active,
-            "az_login_user": result.get("AZ_LOGIN_USER", "unknown"),
-            "az_login_age_seconds": age,
-        })
+        return _json_response(
+            {
+                "az_cli": result.get("AZ_VERSION", "unknown"),
+                "kubectl": result.get("KUBECTL_VERSION", "unknown"),
+                "azcopy": result.get("AZCOPY_VERSION", "unknown"),
+                "python": result.get("PYTHON_VERSION", "unknown"),
+                "az_login_active": az_login_active,
+                "az_login_user": result.get("AZ_LOGIN_USER", "unknown"),
+                "az_login_age_seconds": age,
+            }
+        )
     except Exception as exc:
         return _error_response(500, sanitise(str(exc)))
 
@@ -371,6 +387,7 @@ def destroy_terminal_vm(req: func.HttpRequest) -> func.HttpResponse:
         candidate_vaults.append(env_uri.rstrip("/") + "/")
     try:
         from activities.terminal import _default_vault_name
+
         canonical = _default_vault_name(sub, rg, vm_name)
         candidate_vaults.append(f"https://{canonical}.vault.azure.net/")
     except Exception:
@@ -392,8 +409,10 @@ def destroy_terminal_vm(req: func.HttpRequest) -> func.HttpResponse:
             errors.append(f"RG: {sanitise(str(exc))}")
 
     LOGGER.info("Terminal VM %s destroy: errors=%s", vm_name, errors or "none")
-    return _json_response({
-        "vm_name": vm_name,
-        "status": "destroyed" if not errors else "partial",
-        "errors": errors,
-    })
+    return _json_response(
+        {
+            "vm_name": vm_name,
+            "status": "destroyed" if not errors else "partial",
+            "errors": errors,
+        }
+    )

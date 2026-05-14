@@ -8,10 +8,20 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging as _logging
+import os as _os
 import re
 from typing import Any
 
 import azure.functions as func
+from azure.core.credentials import TokenCredential as _TokenCredential
+from azure.core.exceptions import (
+    ClientAuthenticationError,
+    HttpResponseError,
+    ResourceNotFoundError,
+    ServiceRequestError,
+    ServiceResponseError,
+)
 
 from services.sanitise import sanitise
 
@@ -78,6 +88,25 @@ def _error_response(status: int, message: str) -> func.HttpResponse:
     return _json_response({"error": message}, status=status)
 
 
+def _azure_error_response(exc: Exception, *, operation: str) -> func.HttpResponse:
+    """Return a sanitized, user-safe response for Azure SDK boundary failures."""
+    if isinstance(exc, ResourceNotFoundError):
+        return _error_response(404, f"{operation} not found")
+    if isinstance(exc, ClientAuthenticationError):
+        return _error_response(401, "Azure authentication failed")
+    if isinstance(exc, (ServiceRequestError, ServiceResponseError)):
+        return _error_response(503, f"{operation} temporarily unavailable")
+    if isinstance(exc, HttpResponseError):
+        status = exc.status_code or 502
+        if status == 404:
+            return _error_response(404, f"{operation} not found")
+        if status in (408, 429) or status >= 500:
+            return _error_response(503, f"{operation} temporarily unavailable")
+        if 400 <= status < 500:
+            return _error_response(status, sanitise(str(exc))[:300])
+    return _error_response(502, f"{operation} failed: {sanitise(str(exc))[:300]}")
+
+
 def _require_query(
     req: func.HttpRequest, *names: str
 ) -> tuple[dict[str, str] | None, func.HttpResponse | None]:
@@ -94,11 +123,6 @@ def _require_query(
 # ---------------------------------------------------------------------------
 # Key Vault fallback helper — try multiple candidate vault URIs
 # ---------------------------------------------------------------------------
-import logging as _logging
-import os as _os
-
-from azure.core.credentials import TokenCredential as _TokenCredential
-
 _KV_LOGGER = _logging.getLogger(__name__)
 
 
@@ -127,6 +151,7 @@ def resolve_terminal_secret(
     if subscription_id and resource_group:
         try:
             from activities.terminal import _default_vault_name
+
             canonical = _default_vault_name(subscription_id, resource_group, vm_name)
             canonical_uri = f"https://{canonical}.vault.azure.net/"
             if canonical_uri not in candidate_uris:
@@ -148,6 +173,8 @@ def resolve_terminal_secret(
             _KV_LOGGER.info("secret lookup miss on %s: %s", vault_uri, str(exc)[:120])
     _KV_LOGGER.warning(
         "secret %s not found in any candidate vault (%s): %s",
-        secret_name, [u.split("//")[1].split(".")[0] for u in candidate_uris], last_exc,
+        secret_name,
+        [u.split("//")[1].split(".")[0] for u in candidate_uris],
+        last_exc,
     )
     return None, None

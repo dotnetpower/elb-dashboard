@@ -7,39 +7,30 @@ and entities remain in ``function_app.py``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import os
-import re
 import uuid
 from typing import Any
 
 import azure.durable_functions as df
 import azure.functions as func
-import requests as _requests
 from pydantic import ValidationError
 
 from _http_utils import (
-    _RE_BLOB_NAME,
-    _RE_DB_NAME,
     _RE_INSTANCE_ID,
-    _RE_STORAGE_ACCOUNT,
     _error_response,
     _json_response,
     _require_query,
-    _validate_name,
-    _validate_rg,
-    _validate_sub,
 )
 from auth.token import AuthError, validate_bearer_token
 from models.blast import BlastSubmitRequest
-from services import compute as compute_svc
-from services import keyvault as kv_svc
 from services import storage_data as storage_data_svc
 from services.azure_clients import credential_for_caller
 from services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
+DURABLE_STATUS_TIMEOUT_SECONDS = 5
 
 
 def _toggle_public_access(
@@ -507,7 +498,14 @@ async def get_blast_submit_status(
     instance_id = req.route_params.get("instance_id")
     if not instance_id or not _RE_INSTANCE_ID.match(instance_id):
         return _error_response(400, "invalid instance_id")
-    status = await client.get_status(instance_id, show_input=False)
+    try:
+        status = await asyncio.wait_for(
+            client.get_status(instance_id, show_input=False),
+            timeout=DURABLE_STATUS_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        LOGGER.warning("blast submit status query timed out instance=%s", instance_id)
+        return _error_response(504, "durable status query timed out")
     if status is None or status.runtime_status is None:
         return _error_response(404, "instance not found")
     return _json_response(
