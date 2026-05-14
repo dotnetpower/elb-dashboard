@@ -51,6 +51,13 @@ docs/       Architecture notes + per-feature change log
 tests/      pytest (api) + vitest (web)
 ```
 
+## Architecture Planning
+
+- [Container Apps migration plan](./docs/container-apps-migration.md) - target
+  architecture and phased migration from the current Function App backend to
+  Azure Container Apps, Service Bus, durable state storage, and private
+  networking.
+
 ## Prerequisites
 
 | Tool         | Minimum  | Notes                                  |
