@@ -195,7 +195,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'worker'
           image: apiImage
-          command: [ 'python3', '/app/wait_redis.py' ]
+          command: [ 'python3', '/app/api/wait_redis.py' ]
           args: [
             'celery'
             '-A'
@@ -235,7 +235,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'beat'
           image: apiImage
-          command: [ 'python3', '/app/wait_redis.py' ]
+          command: [ 'python3', '/app/api/wait_redis.py' ]
           args: [
             'celery'
             '-A'
