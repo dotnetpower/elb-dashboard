@@ -94,6 +94,27 @@ def celery_diag() -> dict[str, Any]:
     """
     out: dict[str, Any] = {"queues": {}, "workers": None, "errors": []}
 
+    # 0. Producer-side celery config (so we can spot a config mismatch
+    #    between api and worker sidecars).
+    try:
+        from api.celery_app import celery_app
+        out["producer_conf"] = {
+            "default_queue": celery_app.conf.task_default_queue,
+            "task_routes": dict(celery_app.conf.task_routes or {}),
+            "broker_url": celery_app.conf.broker_url,
+        }
+        # Resolve where a sample task would actually land.
+        from api.tasks.azure import diag_noop
+        router = celery_app.amqp.router
+        route = router.route({}, diag_noop.name)
+        out["producer_conf"]["resolved_route_for_diag_noop"] = {
+            "queue": getattr(route.get("queue"), "name", str(route.get("queue"))),
+            "routing_key": route.get("routing_key"),
+            "exchange": getattr(route.get("exchange"), "name", str(route.get("exchange"))) if route.get("exchange") else None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        out["errors"].append(f"producer_conf: {type(exc).__name__}: {exc}")
+
     # 1. Redis queue lengths via raw redis client (no kombu wrapper)
     try:
         import redis as _redis
@@ -126,4 +147,31 @@ def celery_diag() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         out["errors"].append(f"inspect: {type(exc).__name__}: {exc}")
 
+    return out
+
+
+@router.post("/health/celery/enqueue-noop")
+def celery_enqueue_noop(message: str = "diag-ping") -> dict[str, Any]:
+    """Diagnostic-only: enqueue a no-op task. Returns task_id for status polling."""
+    from api.tasks.azure import diag_noop
+    res = diag_noop.delay(message=message)
+    return {"task_id": res.id, "queue": "azure", "message": message}
+
+
+@router.get("/health/celery/result/{task_id}")
+def celery_task_result(task_id: str) -> dict[str, Any]:
+    """Diagnostic-only: get a celery task result without auth."""
+    from celery.result import AsyncResult
+    from api.celery_app import celery_app
+    r = AsyncResult(task_id, app=celery_app)
+    out: dict[str, Any] = {
+        "task_id": task_id,
+        "status": r.status,
+        "ready": r.ready(),
+    }
+    if r.ready():
+        if r.successful():
+            out["result"] = r.result
+        else:
+            out["error"] = str(r.result)[:500]
     return out

@@ -23,7 +23,7 @@ from azure.core.exceptions import (
     HttpResponseError,
     ResourceNotFoundError,
 )
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from api.auth import CallerIdentity, require_caller
 from api.services import get_credential
@@ -203,6 +203,49 @@ def storage_summary(
         return monitoring_svc.get_storage_summary(cred, sub, resource_group, account_name)
     except Exception as exc:
         return _graceful("storage_summary", exc, empty={"name": account_name, "containers": []})
+
+
+# ---------------------------------------------------------------------------
+# AKS run-command — proxy kubectl commands via Kubernetes API
+# ---------------------------------------------------------------------------
+@router.post("/aks/run-command")
+def aks_run_command(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Run a kubectl command on the AKS cluster via the Kubernetes API.
+
+    Uses the k8s direct API helpers from monitoring service, NOT Azure Run Command
+    (which is ~30s slow and ARM-rate-limited per copilot-instructions.md §11).
+    """
+    sub = body.get("subscription_id", "") or _sub_default()
+    rg = body.get("resource_group", "")
+    cluster_name = body.get("cluster_name", "")
+    command = body.get("command", "")
+
+    if not command or not rg or not cluster_name:
+        return {"exit_code": 1, "output": "Missing required fields: resource_group, cluster_name, command"}
+
+    cred = get_credential()
+    try:
+        # Use k8s_get_pods as a proxy for basic kubectl commands
+        if command.strip().startswith("get pods") or command.strip().startswith("kubectl get pods"):
+            namespace = body.get("namespace")
+            pods = monitoring_svc.k8s_get_pods(cred, sub, rg, cluster_name, namespace=namespace)
+            import json
+            return {"exit_code": 0, "output": json.dumps(pods, indent=2, default=str)}
+        elif command.strip().startswith("get nodes") or command.strip().startswith("kubectl get nodes"):
+            nodes = monitoring_svc.k8s_get_nodes(cred, sub, rg, cluster_name)
+            import json
+            return {"exit_code": 0, "output": json.dumps(nodes, indent=2, default=str)}
+        elif command.strip().startswith("top nodes") or command.strip().startswith("kubectl top nodes"):
+            metrics = monitoring_svc.k8s_top_nodes(cred, sub, rg, cluster_name)
+            import json
+            return {"exit_code": 0, "output": json.dumps(metrics, indent=2, default=str)}
+        else:
+            return {"exit_code": 1, "output": f"Command not supported via API proxy. Supported: get pods, get nodes, top nodes. Use the Browser Terminal for arbitrary kubectl commands."}
+    except Exception as exc:
+        return {"exit_code": 1, "output": f"Error: {type(exc).__name__}: {str(exc)[:500]}"}
 
 
 # ---------------------------------------------------------------------------
