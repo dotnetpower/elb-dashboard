@@ -43,13 +43,119 @@ A single glance shows every moving part of an ElasticBLAST run on Azure:
 ## Layout
 
 ```
-api/        Azure Functions (Python v2, Durable Functions)
-web/        React + Vite + TypeScript SPA (glassmorphic theme)
-infra/      Bicep IaC (Function App, Static Web App, Key Vault, Storage)
-scripts/    cloud-init for the Remote Terminal VM + dev bootstrap scripts
+api_app/    NEW backend — FastAPI for the api sidecar + Celery worker/beat
+web/        React + Vite + TypeScript SPA + Dockerfile + nginx.conf for the frontend sidecar
+terminal/   Dockerfile + entrypoint for the terminal sidecar (ttyd + elastic-blast toolchain)
+infra/      Bicep IaC (network, identity, ACR, storage, Key Vault, Container Apps Env, Container App)
+infra/legacy/  Old Function App + SWA Bicep (preserved for reference; no longer the deploy target)
+api/        LEGACY backend (Azure Functions v2, Durable Functions). Still works; will be retired.
+scripts/    Dev helpers + postprovision hook (`postprovision.sh` builds images and swaps the Container App template)
 docs/       Architecture notes + per-feature change log
 tests/      pytest (api) + vitest (web)
 ```
+
+## Quick start: deploy to Azure in one command
+
+This repo is hardened so a fresh `git clone` can deploy the full
+control-plane bundle (one Container App with six sidecars, a private VNet, a
+locked-down Storage account, an ACR, a Key Vault, and Log Analytics) with a
+single `azd up`. **Cost is roughly USD 130/month** in `koreacentral` for the
+default sizing (see [docs/container-apps-migration.md §Cost Estimate](./docs/container-apps-migration.md#cost-estimate-korea-central-usd-monthly)).
+
+### 1. Install prerequisites
+
+```bash
+# macOS / Linux
+curl -fsSL https://aka.ms/install-azd.sh | bash
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash   # or `brew install azure-cli`
+sudo apt install -y jq curl                              # `brew install jq curl`
+```
+
+Verify:
+
+```bash
+./scripts/dev/preflight-check.sh
+```
+
+### 2. Sign in and create the App Registration
+
+```bash
+az login
+az account set --subscription "<your-subscription>"
+
+# Create the App Registration the SPA + api use for MSAL token validation.
+# Idempotent — re-running on an existing AR is safe.
+./scripts/dev/setup-app-registration.sh
+# Capture the printed CLIENT_ID.
+```
+
+### 3. Create the azd environment
+
+```bash
+azd env new elb-prod                        # pick any name
+azd env set AZURE_LOCATION       koreacentral
+azd env set API_CLIENT_ID        <client-id-from-step-2>
+
+# Optional: same-origin only (recommended once the SPA is served by the
+# frontend sidecar). Leave empty for that.
+# azd env set ALLOWED_ORIGINS     "https://my-other-spa.example.com"
+
+# Optional: leave private networking off for the very first deploy so the
+# postprovision hook can push images and seed secrets, then flip on a
+# second `azd provision`.
+azd env set LOCKDOWN_PRIVATE_NETWORKING false
+```
+
+### 4. Deploy
+
+```bash
+azd up
+```
+
+`azd up` runs:
+
+1. **preprovision** — registers required Azure resource providers
+   (`Microsoft.App`, `Microsoft.OperationalInsights`, etc.).
+2. **provision** — runs [infra/main.bicep](./infra/main.bicep) which creates
+   the platform RG, VNet (3 subnets), Log Analytics, App Insights, the
+   shared user-assigned managed identity, the Premium ACR, the
+   Standard_LRS Storage account (with state tables / blob containers / two
+   Azure Files shares), the Key Vault, the Container Apps Environment, and
+   the Container App seeded with a hello-world bootstrap image.
+3. **postprovision** — runs [scripts/dev/postprovision.sh](./scripts/dev/postprovision.sh)
+   which builds the three images (`elb-api`, `elb-frontend`, `elb-terminal`)
+   via `az acr build` (no local Docker needed) and runs `az deployment group
+   create` to swap the Container App template to the six-sidecar layout.
+
+When it finishes you get an HTTPS URL like
+`https://ca-elb-control.<subdomain>.koreacentral.azurecontainerapps.io`.
+`/api/health` should respond `200 {"status": "ok", ...}`.
+
+### 5. (Recommended) Lock down the network on the second deploy
+
+The first deploy keeps Storage / Key Vault / ACR public so `az acr build`
+and Key Vault seeding can run from the operator's machine. The second
+deploy flips `publicNetworkAccess` to `Disabled` on all three and adds
+private endpoints:
+
+```bash
+azd env set LOCKDOWN_PRIVATE_NETWORKING true
+azd provision
+```
+
+After this point the only client that can reach platform Storage / Key
+Vault / ACR is the Container App, over private endpoints inside the
+platform VNet (see [docs/container-apps-migration.md §Storage Network Isolation](./docs/container-apps-migration.md#storage-network-isolation-hard-requirement)).
+
+### 6. Tear down
+
+```bash
+azd down --purge --force
+```
+
+Removes the platform RG and purges Key Vault soft-deletes.
+
+---
 
 ## Architecture Planning
 

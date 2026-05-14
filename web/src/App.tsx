@@ -5,7 +5,7 @@ import { Layout } from "@/components/Layout";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SignIn } from "@/pages/SignIn";
 import { Dashboard } from "@/pages/Dashboard";
-import { RemoteTerminal } from "@/pages/RemoteTerminal";
+import RemoteTerminal from "@/pages/RemoteTerminal";
 import { BlastSubmit } from "@/pages/BlastSubmit";
 import { BlastJobs } from "@/pages/BlastJobs";
 import { BlastResults } from "@/pages/BlastResults";

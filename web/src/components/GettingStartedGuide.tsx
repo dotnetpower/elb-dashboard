@@ -54,7 +54,7 @@ export function GettingStartedGuide({
     },
     {
       id: "terminal",
-      title: "Provision a Remote Terminal",
+      title: "Open the Terminal",
       description: "Create a VM with ElasticBLAST CLI pre-installed. Used for job submission and management.",
       icon: <Terminal size={18} />,
       done: hasTerminal,

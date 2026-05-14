@@ -19,192 +19,20 @@ import {
 import { api, formatApiError } from "@/api/client";
 import { monitoringApi, blastApi } from "@/api/endpoints";
 import { MonitorCard } from "@/components/MonitorCard";
+import { StorageDownloadResultBanner } from "@/components/cards/StorageDownloadResultBanner";
+import {
+  DB_CATALOG,
+  formatBytes,
+  formatNcbiVersion,
+  formatStorageDate,
+} from "@/components/cards/storageDbCatalog";
 
 const HNS_DISMISSED_KEY = "elb-hns-warning-dismissed";
-
-// ---------------------------------------------------------------------------
-// DB catalog with approximate sizes
-// ---------------------------------------------------------------------------
-const DB_CATALOG = [
-  {
-    value: "16S_ribosomal_RNA",
-    label: "16S ribosomal RNA",
-    desc: "Prokaryotic small subunit rRNA — ideal for microbial ID and metagenomics.",
-    size: "~18 MB",
-    estFiles: 12,
-    estMinutes: "< 1 min",
-    category: "Small / Test",
-    type: "nucl" as const,
-  },
-  {
-    value: "18S_fungal_sequences",
-    label: "18S fungal sequences",
-    desc: "Fungal small subunit rRNA for fungal taxonomy.",
-    size: "~3 MB",
-    estFiles: 10,
-    estMinutes: "< 1 min",
-    category: "Small / Test",
-    type: "nucl" as const,
-  },
-  {
-    value: "ITS_RefSeq_Fungi",
-    label: "ITS RefSeq Fungi",
-    desc: "Internal Transcribed Spacer regions for fungal species-level ID.",
-    size: "~8 MB",
-    estFiles: 10,
-    estMinutes: "< 1 min",
-    category: "Small / Test",
-    type: "nucl" as const,
-  },
-  {
-    value: "pdbnt",
-    label: "PDB nucleotide",
-    desc: "Nucleotide sequences from the Protein Data Bank (3D structures).",
-    size: "~200 MB",
-    estFiles: 15,
-    estMinutes: "~2 min",
-    category: "Medium",
-    type: "nucl" as const,
-  },
-  {
-    value: "swissprot",
-    label: "SwissProt",
-    desc: "Curated, high-quality protein sequences from UniProt/Swiss-Prot.",
-    size: "~300 MB",
-    estFiles: 15,
-    estMinutes: "~3 min",
-    category: "Medium",
-    type: "prot" as const,
-  },
-  {
-    value: "core_nt",
-    label: "Core nucleotide",
-    desc: "Curated subset of nt — major organisms, smaller and faster than full nt.",
-    size: "~250 GB",
-    estFiles: 600,
-    estMinutes: "~2-4 hours",
-    category: "Large",
-    type: "nucl" as const,
-  },
-  {
-    value: "nt",
-    label: "Nucleotide collection",
-    desc: "All GenBank + RefSeq nucleotide sequences. Comprehensive but very large.",
-    size: "~400 GB",
-    estFiles: 900,
-    estMinutes: "~4-8 hours",
-    category: "Large",
-    type: "nucl" as const,
-  },
-  {
-    value: "nr",
-    label: "Non-redundant protein",
-    desc: "All non-redundant GenBank protein translations + RefSeq + PDB + SwissProt.",
-    size: "~300 GB",
-    estFiles: 700,
-    estMinutes: "~3-6 hours",
-    category: "Large",
-    type: "prot" as const,
-  },
-  {
-    value: "refseq_protein",
-    label: "RefSeq protein",
-    desc: "NCBI Reference Sequence protein database — curated and non-redundant.",
-    size: "~100 GB",
-    estFiles: 300,
-    estMinutes: "~1-3 hours",
-    category: "Large",
-    type: "prot" as const,
-  },
-];
 
 interface Props {
   subscriptionId: string;
   resourceGroup: string;
   accountName: string;
-}
-
-// Convert NCBI version dir like "2026-05-09-01-05-02" → "2026-05-09 01:05:02"
-function formatNcbiVersionShared(v: string | null | undefined): string {
-  if (!v) return "";
-  const m = v.match(/^(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})$/);
-  if (!m) return v;
-  return `${m[1]} ${m[2]}:${m[3]}:${m[4]}`;
-}
-
-// Toast banner shown at top of DB popup — fades out after 3s
-function DownloadResultBanner({
-  result,
-  onDismiss,
-}: {
-  result: { db: string; msg: string; version?: string; type: "ok" | "err" };
-  onDismiss: () => void;
-}) {
-  const [fading, setFading] = useState(false);
-
-  useEffect(() => {
-    if (result.type === "err") return; // Errors don't auto-dismiss
-    const fadeTimer = setTimeout(() => setFading(true), 3000);
-    const removeTimer = setTimeout(onDismiss, 3500);
-    return () => {
-      clearTimeout(fadeTimer);
-      clearTimeout(removeTimer);
-    };
-  }, [result, onDismiss]);
-
-  return (
-    <div
-      style={{
-        marginBottom: "var(--space-3)",
-        padding: "8px 12px",
-        borderRadius: 8,
-        fontSize: 12,
-        background:
-          result.type === "ok" ? "rgba(115,191,105,0.08)" : "rgba(242,114,111,0.08)",
-        border: `1px solid ${result.type === "ok" ? "rgba(115,191,105,0.25)" : "rgba(242,114,111,0.25)"}`,
-        color: result.type === "ok" ? "var(--success)" : "var(--danger)",
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        opacity: fading ? 0 : 1,
-        transition: "opacity 0.5s ease-out",
-      }}
-    >
-      {result.type === "ok" ? (
-        <CheckCircle2 size={14} style={{ flexShrink: 0 }} />
-      ) : (
-        <AlertTriangle size={14} style={{ flexShrink: 0 }} />
-      )}
-      <div style={{ flex: 1 }}>
-        <strong>{result.db}</strong>: {result.msg}
-        {result.version && (
-          <span
-            style={{
-              marginLeft: 8,
-              fontSize: 10,
-              color: "var(--text-faint)",
-              fontWeight: 400,
-            }}
-          >
-            Version: {formatNcbiVersionShared(result.version)}
-          </span>
-        )}
-      </div>
-      <button
-        onClick={onDismiss}
-        style={{
-          background: "none",
-          border: "none",
-          color: "inherit",
-          cursor: "pointer",
-          padding: 2,
-          opacity: 0.6,
-        }}
-      >
-        <X size={12} />
-      </button>
-    </div>
-  );
 }
 
 export function StorageCard({ subscriptionId, resourceGroup, accountName }: Props) {
@@ -873,27 +701,6 @@ function BlastDbSection({
     }
   };
 
-  const formatBytes = (b: number) => {
-    if (b < 1024) return `${b} B`;
-    if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
-    if (b < 1024 * 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(b / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  };
-
-  const formatDate = (iso: string | null | undefined) => {
-    if (!iso) return "";
-    try {
-      const d = new Date(iso);
-      const pad = (n: number) => n.toString().padStart(2, "0");
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-    } catch {
-      return "";
-    }
-  };
-
-  // Convert NCBI version dir like "2026-05-09-01-05-02" → "2026-05-09 01:05:02"
-  const formatNcbiVersion = formatNcbiVersionShared;
-
   // Group catalog by category
   const categories = ["Small / Test", "Medium", "Large"] as const;
 
@@ -1083,7 +890,7 @@ function BlastDbSection({
               </div>
               {/* Download result toast — shown at top, fades out after 5s */}
               {downloadResult && (
-                <DownloadResultBanner
+                <StorageDownloadResultBanner
                   result={downloadResult}
                   onDismiss={() => setDownloadResult(null)}
                 />
@@ -1365,7 +1172,7 @@ function BlastDbSection({
                                       </span>
                                     ) : null}
                                     {meta.last_modified ? (
-                                      <span>{formatDate(meta.last_modified)}</span>
+                                      <span>{formatStorageDate(meta.last_modified)}</span>
                                     ) : null}
                                     {meta.source_version && (
                                       <code

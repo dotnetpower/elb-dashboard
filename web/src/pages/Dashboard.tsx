@@ -321,11 +321,7 @@ export function Dashboard() {
             resourceGroup={config.workloadResourceGroup}
             accountName={config.storageAccountName}
           />
-          <TerminalCard
-            subscriptionId={config.subscriptionId}
-            resourceGroup={config.terminalResourceGroup}
-            vmName={config.terminalVmName}
-          />
+          <TerminalCard />
         </div>
 
         <JobCard />

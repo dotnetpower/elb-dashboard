@@ -17,8 +17,11 @@
     "apiClientId": {
       "value": "${API_CLIENT_ID}"
     },
-    "terminalResourceGroup": {
-      "value": "${TERMINAL_DEFAULT_RG}"
+    "allowedOrigins": {
+      "value": "${ALLOWED_ORIGINS}"
+    },
+    "lockdownPrivateNetworking": {
+      "value": "${LOCKDOWN_PRIVATE_NETWORKING=false}"
     }
   }
 }

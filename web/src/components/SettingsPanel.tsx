@@ -30,7 +30,7 @@ export function SettingsPanel({ open, config, onClose, onRerunWizard }: Props) {
     { label: "Storage Account", value: config.storageAccountName || "—", auto: true },
     { section: "Container Registry", label: "ACR Resource Group", value: config.acrResourceGroup || "—" },
     { label: "ACR Name", value: config.acrName || "—", auto: true },
-    { section: "Remote Terminal", label: "Terminal RG", value: config.terminalResourceGroup || "—" },
+    { section: "Terminal", label: "Terminal RG", value: config.terminalResourceGroup || "—" },
     { label: "Terminal VM", value: config.terminalVmName || "—", auto: true },
   ];
 
