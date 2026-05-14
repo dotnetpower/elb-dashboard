@@ -4,12 +4,14 @@
     {
       "label": "api: start",
       "type": "shell",
-      "command": "func start --python --debug-port 9091",
+      "command": "uv run uvicorn api.main:app --reload --host 127.0.0.1 --port 8080",
       "options": {
-        "cwd": "${workspaceFolder}/api",
+        "cwd": "${workspaceFolder}",
         "env": {
-          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
-          "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}"
+          "PYTHONPATH": "${workspaceFolder}",
+          "AUTH_DEV_BYPASS": "true",
+          "LOG_LEVEL": "DEBUG",
+          "ENABLE_DOCS": "true"
         }
       },
       "isBackground": true,
@@ -22,8 +24,64 @@
         },
         "background": {
           "activeOnStart": true,
-          "beginsPattern": "Azure Functions Core Tools",
-          "endsPattern": "For detailed output, run func with --verbose flag"
+          "beginsPattern": "Will watch for changes",
+          "endsPattern": "Application startup complete"
+        }
+      }
+    },
+    {
+      "label": "worker: start",
+      "type": "shell",
+      "command": "uv run celery -A api.celery_app worker -l info",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
+          "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
+          "LOG_LEVEL": "DEBUG"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "file": 1,
+          "location": 2,
+          "message": 3
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "celery@",
+          "endsPattern": "ready\\."
+        }
+      }
+    },
+    {
+      "label": "beat: start",
+      "type": "shell",
+      "command": "uv run celery -A api.celery_app beat -l info",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
+          "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
+          "LOG_LEVEL": "DEBUG"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "file": 1,
+          "location": 2,
+          "message": 3
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "celery beat",
+          "endsPattern": "Scheduler: Sending due task|beat: Starting"
         }
       }
     },

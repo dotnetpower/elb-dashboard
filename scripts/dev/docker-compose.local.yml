@@ -19,7 +19,7 @@ services:
   api:
     build:
       context: ../..
-      dockerfile: api_app/Dockerfile
+      dockerfile: api/Dockerfile
     image: elb-api:dev
     environment:
       AUTH_DEV_BYPASS: "true"

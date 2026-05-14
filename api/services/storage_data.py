@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from azure.core.credentials import TokenCredential
-from azure.storage.blob import (
-    BlobSasPermissions,
-    BlobServiceClient,
-    generate_blob_sas,
-)
+from azure.storage.blob import BlobServiceClient
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,30 +72,14 @@ def list_result_blobs(
     return blobs
 
 
-def generate_download_url(
-    credential: TokenCredential,
-    account_name: str,
-    container: str,
-    blob_name: str,
-    expiry_minutes: int = 60,
-) -> str:
-    """Generate a SAS URL for downloading a result blob using user delegation key."""
-    svc = _blob_service(credential, account_name)
-    now = datetime.now(UTC)
-    expiry = now + timedelta(minutes=expiry_minutes)
-    delegation_key = svc.get_user_delegation_key(
-        key_start_time=now - timedelta(minutes=5),
-        key_expiry_time=expiry,
-    )
-    sas = generate_blob_sas(
-        account_name=account_name,
-        container_name=container,
-        blob_name=blob_name,
-        user_delegation_key=delegation_key,
-        permission=BlobSasPermissions(read=True),
-        expiry=expiry,
-    )
-    return f"https://{account_name}.blob.core.windows.net/{container}/{blob_name}?{sas}"
+# NOTE: There is intentionally NO `generate_download_url` / SAS issuer here.
+# Per .github/copilot-instructions.md §9, every Storage account stays
+# `publicNetworkAccess: Disabled` and **the browser must never receive a SAS
+# token**. Result downloads are served by streaming the blob through the api
+# sidecar (1 MiB chunks, 4 MiB block uploads, semaphore-capped to 4 concurrent
+# transfers). When that route is implemented, add a `stream_blob_to_response`
+# helper here that returns an async iterator the FastAPI route can await — do
+# NOT bring back `generate_blob_sas` / `get_user_delegation_key`.
 
 
 def list_databases(

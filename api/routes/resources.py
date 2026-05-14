@@ -1,87 +1,99 @@
-"""Resource provisioning routes (``/api/resources/*``).
+"""Resource provisioning routes (`/api/resources/*`).
 
-Wizard-driven idempotent creation of the workspace's foundational
-resources: resource group, storage account (HNS), and ACR.
+Synchronous, idempotent creation of the workspace's foundational resources:
+resource group, storage account (HNS-enabled), and ACR. These are wizard
+steps that the user performs interactively, so they are kept synchronous
+(not Celery tasks) — the SPA blocks until the resource exists, then moves
+to the next wizard step.
+
+All Azure SDK calls run under the api sidecar's managed identity, so the
+caller does not need to acquire ARM-scoped tokens themselves.
+
+Validation is done at the controller boundary; the legacy
+`services.network.ensure_resource_group` / `services.monitoring.ensure_*`
+helpers handle the actual idempotent ARM PUT.
 """
 
 from __future__ import annotations
 
-import json
 import logging
+import re
+from typing import Any
 
-import azure.durable_functions as df
-import azure.functions as func
+from fastapi import APIRouter, Body, Depends, HTTPException
 
-from _http_utils import _error_response, _json_response
-from auth.token import AuthError, validate_bearer_token
-from services import monitoring as monitoring_svc
-from services.azure_clients import credential_for_caller
-from services.sanitise import sanitise
+from api.auth import CallerIdentity, require_caller
+from api.services import get_credential
+from api.services import monitoring as monitoring_svc
+from api.services import network as network_svc
+from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
-bp = df.Blueprint()
+router = APIRouter(prefix="/api/resources", tags=["resources"])
+
+_RE_SUB = re.compile(r"^[0-9a-fA-F-]{36}$")
+_RE_RG = re.compile(r"^[-\w._()]{1,90}$")
+_RE_STORAGE = re.compile(r"^[a-z0-9]{3,24}$")
+_RE_ACR = re.compile(r"^[a-zA-Z0-9]{5,50}$")
+_RE_REGION = re.compile(r"^[a-z][a-z0-9]{2,29}$")
 
 
-@bp.route(route="resources/ensure-rg", methods=["POST"])
-def ensure_resource_group(req: func.HttpRequest) -> func.HttpResponse:
-    """Create a resource group if it doesn't exist. Idempotent."""
-    try:
-        identity = validate_bearer_token(req.headers.get("Authorization"))
-    except AuthError as exc:
-        return _error_response(exc.status, exc.message)
-
-    try:
-        body = json.loads(req.get_body() or b"{}")
-    except json.JSONDecodeError as exc:
-        return _error_response(400, f"invalid JSON: {exc}")
-
-    required = {"subscription_id", "resource_group", "region"}
+def _require_fields(body: dict[str, Any], required: set[str]) -> None:
     missing = required - body.keys()
     if missing:
-        return _error_response(400, f"missing fields: {sorted(missing)}")
+        raise HTTPException(400, f"missing fields: {sorted(missing)}")
 
-    from services import network as net_svc
 
-    cred = credential_for_caller(identity.raw_token)
+def _check(value: str, pattern: re.Pattern[str], label: str) -> None:
+    if not isinstance(value, str) or not pattern.match(value):
+        raise HTTPException(400, f"invalid {label}: '{sanitise(str(value)[:40])}'")
+
+
+@router.post("/ensure-rg")
+def ensure_rg(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    _require_fields(body, {"subscription_id", "resource_group", "region"})
+    _check(body["subscription_id"], _RE_SUB, "subscription_id")
+    _check(body["resource_group"], _RE_RG, "resource_group")
+    _check(body["region"], _RE_REGION, "region")
+
+    cred = get_credential()
     try:
-        net_svc.ensure_resource_group(
+        network_svc.ensure_resource_group(
             cred, body["subscription_id"], body["resource_group"], body["region"],
         )
     except Exception as exc:
-        LOGGER.warning("ensure_resource_group failed: %s", exc)
-        return _error_response(500, f"failed to create resource group: {sanitise(str(exc))}")
+        LOGGER.warning("ensure_rg failed: %s", type(exc).__name__)
+        raise HTTPException(
+            500, f"failed to create resource group: {sanitise(str(exc))[:200]}"
+        ) from exc
 
     LOGGER.info(
-        "ensure_resource_group by oid=%s rg=%s",
-        identity.object_id, body["resource_group"],
+        "ensure_rg by oid=%s sub=%s rg=%s region=%s",
+        caller.object_id, body["subscription_id"], body["resource_group"], body["region"],
     )
-    return _json_response({
+    return {
         "resource_group": body["resource_group"],
         "region": body["region"],
         "status": "created",
-    })
+    }
 
 
-@bp.route(route="resources/ensure-storage", methods=["POST"])
-def ensure_storage_account(req: func.HttpRequest) -> func.HttpResponse:
-    """Create a storage account with HNS if it doesn't exist. Idempotent."""
-    try:
-        identity = validate_bearer_token(req.headers.get("Authorization"))
-    except AuthError as exc:
-        return _error_response(exc.status, exc.message)
+@router.post("/ensure-storage")
+def ensure_storage(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    _require_fields(body, {"subscription_id", "resource_group", "account_name", "region"})
+    _check(body["subscription_id"], _RE_SUB, "subscription_id")
+    _check(body["resource_group"], _RE_RG, "resource_group")
+    _check(body["account_name"], _RE_STORAGE, "account_name")
+    _check(body["region"], _RE_REGION, "region")
 
-    try:
-        body = json.loads(req.get_body() or b"{}")
-    except json.JSONDecodeError as exc:
-        return _error_response(400, f"invalid JSON: {exc}")
-
-    required = {"subscription_id", "resource_group", "account_name", "region"}
-    missing = required - body.keys()
-    if missing:
-        return _error_response(400, f"missing fields: {sorted(missing)}")
-
-    cred = credential_for_caller(identity.raw_token)
+    cred = get_credential()
     try:
         monitoring_svc.ensure_storage_account(
             cred,
@@ -89,42 +101,37 @@ def ensure_storage_account(req: func.HttpRequest) -> func.HttpResponse:
             body["resource_group"],
             body["account_name"],
             body["region"],
-            caller_oid=identity.object_id,
+            caller_oid=caller.object_id,
         )
     except Exception as exc:
-        LOGGER.warning("ensure_storage_account failed: %s", exc)
-        return _error_response(500, f"failed to create storage account: {sanitise(str(exc))}")
+        LOGGER.warning("ensure_storage failed: %s", type(exc).__name__)
+        raise HTTPException(
+            500, f"failed to create storage account: {sanitise(str(exc))[:200]}"
+        ) from exc
 
     LOGGER.info(
-        "ensure_storage_account by oid=%s account=%s",
-        identity.object_id, body["account_name"],
+        "ensure_storage by oid=%s account=%s region=%s",
+        caller.object_id, body["account_name"], body["region"],
     )
-    return _json_response({
+    return {
         "account_name": body["account_name"],
         "region": body["region"],
         "status": "created",
-    })
+    }
 
 
-@bp.route(route="resources/ensure-acr", methods=["POST"])
-def ensure_acr(req: func.HttpRequest) -> func.HttpResponse:
-    """Create an ACR if it doesn't exist. Idempotent."""
-    try:
-        identity = validate_bearer_token(req.headers.get("Authorization"))
-    except AuthError as exc:
-        return _error_response(exc.status, exc.message)
+@router.post("/ensure-acr")
+def ensure_acr(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    _require_fields(body, {"subscription_id", "resource_group", "registry_name", "region"})
+    _check(body["subscription_id"], _RE_SUB, "subscription_id")
+    _check(body["resource_group"], _RE_RG, "resource_group")
+    _check(body["registry_name"], _RE_ACR, "registry_name")
+    _check(body["region"], _RE_REGION, "region")
 
-    try:
-        body = json.loads(req.get_body() or b"{}")
-    except json.JSONDecodeError as exc:
-        return _error_response(400, f"invalid JSON: {exc}")
-
-    required = {"subscription_id", "resource_group", "registry_name", "region"}
-    missing = required - body.keys()
-    if missing:
-        return _error_response(400, f"missing fields: {sorted(missing)}")
-
-    cred = credential_for_caller(identity.raw_token)
+    cred = get_credential()
     try:
         monitoring_svc.ensure_acr(
             cred,
@@ -132,18 +139,20 @@ def ensure_acr(req: func.HttpRequest) -> func.HttpResponse:
             body["resource_group"],
             body["registry_name"],
             body["region"],
-            caller_oid=identity.object_id,
+            caller_oid=caller.object_id,
         )
     except Exception as exc:
-        LOGGER.warning("ensure_acr failed: %s", exc)
-        return _error_response(500, f"failed to create ACR: {sanitise(str(exc))}")
+        LOGGER.warning("ensure_acr failed: %s", type(exc).__name__)
+        raise HTTPException(
+            500, f"failed to create ACR: {sanitise(str(exc))[:200]}"
+        ) from exc
 
     LOGGER.info(
-        "ensure_acr by oid=%s registry=%s",
-        identity.object_id, body["registry_name"],
+        "ensure_acr by oid=%s registry=%s region=%s",
+        caller.object_id, body["registry_name"], body["region"],
     )
-    return _json_response({
+    return {
         "registry_name": body["registry_name"],
         "region": body["region"],
         "status": "created",
-    })
+    }

@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from services.sanitise import sanitise
+from api.services.sanitise import sanitise
 
 
 def test_masks_sas_query_string() -> None:

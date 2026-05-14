@@ -50,7 +50,7 @@ import { SectionHeader, SetupRequired, StatBox } from "@/pages/tools/ToolLayout"
 import type { TabMeta } from "@/pages/tools/toolsPageModel";
 
 export function CostEstimatorTab({ meta }: { meta: TabMeta }) {
-  const [sku, setSku] = useState("Standard_E16s_v5");
+  const [sku, setSku] = useState("Standard_E32s_v5");
   const [nodes, setNodes] = useState(3);
   const [hours, setHours] = useState(2);
   const [pdSize, setPdSize] = useState(1000);
@@ -97,15 +97,22 @@ export function CostEstimatorTab({ meta }: { meta: TabMeta }) {
             value={sku}
             onChange={(e) => setSku(e.target.value)}
           >
+            {/* SKUs MUST come from api/services/aks_skus.py::ALLOWED_SKUS
+                (mirror of sibling AZURE_HPC_MACHINES). Picking anything
+                outside that allow-list breaks BLAST submit. */}
             {[
-              "Standard_D2s_v5",
-              "Standard_D4s_v5",
-              "Standard_D8s_v5",
-              "Standard_D16s_v5",
-              "Standard_E4s_v5",
-              "Standard_E8s_v5",
+              "Standard_D8s_v3",
+              "Standard_D16s_v3",
+              "Standard_E16s_v3",
+              "Standard_E32s_v3",
               "Standard_E16s_v5",
               "Standard_E32s_v5",
+              "Standard_E48s_v5",
+              "Standard_E64s_v5",
+              "Standard_E32bs_v5",
+              "Standard_E64bs_v5",
+              "Standard_L32s_v3",
+              "Standard_L64s_v3",
             ].map((s) => (
               <option key={s} value={s}>
                 {s}

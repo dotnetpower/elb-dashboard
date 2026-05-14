@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from azure.core.credentials import TokenCredential
 
-from services.azure_clients import network_client, resource_client
+from api.services.azure_clients import network_client, resource_client
 
 LOGGER = logging.getLogger(__name__)
 

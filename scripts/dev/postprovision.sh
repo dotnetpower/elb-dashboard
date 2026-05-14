@@ -102,7 +102,7 @@ build_image() {
 }
 
 ts "==> Building 3 images in parallel via az acr build (no local Docker needed)"
-PID_API=$(build_image      "elb-api"      "$REPO_ROOT/api_app/Dockerfile"  "$REPO_ROOT")
+PID_API=$(build_image      "elb-api"      "$REPO_ROOT/api/Dockerfile"  "$REPO_ROOT")
 PID_FRONTEND=$(build_image "elb-frontend" "$REPO_ROOT/web/Dockerfile"      "$REPO_ROOT")
 PID_TERMINAL=$(build_image "elb-terminal" "$REPO_ROOT/terminal/Dockerfile" "$REPO_ROOT/terminal")
 

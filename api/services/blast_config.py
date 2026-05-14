@@ -6,6 +6,11 @@ import configparser
 import io
 from typing import Any
 
+from api.services.aks_skus import (
+    AZURE_VM_HOURLY_USD as _ALLOWED_PRICES,
+    DEFAULT_SKU,
+)
+
 
 def generate_config(params: dict[str, Any]) -> str:
     """Build an elastic-blast.ini from a flat dict of parameters.
@@ -48,7 +53,7 @@ def generate_config(params: dict[str, Any]) -> str:
         cfg.set("cluster", "name", aks_cluster_name)
     else:
         cfg.set("cluster", "name", f"elastic-blast-{job_id[:12]}")
-    cfg.set("cluster", "machine-type", params.get("machine_type", "Standard_D8s_v3"))
+    cfg.set("cluster", "machine-type", params.get("machine_type", DEFAULT_SKU))
     cfg.set("cluster", "num-nodes", str(params.get("num_nodes", 1)))
     cfg.set("cluster", "pd-size", params.get("pd_size", "3000Gi"))
 
@@ -136,20 +141,13 @@ def generate_config(params: dict[str, Any]) -> str:
     return buf.getvalue()
 
 
-# Azure VM hourly cost estimates (Pay-As-You-Go, koreacentral)
-AZURE_VM_HOURLY_USD: dict[str, float] = {
-    "Standard_D2s_v5": 0.096,
-    "Standard_D4s_v5": 0.192,
-    "Standard_D8s_v5": 0.384,
-    "Standard_D16s_v5": 0.768,
-    "Standard_E4s_v5": 0.252,
-    "Standard_E8s_v5": 0.504,
-    "Standard_E16s_v5": 1.008,
-    "Standard_E32s_v5": 2.016,
-    "Standard_E48s_v5": 3.024,
-    "Standard_E64s_v5": 4.032,
-    "Standard_D2s_v3": 0.096,
-    "Standard_D4s_v3": 0.192,
-}
+# Azure VM hourly cost estimates (Pay-As-You-Go, koreacentral).
+#
+# Re-exported from ``api.services.aks_skus`` so there is exactly one place
+# in the codebase that defines the elastic-blast SKU allow-list and its
+# pricing. Adding a SKU here without adding it to ``aks_skus.ALLOWED_SKUS``
+# would be a footgun: the cost estimator would price something that the
+# elastic-blast CLI then rejects in the cluster.
+AZURE_VM_HOURLY_USD: dict[str, float] = dict(_ALLOWED_PRICES)
 STORAGE_GB_MONTH_USD = 0.018  # Hot tier
 PD_GB_MONTH_USD = 0.040  # Managed SSD

@@ -2,8 +2,8 @@
 # Browser-accessible operator shell sidecar.
 #
 # Image contains:
-#   * Ubuntu 22.04 base
-#   * azure-cli, kubectl, azcopy, python3.11, primer3, tmux, ttyd, jq, git, make
+#   * Ubuntu 24.04 base (python3.12 native)
+#   * azure-cli, kubectl, azcopy, python3.12, primer3, tmux, ttyd, jq, git, make
 #   * elastic_blast Python package + venv pre-installed under /opt/elb/venv
 #
 # Listens on 127.0.0.1:7681 (loopback only). The api sidecar reverse-proxies
@@ -14,7 +14,7 @@
 # `az login --identity` / `azcopy --auto-login MSI` work without further
 # bootstrap.
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -24,17 +24,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/elb/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # ---------------------------------------------------------------------------
-# Apt deps + Python 3.11
+# Apt deps + Python 3.12 (native to Ubuntu 24.04, no PPA required)
 # ---------------------------------------------------------------------------
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release apt-transport-https software-properties-common \
         git make jq unzip tmux primer3 \
         build-essential libffi-dev libssl-dev \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        python3.11 python3.11-venv python3.11-dev \
+        python3.12 python3.12-venv python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
@@ -72,7 +69,7 @@ RUN curl -sL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_6
 # ---------------------------------------------------------------------------
 # elastic-blast Python package (pre-installed venv at /opt/elb/venv)
 # ---------------------------------------------------------------------------
-RUN python3.11 -m venv /opt/elb/venv \
+RUN python3.12 -m venv /opt/elb/venv \
     && /opt/elb/venv/bin/pip install --upgrade pip wheel build \
     && /opt/elb/venv/bin/pip install \
         azure-mgmt-resource azure-mgmt-network azure-mgmt-compute \
@@ -101,12 +98,14 @@ RUN useradd -m -s /bin/bash -u 1000 azureuser \
 COPY profile.sh    /etc/profile.d/elb-env.sh
 COPY motd          /etc/motd
 COPY entrypoint.sh /usr/local/bin/elb-entrypoint
-RUN chmod +x /usr/local/bin/elb-entrypoint /etc/profile.d/elb-env.sh
+COPY exec_server.py /usr/local/bin/elb-exec-server
+RUN chmod +x /usr/local/bin/elb-entrypoint /usr/local/bin/elb-exec-server /etc/profile.d/elb-env.sh
 
 USER 1000:1000
 WORKDIR /home/azureuser
-EXPOSE 7681
+EXPOSE 7681 7682
 
-# ttyd binds to loopback. The api sidecar reverse-proxies the browser
-# WebSocket into this port after MSAL + tenant-role check.
+# ttyd binds to loopback :7681 (interactive browser shell, proxied by api).
+# elb-exec-server binds to loopback :7682 (programmatic shell channel for
+# Celery tasks; see api/services/terminal_exec.py for the contract).
 ENTRYPOINT ["/usr/local/bin/elb-entrypoint"]

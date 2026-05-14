@@ -15,8 +15,8 @@
 #   4. Adds the SPA redirect URI (Auth Code + PKCE).
 #   5. Adds delegated permissions:
 #        - The app's own `user_impersonation` scope.
-#        - Azure Service Management `user_impersonation` (so backend OBO can call ARM).
-#   6. Writes web/.env.local and api/local.settings.json with the resolved values.
+#        - Azure Service Management `user_impersonation` (so the SPA can call ARM directly when needed).
+#   6. Writes web/.env.local with the resolved values.
 #   7. Prints the admin-consent URL.
 set -euo pipefail
 
@@ -135,42 +135,15 @@ az rest --method PATCH \
   --headers "Content-Type=application/json" \
   --body "$required_payload" >/dev/null
 
-# --- 6. Write local env files ---
+# --- 6. Write local env file ---
 web_env="$repo_root/web/.env.local"
 echo "==> Writing $web_env"
 cat > "$web_env" <<EOF
-VITE_API_BASE_URL=http://localhost:7071
+VITE_API_BASE_URL=http://localhost:8080
 VITE_AZURE_TENANT_ID=$tenant_id
 VITE_AZURE_CLIENT_ID=$app_id
 VITE_AZURE_REDIRECT_URI=$REDIRECT_URI
 EOF
-
-api_settings="$repo_root/api/local.settings.json"
-if [[ ! -f "$api_settings" ]]; then
-  echo "==> Writing $api_settings (template — set API_CLIENT_SECRET and KEY_VAULT_URI manually)"
-  cat > "$api_settings" <<EOF
-{
-  "IsEncrypted": false,
-  "Values": {
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "FUNCTIONS_WORKER_RUNTIME": "python",
-    "AZURE_TENANT_ID": "$tenant_id",
-    "API_CLIENT_ID": "$app_id",
-    "API_CLIENT_SECRET": "",
-    "KEY_VAULT_URI": "",
-    "TERMINAL_DEFAULT_RG": "rg-elb-terminal",
-    "TERMINAL_DEFAULT_REGION": "koreacentral",
-    "AUTH_DEV_BYPASS": "false"
-  },
-  "Host": {
-    "CORS": "*",
-    "CORSCredentials": false
-  }
-}
-EOF
-else
-  echo "==> $api_settings already exists — leaving untouched. Verify AZURE_TENANT_ID / API_CLIENT_ID."
-fi
 
 # --- 7. Admin consent URL ---
 consent_url="https://login.microsoftonline.com/${tenant_id}/adminconsent?client_id=${app_id}&redirect_uri=${REDIRECT_URI}"
@@ -188,12 +161,9 @@ cat <<EOF
 Next steps:
   1. (Recommended) Grant admin consent so users do not need to consent each time:
      $consent_url
-  2. Restart the web dev server so .env.local is picked up:
+  2. Restart the SPA dev server so .env.local is picked up:
      cd web && npm run dev
-  3. To enable the backend (api/), still need to:
-       a. Create a client secret:
-          az ad app credential reset --id $app_id --append --display-name dev-secret --years 1 \\
-            --query password -o tsv
-          # paste the output as API_CLIENT_SECRET in api/local.settings.json
-       b. Provision a Key Vault and set KEY_VAULT_URI in api/local.settings.json.
+  3. Pass the printed App ID into azd:
+     azd env set API_CLIENT_ID $app_id
+     azd up
 EOF

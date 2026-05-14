@@ -12,24 +12,24 @@ import { ClusterItem } from "@/components/ClusterItem";
 const DEFAULT_SKU = "Standard_E32s_v5";
 const DEFAULT_NODE_COUNT = 10;
 
+// NOTE: SKUs here MUST be a subset of api/services/aks_skus.py::ALLOWED_SKUS
+// (which mirrors elastic_blast.azure_traits.AZURE_HPC_MACHINES in the sibling
+// repo). Adding a SKU outside that allow-list makes BLAST submit fail with
+// `NotImplementedError: Cannot get properties for ...`.
 // #13: Human-readable SKU descriptions with approximate hourly cost
 const SKU_INFO: Record<string, { desc: string; costPerNode: number }> = {
-  Standard_E16s_v5: { desc: "16 cores, 128 GB RAM — small databases", costPerNode: 0.67 },
-  Standard_E20s_v5: {
-    desc: "20 cores, 160 GB RAM — medium databases",
-    costPerNode: 0.84,
-  },
+  Standard_E16s_v5: { desc: "16 cores, 128 GB RAM \u2014 small databases", costPerNode: 1.01 },
   Standard_E32s_v5: {
-    desc: "32 cores, 256 GB RAM — large databases (recommended)",
-    costPerNode: 1.34,
-  },
-  Standard_E48s_v5: {
-    desc: "48 cores, 384 GB RAM — very large databases",
+    desc: "32 cores, 256 GB RAM \u2014 large databases (recommended default)",
     costPerNode: 2.02,
   },
+  Standard_E48s_v5: {
+    desc: "48 cores, 384 GB RAM \u2014 very large databases",
+    costPerNode: 3.02,
+  },
   Standard_E64s_v5: {
-    desc: "64 cores, 512 GB RAM — maximum performance",
-    costPerNode: 2.69,
+    desc: "64 cores, 512 GB RAM \u2014 maximum performance",
+    costPerNode: 4.03,
   },
 };
 

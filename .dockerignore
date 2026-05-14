@@ -1,7 +1,8 @@
 # Keep `az acr build` upload size small.
 # These directories are huge build artifacts that the Dockerfiles do not need
-# (api_app/Dockerfile installs deps from requirements.txt; web/Dockerfile
-# runs `npm ci` inside the build image).
+# (api/Dockerfile installs deps from pyproject.toml + uv.lock via the
+# astral-sh/uv builder image; web/Dockerfile runs `npm ci` inside its build
+# image).
 **/__pycache__
 **/*.pyc
 **/*.pyo
@@ -14,10 +15,9 @@
 .ruff_cache
 .mypy_cache
 **/node_modules
-api/.python_packages
 **/.python_packages
 docs
-infra/legacy
+legacy
 *.zip
 *.tgz
 *.tar.gz

@@ -26,10 +26,14 @@ param allowPublicAccessForBootstrap bool = true
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
+var moduleTags = union(tags, {
+  role: 'registry'
+})
+
 resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
   name: acrName
   location: location
-  tags: tags
+  tags: moduleTags
   sku: {
     name: 'Premium'
   }
@@ -82,14 +86,14 @@ resource acrPushForUami 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 resource acrPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (!allowPublicAccessForBootstrap) {
   name: 'privatelink.azurecr.io'
   location: 'global'
-  tags: tags
+  tags: moduleTags
 }
 
 resource acrPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (!allowPublicAccessForBootstrap) {
   parent: acrPrivateDnsZone
   name: 'link-${uniqueString(vnetResourceId)}'
   location: 'global'
-  tags: tags
+  tags: moduleTags
   properties: {
     virtualNetwork: { id: vnetResourceId }
     registrationEnabled: false
@@ -99,7 +103,7 @@ resource acrPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLink
 resource acrPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (!allowPublicAccessForBootstrap) {
   name: 'pe-${acrName}'
   location: location
-  tags: tags
+  tags: moduleTags
   properties: {
     subnet: { id: privateEndpointSubnetId }
     privateLinkServiceConnections: [

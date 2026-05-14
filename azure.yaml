@@ -10,7 +10,7 @@ metadata:
 # `azd deploy` — that lets a fresh `git clone && azd up` go end-to-end
 # without needing Docker locally.
 #
-# The legacy Function App + SWA topology is preserved under infra/legacy/ for
+# The legacy Function App + SWA topology is preserved under legacy/ for
 # reference but is no longer the default deploy target.
 
 infra:

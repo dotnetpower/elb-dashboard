@@ -27,10 +27,14 @@ param aksSubnetCidr string = '10.20.4.0/23'
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
+var moduleTags = union(tags, {
+  role: 'network'
+})
+
 resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
   name: vnetName
   location: location
-  tags: tags
+  tags: moduleTags
   properties: {
     addressSpace: {
       addressPrefixes: [ vnetCidr ]

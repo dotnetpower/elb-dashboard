@@ -14,10 +14,14 @@ param identityName string
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
+var moduleTags = union(tags, {
+  role: 'identity'
+})
+
 resource uami 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: identityName
   location: location
-  tags: tags
+  tags: moduleTags
 }
 
 output identityResourceId string = uami.id

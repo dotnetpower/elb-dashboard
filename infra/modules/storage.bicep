@@ -34,10 +34,14 @@ param allowPublicAccessForBootstrap bool = true
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
+var moduleTags = union(tags, {
+  role: 'platform-storage'
+})
+
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
-  tags: tags
+  tags: moduleTags
   kind: 'StorageV2'
   sku: {
     name: 'Standard_LRS'
@@ -109,13 +113,13 @@ var endpointGroups = [
 resource zones 'Microsoft.Network/privateDnsZones@2024-06-01' = [for g in endpointGroups: if (!allowPublicAccessForBootstrap) {
   name: g.zone
   location: 'global'
-  tags: tags
+  tags: moduleTags
 }]
 
 resource zoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = [for (g, i) in endpointGroups: if (!allowPublicAccessForBootstrap) {
   name: '${g.zone}/link-${uniqueString(vnetResourceId)}'
   location: 'global'
-  tags: tags
+  tags: moduleTags
   properties: {
     virtualNetwork: { id: vnetResourceId }
     registrationEnabled: false
@@ -126,7 +130,7 @@ resource zoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-0
 resource endpoints 'Microsoft.Network/privateEndpoints@2024-01-01' = [for g in endpointGroups: if (!allowPublicAccessForBootstrap) {
   name: 'pe-${storageAccountName}-${g.suffix}'
   location: location
-  tags: tags
+  tags: moduleTags
   properties: {
     subnet: { id: privateEndpointSubnetId }
     privateLinkServiceConnections: [

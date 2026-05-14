@@ -13,7 +13,7 @@ yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 fail=0
 
 echo "==> Tool versions"
-for cmd in az azd jq curl; do
+for cmd in az azd jq curl uv; do
   if command -v "$cmd" >/dev/null 2>&1; then
     v=$($cmd --version 2>/dev/null | head -1)
     green "  ✓ $cmd: $v"

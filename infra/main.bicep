@@ -44,14 +44,38 @@ param allowedOrigins string = ''
 param lockdownPrivateNetworking bool = false
 
 // ---------------------------------------------------------------------------
+// Resource tagging (CAF-aligned)
+// ---------------------------------------------------------------------------
+// Common tags merged into every Azure resource provisioned by this template.
+// Per-module `role` tag is added inside each module via union(tags, { role: ... }).
+// Conventions: lowerCamelCase keys (except azd-required `azd-env-name`).
+
+@description('Cost-center tag value used for chargeback / cost analysis filters.')
+param costCenter string = 'elasticblast'
+
+@description('Optional contact email surfaced as the `owner` tag. Leave empty to omit the tag.')
+param ownerEmail string = ''
+
+// ---------------------------------------------------------------------------
 // Derived names
 // ---------------------------------------------------------------------------
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
-var tags = {
+var baseTags = {
+  // azd contract: marks every resource as belonging to this azd environment so
+  // `azd down` finds and deletes them.
   'azd-env-name': environmentName
-  costCenter: 'elasticblast'
+  app: 'elb-dashboard'
+  environment: environmentName
+  costCenter: costCenter
+  managedBy: 'azd'
+  repo: 'https://github.com/dotnetpower/elb-dashboard'
+  // Topology marker: lets future agents tell at-a-glance which generation of
+  // the platform a resource was provisioned by. Bump when sidecar layout changes.
   topology: 'container-app-bundle-v1'
 }
+var tags = empty(ownerEmail) ? baseTags : union(baseTags, {
+  owner: ownerEmail
+})
 
 var rgName               = 'rg-${environmentName}'
 var vnetName             = 'vnet-${environmentName}'

@@ -15,10 +15,14 @@ param applicationInsightsName string
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
+var moduleTags = union(tags, {
+  role: 'observability'
+})
+
 resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logAnalyticsWorkspaceName
   location: location
-  tags: tags
+  tags: moduleTags
   properties: {
     sku: {
       name: 'PerGB2018'
@@ -35,7 +39,7 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   name: applicationInsightsName
   location: location
-  tags: tags
+  tags: moduleTags
   kind: 'web'
   properties: {
     Application_Type: 'web'

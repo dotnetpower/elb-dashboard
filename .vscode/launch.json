@@ -2,14 +2,49 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "API: Azure Functions",
+      "name": "API: FastAPI (uvicorn)",
       "type": "debugpy",
-      "request": "attach",
-      "connect": {
-        "host": "localhost",
-        "port": 9091
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "api.main:app",
+        "--reload",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8080"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "AUTH_DEV_BYPASS": "true",
+        "LOG_LEVEL": "DEBUG",
+        "ENABLE_DOCS": "true"
       },
-      "preLaunchTask": "api: start"
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Worker: Celery",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "celery",
+      "args": [
+        "-A",
+        "api.celery_app",
+        "worker",
+        "-l",
+        "info"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
+        "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
+        "LOG_LEVEL": "DEBUG"
+      },
+      "justMyCode": false,
+      "console": "integratedTerminal"
     },
     {
       "name": "Web: Vite Dev",
@@ -23,7 +58,7 @@
   "compounds": [
     {
       "name": "Full Stack",
-      "configurations": ["API: Azure Functions", "Web: Vite Dev"],
+      "configurations": ["API: FastAPI (uvicorn)", "Web: Vite Dev"],
       "stopAll": true,
       "presentation": {
         "order": 1

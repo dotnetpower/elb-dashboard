@@ -29,6 +29,10 @@ param internalIngress bool = false
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
+var moduleTags = union(tags, {
+  role: 'control-plane-env'
+})
+
 resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' existing = {
   name: last(split(logAnalyticsWorkspaceResourceId, '/'))
 }
@@ -36,7 +40,7 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' existin
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: environmentName
   location: location
-  tags: tags
+  tags: moduleTags
   properties: {
     appLogsConfiguration: {
       destination: 'log-analytics'

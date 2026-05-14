@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import string
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from services.passwords import generate_admin_password
+from api.services.passwords import generate_admin_password
 
 
 def test_generate_admin_password_length() -> None:

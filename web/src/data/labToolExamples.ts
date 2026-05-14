@@ -25,7 +25,7 @@ export const COST_EXAMPLES: ExamplePreset<CostExampleValues>[] = [
     id: "quick-test",
     label: "Quick test",
     description: "1 small node, 30 min, tiny DB — sanity check",
-    values: { sku: "Standard_D4s_v5", nodes: 1, hours: 0.5, pdSize: 200, dbSize: 5 },
+    values: { sku: "Standard_D8s_v3", nodes: 1, hours: 0.5, pdSize: 200, dbSize: 5 },
   },
   {
     id: "production-survey",

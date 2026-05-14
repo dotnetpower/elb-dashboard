@@ -8,18 +8,19 @@ required by the ElasticBLAST control plane.
 ## Architecture Overview
 
 ```
-Browser (SPA)               Function App                    Azure Resources
+Browser (SPA)               api sidecar                     Azure Resources
 ┌──────────┐  Bearer JWT    ┌──────────────┐  Managed ID    ┌──────────────┐
 │ MSAL.js  │───────────────>│ Validate JWT │───────────────>│ ARM / Data   │
-│ Auth Code │                │ (who called) │  DefaultAzure  │ Plane APIs   │
+│ Auth Code│                │ (who called) │  DefaultAzure  │ Plane APIs   │
 │ + PKCE   │                │              │  Credential()  │              │
 └──────────┘                └──────────────┘                └──────────────┘
 ```
 
-**Key design choice**: All Azure SDK calls use the **Function App's
-system-assigned Managed Identity (MI)**, not On-Behalf-Of (OBO).
-The bearer token from the SPA is used only to verify the caller's
-identity (JWT validation) — it is never exchanged for a downstream
+**Key design choice**: All Azure SDK calls use the **shared user-assigned
+Managed Identity (MI) `id-elb-control`** mounted on the `ca-elb-control`
+Container App (visible to the api / worker / beat / terminal sidecars), not
+On-Behalf-Of (OBO). The bearer token from the SPA is used only to verify the
+caller's identity (JWT validation) — it is never exchanged for a downstream
 ARM token.
 
 **Why MI instead of OBO?**
@@ -27,16 +28,16 @@ ARM token.
   fragile in single-tenant research environments.
 - MI simplifies deployment — no secrets to rotate.
 - Acceptable trade-off: the MI needs broad permissions, but it is scoped
-  to the Function App and auditable via Azure Monitor.
+  to the Container App and auditable via Azure Monitor.
 
 ---
 
 ## §0 Post-Deploy Permissions Checklist (run after every `azd up`)
 
-> **Important**: The Function App's system-assigned MI gets a **new
-> object ID on every fresh `azd up`** (because the Function App resource
-> is recreated). Previous role assignments do not carry over. Run this
-> checklist after each provision.
+> **Important**: When the user-assigned MI `id-elb-control` is recreated
+> (e.g. after `azd down` followed by a fresh `azd up`) it gets a **new
+> object ID**. Previous role assignments do not carry over. Run this
+> checklist after each fresh provision.
 
 ### Step 1 — Capture the new MI object ID and target resources
 
@@ -127,9 +128,10 @@ If a card is still 403 after 5 minutes, the workload resource is in a
 
 ---
 
-## §1 Function App Managed Identity — Required RBAC Roles
+## §1 Container App Managed Identity — Required RBAC Roles
 
-The Function App's **system-assigned Managed Identity** is the principal
+The Container App's **shared user-assigned Managed Identity** `id-elb-control`
+is the principal
 that performs all Azure operations. It must be granted the following roles.
 
 ### Subscription / Resource Group (ARM Management Plane)
@@ -145,14 +147,14 @@ that performs all Azure operations. It must be granted the following roles.
 
 ### Data Plane — Deployed by Bicep (automatic)
 
-These are assigned by `infra/modules/platform.bicep` during `azd up`:
+These are assigned by the `infra/modules/*` Bicep modules during `azd up`:
 
 | Role | Scope | Purpose |
 |------|-------|---------|
-| Key Vault Secrets Officer | Platform Key Vault | Store/read VM passwords |
-| Storage Blob Data Owner | Platform Storage Account | Durable Functions state |
-| Storage Queue Data Contributor | Platform Storage Account | Durable Functions queues |
-| Storage Table Data Contributor | Platform Storage Account | Durable Functions tables |
+| Key Vault Secrets Officer | Platform Key Vault | Read App Registration values + other operational secrets |
+| Storage Blob Data Owner | Platform Storage Account | Append-blob audit / command history / payload blobs |
+| Storage Table Data Contributor | Platform Storage Account | Job / schedule state in Table Storage |
+| Storage File Data SMB Share Contributor | Platform Storage Account | Mount the `redis-data` and `terminal-home` Azure Files shares from the Container App |
 
 ### Data Plane — User-Created Resources (manual or runtime)
 
@@ -178,7 +180,7 @@ copy-pasteable script (with workload RGs, storage, and ACR all covered).
 
 ## §2 Runtime Role Assignments (Best-Effort)
 
-The Function App MI performs RBAC assignments for other principals at
+The shared MI performs RBAC assignments for other principals at
 runtime. All are idempotent and soft-fail if the MI lacks
 `Microsoft.Authorization/roleAssignments/write`.
 
@@ -188,19 +190,6 @@ runtime. All are idempotent and soft-fail if the MI lacks
 |------|-------|---------|
 | AcrPull | ACR | Pull ElasticBLAST container images |
 | Storage Blob Data Contributor | User storage account | Download BLAST DB shards to nodes |
-
-### Remote Terminal VM Managed Identity
-
-The Remote Terminal VM is created with a system-assigned Managed Identity.
-Cloud-init configures Azure CLI and azcopy to use that identity by default;
-`az login --use-device-code` is only for intentionally switching to a personal
-Azure CLI session.
-
-| Role | Scope | Purpose |
-|------|-------|---------|
-| Storage Blob Data Contributor | User storage account | `azcopy` for DB downloads |
-| AcrPull | ACR | Pull images if needed |
-| Contributor | Workload resource group | `az aks get-credentials`, `kubectl` |
 
 ### OpenAPI / Submit Workload Identity
 
@@ -226,7 +215,7 @@ Azure CLI session.
 ## §3 Signed-In User — Required Roles
 
 The signed-in user needs minimal roles since all Azure operations go
-through the Function App MI:
+through the shared MI:
 
 | Role | Scope | Purpose |
 |------|-------|---------|
@@ -238,13 +227,6 @@ All data-plane and mutation operations are performed by the MI.
 
 ## §4 Detailed Role Matrix by Feature
 
-### Virtual Machines (Remote Terminal)
-
-| Feature | MI Role | Scope |
-|---|---|---|
-| Create/Start/Stop/Delete VM | Contributor | Resource Group |
-| Run command on VM | Contributor | VM |
-
 ### Networking
 
 | Feature | MI Role | Scope |
@@ -255,9 +237,13 @@ All data-plane and mutation operations are performed by the MI.
 
 | Feature | MI Role | Scope |
 |---|---|---|
-| Create/toggle public access | Contributor | Resource Group / Storage Account |
-| List/upload/copy blobs | Storage Blob Data Contributor | Storage Account |
-| Generate SAS URL | Storage Blob Delegator | Storage Account |
+| Create / read containers | Contributor | Resource Group / Storage Account |
+| List / upload / copy blobs (streamed through the api sidecar) | Storage Blob Data Contributor | Storage Account |
+
+> **No SAS issuance.** Browser uploads/downloads are streamed through the api
+> sidecar over the private endpoint. `Storage Blob Delegator` is intentionally
+> NOT in the role list — see `docs/container-apps-migration.md` §"Browser ↔
+> Storage Proxy".
 
 ### Azure Container Registry
 
@@ -293,17 +279,20 @@ All data-plane and mutation operations are performed by the MI.
 | `does not have authorization` on RBAC | MI lacks **User Access Administrator** | Assign at target scope; or run the logged `az` command manually |
 | `Forbidden` on AKS kubeconfig | MI lacks **AKS Cluster User Role** | Assign on the cluster |
 | RBAC assigned but still failing | Propagation delay (typically 1–5 min; observed 403→200 within ~70s on `listClusterUserCredential`) | Wait and retry; verify with `az role assignment list --assignee <MI_OID>` |
-| `No identity found` | MI not enabled | Portal → Function App → Identity → System-assigned → On |
+| `No identity found` | MI not enabled | Portal → Container App → Identity → attach `id-elb-control` |
 
 ---
 
 ## §6 Security Notes
 
 - The MI has broad permissions by design — acceptable for a single-tenant
-  research deployment where the MI is scoped to one Function App.
-- `api/auth/obo.py` exists but is **dead code** (never imported). All
-  auth goes through MI via `DefaultAzureCredential`.
-- The bearer token is validated but never used for downstream calls.
-- NSG on the Remote Terminal restricts SSH to the caller's IP.
-- Storage `publicNetworkAccess` is `Enabled` (Y1 plan limitation) but
-  secured via RBAC — no anonymous access.
+  research deployment where the MI is scoped to one Container App.
+- The bearer token is validated but never used for downstream calls (no OBO
+  flow; no `API_CLIENT_SECRET` is provisioned).
+- The browser terminal is a `terminal` sidecar in the same Container App; the
+  api sidecar proxies the WebSocket to loopback `ttyd` on `127.0.0.1:7681`
+  after MSAL + tenant-role check. There is no SSH path, no NSG, no admin
+  password, and no public IP.
+- Every Storage account is `publicNetworkAccess: Disabled` and reachable only
+  via private endpoint from the platform VNet — no anonymous access, no SAS
+  to the browser, no temporary public-window toggle.

@@ -314,7 +314,7 @@ export function BlastSubmit() {
       gap_open: form.gap_open ? parseInt(form.gap_open, 10) : undefined,
       gap_extend: form.gap_extend ? parseInt(form.gap_extend, 10) : undefined,
       additional_options: opts.trim() || undefined,
-      machine_type: selectedCluster.node_sku || "Standard_E16s_v5",
+      machine_type: selectedCluster.node_sku || "Standard_E32s_v5",
       num_nodes: selectedCluster.node_count || 3,
       pd_size: "1000Gi",
       mem_request: "8Gi",

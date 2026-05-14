@@ -22,7 +22,7 @@ import time
 
 from azure.core.credentials import TokenCredential
 
-from services.azure_clients import kv_secret_client, kv_mgmt_client
+from api.services.azure_clients import kv_secret_client, kv_mgmt_client
 
 LOGGER = logging.getLogger(__name__)
 

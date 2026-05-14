@@ -1,14 +1,11 @@
-# Container Apps Migration Plan
+# Container Apps Architecture Reference
 
-This document defines the target architecture and migration sequence for moving
-the ElasticBLAST control plane from Azure Functions to Azure Container Apps.
-
-The goal is not a lift-and-shift of the Function App runtime. The current API
-has grown into a control plane that provisions Azure resources, tracks long
-BLAST jobs, proxies AKS services, manages storage access windows, and coordinates
-Remote Terminal operations. Container Apps should be used to split those
-responsibilities into independently deployable services with private networking
-and queue-backed workers.
+This document is the authoritative reference for the **shipped** ElasticBLAST
+control-plane architecture on Azure Container Apps: the bundled
+`ca-elb-control` Container App with six sidecars, the cost model, the storage
+network isolation rules, the browser ↔ storage proxy contract, and the
+identity / RBAC layout. The Azure Functions backend it replaced is preserved
+under [`legacy/functionapp/`](../legacy/functionapp/) for reference only.
 
 ## Decision Summary
 
@@ -77,7 +74,7 @@ plane for ElasticBLAST. Hosting the control plane outside AKS keeps recovery,
 upgrades, and cluster troubleshooting independent from the cluster being
 managed.
 
-### Explicitly removed from the prior plan
+### Explicitly out of scope (do not re-introduce)
 
 | Removed | Reason | Replacement |
 |---------|--------|-------------|
@@ -114,25 +111,6 @@ Not created: Azure Service Bus, Azure Cosmos DB, Azure Database for PostgreSQL,
 Azure Cache for Redis, dedicated Redis VM, dedicated Redis subnet/NSG/MI,
 Remote Terminal VM, terminal subnet, terminal NSG, terminal admin password
 secret, terminal MI, Azure Bastion, **Azure Static Web Apps**.
-
-## Why Move Away From Functions
-
-The current Function App remains a good proof-of-concept host, but several
-project responsibilities now fit a long-running service model better:
-
-- Many HTTP routes poll Azure, AKS, ACR, Storage, Key Vault, and VM state.
-- BLAST submit/delete/status flows can run for minutes to hours.
-- Durable entities currently hold job registry, audit, and schedule state that
-  should be queryable and portable outside the Functions runtime.
-- Consumption-plan networking limits make private Storage and Key Vault access
-  harder than the target security model requires.
-- SSH and AKS proxy-style features are awkward in HTTP-triggered Functions.
-- Packaging native Python dependencies into Functions has already required a
-  custom deployment script.
-
-Container Apps gives this project a better operational boundary: HTTP API,
-workers, schedulers, and terminal gateway can scale and fail independently while
-sharing one private Container Apps Environment.
 
 ## CPU and Memory Sizing
 
@@ -269,28 +247,7 @@ Isolation invariant.
 The plan defaults to **Option A** because the Storage Network Isolation rule
 is non-negotiable.
 
-### Comparison to today and to earlier revisions of this plan
-
-| Topology | Monthly Azure cost (control-plane only, KR Central, 5% active) | Notes |
-|----------|----------------------------------------------------------------|-------|
-| Today: Function App Consumption + SWA Standard | ~$10 – $15 | SWA $9, Function App < $5 at current load. Storage public access required. |
-| Earlier "split apps + Redis VM + Terminal VM + SWA + Service Bus + Cosmos" plan | **~$385** | 3 Container Apps (~$171), Standard_B2s Redis VM (~$30), Standard_D4s_v5 Terminal VM (~$140), Service Bus Standard (~$10), Cosmos serverless (~$25), SWA ($9). |
-| Previous "5 sidecars + SWA" plan | **~$140** | One bundled Container App + SWA. |
-| **Current "6 sidecars, no SWA"** | **~$132** | One bundled Container App. SWA folded in. |
-
-The current bundled topology spends roughly **$120 / month more** than the
-existing Function App + SWA setup, in exchange for:
-
-- Day-1 `publicNetworkAccess: Disabled` on every Storage account.
-- No SAS to the browser.
-- No Remote Terminal VM, no SSH, no admin password.
-- No Service Bus, no managed database, no managed Redis.
-- One billable Azure resource for the entire control plane.
-
-It is roughly **$253 / month cheaper** than the earlier multi-app + VM
-revision of the migration plan.
-
-### What can move the number
+### What can move the cost number
 
 - **Active fraction.** Real operator usage tends to be < 1% active on average.
   At 0.5% active the per-second meters drop to ~$52, total ~$127 / month.
@@ -306,7 +263,7 @@ revision of the migration plan.
 
 ## Storage Network Isolation (Hard Requirement)
 
-This is the most important non-functional requirement of the migration. Every
+This is the most important non-functional requirement of the control plane. Every
 rule in the rest of this document is consistent with it.
 
 ### Rules
@@ -330,11 +287,9 @@ rule in the rest of this document is consistent with it.
    - AKS nodes live in `snet-aks` in the same VNet, so they reach workload
      storage privately. The terminal sidecar reaches workload storage from
      `snet-containerapps` over the same private endpoint.
-   - **The current temporary-public-access window code path is removed in this
-     migration**, including the `auto-keep-enabled` toggle and any
-     `bypass: AzureServices` workaround. Anything that currently depends on
-     the public window must instead be reachable via private endpoint or be
-     re-architected.
+   - There is **no temporary public-access window**, no `auto-keep-enabled`
+     toggle, and no `bypass: AzureServices` workaround. Anything that needs to
+     reach Storage must do so via private endpoint from inside the VNet.
 3. **Browser ↔ storage**: the SPA never talks to Storage directly. **All
    browser downloads and uploads are proxied by the api sidecar.** No SAS
    tokens (user delegation or otherwise) are ever issued to the browser. See
@@ -346,7 +301,7 @@ rule in the rest of this document is consistent with it.
   workload-profile environment with an `infrastructureSubnetId` pointing at
   `snet-containerapps`.
 - `internal: true` is recommended (the SPA reaches the API through Front Door
-  or a SWA-linked backend). For phase 1, an external ingress is acceptable
+  or via the Container App's external ingress). External ingress is acceptable
   *if and only if* the egress path to Storage still goes through the VNet.
   Egress through the VNet is the property that lets Storage stay private,
   not the ingress mode.
@@ -492,10 +447,8 @@ its own Container App with `maxReplicas` > 1, **not** to re-introduce SAS.
   Content` with the correct `Content-Range`.
 - A SAST/grep check in CI: any code path that calls
   `generate_blob_sas`, `generate_container_sas`, or
-  `BlobClient.url` for a browser-bound response fails the build. The only
-  permitted SAS use is internal (e.g. `WEBSITE_RUN_FROM_PACKAGE` for the
-  legacy Function App during cutover); these call sites are explicitly
-  allow-listed.
+  `BlobClient.url` for a browser-bound response fails the build. There is no
+  permitted browser-bound SAS use.
 
 ## Target Architecture
 
@@ -550,11 +503,11 @@ Private endpoints and managed identity
 |-----------|----------------|---------|-------|
 | `ca-elb-control` | Azure Container Apps | Single Container App, six sidecars | `minReplicas: 1`, `maxReplicas: 1`. Public ingress only on the `api` container. |
 | `frontend` sidecar | Container in `ca-elb-control` | nginx:alpine serving the built React SPA `dist/` | Listens on `127.0.0.1:8081`. SPA navigation fallback to `/index.html`. Security headers (CSP, HSTS, X-Frame-Options, etc.) move from `staticwebapp.config.json` into `nginx.conf`. Image tag matches the SPA build hash so cache-busting is automatic across revisions. |
-| `api` sidecar | Container in `ca-elb-control` | FastAPI HTTP API on Python 3.11 + reverse proxy for non-`/api/*` to the frontend sidecar | Exposes the same `/api/*` contract during phase 1. Public ingress restricted (Container Apps ingress with optional `allowedCidrs`). Forwards requests that do not match `/api/*` to `127.0.0.1:8081`. Terminates the browser WebSocket and proxies it to the `terminal` sidecar's loopback `ttyd` after MSAL + tenant-role check. |
+| `api` sidecar | Container in `ca-elb-control` | FastAPI HTTP API on Python 3.12 + reverse proxy for non-`/api/*` to the frontend sidecar | Owns the public `/api/*` contract. Public ingress restricted (Container Apps ingress with optional `allowedCidrs`). Forwards requests that do not match `/api/*` to `127.0.0.1:8081`. Terminates the browser WebSocket and proxies it to the `terminal` sidecar's loopback `ttyd` after MSAL + tenant-role check. |
 | `worker` sidecar | Container in `ca-elb-control` | Celery worker | Pulls from `redis://127.0.0.1:6379/0`. Writes progress to Storage. |
 | `beat` sidecar | Container in `ca-elb-control` | Celery beat scheduler | Reads schedule definitions from Storage. Singleton by construction (one container, one replica). |
 | `redis` sidecar | Container in `ca-elb-control` | Broker + result backend | `redis:7-alpine`. Binds to `127.0.0.1` only. AOF on, RDB off. `/data` mounted from Azure Files share `redis-data`. |
-| `terminal` sidecar | Container in `ca-elb-control` | Browser-accessible operator shell with the `elastic-blast` toolchain | Image based on Ubuntu 22.04 with `azure-cli`, `kubectl`, `azcopy`, `python3.11`, `primer3`, `tmux`, `git`, `jq`, `make`, and the `elastic_blast` package + venv pre-installed. Runs `ttyd -p 7681 -i 127.0.0.1 -W tmux new -A -s elb` so each browser session attaches to the same persistent tmux. `/home/azureuser` mounted from Azure Files share `terminal-home` for file persistence across revision restarts. Authenticates to ARM with `id-elb-control` via the env-injected MSI endpoint. |
+| `terminal` sidecar | Container in `ca-elb-control` | Browser-accessible operator shell with the `elastic-blast` toolchain | Image based on Ubuntu 24.04 with `azure-cli`, `kubectl`, `azcopy`, `python3.12`, `primer3`, `tmux`, `git`, `jq`, `make`, and the `elastic_blast` package + venv pre-installed. Runs `ttyd -p 7681 -i 127.0.0.1 -W tmux new -A -s elb` so each browser session attaches to the same persistent tmux. `/home/azureuser` mounted from Azure Files share `terminal-home` for file persistence across revision restarts. Authenticates to ARM with `id-elb-control` via the env-injected MSI endpoint. |
 | Job state | Azure Storage table + blob | Job registry, audit log, command history, schedule records | Table for indexed lookups (`PartitionKey=job_id`); blob (append) for audit trail; blob for large request/response payloads. |
 | Secrets | Azure Key Vault | App configuration references and any future SSH material | Use private endpoint and RBAC. Keep purge protection enabled. No VM admin password is stored anywhere because there is no VM. |
 | Runtime storage | Azure Storage | Query, config, DB, and result blobs | Use private endpoints, HNS where needed, and managed identity auth. |
@@ -596,18 +549,6 @@ Image build (`elb-frontend:<tag>`):
 - Image tag = the SPA build hash so cache busting is automatic across
   revisions.
 - No managed identity needed; the container makes no outbound calls.
-
-What this sidecar replaces:
-
-| Old (Azure Static Web Apps) | New (`frontend` sidecar) |
-|-----------------------------|--------------------------|
-| `Microsoft.Web/staticSites` resource billed separately | Container in `ca-elb-control` (no extra Azure resource) |
-| `staticwebapp.config.json` `routes` and `globalHeaders` | `nginx.conf` `location` blocks + `add_header` lines |
-| `navigationFallback` `rewrite` to `/index.html` | nginx `try_files $uri /index.html;` |
-| SWA's free TLS + global CDN | Container Apps ingress TLS (no CDN). Acceptable for low-traffic operator workload; Front Door can be added later if needed. |
-| SWA hostname (`<name>.azurestaticapps.net`) registered as MSAL redirect URI | Container App ingress hostname (`<app>.<region>.azurecontainerapps.io`) registered as MSAL redirect URI. One-time MSAL App Registration update at cutover. |
-| `/api/*` linked-backend rewrite to the Function App | Same hostname, no rewrite needed: api sidecar matches `/api/*` directly and forwards everything else to the frontend sidecar. |
-| Separate CORS origin for SPA → Function App | None. Same origin. |
 
 ### `api` sidecar
 
@@ -691,7 +632,7 @@ Image build (`elb-terminal:<tag>`, pushed to the platform ACR):
 
 - Base: `ubuntu:22.04`.
 - Apt: `azure-cli`, `kubectl` (or installed via direct binary download for
-  version pinning), `azcopy`, `python3.11`, `python3.11-venv`,
+  version pinning), `azcopy`, `python3.12`, `python3.12-venv`,
   `python3-pip`, `primer3`, `git`, `make`, `jq`, `unzip`, `curl`, `tmux`,
   `ttyd`.
 - Pre-installed Python deps: `requirements/test.txt` from
@@ -758,14 +699,14 @@ Lifecycle:
   user session that runs an `elastic-blast submit`. The terminal is the
   single largest sidecar in the bundle because it carries the toolchain.
 
-What this sidecar replaces (full inventory of the Remote Terminal VM's
-responsibilities):
+What this sidecar intentionally does NOT carry (do not re-introduce; the
+left column is the retired Remote Terminal VM model preserved as a guardrail):
 
-| Old (VM) | New (sidecar) |
-|----------|---------------|
-| Ubuntu 22.04 VM (`vm-elb-terminal`) | `elb-terminal:<tag>` container in `ca-elb-control` |
+| Retired (VM model) | Replacement in the sidecar model |
+|--------------------|----------------------------------|
+| Ubuntu 24.04 VM (`vm-elb-terminal`) | `elb-terminal:<tag>` container in `ca-elb-control` |
 | 10-15 min cloud-init bootstrap (apt, pip, clone, venv, defender-onboarding retry) | Image build does this once at CI time. Cold start is whatever the container engine takes (seconds). |
-| `azure-cli`, `kubectl`, `azcopy`, `git`, `make`, `jq`, `python3.11`, `primer3`, `tmux` installed via cloud-init | All baked into the image at build time, with retry / failure handling moved to CI |
+| `azure-cli`, `kubectl`, `azcopy`, `git`, `make`, `jq`, `python3.12`, `primer3`, `tmux` installed via cloud-init | All baked into the image at build time, with retry / failure handling moved to CI |
 | `~/elastic-blast-azure` clone + venv + `pip install -r requirements/test.txt` + `pip install --no-build-isolation --no-deps elastic_blast` | All baked into the image; venv at `/opt/elb/venv`. The cloned repo is also surfaced under `/home/azureuser/elastic-blast-azure` via Azure Files for user convenience but is not on the critical path. |
 | `azure-mgmt-*` SDKs installed via cloud-init | Baked into the image |
 | `/etc/profile.d/elb-env.sh` env vars | Same content baked into the image |
@@ -865,29 +806,6 @@ artifact.
 - Storage tables are billed per operation, with no minimum throughput.
 - A future move to Cosmos DB or PostgreSQL is straightforward because the
   repository layer hides the storage shape.
-
-## Route Migration Map
-
-| Current area | Target owner | Migration notes |
-|--------------|--------------|-----------------|
-| `/api/health`, `/api/me` | `api` sidecar | Direct FastAPI routes. |
-| `monitor/*` | `api` sidecar with optional cache | Keep as fast reads. Add short TTL cache for expensive AKS and blob-count calls. |
-| `resources/ensure-*` | `worker` sidecar (Celery) | API dispatches resource tasks and reads progress from Storage state. |
-| `terminal/provision` | **Removed** | The terminal is now a sidecar that ships with the Container App; there is no per-user provisioning. |
-| `terminal/status/{instance_id}` | **Removed** | No Durable orchestration to track; replaced by `GET /api/terminal/health`. |
-| `terminal/{vm}/start`, `stop`, `destroy` | **Removed** | Lifecycle is the Container App revision; no per-VM action. |
-| `terminal/{vm}/password` | **Removed** | No SSH password to reveal. |
-| `terminal/{vm}/open-ssh` | **Removed** | No SSH path. |
-| `terminal/{vm}/health` | `api` sidecar (renamed `terminal/health`) | Cheap loopback ping to `127.0.0.1:7681` plus revision-state passthrough. |
-| `terminal/ws` (new) | `api` sidecar (WebSocket upgrade) | After MSAL + tenant-role check, duplex-copy bytes between the browser and the terminal sidecar's loopback `ttyd`. |
-| `aks/provision`, `aks/openapi/deploy` | `worker` sidecar (Celery) | Long-running ARM and AKS Run Command operations must run as Celery tasks. |
-| `aks/openapi/proxy` | `api` sidecar initially | Later replace public LoadBalancer with private service access or API gateway pattern. |
-| `acr/build-images` | `worker` sidecar (Celery) | One task per image; track ACR run IDs in Storage state. |
-| `storage/prepare-db` | `worker` sidecar (Celery, `storage` queue) | Avoid background threads in API. Worker owns NCBI download/copy progress. |
-| `blast/submit`, `blast/delete`, `warmup/start` | `worker` sidecar (Celery, `blast` queue) | Celery tasks with explicit state transitions in Storage. |
-| `blast/jobs/*` | `api` sidecar | Reads from Storage state and Storage data plane. |
-| Durable entities | Storage state | Replace job registry, audit trail, and schedules with Storage table + append blobs. |
-| Scheduled work (DB refresh, monitoring, reconciler) | `beat` sidecar | Celery beat dispatches to the appropriate worker queue. |
 
 ## Networking Plan
 
@@ -999,9 +917,6 @@ Target rules:
   downloads go through the api sidecar as a streaming proxy. See the
   "Browser ↔ Storage Proxy" section for the contract, chunk sizes,
   concurrency limits, and verification tests.
-- Internal SAS use (e.g. legacy Function App `WEBSITE_RUN_FROM_PACKAGE` during
-  cutover) is allow-listed and time-bounded. No new internal SAS use is added
-  in this migration.
 - Store DB preparation progress in the platform state table, not background
   threads.
 - For large NCBI database imports, the worker downloads through the private
@@ -1012,317 +927,16 @@ Target rules:
 
 ## AKS Plan
 
-AKS remains the compute plane for ElasticBLAST. The migration should improve how
-the control plane talks to AKS, not replace AKS.
+AKS remains the compute plane for ElasticBLAST.
 
 Target rules:
 
 - Keep OIDC issuer and Workload Identity enabled.
 - Keep Blob CSI driver enabled if BLAST DB access depends on it.
 - Prefer private cluster for production environments.
-- If private cluster is not feasible during phase 1, configure authorized IP
+- If a private cluster is not feasible, configure authorized IP
   ranges and audit the exception.
 - Replace public `elb-openapi` LoadBalancer with an internal service or ingress
   once the Container Apps Environment and AKS can communicate privately.
 - Continue to surface AKS node, pod, warmup, and job state through API routes;
   do not make the browser talk to AKS directly.
-
-## Infrastructure Changes
-
-Add new Bicep modules before removing the Function App module:
-
-- `infra/modules/containerAppsEnvironment.bicep` (Environment + Azure Files
-  storage definition that mounts `redis-data`).
-- `infra/modules/containerAppControl.bicep` (single `ca-elb-control` Container
-  App with six sidecars wired together; Redis and terminal volume mounts;
-  shared MI).
-- `infra/modules/storageState.bicep` (platform table + audit/payload/schedule
-  containers + the `redis-data` file share, lifecycle policies).
-- `infra/modules/privateEndpoints.bicep`
-- `infra/modules/identities.bicep`
-- `infra/modules/acr.bicep`, if platform app images use a platform-owned ACR
-
-Deleted vs the previous (multi-app) revision of this plan:
-
-- `serviceBus.bicep` (no Service Bus).
-- `stateStore.bicep` (no Cosmos / PostgreSQL).
-- `redisVm.bicep` (no Redis VM).
-
-Update `azure.yaml` only after the new containers can be built and deployed.
-The first deployment should support both backends in parallel:
-
-- Existing Function App remains the production API.
-- Container Apps backend is deployed under a separate hostname.
-- The SPA points to the new API only in a dev or staging environment.
-
-## Application Refactor Plan
-
-### Phase 0: Preparation
-
-- Add this architecture document.
-- Add a shared service layer package that does not import `azure.functions` or
-  `azure.durable_functions`.
-- Inventory every route and classify it as fast read, queued command, or stream.
-- Add correlation IDs to current API responses and logs so parity testing is
-  easier.
-
-### Phase 1: Containerize the API on a private network
-
-- Provision the platform VNet and subnets (`snet-containerapps` /23 delegated
-  to `Microsoft.App/environments`, `snet-private-endpoints`, `snet-aks`).
-- Provision the Container Apps Environment with workload profile and the
-  `snet-containerapps` infrastructure subnet.
-- Provision the platform Storage account, Key Vault, and ACR with
-  `publicNetworkAccess: Disabled` from creation. Add the private endpoints
-  and link the private DNS zones to the platform VNet **before** the
-  Container App tries to use them.
-- Add a FastAPI app under `api_app/` or `api/asgi/`.
-- Reuse existing Pydantic models and Azure service wrappers.
-- Add a Dockerfile for Python 3.11.
-- Implement `/api/health`, `/api/me`, and read-only `monitor/*` routes first.
-- Deploy `ca-elb-control` to the Container Apps Environment with public
-  ingress restricted to the SWA origin where possible.
-- Verify from inside the api sidecar that storage hostnames resolve to
-  private IPs and that an external curl to the same hostname is rejected.
-- Keep the Function App route contract unchanged for the SPA.
-
-### Phase 2: Add Storage State, Redis Sidecar, Terminal Sidecar, Frontend Sidecar, and Celery
-
-- Provision the platform Storage state table/containers and the `redis-data`
-  and `terminal-home` Azure Files shares.
-- Build the `elb-terminal:<tag>` image (Ubuntu 22.04 + azure-cli + kubectl +
-  azcopy + python3.11 + primer3 + tmux + ttyd + pre-installed
-  `elastic_blast` venv) and push to the platform ACR.
-- Build the `elb-frontend:<tag>` image (multi-stage: Vite build of
-  [web/](web/) → `nginx:alpine` with the built `dist/` and a custom
-  `nginx.conf` carrying the `staticwebapp.config.json` security headers).
-- Update the Container App definition to bundle the six sidecars (`frontend`,
-  `api`, `worker`, `beat`, `redis`, `terminal`) with the two Azure Files
-  volume mounts.
-- Add the api sidecar's catch-all reverse proxy to `127.0.0.1:8081` for any
-  request whose path does not start with `/api/`.
-- Add command, job, audit, and schedule repositories backed by Storage.
-- Wire Celery into the API container (task dispatch only) using
-  `redis://127.0.0.1:6379/0` as broker and result backend.
-- Implement `POST -> dispatch task -> 202` flow for one low-risk operation,
-  such as `storage/public-access/window` (only as a transitional shim during
-  rollout — the day-1 invariant removes it).
-- Add the `WS /api/terminal/ws` WebSocket upgrade in the api sidecar with
-  MSAL + tenant-role check, and the duplex-copy proxy to `127.0.0.1:7681`.
-- Use `job_id` as the idempotency key, guarded by status transitions in the
-  Storage table.
-- Add Celery `task_failure` signal handlers that write to the `dead-letter`
-  blob container and an operator-visible retry story.
-
-### Phase 3: Move Long-Running Work and Delete the Remote Terminal VM
-
-- Move `terminal/provision` and the rest of the per-VM terminal API surface
-  to **deletion**: there is no Remote Terminal VM in the new design. The
-  `terminal` sidecar replaces it. See the Service Boundaries → `terminal`
-  section for the full inventory of removed endpoints and what replaces them.
-- Move `acr/build-images` to queue-backed worker execution.
-- Move `storage/prepare-db` out of API background threads.
-- Move `aks/provision` and `aks/openapi/deploy` to worker commands.
-- Move `blast/submit`, `blast/delete`, and warmup flows last because they have
-  the largest user-visible surface.
-
-### Phase 4: Tighten and Verify Private Networking
-
-- Confirm `publicNetworkAccess: Disabled` on platform Storage, workload
-  Storage, Key Vault, and ACR.
-- Confirm private DNS zones are linked to the platform VNet (blob, table,
-  file, vault, acr).
-- Run the verification checks listed in “Storage Network Isolation →
-  Verification” section as part of the smoke suite.
-- Convert `elb-openapi` service from public LoadBalancer to private access.
-- Replace public SSH access with Bastion or a private terminal gateway.
-
-This phase is verification-heavy because the network isolation invariants
-were already established in phase 1.
-
-### Phase 5: Cutover and Removal
-
-- Run the SPA, served by the `frontend` sidecar, against the Container Apps
-  backend in staging.
-- Update the MSAL App Registration redirect URI to the Container App ingress
-  hostname (keep the SWA hostname as a fallback URI until cutover is
-  confirmed).
-- Replay core workflows: open the browser shell, ensure resources, build
-  images, provision AKS, prepare DB, submit BLAST, upload queries via the
-  proxy, download results via the proxy (with Range), delete job.
-- Switch production traffic to the Container App ingress hostname (DNS or
-  Front Door upstream change, depending on what fronts the app).
-- Keep the Static Web App and Function App deployed but unused for one
-  release window.
-- Remove the SWA hostname from the MSAL redirect URI list once the new
-  hostname has been the only one used for a full release window.
-- Remove the Static Web App resource (`Microsoft.Web/staticSites`).
-- Remove Durable Functions code and Function App IaC after parity is proven.
-
-## Validation Plan
-
-Minimum validation before production cutover:
-
-- Unit tests for repositories (Storage table + blob), Celery task handlers,
-  auth, and Azure SDK wrappers.
-- Container build test for every sidecar image.
-- Local `docker compose` smoke test that runs all six sidecars together
-  (or `docker run` of the api image with `nginx:alpine` and
-  `redis:7-alpine` sidecars and Azurite for state).
-- Integration test for Celery dispatch → worker execution → Storage state
-  update with managed identity in an Azure dev environment.
-- `azd provision --preview` or subscription-scope `what-if` for Bicep changes.
-- End-to-end browser test of the dashboard against Container Apps.
-- End-to-end BLAST smoke test with a tiny query.
-- Network validation proving Key Vault and Storage can be reached privately and
-  public access can be disabled.
-- Failure-path validation that storage access is closed after failed BLAST work.
-- Revision restart drill: trigger a Container App revision restart, confirm AOF
-  on the Azure Files mount restores the queue, and confirm the beat reconciler
-  re-dispatches any task observed as `running` whose worker disappeared.
-
-## Cutover Checklist
-
-- [ ] New `ca-elb-control` Container App is deployed in staging with all four
-      sidecars healthy.
-- [ ] `api` sidecar validates the same MSAL tokens as the Function App.
-- [ ] Shared identity `id-elb-control` has all required RBAC at workload
-      scopes.
-- [ ] **Platform Storage account: `publicNetworkAccess=Disabled`,
-      `defaultAction=Deny`, `bypass=None`, `ipRules=[]`. Verified.**
-- [ ] **Workload Storage account: same as above. Verified.**
-- [ ] **From inside the api sidecar, `<account>.blob.core.windows.net`,
-      `.table.core.windows.net`, and `.file.core.windows.net` all resolve to
-      `10.x.x.x` private IPs.**
-- [ ] **From the public internet, `curl https://<account>.blob.core.windows.net/`
-      returns `403 PublicAccessNotPermitted` or fails DNS resolution.**
-- [ ] Storage state table contains migrated job registry, audit, and schedule
-      records or the migration intentionally starts with a clean state.
-- [ ] Celery dead-letter container is monitored.
-- [ ] Redis sidecar successfully mounts `redis-data` Azure Files share while
-      the platform storage account is `publicNetworkAccess=Disabled`. AOF
-      survives a revision restart.
-- [ ] **Terminal sidecar successfully mounts `terminal-home` Azure Files
-      share while the platform storage account is
-      `publicNetworkAccess=Disabled`.**
-- [ ] Dashboard polling routes meet current response-time expectations.
-- [ ] **Browser opens the Container App ingress hostname and gets the SPA
-      served by the `frontend` sidecar; `/api/health` returns 200 from the
-      same origin (no CORS preflight observed).**
-- [ ] **MSAL App Registration redirect URI has been updated to the
-      Container App ingress hostname; sign-in completes without redirect_uri
-      mismatch.**
-- [ ] **Static Web App resource has been deleted (or marked for deletion in
-      the next cleanup window).**
-- [ ] **Browser opens the Terminal tab, completes MSAL + tenant-role check,
-      and gets a working bash prompt with `az account show`, `kubectl get
-      nodes`, `azcopy --version`, and `elastic-blast --help` all responding
-      successfully.**
-- [ ] **Closing and re-opening the Terminal tab reattaches to the same tmux
-      session (no work lost).**
-- [ ] **No SSH endpoint exists in the deployed environment: `nmap -p 22
-      <api-host>` finds no open SSH port and there is no public IP that
-      points at a VM.**
-- [ ] **`az resource list -g rg-elb-terminal --query "[?type=='Microsoft.Compute/virtualMachines']"`
-      returns an empty list (or the resource group has been deleted).**
-- [ ] ACR image build workflow is verified.
-- [ ] AKS provision and OpenAPI deployment workflows are verified.
-- [ ] BLAST submit/status/delete workflow is verified **without ever toggling
-      Storage public access**. The legacy storage-window code path has been
-      removed from the codebase.
-- [ ] **Browser uploads of query files succeed via the api sidecar proxy with
-      no SAS in browser DevTools.**
-- [ ] **Browser downloads of result files succeed via the api sidecar proxy,
-      including a Range request that returns `206 Partial Content`.**
-- [ ] **CI grep check passes: no code path generates a SAS for a browser-bound
-      response.**
-- [ ] Private endpoint DNS resolution is verified from the Container App
-      (blob, table, file, vault, acr).
-- [ ] App Insights dashboards are updated for each sidecar's log stream.
-- [ ] Rollback DNS or SWA backend setting is documented.
-
-## Rollback Plan
-
-Keep the Function App backend intact until the Container Apps backend has passed
-one full release window.
-
-Rollback steps:
-
-1. Point SWA backend or `VITE_API_BASE_URL` back to the Function App.
-2. Set `ca-elb-control` to `minReplicas: 0, maxReplicas: 0` to stop the
-   `worker` and `beat` sidecars (and the `api` ingress) from issuing further
-   commands.
-3. Leave the Storage state table and the `redis-data` Azure Files share intact
-   for forensic inspection.
-4. Keep private endpoint changes only if they do not break the Function App
-   runtime path. Otherwise restore public access with the documented exception.
-5. File follow-up issues for every command that was in-flight during rollback.
-5. File follow-up issues for every command that was in-flight during rollback.
-
-## Risks and Mitigations
-
-| Risk | Mitigation |
-|------|------------|
-| Duplicate task execution | Use `job_id` as the idempotency key and guard worker entry by expected status (`queued -> running` ETag swap on the Storage table row). |
-| RBAC propagation delays | Surface retryable authorization failures and include role assignment diagnostics in worker logs. |
-| Private DNS misconfiguration | Add a deployment validation script that resolves each private endpoint from the Container App (including Azure Files for the Redis mount). |
-| Storage public access still needed by ElasticBLAST | Removed as a supported design state. The current `auto-keep-enabled` toggle and `bypass: AzureServices` shortcut are deleted in this migration. Anything that still depends on them is re-architected to use private endpoints (AKS in same VNet, browser uploads/downloads proxied through the api sidecar, NCBI imports performed by the worker over the private endpoint). |
-| API sidecar saturated by proxy traffic | Initial guardrails: 4 concurrent transfers per replica (semaphore + `429`), 256 MiB upload cap, 1 MiB download chunk size, 4 MiB upload block size. Escalation path: split api into its own Container App with `maxReplicas` > 1; do **not** re-introduce SAS to the browser. |
-| Large result download exceeds 240s Container Apps timeout | The proxy advertises `Accept-Ranges: bytes` and honors `Range` requests; the SPA chunks downloads larger than ~200 MiB. Single-shot downloads above the limit return a `Retry with Range` body. |
-| Sidecar crash during cleanup | Store compensating cleanup tasks as separate Celery tasks and run a periodic reconciler from `beat`. |
-| API contract drift | Keep typed frontend clients and run the SPA against both backends during staging. |
-| Cannot scale API horizontally | Accepted trade-off for cost. The bundled topology pins `minReplicas: 1, maxReplicas: 1`. If sustained load ever requires scale-out, split `beat` and `redis` into a separate Container App first, then move `worker` to a separately scalable app. |
-| Whole stack restarts on any image change | Deploy revisions during low-traffic windows. The reconciler in `beat` re-dispatches any task that was in flight at restart. |
-| Redis sidecar is a single point of failure within the revision | AOF on Azure Files survives revision restarts; in-flight tasks are visible in Storage state and re-dispatched by the reconciler. |
-| Shared identity over-grants the API sidecar | Mutating ARM operations only run inside Celery task handlers; document and review the surface. A future split into per-sidecar Container Apps restores per-process identities. |
-| Celery beat duplicate scheduling | Beat is one container in one replica by construction; reject schedule writes if the beat heartbeat (written to a Storage row) is stale. |
-| Browser terminal session lost on revision restart | tmux survives only within one revision. The user-visible files persist on `terminal-home` Azure Files. The terminal MOTD makes this explicit so the user runs long submissions inside `tmux` (the default attachment) rather than relying on tail-following. The api closes the WebSocket cleanly so the browser shows a banner instead of hanging. |
-| Multiple operators sharing one tmux session | Single shared `elb` tmux is intentional for low-traffic operator-driven use. Separate per-user tmux is added if more than one operator regularly uses the terminal: ttyd is launched with `-W tmux new -A -s elb-${owner_oid}` and the api passes the validated `owner_oid` as an env var on session upgrade. |
-| Terminal sidecar carries the heaviest image | The terminal image is built and tagged in CI; pinned through the same `IMAGE_TAGS` table that the worker uses. Cold start cost is amortised across the always-on `minReplicas: 1` revision. |
-| WebSocket auth bypass | The api sidecar refuses any upgrade without a valid MSAL token and the configured tenant role. The loopback `ttyd` is bound to `127.0.0.1`, so even a misconfigured ingress cannot expose the shell directly. CI test asserts both. |
-| Loss of Static Web App's global CDN | Container Apps ingress provides TLS but no CDN. Acceptable for low-traffic operator workload. Escalation: put Front Door in front of the Container App ingress (separate, optional resource). |
-| MSAL redirect URI mismatch at cutover | One-time App Registration update during cutover. Cutover checklist gates production switch on a successful sign-in against the new hostname. Document a rollback step that re-points the redirect URI back to the SWA hostname while the SWA resource is still alive. |
-| nginx misconfiguration breaks SPA routing | The `nginx.conf` is short (one `try_files` line + a few `add_header` lines + cache rules). It is part of the image and covered by an integration test that fetches `/`, `/some/deep/route`, and `/assets/<known-hash>.js` from a running container and asserts the right status + headers. |
-| Frontend image cache busting | Image tag derived from the SPA build hash so a code change always produces a new image and a new revision. The api sidecar reverse proxy passes through the frontend's `Cache-Control` headers unchanged, so browser caching follows nginx's policy (immutable for `/assets/*`, no-cache for `/index.html`). |
-
-## Open Decisions
-
-| Decision | Recommended default | Why |
-|----------|---------------------|-----|
-| State store | Azure Storage table + append blobs | No managed database needed; append-mostly workload, single-key lookup. Repository layer hides shape so a future move to Cosmos DB is local. |
-| Queue / broker | Redis 7 alpine sidecar inside the Container App | Removes the cost of any managed broker and the cost/operations of a dedicated VM. Acceptable because traffic is low and reconciliation handles in-flight loss. |
-| Topology | One Container App with six sidecars | Minimum cost: one billable revision, smallest viable CPU/memory split, no Remote Terminal VM, no Static Web App. Trade-offs documented in Risks. |
-| Scheduler | Celery beat sidecar | One scheduling system; reuses the Celery worker pool. |
-| API framework | FastAPI | Matches Python/Pydantic style and supports OpenAPI naturally. |
-| App image registry | Platform ACR | Keeps app container lifecycle separate from user ElasticBLAST ACRs. |
-| SPA hosting | `frontend` sidecar (nginx:alpine) inside the same Container App | Removes the Static Web App resource; same-origin with the api removes CORS surface; one MSAL redirect URI. CDN can be added later via Front Door. |
-| Browser terminal | `terminal` sidecar with loopback `ttyd`, proxied by the api sidecar's authenticated WebSocket | No SSH, no VM, no NSG, no admin password. tmux gives session continuity across browser refreshes. |
-| Control plane in AKS | No | Keep control plane independent from the workload cluster it manages. |
-
-## First Implementation Slice
-
-The smallest useful PR should avoid moving BLAST execution immediately.
-
-Scope:
-
-- Add platform ACR and Container Apps Environment Bicep modules.
-- Add the `ca-elb-control` Container App with only the `api` sidecar enabled
-  initially, exposing `/api/health`, `/api/me`, and one monitor route.
-- Add Dockerfile and azd wiring for the api image.
-- Deploy side-by-side with the existing Function App.
-- Add a staging-only frontend environment variable that points to Container
-  Apps.
-
-Exit criteria:
-
-- The api image builds locally.
-- The Container App deploys with managed identity.
-- Health and identity routes work through HTTPS.
-- One dashboard card can read from the Container Apps backend.
-- Existing Function App production path remains unchanged.
-
-The `worker`, `beat`, `redis`, `terminal`, and `frontend` sidecars (plus the
-Azure Files mounts and Storage state schema) are introduced in phase 2 — the
-first slice does not need them. Until the `frontend` sidecar is in place, the
-existing Static Web App keeps serving the SPA and points its linked-backend at
-the Function App, exactly as today.

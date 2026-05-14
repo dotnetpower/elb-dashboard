@@ -28,10 +28,14 @@ param allowPublicAccessForBootstrap bool = true
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
+var moduleTags = union(tags, {
+  role: 'secrets'
+})
+
 resource kv 'Microsoft.KeyVault/vaults@2024-04-01-preview' = {
   name: keyVaultName
   location: location
-  tags: tags
+  tags: moduleTags
   properties: {
     tenantId: tenantId
     sku: {
@@ -84,14 +88,14 @@ resource operatorSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04
 resource kvPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (!allowPublicAccessForBootstrap) {
   name: 'privatelink.vaultcore.azure.net'
   location: 'global'
-  tags: tags
+  tags: moduleTags
 }
 
 resource kvPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (!allowPublicAccessForBootstrap) {
   parent: kvPrivateDnsZone
   name: 'link-${uniqueString(vnetResourceId)}'
   location: 'global'
-  tags: tags
+  tags: moduleTags
   properties: {
     virtualNetwork: { id: vnetResourceId }
     registrationEnabled: false
@@ -101,7 +105,7 @@ resource kvPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks
 resource kvPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (!allowPublicAccessForBootstrap) {
   name: 'pe-${keyVaultName}'
   location: location
-  tags: tags
+  tags: moduleTags
   properties: {
     subnet: { id: privateEndpointSubnetId }
     privateLinkServiceConnections: [

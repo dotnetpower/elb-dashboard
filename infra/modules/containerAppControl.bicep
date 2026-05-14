@@ -59,6 +59,14 @@ param allowedOrigins array = []
 @description('Tags applied to every resource in this module.')
 param tags object = {}
 
+@secure()
+@description('Shared secret used by the api / worker sidecars to authenticate with the terminal exec server (loopback :7682). Auto-rotated on every deployment via newGuid(); both sidecars receive the same Container Apps secret reference so they always agree.')
+param execToken string = newGuid()
+
+var moduleTags = union(tags, {
+  role: 'control-plane'
+})
+
 var bootstrapImage = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
 var apiImage      = useBootstrapImage ? bootstrapImage : '${acrLoginServer}/elb-api:${apiImageTag}'
@@ -71,7 +79,7 @@ var blobEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformS
 resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
   location: location
-  tags: tags
+  tags: moduleTags
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
@@ -83,6 +91,16 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
     workloadProfileName: 'Consumption'
     configuration: {
       activeRevisionsMode: 'Single'
+      secrets: [
+        // Shared secret for the loopback exec channel between the api/worker
+        // sidecars and the terminal sidecar's exec server. Container Apps
+        // stores secrets encrypted at rest; both sidecars receive it via
+        // `secretRef` below so the value never appears in env-var listings.
+        {
+          name: 'exec-token'
+          value: execToken
+        }
+      ]
       ingress: {
         external: true
         targetPort: 8080
@@ -139,6 +157,8 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
             { name: 'FRONTEND_UPSTREAM', value: 'http://127.0.0.1:8081' }
             { name: 'TERMINAL_UPSTREAM', value: 'http://127.0.0.1:7681' }
+            { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
+            { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
           probes: [
@@ -177,7 +197,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           image: apiImage
           command: [ '/bin/sh', '-c' ]
           args: [
-            'celery -A api_app.celery_app:celery_app worker --loglevel=info -Q default,azure,blast,storage --concurrency=2'
+            'celery -A api.celery_app:celery_app worker --loglevel=info -Q default,azure,blast,storage --concurrency=2'
           ]
           resources: {
             cpu: json('0.5')
@@ -192,6 +212,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_BLOB_ENDPOINT', value: blobEndpoint }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
+            // Worker calls api.services.terminal_exec which needs the same
+            // shared secret as the api sidecar.
+            { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
+            { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
@@ -206,7 +230,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           image: apiImage
           command: [ '/bin/sh', '-c' ]
           args: [
-            'celery -A api_app.celery_app:celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid'
+            'celery -A api.celery_app:celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid'
           ]
           resources: {
             cpu: json('0.25')
@@ -257,6 +281,29 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZCOPY_MSI_CLIENT_ID', value: sharedIdentityClientId }
             { name: 'ELB_SKIP_DB_VERIFY', value: 'true' }
             { name: 'ELB_DISABLE_AUTO_SHUTDOWN', value: '1' }
+            // Programmatic exec channel — see api/services/terminal_exec.py
+            // and terminal/exec_server.py. Same secret as the api sidecar.
+            { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
+            { name: 'EXEC_MAX_CONCURRENCY', value: '4' }
+          ]
+          // Probe the exec server's /healthz (no auth required). Catches the
+          // case where the supervisor's `wait -n` did not fire because the
+          // python process is still alive but the HTTP server is hung.
+          probes: [
+            {
+              type: 'Liveness'
+              httpGet: { path: '/healthz', port: 7682, scheme: 'HTTP' }
+              periodSeconds: 30
+              timeoutSeconds: 5
+              failureThreshold: 3
+            }
+            {
+              type: 'Readiness'
+              httpGet: { path: '/healthz', port: 7682, scheme: 'HTTP' }
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 3
+            }
           ]
         }
       ]

@@ -9,13 +9,13 @@ from typing import Any
 
 from azure.core.credentials import TokenCredential
 
-from services.azure_clients import (
+from api.services.azure_clients import (
     acr_client,
     aks_client,
     compute_client,
     storage_client,
 )
-from services.image_tags import IMAGE_TAGS
+from api.services.image_tags import IMAGE_TAGS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -67,40 +67,24 @@ def list_aks_clusters(
     return out
 
 
-def run_aks_command(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    command: str,
-) -> dict[str, Any]:
-    """Run a kubectl command on the AKS cluster via Azure Run Command API.
-
-    Only allows read-only commands (get, top, describe, logs).
-    Returns the command output as text.
-    SLOW (~30s) — use k8s_* functions below for direct API access.
-    """
-    # Allowlist: only read-only kubectl commands, reject shell metacharacters
-    _SHELL_META = re.compile(r"[;&|`$(){}\\!\n\r<>~\[\]?*]")
-    if _SHELL_META.search(command):
-        raise ValueError("Command contains forbidden shell metacharacters")
-    allowed_prefixes = ("kubectl get ", "kubectl top ", "kubectl describe ", "kubectl version", "kubectl logs ")
-    if not any(command.startswith(p) for p in allowed_prefixes):
-        raise ValueError("Command not allowed: only read-only kubectl commands are accepted")
-
-    client = aks_client(credential, subscription_id)
-    from azure.mgmt.containerservice.models import RunCommandRequest
-    run_req = RunCommandRequest(command=command)
-    poller = client.managed_clusters.begin_run_command(
-        resource_group, cluster_name, run_req
-    )
-    result = poller.result(timeout=60)
-    return {
-        "exit_code": result.exit_code,
-        "output": result.logs or "",
-        "started_at": result.started_at.isoformat() if result.started_at else None,
-        "finished_at": result.finished_at.isoformat() if result.finished_at else None,
-    }
+# ---------------------------------------------------------------------------
+# AKS / VM Run Command is INTENTIONALLY NOT EXPOSED here.
+#
+# The previous `run_aks_command` wrapper around
+# `ManagedClusters.begin_run_command` was removed (zero callers, ~30 s slow
+# path). Every read-only operation the dashboard needs is already covered by
+# the direct Kubernetes API path below (`k8s_get_nodes`, `k8s_get_pods`,
+# `k8s_top_nodes`, `k8s_pod_logs`, `k8s_warmup_status`, …) which uses the
+# kubeconfig token from `_get_k8s_session` and finishes in tens of
+# milliseconds instead of tens of seconds.
+#
+# Do NOT bring back `begin_run_command` for new monitoring features. If a new
+# read-only need cannot be satisfied by the existing `k8s_*` helpers, add a
+# new `k8s_*` function that uses `_get_k8s_session()` rather than reaching
+# for `RunCommandRequest`. For commands that genuinely need shell tooling
+# (e.g. `azcopy`, `elastic-blast` CLI), see `api/services/terminal_exec.py`
+# for the contract that proxies into the loopback `terminal` sidecar.
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
