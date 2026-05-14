@@ -567,6 +567,12 @@ textarea.form-input {
   font-size: var(--font-size-control);
 }
 
+/* ── BLAST database row (StorageCard popup) ── */
+.db-row:hover {
+  background: rgba(255, 255, 255, 0.02) !important;
+  border-color: var(--border-weak) !important;
+}
+
 .kv:last-child {
   border-bottom: none;
 }

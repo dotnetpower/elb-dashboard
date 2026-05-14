@@ -9,7 +9,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ExternalLink, CheckCircle2, AlertTriangle } from "lucide-react";
+import { ExternalLink, CheckCircle2, Info, AlertTriangle } from "lucide-react";
 
 import { fetchApiRaw } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
@@ -39,18 +39,31 @@ export function TerminalCard() {
 
   const status = health.data?.status ?? (health.isLoading ? "checking" : "unknown");
   const isOk = status === "ok";
+  // `down` is the expected state in local dev (no docker-compose / no Container App revision).
+  // Render it as a muted "unavailable" rather than a red "error" so it doesn't
+  // look like something the user broke.
+  const isUnavailable = status === "down";
+  const cardStatus = isOk
+    ? "ok"
+    : status === "checking"
+      ? "loading"
+      : isUnavailable
+        ? "unavailable"
+        : "error";
   const dotColor = isOk
     ? "var(--success)"
     : status === "checking"
       ? "var(--text-muted)"
-      : "var(--warning)";
+      : isUnavailable
+        ? "var(--text-muted)"
+        : "var(--warning)";
 
   return (
     <MonitorCard
       title="Terminal"
       subtitle="Browser shell with elastic-blast toolchain (in-process sidecar)"
       accentColor="terminal"
-      status={isOk ? "ok" : status === "checking" ? "loading" : "error"}
+      status={cardStatus}
       lastRefreshed={health.dataUpdatedAt ? new Date(health.dataUpdatedAt) : null}
       onRefresh={() => health.refetch()}
       fetching={health.isFetching}
@@ -89,6 +102,14 @@ export function TerminalCard() {
                 </>
               ) : status === "checking" ? (
                 "Checking…"
+              ) : isUnavailable ? (
+                <>
+                  <Info
+                    size={12}
+                    style={{ display: "inline", marginRight: 4, verticalAlign: -1, color: "var(--text-muted)" }}
+                  />
+                  Sidecar unavailable
+                </>
               ) : (
                 <>
                   <AlertTriangle
@@ -100,9 +121,15 @@ export function TerminalCard() {
               )}
             </div>
             <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-              ttyd loopback{" "}
-              <code style={{ fontFamily: "var(--font-mono)" }}>127.0.0.1:7681</code>
-              {health.data?.upstream_status ? ` · upstream ${health.data.upstream_status}` : ""}
+              {isUnavailable ? (
+                "Not running in this environment. The terminal sidecar only ships with the deployed Container App (or a local docker-compose stack)."
+              ) : (
+                <>
+                  ttyd loopback{" "}
+                  <code style={{ fontFamily: "var(--font-mono)" }}>127.0.0.1:7681</code>
+                  {health.data?.upstream_status ? ` · upstream ${health.data.upstream_status}` : ""}
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -131,20 +158,45 @@ export function TerminalCard() {
           </div>
         </div>
 
-        <Link
-          to="/terminal"
-          className="glass-button glass-button--primary"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            justifyContent: "center",
-            textDecoration: "none",
-          }}
-        >
-          <ExternalLink size={14} />
-          Open Terminal
-        </Link>
+        {isOk ? (
+          <Link
+            to="/terminal"
+            className="glass-button glass-button--primary"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              justifyContent: "center",
+              textDecoration: "none",
+            }}
+          >
+            <ExternalLink size={14} />
+            Open Terminal
+          </Link>
+        ) : (
+          <button
+            type="button"
+            className="glass-button"
+            disabled
+            title={
+              isUnavailable
+                ? "Terminal sidecar is not available in this environment"
+                : status === "checking"
+                  ? "Checking sidecar status…"
+                  : `Terminal sidecar is ${status} — cannot open`
+            }
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              justifyContent: "center",
+              cursor: "not-allowed",
+            }}
+          >
+            <ExternalLink size={14} />
+            Open Terminal
+          </button>
+        )}
       </div>
     </MonitorCard>
   );

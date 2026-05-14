@@ -12,6 +12,7 @@ import { JobCard } from "@/components/cards/JobCard";
 import { GettingStartedGuide } from "@/components/GettingStartedGuide";
 import { armProxyApi, monitoringApi } from "@/api/endpoints";
 import { listSubscriptions as armListSubs, listResourceGroups as armListRGs } from "@/api/arm";
+import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import { Loader2, Search } from "lucide-react";
 
 const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
@@ -178,20 +179,14 @@ export function Dashboard() {
     retry: 1,
   });
 
-  const terminalQuery = useQuery({
-    queryKey: ["gs-terminal", config.subscriptionId, config.terminalResourceGroup, config.terminalVmName],
-    queryFn: () => monitoringApi.terminal(config.subscriptionId, config.terminalResourceGroup, config.terminalVmName),
-    enabled: hasConfig && !gettingStartedDismissed,
-    staleTime: 60_000,
-    retry: 1,
-  });
+  const terminalSidecar = useTerminalSidecarHealth();
 
   // Detect "needs setup" state: has base config but missing key resources
   const hasCluster = (aksQuery.data?.clusters?.length ?? 0) > 0;
   const hasImages = acrQuery.data?.actual_tags ? Object.keys(acrQuery.data.actual_tags).length >= 4 : false;
-  const hasTerminal = terminalQuery.data?.power_state != null;
+  const hasTerminal = terminalSidecar.isHealthy;
   const needsSetup = hasConfig && !gettingStartedDismissed && (!hasCluster || !hasImages || !hasTerminal);
-  const queriesLoaded = aksQuery.isFetched && acrQuery.isFetched && terminalQuery.isFetched;
+  const queriesLoaded = aksQuery.isFetched && acrQuery.isFetched && !terminalSidecar.isLoading;
 
   // Auto-show Getting Started when workspace needs setup
   useEffect(() => {

@@ -14,6 +14,7 @@ import { blastApi, type BlastJobSummary } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { statusColor } from "@/constants";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useClusterReadiness } from "@/hooks/usePrerequisites";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -319,6 +320,7 @@ export function BlastJobs() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "running" | "completed" | "failed">("all");
   const [search, setSearch] = useState("");
+  const cluster = useClusterReadiness();
 
   const jobsQuery = useQuery({
     queryKey: ["blast-jobs"],
@@ -432,13 +434,29 @@ export function BlastJobs() {
           )}
         </div>
         <div style={{ display: "flex", gap: "var(--space-3)" }}>
-          <Link
-            to="/blast/submit"
-            className="glass-button glass-button--primary"
-            style={{ textDecoration: "none" }}
-          >
-            New search
-          </Link>
+          {cluster.hasRunningCluster ? (
+            <Link
+              to="/blast/submit"
+              className="glass-button glass-button--primary"
+              style={{ textDecoration: "none" }}
+            >
+              New search
+            </Link>
+          ) : (
+            <button
+              type="button"
+              className="glass-button"
+              disabled
+              title={
+                cluster.hasAnyCluster
+                  ? "AKS cluster is not running — start it on the Dashboard"
+                  : "Provision an AKS cluster on the Dashboard first"
+              }
+              style={{ cursor: "not-allowed" }}
+            >
+              New search
+            </button>
+          )}
           <button
             className="glass-button"
             onClick={() => jobsQuery.refetch()}

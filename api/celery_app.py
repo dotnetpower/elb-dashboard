@@ -23,7 +23,13 @@ celery_app = Celery(
     "elb_control_plane",
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
-    include=["api.tasks"],
+    include=[
+        "api.tasks",
+        "api.tasks.azure",
+        "api.tasks.acr",
+        "api.tasks.blast",
+        "api.tasks.storage",
+    ],
 )
 
 celery_app.conf.update(

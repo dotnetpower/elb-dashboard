@@ -55,13 +55,13 @@ export function GettingStartedGuide({
     {
       id: "terminal",
       title: "Open the Terminal",
-      description: "Create a VM with ElasticBLAST CLI pre-installed. Used for job submission and management.",
+      description: "The browser terminal sidecar (with elastic-blast CLI pre-installed) ships with the deployment and is reached over an authenticated WebSocket.",
       icon: <Terminal size={18} />,
       done: hasTerminal,
-      action: hasTerminal ? null : { label: "Go to Terminal page → Provision", to: "/terminal" },
+      action: hasTerminal ? null : { label: "Open Terminal page", to: "/terminal" },
       detail: hasTerminal
-        ? "Terminal VM is provisioned"
-        : "Navigate to the Terminal page and click Provision. The VM will be created with all necessary tools (az CLI, kubectl, azcopy, elastic-blast) and uses Managed Identity for Azure CLI by default.",
+        ? "Terminal sidecar is healthy"
+        : "The `terminal` sidecar is not available in this environment. It ships with the deployed Container App (or a local `docker compose -f scripts/dev/docker-compose.local.yml up` stack). Running the api alone is enough for the rest of the dashboard.",
     },
     {
       id: "database",

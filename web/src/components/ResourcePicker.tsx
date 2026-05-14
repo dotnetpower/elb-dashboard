@@ -5,6 +5,8 @@ interface Item {
   value: string;
   label: string;
   description?: string;
+  /** Render the option as disabled (non-selectable). */
+  disabled?: boolean;
 }
 
 interface Props {
@@ -48,7 +50,8 @@ export function ResourcePicker({
   useEffect(() => {
     if (!enabled) return;
     if (!value && query.data && query.data.length > 0) {
-      onChange(query.data[0].value);
+      const firstEnabled = query.data.find((i) => !i.disabled);
+      if (firstEnabled) onChange(firstEnabled.value);
     }
   }, [enabled, value, query.data, onChange]);
 
@@ -67,8 +70,9 @@ export function ResourcePicker({
           {!enabled && <option value="">{disabledPlaceholder}</option>}
           {enabled && query.isLoading && <option value="">Loading…</option>}
           {query.data?.map((item) => (
-            <option key={item.value} value={item.value}>
+            <option key={item.value} value={item.value} disabled={item.disabled}>
               {item.label}
+              {item.description ? ` · ${item.description}` : ""}
             </option>
           ))}
           {allowCustom && <option value="__custom__">Other…</option>}
@@ -103,7 +107,7 @@ export function ResourcePicker({
             <option value="">None found in this scope</option>
           )}
           {query.data?.map((item) => (
-            <option key={item.value} value={item.value}>
+            <option key={item.value} value={item.value} disabled={item.disabled}>
               {item.label}
               {item.description ? ` · ${item.description}` : ""}
             </option>

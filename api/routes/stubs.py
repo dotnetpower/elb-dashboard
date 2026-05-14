@@ -10,7 +10,9 @@ implementations accordingly.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -71,14 +73,27 @@ def aks_provision(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("aks/provision", body=body, oid=caller.object_id)
-    instance_id = secrets.token_urlsafe(16)
+    from api.tasks.azure import provision_aks
+    job_id = str(uuid.uuid4())
+    result = provision_aks.delay(
+        job_id=job_id,
+        subscription_id=body.get("subscription_id", ""),
+        resource_group=body.get("resource_group", ""),
+        region=body.get("region", "koreacentral"),
+        cluster_name=body.get("cluster_name", "elb-cluster"),
+        node_sku=body.get("node_sku", DEFAULT_SKU),
+        node_count=body.get("node_count", 3),
+        acr_resource_group=body.get("acr_resource_group", ""),
+        acr_name=body.get("acr_name", ""),
+        storage_resource_group=body.get("storage_resource_group", ""),
+        storage_account=body.get("storage_account", ""),
+        caller_oid=caller.object_id,
+    )
     return {
-        "id": instance_id,
-        "statusQueryGetUri": f"/api/aks/openapi/deploy/{instance_id}/status",
-        "status": "stub",
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
+        "id": job_id,
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/tasks/{result.id}",
+        "status": "queued",
     }
 
 
@@ -135,8 +150,13 @@ def aks_start(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("aks/start", body=body, oid=caller.object_id)
-    return {"status": "stub", "degraded": True, "degraded_reason": "celery_task_not_yet_implemented"}
+    from api.tasks.azure import start_aks
+    result = start_aks.delay(
+        subscription_id=body.get("subscription_id", ""),
+        resource_group=body.get("resource_group", ""),
+        cluster_name=body.get("cluster_name", ""),
+    )
+    return {"task_id": result.id, "status": "queued"}
 
 
 @aks_router.post("/stop")
@@ -144,8 +164,13 @@ def aks_stop(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("aks/stop", body=body, oid=caller.object_id)
-    return {"status": "stub", "degraded": True, "degraded_reason": "celery_task_not_yet_implemented"}
+    from api.tasks.azure import stop_aks
+    result = stop_aks.delay(
+        subscription_id=body.get("subscription_id", ""),
+        resource_group=body.get("resource_group", ""),
+        cluster_name=body.get("cluster_name", ""),
+    )
+    return {"task_id": result.id, "status": "queued"}
 
 
 @aks_router.post("/delete")
@@ -153,8 +178,13 @@ def aks_delete(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("aks/delete", body=body, oid=caller.object_id)
-    return {"status": "stub", "degraded": True, "degraded_reason": "celery_task_not_yet_implemented"}
+    from api.tasks.azure import delete_aks
+    result = delete_aks.delay(
+        subscription_id=body.get("subscription_id", ""),
+        resource_group=body.get("resource_group", ""),
+        cluster_name=body.get("cluster_name", ""),
+    )
+    return {"task_id": result.id, "status": "queued"}
 
 
 @aks_router.post("/{cluster_name}/assign-roles")
@@ -163,14 +193,43 @@ def aks_assign_roles(
     body: dict[str, Any] = Body(default={}),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("aks/assign-roles", cluster=cluster_name, oid=caller.object_id)
-    return {
-        "cluster_name": cluster_name,
-        "roles_assigned": [],
-        "status": "stub",
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
-    }
+    from api.tasks.azure import assign_aks_roles
+    result = assign_aks_roles.delay(
+        subscription_id=body.get("subscription_id", ""),
+        resource_group=body.get("resource_group", ""),
+        cluster_name=cluster_name,
+        acr_resource_group=body.get("acr_resource_group", ""),
+        acr_name=body.get("acr_name", ""),
+    )
+    return {"task_id": result.id, "status": "queued"}
+
+
+# ===========================================================================
+# /api/acr/* — ACR image build
+# ===========================================================================
+acr_build_router = APIRouter(prefix="/api/acr", tags=["acr"])
+
+
+@acr_build_router.post("/build-images")
+def acr_build_images(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    from api.tasks.acr import build_images
+    result = build_images.delay(
+        subscription_id=body.get("subscription_id", ""),
+        resource_group=body.get("resource_group", ""),
+        registry_name=body.get("registry_name", ""),
+        images=body.get("images"),
+    )
+    # For immediate feedback, return the expected images with "scheduled" status
+    from api.services.image_tags import IMAGE_TAGS
+    targets = body.get("images") or list(IMAGE_TAGS.keys())
+    results = []
+    for img in targets:
+        tag = IMAGE_TAGS.get(img, "latest")
+        results.append({"image": f"{img}:{tag}", "status": "scheduled"})
+    return {"results": results, "task_id": result.id}
 
 
 # ===========================================================================
@@ -213,7 +272,21 @@ def blast_jobs_list(
         }
     except Exception as exc:
         LOGGER.warning("blast_jobs_list failed: %s", type(exc).__name__)
-        return {"jobs": [], "degraded": True, "degraded_reason": "state_repo_unavailable"}
+        # Distinguish between "not configured" (local dev) and real errors
+        exc_name = type(exc).__name__
+        if exc_name == "RuntimeError" and "AZURE_TABLE_ENDPOINT" in str(exc):
+            return {
+                "jobs": [],
+                "degraded": True,
+                "degraded_reason": "not_configured",
+                "message": "Job state storage is not configured. Set AZURE_TABLE_ENDPOINT to connect to Azure Table Storage.",
+            }
+        return {
+            "jobs": [],
+            "degraded": True,
+            "degraded_reason": "state_repo_unavailable",
+            "message": f"Could not reach job state storage: {exc_name}",
+        }
 
 
 @blast_router.get("/jobs/{job_id}")
@@ -254,15 +327,18 @@ def blast_job_get(
 @blast_router.post("/jobs/{job_id}/cancel")
 def blast_job_cancel(
     job_id: str = Path(...),
+    body: dict[str, Any] = Body(default={}),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("blast/jobs/cancel", job_id=job_id, oid=caller.object_id)
-    return {
-        "job_id": job_id,
-        "status": "stub",
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
-    }
+    from api.tasks.blast import cancel
+    result = cancel.delay(
+        job_id=job_id,
+        subscription_id=body.get("subscription_id", ""),
+        resource_group=body.get("resource_group", ""),
+        cluster_name=body.get("cluster_name", ""),
+        storage_account=body.get("storage_account", ""),
+    )
+    return {"job_id": job_id, "task_id": result.id, "status": "cancelling"}
 
 
 @blast_router.post("/submit")
@@ -270,14 +346,75 @@ def blast_submit(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("blast/submit", body_keys=list(body.keys()), oid=caller.object_id)
-    instance_id = secrets.token_urlsafe(16)
+    # Input validation
+    from api._http_utils import BlastSubmitRequest
+    try:
+        req = BlastSubmitRequest(**body)
+    except Exception as exc:
+        raise HTTPException(422, detail={"code": "validation_error", "message": str(exc)[:500]})
+
+    # Capacity pre-check — verify AKS cluster exists and is running
+    try:
+        from api.services import get_credential
+        from api.services.monitoring import list_aks_clusters
+        cred = get_credential()
+        sub = req.subscription_id or os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+        clusters = list_aks_clusters(cred, sub, req.resource_group)
+        cluster = next((c for c in clusters if c.get("name") == req.cluster_name), None)
+        if not cluster:
+            raise HTTPException(409, detail={
+                "code": "cluster_not_found",
+                "message": f"AKS cluster '{req.cluster_name}' not found in '{req.resource_group}'",
+                "retryable": False,
+            })
+        power = cluster.get("power_state", "")
+        if power != "Running":
+            raise HTTPException(503, detail={
+                "code": "cluster_not_ready",
+                "message": f"AKS cluster '{req.cluster_name}' is {power}. Start it first.",
+                "retryable": True,
+                "retry_after_seconds": 60,
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("capacity pre-check failed (non-blocking): %s", exc)
+
+    from api.tasks.blast import submit
+    job_id = str(uuid.uuid4())
+    # Create job state record
+    try:
+        from api.services.state_repo import JobState, JobStateRepository
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        repo = JobStateRepository()
+        state = JobState(
+            job_id=job_id, type="blast", status="queued",
+            phase="queued", owner_oid=caller.object_id,
+            tenant_id=caller.tenant_id, created_at=now, updated_at=now,
+            payload=body,
+        )
+        repo.create(state)
+    except Exception as exc:
+        LOGGER.warning("failed to create job state: %s", exc)
+
+    result = submit.delay(
+        job_id=job_id,
+        subscription_id=req.subscription_id,
+        resource_group=req.resource_group,
+        cluster_name=req.cluster_name,
+        storage_account=req.storage_account,
+        program=req.program,
+        database=req.database,
+        query_file=req.query_file,
+        options=req.options,
+        caller_oid=caller.object_id,
+    )
     return {
-        "id": instance_id,
-        "statusQueryGetUri": f"/api/blast/submit/{instance_id}/status",
-        "status": "stub",
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
+        "id": job_id,
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/tasks/{result.id}",
+        "status": "queued",
     }
 
 
@@ -316,12 +453,42 @@ def blast_databases(
     resource_group: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("blast/databases", sa=storage_account)
-    return {
-        "databases": [],
-        "degraded": True,
-        "degraded_reason": "blast_db_listing_not_yet_implemented",
-    }
+    if not storage_account or not resource_group:
+        return {"databases": []}
+    try:
+        from api.services.storage_data import list_databases
+        from api.services import get_credential
+        cred = get_credential()
+        databases = list_databases(cred, storage_account)
+        return {"databases": databases}
+    except Exception as exc:
+        LOGGER.warning("blast_databases failed: %s", type(exc).__name__)
+        # User-friendly messages for common failure modes
+        err_str = str(exc)
+        if "AuthorizationFailure" in err_str:
+            return {
+                "databases": [],
+                "degraded": True,
+                "degraded_reason": "access_denied",
+                "message": (
+                    f"Cannot access storage account '{storage_account}'. "
+                    "In production, the Container App reaches storage via private endpoint. "
+                    "Locally, assign 'Storage Blob Data Reader' role to your az login identity."
+                ),
+            }
+        if "ResourceNotFound" in err_str or "AccountNotFound" in err_str:
+            return {
+                "databases": [],
+                "degraded": True,
+                "degraded_reason": "not_found",
+                "message": f"Storage account '{storage_account}' not found in resource group '{resource_group}'.",
+            }
+        return {
+            "databases": [],
+            "degraded": True,
+            "degraded_reason": type(exc).__name__,
+            "message": f"Could not list databases: {type(exc).__name__}",
+        }
 
 
 @blast_router.get("/databases/check-updates")
@@ -491,14 +658,37 @@ def warmup_start(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("warmup/start", oid=caller.object_id)
-    instance_id = secrets.token_urlsafe(16)
+    from api.tasks.storage import warmup_database
+    job_id = str(uuid.uuid4())
+    # Create job state
+    try:
+        from api.services.state_repo import JobState, JobStateRepository
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        repo = JobStateRepository()
+        state = JobState(
+            job_id=job_id, type="warmup", status="queued",
+            phase="queued", owner_oid=caller.object_id,
+            tenant_id=caller.tenant_id, created_at=now, updated_at=now,
+            payload=body,
+        )
+        repo.create(state)
+    except Exception as exc:
+        LOGGER.warning("failed to create warmup job state: %s", exc)
+
+    result = warmup_database.delay(
+        job_id=job_id,
+        subscription_id=body.get("subscription_id", ""),
+        resource_group=body.get("resource_group", ""),
+        storage_account=body.get("storage_account", ""),
+        database_name=body.get("database_name", ""),
+        caller_oid=caller.object_id,
+    )
     return {
-        "id": instance_id,
-        "statusQueryGetUri": f"/api/warmup/{instance_id}/status",
-        "status": "stub",
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
+        "id": job_id,
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/tasks/{result.id}",
+        "status": "queued",
     }
 
 
@@ -529,9 +719,31 @@ def audit_log(
     action: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("audit/log", limit=limit, action=action)
-    return {
-        "events": [],
-        "degraded": True,
-        "degraded_reason": "audit_aggregator_not_yet_implemented",
-    }
+    """Return recent audit events from the jobhistory table."""
+    try:
+        from api.services.state_repo import JobStateRepository
+        repo = JobStateRepository()
+        # List recent jobs for the caller, then collect their history
+        jobs = repo.list_for_owner(caller.object_id, limit=50)
+        events: list[dict[str, Any]] = []
+        for job in jobs[:20]:  # cap to avoid excessive table queries
+            history = repo.get_history(job.job_id, limit=20)
+            for h in history:
+                if action and h.get("event") != action:
+                    continue
+                events.append({
+                    "job_id": job.job_id,
+                    "job_type": job.type,
+                    "event": h.get("event", ""),
+                    "ts": h.get("ts", ""),
+                    "payload": h.get("payload_json", ""),
+                })
+                if len(events) >= limit:
+                    break
+            if len(events) >= limit:
+                break
+        events.sort(key=lambda e: e.get("ts", ""), reverse=True)
+        return {"events": events[:limit]}
+    except Exception as exc:
+        LOGGER.warning("audit_log failed: %s", exc)
+        return {"events": [], "error": str(exc)[:200]}

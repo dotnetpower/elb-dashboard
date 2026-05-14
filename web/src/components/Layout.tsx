@@ -8,6 +8,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { apiLoginRequest } from "@/auth/msal";
 import { subscribeAuthSessionIssues, type AuthSessionIssue } from "@/auth/sessionEvents";
+import { useClusterReadiness, useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 
 import "./Layout.css";
 
@@ -141,6 +142,23 @@ function MenuAction({ icon, label, onClick }: { icon: React.ReactNode; label: st
   );
 }
 
+function NavWarnDot() {
+  return (
+    <span
+      aria-hidden
+      style={{
+        width: 6,
+        height: 6,
+        borderRadius: 999,
+        background: "var(--warning)",
+        marginLeft: 6,
+        display: "inline-block",
+        verticalAlign: "middle",
+      }}
+    />
+  );
+}
+
 export function Layout({ children }: PropsWithChildren) {
   const { instance, accounts } = useMsal();
   const account = accounts[0];
@@ -155,6 +173,10 @@ export function Layout({ children }: PropsWithChildren) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { showHelp, setShowHelp } = useKeyboardShortcuts();
   const { theme, toggle: toggleTheme } = useTheme();
+  const cluster = useClusterReadiness();
+  const terminalSidecar = useTerminalSidecarHealth();
+  const newSearchBlocked = !cluster.hasRunningCluster;
+  const terminalBlocked = !terminalSidecar.isHealthy;
 
   useEffect(() => subscribeAuthSessionIssues(setSessionIssue), []);
 
@@ -201,8 +223,20 @@ export function Layout({ children }: PropsWithChildren) {
           </NavLink>
           <span className="layout__nav-sep" />
           <span className="layout__nav-group-label">BLAST</span>
-          <NavLink to="/blast/submit" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+          <NavLink
+            to="/blast/submit"
+            className="layout__nav-item"
+            onClick={() => setMobileNavOpen(false)}
+            title={
+              newSearchBlocked
+                ? cluster.hasAnyCluster
+                  ? "AKS cluster is not running"
+                  : "No AKS cluster provisioned yet"
+                : undefined
+            }
+          >
             <Search size={14} strokeWidth={1.5} /> New Search
+            {newSearchBlocked && <NavWarnDot />}
           </NavLink>
           <NavLink to="/blast/jobs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <List size={14} strokeWidth={1.5} /> Jobs
@@ -215,8 +249,14 @@ export function Layout({ children }: PropsWithChildren) {
           <NavLink to="/tools" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <ArrowRightLeft size={14} strokeWidth={1.5} /> Lab Tools
           </NavLink>
-          <NavLink to="/terminal" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+          <NavLink
+            to="/terminal"
+            className="layout__nav-item"
+            onClick={() => setMobileNavOpen(false)}
+            title={terminalBlocked ? "Terminal sidecar is not available in this environment" : undefined}
+          >
             <TerminalIcon size={14} strokeWidth={1.5} /> Terminal
+            {terminalBlocked && <NavWarnDot />}
           </NavLink>
           <NavLink to="/docs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <Code2 size={14} strokeWidth={1.5} /> API

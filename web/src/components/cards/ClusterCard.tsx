@@ -454,11 +454,15 @@ export function ClusterCard({
                       className="glass-input"
                       style={{ width: "100%", fontSize: 13 }}
                     >
-                      {(skuQuery.data?.skus || [DEFAULT_SKU]).map((s) => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
-                      ))}
+                      {(skuQuery.data?.skus || [{ name: DEFAULT_SKU, vCPUs: 0, memoryGiB: 0, category: "", series: "" }]).map((s) => {
+                        const name = s.name;
+                        const detail = s.vCPUs ? ` (${s.vCPUs} vCPUs, ${s.memoryGiB} GB)` : "";
+                        return (
+                          <option key={name} value={name}>
+                            {name}{detail}
+                          </option>
+                        );
+                      })}
                     </select>
                     <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
                       {SKU_INFO[nodeSku]?.desc || ""}

@@ -28,6 +28,7 @@ import time
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -41,6 +42,7 @@ from api.routes import (
     monitor,
     resources,
     stubs,
+    tasks,
     terminal_legacy,
     terminal_ws,
 )
@@ -94,6 +96,37 @@ def create_app() -> FastAPI:
     # Per-request id + timing logging.
     app.add_middleware(RequestIdMiddleware)
 
+    # Body size limit — reject payloads > 10 MiB.  Uvicorn's
+    # --limit-concurrency and --limit-max-requests handle connection-level
+    # limits; this catches oversized JSON bodies before they hit route
+    # handlers.  Streaming uploads (query files) bypass this because they
+    # use chunked transfer encoding and never buffer the full body.
+    _MAX_BODY = int(os.environ.get("MAX_REQUEST_BODY_BYTES", str(10 * 1024 * 1024)))
+
+    @app.middleware("http")
+    async def body_size_guard(request: Request, call_next):
+        cl = request.headers.get("content-length")
+        if cl and int(cl) > _MAX_BODY:
+            return JSONResponse(
+                {"code": "payload_too_large", "message": f"body exceeds {_MAX_BODY} bytes"},
+                status_code=413,
+            )
+        return await call_next(request)
+
+    # CORS — only needed for local dev where SPA (:8090) and API (:8080)
+    # run on different origins.  In production both live behind the same
+    # ingress so this is a no-op.
+    cors_origins = os.environ.get("CORS_ALLOW_ORIGINS", "").split(",")
+    cors_origins = [o.strip() for o in cors_origins if o.strip()]
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
     # ---- /api/* routers (must be registered BEFORE the catch-all) ----
     app.include_router(health.router, prefix="/api")
     app.include_router(me.router, prefix="/api")
@@ -102,8 +135,10 @@ def create_app() -> FastAPI:
     app.include_router(resources.router)  # carries /api/resources prefix
     app.include_router(terminal_ws.router)  # WebSocket + ticket + health
     app.include_router(terminal_legacy.router)  # /api/terminal/{vm}/* → 410 Gone
+    app.include_router(tasks.router)  # GET /api/tasks/{id} — Celery task status
     app.include_router(stubs.resources_router)  # legacy stub (no routes; harmless)
     app.include_router(stubs.aks_router)
+    app.include_router(stubs.acr_build_router)
     app.include_router(stubs.blast_router)
     app.include_router(stubs.warmup_router)
     app.include_router(stubs.audit_router)

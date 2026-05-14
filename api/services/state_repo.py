@@ -92,6 +92,18 @@ def _ulid_like() -> str:
     return f"{int(time.time() * 1000):013d}-{uuid.uuid4().hex[:8]}"
 
 
+def _sanitise_odata_value(v: str) -> str:
+    """Escape a value for safe interpolation into OData filter expressions.
+
+    OData single-quoted strings require escaping the single quote by doubling it.
+    Additionally reject any control characters.
+    """
+    import re
+    if re.search(r"[\x00-\x1f]", v):
+        raise ValueError("control characters not allowed in OData value")
+    return v.replace("'", "''")
+
+
 class JobStateRepository:
     """Read/write jobstate + jobhistory tables on the platform Storage account."""
 
@@ -171,9 +183,10 @@ class JobStateRepository:
         return JobState.from_entity(e)
 
     def list_for_owner(self, owner_oid: str, limit: int = 50) -> list[JobState]:
+        safe_oid = _sanitise_odata_value(owner_oid)
         with self._state_client() as t:
             entities = t.query_entities(
-                f"owner_oid eq '{owner_oid}'", results_per_page=limit
+                f"owner_oid eq '{safe_oid}'", results_per_page=limit
             )
             rows = []
             for e in entities:
@@ -207,9 +220,10 @@ class JobStateRepository:
             LOGGER.warning("append_history failed for %s: %s", job_id, exc)
 
     def get_history(self, job_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        safe_id = _sanitise_odata_value(job_id)
         with self._history_client() as t:
             entities = t.query_entities(
-                f"PartitionKey eq '{job_id}'", results_per_page=limit
+                f"PartitionKey eq '{safe_id}'", results_per_page=limit
             )
             rows = []
             for e in entities:

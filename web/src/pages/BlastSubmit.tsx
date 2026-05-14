@@ -151,8 +151,6 @@ export function BlastSubmit() {
   const storageAccount = config?.storageAccountName ?? "";
   const acrRg = config?.acrResourceGroup ?? "";
   const acrName = config?.acrName ?? "";
-  const terminalRg = config?.terminalResourceGroup ?? "rg-elb-terminal";
-  const terminalVm = config?.terminalVmName ?? "vm-elb-terminal";
   const region = config?.region ?? "koreacentral";
 
   const programMeta = PROGRAMS.find((p) => p.value === form.program) ?? PROGRAMS[0];
@@ -184,15 +182,6 @@ export function BlastSubmit() {
     queryFn: () => blastApi.listDatabases(subId, storageAccount, workloadRg),
     enabled: Boolean(subId && storageAccount && workloadRg),
   });
-
-  // Check Remote Terminal VM status (needed for elastic-blast CLI)
-  const vmQuery = useQuery({
-    queryKey: ["terminal-vm", subId, terminalRg, terminalVm],
-    queryFn: () => monitoringApi.terminal(subId, terminalRg, terminalVm),
-    enabled: Boolean(subId && terminalRg && terminalVm),
-    staleTime: 30_000,
-  });
-  const vmRunning = vmQuery.data?.power_state?.toLowerCase().includes("running") ?? false;
 
   // Warmup status — which DBs are already cached on cluster nodes
   const warmupQuery = useQuery({
@@ -260,8 +249,6 @@ export function BlastSubmit() {
         acr_name: acrName || undefined,
         storage_account: storageAccount,
         aks_cluster_name: selectedCluster?.name || "",
-        terminal_resource_group: terminalRg,
-        terminal_vm_name: terminalVm,
         db: form.db,
         query_data: form.query_data || undefined,
       }),
@@ -281,8 +268,6 @@ export function BlastSubmit() {
 
   const handleSubmit = () => {
     if (!selectedCluster) return;
-    // Refresh VM status before submitting to ensure it's still running
-    vmQuery.refetch();
     let opts = form.additional_options || "";
     if (
       form.low_complexity_filter &&
@@ -325,8 +310,6 @@ export function BlastSubmit() {
       acr_name: acrName || undefined,
       storage_account: storageAccount,
       aks_cluster_name: selectedCluster.name,
-      terminal_resource_group: terminalRg,
-      terminal_vm_name: terminalVm,
     });
   };
 
@@ -373,11 +356,6 @@ export function BlastSubmit() {
     missing.push({ text: "AKS cluster — create one on the Dashboard", link: "/" });
   else if (selectedCluster.power_state !== "Running")
     missing.push({ text: "AKS cluster must be running" });
-  if (!vmRunning)
-    missing.push({
-      text: "Remote Terminal VM must be running — go to Terminal page",
-      link: "/terminal",
-    });
 
   const isNuclDb = form.db && /\b(nt|core_nt)\b/.test(form.db);
   const isProtDb = form.db && /\b(nr|swissprot|refseq_protein|pdb)\b/.test(form.db);

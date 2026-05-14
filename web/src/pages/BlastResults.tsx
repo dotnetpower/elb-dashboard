@@ -35,6 +35,7 @@ import {
 } from "@/components/BlastStepTimeline";
 import { ElapsedTimer, formatBytes } from "@/components/BlastFilePreview";
 import { useBlastResultActions } from "@/hooks/useBlastResultActions";
+import { useClusterReadiness, useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import {
   resolveBlastJobPhase,
   resolveBlastResultState,
@@ -190,6 +191,8 @@ export function BlastResults() {
   const queryClient = useQueryClient();
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const prevPhaseRef = useRef<string | null>(null);
+  const cluster = useClusterReadiness();
+  const terminalSidecar = useTerminalSidecarHealth();
   const subscriptionId =
     searchParams.get("subscription_id") || config?.subscriptionId || "";
   const storageAccount =
@@ -956,20 +959,48 @@ export function BlastResults() {
                   >
                     <RefreshCw size={13} /> Try Again
                   </button>
-                  <Link
-                    to="/terminal"
-                    className="glass-button"
-                    style={{ textDecoration: "none", fontSize: 12 }}
-                  >
-                    <Server size={13} /> Check Terminal
-                  </Link>
-                  <Link
-                    to={`/blast/submit?resubmit=${encodeURIComponent(jobId!)}`}
-                    className="glass-button glass-button--primary"
-                    style={{ textDecoration: "none", fontSize: 12 }}
-                  >
-                    <Send size={13} /> Re-submit with Same Parameters
-                  </Link>
+                  {terminalSidecar.isHealthy ? (
+                    <Link
+                      to="/terminal"
+                      className="glass-button"
+                      style={{ textDecoration: "none", fontSize: 12 }}
+                    >
+                      <Server size={13} /> Check Terminal
+                    </Link>
+                  ) : (
+                    <button
+                      type="button"
+                      className="glass-button"
+                      disabled
+                      title="Terminal sidecar is not available in this environment"
+                      style={{ fontSize: 12, cursor: "not-allowed" }}
+                    >
+                      <Server size={13} /> Check Terminal
+                    </button>
+                  )}
+                  {cluster.hasRunningCluster ? (
+                    <Link
+                      to={`/blast/submit?resubmit=${encodeURIComponent(jobId!)}`}
+                      className="glass-button glass-button--primary"
+                      style={{ textDecoration: "none", fontSize: 12 }}
+                    >
+                      <Send size={13} /> Re-submit with Same Parameters
+                    </Link>
+                  ) : (
+                    <button
+                      type="button"
+                      className="glass-button"
+                      disabled
+                      title={
+                        cluster.hasAnyCluster
+                          ? "AKS cluster is not running — start it on the Dashboard"
+                          : "Provision an AKS cluster on the Dashboard first"
+                      }
+                      style={{ fontSize: 12, cursor: "not-allowed" }}
+                    >
+                      <Send size={13} /> Re-submit with Same Parameters
+                    </button>
+                  )}
                 </div>
                 {/* Results location */}
                 <div

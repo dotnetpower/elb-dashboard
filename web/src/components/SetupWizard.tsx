@@ -287,7 +287,7 @@ export function SetupWizard({ onComplete, onClose }: Props) {
               </>) : (
                 <select className="glass-input" value={config.subscriptionId} onChange={(e) => setConfig((c) => ({ ...c, subscriptionId: e.target.value }))}>
                   <option value="">Select a subscription</option>
-                  {subsQuery.data?.map((s) => <option key={s.subscriptionId} value={s.subscriptionId}>{s.displayName} ({s.subscriptionId.slice(0, 8)}…)</option>)}
+                  {subsQuery.data?.map((s) => <option key={s.subscriptionId} value={s.subscriptionId}>{s.displayName} ({s.subscriptionId})</option>)}
                 </select>
               )}
               <ErrorMsg msg={errors.subscriptionId} />

@@ -6,6 +6,7 @@ import { ArrowRight } from "lucide-react";
 import { blastApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
+import { useClusterReadiness } from "@/hooks/usePrerequisites";
 import { statusColor } from "@/constants";
 
 const TERMINAL_PHASES = ["completed", "failed", "submit_failed", "error", "deleted"];
@@ -17,6 +18,7 @@ export function JobCard() {
     queryFn: () => blastApi.listJobs(),
     refetchInterval: 30_000,
   });
+  const cluster = useClusterReadiness();
 
   const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
   const running = jobs.filter(
@@ -33,7 +35,18 @@ export function JobCard() {
 
   const hasMore = jobs.length > MAX_DASHBOARD_JOBS;
 
-  const status = query.isLoading ? "loading" : query.isError ? "error" : "ok";
+  // Status:
+  //   loading → first fetch
+  //   error   → backend failure
+  //   ok      → at least one job exists (badge gives a meaningful signal)
+  //   idle    → 0 jobs (don't claim "OK" before the user has ever submitted)
+  const status = query.isLoading
+    ? "loading"
+    : query.isError
+      ? "error"
+      : jobs.length > 0
+        ? "ok"
+        : "idle";
 
   return (
     <MonitorCard
@@ -46,13 +59,29 @@ export function JobCard() {
       accentColor="jobs"
       collapsible
       rightSlot={
-        <Link
-          to="/blast/submit"
-          className="glass-button glass-button--primary"
-          style={{ textDecoration: "none", fontSize: 12 }}
-        >
-          New search
-        </Link>
+        cluster.hasRunningCluster ? (
+          <Link
+            to="/blast/submit"
+            className="glass-button glass-button--primary"
+            style={{ textDecoration: "none", fontSize: 12 }}
+          >
+            New search
+          </Link>
+        ) : (
+          <button
+            type="button"
+            className="glass-button"
+            disabled
+            title={
+              cluster.hasAnyCluster
+                ? "AKS cluster is not running — start it on the Dashboard"
+                : "Provision an AKS cluster on the Dashboard first"
+            }
+            style={{ fontSize: 12, cursor: "not-allowed" }}
+          >
+            New search
+          </button>
+        )
       }
     >
       {query.isError && (

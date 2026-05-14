@@ -218,9 +218,9 @@ def list_acr(
     sub = subscription_id or _sub_default()
     cred = get_credential()
     try:
-        return {"repositories": monitoring_svc.list_acr_repositories(cred, sub, resource_group, registry_name)}
+        return monitoring_svc.list_acr_repositories(cred, sub, resource_group, registry_name)
     except Exception as exc:
-        return _graceful("list_acr", exc, empty={"repositories": []})
+        return _graceful("list_acr", exc, empty={"name": registry_name, "login_server": "", "sku": None, "expected_image_tags": {}, "actual_tags": {}, "building_images": [], "build_details": []})
 
 
 # ---------------------------------------------------------------------------

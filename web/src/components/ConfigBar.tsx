@@ -16,12 +16,28 @@ export function ConfigBar({ config, onChange, onOpenSettings }: Props) {
   const [expanded, setExpanded] = useState(true);
   const sub = config.subscriptionId;
   const rgFetcher = sub
-    ? async () =>
-        (await armProxyApi.listResourceGroups(sub)).map((g) => ({
-          value: g.name,
-          label: g.name,
-          description: g.location,
-        }))
+    ? async () => {
+        const groups = await armProxyApi.listResourceGroups(sub);
+        // Only enable RGs that carry at least one elb-* tag (our workspace marker).
+        // Untagged RGs are listed but disabled so users can see they exist
+        // without accidentally picking one that the dashboard cannot manage.
+        const items = groups.map((g) => {
+          const tags = g.tags ?? {};
+          const isElb = Object.keys(tags).some((k) => k.startsWith("elb-"));
+          return {
+            value: g.name,
+            label: g.name,
+            description: isElb ? g.location : `${g.location} · no elb-* tag`,
+            disabled: !isElb,
+          };
+        });
+        // Tagged (selectable) RGs first, then untagged; keep alpha order within each bucket.
+        items.sort((a, b) => {
+          if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
+          return a.label.localeCompare(b.label);
+        });
+        return items;
+      }
     : null;
 
   return (
@@ -88,11 +104,6 @@ export function ConfigBar({ config, onChange, onOpenSettings }: Props) {
         {config.storageAccountName && (
           <div className="env-pill">
             <div className="pill-dot" /> {config.storageAccountName}
-          </div>
-        )}
-        {config.terminalVmName && (
-          <div className="env-pill">
-            <div className="pill-dot" /> {config.terminalVmName}
           </div>
         )}
       </div>

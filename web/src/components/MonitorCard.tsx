@@ -5,7 +5,7 @@ import { useRelativeTime } from "@/hooks/useRelativeTime";
 interface Props {
   title: string;
   subtitle?: ReactNode;
-  status?: "idle" | "loading" | "ok" | "ready" | "not-provisioned" | "error";
+  status?: "idle" | "loading" | "ok" | "ready" | "not-provisioned" | "unavailable" | "error";
   fetching?: boolean;
   rightSlot?: ReactNode;
   lastRefreshed?: Date | null;
@@ -24,6 +24,7 @@ const STATUS_TAG: Record<
   ok: { cls: "gt gt-g", label: "OK" },
   ready: { cls: "gt gt-b", label: "Ready" },
   "not-provisioned": { cls: "gt gt-m", label: "Not Provisioned" },
+  unavailable: { cls: "gt gt-m", label: "Unavailable" },
   error: { cls: "gt gt-r", label: "Error" },
 };
 

@@ -391,7 +391,7 @@ export interface AksProvisionResponse {
 }
 
 export const aksApi = {
-  listSkus: () => api.get<{ skus: string[]; default: string }>("/aks/skus"),
+  listSkus: () => api.get<{ skus: { name: string; vCPUs: number; memoryGiB: number; category: string; series: string }[]; default: string }>("/aks/skus"),
 
   provision: (req: AksProvisionRequest) =>
     api.post<AksProvisionResponse>("/aks/provision", req),
