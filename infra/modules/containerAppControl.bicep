@@ -197,7 +197,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           image: apiImage
           command: [ '/bin/sh', '-c' ]
           args: [
-            'celery -A api.celery_app:celery_app worker --loglevel=info -Q default,azure,blast,storage --concurrency=2'
+            'echo "Waiting for Redis..."; for i in $(seq 1 30); do if python -c "import socket; s=socket.socket(); s.settimeout(1); s.connect((\'127.0.0.1\', 6379)); s.close(); print(\'Redis ready\')" 2>/dev/null; then break; fi; echo "  attempt $i/30"; sleep 2; done; exec celery -A api.celery_app:celery_app worker --loglevel=info -Q default,azure,blast,storage --concurrency=2'
           ]
           resources: {
             cpu: json('0.5')
@@ -230,7 +230,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           image: apiImage
           command: [ '/bin/sh', '-c' ]
           args: [
-            'celery -A api.celery_app:celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid'
+            'echo "Waiting for Redis..."; for i in $(seq 1 30); do if python -c "import socket; s=socket.socket(); s.settimeout(1); s.connect((\'127.0.0.1\', 6379)); s.close(); print(\'Redis ready\')" 2>/dev/null; then break; fi; echo "  attempt $i/30"; sleep 2; done; exec celery -A api.celery_app:celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid'
           ]
           resources: {
             cpu: json('0.25')

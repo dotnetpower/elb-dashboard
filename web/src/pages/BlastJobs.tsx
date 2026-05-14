@@ -558,13 +558,40 @@ export function BlastJobs() {
           style={{ textAlign: "center", padding: "var(--space-7)" }}
         >
           <p className="muted">No BLAST jobs yet.</p>
-          <Link
-            to="/blast/submit"
-            className="glass-button glass-button--primary"
-            style={{ marginTop: "var(--space-4)", textDecoration: "none" }}
-          >
-            Submit your first search
-          </Link>
+          {cluster.hasRunningCluster ? (
+            <Link
+              to="/blast/submit"
+              className="glass-button glass-button--primary"
+              style={{ marginTop: "var(--space-4)", textDecoration: "none" }}
+            >
+              Submit your first search
+            </Link>
+          ) : (
+            <div style={{ marginTop: "var(--space-4)" }}>
+              <button
+                type="button"
+                className="glass-button"
+                disabled
+                title={
+                  cluster.hasAnyCluster
+                    ? "AKS cluster is not running — start it on the Dashboard"
+                    : "Provision an AKS cluster on the Dashboard first"
+                }
+                style={{ cursor: "not-allowed" }}
+              >
+                Submit your first search
+              </button>
+              <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+                {cluster.hasAnyCluster
+                  ? "AKS cluster is not running."
+                  : "No AKS cluster yet."}{" "}
+                <Link to="/" style={{ color: "var(--accent)" }}>
+                  Go to Dashboard
+                </Link>{" "}
+                to provision one.
+              </div>
+            </div>
+          )}
         </section>
       )}
       {filtered.length === 0 && allJobs.length > 0 && !jobsQuery.isLoading && (

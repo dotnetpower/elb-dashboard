@@ -43,7 +43,7 @@ export const TAB_GROUPS: { label: string; tabs: TabMeta[] }[] = [
         key: "primer",
         label: "Primer Design",
         icon: <FlaskConical size={13} />,
-        desc: "Run Primer3 on the Remote Terminal VM",
+        desc: "Run Primer3 in the terminal sidecar",
         needsConfig: true,
       },
       {
