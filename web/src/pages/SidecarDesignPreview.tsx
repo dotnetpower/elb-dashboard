@@ -519,6 +519,8 @@ function TopoNode({
         width,
         padding: "10px 12px",
         borderRadius: 12,
+        position: "relative",
+        zIndex: 1,
         border: `1px solid ${
           s.health === "ok"
             ? "rgba(106,214,163,0.35)"
@@ -613,6 +615,30 @@ function TopoArrow({
   );
 }
 
+/**
+ * Single particle that travels across an entire topology row, "behind" the
+ * intermediate node. Used so a request looks like one continuous flow
+ * (browser → frontend → api) instead of independent pulses per arrow.
+ *
+ * `endRight` overrides the CSS variable that controls where the particle
+ * fades out — useful for rows that don't span both node columns (e.g. the
+ * Scheduled row only has a left-node, so the particle should stop near
+ * the right edge of that node instead of continuing into empty space).
+ */
+function RowParticle({
+  delaySec = 0,
+  endRight,
+}: {
+  delaySec?: number;
+  endRight?: string;
+}) {
+  const style: React.CSSProperties & Record<string, string> = {
+    animationDelay: `${delaySec}s`,
+  };
+  if (endRight) style["--row-end"] = endRight;
+  return <span className="topo-row-particle" aria-hidden style={style} />;
+}
+
 function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
   const get = (id: string) => snapshots.find((s) => s.id === id)!;
   const fe = get("frontend");
@@ -632,6 +658,7 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
     alignItems: "center",
     columnGap: 8,
     padding: "8px 4px",
+    position: "relative",
   };
   const labelStyle: React.CSSProperties = {
     fontSize: 10,
@@ -667,8 +694,28 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
         .topo-arrow-pulse {
           animation: topoArrowPulse 1.1s linear infinite;
         }
+        @keyframes topoRowParticle {
+          0%   { left: 98px;                    opacity: 0; }
+          5%   { opacity: 1; }
+          95%  { opacity: 1; }
+          100% { left: var(--row-end, calc(100% - 12px)); opacity: 0; }
+        }
+        .topo-row-particle {
+          position: absolute;
+          top: 50%;
+          width: 8px;
+          height: 8px;
+          margin-top: -4px;
+          border-radius: 999px;
+          background: var(--accent);
+          box-shadow: 0 0 12px 2px rgba(122, 167, 255, 0.55);
+          pointer-events: none;
+          z-index: 0;
+          animation: topoRowParticle 1.6s linear infinite;
+        }
         @media (prefers-reduced-motion: reduce) {
-          .topo-arrow-pulse { animation: none; opacity: 0.6; }
+          .topo-arrow-pulse,
+          .topo-row-particle { animation: none; opacity: 0.6; }
         }
       `}</style>
 
@@ -678,10 +725,11 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
           surfaced as a small caption below the row. */}
       <div style={gridStyle}>
         <div style={labelStyle}>Browser ↣</div>
-        <TopoArrow delaySec={0} />
+        <TopoArrow animated={false} />
         <TopoNode s={fe} width={NODE_W} />
-        <TopoArrow delaySec={0.6} />
+        <TopoArrow animated={false} />
         <TopoNode s={api} width={NODE_W} />
+        <RowParticle delaySec={0} />
       </div>
       <div
         style={{
@@ -700,10 +748,11 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
       {/* Row 2: async-task channel — api enqueues to redis, worker pops. */}
       <div style={gridStyle}>
         <div style={labelStyle}>Async ↣</div>
-        <TopoArrow degraded={worker.health !== "ok" || redis.health !== "ok"} delaySec={0.3} />
+        <TopoArrow degraded={worker.health !== "ok" || redis.health !== "ok"} animated={false} />
         <TopoNode s={redis} width={NODE_W} />
-        <TopoArrow degraded={worker.health !== "ok"} delaySec={0.9} />
+        <TopoArrow degraded={worker.health !== "ok"} animated={false} />
         <TopoNode s={worker} width={NODE_W} />
+        {worker.health === "ok" && redis.health === "ok" && <RowParticle delaySec={0.4} />}
       </div>
       <div
         style={{
@@ -720,10 +769,13 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
 
       {/* Row 3: scheduler — beat enqueues periodic jobs into the same broker.
           Right-node column is intentionally empty: beat does NOT talk to the
-          terminal (that was the bug the operator caught earlier). */}
+          terminal (that was the bug the operator caught earlier). The
+          particle is scoped to end inside the beat box (calc against the
+          known fixed grid tracks: 90px label + 8gap + 1fr arrow + 8gap +
+          168px node, where 1fr = (100% - 458px) / 2). */}
       <div style={gridStyle}>
         <div style={labelStyle}>Scheduled ↣</div>
-        <TopoArrow delaySec={1.2} />
+        <TopoArrow animated={false} />
         <TopoNode s={beat} width={NODE_W} />
         <div
           style={{
@@ -736,16 +788,21 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
         >
           beat enqueues periodic jobs into the same redis broker.
         </div>
+        <RowParticle
+          delaySec={0.8}
+          endRight="calc((100% - 458px) / 2 + 274px)"
+        />
       </div>
 
       {/* Row 4: terminal channel — api (and worker) reach the terminal sidecar
           via WebSocket proxy + privileged exec. NOT beat. */}
       <div style={gridStyle}>
         <div style={labelStyle}>ws / exec ↣</div>
-        <TopoArrow delaySec={0.5} />
+        <TopoArrow animated={false} />
         <TopoNode s={api} width={NODE_W} />
-        <TopoArrow degraded={terminal.health !== "ok"} delaySec={1.5} />
+        <TopoArrow degraded={terminal.health !== "ok"} animated={false} />
         <TopoNode s={terminal} width={NODE_W} />
+        {terminal.health === "ok" && <RowParticle delaySec={1.2} />}
       </div>
       <div
         style={{
