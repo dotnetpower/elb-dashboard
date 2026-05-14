@@ -69,7 +69,7 @@ EXEC_PID=$!
   -W \
   -t enableZmodem=false \
   -t fontSize=14 \
-  bash -lc 'tmux new -A -s elb' &
+  bash -l &
 TTYD_PID=$!
 
 echo "elb-supervisor: ttyd pid=$TTYD_PID exec_server pid=$EXEC_PID" >&2

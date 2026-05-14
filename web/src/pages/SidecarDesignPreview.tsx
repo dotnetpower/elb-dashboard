@@ -201,13 +201,52 @@ function summary(snapshots: SidecarSnapshot[]): string {
   return `${ok}/${total} healthy`;
 }
 
+/**
+ * Subtitle-row "Near real-time · 30s" pill. Lives next to the OK / Degraded
+ * status tag so the operator immediately knows the card is poll-driven, not
+ * push-driven, and is at most ~30s stale. (Container Apps Mgmt API + App
+ * Insights have their own ~1m lag layered on top of that — this pill makes
+ * the staleness contract explicit.)
+ */
+function NearRealtimeLabel() {
+  return (
+    <span
+      title="Polled every 30s. Container Apps Mgmt API + App Insights add ~1m lag of their own."
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 10,
+        padding: "2px 8px",
+        borderRadius: 999,
+        background: "rgba(122, 167, 255, 0.08)",
+        border: "1px solid rgba(122, 167, 255, 0.22)",
+        color: "var(--text-muted)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: 999,
+          background: "var(--accent)",
+          boxShadow: "0 0 6px rgba(122,167,255,0.55)",
+        }}
+      />
+      Near real-time · 30s
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Proposal 1 — Compact strip
 // ---------------------------------------------------------------------------
 function ProposalCompactStrip({ snapshots }: { snapshots: SidecarSnapshot[] }) {
   return (
     <MonitorCard
-      title="Container App sidecars"
+      title="Control Plane Sidecars"
       subtitle="ca-elb-control · revision r0042"
       status={rollupStatus(snapshots)}
       lastRefreshed={new Date()}
@@ -215,9 +254,12 @@ function ProposalCompactStrip({ snapshots }: { snapshots: SidecarSnapshot[] }) {
       accentColor="terminal"
       collapsible
       rightSlot={
-        <span className="muted" style={{ fontSize: 11 }}>
-          {summary(snapshots)}
-        </span>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <NearRealtimeLabel />
+          <span className="muted" style={{ fontSize: 11 }}>
+            {summary(snapshots)}
+          </span>
+        </div>
       }
     >
       <div
@@ -459,7 +501,7 @@ function SidecarMiniCard({ s }: { s: SidecarSnapshot }) {
 function ProposalDetailedGrid({ snapshots }: { snapshots: SidecarSnapshot[] }) {
   return (
     <MonitorCard
-      title="Container App sidecars"
+      title="Control Plane Sidecars"
       subtitle="ca-elb-control · revision r0042 · 1 replica"
       status={rollupStatus(snapshots)}
       lastRefreshed={new Date()}
@@ -468,6 +510,7 @@ function ProposalDetailedGrid({ snapshots }: { snapshots: SidecarSnapshot[] }) {
       collapsible
       rightSlot={
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <NearRealtimeLabel />
           <span className="muted" style={{ fontSize: 11 }}>
             {summary(snapshots)}
           </span>
@@ -624,18 +667,25 @@ function TopoArrow({
  * fades out — useful for rows that don't span both node columns (e.g. the
  * Scheduled row only has a left-node, so the particle should stop near
  * the right edge of that node instead of continuing into empty space).
+ *
+ * `durationSec` overrides the animation period so a half-length row can
+ * keep the same *visual speed* as the full-length rows (otherwise the
+ * shorter trip looks slow).
  */
 function RowParticle({
   delaySec = 0,
+  durationSec,
   endRight,
 }: {
   delaySec?: number;
+  durationSec?: number;
   endRight?: string;
 }) {
   const style: React.CSSProperties & Record<string, string> = {
     animationDelay: `${delaySec}s`,
   };
   if (endRight) style["--row-end"] = endRight;
+  if (durationSec) style.animationDuration = `${durationSec}s`;
   return <span className="topo-row-particle" aria-hidden style={style} />;
 }
 
@@ -668,7 +718,7 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
 
   return (
     <MonitorCard
-      title="Container App sidecars"
+      title="Control Plane Sidecars"
       subtitle="Data flow inside ca-elb-control · revision r0042"
       status={rollupStatus(snapshots)}
       lastRefreshed={new Date()}
@@ -676,9 +726,12 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
       accentColor="terminal"
       collapsible
       rightSlot={
-        <span className="muted" style={{ fontSize: 11 }}>
-          {summary(snapshots)}
-        </span>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <NearRealtimeLabel />
+          <span className="muted" style={{ fontSize: 11 }}>
+            {summary(snapshots)}
+          </span>
+        </div>
       }
     >
       {/* Inject keyframes once for traffic animation. Defining via <style> here
@@ -790,7 +843,8 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
         </div>
         <RowParticle
           delaySec={0.8}
-          endRight="calc((100% - 458px) / 2 + 274px)"
+          durationSec={0.9}
+          endRight="calc((100% - 458px) / 2 + 250px)"
         />
       </div>
 
@@ -865,7 +919,7 @@ export function SidecarDesignPreview() {
           Sidecar status — design proposals
         </div>
         <div className="page-header__desc">
-          Three visual approaches for adding a Container App sidecars panel to the
+          Three visual approaches for adding a Control Plane Sidecars panel to the
           dashboard. All three use the same mock data (one degraded sidecar, one down)
           so the comparison is apples-to-apples.{" "}
           <Link to="/" style={{ color: "var(--accent)" }}>
