@@ -87,7 +87,7 @@ RUN git clone --depth 1 https://github.com/dotnetpower/elastic-blast-azure.git /
 # Operator user + home directory (will be overlaid by the Azure Files mount
 # at /home/azureuser at runtime)
 # ---------------------------------------------------------------------------
-RUN useradd -m -s /bin/bash -u 1000 azureuser \
+RUN id azureuser 2>/dev/null || useradd -m -s /bin/bash azureuser \
     && mkdir -p /home/azureuser \
     && chown -R azureuser:azureuser /home/azureuser
 
