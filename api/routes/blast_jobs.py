@@ -170,12 +170,19 @@ async def get_blast_job(
     instance_id = job.get("instance_id")
     if instance_id:
         show_history = req.params.get("history", "").lower() in ("1", "true")
-        orch_status = await client.get_status(
-            instance_id,
-            show_input=False,
-            show_history=show_history,
-            show_history_output=show_history,
-        )
+        try:
+            orch_status = await asyncio.wait_for(
+                client.get_status(
+                    instance_id,
+                    show_input=False,
+                    show_history=show_history,
+                    show_history_output=show_history,
+                ),
+                timeout=LIST_STATUS_REFRESH_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            LOGGER.warning("blast job status enrichment timed out instance=%s", instance_id)
+            orch_status = None
         if orch_status:
             job["runtime_status"] = (
                 orch_status.runtime_status.name if orch_status.runtime_status else "Unknown"

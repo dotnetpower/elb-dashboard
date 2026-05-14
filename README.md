@@ -9,6 +9,37 @@ are a one-time bring-up for the control plane itself.
 
 > Project charter: [.github/copilot-instructions.md](./.github/copilot-instructions.md)
 
+## Dashboard preview
+
+![ElasticBLAST Control Plane dashboard](./docs/images/dashboard.png)
+
+A single glance shows every moving part of an ElasticBLAST run on Azure:
+
+- **Azure Kubernetes Service Cluster** — node-pool CPU/memory live, cluster
+  state, kubelet object id, and which BLAST databases are pre-warmed on each
+  cluster (`16S_ribosomal_RNA 3/3`, `core_nt 0/3`). Start/stop/delete actions
+  are inline.
+- **Azure Container Registry** — login server, SKU, and the four pinned
+  ElasticBLAST images (`elb 1.4.0`, `job-submit 4.1.0`, `query-split 0.1.4`,
+  `openapi 3.4`) with build status per image. A one-click **Build** kicks off
+  `az acr build` via a Durable Functions orchestrator.
+- **Storage Account** — region, SKU, HNS state, and the explicit
+  `publicNetworkAccess` toggle that ElasticBLAST requires during `submit /
+  status / delete`. The **Auto** mode flips it on for the duration of a job
+  and back off on completion (see [Storage window §9 of the charter](./.github/copilot-instructions.md)).
+  The container row shows blob counts and last-update times for `blast-db`,
+  `queries`, and `results`; the BLAST Databases chip row reflects what is
+  ready for immediate use.
+- **Remote Terminal** — VM power state, size + hourly/daily cost, OS disk
+  size, public IP/FQDN, managed-identity status, and **Open / SSH** buttons
+  that launch the browser shell (xterm.js over a WebSocket → SSH proxy).
+- **BLAST Jobs** — submission history with status, elapsed time, and
+  drill-down to per-orchestration event history. The card is empty in this
+  screenshot because no jobs were submitted yet.
+
+> Subscription name, public IP, FQDN, and the kubelet object id are masked in
+> this screenshot. The dashboard renders the real values when you sign in.
+
 ## Layout
 
 ```

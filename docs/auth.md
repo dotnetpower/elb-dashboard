@@ -31,6 +31,102 @@ ARM token.
 
 ---
 
+## §0 Post-Deploy Permissions Checklist (run after every `azd up`)
+
+> **Important**: The Function App's system-assigned MI gets a **new
+> object ID on every fresh `azd up`** (because the Function App resource
+> is recreated). Previous role assignments do not carry over. Run this
+> checklist after each provision.
+
+### Step 1 — Capture the new MI object ID and target resources
+
+```bash
+# From the azd env you just provisioned
+RG_PLATFORM="rg-prod2"                # whatever your azd env name resolves to
+FUNC_APP="func-prod2-fuxqeza73ska4"   # azd outputs.FUNCTION_APP_NAME
+SUB="$(az account show --query id -o tsv)"
+
+MI_OID="$(az functionapp identity show -g "$RG_PLATFORM" -n "$FUNC_APP" \
+  --query principalId -o tsv)"
+echo "MI object id: $MI_OID"
+
+# Workload resource groups (created/managed via the UI — these are
+# OUTSIDE the azd platform RG)
+WORKLOAD_RGS=(rg-elb-demo rg-elb-demo-acr rg-elb-demo-terminal)
+
+# User-created storage account + ACR (the ones BLAST jobs read/write)
+USER_STORAGE="stgelbdemo"             # in rg-elb-demo
+USER_STORAGE_RG="rg-elb-demo"
+USER_ACR="elbacrdemo"                 # in rg-elb-demo-acr
+USER_ACR_RG="rg-elb-demo-acr"
+```
+
+### Step 2 — Workload RGs: Contributor + User Access Administrator
+
+Required for: VM/VNet/AKS/ACR/Storage lifecycle, AKS `listClusterUserCredential`
+(direct K8s API calls), and runtime sub-role assignments (AcrPull to kubelet, etc.).
+
+```bash
+for rg in "${WORKLOAD_RGS[@]}"; do
+  for role in "Contributor" "User Access Administrator"; do
+    az role assignment create \
+      --assignee-object-id "$MI_OID" \
+      --assignee-principal-type ServicePrincipal \
+      --role "$role" \
+      --scope "/subscriptions/$SUB/resourceGroups/$rg"
+  done
+done
+```
+
+### Step 3 — User storage account: Blob Data Contributor + Blob Delegator
+
+Required for: uploading queries, copying BLAST DBs from NCBI, generating
+**User Delegation SAS** (the deployment policy forces `allowSharedKeyAccess=false`,
+so account-key SAS is unavailable — delegation SAS is the only option).
+
+```bash
+STG_ID="/subscriptions/$SUB/resourceGroups/$USER_STORAGE_RG/providers/Microsoft.Storage/storageAccounts/$USER_STORAGE"
+for role in "Storage Blob Data Contributor" "Storage Blob Delegator"; do
+  az role assignment create \
+    --assignee-object-id "$MI_OID" \
+    --assignee-principal-type ServicePrincipal \
+    --role "$role" --scope "$STG_ID"
+done
+```
+
+### Step 4 — User ACR: AcrPush
+
+Required for: `az acr build` REST calls from the `build_acr_images` orchestrator.
+
+```bash
+ACR_ID="/subscriptions/$SUB/resourceGroups/$USER_ACR_RG/providers/Microsoft.ContainerRegistry/registries/$USER_ACR"
+az role assignment create \
+  --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "AcrPush" --scope "$ACR_ID"
+```
+
+### Step 5 — Wait for propagation, then verify
+
+Azure RBAC propagation typically takes **1–5 minutes**. The first
+1–2 dashboard refreshes after running this script will almost always
+show 403s from AKS / Storage / ACR cards. This is **normal**, not a
+missing role.
+
+Verify with:
+
+```bash
+# Confirm the assignments exist at the expected scopes
+az role assignment list --assignee "$MI_OID" \
+  --query "[].{role:roleDefinitionName,scope:scope}" -o table
+```
+
+If a card is still 403 after 5 minutes, the workload resource is in a
+**different RG** (e.g. switching the UI to a cluster in `rg-elb-koc` or
+`rg-elb-0509`) — add that RG to `WORKLOAD_RGS` and re-run Step 2.
+
+---
+
 ## §1 Function App Managed Identity — Required RBAC Roles
 
 The Function App's **system-assigned Managed Identity** is the principal
@@ -75,29 +171,8 @@ These must be assigned on user-created storage accounts, ACRs, etc.:
 
 ### Quick Setup — MI Role Assignment Commands
 
-```bash
-MI_OID="<function-app-mi-object-id>"  # Portal → Function App → Identity
-SUB="/subscriptions/<subscription-id>"
-
-# Subscription-level (simplest)
-az role assignment create --assignee-object-id "$MI_OID" \
-  --assignee-principal-type ServicePrincipal \
-  --role Contributor --scope "$SUB"
-
-az role assignment create --assignee-object-id "$MI_OID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "User Access Administrator" --scope "$SUB"
-
-# User data storage
-STORAGE_ID="$SUB/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>"
-az role assignment create --assignee-object-id "$MI_OID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Data Contributor" --scope "$STORAGE_ID"
-
-az role assignment create --assignee-object-id "$MI_OID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "Storage Blob Delegator" --scope "$STORAGE_ID"
-```
+See **§0 Post-Deploy Permissions Checklist** above for the full,
+copy-pasteable script (with workload RGs, storage, and ACR all covered).
 
 ---
 
@@ -217,7 +292,7 @@ All data-plane and mutation operations are performed by the MI.
 | `ForbiddenByRbac` on Key Vault | MI lacks **Key Vault Secrets Officer** | Assign on the vault |
 | `does not have authorization` on RBAC | MI lacks **User Access Administrator** | Assign at target scope; or run the logged `az` command manually |
 | `Forbidden` on AKS kubeconfig | MI lacks **AKS Cluster User Role** | Assign on the cluster |
-| RBAC assigned but still failing | Propagation delay (up to 5 min) | Wait and retry |
+| RBAC assigned but still failing | Propagation delay (typically 1–5 min; observed 403→200 within ~70s on `listClusterUserCredential`) | Wait and retry; verify with `az role assignment list --assignee <MI_OID>` |
 | `No identity found` | MI not enabled | Portal → Function App → Identity → System-assigned → On |
 
 ---
