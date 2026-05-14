@@ -70,7 +70,7 @@ RUN curl -sL https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_6
 # elastic-blast Python package (pre-installed venv at /opt/elb/venv)
 # ---------------------------------------------------------------------------
 RUN python3.12 -m venv /opt/elb/venv \
-    && /opt/elb/venv/bin/pip install --upgrade pip wheel build \
+    && /opt/elb/venv/bin/pip install --upgrade pip wheel build setuptools \
     && /opt/elb/venv/bin/pip install \
         azure-mgmt-resource azure-mgmt-network azure-mgmt-compute \
         azure-mgmt-storage azure-mgmt-containerregistry azure-mgmt-containerservice \
