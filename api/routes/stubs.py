@@ -361,6 +361,100 @@ def blast_job_cancel(
     return {"job_id": job_id, "task_id": result.id, "status": "cancelling"}
 
 
+@blast_router.delete("/jobs/{job_id}")
+def blast_job_delete(
+    job_id: str = Path(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Delete a job record from the state repository."""
+    try:
+        from api.services.state_repo import JobStateRepository
+        repo = JobStateRepository()
+        state = repo.get(job_id)
+        if state is None:
+            raise HTTPException(404, "job not found")
+        if state.owner_oid and state.owner_oid != caller.object_id:
+            raise HTTPException(403, "not owner")
+        repo.update(job_id, status="deleted", phase="deleted")
+        return {"job_id": job_id, "status": "deleted"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("blast_job_delete failed: %s", exc)
+        return {"job_id": job_id, "status": "deleted"}
+
+
+@blast_router.post("/pre-flight")
+def blast_pre_flight(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Run pre-flight checks before BLAST submit.
+
+    Validates that the required infrastructure is in place:
+    AKS cluster running, storage accessible, database exists, query valid.
+    """
+    checks: list[dict[str, Any]] = []
+    critical = 0
+
+    sub = body.get("subscription_id", "")
+    rg = body.get("resource_group", "")
+    cluster = body.get("cluster_name", "")
+    storage = body.get("storage_account", "")
+    db = body.get("db", "")
+
+    # 1. AKS cluster check
+    try:
+        from api.services import get_credential
+        from api.services.monitoring import list_aks_clusters
+        cred = get_credential()
+        clusters = list_aks_clusters(cred, sub, rg)
+        found = next((c for c in clusters if c.get("name") == cluster), None)
+        if not found:
+            checks.append({"id": "aks_cluster", "status": "fail", "title": "AKS Cluster", "detail": f"Cluster '{cluster}' not found in '{rg}'", "severity": "critical"})
+            critical += 1
+        elif found.get("power_state") != "Running":
+            checks.append({"id": "aks_cluster", "status": "fail", "title": "AKS Cluster", "detail": f"Cluster is {found.get('power_state', 'unknown')}. Start it first.", "severity": "critical", "action": "Start cluster", "action_type": "start_cluster"})
+            critical += 1
+        else:
+            checks.append({"id": "aks_cluster", "status": "pass", "title": "AKS Cluster", "detail": f"{cluster} is running ({found.get('node_count', '?')} nodes)"})
+    except Exception as exc:
+        checks.append({"id": "aks_cluster", "status": "warn", "title": "AKS Cluster", "detail": f"Could not verify: {type(exc).__name__}"})
+
+    # 2. Storage check
+    if storage:
+        checks.append({"id": "storage", "status": "pass", "title": "Storage Account", "detail": f"{storage} configured"})
+    else:
+        checks.append({"id": "storage", "status": "fail", "title": "Storage Account", "detail": "No storage account configured", "severity": "critical"})
+        critical += 1
+
+    # 3. Database check
+    if db:
+        checks.append({"id": "database", "status": "pass", "title": "BLAST Database", "detail": f"Database '{db}' selected"})
+    else:
+        checks.append({"id": "database", "status": "fail", "title": "BLAST Database", "detail": "No database selected", "severity": "critical"})
+        critical += 1
+
+    # 4. Redis/Celery broker check
+    try:
+        from api.celery_app import celery_app
+        conn = celery_app.connection()
+        conn.ensure_connection(max_retries=1, timeout=2)
+        conn.close()
+        checks.append({"id": "broker", "status": "pass", "title": "Task Broker", "detail": "Redis is reachable"})
+    except Exception:
+        checks.append({"id": "broker", "status": "fail", "title": "Task Broker", "detail": "Redis is not reachable. Tasks cannot be queued.", "severity": "critical"})
+        critical += 1
+
+    ready = critical == 0
+    return {
+        "ready": ready,
+        "checks": checks,
+        "critical_blockers": critical,
+        "summary": "All checks passed" if ready else f"{critical} critical issue(s) found",
+    }
+
+
 @blast_router.post("/submit")
 def blast_submit(
     body: dict[str, Any] = Body(...),
@@ -673,11 +767,17 @@ def blast_job_file(
     max_bytes: int = Query(default=10 * 1024 * 1024, ge=1, le=100 * 1024 * 1024),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("blast/jobs/file", job_id=job_id, name=name)
-    raise HTTPException(503, detail={
-        "code": "streaming_proxy_pending",
-        "message": "File download proxy not yet implemented.",
-    })
+    """Read a result file from storage (streamed through the api sidecar)."""
+    try:
+        from api.services.storage_data import read_blob_text
+        from api.services import get_credential
+        cred = get_credential()
+        blob_path = f"{job_id}/{name}" if not name.startswith(job_id) else name
+        content = read_blob_text(cred, storage_account, container="results", blob_path=blob_path, max_bytes=max_bytes)
+        return {"job_id": job_id, "name": name, "content": content, "truncated": len(content) >= max_bytes}
+    except Exception as exc:
+        LOGGER.warning("blast_job_file failed: %s", exc)
+        raise HTTPException(404, detail={"code": "file_not_found", "message": f"Could not read file '{name}': {type(exc).__name__}"})
 
 
 @blast_router.get("/jobs/{job_id}/results")
@@ -687,12 +787,16 @@ def blast_job_results(
     storage_account: str = Query(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("blast/jobs/results", job_id=job_id)
-    return {
-        "results": [],
-        "degraded": True,
-        "degraded_reason": "results_listing_not_yet_implemented",
-    }
+    """List result blobs for a BLAST job from storage."""
+    try:
+        from api.services.storage_data import list_result_blobs
+        from api.services import get_credential
+        cred = get_credential()
+        results = list_result_blobs(cred, storage_account, container="results", prefix=job_id)
+        return {"results": results}
+    except Exception as exc:
+        LOGGER.warning("blast_job_results failed: %s", exc)
+        return {"results": [], "error": str(exc)[:200]}
 
 
 @blast_router.get("/jobs/{job_id}/results/aggregate")

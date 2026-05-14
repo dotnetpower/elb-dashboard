@@ -27,6 +27,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+@shared_task(name="api.tasks.azure.diag_noop", bind=True, max_retries=0)
+def diag_noop(self, *, message: str = "ping") -> dict[str, Any]:
+    """Diagnostic-only no-op task — proves enqueue ↔ consume round-trip works."""
+    LOGGER.info("DIAG_NOOP message=%r task_id=%s", message, self.request.id)
+    return {"message": message, "task_id": self.request.id, "ts": _now_iso()}
+
+
 def _update_state(task_id: str, phase: str, status: str = "running", **extra: Any) -> None:
     """Best-effort state update to the job state repo."""
     try:
