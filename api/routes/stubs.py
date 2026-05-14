@@ -27,6 +27,26 @@ def _stub_log(name: str, **ctx: Any) -> None:
     LOGGER.warning("STUB_CALLED endpoint=%s ctx=%s", name, ctx)
 
 
+def _safe_delay(task, **kwargs):
+    """Enqueue a Celery task, returning the AsyncResult. If the broker is
+    unreachable (Redis down), raise 503 with a retryable hint instead of
+    letting the OperationalError bubble as a 500."""
+    try:
+        return task.delay(**kwargs)
+    except Exception as exc:
+        if "Connection refused" in str(exc) or "OperationalError" in type(exc).__name__:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "broker_unavailable",
+                    "message": "Task broker (Redis) is not reachable. The task cannot be queued right now.",
+                    "retryable": True,
+                    "retry_after_seconds": 30,
+                },
+            ) from exc
+        raise
+
+
 # ===========================================================================
 # /api/resources/* moved to api/routes/resources.py (real implementation).
 # Keeping this empty router so the import in main.py keeps working without a
@@ -75,7 +95,7 @@ def aks_provision(
 ) -> dict[str, Any]:
     from api.tasks.azure import provision_aks
     job_id = str(uuid.uuid4())
-    result = provision_aks.delay(
+    result = _safe_delay(provision_aks,
         job_id=job_id,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
@@ -151,7 +171,7 @@ def aks_start(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     from api.tasks.azure import start_aks
-    result = start_aks.delay(
+    result = _safe_delay(start_aks,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
         cluster_name=body.get("cluster_name", ""),
@@ -165,7 +185,7 @@ def aks_stop(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     from api.tasks.azure import stop_aks
-    result = stop_aks.delay(
+    result = _safe_delay(stop_aks,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
         cluster_name=body.get("cluster_name", ""),
@@ -179,7 +199,7 @@ def aks_delete(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     from api.tasks.azure import delete_aks
-    result = delete_aks.delay(
+    result = _safe_delay(delete_aks,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
         cluster_name=body.get("cluster_name", ""),
@@ -194,7 +214,7 @@ def aks_assign_roles(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     from api.tasks.azure import assign_aks_roles
-    result = assign_aks_roles.delay(
+    result = _safe_delay(assign_aks_roles,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
         cluster_name=cluster_name,
@@ -216,7 +236,7 @@ def acr_build_images(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     from api.tasks.acr import build_images
-    result = build_images.delay(
+    result = _safe_delay(build_images,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
         registry_name=body.get("registry_name", ""),
@@ -331,7 +351,7 @@ def blast_job_cancel(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     from api.tasks.blast import cancel
-    result = cancel.delay(
+    result = _safe_delay(cancel,
         job_id=job_id,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
@@ -398,7 +418,7 @@ def blast_submit(
     except Exception as exc:
         LOGGER.warning("failed to create job state: %s", exc)
 
-    result = submit.delay(
+    result = _safe_delay(submit,
         job_id=job_id,
         subscription_id=req.subscription_id,
         resource_group=req.resource_group,
@@ -758,7 +778,7 @@ def warmup_start(
     except Exception as exc:
         LOGGER.warning("failed to create warmup job state: %s", exc)
 
-    result = warmup_database.delay(
+    result = _safe_delay(warmup_database,
         job_id=job_id,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),

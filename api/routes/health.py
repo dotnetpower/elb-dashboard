@@ -83,3 +83,47 @@ def readiness() -> dict[str, Any]:
         },
         status_code=status_code,
     )
+
+
+@router.get("/health/celery")
+def celery_diag() -> dict[str, Any]:
+    """Diagnostic-only: return per-queue length + worker inspect snapshot.
+
+    Unauthenticated by design (read-only, no secrets in payload). Used to
+    diagnose 'task enqueued but worker silent' problems.
+    """
+    out: dict[str, Any] = {"queues": {}, "workers": None, "errors": []}
+
+    # 1. Redis queue lengths via raw redis client (no kombu wrapper)
+    try:
+        import redis as _redis
+        from api.celery_app import CELERY_BROKER_URL
+        r = _redis.Redis.from_url(CELERY_BROKER_URL, socket_timeout=2)
+        for q in ("default", "azure", "blast", "storage", "celery"):
+            try:
+                out["queues"][q] = r.llen(q)
+            except Exception as exc:  # noqa: BLE001
+                out["queues"][q] = f"err:{type(exc).__name__}"
+        out["broker_url"] = CELERY_BROKER_URL
+        out["redis_keys_db0"] = sorted(
+            k.decode() for k in r.keys("*") if not k.startswith(b"_kombu")
+        )
+    except Exception as exc:  # noqa: BLE001
+        out["errors"].append(f"redis: {type(exc).__name__}: {exc}")
+
+    # 2. Celery worker inspect (active / reserved / scheduled / registered)
+    try:
+        from api.celery_app import celery_app
+        insp = celery_app.control.inspect(timeout=2)
+        out["workers"] = {
+            "active": insp.active(),
+            "reserved": insp.reserved(),
+            "scheduled": insp.scheduled(),
+            "registered": insp.registered(),
+            "stats": insp.stats(),
+            "ping": insp.ping(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        out["errors"].append(f"inspect: {type(exc).__name__}: {exc}")
+
+    return out
