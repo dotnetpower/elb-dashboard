@@ -34,6 +34,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api import __version__
+# Import celery_app eagerly so it is registered as the current/default
+# Celery instance BEFORE any route handler imports `api.tasks.*` (whose
+# `@shared_task` decorators bind to the current Celery app at call time).
+# Without this guard, `task.delay()` resolves `current_app` to a phantom
+# default Celery app and the produced message lands in a queue the worker
+# doesn't subscribe to → tasks silently never run. See `api/tasks/__init__.py`.
+from api import celery_app as _celery_app  # noqa: F401
 from api.routes import (
     arm,
     frontend_proxy,

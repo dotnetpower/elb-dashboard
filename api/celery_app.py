@@ -23,6 +23,7 @@ celery_app = Celery(
     "elb_control_plane",
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
+    set_as_current=True,
     include=[
         "api.tasks",
         "api.tasks.azure",
@@ -31,6 +32,14 @@ celery_app = Celery(
         "api.tasks.storage",
     ],
 )
+# Belt-and-braces: force this Celery instance to be both `default_app`
+# and the top of `_task_stack` even if some other module instantiated a
+# Celery app first. Without this, `shared_task.delay()` from the api
+# sidecar would resolve `current_app` to a phantom default Celery app
+# (broker=amqp://, queue="celery", routes={}) and the task would land in
+# a queue the worker doesn't subscribe to → tasks silently never run.
+celery_app.set_default()
+celery_app.set_current()
 
 celery_app.conf.update(
     task_acks_late=True,

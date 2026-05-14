@@ -90,7 +90,9 @@ def celery_diag() -> dict[str, Any]:
     """Diagnostic-only: return per-queue length + worker inspect snapshot.
 
     Unauthenticated by design (read-only, no secrets in payload). Used to
-    diagnose 'task enqueued but worker silent' problems.
+    diagnose 'task enqueued but worker silent' problems. Kept after the
+    2026-05-15 routing-fix so future drift can be spotted in seconds:
+    `redis_keys_db0` should contain only the worker's known queue names.
     """
     out: dict[str, Any] = {"queues": {}, "workers": None, "errors": []}
 
@@ -102,15 +104,6 @@ def celery_diag() -> dict[str, Any]:
             "default_queue": celery_app.conf.task_default_queue,
             "task_routes": dict(celery_app.conf.task_routes or {}),
             "broker_url": celery_app.conf.broker_url,
-        }
-        # Resolve where a sample task would actually land.
-        from api.tasks.azure import diag_noop
-        router = celery_app.amqp.router
-        route = router.route({}, diag_noop.name)
-        out["producer_conf"]["resolved_route_for_diag_noop"] = {
-            "queue": getattr(route.get("queue"), "name", str(route.get("queue"))),
-            "routing_key": route.get("routing_key"),
-            "exchange": getattr(route.get("exchange"), "name", str(route.get("exchange"))) if route.get("exchange") else None,
         }
     except Exception as exc:  # noqa: BLE001
         out["errors"].append(f"producer_conf: {type(exc).__name__}: {exc}")
