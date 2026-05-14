@@ -638,13 +638,6 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
     color: "var(--text-faint)",
     textAlign: "right",
   };
-  const midLabelStyle: React.CSSProperties = {
-    fontSize: 10,
-    color: "var(--text-faint)",
-    fontStyle: "italic",
-    whiteSpace: "nowrap",
-    padding: "0 6px",
-  };
 
   return (
     <MonitorCard
@@ -672,7 +665,7 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
           100% { left: calc(100% - 8px); opacity: 0; }
         }
         .topo-arrow-pulse {
-          animation: topoArrowPulse 2.4s linear infinite;
+          animation: topoArrowPulse 1.1s linear infinite;
         }
         @media (prefers-reduced-motion: reduce) {
           .topo-arrow-pulse { animation: none; opacity: 0.6; }
@@ -704,34 +697,69 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
         <code>/api/*</code> requests to <code>frontend:8081</code>.
       </div>
 
-      {/* Mid row: async path (SPA enqueue → redis broker → worker) */}
+      {/* Row 2: async-task channel — api enqueues to redis, worker pops. */}
       <div style={gridStyle}>
-        <div style={labelStyle}>Async tasks</div>
+        <div style={labelStyle}>Async ↣</div>
         <TopoArrow degraded={worker.health !== "ok" || redis.health !== "ok"} delaySec={0.3} />
         <TopoNode s={redis} width={NODE_W} />
         <TopoArrow degraded={worker.health !== "ok"} delaySec={0.9} />
         <TopoNode s={worker} width={NODE_W} />
       </div>
+      <div
+        style={{
+          fontSize: 10,
+          color: "var(--text-faint)",
+          paddingLeft: 102,
+          marginTop: -4,
+          marginBottom: 4,
+          fontStyle: "italic",
+        }}
+      >
+        api produces tasks into the broker; worker pops and runs them.
+      </div>
 
-      {/* Bottom row: scheduler + terminal — beat anchored at the same left
-          column as frontend / redis; ws/exec caption pushed into the wide
-          mid-arrow so terminal aligns with api / worker on the right. */}
+      {/* Row 3: scheduler — beat enqueues periodic jobs into the same broker.
+          Right-node column is intentionally empty: beat does NOT talk to the
+          terminal (that was the bug the operator caught earlier). */}
       <div style={gridStyle}>
-        <div style={labelStyle}>Scheduled</div>
+        <div style={labelStyle}>Scheduled ↣</div>
         <TopoArrow delaySec={1.2} />
         <TopoNode s={beat} width={NODE_W} />
         <div
           style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            minWidth: 0,
+            gridColumn: "4 / span 2",
+            fontSize: 10,
+            color: "var(--text-faint)",
+            fontStyle: "italic",
+            paddingLeft: 14,
           }}
         >
-          <TopoArrow degraded={terminal.health !== "ok"} delaySec={1.5} />
-          <span style={midLabelStyle}>ws / exec ↣</span>
+          beat enqueues periodic jobs into the same redis broker.
         </div>
+      </div>
+
+      {/* Row 4: terminal channel — api (and worker) reach the terminal sidecar
+          via WebSocket proxy + privileged exec. NOT beat. */}
+      <div style={gridStyle}>
+        <div style={labelStyle}>ws / exec ↣</div>
+        <TopoArrow delaySec={0.5} />
+        <TopoNode s={api} width={NODE_W} />
+        <TopoArrow degraded={terminal.health !== "ok"} delaySec={1.5} />
         <TopoNode s={terminal} width={NODE_W} />
+      </div>
+      <div
+        style={{
+          fontSize: 10,
+          color: "var(--text-faint)",
+          paddingLeft: 102,
+          marginTop: -4,
+          marginBottom: 4,
+          fontStyle: "italic",
+        }}
+      >
+        api proxies <code>/api/terminal/ws</code> + the privileged exec channel
+        on <code>:7682</code>; worker uses the same exec channel for shell-only
+        tools (<code>azcopy</code>, <code>kubectl</code>, <code>elastic-blast</code>).
       </div>
 
       {/* Legend */}
