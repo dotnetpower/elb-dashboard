@@ -3,7 +3,7 @@ import { ChevronRight } from "lucide-react";
 
 const ROUTE_LABELS: Record<string, string> = {
   "": "Dashboard",
-  terminal: "Remote Terminal",
+  terminal: "Terminal",
   blast: "BLAST",
   submit: "New Search",
   jobs: "Jobs",

@@ -75,7 +75,7 @@ const PHASE_TO_STEP: Record<string, string> = {
 };
 
 export const PHASE_MESSAGES: Record<string, string> = {
-  checking_vm: "Verifying Remote Terminal VM is running...",
+  checking_vm: "Verifying Terminal sidecar is reachable...",
   enabling_storage: "Enabling storage public access for data transfer...",
   uploading: "Uploading query sequence to Azure Blob Storage...",
   configuring: "Generating ElasticBLAST configuration...",
@@ -420,7 +420,7 @@ export function StepLogSection({
           return started
             ? `✓ VM was deallocated → started (power: ${ps || "running"}). Waited 30s for boot.`
             : `✓ VM already running (power: ${ps || "running"}).`;
-        return "Checking Remote Terminal VM power state...";
+        return "Checking Terminal sidecar reachability...";
       }
       case "enabling_storage":
         if (state === "error") return `✗ ${stepLabel} failed:\n${failureText}`;

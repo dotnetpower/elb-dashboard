@@ -21,23 +21,25 @@ import {
   BarChart3,
 } from "lucide-react";
 
-import { blastApi, type BlastExportFormat, type BlastResultFile } from "@/api/endpoints";
+import { blastApi } from "@/api/endpoints";
 import { api } from "@/api/client";
 import { loadSavedConfig } from "@/components/SetupWizard";
-import { statusColor } from "@/constants";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
-  PHASE_STEPS,
   PHASE_MESSAGES,
   FAILURE_PHASES,
-  isRecord,
-  inferFailedStepKey,
   firstErrorLine,
   getFailureText,
   StepLogSection,
 } from "@/components/BlastStepTimeline";
 import { ElapsedTimer, formatBytes } from "@/components/BlastFilePreview";
+import { useBlastResultActions } from "@/hooks/useBlastResultActions";
+import {
+  resolveBlastJobPhase,
+  resolveBlastResultState,
+  splitBlastResultFiles,
+} from "@/pages/blastResultsModel";
 
 function StorageLockedPanel({
   subscriptionId,
@@ -186,9 +188,6 @@ export function BlastResults() {
   const config = loadSavedConfig();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [copiedId, setCopiedId] = useState(false);
-  const [downloadingFile, setDownloadingFile] = useState<string | null>(null);
-  const [exportingFormat, setExportingFormat] = useState<BlastExportFormat | null>(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const prevPhaseRef = useRef<string | null>(null);
   const subscriptionId =
@@ -229,38 +228,42 @@ export function BlastResults() {
 
   const job = jobQuery.data;
   const allFiles = resultsQuery.data?.files ?? [];
-  // Separate BLAST result files (.out) from debug/log artifacts
-  const DEBUG_FILES = new Set(["blast-status.txt", "jobs.txt", "pods.txt"]);
-  const resultFiles = allFiles.filter((f: BlastResultFile) => {
-    const basename = f.name.split("/").pop() || "";
-    return !DEBUG_FILES.has(basename) && !basename.endsWith(".log");
-  });
-  const debugFiles = allFiles.filter((f: BlastResultFile) => {
-    const basename = f.name.split("/").pop() || "";
-    return DEBUG_FILES.has(basename) || basename.endsWith(".log");
-  });
-  // Show result files first; if none exist, show debug files as fallback
-  const files = resultFiles.length > 0 ? resultFiles : debugFiles;
-  const hasOnlyDebugFiles = resultFiles.length === 0 && debugFiles.length > 0;
+  const { resultFiles, debugFiles, files, hasOnlyDebugFiles } =
+    splitBlastResultFiles(allFiles);
   const publicAccessDisabled = resultsQuery.data?.public_access_disabled === true;
-  const customStatus = isRecord(job?.custom_status) ? job.custom_status : null;
-  const output = isRecord(job?.output) ? job.output : null;
-  // Phase resolution: use multiple signals to determine the real status.
-  // Priority: output.phase (orchestrator final result) > custom_status.phase > entity phase > runtime_status
-  const outputPhase = output?.phase as string | undefined;
-  const outputStatus = output?.status as string | undefined;
-  const jobPhase =
-    outputPhase || (customStatus?.phase as string) || job?.phase || job?.status;
-  const isJobFailed = FAILURE_PHASES.has(jobPhase ?? "") || outputStatus === "failed";
-  const phase = isJobFailed
-    ? FAILURE_PHASES.has(jobPhase ?? "")
-      ? (jobPhase as string)
-      : "error"
-    : job?.runtime_status === "Completed" && !isJobFailed
-      ? "completed"
-      : job?.runtime_status === "Failed"
-        ? "error"
-        : jobPhase || "unknown";
+  const { customStatus, output, outputStatus, phase, isJobFailed } =
+    resolveBlastJobPhase(job);
+  const {
+    blastStatus,
+    pollAttempt,
+    runtimeStatus,
+    stepsObj,
+    submitOutput,
+    completedButFailed,
+    effectivePhase,
+    effectiveIsFailed,
+    effectiveColor,
+    isRunning,
+    failedStepKey,
+    failedStepLabel,
+  } = resolveBlastResultState({
+    job,
+    phase,
+    customStatus,
+    output,
+    outputStatus,
+    isJobFailed,
+  });
+
+  const {
+    copiedId,
+    copyJobId,
+    downloadingFile,
+    exportingFormat,
+    handleDownload,
+    handleExport,
+    cancelMutation,
+  } = useBlastResultActions({ jobId, subscriptionId, storageAccount });
 
   // Track phase transitions for toast notifications.
   // Only toast when we observe a LIVE transition (running → completed).
@@ -292,121 +295,6 @@ export function BlastResults() {
     }
     prevPhaseRef.current = phase;
   }, [job, phase, toast]);
-
-  const handleDownload = async (file: BlastResultFile) => {
-    if (!jobId) return;
-    setDownloadingFile(file.name);
-    try {
-      const resp = await blastApi.downloadResult(
-        jobId,
-        subscriptionId,
-        storageAccount,
-        file.name,
-      );
-      window.open(resp.download_url, "_blank");
-    } catch (e) {
-      toast(`Download failed: ${(e as Error).message}`, "error");
-    } finally {
-      setDownloadingFile(null);
-    }
-  };
-
-  const handleExport = async (format: BlastExportFormat) => {
-    if (!jobId || !subscriptionId || !storageAccount) return;
-    setExportingFormat(format);
-    try {
-      const response = await blastApi.exportResults(
-        jobId,
-        subscriptionId,
-        storageAccount,
-        format,
-      );
-      const blob = new Blob([response.text], { type: response.contentType });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = response.filename ?? `${jobId}_results.${format}`;
-      document.body.append(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
-      toast(`Exported ${format.toUpperCase()} report.`, "success");
-    } catch (e) {
-      toast(`Export failed: ${(e as Error).message}`, "error");
-    } finally {
-      setExportingFormat(null);
-    }
-  };
-
-  const cancelMutation = useMutation({
-    mutationFn: () => blastApi.cancelJob(jobId!),
-    onSuccess: () => {
-      toast("Job cancelled.", "success");
-      queryClient.invalidateQueries({ queryKey: ["blast-job", jobId] });
-    },
-    onError: (e) => toast(`Cancel failed: ${(e as Error).message}`, "error"),
-  });
-
-  const copyJobId = () => {
-    if (jobId) {
-      navigator.clipboard.writeText(jobId).catch(() => {});
-      setCopiedId(true);
-      setTimeout(() => setCopiedId(false), 2000);
-    }
-  };
-
-  const isFailed = isJobFailed || FAILURE_PHASES.has(phase);
-  const blastStatus = customStatus?.blast_status as string | undefined;
-  const pollAttempt = customStatus?.poll_attempt as number | undefined;
-  const runtimeStatus = job?.runtime_status as string | undefined;
-
-  // Detect errors in submit/export logs
-  const stepsObj = (customStatus?.steps ?? output?.steps ?? {}) as Record<
-    string,
-    Record<string, unknown>
-  >;
-  const exportStep = stepsObj?.exporting_results as Record<string, unknown> | undefined;
-  const submitStep = stepsObj?.submitting as Record<string, unknown> | undefined;
-  const hasOutputFiles = exportStep?.has_output_files as boolean | undefined;
-  const submitOutput = (submitStep?.output as string) ?? "";
-  // Only match fatal errors — not non-fatal config warnings
-  const submitHasFatalErrors = (() => {
-    if (/ErrorCode:|<Error>/.test(submitOutput)) return true;
-    // Check for ERROR: at line start, but exclude known non-fatal warnings
-    const NON_FATAL = ["Unrecognized configuration parameter"];
-    for (const line of submitOutput.split("\n")) {
-      if (line.startsWith("ERROR:")) {
-        const isFatal = !NON_FATAL.some((nf) => line.includes(nf));
-        if (isFatal) return true;
-      }
-    }
-    return false;
-  })();
-  // "completed" but submit had fatal errors or no .out files = treat as failed
-  // However, trust the orchestrator's final verdict if it explicitly says "completed"
-  const orchestratorSaysCompleted = outputStatus === "completed";
-  const completedButFailed =
-    phase === "completed" &&
-    !orchestratorSaysCompleted &&
-    (hasOutputFiles === false || submitHasFatalErrors);
-  // Effective phase: override to submit_failed when completed-but-failed
-  const effectivePhase = completedButFailed ? "submit_failed" : phase;
-  const effectiveIsFailed = isFailed || completedButFailed;
-  const effectiveColor = statusColor(
-    effectivePhase === "submit_failed" ? "failed" : effectivePhase,
-  );
-  const isRunning =
-    Boolean(job) &&
-    !effectiveIsFailed &&
-    phase !== "completed" &&
-    phase !== "deleted" &&
-    phase !== "cancelled";
-  const failedStepKey = effectiveIsFailed
-    ? inferFailedStepKey(effectivePhase, stepsObj, output, customStatus)
-    : null;
-  const failedStepLabel = failedStepKey
-    ? (PHASE_STEPS.find((step) => step.key === failedStepKey)?.label ?? "Execution")
-    : "Execution";
 
   return (
     <div className="page-stack">

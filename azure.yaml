@@ -1,21 +1,17 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
 name: elastic-blast-azure-functionapp
 metadata:
-  template: elastic-blast-azure-functionapp@0.1.0
+  template: elastic-blast-azure-functionapp@0.2.0
 
-services:
-  # Backend: `azd deploy api` does NOT work for this Function App because it
-  # omits .python_packages from the zip. Use `./scripts/dev/deploy-api.sh` instead.
-  # For web-only changes, `azd deploy web --no-prompt` works fine.
-  api:
-    project: ./api
-    language: python
-    host: function
-  web:
-    project: ./web
-    language: ts
-    host: staticwebapp
-    dist: dist
+# This azure.yaml is configured for the BUNDLED CONTAINER APP topology
+# (six sidecars: api, frontend, worker, beat, redis, terminal).
+#
+# Image build is handled by the postprovision hook via `az acr build`, not by
+# `azd deploy` — that lets a fresh `git clone && azd up` go end-to-end
+# without needing Docker locally.
+#
+# The legacy Function App + SWA topology is preserved under infra/legacy/ for
+# reference but is no longer the default deploy target.
 
 infra:
   provider: bicep
@@ -25,5 +21,35 @@ infra:
 hooks:
   preprovision:
     shell: sh
+    interactive: false
+    continueOnError: false
     run: |
-      echo "Provisioning ElasticBLAST control plane (Function App + SWA + Key Vault + VNet + Storage)..."
+      set -eu
+      echo "==> Pre-provision: registering required Azure providers (idempotent)..."
+      for ns in \
+        Microsoft.App \
+        Microsoft.OperationalInsights \
+        Microsoft.Insights \
+        Microsoft.ContainerRegistry \
+        Microsoft.KeyVault \
+        Microsoft.Storage \
+        Microsoft.Network \
+        Microsoft.ManagedIdentity; do
+        state=$(az provider show -n "$ns" --query registrationState -o tsv 2>/dev/null || echo "")
+        if [ "$state" != "Registered" ]; then
+          echo "  registering $ns ..."
+          az provider register -n "$ns" --wait --only-show-errors >/dev/null
+        fi
+      done
+      echo "==> Pre-provision OK."
+
+  postprovision:
+    shell: sh
+    # interactive: true makes azd stream the hook's stdout/stderr to the
+    # operator's terminal in real time so the timestamped progress lines from
+    # postprovision.sh are visible while it runs (otherwise azd buffers
+    # everything until the hook exits).
+    interactive: true
+    continueOnError: false
+    run: |
+      bash ./scripts/dev/postprovision.sh

@@ -59,7 +59,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const RG_RE = /^[-\w._()]+$/;
 const STORAGE_RE = /^[a-z0-9]{3,24}$/;
 const ACR_RE = /^[a-zA-Z0-9]{5,50}$/;
-const VM_RE = /^[a-zA-Z0-9][-a-zA-Z0-9]{0,62}[a-zA-Z0-9]?$/;
+// VM_RE removed: there is no Terminal VM in the bundled Container Apps topology.
 
 interface ValidationErrors { [key: string]: string }
 
@@ -76,8 +76,9 @@ function validateStep2(c: ResourceConfig): ValidationErrors {
   else if (!RG_RE.test(c.workloadResourceGroup)) e.workloadResourceGroup = "Invalid name. Use letters, numbers, hyphens, underscores.";
   if (!c.acrResourceGroup) e.acrResourceGroup = "ACR RG is required";
   else if (!RG_RE.test(c.acrResourceGroup)) e.acrResourceGroup = "Invalid name";
-  if (!c.terminalResourceGroup) e.terminalResourceGroup = "Terminal RG is required";
-  else if (!RG_RE.test(c.terminalResourceGroup)) e.terminalResourceGroup = "Invalid name";
+  // Terminal RG no longer required — the browser terminal is the in-process
+  // `terminal` sidecar in the Container App, not a Linux VM. The legacy field
+  // is kept on the config object only so old saved configs do not crash.
   return e;
 }
 
@@ -87,7 +88,7 @@ function validateStep3(c: ResourceConfig): ValidationErrors {
   else if (!STORAGE_RE.test(c.storageAccountName)) e.storageAccountName = "3-24 lowercase letters and numbers only";
   if (!c.acrName) e.acrName = "Container Registry name is required";
   else if (!ACR_RE.test(c.acrName)) e.acrName = "5-50 alphanumeric characters only";
-  if (c.terminalVmName && !VM_RE.test(c.terminalVmName)) e.terminalVmName = "Invalid VM name";
+  // Terminal VM no longer required.
   return e;
 }
 
@@ -155,11 +156,8 @@ export function SetupWizard({ onComplete, onClose }: Props) {
     queryFn: () => armProxyApi.listAcrs(config.subscriptionId, config.acrResourceGroup),
     enabled: step >= 3 && Boolean(config.subscriptionId && config.acrResourceGroup), retry: 1,
   });
-  const vmQuery = useQuery({
-    queryKey: ["wizard-vm", config.subscriptionId, config.terminalResourceGroup],
-    queryFn: () => armProxyApi.listVms(config.subscriptionId, config.terminalResourceGroup),
-    enabled: step >= 3 && Boolean(config.subscriptionId && config.terminalResourceGroup), retry: 1,
-  });
+  // vmQuery removed: there is no Terminal VM in the bundled Container Apps
+  // topology; the terminal is the in-process `terminal` sidecar.
 
   // Auto-fill discovered resources
   useEffect(() => {
@@ -168,10 +166,9 @@ export function SetupWizard({ onComplete, onClose }: Props) {
       const n = { ...c };
       if (!n.storageAccountName && storageQuery.data?.length) n.storageAccountName = storageQuery.data[0].name;
       if (!n.acrName && acrQuery.data?.length) n.acrName = acrQuery.data[0].name;
-      if (!n.terminalVmName && vmQuery.data?.length) n.terminalVmName = vmQuery.data[0].name;
       return n;
     });
-  }, [step, storageQuery.data, acrQuery.data, vmQuery.data]);
+  }, [step, storageQuery.data, acrQuery.data]);
 
   // ── Mutations for resource creation ──
   const createStorageMut = useMutation({
@@ -201,16 +198,14 @@ export function SetupWizard({ onComplete, onClose }: Props) {
     saveConfig(config);
     // Save associated resource config as RG tags (fire-and-forget)
     if (config.subscriptionId && config.workloadResourceGroup) {
-      import("@/api/endpoints").then(({ armProxyApi }) => {
-        armProxyApi.setRgTags(config.subscriptionId, config.workloadResourceGroup, {
-          "elb-acr-rg": config.acrResourceGroup || "",
-          "elb-acr": config.acrName || "",
-          "elb-storage": config.storageAccountName || "",
-          "elb-terminal-rg": config.terminalResourceGroup || "",
-          "elb-terminal-vm": config.terminalVmName || "",
-          "elb-region": config.region || "",
-        }).catch(() => {}); // Best-effort, don't block
-      });
+      armProxyApi.setRgTags(config.subscriptionId, config.workloadResourceGroup, {
+        "elb-acr-rg": config.acrResourceGroup || "",
+        "elb-acr": config.acrName || "",
+        "elb-storage": config.storageAccountName || "",
+        "elb-terminal-rg": config.terminalResourceGroup || "",
+        "elb-terminal-vm": config.terminalVmName || "",
+        "elb-region": config.region || "",
+      }).catch(() => {}); // Best-effort, don't block
     }
     onComplete(config);
   }, [config, onComplete]);
@@ -387,28 +382,10 @@ export function SetupWizard({ onComplete, onClose }: Props) {
                 </>}
               />
 
-              <RgField
-                label="Terminal Resource Group"
-                configKey="terminalResourceGroup"
-                placeholder="rg-elb-terminal"
-                config={config}
-                setConfig={setConfig}
-                rgData={rgQuery.data}
-                isManual={rgQuery.isError || !rgQuery.data?.length}
-                error={errors.terminalResourceGroup}
-                tooltip={<>
-                  <strong>Remote Terminal VM</strong><br />
-                  A Linux VM with everything pre-installed for running elastic-blast CLI.
-                  <div className="tt-resources">
-                    <div className="tt-resource"><span className="tt-icon">🖥</span> <strong>Terminal VM</strong> — Ubuntu 22.04, D4s_v5</div>
-                    <div className="tt-resource"><span className="tt-icon">🔧</span> Pre-installed: az CLI, kubectl, azcopy, Python 3.11</div>
-                  </div>
-                  <div className="tt-note">
-                    You SSH into this VM and use its Managed Identity session.
-                    One terminal serves all your workloads.
-                  </div>
-                </>}
-              />
+              <div style={{ marginTop: 12, padding: "10px 12px", background: "rgba(110,159,255,0.06)", border: "1px solid rgba(110,159,255,0.15)", borderRadius: "var(--radius)", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                <strong style={{ color: "var(--text-primary)" }}>🗒 Terminal:</strong>{" "}
+                The browser terminal runs as a sidecar inside this control plane — there is no Linux VM to provision. Open it from the dashboard “Terminal” card after setup.
+              </div>
             </>)}
           </div>)}
 
@@ -445,19 +422,6 @@ export function SetupWizard({ onComplete, onClose }: Props) {
               error={errors.acrName}
             />
 
-            {/* Terminal VM */}
-            <div style={{ fontSize: 11, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.06em", margin: "14px 0 6px" }}>
-              Terminal VM ({config.terminalResourceGroup})
-            </div>
-            <div style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-weak)", borderRadius: "var(--radius)", padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ fontSize: 16 }}>🖥</div>
-              <input className="glass-input" placeholder="e.g. vm-elb-terminal" value={config.terminalVmName} onChange={(e) => setConfig((c) => ({ ...c, terminalVmName: e.target.value.trim() }))} spellCheck={false} style={{ flex: 1, fontSize: 12 }} />
-              {!vmQuery.isLoading && config.terminalVmName && vmQuery.data?.some((v) => v.name === config.terminalVmName) ? (
-                <span className="gt gt-g"><CheckCircle2 size={10} /> Found</span>
-              ) : <span className="gt gt-o">Provision later</span>}
-            </div>
-            <ErrorMsg msg={errors.terminalVmName} />
-
             <div style={{ marginTop: 16, padding: "12px 14px", background: "rgba(110,159,255,0.06)", border: "1px solid rgba(110,159,255,0.15)", borderRadius: "var(--radius)", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
               Config is saved in your browser. Change it anytime via the ⚙ icon.
             </div>
@@ -476,8 +440,7 @@ export function SetupWizard({ onComplete, onClose }: Props) {
                   ["Storage", config.storageAccountName || "— (skip)"],
                   ["ACR RG", config.acrResourceGroup],
                   ["ACR", config.acrName || "— (skip)"],
-                  ["Terminal RG", config.terminalResourceGroup],
-                  ["Terminal VM", config.terminalVmName || "— (skip)"],
+                  ["Terminal", "in-process sidecar (no VM)"],
                 ] as const).map(([l, v]) => (
                   <tr key={l}>
                     <td style={{ padding: "8px 0", borderBottom: "1px solid var(--border-weak)", color: "var(--text-muted)", width: 160 }}>{l}</td>
@@ -583,7 +546,7 @@ function ResourceRow({ label, icon, placeholder, value, onChange, query, isValid
 // ---------------------------------------------------------------------------
 interface RgFieldProps {
   label: string;
-  configKey: "workloadResourceGroup" | "acrResourceGroup" | "terminalResourceGroup";
+  configKey: "workloadResourceGroup" | "acrResourceGroup";
   placeholder: string;
   config: ResourceConfig;
   setConfig: React.Dispatch<React.SetStateAction<ResourceConfig>>;

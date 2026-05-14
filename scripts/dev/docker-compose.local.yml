@@ -1,0 +1,42 @@
+# Local 2-sidecar validation for the new bundled Container App.
+# Runs the api + frontend sidecars on loopback so we can verify:
+#   * api responds on /api/health and /api/me (with AUTH_DEV_BYPASS=true).
+#   * frontend serves the SPA, including the SPA navigation fallback.
+#
+# Usage:
+#   cd /home/moonchoi/dev/elastic-blast-azure-functionapp
+#   docker compose -f scripts/dev/docker-compose.local.yml up --build
+#
+# Then:
+#   curl http://127.0.0.1:8080/api/health      # 200 from api
+#   curl http://127.0.0.1:8081/                # 200 SPA from frontend
+#
+# Phase 2 will extend this compose with worker, beat, redis, and terminal
+# sidecars and switch the api to act as the single ingress port (8080) that
+# proxies non-/api/* traffic to the frontend.
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: api_app/Dockerfile
+    image: elb-api:dev
+    environment:
+      AUTH_DEV_BYPASS: "true"
+      AZURE_FUNCTIONS_ENVIRONMENT: development
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
+      API_CLIENT_ID: ${API_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
+      LOG_LEVEL: DEBUG
+      ENABLE_DOCS: "true"
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: web/Dockerfile
+    image: elb-frontend:dev
+    ports:
+      - "8081:8081"
+    depends_on:
+      - api

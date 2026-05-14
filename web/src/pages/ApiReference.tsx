@@ -23,9 +23,9 @@ import {
 import { Link } from "react-router-dom";
 
 import { monitoringApi, aksApi } from "@/api/endpoints";
-import { fetchApiRaw } from "@/api/client";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { OpenApiDeployPanel } from "@/components/OpenApiDeployPanel";
+import { useOpenApiExecutor } from "@/hooks/useOpenApiExecutor";
 
 // ---------------------------------------------------------------------------
 // Types (parsed from openapi.json)
@@ -402,12 +402,13 @@ function EndpointCard({
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [bodyText, setBodyText] = useState("");
   const [selectedExample, setSelectedExample] = useState("");
-  const [response, setResponse] = useState<{
-    status: number;
-    body: string;
-    time: number;
-  } | null>(null);
-  const [loading, setLoading] = useState(false);
+  const { execute, response, loading, copyResponse } = useOpenApiExecutor({
+    endpoint: ep,
+    baseUrl,
+    proxyInfo,
+    paramValues,
+    bodyText,
+  });
 
   const m = METHOD_META[ep.method] || METHOD_META.get;
   const examples = ep.requestBody?.content?.["application/json"]?.examples || {};
@@ -429,52 +430,6 @@ function EndpointCard({
     if (ex) setBodyText(JSON.stringify(ex.value, null, 2));
   };
 
-  const handleExecute = useCallback(async () => {
-    setLoading(true);
-    setResponse(null);
-    let targetPath = ep.path;
-    for (const p of ep.parameters.filter((p) => p.in === "path")) {
-      targetPath = targetPath.replace(`{${p.name}}`, paramValues[p.name] || "");
-    }
-    const start = Date.now();
-    try {
-      let resp: Response;
-      if (proxyInfo) {
-        // Route through backend proxy to avoid mixed-content (HTTPS→HTTP) blocking
-        const qs =
-          `subscription_id=${encodeURIComponent(proxyInfo.sub)}` +
-          `&resource_group=${encodeURIComponent(proxyInfo.rg)}` +
-          `&cluster_name=${encodeURIComponent(proxyInfo.clusterName)}` +
-          `&path=${encodeURIComponent(targetPath)}`;
-        const proxyUrl = `/aks/openapi/proxy?${qs}`;
-        const opts: RequestInit = { method: ep.method.toUpperCase() };
-        if (ep.requestBody && bodyText) opts.body = bodyText;
-        resp = await fetchApiRaw(proxyUrl, opts);
-      } else {
-        // Direct fetch fallback
-        const url = baseUrl + targetPath;
-        const opts: RequestInit = {
-          method: ep.method.toUpperCase(),
-          headers: { "Content-Type": "application/json" },
-        };
-        if (ep.requestBody && bodyText) opts.body = bodyText;
-        resp = await fetch(url, opts);
-      }
-      const text = await resp.text();
-      let formatted = text;
-      try {
-        formatted = JSON.stringify(JSON.parse(text), null, 2);
-      } catch {
-        /* not json */
-      }
-      setResponse({ status: resp.status, body: formatted, time: Date.now() - start });
-    } catch (e) {
-      setResponse({ status: 0, body: String(e), time: Date.now() - start });
-    } finally {
-      setLoading(false);
-    }
-  }, [baseUrl, ep, paramValues, bodyText, proxyInfo]);
-
   /** Try it: simple GET → expand + execute immediately. Others → expand for input. */
   const handleTryIt = () => {
     if (!expanded) {
@@ -482,12 +437,8 @@ function EndpointCard({
       initBody();
     }
     if (simple) {
-      handleExecute();
+      execute();
     }
-  };
-
-  const handleCopy = () => {
-    if (response) navigator.clipboard.writeText(response.body).catch(() => {});
   };
 
   return (
@@ -725,7 +676,7 @@ function EndpointCard({
               <SectionLabel style={{ margin: 0 }}>Try it</SectionLabel>
               <button
                 className="glass-button glass-button--primary"
-                onClick={handleExecute}
+                onClick={execute}
                 disabled={loading}
                 style={{ fontSize: 11, gap: 5, padding: "5px 14px" }}
               >
@@ -897,7 +848,7 @@ function EndpointCard({
             )}
 
             {/* Response */}
-            {response && <ResponseViewer response={response} onCopy={handleCopy} />}
+            {response && <ResponseViewer response={response} onCopy={copyResponse} />}
 
             {/* Empty state for simple endpoints */}
             {!response && !loading && simple && (
@@ -1252,9 +1203,9 @@ export function ApiReference() {
     staleTime: 300_000,
     retry: 1,
   });
-  const retryOpenApiService = useCallback(() => {
+  const retryOpenApiService = () => {
     void svcQuery.refetch();
-  }, [svcQuery.refetch]);
+  };
   const baseUrl = svcQuery.data ? `http://${svcQuery.data.external_ip}` : null;
 
   // 3. Fetch openapi.json via backend proxy (avoids CSP / mixed-content block)
