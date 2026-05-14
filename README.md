@@ -55,8 +55,18 @@ tests/      pytest (api) + vitest (web)
 
 - [Container Apps migration plan](./docs/container-apps-migration.md) - target
   architecture and phased migration from the current Function App backend to
-  Azure Container Apps, Service Bus, durable state storage, and private
-  networking.
+  **a single Azure Container App** that bundles six sidecars: `frontend`
+  (nginx serving the React SPA), `api` (FastAPI), Celery `worker`, Celery
+  `beat`, a `redis` broker, and a `terminal` shell with the `elastic-blast`
+  toolchain. State lives in **Azure Storage** (table + append blobs); Redis
+  AOF and the terminal `/home/azureuser` are persisted on Azure Files shares.
+  **Every Storage account is `publicNetworkAccess=Disabled` from day 1** and
+  is reachable only by the Container App over private endpoints in the
+  platform VNet. **All browser uploads and downloads are streamed through the
+  api sidecar — no SAS tokens are issued to the browser.** **The browser
+  shell is the `terminal` sidecar; there is no Remote Terminal VM, no SSH,
+  and no admin password.** No Service Bus, no managed database, no separate
+  Redis VM, no Static Web App, no temporary storage public-access window.
 
 ## Prerequisites
 
