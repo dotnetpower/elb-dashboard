@@ -1,4 +1,4 @@
-# elastic-blast-azure-functionapp — Copilot Instructions
+# elb-dashboard — Copilot Instructions
 
 > **Sibling repository**: [`dotnetpower/elastic-blast-azure`](https://github.com/dotnetpower/elastic-blast-azure) — the BLAST runtime this project automates.
 > Local clone (always read-only from this repo's point of view): `~/dev/elastic-blast-azure`.

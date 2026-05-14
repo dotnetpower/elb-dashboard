@@ -257,7 +257,7 @@ def ensure_keyvault(
                 "soft_delete_retention_in_days": 7,
                 "public_network_access": "Enabled",
             },
-            "tags": {"managed-by": "elastic-blast-azure-functionapp"},
+            "tags": {"managed-by": "elb-dashboard"},
         },
     )
     vault = poller.result()

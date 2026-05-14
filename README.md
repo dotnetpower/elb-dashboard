@@ -1,4 +1,4 @@
-# elastic-blast-azure-functionapp
+# elb-dashboard
 
 Browser-only control plane for [ElasticBLAST on Azure](https://github.com/dotnetpower/elastic-blast-azure).
 
@@ -468,7 +468,7 @@ python bin/elastic-blast delete --cfg /tmp/test.ini
 az aks delete -g rg-elb -n elastic-blast-test --yes --no-wait
 
 # 2) Workload + ACR + Terminal + Platform RGs and the App Registration
-cd ~/dev/elastic-blast-azure-functionapp
+cd ~/dev/elb-dashboard
 ./scripts/dev/teardown-local.sh --include-workload
 
 # 3) Stop local services

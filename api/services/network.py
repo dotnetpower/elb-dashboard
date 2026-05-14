@@ -58,7 +58,7 @@ def ensure_resource_group(
     LOGGER.info("ensure_resource_group rg=%s region=%s", resource_group, region)
     rc.resource_groups.create_or_update(
         resource_group,
-        {"location": region, "tags": {"managed-by": "elastic-blast-azure-functionapp"}},
+        {"location": region, "tags": {"managed-by": "elb-dashboard"}},
     )
 
 

@@ -203,7 +203,7 @@ approval). All Bicep, Python, and shell-script syntax is validated locally.
 
 ```bash
 git clone <repo>
-cd elastic-blast-azure-functionapp
+cd elb-dashboard
 ./scripts/dev/preflight-check.sh         # 1. verify tools + az login + azd env
 ./scripts/dev/setup-app-registration.sh  # 2. create or reuse the App Registration
 azd env new <env-name>

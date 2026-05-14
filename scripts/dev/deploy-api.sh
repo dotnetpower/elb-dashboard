@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-api.sh — One-command backend deployment for elastic-blast-azure-functionapp.
+# deploy-api.sh — One-command backend deployment for elb-dashboard.
 #
 # Usage:  ./scripts/dev/deploy-api.sh
 #

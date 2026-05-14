@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
-name: elastic-blast-azure-functionapp
+name: elb-dashboard
 metadata:
-  template: elastic-blast-azure-functionapp@0.2.0
+  template: elb-dashboard@0.2.0
 
 # This azure.yaml is configured for the BUNDLED CONTAINER APP topology
 # (six sidecars: api, frontend, worker, beat, redis, terminal).

@@ -1,4 +1,4 @@
-// elastic-blast-azure-functionapp — bundled Container App architecture.
+// elb-dashboard — bundled Container App architecture.
 //
 // One azd up provisions:
 //   * Platform RG (rg-${environmentName}) with all platform resources.

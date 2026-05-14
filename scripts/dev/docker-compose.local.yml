@@ -4,7 +4,7 @@
 #   * frontend serves the SPA, including the SPA navigation fallback.
 #
 # Usage:
-#   cd /home/moonchoi/dev/elastic-blast-azure-functionapp
+#   cd /home/moonchoi/dev/elb-dashboard
 #   docker compose -f scripts/dev/docker-compose.local.yml up --build
 #
 # Then:
