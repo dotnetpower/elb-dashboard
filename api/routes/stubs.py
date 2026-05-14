@@ -518,6 +518,65 @@ def blast_databases_versions(
     }
 
 
+# --- Lab Tools: pre-flight estimators and sidecar-dependent utilities ---
+#
+# These endpoints are referenced by the SPA (`web/src/api/endpoints.ts`,
+# `web/src/pages/tools/ToolTabs.tsx`, `web/src/pages/DatabaseBuilder.tsx`)
+# but their Celery tasks have not been ported from the legacy Function App
+# yet. Returning a structured 503 here turns silent 404s into a clear
+# "backend pending" signal the UI can render.
+
+_LAB_TOOL_PENDING = {
+    "code": "lab_tool_backend_pending",
+    "message": "This Lab Tool route has no backend implementation in the Container Apps build yet.",
+}
+
+
+@blast_router.post("/cost-estimate")
+def blast_cost_estimate_stub(
+    _body: dict[str, Any] = Body(default_factory=dict),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    _stub_log("blast/cost-estimate")
+    raise HTTPException(503, detail=_LAB_TOOL_PENDING)
+
+
+@blast_router.post("/preprocess")
+def blast_preprocess_stub(
+    _body: dict[str, Any] = Body(default_factory=dict),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    _stub_log("blast/preprocess")
+    raise HTTPException(503, detail=_LAB_TOOL_PENDING)
+
+
+@blast_router.post("/taxonomy")
+def blast_taxonomy_stub(
+    _body: dict[str, Any] = Body(default_factory=dict),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    _stub_log("blast/taxonomy")
+    raise HTTPException(503, detail=_LAB_TOOL_PENDING)
+
+
+@blast_router.post("/primer-design")
+def blast_primer_design_stub(
+    _body: dict[str, Any] = Body(default_factory=dict),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    _stub_log("blast/primer-design")
+    raise HTTPException(503, detail=_LAB_TOOL_PENDING)
+
+
+@blast_router.post("/databases/build")
+def blast_databases_build_stub(
+    _body: dict[str, Any] = Body(default_factory=dict),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    _stub_log("blast/databases/build")
+    raise HTTPException(503, detail=_LAB_TOOL_PENDING)
+
+
 # --- Schedules ---
 @blast_router.get("/schedules")
 def blast_schedules_list(

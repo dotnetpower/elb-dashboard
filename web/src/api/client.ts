@@ -198,6 +198,16 @@ export function formatApiError(err: unknown, context?: string): string {
       : clean;
   }
   if (apiErr.status === 503) {
+    // Surface the structured "lab_tool_backend_pending" code cleanly so the UI
+    // shows "Backend not implemented yet" instead of a generic 503 string.
+    const body = apiErr.body as { detail?: { code?: string; message?: string } } | undefined;
+    const detail = body?.detail;
+    if (detail?.code === "lab_tool_backend_pending") {
+      return (
+        detail.message ||
+        "This Lab Tool route has no backend implementation in this build yet."
+      );
+    }
     return "Service temporarily unavailable. The Function App may be starting up — try again in a moment.";
   }
   // Network errors

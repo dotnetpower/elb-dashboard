@@ -46,7 +46,14 @@ import {
   type TaxonomyExampleValues,
 } from "@/data/labToolExamples";
 import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
-import { SectionHeader, SetupRequired, StatBox } from "@/pages/tools/ToolLayout";
+import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
+import {
+  NotImplementedBanner,
+  SectionHeader,
+  SetupRequired,
+  SidecarRequired,
+  StatBox,
+} from "@/pages/tools/ToolLayout";
 import type { TabMeta } from "@/pages/tools/toolsPageModel";
 
 export function CostEstimatorTab({ meta }: { meta: TabMeta }) {
@@ -76,6 +83,7 @@ export function CostEstimatorTab({ meta }: { meta: TabMeta }) {
         title={meta.label}
         subtitle={meta.desc}
       />
+      <NotImplementedBanner feature="Cost Estimator" />
 
       <ExamplePicker<CostExampleValues>
         examples={COST_EXAMPLES}
@@ -224,6 +232,7 @@ export function PreprocessorTab({ meta }: { meta: TabMeta }) {
         title={meta.label}
         subtitle={meta.desc}
       />
+      <NotImplementedBanner feature="Preprocessor" />
 
       <ExamplePicker<PreprocessExampleValues>
         examples={PREPROCESS_EXAMPLES}
@@ -354,6 +363,7 @@ export function PrimerDesignTab({
 }) {
   const cfg = loadSavedConfig();
   const { toast } = useToast();
+  const terminalSidecar = useTerminalSidecarHealth();
   const [sequence, setSequence] = useState("");
   const [targetStart, setTargetStart] = useState(100);
   const [targetLength, setTargetLength] = useState(200);
@@ -365,8 +375,6 @@ export function PrimerDesignTab({
       primerApi.design({
         sequence,
         subscription_id: cfg?.subscriptionId ?? "",
-        terminal_resource_group: cfg?.terminalResourceGroup,
-        terminal_vm_name: cfg?.terminalVmName,
         target_start: targetStart,
         target_length: targetLength,
         product_size_min: productMin,
@@ -388,6 +396,19 @@ export function PrimerDesignTab({
     );
   }
 
+  if (!terminalSidecar.isHealthy) {
+    return (
+      <section className="glass-card blast-section">
+        <SectionHeader
+          icon={<FlaskConical size={16} strokeWidth={1.5} />}
+          title={meta.label}
+          subtitle={meta.desc}
+        />
+        <SidecarRequired feature="Primer Design" />
+      </section>
+    );
+  }
+
   return (
     <section className="glass-card blast-section">
       <SectionHeader
@@ -395,6 +416,7 @@ export function PrimerDesignTab({
         title={meta.label}
         subtitle={meta.desc}
       />
+      <NotImplementedBanner feature="Primer Design" />
 
       <ExamplePicker<PrimerExampleValues>
         examples={PRIMER_EXAMPLES}
@@ -549,6 +571,7 @@ export function TaxonomyTab({ meta }: { meta: TabMeta }) {
         title={meta.label}
         subtitle={meta.desc}
       />
+      <NotImplementedBanner feature="Taxonomy" />
 
       <ExamplePicker<TaxonomyExampleValues>
         examples={TAXONOMY_EXAMPLES}

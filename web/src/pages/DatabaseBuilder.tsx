@@ -23,6 +23,8 @@ import { formatApiError } from "@/api/client";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { useToast } from "@/components/Toast";
 import { ExamplePicker } from "@/components/ExamplePicker";
+import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
+import { NotImplementedBanner } from "@/pages/tools/ToolLayout";
 import { CUSTOM_DB_EXAMPLES, type CustomDbExampleValues } from "@/data/labToolExamples";
 
 const MAX_INLINE_BYTES = 50 * 1024 * 1024;
@@ -65,6 +67,7 @@ function SectionHeader({
 export function DatabaseBuilder() {
   const cfg = loadSavedConfig();
   const { toast } = useToast();
+  const terminalSidecar = useTerminalSidecarHealth();
 
   const [dbName, setDbName] = useState("");
   const [dbType, setDbType] = useState<"nucl" | "prot">("nucl");
@@ -146,6 +149,7 @@ export function DatabaseBuilder() {
     { ok: !!cfg?.subscriptionId, label: "Workspace" },
     { ok: isValidDbName, label: "Database name" },
     { ok: fastaStats.isValid, label: "FASTA input" },
+    { ok: terminalSidecar.isHealthy, label: "Terminal sidecar" },
   ];
   const readyCount = readiness.filter((r) => r.ok).length;
   const allReady = readyCount === readiness.length && !buildMutation.isPending;
@@ -184,8 +188,8 @@ export function DatabaseBuilder() {
             Custom Database Builder
           </div>
           <div className="page-header__desc">
-            Upload FASTA sequences, run <code className="code-val">makeblastdb</code> on
-            the Remote Terminal VM, and publish a private BLAST database to Azure Blob
+            Upload FASTA sequences, run <code className="code-val">makeblastdb</code> in
+            the terminal sidecar, and publish a private BLAST database to Azure Blob
             Storage.
           </div>
         </div>
@@ -207,6 +211,8 @@ export function DatabaseBuilder() {
         </div>
       </header>
 
+      <NotImplementedBanner feature="Custom Database Builder" />
+
       {/* ── Setup-required banner ── */}
       {!cfg?.subscriptionId && (
         <section
@@ -223,8 +229,8 @@ export function DatabaseBuilder() {
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 600, fontSize: 13 }}>Workspace not configured</div>
             <div className="muted" style={{ fontSize: 12 }}>
-              Pick a subscription, storage account, and Remote Terminal on the Dashboard
-              before building a custom database.
+              Pick a subscription and storage account on the Dashboard before building
+              a custom database.
             </div>
           </div>
           <Link to="/" className="btn btn--primary btn--sm">
@@ -464,7 +470,7 @@ export function DatabaseBuilder() {
           step={3}
           icon={<FlaskConical size={16} strokeWidth={1.5} />}
           title="Build database"
-          subtitle="Runs makeblastdb on the Remote Terminal VM, then publishes to blob storage"
+          subtitle="Runs makeblastdb in the terminal sidecar, then publishes to blob storage"
         />
 
         <div
