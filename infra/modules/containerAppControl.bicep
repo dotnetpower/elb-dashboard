@@ -245,7 +245,6 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             '--schedule=/tmp/celerybeat-schedule'
             '--pidfile=/tmp/celerybeat.pid'
           ]
-          ]
           resources: {
             cpu: json('0.25')
             memory: '0.5Gi'
