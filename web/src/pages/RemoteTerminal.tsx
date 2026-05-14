@@ -110,13 +110,20 @@ export default function RemoteTerminal() {
 
         ws.onopen = () => {
           setStatus("connected");
-          // ttyd "0" frame: initial input. Empty payload is fine.
-          // ttyd "1" frame: resize.
+          // ttyd "1" frame: resize notification.
           const msg = JSON.stringify({ columns: term.cols, rows: term.rows });
           ws.send("1" + msg);
+          // Focus the terminal so keyboard input works immediately.
+          setTimeout(() => term.focus(), 100);
         };
         ws.onmessage = (ev) => {
           if (typeof ev.data === "string") {
+            // ttyd sends a JSON config frame on first connect (no prefix).
+            // Detect and skip it so it doesn't render as garbage.
+            if (ev.data[0] === "{") {
+              // Config frame from ttyd — ignore (it contains enableZmodem, fontSize, etc.)
+              return;
+            }
             // ttyd output frames start with "0".
             if (ev.data[0] === "0") {
               term.write(ev.data.slice(1));

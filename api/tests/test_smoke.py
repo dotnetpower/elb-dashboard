@@ -54,6 +54,7 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
         ("GET", "/api/monitor/jobs"),
         ("GET", "/api/arm/subscriptions"),
         ("POST", "/api/resources/ensure-rg"),
+        ("POST", "/api/storage/prepare-db"),
         ("POST", "/api/blast/submit"),
         ("POST", "/api/aks/provision"),
         ("POST", "/api/warmup/start"),

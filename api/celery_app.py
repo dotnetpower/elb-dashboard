@@ -52,3 +52,37 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# Sidecar metrics reporter — fires from worker_init / beat_init signals so
+# both Celery sidecars publish their cgroup CPU/MEM into Redis db 2 next to
+# the api sidecar's snapshots. The /api/monitor/sidecars endpoint reads
+# all six.
+# ---------------------------------------------------------------------------
+def _start_reporter(sender_name: str) -> None:
+    if os.environ.get("SIDECAR_REPORTER_DISABLED", "").lower() == "true":
+        return
+    try:
+        from api.services.cgroup_reporter import start_in_thread
+
+        name = os.environ.get("SIDECAR_NAME", sender_name)
+        start_in_thread(name)
+    except Exception:  # noqa: BLE001 — never crash the worker over telemetry
+        import logging
+        logging.getLogger(__name__).warning(
+            "cgroup reporter failed to start in %s", sender_name, exc_info=True
+        )
+
+
+from celery.signals import beat_init, worker_init  # noqa: E402 — keep near user
+
+
+@worker_init.connect
+def _on_worker_init(**_kwargs):
+    _start_reporter("worker")
+
+
+@beat_init.connect
+def _on_beat_init(**_kwargs):
+    _start_reporter("beat")

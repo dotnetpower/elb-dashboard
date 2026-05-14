@@ -495,12 +495,35 @@ def blast_databases(
 def blast_databases_check_updates(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("blast/databases/check-updates")
-    return {
-        "updates_available": [],
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
-    }
+    """Return NCBI's current ``latest-dir`` snapshot id.
+
+    The SPA compares this against each downloaded DB's ``source_version``
+    (written into ``{db}-metadata.json`` by ``/api/storage/prepare-db``) to
+    flag DBs whose snapshot is stale. The lookup is a single unauthenticated
+    GET to the NCBI public S3 bucket — fast and cheap; it is intentionally
+    not Celery-backed.
+    """
+    try:
+        import httpx
+
+        resp = httpx.get(
+            "https://ncbi-blast-databases.s3.amazonaws.com/latest-dir",
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        return {
+            "latest_version": resp.text.strip(),
+            "updates_available": [],
+        }
+    except Exception as exc:
+        LOGGER.warning("blast/databases/check-updates failed: %s", type(exc).__name__)
+        return {
+            "latest_version": "",
+            "updates_available": [],
+            "degraded": True,
+            "degraded_reason": "ncbi_unreachable",
+            "message": f"Could not contact NCBI: {type(exc).__name__}",
+        }
 
 
 @blast_router.get("/databases/versions")

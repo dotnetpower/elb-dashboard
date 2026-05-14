@@ -75,7 +75,8 @@ RUN python3.12 -m venv /opt/elb/venv \
         azure-mgmt-resource azure-mgmt-network azure-mgmt-compute \
         azure-mgmt-storage azure-mgmt-containerregistry azure-mgmt-containerservice \
         azure-mgmt-authorization azure-mgmt-msi azure-mgmt-monitor \
-        azure-identity azure-storage-blob azure-keyvault-secrets
+        azure-identity azure-storage-blob azure-keyvault-secrets \
+        redis==5.2.0
 
 # Clone elastic-blast and install it into the venv. The upstream uses NCBI's
 # `packit` / `pbr` which fights pip's PEP 517 build isolation, so install
@@ -99,7 +100,8 @@ COPY profile.sh    /etc/profile.d/elb-env.sh
 COPY motd          /etc/motd
 COPY entrypoint.sh /usr/local/bin/elb-entrypoint
 COPY exec_server.py /usr/local/bin/elb-exec-server
-RUN chmod +x /usr/local/bin/elb-entrypoint /usr/local/bin/elb-exec-server /etc/profile.d/elb-env.sh
+COPY cgroup_reporter.py /usr/local/bin/elb-cgroup-reporter
+RUN chmod +x /usr/local/bin/elb-entrypoint /usr/local/bin/elb-exec-server /usr/local/bin/elb-cgroup-reporter /etc/profile.d/elb-env.sh
 
 USER 1000:1000
 WORKDIR /home/azureuser

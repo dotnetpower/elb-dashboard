@@ -146,6 +146,8 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             memory: '1.0Gi'
           }
           env: [
+            { name: 'SIDECAR_NAME', value: 'api' }
+            { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
             { name: 'AZURE_TENANT_ID', value: tenantId }
             { name: 'API_CLIENT_ID', value: apiClientId }
             { name: 'AZURE_CLIENT_ID', value: sharedIdentityClientId }
@@ -188,6 +190,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json('0.25')
             memory: '0.5Gi'
           }
+          env: [
+            { name: 'SIDECAR_NAME', value: 'frontend' }
+            { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
+            { name: 'LOG_LEVEL', value: 'INFO' }
+          ]
         }
         // -------------------------------------------------------------------
         // 3. worker sidecar  (Celery worker, same image as api)
@@ -211,6 +218,8 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             memory: '1.0Gi'
           }
           env: [
+            { name: 'SIDECAR_NAME', value: 'worker' }
+            { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
             { name: 'AZURE_TENANT_ID', value: tenantId }
             { name: 'API_CLIENT_ID', value: apiClientId }
             { name: 'AZURE_CLIENT_ID', value: sharedIdentityClientId }
@@ -250,6 +259,8 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             memory: '0.5Gi'
           }
           env: [
+            { name: 'SIDECAR_NAME', value: 'beat' }
+            { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
             { name: 'LOG_LEVEL', value: 'INFO' }
@@ -288,6 +299,8 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             memory: '1.0Gi'
           }
           env: [
+            { name: 'SIDECAR_NAME', value: 'terminal' }
+            { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
             { name: 'AZURE_TENANT_ID', value: tenantId }
             { name: 'AZURE_CLIENT_ID', value: sharedIdentityClientId }
             { name: 'AZCOPY_AUTO_LOGIN_TYPE', value: 'MSI' }

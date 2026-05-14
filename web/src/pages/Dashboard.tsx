@@ -9,6 +9,7 @@ import { StorageCard } from "@/components/cards/StorageCard";
 import { AcrCard } from "@/components/cards/AcrCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
 import { JobCard } from "@/components/cards/JobCard";
+import { SidecarsCard } from "@/components/cards/SidecarsCard";
 import { GettingStartedGuide } from "@/components/GettingStartedGuide";
 import { armProxyApi, monitoringApi } from "@/api/endpoints";
 import { listSubscriptions as armListSubs, listResourceGroups as armListRGs } from "@/api/arm";
@@ -318,6 +319,8 @@ export function Dashboard() {
           />
           <TerminalCard />
         </div>
+
+        <SidecarsCard />
 
         <JobCard />
       </div>

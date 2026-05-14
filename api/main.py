@@ -41,6 +41,7 @@ from api.routes import (
     me,
     monitor,
     resources,
+    storage,
     stubs,
     tasks,
     terminal_legacy,
@@ -133,6 +134,7 @@ def create_app() -> FastAPI:
     app.include_router(monitor.router, prefix="/api/monitor")
     app.include_router(arm.router)  # carries /api/arm prefix
     app.include_router(resources.router)  # carries /api/resources prefix
+    app.include_router(storage.router)  # carries /api/storage prefix
     app.include_router(terminal_ws.router)  # WebSocket + ticket + health
     app.include_router(terminal_legacy.router)  # /api/terminal/{vm}/* → 410 Gone
     app.include_router(tasks.router)  # GET /api/tasks/{id} — Celery task status
@@ -159,6 +161,19 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_handler(_request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse({"detail": exc.errors()}, status_code=422)
+
+    # Background cgroup reporter — publishes this sidecar's CPU/MEM into
+    # the in-revision Redis (db 2) every REPORT_INTERVAL seconds. The
+    # `/api/monitor/sidecars` endpoint reads them back. Disabled when the
+    # sidecar isn't running on cgroup v2 (e.g. non-Linux dev laptops).
+    if os.environ.get("SIDECAR_REPORTER_DISABLED", "").lower() != "true":
+        try:
+            from api.services.cgroup_reporter import start_in_thread
+
+            sidecar_name = os.environ.get("SIDECAR_NAME", "api")
+            start_in_thread(sidecar_name)
+        except Exception as exc:  # noqa: BLE001 — reporter must not crash startup
+            LOGGER.warning("cgroup reporter not started: %s", exc)
 
     LOGGER.info("api sidecar started, version=%s", __version__)
     return app

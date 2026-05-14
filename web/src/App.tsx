@@ -13,7 +13,6 @@ import { BlastAnalytics } from "@/pages/BlastAnalytics";
 import { DatabaseBuilder } from "@/pages/DatabaseBuilder";
 import { ToolsPage } from "@/pages/ToolsPage";
 import { ApiReference } from "@/pages/ApiReference";
-import { SidecarDesignPreview } from "@/pages/SidecarDesignPreview";
 
 const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
 const CLIENT_ID_MISSING = !import.meta.env.VITE_AZURE_CLIENT_ID && !DEV_BYPASS;
@@ -32,7 +31,6 @@ function AppRoutes() {
           <Route path="/blast/databases/build" element={<DatabaseBuilder />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/docs" element={<ApiReference />} />
-          <Route path="/sidecar-design-preview" element={<SidecarDesignPreview />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>

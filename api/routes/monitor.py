@@ -325,3 +325,139 @@ def get_job(
         raise
     except Exception as exc:
         return _graceful("get_job", exc, empty={"state": None, "history": []})
+
+
+# ---------------------------------------------------------------------------
+# Control-plane sidecars — snapshot + ticket + SSE
+#
+# Browsers cannot attach Authorization headers to `EventSource`, so we mirror
+# the ticket pattern from /api/terminal/ws: the SPA POSTs to /sidecars/ticket
+# with its bearer, gets a single-use opaque token back, then connects to
+# /sidecars/events?ticket=... — the GET handler validates the ticket
+# without re-reading the bearer.
+# ---------------------------------------------------------------------------
+import asyncio  # noqa: E402 — keep import local to the section that uses it
+import json as _json  # noqa: E402
+import secrets  # noqa: E402
+import time as _time  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+
+from fastapi.responses import StreamingResponse  # noqa: E402
+
+from api.services.sidecar_metrics import collect_snapshot  # noqa: E402
+
+_SIDECAR_TICKET_TTL_SEC = 30
+_SSE_PUSH_INTERVAL_SEC = 5
+_SSE_HEARTBEAT_INTERVAL_SEC = 25  # < Container Apps' 240s idle ws timeout.
+
+
+@dataclass(frozen=True)
+class _SidecarTicket:
+    owner_oid: str
+    expires_at: float
+
+
+_sidecar_tickets: dict[str, _SidecarTicket] = {}
+_sidecar_tickets_lock = asyncio.Lock()
+
+
+@router.get("/sidecars")
+async def sidecars_snapshot(
+    _caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """One-shot snapshot of all sidecars' health + CPU/MEM. Used by the SPA
+    on initial card mount and as the polling fallback when SSE fails.
+    """
+    try:
+        return collect_snapshot()
+    except Exception as exc:  # noqa: BLE001
+        return _graceful(
+            "sidecars_snapshot",
+            exc,
+            empty={
+                "ts": None,
+                "revision": os.environ.get("CONTAINER_APP_REVISION", "local"),
+                "sidecars": {},
+            },
+        )
+
+
+@router.post("/sidecars/ticket")
+async def sidecars_ticket(
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, object]:
+    """Validate the bearer and issue a short-lived single-use SSE ticket."""
+    token = secrets.token_urlsafe(24)
+    async with _sidecar_tickets_lock:
+        now = _time.time()
+        # Reap expired tickets opportunistically.
+        for k in [k for k, v in _sidecar_tickets.items() if v.expires_at <= now]:
+            _sidecar_tickets.pop(k, None)
+        _sidecar_tickets[token] = _SidecarTicket(
+            owner_oid=caller.object_id,
+            expires_at=now + _SIDECAR_TICKET_TTL_SEC,
+        )
+    return {"ticket": token, "ttl_seconds": _SIDECAR_TICKET_TTL_SEC}
+
+
+async def _consume_sidecar_ticket(token: str | None) -> _SidecarTicket:
+    if not token:
+        raise HTTPException(401, "ticket required")
+    async with _sidecar_tickets_lock:
+        entry = _sidecar_tickets.pop(token, None)
+    if entry is None:
+        raise HTTPException(401, "invalid or expired ticket")
+    if entry.expires_at <= _time.time():
+        raise HTTPException(401, "ticket expired")
+    return entry
+
+
+@router.get("/sidecars/events")
+async def sidecars_events(ticket: str | None = Query(default=None)):
+    """Server-Sent Events stream of sidecar metric snapshots.
+
+    Protocol:
+      * Every 5s: ``event: snapshot`` followed by the same JSON shape as
+        the GET /sidecars endpoint.
+      * Every 25s of idle: ``: heartbeat`` comment line so Container Apps'
+        proxy keeps the connection alive (idle ws/SSE timeout is 240s).
+      * Client should reconnect on any close (TanStack Query / EventSource
+        does this automatically with ``last-event-id``).
+    """
+    await _consume_sidecar_ticket(ticket)
+
+    async def event_stream():
+        # Initial snapshot — emits within ~50 ms of connect for fast first paint.
+        try:
+            initial = collect_snapshot()
+            yield f"event: snapshot\ndata: {_json.dumps(initial)}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("sidecars_events: initial snapshot failed: %s", exc)
+            yield 'event: error\ndata: {"code":"snapshot_failed"}\n\n'
+
+        last_push = asyncio.get_event_loop().time()
+        while True:
+            now_loop = asyncio.get_event_loop().time()
+            # Heartbeat keep-alive when no real event in a while.
+            if now_loop - last_push >= _SSE_HEARTBEAT_INTERVAL_SEC:
+                yield ": heartbeat\n\n"
+                last_push = now_loop
+                continue
+            await asyncio.sleep(_SSE_PUSH_INTERVAL_SEC)
+            try:
+                snap = collect_snapshot()
+                yield f"event: snapshot\ndata: {_json.dumps(snap)}\n\n"
+                last_push = asyncio.get_event_loop().time()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("sidecars_events: tick failed: %s", exc)
+                yield 'event: error\ndata: {"code":"tick_failed"}\n\n'
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # disable proxy buffering
+            "Connection": "keep-alive",
+        },
+    )

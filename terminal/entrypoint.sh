@@ -40,16 +40,29 @@ fi
 # ---------------------------------------------------------------------------
 TTYD_PID=0
 EXEC_PID=0
+REPORTER_PID=0
 
 shutdown() {
   local sig="$1"
   echo "elb-supervisor: received $sig, forwarding to children" >&2
+  if [[ "$REPORTER_PID" -gt 0 ]]; then kill -"$sig" "$REPORTER_PID" 2>/dev/null || true; fi
   if [[ "$EXEC_PID" -gt 0 ]]; then kill -"$sig" "$EXEC_PID" 2>/dev/null || true; fi
   if [[ "$TTYD_PID" -gt 0 ]]; then kill -"$sig" "$TTYD_PID" 2>/dev/null || true; fi
 }
 trap 'shutdown TERM' SIGTERM
 trap 'shutdown INT'  SIGINT
 trap 'shutdown HUP'  SIGHUP
+
+# ---------------------------------------------------------------------------
+# Start cgroup metrics reporter (background). Publishes this sidecar's
+# CPU/MEM into Redis db 2 every REPORT_INTERVAL seconds — read by the api
+# sidecar at /api/monitor/sidecars. Crashes are non-fatal: we don't include
+# REPORTER_PID in `wait -n` because losing telemetry must NOT cycle the
+# revision (ttyd / exec_server failures are the actual liveness signals).
+# ---------------------------------------------------------------------------
+SIDECAR_NAME="${SIDECAR_NAME:-terminal}" \
+  /opt/elb/venv/bin/python3 /usr/local/bin/elb-cgroup-reporter "$SIDECAR_NAME" &
+REPORTER_PID=$!
 
 # ---------------------------------------------------------------------------
 # Start exec server (background). Uses python3.12 explicitly so PATH order
@@ -72,20 +85,20 @@ EXEC_PID=$!
   bash -l &
 TTYD_PID=$!
 
-echo "elb-supervisor: ttyd pid=$TTYD_PID exec_server pid=$EXEC_PID" >&2
+echo "elb-supervisor: ttyd pid=$TTYD_PID exec_server pid=$EXEC_PID reporter pid=$REPORTER_PID" >&2
 
-# Block until either child exits. `wait -n` returns the exit status of the
-# first child to finish, then we reap and exit with that status so Container
-# Apps observes a non-zero/zero exit and restarts the revision.
-wait -n
+# Block until either critical child (ttyd / exec_server) exits. The reporter
+# is intentionally NOT waited on — telemetry loss must not cycle the revision.
+wait -n "$TTYD_PID" "$EXEC_PID"
 FIRST_RC=$?
 
 shutdown TERM
 # Give children up to 5 s to clean up before we exit.
 SECONDS=0
-while [[ $SECONDS -lt 5 ]] && { kill -0 "$EXEC_PID" 2>/dev/null || kill -0 "$TTYD_PID" 2>/dev/null; }; do
+while [[ $SECONDS -lt 5 ]] && { kill -0 "$EXEC_PID" 2>/dev/null || kill -0 "$TTYD_PID" 2>/dev/null || kill -0 "$REPORTER_PID" 2>/dev/null; }; do
   sleep 0.5
 done
+kill -KILL "$REPORTER_PID" 2>/dev/null || true
 kill -KILL "$EXEC_PID" 2>/dev/null || true
 kill -KILL "$TTYD_PID" 2>/dev/null || true
 
