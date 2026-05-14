@@ -564,9 +564,11 @@ function TopoNode({
 function TopoArrow({
   degraded = false,
   animated = true,
+  delaySec = 0,
 }: {
   degraded?: boolean;
   animated?: boolean;
+  delaySec?: number;
 }) {
   return (
     <div
@@ -594,6 +596,7 @@ function TopoArrow({
             borderRadius: 999,
             background: "var(--accent)",
             boxShadow: "0 0 12px 2px rgba(122,167,255,0.55)",
+            animationDelay: `${delaySec}s`,
           }}
         />
       )}
@@ -682,9 +685,9 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
           surfaced as a small caption below the row. */}
       <div style={gridStyle}>
         <div style={labelStyle}>Browser ↣</div>
-        <TopoArrow />
+        <TopoArrow delaySec={0} />
         <TopoNode s={fe} width={NODE_W} />
-        <TopoArrow />
+        <TopoArrow delaySec={0.6} />
         <TopoNode s={api} width={NODE_W} />
       </div>
       <div
@@ -704,9 +707,9 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
       {/* Mid row: async path (SPA enqueue → redis broker → worker) */}
       <div style={gridStyle}>
         <div style={labelStyle}>Async tasks</div>
-        <TopoArrow degraded={worker.health !== "ok" || redis.health !== "ok"} />
+        <TopoArrow degraded={worker.health !== "ok" || redis.health !== "ok"} delaySec={0.3} />
         <TopoNode s={redis} width={NODE_W} />
-        <TopoArrow degraded={worker.health !== "ok"} />
+        <TopoArrow degraded={worker.health !== "ok"} delaySec={0.9} />
         <TopoNode s={worker} width={NODE_W} />
       </div>
 
@@ -715,7 +718,7 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
           mid-arrow so terminal aligns with api / worker on the right. */}
       <div style={gridStyle}>
         <div style={labelStyle}>Scheduled</div>
-        <TopoArrow />
+        <TopoArrow delaySec={1.2} />
         <TopoNode s={beat} width={NODE_W} />
         <div
           style={{
@@ -725,7 +728,7 @@ function ProposalTopology({ snapshots }: { snapshots: SidecarSnapshot[] }) {
             minWidth: 0,
           }}
         >
-          <TopoArrow degraded={terminal.health !== "ok"} />
+          <TopoArrow degraded={terminal.health !== "ok"} delaySec={1.5} />
           <span style={midLabelStyle}>ws / exec ↣</span>
         </div>
         <TopoNode s={terminal} width={NODE_W} />
