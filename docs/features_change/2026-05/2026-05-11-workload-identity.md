@@ -15,7 +15,7 @@ The OpenAPI pod (`elb-openapi`) inside AKS ran `az account show` for its health 
 
 ## Technical Changes
 
-### Control Plane (`elastic-blast-azure-functionapp`)
+### Control Plane (`elb-dashboard`)
 
 | File | Change |
 |------|--------|

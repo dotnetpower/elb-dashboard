@@ -997,7 +997,7 @@ def ensure_storage_account(
             "is_hns_enabled": True,
             "public_network_access": "Disabled",
             "minimum_tls_version": "TLS1_2",
-            "tags": {"managed-by": "elastic-blast-azure-functionapp"},
+            "tags": {"managed-by": "elb-dashboard"},
         },
     )
     poller.result()
@@ -1037,7 +1037,7 @@ def ensure_acr(
             "location": region,
             "sku": {"name": "Standard"},
             "admin_user_enabled": False,
-            "tags": {"managed-by": "elastic-blast-azure-functionapp"},
+            "tags": {"managed-by": "elb-dashboard"},
         },
     )
     poller.result()

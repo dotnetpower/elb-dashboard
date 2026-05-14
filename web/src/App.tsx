@@ -50,7 +50,7 @@ export function App() {
             and set <code className="code-val">VITE_AZURE_CLIENT_ID</code> in the environment.
           </p>
           <p className="muted" style={{ fontSize: 12 }}>
-            See the <a href="https://github.com/dotnetpower/elastic-blast-azure-functionapp#readme" target="_blank" rel="noreferrer">README</a> for setup instructions.
+            See the <a href="https://github.com/dotnetpower/elb-dashboard#readme" target="_blank" rel="noreferrer">README</a> for setup instructions.
           </p>
         </div>
       </div>

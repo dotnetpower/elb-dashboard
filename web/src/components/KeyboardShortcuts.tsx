@@ -381,8 +381,8 @@ function LinksTab() {
     {
       icon: <Github size={14} />,
       label: "Source Code",
-      desc: "elastic-blast-azure-functionapp",
-      url: "https://github.com/dotnetpower/elastic-blast-azure-functionapp",
+      desc: "elb-dashboard",
+      url: "https://github.com/dotnetpower/elb-dashboard",
     },
     {
       icon: <Github size={14} />,
