@@ -118,28 +118,22 @@ export default function RemoteTerminal() {
         };
         ws.onmessage = (ev) => {
           if (typeof ev.data === "string") {
-            // ttyd sends a JSON config frame on first connect (no prefix).
-            // Detect and skip it so it doesn't render as garbage.
-            if (ev.data[0] === "{") {
-              // Config frame from ttyd — ignore (it contains enableZmodem, fontSize, etc.)
-              return;
+            const cmd = ev.data[0];
+            const payload = ev.data.slice(1);
+            if (cmd === "0") {
+              // ttyd output frame — render in terminal
+              term.write(payload);
             }
-            // ttyd output frames start with "0".
-            if (ev.data[0] === "0") {
-              term.write(ev.data.slice(1));
-            } else if (ev.data[0] === "1") {
-              // server-initiated resize ack; ignore
-            } else {
-              term.write(ev.data);
-            }
+            // cmd "1" = window title — ignore
+            // cmd "2" = preferences JSON — ignore
+            // anything else: also ignore (unknown ttyd frame type)
           } else {
-            // ArrayBuffer
+            // ArrayBuffer — binary frames from ttyd
             const view = new Uint8Array(ev.data);
             if (view.length > 0 && view[0] === 48 /* '0' */) {
               term.write(view.subarray(1));
-            } else {
-              term.write(view);
             }
+            // Other binary frame types (title, prefs) — ignore
           }
         };
         ws.onerror = () => {
