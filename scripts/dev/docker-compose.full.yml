@@ -1,0 +1,240 @@
+# Full 6-sidecar local stack for the bundled Container App.
+#
+# Mirrors the production layout in infra/modules/containerAppControl.bicep
+# (api, frontend, worker, beat, redis, terminal) so the things that have
+# been hardest to debug remotely — celery routing, redis-wait,
+# terminal/exec_server contract, route ordering, ttyd proxy — are all
+# reproducible locally without an Azure round-trip.
+#
+# Differences from production (intentional):
+#   * Source mounted as read-only volumes for hot reload (uvicorn --reload).
+#     Code edits in api/ are visible to api / worker / beat in real time.
+#   * EXEC_TOKEN is a fixed dev value, not a Container Apps secret.
+#   * Storage / MI / Key Vault are NOT wired — AUTH_DEV_BYPASS=true short-
+#     circuits the bearer check, and any Azure SDK call that needs MI will
+#     fail (that is a feature, not a bug — it forces those code paths to
+#     be tested separately).
+#   * Frontend is vite dev (HMR) instead of nginx-served bundle. Same
+#     reverse proxy surface from the api sidecar at /api/* vs /*.
+#   * Probes are simplified to `healthcheck` blocks for compose semantics.
+#
+# Usage:
+#   cd /home/moonchoi/dev/elb-dashboard
+#   docker compose -f scripts/dev/docker-compose.full.yml up --build
+#
+# Then in another terminal:
+#   curl http://127.0.0.1:8080/api/health         # 200 from api
+#   curl http://127.0.0.1:8080/api/me             # 200 with dev-bypass identity
+#   curl http://127.0.0.1:8080/api/health/celery  # queue snapshot
+#   curl -XPOST 'http://127.0.0.1:8080/api/health/celery/enqueue-noop?message=hi'
+#   open http://127.0.0.1:8080/                   # SPA via api → vite dev
+#
+# Tear down:
+#   docker compose -f scripts/dev/docker-compose.full.yml down -v
+
+name: elb-control-local
+
+services:
+  # ---------------------------------------------------------------------
+  # 1. redis — broker + result backend + ops bus (db 0/1/2)
+  # ---------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --bind
+      - 0.0.0.0
+      - --protected-mode
+      - "no"
+    networks: [elb]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------
+  # 2. terminal — ttyd (7681) + exec_server (7682), loopback in prod;
+  #    here we expose on the compose network so api/worker can reach it.
+  # ---------------------------------------------------------------------
+  terminal:
+    build:
+      context: ../..
+      dockerfile: terminal/Dockerfile
+    image: elb-terminal:dev
+    environment:
+      EXEC_TOKEN: dev-exec-token-not-secret-but-long-enough-for-startup-check
+      EXEC_MAX_CONCURRENCY: "4"
+      SIDECAR_NAME: terminal
+      # exec_server binds 127.0.0.1 in prod (loopback only). In compose
+      # each service is its own net namespace, so we must bind 0.0.0.0
+      # so the api / worker containers can reach :7682 across the bridge.
+      # ttyd remains loopback (its 127.0.0.1 bind is in entrypoint.sh)
+      # because the browser shell isn't the local debug bottleneck.
+      EXEC_HOST: 0.0.0.0
+      # Skip MSI bootstrap — the toolchain in this sidecar does not need
+      # to authenticate against Azure for local debug.
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
+    networks: [elb]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7682/healthz', timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # ---------------------------------------------------------------------
+  # 3. frontend — vite dev with HMR on :8081 (proxied by api as /*)
+  # ---------------------------------------------------------------------
+  frontend:
+    image: node:20-alpine
+    working_dir: /web
+    command: ["sh", "-lc", "npm install --no-audit --no-fund --prefer-offline && npm run dev -- --host 0.0.0.0 --port 8081"]
+    volumes:
+      - ../../web:/web
+      - frontend_node_modules:/web/node_modules
+    environment:
+      VITE_API_BASE_URL: http://127.0.0.1:8080
+    networks: [elb]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8081/"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+
+  # ---------------------------------------------------------------------
+  # 4. api — FastAPI + reverse proxy. uvicorn --reload watches /app/api.
+  # ---------------------------------------------------------------------
+  api:
+    build:
+      context: ../..
+      dockerfile: api/Dockerfile
+    image: elb-api:dev
+    user: "0:0"  # bind-mount friendliness for --reload watcher
+    command:
+      - uvicorn
+      - api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --reload
+      - --reload-dir
+      - /app/api
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    environment:
+      AUTH_DEV_BYPASS: "true"
+      LOG_LEVEL: DEBUG
+      ENABLE_DOCS: "true"
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
+      API_CLIENT_ID: ${API_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
+      AZURE_SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID:-00000000-0000-0000-0000-000000000000}
+      # Cross-sidecar wiring (overrides the prod defaults that point at
+      # 127.0.0.1, since each compose service is its own net namespace).
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      OPS_REDIS_URL: redis://redis:6379/2
+      FRONTEND_UPSTREAM: http://frontend:8081
+      TERMINAL_UPSTREAM: http://terminal:7681
+      TERMINAL_EXEC_UPSTREAM: http://terminal:7682
+      EXEC_TOKEN: dev-exec-token-not-secret-but-long-enough-for-startup-check
+    volumes:
+      - ../../api:/app/api:ro
+    ports:
+      - "8080:8080"
+    networks: [elb]
+    depends_on:
+      redis:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+      terminal:
+        condition: service_started
+
+  # ---------------------------------------------------------------------
+  # 5. worker — celery worker, same image as api, picks up source via mount
+  # ---------------------------------------------------------------------
+  worker:
+    image: elb-api:dev
+    user: "0:0"
+    command:
+      - python3
+      - /app/api/wait_redis.py
+      - celery
+      - -A
+      - api.celery_app:celery_app
+      - worker
+      - --loglevel=info
+      - -Q
+      - default,azure,blast,storage
+      - --concurrency=2
+    environment:
+      LOG_LEVEL: DEBUG
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
+      AZURE_SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID:-00000000-0000-0000-0000-000000000000}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      OPS_REDIS_URL: redis://redis:6379/2
+      TERMINAL_EXEC_UPSTREAM: http://terminal:7682
+      EXEC_TOKEN: dev-exec-token-not-secret-but-long-enough-for-startup-check
+    volumes:
+      - ../../api:/app/api:ro
+    networks: [elb]
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+      terminal:
+        condition: service_started
+
+  # ---------------------------------------------------------------------
+  # 6. beat — celery beat singleton; same image as api
+  # ---------------------------------------------------------------------
+  beat:
+    image: elb-api:dev
+    user: "0:0"
+    command:
+      - python3
+      - /app/api/wait_redis.py
+      - celery
+      - -A
+      - api.celery_app:celery_app
+      - beat
+      - --loglevel=info
+      - --schedule=/tmp/celerybeat-schedule
+      - --pidfile=/tmp/celerybeat.pid
+    environment:
+      LOG_LEVEL: DEBUG
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      OPS_REDIS_URL: redis://redis:6379/2
+    volumes:
+      - ../../api:/app/api:ro
+    networks: [elb]
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+networks:
+  elb:
+    driver: bridge
+
+volumes:
+  frontend_node_modules:

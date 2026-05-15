@@ -429,7 +429,11 @@ function BlastDbSection({
   // Poll database list while there are in-progress downloads (every 10s)
   useEffect(() => {
     if (inProgress.size === 0) return;
-    const t = setInterval(() => dbQuery.refetch(), 10_000);
+    console.log(`[BLAST-DB] Polling: ${inProgress.size} download(s) in progress, refetching DB list...`);
+    const t = setInterval(() => {
+      console.log(`[BLAST-DB] Refetching database list (degraded=${(dbQuery.data as Record<string, unknown> | undefined)?.degraded ?? false})`);
+      dbQuery.refetch();
+    }, 10_000);
     return () => clearInterval(t);
   }, [inProgress.size, dbQuery]);
 
@@ -458,6 +462,7 @@ function BlastDbSection({
     setDownloading(dbName);
     setDownloadResult(null);
     const startTime = Date.now();
+    console.log(`[BLAST-DB] Starting download: ${dbName}`);
     try {
       const resp = await monitoringApi.prepareBlastDb(
         subscriptionId,
@@ -486,8 +491,10 @@ function BlastDbSection({
         type: "ok",
       });
       // Refresh database list
+      console.log(`[BLAST-DB] Download initiated for ${dbName}: ${total} files, async=${resp.async}`);
       dbQuery.refetch();
     } catch (e) {
+      console.error(`[BLAST-DB] Download failed for ${dbName}:`, e);
       setDownloadResult({ db: dbName, msg: formatApiError(e, "storage"), type: "err" });
     } finally {
       setDownloading(null);
@@ -688,6 +695,28 @@ function BlastDbSection({
                   onDismiss={() => setDownloadResult(null)}
                 />
               )}
+              {/* Database access warning — shown when listDatabases fails */}
+              {(() => {
+                const d = dbQuery.data as { degraded?: boolean; message?: string } | undefined;
+                if (!d?.degraded) return null;
+                return (
+                  <div
+                    style={{
+                      padding: "8px 12px",
+                      marginBottom: "var(--space-3)",
+                      borderRadius: 6,
+                      fontSize: 11,
+                      background: "rgba(224,123,138,0.08)",
+                      border: "1px solid rgba(224,123,138,0.2)",
+                      color: "var(--danger)",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    <strong>Cannot read databases from storage:</strong>{" "}
+                    {d.message ?? "Storage access denied. Check RBAC roles."}
+                  </div>
+                );
+              })()}
               {/* Public access disabled warning */}
               {publicAccessDisabled && (
                 <div
