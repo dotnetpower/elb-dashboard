@@ -39,142 +39,115 @@ ARM token.
 > object ID**. Previous role assignments do not carry over. Run this
 > checklist after each fresh provision.
 
-### Step 1 — Capture the new MI object ID and target resources
+### Step 1 — Capture the MI object ID
 
 ```bash
-# From the azd env you just provisioned
-RG_PLATFORM="rg-prod2"                # whatever your azd env name resolves to
-FUNC_APP="func-prod2-fuxqeza73ska4"   # azd outputs.FUNCTION_APP_NAME
-SUB="$(az account show --query id -o tsv)"
+# Load azd env variables
+source <(azd env get-values -e <YOUR_ENV> | sed 's/^/export /')
 
-MI_OID="$(az functionapp identity show -g "$RG_PLATFORM" -n "$FUNC_APP" \
-  --query principalId -o tsv)"
-echo "MI object id: $MI_OID"
-
-# Workload resource groups (created/managed via the UI — these are
-# OUTSIDE the azd platform RG)
-WORKLOAD_RGS=(rg-elb-demo rg-elb-demo-acr rg-elb-demo-terminal)
-
-# User-created storage account + ACR (the ones BLAST jobs read/write)
-USER_STORAGE="stgelbdemo"             # in rg-elb-demo
-USER_STORAGE_RG="rg-elb-demo"
-USER_ACR="elbacrdemo"                 # in rg-elb-demo-acr
-USER_ACR_RG="rg-elb-demo-acr"
+# Get the MI principal ID
+MI_OID=$(az identity show --ids "$SHARED_IDENTITY_RESOURCE_ID" --query principalId -o tsv)
+SUB=$(az account show --query id -o tsv)
+echo "MI ObjectId: $MI_OID"
 ```
 
-### Step 2 — Workload RGs: Contributor + User Access Administrator
-
-Required for: VM/VNet/AKS/ACR/Storage lifecycle, AKS `listClusterUserCredential`
-(direct K8s API calls), and runtime sub-role assignments (AcrPull to kubelet, etc.).
+### Step 2 — Subscription-level roles (ARM management plane)
 
 ```bash
-for rg in "${WORKLOAD_RGS[@]}"; do
-  for role in "Contributor" "User Access Administrator"; do
-    az role assignment create \
-      --assignee-object-id "$MI_OID" \
-      --assignee-principal-type ServicePrincipal \
-      --role "$role" \
-      --scope "/subscriptions/$SUB/resourceGroups/$rg"
-  done
-done
-```
-
-### Step 3 — User storage account: Blob Data Contributor + Blob Delegator
-
-Required for: uploading queries, copying BLAST DBs from NCBI, generating
-**User Delegation SAS** (the deployment policy forces `allowSharedKeyAccess=false`,
-so account-key SAS is unavailable — delegation SAS is the only option).
-
-```bash
-STG_ID="/subscriptions/$SUB/resourceGroups/$USER_STORAGE_RG/providers/Microsoft.Storage/storageAccounts/$USER_STORAGE"
-for role in "Storage Blob Data Contributor" "Storage Blob Delegator"; do
-  az role assignment create \
-    --assignee-object-id "$MI_OID" \
-    --assignee-principal-type ServicePrincipal \
-    --role "$role" --scope "$STG_ID"
-done
-```
-
-### Step 4 — User ACR: AcrPush
-
-Required for: `az acr build` REST calls from the `build_acr_images` orchestrator.
-
-```bash
-ACR_ID="/subscriptions/$SUB/resourceGroups/$USER_ACR_RG/providers/Microsoft.ContainerRegistry/registries/$USER_ACR"
-az role assignment create \
-  --assignee-object-id "$MI_OID" \
+# Contributor — CRUD for AKS, Storage, ACR, Network, Key Vault
+az role assignment create --assignee-object-id "$MI_OID" \
   --assignee-principal-type ServicePrincipal \
-  --role "AcrPush" --scope "$ACR_ID"
+  --role "Contributor" --scope "/subscriptions/$SUB"
+
+# Reader — list subscriptions, RGs
+az role assignment create --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Reader" --scope "/subscriptions/$SUB"
+
+# AKS Cluster User — get kubeconfig for direct K8s API calls
+az role assignment create --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Azure Kubernetes Service Cluster User Role" --scope "/subscriptions/$SUB"
+
+# User Access Administrator — runtime role assignments (AcrPull to kubelet, etc.)
+# Best-effort: if missing, the code logs a recovery hint instead of failing.
+az role assignment create --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "User Access Administrator" --scope "/subscriptions/$SUB"
 ```
 
-### Step 5 — Wait for propagation, then verify
-
-Azure RBAC propagation typically takes **1–5 minutes**. The first
-1–2 dashboard refreshes after running this script will almost always
-show 403s from AKS / Storage / ACR cards. This is **normal**, not a
-missing role.
-
-Verify with:
+### Step 3 — Workload Storage Account (data plane)
 
 ```bash
-# Confirm the assignments exist at the expected scopes
-az role assignment list --assignee "$MI_OID" \
-  --query "[].{role:roleDefinitionName,scope:scope}" -o table
+# Replace with your workload storage account
+WORKLOAD_STG="/subscriptions/$SUB/resourceGroups/rg-elb-01/providers/Microsoft.Storage/storageAccounts/elbstg01"
+
+az role assignment create --assignee-object-id "$MI_OID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Contributor" --scope "$WORKLOAD_STG"
 ```
 
-If a card is still 403 after 5 minutes, the workload resource is in a
-**different RG** (e.g. switching the UI to a cluster in `rg-elb-koc` or
-`rg-elb-0509`) — add that RG to `WORKLOAD_RGS` and re-run Step 2.
+### Step 4 — Workload ACR (build + pull images)
+
+```bash
+# Replace with your workload ACR
+WORKLOAD_ACR="/subscriptions/$SUB/resourceGroups/rg-elbacr-01/providers/Microsoft.ContainerRegistry/registries/elbacr01"
+
+for role in "AcrPush" "AcrPull"; do
+  az role assignment create --assignee-object-id "$MI_OID" \
+    --assignee-principal-type ServicePrincipal \
+    --role "$role" --scope "$WORKLOAD_ACR"
+done
+```
+
+### Step 5 — Verify (wait 1-5 minutes for propagation)
+
+```bash
+az role assignment list --assignee "$MI_OID" --all \
+  --query "[].{role:roleDefinitionName, scope:scope}" -o table
+```
+
+Expected: 14+ roles covering subscription, platform storage, workload storage, platform ACR, workload ACR.
 
 ---
 
 ## §1 Container App Managed Identity — Required RBAC Roles
 
 The Container App's **shared user-assigned Managed Identity** `id-elb-control`
-is the principal
-that performs all Azure operations. It must be granted the following roles.
+is the principal that performs all Azure operations. It must be granted the
+following roles.
 
-### Subscription / Resource Group (ARM Management Plane)
+### Subscription-Level (ARM Management Plane)
 
-| Role | Scope | Purpose |
-|------|-------|---------|
-| **Contributor** | Subscription or workload RGs | Create/delete VMs, VNets, AKS, ACR, Storage accounts |
-| **User Access Administrator** | Subscription or workload RGs | Assign RBAC roles at runtime (AcrPull to kubelet, Storage roles to VM, etc.) |
+| Role | Purpose |
+|------|---------|
+| **Contributor** | Create/delete AKS, Storage, ACR, Network, Key Vault resources |
+| **Reader** | List subscriptions, resource groups, VMs |
+| **Azure Kubernetes Service Cluster User Role** | Get kubeconfig via `listClusterUserCredential` for direct K8s API calls |
+| **User Access Administrator** | Assign RBAC roles at runtime (AcrPull to kubelet, etc.) — **best-effort**: code degrades gracefully if missing |
 
-> **Least-privilege alternative**: Instead of Subscription-level, grant
-> Contributor + User Access Administrator on each resource group:
-> `rg-elb`, `rg-elbacr`, `rg-elb-terminal`, `rg-elb-prod`.
-
-### Data Plane — Deployed by Bicep (automatic)
-
-These are assigned by the `infra/modules/*` Bicep modules during `azd up`:
+### Platform Resources (assigned by Bicep during `azd up`)
 
 | Role | Scope | Purpose |
 |------|-------|---------|
-| Key Vault Secrets Officer | Platform Key Vault | Read App Registration values + other operational secrets |
-| Storage Blob Data Owner | Platform Storage Account | Append-blob audit / command history / payload blobs |
+| Key Vault Secrets User | Platform Key Vault | Read App Registration values |
+| Storage Blob Data Contributor | Platform Storage Account | Append-blob audit / payload blobs |
 | Storage Table Data Contributor | Platform Storage Account | Job / schedule state in Table Storage |
-| Storage File Data SMB Share Contributor | Platform Storage Account | Mount the `redis-data` and `terminal-home` Azure Files shares from the Container App |
+| Storage File Data SMB Share Contributor | Platform Storage Account | Mount `redis-data` and `terminal-home` Azure Files shares |
+| AcrPull + AcrPush | Platform ACR | Pull sidecar images + build new images |
 
-### Data Plane — User-Created Resources (manual or runtime)
-
-These must be assigned on user-created storage accounts, ACRs, etc.:
+### Workload Resources (manual after first `azd up`)
 
 | Role | Scope | Purpose |
 |------|-------|---------|
-| **Storage Blob Data Contributor** | User storage account (e.g. `stgelbdemo`) | Upload queries, copy DBs from NCBI, list blobs |
-| **Storage Blob Delegator** | User storage account | Generate SAS download URLs for results |
-| **AcrPush** | User ACR | Build ElasticBLAST images via ACR Build Tasks |
-| **Azure Kubernetes Service Cluster User Role** | AKS clusters | Get kubeconfig, run commands |
+| **Storage Blob Data Contributor** | Workload storage account (e.g. `elbstg01`) | Upload queries, copy DBs from NCBI, list/read result blobs |
+| **AcrPush + AcrPull** | Workload ACR (e.g. `elbacr01`) | Build ElasticBLAST images via ACR Build Tasks |
 
-> The control plane attempts to assign these at runtime via `_assign_role()`.
-> If the MI lacks `User Access Administrator`, the assignment soft-fails
-> and logs a one-line `az role assignment create` recovery command.
+### Kubernetes (via kubeconfig, no additional RBAC on Azure)
 
-### Quick Setup — MI Role Assignment Commands
-
-See **§0 Post-Deploy Permissions Checklist** above for the full,
-copy-pasteable script (with workload RGs, storage, and ACR all covered).
+Direct K8s API calls (get nodes/pods/jobs, top nodes, pod logs) use the
+kubeconfig obtained via `Azure Kubernetes Service Cluster User Role`. No
+additional Azure RBAC is needed for K8s data-plane operations.
 
 ---
 

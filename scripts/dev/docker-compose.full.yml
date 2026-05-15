@@ -63,8 +63,11 @@ services:
   # ---------------------------------------------------------------------
   terminal:
     build:
-      context: ../..
-      dockerfile: terminal/Dockerfile
+      # Production builds this image with `az acr build ... terminal/`,
+      # so the Dockerfile uses bare COPY paths (`profile.sh`, etc.).
+      # Match that here \u2014 context MUST be the terminal/ folder.
+      context: ../../terminal
+      dockerfile: Dockerfile
     image: elb-terminal:dev
     environment:
       EXEC_TOKEN: dev-exec-token-not-secret-but-long-enough-for-startup-check
@@ -164,6 +167,13 @@ services:
   # 5. worker — celery worker, same image as api, picks up source via mount
   # ---------------------------------------------------------------------
   worker:
+    # Same image name as the api service so docker compose reuses the
+    # build cache (one build, three containers). The `build:` block is
+    # required even though the image is shared — without it `compose up`
+    # tries to PULL elb-api:dev (which doesn't exist on any registry).
+    build:
+      context: ../..
+      dockerfile: api/Dockerfile
     image: elb-api:dev
     user: "0:0"
     command:
@@ -204,6 +214,11 @@ services:
   # 6. beat — celery beat singleton; same image as api
   # ---------------------------------------------------------------------
   beat:
+    # See worker: identical build block so compose builds (not pulls)
+    # and shares the cache with api / worker.
+    build:
+      context: ../..
+      dockerfile: api/Dockerfile
     image: elb-api:dev
     user: "0:0"
     command:
