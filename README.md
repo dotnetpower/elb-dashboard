@@ -2,13 +2,22 @@
 
 Browser-only control plane for [ElasticBLAST on Azure](https://github.com/dotnetpower/elastic-blast-azure).
 
-A researcher signs in with `az login` in the browser, provisions a **Remote Terminal** VM
-with one click, and monitors AKS / Storage / ACR / Job state from a glassmorphic dashboard.
-The user never opens a local terminal during steady state — the local instructions below
-are a one-time bring-up for the control plane itself.
+A researcher signs in through the browser, opens the embedded **Browser Terminal**
+sidecar when command-line work is needed, and monitors AKS / Storage / ACR / Job
+state from a glassmorphic dashboard. The user never opens a local terminal during
+steady state; local commands are only for developers or operators bringing up the
+control plane itself.
 
 > Project charter: [.github/copilot-instructions.md](./.github/copilot-instructions.md)
 > · Agent navigation map: [AGENTS.md](./AGENTS.md)
+
+## Get started
+
+New to this repo? Start with the guided setup: [docs/get-started.md](./docs/get-started.md).
+
+It covers Windows with WSL2, macOS, Linux, exact tool versions, Python 3.12 setup
+with `uv`, Node 20 setup for the SPA, local development commands, first Azure
+deployment with `azd up`, and the post-deploy redirect URI step for browser sign-in.
 
 ## Dashboard preview
 
@@ -63,6 +72,9 @@ control-plane bundle (one Container App with six sidecars, a private VNet, a
 locked-down Storage account, an ACR, a Key Vault, and Log Analytics) with a
 single `azd up`. **Cost is roughly USD 130/month** in `koreacentral` for the
 default sizing (see [docs/container-apps-migration.md §Cost Estimate](./docs/container-apps-migration.md#cost-estimate-korea-central-usd-monthly)).
+
+For first-time setup, especially on Windows, use the guided walkthrough first:
+[docs/get-started.md](./docs/get-started.md).
 
 ### 1. Install prerequisites
 
@@ -193,8 +205,48 @@ Local backend bring-up:
 ```bash
 uv sync --all-groups        # creates .venv on Python 3.12 + installs runtime + dev tools
 uv run pytest -q api/tests  # 28 tests
-uv run uvicorn api.main:app --reload --host 127.0.0.1 --port 8080
+scripts/dev/local-run.sh api
 ```
+
+VS Code dev tasks and direct terminal runs through `scripts/dev/local-run.sh`
+mirror local pipeline logs into `.logs/local/latest/` inside this project. The
+newest 3 sessions are retained, each log chunk is capped at 1 MiB, and each
+service keeps a bounded 16-chunk ring per session. Start with
+`.logs/local/latest/api.log`, then check `worker.log`, `beat.log`, `web.log`,
+and `smoke.log` when diagnosing warnings, errors, or pipeline health.
+Docker Compose runs should go through `scripts/dev/local-run.sh compose-full`
+or `compose-local`; detached compose runs also create
+`compose-full-containers.log` / `compose-local-containers.log` with container
+stdout/stderr and replay only the newest 200 lines by default.
+
+### Driving a deployed environment from your laptop (one-time RBAC + network)
+
+The local api uses `DefaultAzureCredential` → your `az login` identity, which
+starts with **zero** RBAC on the workload Storage / ACR. Without the steps
+below the dashboard will render `network_blocked` / `access_denied` and DB
+downloads will fail with HTTP 403.
+
+```bash
+# 1. one-shot: grant your az user the minimum roles on the deployed environment.
+#    Defaults match docs/auth.md (storage=elbstg01 in rg-elb-01, acr=elbacr01 in rg-elbacr-01).
+#    Override with --storage / --storage-rg / --acr / --acr-rg if your deployment differs.
+scripts/dev/grant-local-rbac.sh                  # add --dry-run to preview
+# wait 1-5 min for RBAC propagation, then:
+
+# 2. start the api with the local-debug Storage auto-open helper enabled —
+#    this opens publicNetworkAccess for your caller IP only when needed.
+LOCAL_DEBUG_AUTO_OPEN_STORAGE=true \
+  AUTH_DEV_BYPASS=true \
+  scripts/dev/local-run.sh api
+
+# 3. when you're done debugging, close the network surface again:
+scripts/dev/storage-public-access.sh off
+```
+
+Both helpers are idempotent; both refuse to act inside a Container App
+(`CONTAINER_APP_NAME` env present). See
+[`scripts/dev/README.md`](./scripts/dev/README.md) and
+[`.github/copilot-instructions.md`](./.github/copilot-instructions.md) §9.
 
 ---
 

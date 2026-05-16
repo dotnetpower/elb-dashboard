@@ -162,14 +162,38 @@ def aks_service_ip(
     service_name: str = Query(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
+    """Return the LoadBalancer external IP for a service in the AKS cluster.
+
+    Response shape (matches the SPA's `monitoringApi.serviceIp` typing):
+        ``{"service_name": "<name>", "external_ip": "<addr>"}``
+
+    Raises HTTP 404 when the service does not exist or has no LoadBalancer
+    ingress yet. The SPA relies on the error state to render the
+    OpenApiDeployPanel — never collapse "no IP yet" into a 200 response or
+    the page hangs in the "Discovering OpenAPI service…" state.
+    """
+
     sub = subscription_id or _sub_default()
     cred = get_credential()
     try:
-        return monitoring_svc.k8s_get_service_ip(
+        ip = monitoring_svc.k8s_get_service_ip(
             cred, sub, resource_group, cluster_name, service_name
         )
     except Exception as exc:
-        return _graceful("aks_service_ip", exc, empty={"ip": None})
+        # k8s_get_service_ip should already swallow not-found and return
+        # None, but if it raises something else (auth, network), surface a
+        # 404 so the SPA shows the deploy panel.
+        LOGGER.warning("aks_service_ip: lookup failed: %s", exc)
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "service_not_found", "service_name": service_name},
+        ) from exc
+    if not ip:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "service_no_external_ip", "service_name": service_name},
+        )
+    return {"service_name": service_name, "external_ip": ip}
 
 
 @router.get("/aks/warmup-status")
@@ -410,9 +434,15 @@ async def sidecars_snapshot(
 ) -> dict[str, Any]:
     """One-shot snapshot of all sidecars' health + CPU/MEM. Used by the SPA
     on initial card mount and as the polling fallback when SSE fails.
+
+    Note: ``drain_events=False`` — the SSE stream is the canonical drainer
+    of the animation event hash. If this poll endpoint also drained, two
+    independent readers (the live SSE consumer and any HTTP poller — same
+    tab, second tab, monitoring probe) would race for events and the badge
+    would silently flicker for whichever client lost the race.
     """
     try:
-        return collect_snapshot()
+        return collect_snapshot(drain_events=False)
     except Exception as exc:  # noqa: BLE001
         return _graceful(
             "sidecars_snapshot",
@@ -466,34 +496,39 @@ async def sidecars_events(ticket: str | None = Query(default=None)):
         proxy keeps the connection alive (idle ws/SSE timeout is 240s).
       * Client should reconnect on any close (TanStack Query / EventSource
         does this automatically with ``last-event-id``).
+
+    Multi-subscriber model: a single in-process broadcaster owns the
+    Redis hash drain. Each connected SSE stream is just a subscriber to
+    its fan-out. This guarantees that two browser tabs (or any number of
+    concurrent EventSource consumers) see *the same* event counts every
+    tick — no consumer can steal another's events. See
+    ``_SidecarBroadcaster``.
     """
     await _consume_sidecar_ticket(ticket)
 
-    async def event_stream():
-        # Initial snapshot — emits within ~50 ms of connect for fast first paint.
-        try:
-            initial = collect_snapshot()
-            yield f"event: snapshot\ndata: {_json.dumps(initial)}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("sidecars_events: initial snapshot failed: %s", exc)
-            yield 'event: error\ndata: {"code":"snapshot_failed"}\n\n'
+    queue, initial = await _SIDECAR_BROADCASTER.subscribe()
 
-        last_push = asyncio.get_event_loop().time()
-        while True:
-            now_loop = asyncio.get_event_loop().time()
-            # Heartbeat keep-alive when no real event in a while.
-            if now_loop - last_push >= _SSE_HEARTBEAT_INTERVAL_SEC:
-                yield ": heartbeat\n\n"
-                last_push = now_loop
-                continue
-            await asyncio.sleep(_SSE_PUSH_INTERVAL_SEC)
-            try:
-                snap = collect_snapshot()
-                yield f"event: snapshot\ndata: {_json.dumps(snap)}\n\n"
-                last_push = asyncio.get_event_loop().time()
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("sidecars_events: tick failed: %s", exc)
-                yield 'event: error\ndata: {"code":"tick_failed"}\n\n'
+    async def event_stream():
+        try:
+            # Initial snapshot was captured atomically with the subscribe
+            # (drain_events=False) so we don't steal a tick from the
+            # broadcaster's pending drain.
+            yield f"event: snapshot\ndata: {_json.dumps(initial)}\n\n"
+
+            while True:
+                try:
+                    payload = await asyncio.wait_for(
+                        queue.get(), timeout=_SSE_HEARTBEAT_INTERVAL_SEC
+                    )
+                except TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                if payload is None:
+                    # Sentinel from broadcaster shutdown — let the client reconnect.
+                    return
+                yield payload
+        finally:
+            await _SIDECAR_BROADCASTER.unsubscribe(queue)
 
     return StreamingResponse(
         event_stream(),
@@ -504,3 +539,136 @@ async def sidecars_events(ticket: str | None = Query(default=None)):
             "Connection": "keep-alive",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Sidecar broadcaster — single drain loop, fan-out to N SSE subscribers.
+#
+# Two browser tabs both opening EventSource used to race for the Redis
+# events hash and steal each other's counts. The broadcaster removes
+# that race by being the *only* component that calls
+# ``collect_snapshot(drain_events=True)``. Subscribers receive the same
+# pre-serialised SSE frame from a per-connection bounded queue.
+#
+# Lifecycle:
+#   * First subscribe() spawns the background drain task.
+#   * unsubscribe() removes the queue; when the last subscriber leaves,
+#     the drain task is cancelled (no Redis traffic when nobody's
+#     watching).
+#   * close() is called from FastAPI shutdown to drain cleanly.
+# ---------------------------------------------------------------------------
+
+
+class _SidecarBroadcaster:
+    """In-process fan-out for sidecar SSE snapshots."""
+
+    # Per-subscriber queue size. Each snapshot frame is small (~1 KB).
+    # Bound the queue so a stuck subscriber can't grow memory unbounded;
+    # if the queue is full we drop the oldest frame (the freshest one
+    # always wins for a monitoring UI).
+    _QUEUE_MAXSIZE = 8
+
+    def __init__(self) -> None:
+        self._subscribers: set[asyncio.Queue[str | None]] = set()
+        self._task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
+
+    async def subscribe(self) -> tuple[asyncio.Queue[str | None], dict[str, Any]]:
+        """Register a new subscriber. Returns (queue, initial_snapshot).
+
+        The initial snapshot is captured under the same lock that spawns
+        the drain task, so the very first subscriber gets a non-draining
+        snapshot for fast first paint and the broadcaster owns every
+        subsequent drain.
+        """
+
+        queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=self._QUEUE_MAXSIZE)
+        async with self._lock:
+            self._subscribers.add(queue)
+            if self._task is None or self._task.done():
+                self._task = asyncio.create_task(
+                    self._run(), name="sidecar-broadcaster"
+                )
+        # Initial snapshot for the new subscriber. Using drain_events=False
+        # keeps the broadcaster the sole drainer.
+        try:
+            initial = await asyncio.to_thread(collect_snapshot, drain_events=False)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("sidecar broadcaster: initial snapshot failed: %s", exc)
+            initial = {
+                "ts": None,
+                "revision": os.environ.get("CONTAINER_APP_REVISION", "local"),
+                "sidecars": {},
+                "events": {"row1": 0, "row2": 0, "row3": 0, "row4": 0},
+            }
+        return queue, initial
+
+    async def unsubscribe(self, queue: asyncio.Queue[str | None]) -> None:
+        async with self._lock:
+            self._subscribers.discard(queue)
+            if not self._subscribers and self._task is not None:
+                task = self._task
+                self._task = None
+                task.cancel()
+
+    async def close(self) -> None:
+        """Stop the broadcaster and wake any waiting subscribers."""
+
+        async with self._lock:
+            task = self._task
+            self._task = None
+            for q in list(self._subscribers):
+                try:
+                    q.put_nowait(None)
+                except asyncio.QueueFull:
+                    # Drop oldest, push sentinel so the consumer exits promptly.
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    try:
+                        q.put_nowait(None)
+                    except asyncio.QueueFull:
+                        pass
+            self._subscribers.clear()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+
+    async def _run(self) -> None:
+        """The single drain loop. Fans the snapshot out to every queue."""
+        try:
+            while True:
+                await asyncio.sleep(_SSE_PUSH_INTERVAL_SEC)
+                try:
+                    snap = await asyncio.to_thread(collect_snapshot)
+                    payload = f"event: snapshot\ndata: {_json.dumps(snap)}\n\n"
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("sidecar broadcaster: tick failed: %s", exc)
+                    payload = 'event: error\ndata: {"code":"tick_failed"}\n\n'
+                # Snapshot the subscriber set so unsubscribe() during fan-out
+                # doesn't mutate while we iterate.
+                for q in list(self._subscribers):
+                    try:
+                        q.put_nowait(payload)
+                    except asyncio.QueueFull:
+                        # Slow consumer: drop the oldest queued frame so
+                        # the latest snapshot still gets through. This is
+                        # the right policy for a monitoring UI — we want
+                        # currentness over completeness.
+                        try:
+                            q.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                        try:
+                            q.put_nowait(payload)
+                        except asyncio.QueueFull:
+                            pass
+        except asyncio.CancelledError:
+            return
+
+
+_SIDECAR_BROADCASTER = _SidecarBroadcaster()

@@ -23,17 +23,35 @@ export function useBlastResultActions({
   const handleDownload = async (file: BlastResultFile) => {
     if (!jobId) return;
     setDownloadingFile(file.name);
+    let url: string | null = null;
     try {
-      const resp = await blastApi.downloadResult(
-        jobId,
-        subscriptionId,
-        storageAccount,
-        file.name,
-      );
-      window.open(resp.download_url, "_blank");
+      if (file.file_id) {
+        const response = await blastApi.downloadResultFile(
+          jobId,
+          file.file_id,
+          subscriptionId,
+          storageAccount,
+        );
+        url = URL.createObjectURL(response.blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = response.filename ?? file.name.split("/").pop() ?? `${jobId}-result`;
+        document.body.append(anchor);
+        anchor.click();
+        anchor.remove();
+      } else {
+        const resp = await blastApi.downloadResult(
+          jobId,
+          subscriptionId,
+          storageAccount,
+          file.name,
+        );
+        window.open(resp.download_url, "_blank");
+      }
     } catch (e) {
       toast(`Download failed: ${(e as Error).message}`, "error");
     } finally {
+      if (url) URL.revokeObjectURL(url);
       setDownloadingFile(null);
     }
   };

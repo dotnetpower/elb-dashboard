@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { ConfigBar } from "@/components/ConfigBar";
+import { SubscriptionPicker } from "@/components/SubscriptionPicker";
+import { ResourcePicker } from "@/components/ResourcePicker";
 import { SetupWizard, loadSavedConfig, saveConfig, clearConfig, type ResourceConfig } from "@/components/SetupWizard";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { ClusterCard } from "@/components/cards/ClusterCard";
@@ -14,7 +15,16 @@ import { GettingStartedGuide } from "@/components/GettingStartedGuide";
 import { armProxyApi, monitoringApi } from "@/api/endpoints";
 import { listSubscriptions as armListSubs, listResourceGroups as armListRGs } from "@/api/arm";
 import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
-import { Loader2, Search } from "lucide-react";
+import { usePrefetchApiReference } from "@/hooks/usePrefetchApiReference";
+import { AUTO_REFRESH_OPTIONS, useAutoRefresh } from "@/hooks/useAutoRefresh";
+import {
+  HelpCircle,
+  LayoutGrid,
+  Loader2,
+  RefreshCw,
+  Search,
+  Settings as SettingsIcon,
+} from "lucide-react";
 
 const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
 
@@ -148,6 +158,20 @@ export function Dashboard() {
     }
   }, [needsDiscovery, subsQuery.isError, rgsQueries.isError]);
 
+  // Empty subscription list (e.g. dev-bypass without ARM creds, or a tenant
+  // the caller has zero RBAC on) — there is nothing to scan, so skip
+  // straight to the manual wizard instead of spinning forever on
+  // "Discovering existing BLAST workspaces…". Without this, rgsQueries
+  // stays disabled (needs subsQuery.data.length > 0) and the loading
+  // screen never resolves.
+  useEffect(() => {
+    if (!needsDiscovery) return;
+    if (subsQuery.isSuccess && (subsQuery.data?.length ?? 0) === 0) {
+      setDiscoveryDone(true);
+      setShowWizard(true);
+    }
+  }, [needsDiscovery, subsQuery.isSuccess, subsQuery.data]);
+
   const handleWizardComplete = useCallback((wizConfig: ResourceConfig) => {
     setConfig(wizConfig);
     setShowWizard(false);
@@ -181,6 +205,16 @@ export function Dashboard() {
   });
 
   const terminalSidecar = useTerminalSidecarHealth();
+
+  // Pre-warm the React Query cache for the API Reference page so the
+  // user does not have to sit through the "Discovering OpenAPI service
+  // on AKS..." spinner when they navigate from here to /docs.
+  usePrefetchApiReference({
+    subscriptionId: config.subscriptionId,
+    workloadResourceGroup: config.workloadResourceGroup,
+    acrResourceGroup: config.acrResourceGroup,
+    acrName: config.acrName,
+  });
 
   // Detect "needs setup" state: has base config but missing key resources
   const hasCluster = (aksQuery.data?.clusters?.length ?? 0) > 0;
@@ -280,19 +314,133 @@ export function Dashboard() {
 
   return (
     <>
-      <ConfigBar
-        config={config}
-        onChange={(next) => { setConfig(next); saveConfig(next); }}
-        onOpenSettings={() => setShowSettings(true)}
-      />
-
-      <div className="page-header">
-        <div className="page-header__title">Dashboard</div>
-        <div className="page-header__desc">
-          Your BLAST workspace at a glance
-          <span className="muted" style={{ fontSize: 11, marginLeft: 12 }}>Auto-refresh: 30s</span>
+      <header
+        className="page-header"
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          marginBottom: 0,
+        }}
+      >
+        {/* Row 1 — title (left) + workspace + auto-refresh + buttons (right). */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <div
+            className="page-header__title"
+            style={{ display: "flex", alignItems: "center", gap: 10 }}
+          >
+            <LayoutGrid size={22} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
+            ElasticBLAST Dashboard
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flexWrap: "wrap",
+              justifyContent: "flex-end",
+            }}
+          >
+            <SubscriptionPicker
+              value={config.subscriptionId}
+              onChange={(id) => {
+                const next = { ...config, subscriptionId: id };
+                setConfig(next);
+                saveConfig(next);
+              }}
+              compact
+              style={{ maxWidth: 240, minWidth: 160 }}
+            />
+            <ResourcePicker
+              label="Workload RG"
+              value={config.workloadResourceGroup}
+              onChange={async (v) => {
+                const next = { ...config, workloadResourceGroup: v };
+                if (config.subscriptionId && v) {
+                  try {
+                    const { tags } = await armProxyApi.getRgTags(config.subscriptionId, v);
+                    if (tags["elb-acr-rg"]) next.acrResourceGroup = tags["elb-acr-rg"];
+                    if (tags["elb-acr"]) next.acrName = tags["elb-acr"];
+                    if (tags["elb-storage"]) next.storageAccountName = tags["elb-storage"];
+                    if (tags["elb-terminal-rg"]) next.terminalResourceGroup = tags["elb-terminal-rg"];
+                    if (tags["elb-terminal-vm"]) next.terminalVmName = tags["elb-terminal-vm"];
+                    if (tags["elb-region"]) next.region = tags["elb-region"];
+                  } catch {
+                    /* RG has no elb-* tags — leave the rest of the config untouched. */
+                  }
+                }
+                setConfig(next);
+                saveConfig(next);
+              }}
+              queryKey={["arm-rgs", config.subscriptionId]}
+              fetcher={
+                config.subscriptionId
+                  ? async () => {
+                      const groups = await armProxyApi.listResourceGroups(config.subscriptionId);
+                      const items = groups.map((g) => {
+                        const tags = g.tags ?? {};
+                        const isElb = Object.keys(tags).some((k) => k.startsWith("elb-"));
+                        return {
+                          value: g.name,
+                          label: g.name,
+                          description: isElb ? g.location : `${g.location} · no elb-* tag`,
+                          disabled: !isElb,
+                        };
+                      });
+                      items.sort((a, b) => {
+                        if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
+                        return a.label.localeCompare(b.label);
+                      });
+                      return items;
+                    }
+                  : null
+              }
+              allowCustom
+              compact
+              style={{ maxWidth: 220, minWidth: 140 }}
+            />
+            <AutoRefreshChip />
+            {gettingStartedDismissed && (
+              <button
+                type="button"
+                className="cfg-gear"
+                onClick={() => {
+                  sessionStorage.removeItem("elb-getting-started-dismissed");
+                  setGettingStartedDismissed(false);
+                  setShowGettingStarted(true);
+                }}
+                title="Re-open the Getting Started checklist"
+                aria-label="Open Getting Started checklist"
+                style={{ marginLeft: 0 }}
+              >
+                <HelpCircle size={14} strokeWidth={1.5} />
+              </button>
+            )}
+            <button
+              type="button"
+              className="cfg-gear"
+              onClick={() => setShowSettings(true)}
+              title="Workspace settings"
+              aria-label="Open workspace settings"
+              style={{ marginLeft: 0 }}
+            >
+              <SettingsIcon size={14} strokeWidth={1.5} />
+            </button>
+          </div>
         </div>
-      </div>
+        {/* Row 2 — description (full width, doesn't compete with controls). */}
+        <div className="page-header__desc" style={{ marginTop: 0 }}>
+          Live view of your BLAST workspace — clusters, registries, storage, and terminal health.
+        </div>
+      </header>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div className="dashboard-grid">
@@ -343,5 +491,37 @@ export function Dashboard() {
         />
       )}
     </>
+  );
+}
+
+/**
+ * Compact dropdown for the global dashboard auto-refresh interval.
+ * Styled as a `cfg-chip` so it lines up visually with the Subscription /
+ * Workload RG pickers next to it.
+ */
+function AutoRefreshChip() {
+  const { intervalMs, setIntervalMs } = useAutoRefresh();
+  return (
+    <label
+      className="cfg-chip"
+      title="How often dashboard cards refetch from Azure"
+      style={{ cursor: "pointer" }}
+    >
+      <span className="lbl" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <RefreshCw size={11} strokeWidth={1.5} />
+        Auto-refresh
+      </span>
+      <select
+        value={intervalMs}
+        onChange={(e) => setIntervalMs(Number(e.target.value))}
+        aria-label="Auto-refresh interval"
+      >
+        {AUTO_REFRESH_OPTIONS.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }

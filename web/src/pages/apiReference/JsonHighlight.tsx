@@ -1,0 +1,72 @@
+import type { CSSProperties, ReactNode } from "react";
+
+export function JsonHighlight({ text }: { text: string }) {
+  const styles: Record<string, CSSProperties> = {
+    key: { color: "#8cb4ff" },
+    str: { color: "#a8d4a2" },
+    num: { color: "#d4b88c" },
+    bool: { color: "#c9a0dc" },
+    nil: { color: "#9da5b4", fontStyle: "italic" },
+    brace: { color: "#7a8194" },
+  };
+
+  const parts: ReactNode[] = [];
+  const re =
+    /("(?:[^"\\]|\\.)*")\s*(:?)|(\b(?:true|false)\b)|(\bnull\b)|([\d](?:[\d.eE+\-])*)|([{}[\],])/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  let index = 0;
+
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) parts.push(text.slice(last, match.index));
+    if (match[1]) {
+      if (match[2]) {
+        parts.push(
+          <span key={index} style={styles.key}>
+            {match[1]}
+          </span>,
+        );
+        parts.push(
+          <span key={`${index}c`} style={styles.brace}>
+            {match[2]}
+          </span>,
+        );
+      } else {
+        parts.push(
+          <span key={index} style={styles.str}>
+            {match[1]}
+          </span>,
+        );
+      }
+    } else if (match[3]) {
+      parts.push(
+        <span key={index} style={styles.bool}>
+          {match[3]}
+        </span>,
+      );
+    } else if (match[4]) {
+      parts.push(
+        <span key={index} style={styles.nil}>
+          {match[4]}
+        </span>,
+      );
+    } else if (match[5]) {
+      parts.push(
+        <span key={index} style={styles.num}>
+          {match[5]}
+        </span>,
+      );
+    } else if (match[6]) {
+      parts.push(
+        <span key={index} style={styles.brace}>
+          {match[6]}
+        </span>,
+      );
+    }
+    last = match.index + match[0].length;
+    index++;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+
+  return <>{parts}</>;
+}

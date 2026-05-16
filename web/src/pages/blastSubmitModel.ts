@@ -146,7 +146,10 @@ export interface FormState {
   selectedCluster: string;
   optimize: string;
   enable_warmup: boolean;
+  sharding_mode: "off" | "approximate" | "precise";
   db_auto_partition: boolean;
+  /** Opt-out of automatic shard layout selection for warmed DBs. Default false. */
+  disable_sharding: boolean;
 }
 
 export const INITIAL: FormState = {
@@ -169,7 +172,9 @@ export const INITIAL: FormState = {
   selectedCluster: "",
   optimize: "megablast",
   enable_warmup: true,
-  db_auto_partition: true,
+  sharding_mode: "off",
+  db_auto_partition: false,
+  disable_sharding: false,
 };
 
 export function buildCommandString(form: FormState, programMeta: (typeof PROGRAMS)[0]): string {

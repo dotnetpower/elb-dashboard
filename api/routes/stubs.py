@@ -11,16 +11,33 @@ from __future__ import annotations
 
 import logging
 import os
-import secrets
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi.responses import StreamingResponse
 
 from api.auth import CallerIdentity, require_caller
-from api.services.aks_skus import DEFAULT_SKU, list_skus
+from api.services.aks_skus import DEFAULT_SKU, DEFAULT_SYSTEM_SKU, sku_list_response
 
 LOGGER = logging.getLogger(__name__)
+
+# Per-(account, db) lock registry for /api/blast/databases/{db}/shard.
+# A shard daemon holds the lock for the lifetime of its background work
+# so a re-clicked chip returns 409 instead of starting a second writer.
+# The guard mutex protects insertions into the registry itself; the
+# registry never shrinks (one entry per ever-touched DB) which is fine
+# at the scale we operate at (low-tens of DBs per deployment).
+import threading as _threading
+
+_SHARD_LOCK_REGISTRY: dict[str, _threading.Lock] = {}
+_SHARD_LOCK_REGISTRY_GUARD = _threading.Lock()
+# Older than this and we treat a leftover sharding_in_progress=true
+# marker as a crashed previous daemon (and allow re-trigger). Picked to
+# be much larger than the worst-case wall time for ensure_shard_sets
+# against the largest known DB while still small enough that a real
+# crash recovers quickly.
+_SHARD_STALE_SECONDS = 30 * 60
 
 
 def _stub_log(name: str, **ctx: Any) -> None:
@@ -45,6 +62,176 @@ def _safe_delay(task, **kwargs):
                 },
             ) from exc
         raise
+
+
+def _payload_value(payload: dict[str, Any] | None, *keys: str) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _external_status_to_dashboard(status: str) -> str:
+    if status == "success":
+        return "completed"
+    if status in {"queued", "running", "failed", "cancelled"}:
+        return status
+    return "running" if status else "unknown"
+
+
+def _external_to_blast_job(job: dict[str, Any]) -> dict[str, Any]:
+    external_status = str(job.get("status") or "unknown")
+    status = _external_status_to_dashboard(external_status)
+    db_name = str(job.get("db_name") or "")
+    db = str(job.get("db") or db_name)
+    program = str(job.get("program") or "blast")
+    created_at = str(job.get("created_at") or "")
+    updated_at = str(
+        job.get("updated_at")
+        or job.get("completed_at")
+        or job.get("failed_at")
+        or created_at
+    )
+    source = str(job.get("submission_source") or "external_api")
+    job_title = f"{program} - {db_name or db}" if db_name or db else str(job.get("job_id") or "")
+    out: dict[str, Any] = {
+        "job_id": job.get("job_id"),
+        "job_title": job_title,
+        "program": program,
+        "db": db,
+        "status": status,
+        "phase": status,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "source": source,
+        "submission_source": source,
+        "external_correlation_id": job.get("external_correlation_id") or "",
+        "custom_status": {
+            "phase": status,
+            "blast_status": external_status,
+            "progress_pct": job.get("progress_pct"),
+            "queue_position": job.get("queue_position"),
+        },
+        "output": {
+            "status": status,
+            "external_status": external_status,
+            "result": job.get("result"),
+            "execution": job.get("execution"),
+        },
+        "payload": {"external": job},
+    }
+    if job.get("cluster_name"):
+        out["infrastructure"] = {"cluster_name": job.get("cluster_name")}
+    if job.get("error"):
+        error = job.get("error")
+        out["error"] = error.get("message") if isinstance(error, dict) else str(error)
+    return out
+
+
+def _split_child_summary_from_repo(repo: Any, parent_job_id: str) -> dict[str, Any] | None:
+    try:
+        children = list(repo.list_children(parent_job_id, limit=1000))
+    except Exception as exc:
+        LOGGER.info("split child summary unavailable job_id=%s: %s", parent_job_id, type(exc).__name__)
+        return None
+    if not children:
+        return None
+    counts: dict[str, int] = {}
+    items: list[dict[str, Any]] = []
+    for child in children:
+        status = str(getattr(child, "status", "") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+        payload = child.payload if isinstance(getattr(child, "payload", None), dict) else {}
+        items.append(
+            {
+                "job_id": getattr(child, "job_id", ""),
+                "status": status,
+                "phase": getattr(child, "phase", None),
+                "group_id": payload.get("group_id"),
+                "query_file": payload.get("query_file"),
+                "effective_search_space": payload.get("effective_search_space"),
+            }
+        )
+    return {"child_count": len(children), "children_by_status": counts, "children": items}
+
+
+def _local_to_blast_job(state: Any, split_children: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = state.payload if isinstance(state.payload, dict) else {}
+    program = str(_payload_value(payload, "program") or "blast")
+    db = str(_payload_value(payload, "db", "database") or "")
+    infrastructure = {
+        "subscription_id": _payload_value(payload, "subscription_id"),
+        "resource_group": _payload_value(payload, "resource_group"),
+        "region": _payload_value(payload, "region"),
+        "storage_account": _payload_value(payload, "storage_account"),
+        "acr_name": _payload_value(payload, "acr_name"),
+        "cluster_name": _payload_value(payload, "aks_cluster_name", "cluster_name"),
+    }
+    out = {
+        "job_id": state.job_id,
+        "instance_id": state.task_id,
+        "job_title": str(
+            _payload_value(payload, "job_title")
+            or (f"{program} - {db}" if db else state.job_id)
+        ),
+        "program": program,
+        "db": db,
+        "status": state.status,
+        "phase": state.phase or state.status,
+        "task_id": state.task_id,
+        "created_at": state.created_at,
+        "updated_at": state.updated_at,
+        "error_code": state.error_code,
+        "payload": payload,
+        "config_snapshot": payload.get("config_snapshot") if isinstance(payload, dict) else None,
+        "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
+        "source": "dashboard",
+    }
+    if getattr(state, "parent_job_id", None):
+        out["parent_job_id"] = state.parent_job_id
+    if split_children is not None:
+        out["split_children"] = split_children
+    return out
+
+
+def _external_result_files(job: dict[str, Any]) -> list[dict[str, Any]]:
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    files = result.get("files") if isinstance(result, dict) else []
+    if not isinstance(files, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        filename = str(item.get("filename") or item.get("name") or "")
+        file_id = str(item.get("file_id") or "")
+        if not filename or not file_id:
+            continue
+        out.append(
+            {
+                "file_id": file_id,
+                "name": filename,
+                "size": item.get("size_bytes") or item.get("size"),
+                "last_modified": item.get("last_modified"),
+                "format": item.get("format"),
+                "source": "external",
+            }
+        )
+    return out
+
+
+def _ensure_job_read_allowed(job_id: str, caller: CallerIdentity) -> None:
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        state = JobStateRepository().get(job_id)
+    except Exception:
+        return
+    if state and state.owner_oid and state.owner_oid != caller.object_id:
+        raise HTTPException(403, "not owner")
 
 
 # ===========================================================================
@@ -79,13 +266,7 @@ def aks_skus(
     # filters by region availability. The static list is correct for the
     # SKU set elastic-blast understands; what's missing is per-region
     # availability and quota.
-    skus = list_skus()
-    return {
-        "skus": [dict(s) for s in skus],
-        "default_sku": DEFAULT_SKU,
-        "degraded": True,
-        "degraded_reason": "static_skus_celery_task_pending",
-    }
+    return sku_list_response()
 
 
 @aks_router.post("/provision")
@@ -103,6 +284,10 @@ def aks_provision(
         cluster_name=body.get("cluster_name", "elb-cluster"),
         node_sku=body.get("node_sku", DEFAULT_SKU),
         node_count=body.get("node_count", 3),
+        # Sibling repo's two-pool layout: small system pool + workload pool.
+        # Defaults mirror constants.py::ELB_DFLT_AZURE_SYSTEM_VM_SIZE.
+        system_vm_size=body.get("system_vm_size", DEFAULT_SYSTEM_SKU),
+        system_node_count=body.get("system_node_count", 1),
         acr_resource_group=body.get("acr_resource_group", ""),
         acr_name=body.get("acr_name", ""),
         storage_resource_group=body.get("storage_resource_group", ""),
@@ -111,6 +296,8 @@ def aks_provision(
     )
     return {
         "id": job_id,
+        "job_id": job_id,
+        "instance_id": result.id,
         "task_id": result.id,
         "statusQueryGetUri": f"/api/tasks/{result.id}",
         "status": "queued",
@@ -122,14 +309,47 @@ def aks_openapi_deploy(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("aks/openapi/deploy", body=body, oid=caller.object_id)
-    instance_id = secrets.token_urlsafe(16)
+    """Re-deploy ``elb-openapi`` to an existing AKS cluster.
+
+    Translates the SPA's ``OpenApiDeployPanel`` body into a Celery task
+    enqueue. The returned ``id`` is the Celery task id so the SPA can poll
+    ``GET /aks/openapi/deploy/{id}/status`` directly.
+    """
+
+    from api.tasks.openapi import deploy_openapi_service
+
+    rg = body.get("resource_group", "") or ""
+    cluster_name = body.get("cluster_name", "") or ""
+    acr_name = body.get("acr_name", "") or ""
+    if not (rg and cluster_name and acr_name):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "missing_parameters",
+                "message": (
+                    "resource_group, cluster_name and acr_name are required "
+                    "to deploy the OpenAPI service."
+                ),
+            },
+        )
+
+    result = _safe_delay(
+        deploy_openapi_service,
+        subscription_id=body.get("subscription_id", "") or "",
+        resource_group=rg,
+        cluster_name=cluster_name,
+        acr_name=acr_name,
+        storage_account=body.get("storage_account", "") or "",
+        storage_resource_group=body.get("storage_resource_group", "") or "",
+        tenant_id=caller.tenant_id or "",
+        caller_oid=caller.object_id or "",
+    )
     return {
-        "id": instance_id,
-        "statusQueryGetUri": f"/api/aks/openapi/deploy/{instance_id}/status",
-        "status": "stub",
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
+        "id": result.id,
+        "instance_id": result.id,
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/aks/openapi/deploy/{result.id}/status",
+        "status": "queued",
     }
 
 
@@ -138,13 +358,64 @@ def aks_openapi_deploy_status(
     instance_id: str = Path(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("aks/openapi/deploy/status", id=instance_id)
+    """Translate the Celery ``AsyncResult`` for a deploy_openapi task into
+    the orchestrator-style envelope (``runtime_status`` + ``custom_status``
+    + ``output``) the SPA's ``OpenApiDeployPanel`` was originally written
+    against.
+    """
+
+    from celery.result import AsyncResult
+
+    from api.celery_app import celery_app
+
+    result = AsyncResult(instance_id, app=celery_app)
+    status = (result.status or "PENDING").upper()
+    runtime_status = {
+        "PENDING": "Pending",
+        "RECEIVED": "Pending",
+        "STARTED": "Running",
+        "RETRY": "Running",
+        "PROGRESS": "Running",
+        "SUCCESS": "Completed",
+        "FAILURE": "Failed",
+        "REVOKED": "Terminated",
+    }.get(status, "Running")
+
+    custom_status: dict[str, Any] = {"phase": status.lower()}
+    output: dict[str, Any] | None = None
+
+    if not result.ready():
+        info = result.info if isinstance(result.info, dict) else None
+        if info:
+            custom_status.update({k: v for k, v in info.items() if k != "exc_type"})
+    elif result.successful():
+        payload = result.result if isinstance(result.result, dict) else {}
+        succeeded = str(payload.get("status", "")).lower() == "succeeded"
+        custom_status.update({"phase": "completed"})
+        # The SPA reads ``output.openapi_deploy.error`` and
+        # ``output.workload_identity.error`` to surface failures, so pass
+        # the whole task payload through as ``output``.
+        output = dict(payload)
+        if not succeeded:
+            output.setdefault("status", "failed")
+    else:
+        # FAILURE / REVOKED
+        err = ""
+        try:
+            err = str(result.result or result.info or "")[:500]
+        except Exception:
+            err = "task failed"
+        custom_status.update({"phase": "failed"})
+        output = {
+            "status": "failed",
+            "openapi_deploy": {"error": err},
+        }
+
     return {
         "instance_id": instance_id,
-        "runtime_status": "Pending",
-        "custom_status": {"phase": "stub", "description": "Celery task pending"},
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
+        "runtime_status": runtime_status,
+        "custom_status": custom_status,
+        "output": output,
     }
 
 
@@ -155,13 +426,52 @@ def aks_openapi_spec(
     cluster_name: str = Query(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("aks/openapi/spec", rg=resource_group, cluster=cluster_name)
+    """Best-effort proxy for the deployed OpenAPI service's ``/openapi.json``.
+
+    Resolves the LoadBalancer IP via the K8s API, then fetches the spec.
+    Returns a degraded ``openapi:"3.0.0"`` placeholder when the service is
+    not yet reachable so the SPA's docs page does not crash.
+    """
+
+    import httpx
+
+    from api.services import get_credential
+    from api.services.k8s_monitoring import k8s_get_service_ip
+
+    sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
+    cred = get_credential()
+    try:
+        ip = k8s_get_service_ip(
+            cred, sub, resource_group, cluster_name, "elb-openapi"
+        )
+    except Exception as exc:
+        ip = None
+        LOGGER.warning("openapi/spec: k8s_get_service_ip failed: %s", exc)
+
+    if not ip:
+        return {
+            "openapi": "3.0.0",
+            "info": {"title": "elb-openapi (not yet deployed)", "version": "0.0.0"},
+            "paths": {},
+            "degraded": True,
+            "degraded_reason": "openapi_service_not_reachable",
+        }
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            for path in ("/openapi.json", "/docs/openapi.json"):
+                resp = client.get(f"http://{ip}{path}")
+                if resp.status_code == 200:
+                    return resp.json()
+    except Exception as exc:
+        LOGGER.warning("openapi/spec: fetch failed for %s: %s", ip, exc)
+
     return {
         "openapi": "3.0.0",
-        "info": {"title": "elb-openapi (stub)", "version": "0.0.0"},
+        "info": {"title": "elb-openapi (spec not available)", "version": "0.0.0"},
         "paths": {},
         "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
+        "degraded_reason": "openapi_endpoint_unreachable",
     }
 
 
@@ -263,50 +573,76 @@ def blast_jobs_list(
     limit: int = Query(default=50, ge=1, le=500),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    """List the caller's BLAST jobs from the platform jobstate table.
+    """List BLAST jobs from the platform table plus external OpenAPI jobs.
 
-    This is the read-only path; the legacy job_registry entity has been
-    replaced by the Storage table created in storageState.bicep.
+    Local Table-backed rows win when both sources know the same job. Direct
+    OpenAPI submissions live in the sibling service's ConfigMaps, so merging
+    them here keeps the SPA on one canonical jobs endpoint.
     """
+    jobs: list[dict[str, Any]] = []
+    degraded: dict[str, Any] = {}
     try:
         from api.services.state_repo import JobStateRepository
 
         repo = JobStateRepository()
         rows = repo.list_for_owner(caller.object_id, limit=limit)
-        # Filter to BLAST jobs only.
-        blast_rows = [r for r in rows if r.type == "blast"]
-        return {
-            "jobs": [
-                {
-                    "job_id": j.job_id,
-                    "status": j.status,
-                    "phase": j.phase,
-                    "task_id": j.task_id,
-                    "created_at": j.created_at,
-                    "updated_at": j.updated_at,
-                    "error_code": j.error_code,
-                    "payload": j.payload,
-                }
-                for j in blast_rows
-            ]
-        }
+        for row in rows:
+            if row.type != "blast":
+                continue
+            jobs.append(
+                _local_to_blast_job(
+                    row,
+                    split_children=_split_child_summary_from_repo(repo, row.job_id),
+                )
+            )
     except Exception as exc:
         LOGGER.warning("blast_jobs_list failed: %s", type(exc).__name__)
-        # Distinguish between "not configured" (local dev) and real errors
         exc_name = type(exc).__name__
         if exc_name == "RuntimeError" and "AZURE_TABLE_ENDPOINT" in str(exc):
-            return {
-                "jobs": [],
+            degraded = {
                 "degraded": True,
                 "degraded_reason": "not_configured",
-                "message": "Job state storage is not configured. Set AZURE_TABLE_ENDPOINT to connect to Azure Table Storage.",
+                "message": (
+                    "Job state storage is not configured. Set AZURE_TABLE_ENDPOINT "
+                    "to connect to Azure Table Storage."
+                ),
             }
-        return {
-            "jobs": [],
-            "degraded": True,
-            "degraded_reason": "state_repo_unavailable",
-            "message": f"Could not reach job state storage: {exc_name}",
+        else:
+            degraded = {
+                "degraded": True,
+                "degraded_reason": "state_repo_unavailable",
+                "message": f"Could not reach job state storage: {exc_name}",
+            }
+
+    external_degraded: dict[str, Any] = {}
+    try:
+        from api.services import external_blast
+
+        external_rows = external_blast.list_jobs().get("jobs", [])
+        if isinstance(external_rows, list):
+            seen = {str(job.get("job_id")) for job in jobs}
+            for row in external_rows:
+                if not isinstance(row, dict):
+                    continue
+                job_id = str(row.get("job_id") or "")
+                if not job_id or job_id in seen:
+                    continue
+                jobs.append(_external_to_blast_job(row))
+                seen.add(job_id)
+    except Exception as exc:
+        LOGGER.info("external blast job list unavailable: %s", type(exc).__name__)
+        external_degraded = {
+            "external_degraded": True,
+            "external_degraded_reason": type(exc).__name__,
         }
+
+    jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+    response: dict[str, Any] = {"jobs": jobs[:limit]}
+    if degraded and not jobs:
+        response.update(degraded)
+    if external_degraded:
+        response.update(external_degraded)
+    return response
 
 
 @blast_router.get("/jobs/{job_id}")
@@ -315,33 +651,48 @@ def blast_job_get(
     history: int = Query(default=0),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
+    local_unavailable: Exception | None = None
     try:
         from api.services.state_repo import JobStateRepository
 
         repo = JobStateRepository()
         state = repo.get(job_id)
-        if state is None:
-            raise HTTPException(404, "job not found")
-        if state.owner_oid and state.owner_oid != caller.object_id:
-            raise HTTPException(403, "not owner")
-        out: dict[str, Any] = {
-            "job_id": state.job_id,
-            "status": state.status,
-            "phase": state.phase,
-            "task_id": state.task_id,
-            "created_at": state.created_at,
-            "updated_at": state.updated_at,
-            "error_code": state.error_code,
-            "payload": state.payload,
-        }
-        if history:
-            out["history"] = repo.get_history(job_id, limit=200)
-        return out
+        if state is not None:
+            if state.owner_oid and state.owner_oid != caller.object_id:
+                raise HTTPException(403, "not owner")
+            out = _local_to_blast_job(
+                state,
+                split_children=_split_child_summary_from_repo(repo, state.job_id),
+            )
+            if history:
+                out["history"] = repo.get_history(job_id, limit=200)
+            return out
     except HTTPException:
         raise
     except Exception as exc:
         LOGGER.warning("blast_job_get failed: %s", type(exc).__name__)
-        raise HTTPException(500, str(exc)) from exc
+        local_unavailable = exc
+
+    try:
+        from api.services import external_blast
+
+        return _external_to_blast_job(external_blast.get_job(job_id))
+    except HTTPException as exc:
+        if exc.status_code == 404 and local_unavailable is not None:
+            raise HTTPException(
+                503,
+                f"local job state unavailable: {type(local_unavailable).__name__}",
+            ) from exc
+        raise
+    except Exception as exc:
+        if local_unavailable is not None:
+            raise HTTPException(
+                503,
+                "local job state unavailable: "
+                f"{type(local_unavailable).__name__}; external lookup unavailable: "
+                f"{type(exc).__name__}",
+            ) from exc
+        raise HTTPException(404, "job not found") from exc
 
 
 @blast_router.post("/jobs/{job_id}/cancel")
@@ -401,7 +752,23 @@ def blast_pre_flight(
     rg = body.get("resource_group", "")
     cluster = body.get("cluster_name", "")
     storage = body.get("storage_account", "")
-    db = body.get("db", "")
+    db = body.get("db") or body.get("database", "")
+    raw_options = body.get("options") if isinstance(body.get("options"), dict) else {}
+    precision_options = {**raw_options}
+    for key in (
+        "additional_options",
+        "allow_approximate_sharding",
+        "db_auto_partition",
+        "db_partitions",
+        "db_partition_prefix",
+        "db_effective_search_space",
+        "db_total_letters",
+        "outfmt",
+        "query_effective_search_spaces",
+        "sharding_mode",
+    ):
+        if key in body:
+            precision_options[key] = body[key]
 
     # 1. AKS cluster check
     try:
@@ -435,6 +802,55 @@ def blast_pre_flight(
         checks.append({"id": "database", "status": "fail", "title": "BLAST Database", "detail": "No database selected", "severity": "critical"})
         critical += 1
 
+    # 3b. Sharding precision policy check
+    try:
+        from api.services.sharding_precision import build_precision_report
+
+        query_metadata = None
+        query_count = body.get("query_count")
+        query_data = body.get("query_data")
+        if isinstance(query_data, str) and query_data.strip():
+            from api.services.query_metadata import parse_fasta_metadata
+
+            query_metadata = parse_fasta_metadata(query_data)
+            query_count = query_metadata.query_count
+        elif not isinstance(query_count, int):
+            query_count = None
+        shard_sets = body.get("shard_sets")
+        if not isinstance(shard_sets, list):
+            shard_sets = None
+        precision_report = build_precision_report(
+            precision_options,
+            query_count=query_count,
+            db_stats_available=bool(precision_options.get("db_total_letters")),
+            shard_sets=shard_sets,
+        )
+        status = "pass" if precision_report.eligible else "fail"
+        checks.append(
+            {
+                "id": "sharding_precision",
+                "status": status,
+                "title": "Sharding Precision",
+                "detail": precision_report.precision_level,
+                "severity": "critical" if not precision_report.eligible else None,
+                "precision": precision_report.as_dict(),
+                "query_metadata": query_metadata.as_dict() if query_metadata else None,
+            }
+        )
+        if not precision_report.eligible:
+            critical += 1
+    except Exception as exc:
+        checks.append(
+            {
+                "id": "sharding_precision",
+                "status": "fail",
+                "title": "Sharding Precision",
+                "detail": str(exc)[:200],
+                "severity": "critical",
+            }
+        )
+        critical += 1
+
     # 4. Redis/Celery broker check
     try:
         from api.celery_app import celery_app
@@ -466,6 +882,39 @@ def blast_submit(
         req = BlastSubmitRequest(**body)
     except Exception as exc:
         raise HTTPException(422, detail={"code": "validation_error", "message": str(exc)[:500]})
+
+    # Precision gate: exact/precise sharding claims must be validated before a
+    # Celery task is queued. Approximate mode remains explicit and warning-only.
+    try:
+        from api.services.sharding_precision import build_precision_report, normalize_sharding_mode
+
+        precision_options = dict(req.options or {})
+        mode = normalize_sharding_mode(precision_options)
+        if mode == "precise":
+            report = build_precision_report(
+                precision_options,
+                query_count=precision_options.get("query_count"),
+                db_stats_available=bool(precision_options.get("db_total_letters")),
+                shard_sets=precision_options.get("shard_sets")
+                if isinstance(precision_options.get("shard_sets"), list)
+                else None,
+            )
+            if not report.eligible:
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "sharding_precision_blocked",
+                        "message": "; ".join(report.blocking_errors),
+                        "precision": report.as_dict(),
+                    },
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            422,
+            detail={"code": "sharding_precision_invalid", "message": str(exc)[:500]},
+        ) from exc
 
     # Capacity pre-check — verify AKS cluster exists and is running
     try:
@@ -523,6 +972,7 @@ def blast_submit(
         query_file=req.query_file,
         options=req.options,
         caller_oid=caller.object_id,
+        caller_tenant_id=caller.tenant_id,
     )
     return {
         "id": job_id,
@@ -530,6 +980,39 @@ def blast_submit(
         "statusQueryGetUri": f"/api/tasks/{result.id}",
         "status": "queued",
     }
+
+
+@blast_router.post("/jobs", status_code=202)
+def blast_job_submit(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Canonical BLAST job submit endpoint.
+
+    Dashboard submissions continue to use the local Celery path. Inline FASTA
+    submissions use the sibling OpenAPI execution plane but are exposed under
+    the same `/api/blast/jobs` domain so clients do not need a second jobs API.
+    """
+    if "query_fasta" not in body:
+        return blast_submit(body, caller)
+
+    from api.routes.elastic_blast import ExternalBlastSubmitRequest
+    from api.services import external_blast
+
+    try:
+        request = ExternalBlastSubmitRequest(**body)
+    except Exception as exc:
+        raise HTTPException(422, detail={"code": "validation_error", "message": str(exc)[:500]}) from exc
+
+    payload = request.model_dump(exclude_none=True)
+    payload["submission_source"] = "external_api"
+    LOGGER.info(
+        "canonical external BLAST submit accepted caller_oid=%s db=%s program=%s",
+        caller.object_id,
+        request.db,
+        request.program,
+    )
+    return external_blast.submit_job(payload)
 
 
 @blast_router.get("/submit/{instance_id}/status")
@@ -565,44 +1048,297 @@ def blast_databases(
     subscription_id: str = Query(default=""),
     storage_account: str = Query(default=""),
     resource_group: str = Query(default=""),
+    num_nodes: int = Query(default=0, ge=0, le=1000),
+    machine_type: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     if not storage_account or not resource_group:
         return {"databases": []}
+    from api.services import get_credential
+    from api.services.storage_data import classify_storage_failure, list_databases
+    from api.services.storage_public_access import ensure_local_storage_access
+
+    cred = get_credential()
+    if subscription_id:
+        access = ensure_local_storage_access(
+            cred, subscription_id, resource_group, storage_account
+        )
+        if access.get("action") == "failed":
+            LOGGER.warning(
+                "blast_databases: local-debug auto-open failed for %s: %s",
+                storage_account,
+                access.get("error"),
+            )
     try:
-        from api.services.storage_data import list_databases
-        from api.services import get_credential
-        cred = get_credential()
         databases = list_databases(cred, storage_account)
-        return {"databases": databases}
     except Exception as exc:
         LOGGER.warning("blast_databases failed: %s", type(exc).__name__)
-        # User-friendly messages for common failure modes
-        err_str = str(exc)
-        if "AuthorizationFailure" in err_str:
-            return {
-                "databases": [],
-                "degraded": True,
-                "degraded_reason": "access_denied",
-                "message": (
-                    f"Cannot access storage account '{storage_account}'. "
-                    "In production, the Container App reaches storage via private endpoint. "
-                    "Locally, assign 'Storage Blob Data Reader' role to your az login identity."
-                ),
-            }
-        if "ResourceNotFound" in err_str or "AccountNotFound" in err_str:
-            return {
-                "databases": [],
-                "degraded": True,
-                "degraded_reason": "not_found",
-                "message": f"Storage account '{storage_account}' not found in resource group '{resource_group}'.",
-            }
         return {
             "databases": [],
-            "degraded": True,
-            "degraded_reason": type(exc).__name__,
-            "message": f"Could not list databases: {type(exc).__name__}",
+            **classify_storage_failure(
+                cred, subscription_id, resource_group, storage_account, exc
+            ),
         }
+
+    # Optional warmup plan enrichment. Only computed when the caller
+    # supplied cluster topology — the planner needs node count + SKU and
+    # the api sidecar deliberately does not re-query AKS here (an extra
+    # ARM round trip per page render would be wasteful since the SPA
+    # already loads /api/monitor/aks via useClusterReadiness).
+    if num_nodes > 0 and machine_type:
+        from api.services.warmup_planner import compute_warmup_feasibility
+
+        for db in databases:
+            try:
+                plan = compute_warmup_feasibility(
+                    db_total_bytes=int(db.get("total_bytes") or 0),
+                    num_nodes=num_nodes,
+                    machine_type=machine_type,
+                )
+                db["warmup_plan"] = plan.to_dict()
+            except Exception as exc:  # planner only raises on programmer error
+                LOGGER.warning(
+                    "warmup_plan compute failed db=%s: %s",
+                    db.get("name"), type(exc).__name__,
+                )
+                # Honest degraded marker — never silently swallow.
+                db["warmup_plan"] = {
+                    "feasible": False,
+                    "status": "no_db_size",
+                    "message": "Warmup plan unavailable.",
+                    "recommendations": [],
+                }
+
+    return {"databases": databases}
+
+
+@blast_router.post("/databases/{db_name}/shard")
+def blast_database_shard(
+    db_name: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Run prepare-db's sharding step against an already-downloaded DB.
+
+    **Async** — returns 202 immediately and runs ``ensure_shard_sets`` in
+    a daemon thread (mirrors ``/api/storage/prepare-db``). Sharding for
+    large DBs like ``core_nt`` does ~150+ small SDK round-trips and
+    cannot complete inside an HTTP request window. Progress is published
+    by writing ``sharding_in_progress`` / ``sharding_started_at`` /
+    ``sharding_error`` into ``{db_name}-metadata.json`` so the SPA's
+    ``GET /api/blast/databases`` poll renders the in-flight state
+    (and survives a page reload).
+
+    Hardening:
+      * Per-``(account, db)`` lock prevents concurrent daemons from
+        thrashing the metadata blob.
+      * If a previous daemon's ``sharding_in_progress`` flag is older
+        than ``_SHARD_STALE_SECONDS`` we treat it as crashed and allow
+        re-trigger.
+      * All error strings are passed through ``sanitise()`` before
+        landing in the metadata blob or the response.
+    """
+    import json
+    import re
+    import threading
+    from datetime import UTC, datetime
+
+    from azure.core.exceptions import ResourceNotFoundError
+
+    from api.services import get_credential
+    from api.services.db_sharding import (
+        DEFAULT_CONTAINER,
+        ensure_shard_sets,
+    )
+    from api.services.sanitise import sanitise
+    from api.services.storage_data import _blob_service  # type: ignore[attr-defined]
+    from api.services.storage_public_access import ensure_local_storage_access
+
+    sub = body.get("subscription_id", "")
+    storage_rg = body.get("resource_group", "")
+    account_name = body.get("account_name", "")
+    if not all([sub, storage_rg, account_name]):
+        raise HTTPException(
+            400,
+            "subscription_id, resource_group, account_name required in body",
+        )
+    # Mirror the validation in /api/storage/prepare-db. Keep it tight —
+    # `db_name` flows straight to a blob path.
+    _re_db = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+    _re_sub = re.compile(
+        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    _re_rg = re.compile(r"^[A-Za-z0-9._\-()]{1,90}$")
+    _re_sa = re.compile(r"^[a-z0-9]{3,24}$")
+    if not _re_db.match(db_name):
+        raise HTTPException(400, "invalid db_name")
+    if not _re_sub.match(sub):
+        raise HTTPException(400, "invalid subscription_id")
+    if not _re_rg.match(storage_rg):
+        raise HTTPException(400, "invalid resource_group")
+    if not _re_sa.match(account_name):
+        raise HTTPException(400, "invalid account_name")
+
+    cred = get_credential()
+    # Local-debug auto-open mirrors /api/storage/prepare-db so this call
+    # also works from a developer laptop. No-op inside the Container App.
+    access = ensure_local_storage_access(cred, sub, storage_rg, account_name)
+    if access.get("action") == "failed":
+        LOGGER.warning(
+            "blast_database_shard: local-debug auto-open failed for %s: %s",
+            account_name,
+            access.get("error"),
+        )
+
+    # Per-(account, db) lock — prevents the user double-clicking a chip
+    # from spawning two daemons that race the metadata write. Lock is
+    # acquired non-blocking; if it's already held we return 409 so the
+    # SPA shows "already running" instead of starting a second writer.
+    lock_key = f"{account_name.lower()}|{db_name}"
+    with _SHARD_LOCK_REGISTRY_GUARD:
+        lock = _SHARD_LOCK_REGISTRY.setdefault(lock_key, threading.Lock())
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "sharding already in progress for this DB")
+
+    # Read the current metadata so we can preserve unrelated fields
+    # (source_version, downloaded_at, …) and detect a stale in-progress
+    # marker from a crashed previous daemon.
+    svc = _blob_service(cred, account_name)
+    cc = svc.get_container_client(DEFAULT_CONTAINER)
+    bc = cc.get_blob_client(f"{db_name}-metadata.json")
+    existing: dict[str, Any] = {}
+    try:
+        existing = json.loads(bc.download_blob().readall().decode("utf-8"))
+    except ResourceNotFoundError:
+        existing = {"db_name": db_name}
+    except Exception:
+        existing = {"db_name": db_name}
+
+    # Stale-flag recovery — if the previous daemon crashed the metadata
+    # could be left with sharding_in_progress=true forever. Treat
+    # markers older than _SHARD_STALE_SECONDS as crashed.
+    if existing.get("sharding_in_progress"):
+        started = existing.get("sharding_started_at") or ""
+        try:
+            started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+            age = (datetime.now(UTC) - started_dt).total_seconds()
+        except Exception:
+            age = float("inf")  # parse failure → treat as stale
+        if age < _SHARD_STALE_SECONDS:
+            lock.release()
+            raise HTTPException(409, "sharding already in progress for this DB")
+        LOGGER.info(
+            "blast_database_shard: clearing stale in-progress flag for %s (age=%.0fs)",
+            db_name, age,
+        )
+
+    started_at = datetime.now(UTC).isoformat()
+    existing["db_name"] = db_name
+    existing["sharding_in_progress"] = True
+    existing["sharding_started_at"] = started_at
+    # Clear any prior error so the SPA doesn't keep showing a stale
+    # failure once a fresh attempt is launched.
+    existing.pop("sharding_error", None)
+    try:
+        bc.upload_blob(json.dumps(existing).encode("utf-8"), overwrite=True)
+    except Exception as exc:
+        lock.release()
+        LOGGER.warning(
+            "blast_database_shard: pre-state write failed db=%s: %s",
+            db_name, type(exc).__name__,
+        )
+        raise HTTPException(
+            502, f"metadata pre-write failed: {type(exc).__name__}"
+        ) from exc
+
+    LOGGER.info(
+        "blast_database_shard accepted oid=%s db=%s account=%s",
+        caller.object_id, db_name, account_name,
+    )
+
+    def _do_shard() -> None:
+        """Background worker — owns the lock for the lifetime of the call."""
+        from api.services import get_credential as _get_cred
+        try:
+            local_cred = _get_cred()
+            summary = ensure_shard_sets(local_cred, account_name, db_name)
+        except Exception as exc:
+            LOGGER.warning(
+                "blast_database_shard daemon failed db=%s: %s",
+                db_name, type(exc).__name__,
+            )
+            err_msg = sanitise(f"{type(exc).__name__}: {exc}")[:300]
+            try:
+                local_cred = _get_cred()
+                svc2 = _blob_service(local_cred, account_name)
+                bc2 = svc2.get_container_client(DEFAULT_CONTAINER).get_blob_client(
+                    f"{db_name}-metadata.json"
+                )
+                final: dict[str, Any] = {}
+                try:
+                    final = json.loads(bc2.download_blob().readall().decode("utf-8"))
+                except Exception:
+                    final = {"db_name": db_name}
+                final["sharding_in_progress"] = False
+                final["sharding_error"] = err_msg
+                bc2.upload_blob(json.dumps(final).encode("utf-8"), overwrite=True)
+            except Exception as inner:
+                LOGGER.warning(
+                    "blast_database_shard error-state write failed db=%s: %s",
+                    db_name, type(inner).__name__,
+                )
+            finally:
+                lock.release()
+            return
+
+        # Success — merge the summary into metadata.
+        try:
+            local_cred = _get_cred()
+            svc2 = _blob_service(local_cred, account_name)
+            bc2 = svc2.get_container_client(DEFAULT_CONTAINER).get_blob_client(
+                f"{db_name}-metadata.json"
+            )
+            final: dict[str, Any] = {}
+            try:
+                final = json.loads(bc2.download_blob().readall().decode("utf-8"))
+            except Exception:
+                final = {"db_name": db_name}
+            final["sharding_in_progress"] = False
+            final.pop("sharding_error", None)
+            final["sharded"] = bool(summary.get("shard_sets"))
+            final["shard_sets"] = summary.get("shard_sets", [])
+            final["sharded_at"] = datetime.now(UTC).isoformat()
+            if summary.get("total_bytes"):
+                final.setdefault("total_bytes", summary["total_bytes"])
+            for key in ("total_letters", "total_sequences", "bytes_to_cache", "bytes_total"):
+                if summary.get(key):
+                    final.setdefault(key, summary[key])
+            bc2.upload_blob(json.dumps(final).encode("utf-8"), overwrite=True)
+            LOGGER.info(
+                "blast_database_shard daemon ok db=%s shard_sets=%s",
+                db_name, summary.get("shard_sets"),
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "blast_database_shard final-state write failed db=%s: %s",
+                db_name, type(exc).__name__,
+            )
+        finally:
+            lock.release()
+
+    threading.Thread(
+        target=_do_shard, daemon=True, name=f"shard-{db_name}",
+    ).start()
+
+    return {
+        "accepted": True,
+        "db_name": db_name,
+        "sharding_started_at": started_at,
+        "output": (
+            "Sharding started in background. Poll /api/blast/databases for "
+            "progress (look at sharding_in_progress / sharded / shard_sets)."
+        ),
+    }
 
 
 @blast_router.get("/databases/check-updates")
@@ -769,34 +1505,73 @@ def blast_job_file(
 ) -> dict[str, Any]:
     """Read a result file from storage (streamed through the api sidecar)."""
     try:
-        from api.services.storage_data import read_blob_text
         from api.services import get_credential
+        from api.services.storage_data import read_blob_text
+
         cred = get_credential()
         blob_path = f"{job_id}/{name}" if not name.startswith(job_id) else name
-        content = read_blob_text(cred, storage_account, container="results", blob_path=blob_path, max_bytes=max_bytes)
+        content = read_blob_text(
+            cred,
+            storage_account,
+            container="results",
+            blob_path=blob_path,
+            max_bytes=max_bytes,
+        )
         return {"job_id": job_id, "name": name, "content": content, "truncated": len(content) >= max_bytes}
     except Exception as exc:
-        LOGGER.warning("blast_job_file failed: %s", exc)
-        raise HTTPException(404, detail={"code": "file_not_found", "message": f"Could not read file '{name}': {type(exc).__name__}"})
+        LOGGER.warning("blast_job_file failed: %s", type(exc).__name__)
+        from api.services import get_credential as _get_cred
+        from api.services.storage_data import classify_storage_failure
+
+        info = classify_storage_failure(
+            _get_cred(), subscription_id, "", storage_account, exc
+        )
+        raise HTTPException(
+            404 if info["degraded_reason"] == "not_found" else 503,
+            detail={"code": info["degraded_reason"], "message": info["message"]},
+        ) from exc
 
 
 @blast_router.get("/jobs/{job_id}/results")
 def blast_job_results(
     job_id: str = Path(...),
     subscription_id: str = Query(default=""),
-    storage_account: str = Query(...),
+    storage_account: str = Query(default=""),
+    resource_group: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """List result blobs for a BLAST job from storage."""
+    _ensure_job_read_allowed(job_id, caller)
+    local_failure: dict[str, Any] | None = None
     try:
-        from api.services.storage_data import list_result_blobs
-        from api.services import get_credential
-        cred = get_credential()
-        results = list_result_blobs(cred, storage_account, container="results", prefix=job_id)
-        return {"results": results}
+        if storage_account:
+            from api.services import get_credential
+            from api.services.storage_data import list_result_blobs
+
+            cred = get_credential()
+            files = list_result_blobs(cred, storage_account, container="results", prefix=job_id)
+            return {"job_id": job_id, "files": files, "results": files}
     except Exception as exc:
-        LOGGER.warning("blast_job_results failed: %s", exc)
-        return {"results": [], "error": str(exc)[:200]}
+        LOGGER.warning("blast_job_results failed: %s", type(exc).__name__)
+        from api.services import get_credential as _get_cred
+        from api.services.storage_data import classify_storage_failure
+
+        local_failure = classify_storage_failure(
+            _get_cred(), subscription_id, resource_group, storage_account, exc
+        )
+
+    try:
+        from api.services import external_blast
+
+        files = _external_result_files(external_blast.get_job(job_id))
+        if files:
+            return {"job_id": job_id, "files": files, "results": files, "source": "external"}
+    except Exception as exc:
+        LOGGER.info("external blast result list unavailable: %s", type(exc).__name__)
+
+    if local_failure:
+        return {"job_id": job_id, "files": [], "results": [], **local_failure}
+    return {"job_id": job_id, "files": [], "results": []}
 
 
 @blast_router.get("/jobs/{job_id}/results/aggregate")
@@ -853,10 +1628,114 @@ def blast_job_results_export(
     raise HTTPException(503, detail={"code": "streaming_proxy_pending"})
 
 
+@blast_router.get("/jobs/{job_id}/results/{file_id}")
+def blast_job_result_file(
+    job_id: str = Path(...),
+    file_id: str = Path(..., min_length=1, max_length=512, pattern=r"^[A-Za-z0-9._-]+$"),
+    subscription_id: str = Query(default=""),
+    storage_account: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    caller: CallerIdentity = Depends(require_caller),
+) -> StreamingResponse:
+    """Stream one result file by file_id through the api sidecar.
+
+    Local result file ids are deterministic URL-safe encodings of blob names.
+    External OpenAPI jobs keep their sibling-generated ids such as
+    `result-001`. The browser never receives a SAS URL in either path.
+    """
+    _ensure_job_read_allowed(job_id, caller)
+    try:
+        from api.services.storage_data import (
+            decode_blob_file_id,
+            result_media_type,
+            safe_download_filename,
+            stream_blob_bytes,
+        )
+
+        blob_path = decode_blob_file_id(file_id)
+        if blob_path is not None:
+            if blob_path != job_id and not blob_path.startswith(f"{job_id}/"):
+                raise HTTPException(
+                    400,
+                    detail={
+                        "code": "invalid_file_id",
+                        "message": "file_id does not belong to this job",
+                    },
+                )
+            if not storage_account:
+                raise HTTPException(
+                    400,
+                    detail={
+                        "code": "missing_storage_account",
+                        "message": "storage_account is required for local result file downloads.",
+                    },
+                )
+            from api.services import get_credential
+
+            filename = safe_download_filename(blob_path)
+            return StreamingResponse(
+                stream_blob_bytes(get_credential(), storage_account, "results", blob_path),
+                media_type=result_media_type(filename),
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(400, detail={"code": "invalid_file_id", "message": str(exc)}) from exc
+    except Exception as exc:
+        LOGGER.warning("local result stream failed: %s", type(exc).__name__)
+
+    try:
+        from api.services import external_blast
+
+        downloaded = external_blast.stream_file(job_id, file_id)
+        return StreamingResponse(
+            downloaded.chunks,
+            media_type=downloaded.media_type,
+            headers={"Content-Disposition": f'attachment; filename="{downloaded.filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning(
+            "external result stream failed job_id=%s file_id=%s: %s",
+            job_id,
+            file_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            503,
+            detail={
+                "code": "result_stream_unavailable",
+                "message": (
+                    "Result file could not be streamed from local storage or "
+                    "external OpenAPI."
+                ),
+            },
+        ) from exc
+
+
 # ===========================================================================
 # /api/warmup/* — Celery task placeholder
 # ===========================================================================
 warmup_router = APIRouter(prefix="/api/warmup", tags=["warmup"])
+
+
+def _resolve_warmup_db_name(body: dict[str, Any]) -> str:
+    """Pick the database name out of either the new SPA shape (`db` /
+    `db_display_name`) or the legacy `database_name` shape. Returns the
+    bare DB name (e.g. ``16S_ribosomal_RNA``) — strips any
+    ``blast-db/`` container prefix the SPA sends with `db`.
+    """
+    raw = (
+        body.get("database_name")
+        or body.get("db_display_name")
+        or body.get("db")
+        or ""
+    )
+    if isinstance(raw, str) and "/" in raw:
+        raw = raw.rsplit("/", 1)[-1]
+    return str(raw or "").strip()
 
 
 @warmup_router.post("/start")
@@ -866,6 +1745,7 @@ def warmup_start(
 ) -> dict[str, Any]:
     from api.tasks.storage import warmup_database
     job_id = str(uuid.uuid4())
+    database_name = _resolve_warmup_db_name(body)
     # Create job state
     try:
         from api.services.state_repo import JobState, JobStateRepository
@@ -887,12 +1767,17 @@ def warmup_start(
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
         storage_account=body.get("storage_account", ""),
-        database_name=body.get("database_name", ""),
+        database_name=database_name,
         caller_oid=caller.object_id,
     )
+    # The SPA's WarmupSection polls `/warmup/{instance_id}/status`, where
+    # `instance_id` is the Celery task id. We expose all three aliases so
+    # both the new SPA and any legacy callers keep working.
     return {
         "id": job_id,
+        "instance_id": result.id,
         "task_id": result.id,
+        "db": database_name,
         "statusQueryGetUri": f"/api/tasks/{result.id}",
         "status": "queued",
     }
@@ -903,13 +1788,66 @@ def warmup_status(
     instance_id: str = Path(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("warmup/status", id=instance_id)
+    """Return warmup task status mapped to the SPA's orchestrator-style shape.
+
+    The SPA's `WarmupSection` was originally written against a Durable
+    Functions orchestrator (``runtime_status`` ∈ {Pending, Running,
+    Completed, Failed, Terminated}) and a ``custom_status``/``output``
+    payload. We translate the Celery ``AsyncResult`` to that shape so
+    the SPA can be migrated incrementally.
+    """
+    from celery.result import AsyncResult
+    from api.celery_app import celery_app
+
+    result = AsyncResult(instance_id, app=celery_app)
+    status = (result.status or "PENDING").upper()
+    runtime_status = {
+        "PENDING": "Pending",
+        "RECEIVED": "Pending",
+        "STARTED": "Running",
+        "RETRY": "Running",
+        "PROGRESS": "Running",
+        "SUCCESS": "Completed",
+        "FAILURE": "Failed",
+        "REVOKED": "Terminated",
+    }.get(status, "Running")
+
+    custom_status: dict[str, Any] = {"phase": status.lower()}
+    output: dict[str, Any] | None = None
+
+    if not result.ready():
+        info = result.info if isinstance(result.info, dict) else None
+        if info:
+            custom_status.update({k: v for k, v in info.items() if k != "exc_type"})
+    elif result.successful():
+        payload = result.result if isinstance(result.result, dict) else {}
+        db_name = str(payload.get("database") or payload.get("db") or "")
+        succeeded = (
+            str(payload.get("status", "")).lower() == "completed"
+            or runtime_status == "Completed"
+        )
+        custom_status.update({"phase": "completed", "db": db_name})
+        output = {
+            "status": "succeeded" if succeeded else "failed",
+            "db": db_name,
+        }
+        if not succeeded and payload.get("error"):
+            output["error"] = str(payload.get("error"))[:500]
+    else:
+        # FAILURE / REVOKED
+        err = ""
+        try:
+            err = str(result.result or result.info or "")[:500]
+        except Exception:
+            err = "task failed"
+        custom_status.update({"phase": "failed"})
+        output = {"status": "failed", "db": "", "error": err}
+
     return {
         "instance_id": instance_id,
-        "runtime_status": "Pending",
-        "custom_status": {"phase": "stub"},
-        "degraded": True,
-        "degraded_reason": "celery_task_not_yet_implemented",
+        "runtime_status": runtime_status,
+        "custom_status": custom_status,
+        "output": output,
     }
 
 

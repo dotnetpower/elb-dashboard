@@ -25,32 +25,39 @@ under-provisioned 8-vCPU/32-GiB node when they didn't override the SKU.
   higher network bandwidth. Existing AKS clusters keep whatever SKU they
   were created with — only newly-submitted jobs / newly-created clusters
   see the change.
-- The `/api/aks/skus` dropdown now lists **22** SKUs grouped into 5
-  series (`D-v3`, `E-v3`, `E-v5`, `E-v5-bs`, `L-v3`), all guaranteed to
-  work with elastic-blast. Five SKUs that used to appear (`D2s_v5`,
-  `D4s_v5`, `D8s_v5`, `E4s_v5`, `E8s_v5`) are gone — they would have
-  failed at submit time.
+- The `/api/aks/skus` dropdown now lists **31** SKUs from the sibling
+  `AZURE_HPC_MACHINES` allow-list. Newly surfaced options include the
+  sibling-supported H-series HPC nodes, `Standard_E64is_v3`, larger
+  Intel L-series nodes (`L48/L80`), and AMD L-series nodes (`L*as_v3`).
+  `Standard_E16s_v3`, `Standard_E32s_v3`, and `Standard_E48s_v3` were
+  removed because they are not in the sibling allow-list.
+- The price table now mirrors sibling `AZURE_VM_HOURLY_PRICES` for every
+  allowed SKU; `Standard_E48bs_v5` was corrected from `3.648` to `3.576`.
 - The Cost Estimator dropdown and the Quick-test example were updated
   accordingly (`Standard_D4s_v5` → `Standard_D8s_v3`, etc.).
 
 ## Implementation
 
-### New module — single source of truth
+### SKU catalog - single source of truth
 
-- [api/services/aks_skus.py](../../api/services/aks_skus.py) (`ALLOWED_SKUS`,
-  `AZURE_VM_HOURLY_USD`, `DEFAULT_SKU = "Standard_E32s_v5"`). Mirrors
-  `src/elastic_blast/azure_traits.py::AZURE_HPC_MACHINES` and
-  `constants.py::ELB_DFLT_AZURE_MACHINE_TYPE` in the sibling repo, exactly
-  the same way [api/services/image_tags.py](../../api/services/image_tags.py)
-  mirrors the pinned image tags. A module-level `assert` block self-checks
-  that `DEFAULT_SKU` is present in both dicts, so a botched future bump
-  fails import instead of failing in production.
+- [api/services/aks_skus.py](../../api/services/aks_skus.py) now defines one
+  `SKU_CATALOG` of `SkuCatalogEntry` rows. `ALLOWED_SKUS`,
+  `AZURE_VM_HOURLY_USD`, `list_skus()`, and the `/api/aks/skus` payload are
+  derived from that catalog, so the allow-list and pricing table cannot drift
+  independently. The catalog still mirrors
+  `src/elastic_blast/azure_traits.py::AZURE_HPC_MACHINES`,
+  `AZURE_VM_HOURLY_PRICES`, and
+  `constants.py::ELB_DFLT_AZURE_MACHINE_TYPE` in the sibling repo.
+- `SkuSpec` now includes `hourlyUsd`; the frontend no longer needs its own
+  small duplicate pricing table for cluster cost hints.
 
 ### Backend
 
 - [api/routes/stubs.py](../../api/routes/stubs.py): `GET /api/aks/skus` now
-  reads from `aks_skus.list_skus()` and returns `default_sku` alongside
-  the list. Still flagged `degraded: true` until the Celery task lands —
+  delegates response construction to `aks_skus.sku_list_response()` and
+  returns both `default` and `default_sku` alongside the list, so old and new
+  typed clients agree on the default field. Still flagged `degraded: true`
+  until the Celery task lands —
   that task will intersect this allow-list with a live
   `Microsoft.Compute/skus` query for region availability + quota.
 - [api/services/blast_config.py](../../api/services/blast_config.py):
@@ -63,53 +70,71 @@ under-provisioned 8-vCPU/32-GiB node when they didn't override the SKU.
 ### Frontend
 
 - [web/src/components/cards/ClusterCard.tsx](../../web/src/components/cards/ClusterCard.tsx):
-  removed the bogus `Standard_E20s_v5` entry from `SKU_INFO`; updated the
-  per-node hourly costs to match the sibling pricing table
-  (`AZURE_VM_HOURLY_PRICES` in `azure_traits.py`); added a comment
-  pinning the file to the backend allow-list.
+  removed the local `SKU_INFO` pricing table and now uses the shared SKU hook
+  for dropdown options, labels, descriptions, and per-node hourly cost hints.
 - [web/src/pages/tools/ToolTabs.tsx](../../web/src/pages/tools/ToolTabs.tsx):
-  hard-coded Cost-Estimator dropdown rebuilt from the allow-list; default
-  state SKU `Standard_E16s_v5` → `Standard_E32s_v5`.
+  Cost-Estimator dropdown now uses the same shared SKU hook instead of
+  duplicating a stale hard-coded subset; default state remains
+  `Standard_E32s_v5`.
+- [web/src/hooks/useAksSkus.ts](../../web/src/hooks/useAksSkus.ts): new
+  shared hook for SKU fetching, fallback data, option labels, and short SKU
+  descriptions.
+- [web/src/api/endpoints.ts](../../web/src/api/endpoints.ts): typed
+  `/api/aks/skus` response now includes `default_sku`, `degraded`,
+  `degraded_reason`, and catalog-derived `hourlyUsd`.
 - [web/src/pages/BlastSubmit.tsx](../../web/src/pages/BlastSubmit.tsx):
   fallback `machine_type` for a cluster with no `node_sku` flipped from
   `Standard_E16s_v5` to `Standard_E32s_v5`.
 - [web/src/data/labToolExamples.ts](../../web/src/data/labToolExamples.ts):
   Quick-test example SKU `Standard_D4s_v5` → `Standard_D8s_v3` (smallest
   allow-listed general-purpose SKU; `MIN_PROCESSORS = 8` in
-  `azure_traits.py` would reject anything smaller anyway).
+  `azure_traits.py` would reject anything smaller anyway). The production
+  example now uses the default `Standard_E32s_v5` instead of `E16s_v5`.
+- Removed unused `web/src/pages/remoteTerminalModel.ts`, a retired Remote
+  Terminal VM helper that still carried unsupported VM-size choices. The
+  browser terminal is a sidecar now, so this model should not remain in the
+  active frontend tree.
 
-### Sibling repo (`~/dev/elastic-blast-azure`, commit `aebffce7`, **not pushed**)
+### Sibling repo reference (read-only for this dashboard change)
 
-- `src/elastic_blast/constants.py`: `ELB_DFLT_AZURE_MACHINE_TYPE` flipped
-  to `Standard_E32s_v5`.
-- `src/elastic_blast/azure.py`: the `apply_optimization_profile()`
-  comparison `machine_type != 'Standard_E32s_v3'` now reads
-  `ELB_DFLT_AZURE_MACHINE_TYPE` from `constants.py`, so the default and
-  the comparison can never drift again.
-- `docs/azure-prereq.md`, `docs/azure-pipeline-reference.md`,
-  `docs/azure-data-pipeline-analysis.md`: updated examples / tables to
-  v5; v3 row in the benchmark table relabelled "baseline (v3)" so the
-  measured numbers stay valid.
-- `.gitignore`: ignore `.venv/` and `venv/`.
+- `~/dev/elastic-blast-azure/src/elastic_blast/constants.py` still sets
+  `ELB_DFLT_AZURE_MACHINE_TYPE = 'Standard_E32s_v5'`.
+- `~/dev/elastic-blast-azure/src/elastic_blast/azure_traits.py` currently
+  exposes 31 entries in `AZURE_HPC_MACHINES` and matching prices in
+  `AZURE_VM_HOURLY_PRICES`; this dashboard mirror now matches both sets.
 
 ## Validation evidence
 
-- `uv run pytest -q api/tests` → **45 passed** (was 37 — eight new tests
-  in [api/tests/test_aks_skus.py](../../api/tests/test_aks_skus.py)
-  guard the allow-list, the default constant, and the rejection of the
-  five SKUs we just removed).
+- `uv run pytest -q api/tests/test_aks_skus.py` → **12 passed**. The test
+  file now guards the exact sibling SKU set, default constant, full pricing
+  coverage, representative sibling price values, and the `/api/aks/skus`
+  `default` / `default_sku` / `hourlyUsd` response contract.
+- Direct AST comparison against the sibling source files:
+
+  ```
+  sibling_skus=31 current_skus=31
+  missing=[]
+  extra=[]
+  price_mismatch=[]
+  ```
+
+- `uv run pytest -q api/tests` → **71 passed**.
 - Smoke-test of the live route via FastAPI `TestClient`:
 
   ```
-  GET /api/aks/skus  → 200
-  default_sku: Standard_E32s_v5
-  sku count: 22
-  first 3: ['Standard_E16s_v3', 'Standard_E32s_v3', 'Standard_E48s_v3']
-  series set: ['D-v3', 'E-v3', 'E-v5', 'E-v5-bs', 'L-v3']
+  status=200
+  default_sku=Standard_E32s_v5
+  sku_count=31
+  has_hpc=True
+  has_l_as=True
   ```
 
 - `cd web && npm run build` → clean (one informational chunk-size
   warning, unchanged from before).
+- `cd web && npx eslint src/api/endpoints.ts src/hooks/useAksSkus.ts src/components/cards/ClusterCard.tsx src/pages/tools/ToolTabs.tsx src/data/labToolExamples.ts --max-warnings 0`
+  → clean.
+- Active-code stale SKU search now only finds unsupported SKUs inside the
+  negative regression test in [api/tests/test_aks_skus.py](../../api/tests/test_aks_skus.py).
 - Sibling import sanity-check:
 
   ```
@@ -122,8 +147,3 @@ under-provisioned 8-vCPU/32-GiB node when they didn't override the SKU.
 1. Replace the `degraded: true` stub for `/api/aks/skus` with a Celery
    task that intersects `ALLOWED_SKUS` with a live
    `Microsoft.Compute/skus` query (per-region availability, quota).
-2. Push the sibling commit `aebffce7` to `origin/master` — held back
-   pending user OK because pushing affects shared state.
-3. Convert the Cost-Estimator dropdown to fetch from `aksApi.listSkus()`
-   so there is a single allow-list visible in the SPA. The current
-   alignment is correct but still duplicated in TypeScript.

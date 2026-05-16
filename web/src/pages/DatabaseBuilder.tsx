@@ -166,10 +166,10 @@ export function DatabaseBuilder() {
   };
 
   return (
-    <div className="page-stack">
+    <div className="page-stack mono-page custom-db-page">
       {/* ── Premium header ── */}
       <header
-        className="page-header"
+        className="page-header mono-header"
         style={{
           display: "flex",
           alignItems: "flex-start",
@@ -185,7 +185,7 @@ export function DatabaseBuilder() {
             style={{ display: "flex", alignItems: "center", gap: 10 }}
           >
             <Database size={22} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
-            Custom Database Builder
+            ElasticBLAST Custom DB
           </div>
           <div className="page-header__desc">
             Upload FASTA sequences, run <code className="code-val">makeblastdb</code> in

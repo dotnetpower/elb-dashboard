@@ -1,14 +1,28 @@
-"""Liveness + readiness endpoints. No auth required — used by Container Apps health probes."""
+"""Liveness + readiness endpoints. No auth required — used by Container Apps health probes.
+
+The diagnostic ``/health/azure-discovery`` endpoint is the one exception:
+it touches ARM and references subscription identifiers, so it is gated
+behind the standard MSAL bearer dependency (``require_caller``).
+"""
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from api import __version__
+from api.auth import require_caller
+
+if TYPE_CHECKING:
+    from api.auth import CallerIdentity
+
+
+# Re-export with a private alias so the dependency is unambiguous in the
+# diagnostic route signature (the public name is still ``require_caller``).
+_require_caller_lazy = require_caller
 
 LOGGER = logging.getLogger(__name__)
 
@@ -167,4 +181,138 @@ def celery_task_result(task_id: str) -> dict[str, Any]:
             out["result"] = r.result
         else:
             out["error"] = str(r.result)[:500]
+    return out
+
+
+@router.get("/health/azure-discovery")
+def azure_discovery_probe(
+    caller: "CallerIdentity" = Depends(_require_caller_lazy),
+) -> dict[str, Any]:
+    """Diagnostic-only: prove the api can list subscriptions / RGs end-to-end.
+
+    Why this exists: the SPA's discovery wizard fails silently when the
+    api sidecar's credential cannot reach ARM (no MI attached, MI lacks
+    Reader at subscription scope, IMDS not responding, ...). The user-
+    visible symptom is an empty list with no error. This endpoint forces
+    each step of the chain and reports which one fails so the operator
+    has a single curl-able answer.
+
+    Auth-gated (MSAL bearer required — unlike the other /health/* probes)
+    because the response references subscription ids and would otherwise
+    leak tenant topology to anyone who can reach the ingress. All sub
+    ids and display names that appear in the response go through
+    `sanitise()` so even an authenticated caller never sees raw GUIDs.
+
+    Makes two real ARM calls (subscriptions.list with a hard cap of 5,
+    then resource_groups.list on the first sub) so do not poll this
+    from a dashboard — use it as a one-shot post-deploy sanity check.
+    """
+    from azure.mgmt.resource import SubscriptionClient
+    from api.services import get_credential
+    from api.services.azure_clients import resource_client
+    from api.services.sanitise import sanitise
+
+    _ = caller  # accepted for auth-gate side effect; not echoed back
+
+    out: dict[str, Any] = {
+        "credential": {"status": "unknown"},
+        "subscriptions_list": {"status": "unknown"},
+        "resource_groups_list": {"status": "unknown"},
+        "hint": None,
+    }
+
+    # 1. Credential acquisition (does NOT call IMDS yet — just constructs).
+    try:
+        cred = get_credential()
+        out["credential"] = {"status": "ok", "type": type(cred).__name__}
+    except Exception as exc:
+        out["credential"] = {
+            "status": "error",
+            "error_type": type(exc).__name__,
+            "error_message": sanitise(str(exc))[:300],
+        }
+        out["hint"] = (
+            "DefaultAzureCredential could not be constructed. Check that the "
+            "azure-identity package is installed in the api image."
+        )
+        return out
+
+    # 2. Subscriptions list (forces a real ARM token via IMDS / MI).
+    sub_id: str | None = None
+    try:
+        client = SubscriptionClient(cred)
+        # Hard cap so a misconfigured tenant with thousands of subs does
+        # not turn this probe into an outage.
+        samples: list[dict[str, str]] = []
+        first_sub_id: str | None = None
+        for i, s in enumerate(client.subscriptions.list()):
+            if i >= 5:
+                break
+            if first_sub_id is None:
+                first_sub_id = s.subscription_id
+            # Always sanitise: response is auth-gated but we still mask GUIDs
+            # so the diagnostic blob can be safely pasted into a bug report
+            # or a public log channel. Display names are dropped entirely
+            # (they often encode tenant/org names or billing context).
+            samples.append({"id": sanitise(s.subscription_id or "")})
+        out["subscriptions_list"] = {
+            "status": "ok",
+            "count_capped_at_5": len(samples),
+            "samples": samples,
+        }
+        sub_id = first_sub_id  # raw (used for the next ARM call only, never echoed)
+    except Exception as exc:
+        out["subscriptions_list"] = {
+            "status": "error",
+            "error_type": type(exc).__name__,
+            "error_message": sanitise(str(exc))[:300],
+        }
+        out["hint"] = (
+            "subscriptions.list() failed. Most likely the user-assigned MI is "
+            "not attached to this Container App, or the AZURE_CLIENT_ID env "
+            "does not match the MI's clientId. Verify with `az containerapp "
+            "show --name ca-elb-control --query identity` and "
+            "`az containerapp show ... --query 'properties.template.containers[0].env'`."
+        )
+        return out
+
+    if not sub_id:
+        out["resource_groups_list"] = {"status": "skipped", "reason": "no subscriptions visible"}
+        out["hint"] = (
+            "Credential works but the MI sees zero subscriptions. Confirm "
+            "subscription-scope Reader was granted (infra/modules/"
+            "subscriptionRoles.bicep, or `az role assignment create --role "
+            "Reader --scope /subscriptions/<id> --assignee-object-id <miOid>`)."
+        )
+        return out
+
+    # 3. Resource group list — proves Reader/Contributor at sub scope.
+    try:
+        rc = resource_client(cred, sub_id)
+        rg_count = sum(1 for _ in rc.resource_groups.list())
+        out["resource_groups_list"] = {
+            "status": "ok",
+            "subscription_id": sanitise(sub_id),
+            "count": rg_count,
+        }
+        if rg_count == 0:
+            out["hint"] = (
+                "subscriptions.list() works but resource_groups.list() returned 0. "
+                "Either the subscription truly is empty, or the MI has only a "
+                "resource-scope role (Storage/ACR/KV) which is enough to surface "
+                "the subscription but not to enumerate RGs. Grant Reader at "
+                "subscription scope."
+            )
+    except Exception as exc:
+        out["resource_groups_list"] = {
+            "status": "error",
+            "subscription_id": sanitise(sub_id),
+            "error_type": type(exc).__name__,
+            "error_message": sanitise(str(exc))[:300],
+        }
+        out["hint"] = (
+            "resource_groups.list() failed. Check that the MI has Reader (or "
+            "higher) at subscription scope — see docs/auth.md §Step 2."
+        )
+
     return out

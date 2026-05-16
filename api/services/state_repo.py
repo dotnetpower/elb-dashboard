@@ -32,6 +32,7 @@ class JobState:
     phase: str | None = None
     owner_oid: str | None = None
     tenant_id: str | None = None
+    parent_job_id: str | None = None
     task_id: str | None = None
     error_code: str | None = None
     created_at: str | None = None
@@ -47,6 +48,7 @@ class JobState:
             "phase": self.phase or "",
             "owner_oid": self.owner_oid or "",
             "tenant_id": self.tenant_id or "",
+            "parent_job_id": self.parent_job_id or "",
             "task_id": self.task_id or "",
             "error_code": self.error_code or "",
             "created_at": self.created_at or "",
@@ -75,6 +77,7 @@ class JobState:
             phase=e.get("phase") or None,
             owner_oid=e.get("owner_oid") or None,
             tenant_id=e.get("tenant_id") or None,
+            parent_job_id=e.get("parent_job_id") or None,
             task_id=e.get("task_id") or None,
             error_code=e.get("error_code") or None,
             created_at=e.get("created_at") or None,
@@ -194,6 +197,20 @@ class JobStateRepository:
                 if len(rows) >= limit:
                     break
         rows.sort(key=lambda r: r.created_at or "", reverse=True)
+        return rows
+
+    def list_children(self, parent_job_id: str, limit: int = 100) -> list[JobState]:
+        safe_parent = _sanitise_odata_value(parent_job_id)
+        with self._state_client() as t:
+            entities = t.query_entities(
+                f"parent_job_id eq '{safe_parent}'", results_per_page=limit
+            )
+            rows = []
+            for e in entities:
+                rows.append(JobState.from_entity(dict(e)))
+                if len(rows) >= limit:
+                    break
+        rows.sort(key=lambda r: r.created_at or "")
         return rows
 
     # --- jobhistory ---

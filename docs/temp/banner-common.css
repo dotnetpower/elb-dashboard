@@ -1,0 +1,116 @@
+:root {
+  --bg: #05060a;
+  --panel: #0c0f17;
+  --panel-2: #11151f;
+  --border: rgba(255,255,255,0.08);
+  --muted: #6b7280;
+  --text: #d8def0;
+  --aqua: #4cdeff;
+  --blue: #7aa7ff;
+  --violet: #a878ff;
+  --pink: #ff5ccd;
+  --green: #6ad6a3;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  background: radial-gradient(1200px 600px at 20% 0%, #1c2541 0%, #0b132b 60%, #050816 100%);
+  color: var(--text);
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  min-height: 100vh;
+}
+.wrap { padding: 32px; max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.04em; margin: 0 0 4px; }
+.sub { color: var(--muted); font-size: 12px; margin: 0 0 18px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+}
+.cardhead {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.cardhead .title { font-size: 13px; font-weight: 700; letter-spacing: 0.06em; }
+.cardhead .meta  { font-size: 11px; color: var(--muted); }
+.term {
+  background: #04050a;
+  padding: 28px 32px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.term .meta-line { color: #9aa3b8; margin-bottom: 10px; font-size: 12px; }
+.term .meta-line code { color: var(--aqua); }
+.term .prompt { color: var(--muted); margin-top: 18px; font-size: 13px; }
+.cursor { background:#fff;color:#04050a;width:8px;display:inline-block; }
+
+.row .key   { color: #fff; font-weight: 700; }
+.row .ok    { color: var(--green); font-weight: 700; }
+.row .arrow { color: var(--muted); }
+.row .hint  { color: var(--muted); margin-left: 8px; }
+
+/* Variant A */
+.a-block { display: grid; grid-template-columns: auto 1fr; gap: 28px; align-items: center; }
+.a-block .chev {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 36px;
+  line-height: 1.0;
+  letter-spacing: -0.02em;
+  background: linear-gradient(180deg, var(--aqua) 0%, var(--blue) 35%, var(--violet) 65%, var(--pink) 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  text-shadow: 0 0 18px rgba(120, 200, 255, 0.18);
+  white-space: pre;
+  margin: 0;
+}
+.a-block .info { display: grid; gap: 4px; }
+.a-block .wordmark {
+  font-style: italic; font-weight: 700; font-size: 24px;
+  background: linear-gradient(90deg, var(--aqua), var(--violet) 50%, var(--pink));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  letter-spacing: 0.02em;
+}
+.a-block .wordmark .ver { color: var(--muted); font-style: normal; font-weight: 400; margin-left: 8px; font-size: 14px; }
+.a-block .row { font-size: 13px; color: #c9d0e1; }
+
+/* Variant B */
+.b-pixel { display: flex; align-items: flex-end; gap: 32px; }
+.b-pixel svg.glyph { width: 160px; height: 150px; flex-shrink: 0; }
+.b-pixel .right { display: flex; flex-direction: column; gap: 6px; }
+.b-pixel .wordmark {
+  font-family: 'Press Start 2P', monospace;
+  font-size: 24px; letter-spacing: 0.02em;
+  background: linear-gradient(90deg, var(--aqua), var(--violet) 55%, var(--pink));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  text-shadow: 0 0 22px rgba(168,120,255,0.25);
+}
+.b-pixel .tagline { color: var(--muted); font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; margin-top: 4px; }
+.b-pixel .info { margin-top: 12px; display: grid; gap: 3px; font-size: 13px; color: #c9d0e1; }
+
+/* Variant C */
+.c-neon { display: grid; grid-template-columns: auto 1fr; gap: 36px; align-items: center; }
+.c-neon .chev { width: 140px; height: 140px; flex-shrink: 0; }
+.c-neon .right { display: flex; flex-direction: column; gap: 8px; }
+.c-neon .wordmark {
+  font-family: 'VT323', monospace;
+  font-size: 56px; line-height: 1; letter-spacing: 0.02em;
+  background: linear-gradient(90deg, var(--aqua), var(--violet) 60%, var(--pink));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  text-shadow: 0 0 18px rgba(76, 222, 255, 0.25);
+  margin: 0;
+}
+.c-neon .wordmark .ver {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 18px; margin-left: 12px;
+  background: none; -webkit-background-clip: initial;
+  color: var(--muted); text-shadow: none;
+}
+.c-neon .underline {
+  width: 240px; height: 6px; border-radius: 3px;
+  background: linear-gradient(90deg, var(--aqua), var(--pink));
+  box-shadow: 0 0 18px rgba(255, 92, 205, 0.35);
+}
+.c-neon .info { margin-top: 10px; display: grid; gap: 3px; font-size: 13px; color: #c9d0e1; }

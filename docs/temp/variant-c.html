@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Variant C · Neon outline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=VT323&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="banner-common.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>Variant C &middot; Neon outline <code>&gt;</code> + calligraphic wordmark</h1>
+  <p class="sub">SVG chevron with glow &middot; closest to the Gemini-style splash you sent. Renders as an HTML overlay above xterm.js.</p>
+  <article class="card">
+    <div class="cardhead"><span class="title">Variant C</span><span class="meta">SVG overlay above xterm.js</span></div>
+    <div class="term">
+      <div class="meta-line">Signed in: <code>dev-bypass@local</code> &middot; Shell: <code>azureuser</code> &middot; Session: <code>de78a52954c9</code></div>
+      <div class="c-neon">
+        <svg class="chev" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="strokeGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%"  stop-color="#4cdeff"/>
+              <stop offset="55%" stop-color="#a878ff"/>
+              <stop offset="100%" stop-color="#ff5ccd"/>
+            </linearGradient>
+            <filter id="neonGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="3" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <polyline
+            points="20,18 90,60 20,102"
+            fill="none"
+            stroke="url(#strokeGrad)"
+            stroke-width="14"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            filter="url(#neonGlow)"/>
+        </svg>
+        <div class="right">
+          <h2 class="wordmark">ElasticBlast CLI<span class="ver">v0.1</span></h2>
+          <div class="underline"></div>
+          <div class="info row">
+            <div><span class="key">Signed in with Azure</span> <span class="hint">/session</span></div>
+            <div><span class="key">Guard:</span> <span class="ok">protected shell</span> <span class="hint">/help</span></div>
+            <div><span class="key">Trace:</span> browser <span class="arrow">&gt;&gt;&gt;</span> api <span class="arrow">&gt;&gt;&gt;</span> ttyd <span class="arrow">&gt;&gt;&gt;</span> shell</div>
+          </div>
+        </div>
+      </div>
+      <div class="prompt">azureuser@terminal:~$ <span class="cursor">&nbsp;</span></div>
+    </div>
+  </article>
+</div>
+</body>
+</html>

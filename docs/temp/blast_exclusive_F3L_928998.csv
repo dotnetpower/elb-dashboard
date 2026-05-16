@@ -1,0 +1,330 @@
+accession,scientific_name,taxid,hit_def,identity_pct,coverage_pct,evalue,bits,align_length,identities,gaps,query_from,query_to,hit_from,hit_to,subject_length
+OM460002.1,Cowpox virus,10243,"Cowpox virus isolate No-H2, complete genome",96.96969696969697,100.0,0.0,750.86,462,448,0,1,462,63851,64312,220276
+LR812035.1,Cowpox virus,10243,"Cowpox virus isolate GerMygEK 938/17 genome assembly, complete genome: monopartite",95.88744588744589,100.0,0.0,723.16,462,443,0,1,462,63551,64012,220822
+LT896721.1,Cowpox virus,10243,"Cowpox virus isolate Ger 2010 MKY genome assembly, complete genome: monopartite",95.88744588744589,100.0,0.0,723.16,462,443,0,1,462,63694,64155,220958
+KY549148.1,Cowpox virus,10243,"Cowpox virus isolate CPXV_1639, complete genome",95.67099567099568,100.0,0.0,717.62,462,442,0,1,462,64677,65138,224936
+KY549144.1,Cowpox virus,10243,"Cowpox virus isolate CPXV_Catpox5wv1, complete genome",95.23809523809523,100.0,0.0,706.54,462,440,0,1,462,64836,65297,224952
+HQ420900.1,Cowpox virus,10243,"Cowpox virus strain UK2000_K2984, complete genome",95.23809523809523,100.0,0.0,706.54,462,440,0,1,462,63434,63895,221530
+OP125538.1,Cowpox virus,10243,"Cowpox virus isolate Swe-H1, complete genome",95.02164502164501,100.0,0.0,701.001,462,439,0,1,462,62896,63357,220981
+OP125537.1,Cowpox virus,10243,"Cowpox virus isolate Swe-H2, complete genome",95.02164502164501,100.0,0.0,701.001,462,439,0,1,462,62717,63178,220808
+KY549150.2,Cowpox virus,10243,"Cowpox virus isolate CPXV_K4207, complete genome",93.53448275862068,100.0,0.0,664.068,464,434,4,1,462,64380,64841,224139
+KJ125439.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain IHD-W clone IHDW1, complete genome",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,50958,51419,195821
+LT966077.1,Vaccinia virus WR,10254,"Vaccinia virus WR strain WR - ATCC VR-2035 genome assembly, complete genome: monopartite",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,47885,48346,194888
+JX489135.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Tiantan clone TT8, complete genome",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,46720,47181,189366
+DQ530240.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Passatempo double-stranded RNA-binding protein gene, partial cds",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,570,109,570
+KC207810.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain TianTan clone TP3, complete genome",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,44406,44867,184849
+KC207811.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain TianTan clone TP5, complete genome",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,50113,50574,196263
+DQ070236.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain IOC putative double-stranded RNA binding protein gene, complete cds",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,573,112,573
+NC_006998.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus, complete genome >gi|29692106|gb|AY243312.1| Vaccinia virus WR, complete genome",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,47780,48241,194711
+KT184691.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain IOC clone B388, complete genome",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,48378,48839,186980
+AY484669.1,Rabbitpox virus,32606,"Rabbitpox virus, complete genome",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,52512,52973,197731
+KC201194.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain IHD-W, partial sequence",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,51226,51687,180874
+M36339.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus polyA polymerase large subunit, ORF1 (E2L), ORF2 (E3), RNA polymerase subunit (rpo30) (E4L), ORF3 (E5R), ORF4 (E6R), ORF5, ORF6, DNA polymerase, ORF7, and ORF8 genes, complete cds",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,3958,4419,15212
+OP584857.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus isolate WR.TKplus, complete genome",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,47856,48317,194902
+M59813.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus RNA polymerase subunit gene, complete cds",93.31896551724138,100.0,0.0,656.681,464,433,4,1,462,1764,1303,1928
+LC909707.1,Cowpox virus,10243,"Cowpox virus BASRAHBUFA1 DNA, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,64465,64926,224499
+KT184690.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain IOC clone B141, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,48721,49182,192017
+NC_003663.2,Cowpox virus,10243,"Cowpox virus, complete genome >gi|30795158|gb|AF482758.2| Cowpox virus strain Brighton Red, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,64465,64926,224499
+MK336431.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate KVAC103, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,30861,31322,167125
+LC909709.1,Cowpox virus,10243,"Cowpox virus BASRAH2 DNA, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,64465,64926,224499
+AF095689.1,Vaccinia virus Tian Tan,10253,Vaccinia virus (strain Tian Tan) complete genome,93.10344827586206,100.0,0.0,651.141,464,432,3,1,462,47348,47810,189274
+LC909708.1,Cowpox virus,10243,"Cowpox virus BASRAHBUFA2 DNA, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,64465,64926,224499
+AJ312293.1,Cowpox virus,10243,"Cowpox virus gene for dsRNA binding protein, strain Brighton Red",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,573,112,573
+PX585982.1,Cowpox virus,10243,"Cowpox virus isolate Brighton_Red-19560227, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,63013,63474,221599
+JX489139.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Tiantan clone TT12, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,47255,47716,190581
+LC895885.1,Cowpox virus,10243,"Cowpox virus CPXV/Bos taurus/Basrah/BASRAH1/2024 DNA, complete genome",93.10344827586206,100.0,0.0,651.141,464,432,4,1,462,64465,64926,224499
+JX489136.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Tiantan clone TT9, complete genome",92.88793103448276,100.0,1.98168e-180,645.601,464,431,4,1,462,47139,47600,190412
+JX489138.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Tiantan clone TT11, complete genome",92.88793103448276,100.0,1.98168e-180,645.601,464,431,4,1,462,47077,47538,191144
+S64006.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus double-stranded RNA-binding protein (E3L) gene, complete cds",92.88793103448276,100.0,1.98168e-180,645.601,464,431,4,1,462,633,172,633
+JX489137.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Tiantan clone TT10, complete genome",92.88793103448276,100.0,1.98168e-180,645.601,464,431,4,1,462,47163,47624,190367
+OR837118.1,Vaccinia virus Lister,10252,"Vaccinia virus Lister isolate Lisbon_1951, complete genome",92.88793103448276,100.0,1.98168e-180,645.601,464,431,4,1,462,50885,51346,197703
+MH341445.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain L-IVP_oncoB, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,49854,50315,195850
+KX061501.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain Lister, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,49652,50113,187893
+DQ983238.1,Orthopoxvirus vaccinia,10245,Vaccinia virus strain MVA-BN genomic sequence,92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,36058,36519,165041
+OP868847.1,Vaccinia virus Copenhagen,10249,"Vaccinia virus Copenhagen, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,47000,47461,183917
+MH341447.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain L-IVP_oncoQ, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,50048,50509,196239
+MH607143.1,Orthopoxvirus akhmetapox,2200830,"Orthopoxvirus akhmetapox isolate Vani_2010, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,60182,60643,217740
+MK314710.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain 44.1 rMVA, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,37069,37530,166859
+MH341446.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain L-IVP_oncoM, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,49914,50375,195979
+DQ377945.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain 3737, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,53211,53672,199377
+JN654976.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP9, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,50393,50854,198518
+DQ983240.1,Orthopoxvirus vaccinia,10245,Vaccinia virus strain AGR-MVA-572seq genomic sequence,92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,25185,25646,154167
+OP868848.1,Vaccinia virus Copenhagen,10249,"Mutant Vaccinia virus Copenhagen strain Copenhagen_vP811, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,14651,15112,134690
+AY678276.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Lister, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,50297,50758,189122
+KY549145.1,Cowpox virus,10243,"Cowpox virus isolate CPXV_K428, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,65203,65664,225263
+LT896725.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2014/Cat2 genome assembly, complete genome: monopartite",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,64870,65331,224837
+EF175984.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Lister Butantan (LTBUT) double-stranded RNA-binding protein gene, partial cds",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,570,109,570
+MK314712.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain 47.1 rMVA, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,35008,35469,164627
+AM501482.1,Vaccinia virus Ankara,126794,"Vaccinia virus Ankara strain chorioallantois vaccinia virus Ankara (CVA), complete coding genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,48023,48484,192353
+LT896727.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2015/Cat2 genome assembly, complete genome: monopartite",92.65658747300216,100.0,9.21986e-179,640.061,463,429,2,1,462,64420,64881,223681
+KP233807.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain L-IVP, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,48116,48577,186498
+U94848.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Ankara, complete genomic sequence",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,42697,43158,177923
+DQ983236.1,Orthopoxvirus vaccinia,10245,Vaccinia virus strain MVA-I721 genomic sequence >gi|115607418|gb|DQ983237.1| Vaccinia virus strain MVA-572 genomic sequence,92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,36258,36719,165242
+MG663594.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain 51.1rMVA, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,46349,46810,177992
+MK314713.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain 51.2 rMVA, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,40933,41394,171118
+M35027.1,Vaccinia virus Copenhagen,10249,"Vaccinia virus Copenhagen, complete genome",92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,50911,51372,191737
+DQ983239.1,Orthopoxvirus vaccinia,10245,Vaccinia virus strain AGR-MVA-572pre genomic sequence,92.67241379310344,100.0,9.21986e-179,640.061,464,430,4,1,462,36056,36517,165040
+KP768318.1,Camelpox virus,28873,"Camelpox virus strain 0408151v, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,48906,49367,202289
+KM044309.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Tashkent clone TKT3, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,40698,41159,182481
+JN654980.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP13, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,50363,50824,194800
+AY678277.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain LC16mO, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,50417,50878,189157
+JN653079.1,Buffalopox virus,32605,"Buffalopox virus isolate BPXV/Human/Jalgaon/10 double-stranded RNA-binding protein (E3L) gene, complete cds >gi|385246974|gb|JN653080.1| Buffalopox virus isolate BPXV/Buffalo/Jalgaon/10 double-stranded RNA-binding protein (E3L) gene, complete cds",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,657,196,787
+MG599038.1,Buffalopox virus,32605,"Buffalopox virus isolate Karachi 2005, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,51075,51536,195630
+OQ754425.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo COG01, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,46379,46840,187256
+AY678275.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain LC16m8, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,50417,50878,189158
+MW018155.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo CG04, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,41322,41783,180988
+NC_003391.1,Camelpox virus,28873,"Camelpox virus, complete genome >gi|18482913|gb|AF438165.1| Camelpox virus M-96 from Kazakhstan, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,50654,51115,205719
+OQ754424.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo FAI01, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,45967,46428,186425
+JN653081.1,Buffalopox virus,32605,"Buffalopox virus isolate BPXV/Cow/Baatnor/11 double-stranded RNA-binding protein (E3L) gene, complete cds",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,657,196,787
+AY009089.1,Camelpox virus CMS,203172,"Camelpox virus CMS, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,48864,49325,202205
+JN654983.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP17, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,50535,50996,191709
+MN244297.1,Orthopoxvirus akhmetapox,2200830,"Akhmeta virus strain A39, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,61876,62337,221153
+OQ754427.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo URA01, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,46384,46845,187259
+MK314711.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain 44/47.1 rMVA, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,44899,45360,175000
+OK422496.1,Buffalopox virus,32605,"Buffalopox virus isolate BPXV/buffalo/India/2011/Meerut-1/P50/C5, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,143445,142984,180415
+MW018156.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo ALEH2, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,45077,45538,184841
+MW018153.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo MI233, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,41323,41784,181064
+OK422495.1,Buffalopox virus,32605,"Buffalopox virus isolate BPXV/buffalo/India/2011/Meerut-1/P50/A3, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,37114,37575,168120
+DQ121394.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Lister clone VACV107, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,50496,50957,189421
+JN654981.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP15, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,50358,50819,198547
+KM044310.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Tashkent clone TKT4, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,40265,40726,181617
+OQ754426.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo COG02, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,46193,46654,186884
+PV920573.1,Orthopoxvirus camelpox,3431480,"Orthopoxvirus camelpox strain Camelpox virus/KZ/Beineu/2023, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,48893,49354,202273
+AY771338.1,Cantagalo virus,124313,"Cantagalo orthopoxvirus putative double-stranded RNA binding protein gene, complete cds",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,573,112,573
+OR515685.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain VACV_Brazil/SP/IAL/LEIAL397/2023, complete genome >gi|2594665173|gb|OR515686.1| Orthopoxvirus vaccinia strain VACV_Brazil/SP/IAL/LEIAL398/2023, complete genome >gi|2594665402|gb|OR515687.1| Orthopoxvirus vaccinia strain VACV_Brazil/SP/IAL/LEIAL537/2023, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,46379,46840,187256
+KF179385.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,44848,45309,184572
+KX781953.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain L-IVP clone 14, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,49819,50280,194378
+MT648498.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain Ducapox vaccine, partial genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,36907,37368,166722
+MT946551.2,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain Ducapox vaccine, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,30315,30776,159695
+KT013210.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo virus CM01, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,41716,42177,181774
+MN244298.1,Orthopoxvirus akhmetapox,2200830,"Akhmeta virus strain A40, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,62003,62464,221251
+OQ849768.1,Camelpox virus,28873,"Camelpox virus isolate CML MOR P175, complete genome",92.45689655172413,100.0,4.28958e-177,634.521,464,429,4,1,462,43747,44208,191707
+AY313848.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Acambis clone 3, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50700,51161,197418
+PV798393.1,Buffalopox virus,32605,"Buffalopox virus isolate MCl-24-H-201, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,143456,142995,180420
+BK013342.1,Orthopoxvirus vaccinia,10245,"TPA_asm: Orthopoxvirus vaccinia isolate VK08, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,55034,55495,204481
+LN864566.1,Cowpox virus,10243,"Cowpox virus complete genome, strain FM2292",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63515,63976,227639
+MN244296.1,Orthopoxvirus akhmetapox,2200830,"Akhmeta virus strain G66, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,62525,62986,221899
+MT227314.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain Acambis/2019, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50618,51079,199150
+MN369532.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate VK01, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,35134,35595,184677
+KJ125438.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP25, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50402,50863,196939
+MN974381.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain TNX-1200, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50909,51370,199617
+MK239754.1,Buffalopox virus,32605,"Buffalopox virus isolate NIV116233, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,43342,43803,178863
+MW018154.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate Cantagalo VI04, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,41691,42152,181770
+JN654986.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP21, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50349,50810,194916
+JN654977.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP10, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50344,50805,198464
+BK013340.1,Orthopoxvirus vaccinia,10245,"TPA_asm: Orthopoxvirus vaccinia isolate VK02, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,44154,44615,199507
+NC_066642.1,Horsepox virus,397342,"Horsepox virus, complete genome >gi|111184167|gb|DQ792504.1| Horsepox virus isolate MNR-76, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,59047,59508,212633
+MK035753.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Cepad 333, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63465,63926,228534
+KC813510.1,Cowpox virus,10243,"Cowpox virus strain HumGra07/1, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63436,63897,221071
+NC_055230.1,Orthopoxvirus akhmetapox,2200830,"Akhmeta virus isolate Akhmeta_2013-88, complete genome >gi|1450243445|gb|MH607141.1| Orthopoxvirus akhmetapox isolate Akhmeta_2013-88, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,62548,63009,221923
+MK239753.1,Buffalopox virus,32605,"Buffalopox virus isolate NIV143262, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,43154,43615,178336
+LT896722.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2007/Vole genome assembly, complete genome: monopartite",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63683,64144,228276
+KC813503.1,Cowpox virus,10243,"Cowpox virus strain RatGer09/1, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63629,64090,221153
+OP751803.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus isolate VACV-Wyeth_A311, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,51030,51491,199892
+MK035759.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Cepad 332, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63463,63924,228530
+JN654984.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP19, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50430,50891,198609
+BK013341.1,Horsepox virus,397342,"TPA_asm: Horsepox virus isolate VK05, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,59132,59593,212688
+LR800245.1,Variola virus,10255,"Variola virus genome assembly, complete genome: monopartite",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,42768,43229,192255
+MK035750.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Compiegne 2009, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,53260,53721,218251
+OP751801.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus isolate VACV-Wyeth_A111, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,51166,51627,200123
+BK013339.1,Orthopoxvirus vaccinia,10245,"TPA_asm: Orthopoxvirus vaccinia isolate VK01, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,64890,65351,214388
+KC813505.1,Cowpox virus,10243,"Cowpox virus strain RatKre08/2, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,55845,56306,221194
+KC813501.1,Cowpox virus,10243,"Cowpox virus strain RatAac09/1, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,55600,56061,212814
+JN654982.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP16, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50554,51015,198820
+LN864565.1,Cowpox virus,10243,"Cowpox virus complete genome, strain Ratpox09",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63281,63742,228162
+DQ439815.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain DUKE, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,52931,53392,199960
+MK035746.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Boy Biederstein, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,49423,49884,214880
+MK035748.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Boa Marl, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63377,63838,228367
+MK035747.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Rat Marl, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63379,63840,228369
+OQ223253.1,Buffalopox virus,32605,"Buffalopox virus isolate MCL-22-H-7072, partial genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,51051,51512,195606
+MF477237.2,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain Mulford 1902, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50935,51396,195772
+OP751802.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus isolate VACV-Wyeth_A211, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,51013,51474,199816
+MN974380.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia strain VACV_li, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50855,51316,199509
+AY313847.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Acambis clone 2000, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50637,51098,199234
+KC813508.1,Cowpox virus,10243,"Cowpox virus strain HumAac09/1, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,55923,56384,214048
+BK013343.1,Orthopoxvirus vaccinia,10245,"TPA_asm: Orthopoxvirus vaccinia isolate VK12, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,71855,72316,219645
+KY349117.1,Horsepox virus,397342,"Horsepox virus strain MNR, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,59136,59597,212811
+JN654978.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP11, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50369,50830,198554
+MH607142.1,Orthopoxvirus akhmetapox,2200830,"Orthopoxvirus akhmetapox isolate Akhmeta_2013-85, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,62548,63009,221917
+JN654979.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP12, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50537,50998,198741
+LR800247.1,Variola virus,10255,"Variola virus genome assembly, complete genome: monopartite",92.22462203023758,100.0,1.99575e-175,628.981,463,427,2,1,462,42736,43197,188014
+MK035749.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Rat Biederstein, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,48969,49430,213972
+KC813512.1,Cowpox virus,10243,"Cowpox virus strain HumKre08/1, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,55599,56060,212773
+LR800246.1,Variola virus,10255,"Variola virus genome assembly, complete genome: monopartite",92.22462203023758,100.0,1.99575e-175,628.981,463,427,2,1,462,42727,43188,188152
+KC813493.1,Cowpox virus,10243,"Cowpox virus strain HumLit08/1, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,56033,56494,215715
+JN654985.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Dryvax clone DPP20, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,50421,50882,198699
+MK035757.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Rat Koelle, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,63760,64221,229131
+MK239755.1,Buffalopox virus,32605,"Buffalopox virus isolate NIV116234, complete genome",92.24137931034483,100.0,1.99575e-175,628.981,464,428,4,1,462,41041,41502,174580
+DQ194385.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Guarani P1 double-stranded RNA-binding protein gene, partial cds >gi|77434275|gb|DQ194387.1| Vaccinia virus strain SPAn232 double-stranded RNA-binding protein gene, partial cds >gi|77434312|gb|DQ194388.1| Vaccinia virus strain BeAn58058 double-stranded RNA-binding protein gene, partial cds",93.25842696629213,95.88744588744589,7.17799e-175,627.135,445,415,4,20,462,2,444,537
+DQ194390.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Belo Horizonte double-stranded RNA-binding protein gene, partial cds",93.25842696629213,95.88744588744589,7.17799e-175,627.135,445,415,4,20,462,2,444,537
+DQ247774.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Muriae double-stranded RNA-binding protein gene, partial cds >gi|317018623|gb|HQ402908.1| Vaccinia virus isolate Pelotas 1 E3L gene, partial cds",93.25842696629213,95.88744588744589,7.17799e-175,627.135,445,415,4,20,462,536,94,537
+LR800244.1,Variola virus,10255,"Variola virus genome assembly, complete genome: monopartite",92.20779220779221,99.56709956709958,2.58166e-174,625.288,462,426,4,3,462,42758,43217,192246
+MZ300859.1,Camelpox virus,28873,"Camelpox virus strain D1734/20, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,48589,49050,201406
+PP405583.1,Variola virus,10255,"Variola virus isolate VARV_KUW5-67, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,38904,39365,186214
+LT896718.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2010/Alpaca genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,64175,64636,223357
+KC813500.1,Cowpox virus,10243,"Cowpox virus strain MonKre08/4, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,46047,46508,197388
+LT896719.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2013/Alpaca genome assembly, complete genome: monopartite",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,63423,63884,221816
+KY549149.1,Cowpox virus,10243,"Cowpox virus isolate CPXV_K2739, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,65236,65697,225395
+MK035756.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Leo 2015/5, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,64127,64588,223150
+KC813495.1,Cowpox virus,10243,"Cowpox virus strain HumMag07/1, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,57644,58105,217406
+LT896731.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2015/Cat4 genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,63734,64195,222189
+PP405597.1,Variola virus,10255,"Variola virus isolate VARV_10305, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,38929,39390,186271
+LT993230.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2017/Alpaca1 genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,63520,63981,221930
+DQ437580.1,Variola virus,10255,"Variola virus strain Afghanistan 1970 Variolator 4, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39021,39482,185855
+LT896728.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2010/Rat genome assembly, complete genome: monopartite",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,64068,64529,223088
+MZ300857.1,Camelpox virus,28873,"Camelpox virus strain D1804/20, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,48588,49049,201398
+KC813502.1,Cowpox virus,10243,"Cowpox virus strain CatBer07/1, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,56682,57143,200528
+KC813496.1,Cowpox virus,10243,"Cowpox virus strain HumPad07/1, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,51708,52169,200835
+KC813509.1,Cowpox virus,10243,"Cowpox virus strain HumBer07/1, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,51499,51960,201217
+DQ437588.1,Variola virus,10255,"Variola virus strain Nepal 1973, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39010,39471,185654
+MK035758.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Moritz 2015/3a, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,64228,64689,223508
+DQ437586.1,Variola virus,10255,"Variola virus strain India 1964 7125 Vellore, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39096,39557,186127
+MZ300858.1,Camelpox virus,28873,"Camelpox virus strain D1795/20, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,48589,49050,201398
+PP405594.1,Variola virus,10255,"Variola virus isolate VARV_64-7, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,38910,39371,186216
+MK035755.1,Cowpox virus,10243,"Cowpox virus strain CPXV/75/01, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,64452,64913,223850
+DQ437592.1,Variola virus,10255,"Variola virus strain Syria 1972 V72-199, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39011,39472,185853
+KC813497.1,Cowpox virus,10243,"Cowpox virus strain JagKre08/1, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,64704,65165,216415
+NC_008291.1,Taterapox virus,28871,"Taterapox virus, complete genome >gi|90660453|gb|DQ437594.1| Taterapox virus strain Dahomey 1968, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,47605,48066,198050
+MZ300860.1,Camelpox virus,28873,"Camelpox virus strain D1621/20, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,48588,49049,201401
+KF866253.1,Vaccinia virus WAU86/88-1,1651169,"Vaccinia virus WAU86/88-1, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,49645,50106,187723
+MK035754.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Cookie S963_15, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,64583,65044,223225
+KY549147.1,Cowpox virus,10243,"Cowpox virus isolate CPXV_K780, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,56355,56816,196768
+DQ437585.1,Variola virus,10255,"Variola virus strain India 1964 7124 Vellore, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39235,39696,186677
+LN879483.1,Cowpox virus,10243,"Cowpox virus strain CPXV Amadeus 2015, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,63494,63955,222069
+KY549146.1,Cowpox virus,10243,"Cowpox virus isolate CPXV_K779, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,56589,57050,196570
+PX585981.1,Cowpox virus,10243,"Cowpox virus isolate Amsterdam-19791011, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,49344,49805,207945
+KY463519.1,Cowpox virus,10243,"Cowpox virus strain Germany_1971_EP1, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,54912,55373,214707
+DQ441433.1,Variola virus,10255,"Variola virus strain Kuwait 1967 (K1629), complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39022,39483,185853
+KC813507.1,Cowpox virus,10243,"Cowpox virus strain EleGri07/1, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,46007,46468,197324
+DQ441448.1,Variola virus,10255,"Variola virus strain Yugoslavia 1972 V72-164, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39011,39472,185851
+KY549143.2,Cowpox virus,10243,"Cowpox virus isolate CPXV_Catpox3L97, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,59567,60028,216799
+MZ300856.1,Camelpox virus,28873,"Camelpox virus strain D1865/20, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,48525,48986,201277
+MK035752.1,Cowpox virus,10243,"Cowpox virus strain CPXV/Sammy 2015/4a, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,64350,64811,213486
+KC813506.1,Cowpox virus,10243,"Cowpox virus strain CatPot07/1, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,64763,65224,216271
+KC813498.1,Cowpox virus,10243,"Cowpox virus strain JagKre08/2, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,65022,65483,216813
+LT993231.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2015/Prairie-dog genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,64410,64871,223701
+PX585980.1,Cowpox virus,10243,"Cowpox virus isolate 58-19840526, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,63345,63806,221817
+LT896732.2,Cowpox virus,10243,"Cowpox virus isolate Ger/2017/Alpaca2 genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,64532,64993,223759
+LT896726.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2012/Alpaca genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,63536,63997,222058
+KC813511.1,Cowpox virus,10243,"Cowpox virus strain HumGri07/1, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,57534,57995,209262
+HQ420895.1,Cowpox virus,10243,"Cowpox virus strain Germany_1980_EP4, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,65074,65535,225136
+KC813492.1,Cowpox virus,10243,"Cowpox virus strain HumLan08/1, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,56824,57285,216357
+MK910851.1,Camelpox virus,28873,"Camelpox virus strain Negev2016, complete genome",92.02586206896551,100.0,9.28531e-174,623.441,464,427,4,1,462,48671,49132,201609
+LT993232.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2015/Human2 genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,62382,62843,221171
+KC813504.1,Cowpox virus,10243,"Cowpox virus strain RatHei09/1, complete genome",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,56968,57429,208980
+LT896720.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2015/Human1 genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,62350,62811,220975
+LT993228.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2017/common vole FMEimka genome assembly, complete genome: monopartite",92.06008583690986,100.0,9.28531e-174,623.441,466,429,8,1,462,63657,64118,222062
+DQ437589.1,Variola virus,10255,"Variola virus strain Pakistan 1969 (Rafig Lahore), complete sequence",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39027,39488,185865
+DQ437587.1,Variola virus,10255,"Variola virus strain Iran 1972 2602 Tabriz, complete genome",92.04301075268818,100.0,9.28531e-174,623.441,465,428,6,1,462,39014,39475,185848
+PP405581.1,Variola virus,10255,"Variola virus isolate VARV_Gabi3180, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,38906,39373,186218
+PP405592.1,Variola virus,10255,"Variola virus isolate VARV_TZA_1963_2-63, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39083,39550,186033
+DQ441441.1,Variola virus,10255,"Variola virus strain Sudan 1947 (Rumbec), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39385,39852,186415
+DQ437583.1,Variola virus,10255,"Variola virus strain Congo 1970, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39412,39879,186553
+PP405593.1,Variola virus,10255,"Variola virus isolate VARV_TZA_1961_12-61, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39183,39650,185707
+PP405585.1,Variola virus,10255,"Variola virus isolate VARV_KEN_1963_NJO, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39125,39592,186107
+HQ420898.1,Cowpox virus,10243,"Cowpox virus strain Germany_2002_MKY, complete genome",91.8103448275862,100.0,4.32004e-172,617.901,464,426,4,1,462,63826,64287,222555
+DQ441427.1,Variola virus,10255,"Variola virus strain India 1953 (Kali-Muthu-M50 Madras), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39096,39563,186108
+DQ441432.1,Variola virus,10255,"Variola virus strain Korea 1947 (Lee, Masterseed), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39215,39682,186383
+DQ441419.1,Variola virus,10255,"Variola virus strain Brazil 1966 (v66-39 Sao Paulo), complete genome",91.66666666666666,100.0,4.32004e-172,617.901,468,429,6,1,462,39945,40412,188062
+DQ441447.1,Variola virus,10255,"Variola virus strain United Kingdom 1952 Butler, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,40072,40539,188251
+DQ437582.1,Variola virus,10255,"Variola virus strain China Horn 1948, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39358,39825,186668
+OL468962.1,Variola virus,10255,"Variola virus strain Congo 1970 v70-60, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39858,40325,187872
+DQ441434.1,Variola virus,10255,"Variola virus strain Niger 1969 (001, importation from Nigeria), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39983,40450,186942
+PP405599.1,Variola virus,10255,"Variola virus isolate VARV_KEN_1963_BED, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39601,40068,186566
+DQ441435.1,Variola virus,10255,"Variola virus strain South Africa 1965 (102 Natal, Ingwavuma), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39295,39762,186050
+DQ441440.1,Variola virus,10255,"Variola virus strain Sudan 1947 (Juba), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39324,39791,186284
+MK035751.1,Cowpox virus,10243,"Cowpox virus strain CPXV/S2216/04, complete genome",91.8103448275862,100.0,4.32004e-172,617.901,464,426,4,1,462,64875,65336,224665
+PP405595.1,Variola virus,10255,"Variola virus isolate VARV_623, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,38932,39399,186234
+DQ441420.1,Variola virus,10255,"Variola virus strain Bangladesh 1974 (nur islam), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39250,39717,186293
+DQ441423.1,Variola virus,10255,"Variola virus strain Congo 9 1970 (v74-227 Gispen), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39240,39707,186652
+PP405578.1,Variola virus,10255,"Variola virus isolate VARV_Chimp9, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,38921,39388,186278
+DQ441425.1,Variola virus,10255,"Variola virus strain Ethiopia 1972 (Eth17 R14-1X-72 Addis), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39493,39960,186648
+PP405587.1,Variola virus,10255,"Variola virus isolate VARV_Pat63_8804, complete genome >gi|2693351323|gb|PP405588.1| Variola virus isolate VARV_Pat63_8805, complete genome >gi|2693351651|gb|PP405590.1| Variola virus isolate VARV_Tilburg6801, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39088,39555,186546
+PP405589.1,Variola virus,10255,"Variola virus isolate VARV_RZ10_3587, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39085,39552,185939
+DQ441421.1,Variola virus,10255,"Variola virus strain Bangladesh 1974 (Shahzaman), complete genome >gi|94484855|gb|DQ441422.1| Variola virus strain Bangladesh 1974 (Solaiman), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39250,39717,186293
+NC_055231.1,Orthopoxvirus Abatino,2478919,"Orthopoxvirus Abatino, complete genome >gi|1495877350|gb|MH816996.1| Orthopoxvirus Abatino, complete genome",91.8103448275862,100.0,4.32004e-172,617.901,464,426,4,1,462,56421,56882,213743
+DQ441429.1,Variola virus,10255,"Variola virus strain Japan 1946 (Yamada MS-2(A) Tokyo), complete genome",91.82795698924731,100.0,4.32004e-172,617.901,465,427,6,1,462,39109,39570,186662
+PP405586.1,Variola virus,10255,"Variola virus isolate VARV_GBR_1953_NOO, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39113,39580,186107
+PP405580.1,Variola virus,10255,"Variola virus isolate VARV_Ex, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39097,39564,186555
+LT993226.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2014/Human genome assembly, complete genome: monopartite",91.8103448275862,100.0,4.32004e-172,617.901,464,426,4,1,462,63216,63677,220997
+KC813491.1,Cowpox virus,10243,"Cowpox virus strain BeaBer04/1, complete genome",91.8103448275862,100.0,4.32004e-172,617.901,464,426,4,1,462,57192,57653,213325
+DQ441444.1,Variola virus,10255,"Variola virus strain United Kingdom 1946 Harvey, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39058,39525,185771
+DQ441424.1,Variola virus,10255,"Variola virus strain Ethiopia 1972 (Eth16 R14-1X-72 Addis), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39493,39960,186648
+DQ437591.1,Variola virus,10255,"Variola virus strain Sumatra 1970 V70-222, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39139,39606,185449
+DQ437584.1,Variola virus,10255,"Variola virus strain Germany 1958 Heidelberg, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39052,39519,184900
+NC_001611.1,Variola virus,10255,"Variola virus, complete genome >gi|456758|emb|X69198.1| Variola virus DNA complete genome",91.82795698924731,100.0,4.32004e-172,617.901,465,427,6,1,462,38632,39093,185578
+LT896730.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2010/Racoon genome assembly, complete genome: monopartite",91.84549356223177,100.0,4.32004e-172,617.901,466,428,8,1,462,63773,64234,222104
+LT706528.1,Variola virus,10255,"Variola virus isolate VARV_V563 genome assembly, chromosome: I",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,38656,39123,183535
+DQ441430.1,Variola virus,10255,"Variola virus strain Japan 1951 (Harper, Masterseed), complete genome",91.82795698924731,100.0,4.32004e-172,617.901,465,427,6,1,462,39092,39553,186180
+DQ441418.1,Variola virus,10255,"Variola virus strain Botswana 1973 (v73-225), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39127,39594,185871
+Y16780.1,Variola minor virus,53258,variola minor virus complete genome,91.66666666666666,100.0,4.32004e-172,617.901,468,429,6,1,462,39619,40086,186986
+PP405582.1,Variola virus,10255,"Variola virus isolate VARV_II2a, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,38939,39406,185827
+PP405579.1,Variola virus,10255,"Variola virus isolate VARV_Congo1_3422, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39009,39476,186412
+L22579.1,Variola major virus,12870,Variola major virus (strain Bangladesh-1975) complete genome,91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39258,39725,186103
+DQ437581.1,Variola virus,10255,"Variola virus strain Bangladesh 1975 v75-550 Banu, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39173,39640,185976
+PP405596.1,Variola virus,10255,"Variola virus isolate VARV_BWA_1972_5008, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39187,39654,186084
+DQ441443.1,Variola virus,10255,"Variola virus strain Tanzania 1965 kembula, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39181,39648,185826
+DQ441446.1,Variola virus,10255,"Variola virus strain United Kingdom 1947 Higgins (Staffordshire), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39153,39620,185026
+DQ441431.1,Variola virus,10255,"Variola virus strain Japan 1951 (Stillwell, Masterseed), complete genome",91.82795698924731,100.0,4.32004e-172,617.901,465,427,6,1,462,39100,39561,186115
+PP405600.1,Variola virus,10255,"Variola virus isolate VARV_IND_1958_BOM, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39114,39581,186728
+DQ441436.1,Variola virus,10255,"Variola virus strain South Africa 1965 (103 T'vaal, Nelspruit), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39134,39601,185881
+DQ441442.1,Variola virus,10255,"Variola virus strain Sumatra 1970 V70-228, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39104,39571,185405
+DQ441428.1,Variola virus,10255,"Variola virus strain India 1953 (New Delhi), complete genome",91.82795698924731,100.0,4.32004e-172,617.901,465,427,6,1,462,39109,39570,186662
+PP405584.1,Variola virus,10255,"Variola virus isolate VARV_AFRICA_1964_LUK, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39210,39677,186197
+PP405598.1,Variola virus,10255,"Variola virus isolate VARV_11559, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39090,39557,186542
+PP405591.1,Variola virus,10255,"Variola virus isolate VARV_TongerenEK1, complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39106,39573,186564
+LT896724.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2015/Cat1 genome assembly, complete genome: monopartite",91.8103448275862,100.0,4.32004e-172,617.901,464,426,4,1,462,63064,63525,220621
+DQ441445.1,Variola virus,10255,"Variola virus strain United Kingdom 1946 Hinden (Middlesex), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39076,39543,186096
+DQ441417.1,Variola virus,10255,"Variola virus strain Botswana 1972 (v72-143), complete genome",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,39137,39604,185881
+LT706529.1,Variola virus,10255,"Variola virus isolate VARV_V1588 genome assembly, chromosome: I",91.68443496801706,100.0,4.32004e-172,617.901,469,430,8,1,462,38419,38886,184440
+DQ441439.1,Variola virus,10255,"Variola virus strain Somalia 1977 (V77-1605), complete genome",91.47121535181236,100.0,2.00992e-170,612.361,469,429,8,1,462,38303,38770,184170
+KY358055.1,Variola virus,10255,"Variola virus strain VD21, 17th century, complete genome",91.47121535181236,100.0,2.00992e-170,612.361,469,429,8,1,462,38561,39028,185517
+LT883663.1,Cowpox virus,10243,"Cowpox virus strain France Amiens 2016 genome assembly, complete genome: monopartite",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,61940,62401,219385
+KC813494.1,Cowpox virus,10243,"Cowpox virus strain HumLue09/1, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,55146,55607,213043
+DQ437590.1,Variola virus,10255,"Variola virus strain Somalia 1977, complete genome",91.47121535181236,100.0,2.00992e-170,612.361,469,429,8,1,462,39298,39765,186231
+KY369926.1,Cowpox virus,10243,"Cowpox virus strain Kostroma_2015, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,63917,64378,223595
+HQ420899.1,Cowpox virus,10243,"Cowpox virus strain Norway_1994_MAN, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,63163,63624,220915
+LT896729.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2010/Cat genome assembly, complete genome: monopartite",91.63090128755364,100.0,2.00992e-170,612.361,466,427,8,1,462,63720,64181,222113
+OP125540.1,Cowpox virus,10243,"Cowpox virus isolate No-F2, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,63711,64172,222178
+KY549151.1,Cowpox virus,10243,"Cowpox virus isolate Norwayfeline, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,59986,60447,217955
+LT896733.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2015/Cat3 genome assembly, complete genome: monopartite",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,63734,64195,222376
+DQ441438.1,Variola virus,10255,"Variola virus strain Somalia 1977 (V77-1252), complete genome",91.47121535181236,100.0,2.00992e-170,612.361,469,429,8,1,462,38312,38779,184191
+KY569019.1,Cowpox virus,10243,"Cowpox virus strain CPXV CheNova_DK_2014, complete genome",91.47121535181236,100.0,2.00992e-170,612.361,469,429,8,1,462,62486,62953,212910
+X94355.2,Cowpox virus,10243,"Cowpox virus strain GRI-90, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,64011,64472,223666
+KY569021.1,Cowpox virus,10243,"Cowpox virus strain CPXV CheGrey_DK_2010, complete genome",91.47121535181236,100.0,2.00992e-170,612.361,469,429,8,1,462,53901,54368,204321
+KC813499.1,Cowpox virus,10243,"Cowpox virus strain MarLei07/1, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,62923,63384,212909
+BK010317.1,Variola virus,10255,"TPA_asm: Variola virus isolate VD21, complete genome",91.47121535181236,100.0,2.00992e-170,612.361,469,429,8,1,462,39970,40437,186775
+KY569022.1,Cowpox virus,10243,"Cowpox virus strain CPXV CheTopCut_DK_2011, complete genome",91.47121535181236,100.0,2.00992e-170,612.361,469,429,8,1,462,53895,54362,204015
+OP125539.1,Cowpox virus,10243,"Cowpox virus isolate No-H1, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,63669,64130,221926
+OP125541.1,Cowpox virus,10243,"Cowpox virus isolate No-F1, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,63225,63686,221334
+HQ420893.1,Cowpox virus,10243,"Cowpox virus strain Finland_2000_MAN, complete genome",91.59482758620689,100.0,2.00992e-170,612.361,464,425,4,1,462,63201,63662,222105
+HQ402909.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus isolate Pelotas 2 E3L gene, partial cds",92.58426966292134,95.88744588744589,7.22895e-170,610.515,445,412,4,20,462,536,94,537
+KY569020.1,Cowpox virus,10243,"Cowpox virus strain CPXV CheNuru_DK_2012, complete genome",91.25799573560768,100.0,2.59999e-169,608.668,469,428,9,1,462,53915,54381,203925
+KY569018.1,Cowpox virus,10243,"Cowpox virus strain CPXV CheHurley_DK_2012, complete genome",91.25799573560768,100.0,2.59999e-169,608.668,469,428,9,1,462,53928,54394,204218
+HQ407377.1,Cowpox virus,10243,"Cowpox virus strain Austria 1999, complete genome",91.59482758620689,100.0,2.59999e-169,608.668,464,425,7,1,462,62322,62780,221512
+OL468961.1,Variola virus,10255,"Variola virus strain GHA68, complete genome",91.25799573560768,100.0,9.35124e-169,606.821,469,428,8,1,462,40159,40626,187742
+DQ441416.1,Variola virus,10255,"Variola virus strain Benin, Dahomey 1968 (v68-59), complete genome",91.25799573560768,100.0,9.35124e-169,606.821,469,428,8,1,462,39995,40462,187070
+DQ441426.1,Variola virus,10255,"Variola virus strain Guinea 1969 (005), complete genome",91.25799573560768,100.0,9.35124e-169,606.821,469,428,8,1,462,39917,40384,186883
+LT896723.1,Cowpox virus,10243,"Cowpox virus isolate Ger/2014/Cat1 genome assembly, complete genome: monopartite",91.37931034482759,100.0,9.35124e-169,606.821,464,424,4,1,462,64236,64697,223583
+HQ420896.1,Cowpox virus,10243,"Cowpox virus strain Germany_1990_2, complete genome",91.37931034482759,100.0,9.35124e-169,606.821,464,424,4,1,462,62744,63205,220280
+DQ441437.1,Variola virus,10255,"Variola virus strain Sierra Leone 1969 (V68-258), complete genome",91.25799573560768,100.0,9.35124e-169,606.821,469,428,8,1,462,40088,40555,187014
+DQ194386.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Guarani P2 double-stranded RNA-binding protein gene, partial cds",92.35955056179776,95.88744588744589,3.3633e-168,604.975,445,411,4,20,462,2,444,537
+DQ194389.1,Orthopoxvirus vaccinia,10245,"Vaccinia virus strain Aracatuba double-stranded RNA-binding protein gene, partial cds",92.35955056179776,95.88744588744589,3.3633e-168,604.975,445,411,4,20,462,2,444,537
+HQ420894.1,Cowpox virus,10243,"Cowpox virus strain France_2001_Nancy, complete genome",91.04477611940298,100.0,4.35071e-167,601.281,469,427,8,1,462,62540,63007,226424
+OU343157.1,Ectromelia virus,12643,"Ectromelia virus strain Mp4 genome assembly, chromosome: 1",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,55576,56037,207701
+KY554976.1,Ectromelia virus,12643,"Ectromelia virus isolate Hampstead, complete genome",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,54885,55346,206757
+NC_004105.1,Ectromelia virus,12643,"Ectromelia virus, complete genome >gi|22123748|gb|AF012825.2| Ectromelia virus strain Moscow, complete genome",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,56526,56987,209771
+PX585983.1,Ectromelia virus,12643,"Ectromelia virus isolate Hampstead-19750711, complete genome",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,54652,55113,199798
+MN912466.1,Ectromelia virus WH,2696714,"Ectromelia virus WH, complete genome",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,53169,53630,202359
+KJ563295.1,Ectromelia virus Naval,1651168,"Ectromelia virus Naval, complete genome",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,54127,54588,207428
+OU343112.1,Ectromelia virus,12643,"Ectromelia virus strain Hampstead Egg genome assembly, chromosome: 1",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,54827,55288,206746
+AJ312294.1,Ectromelia virus,12643,"Ectromelia virus gene for dsRNA binding protein, strain Hampstead",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,573,112,573
+OU343155.1,Ectromelia virus,12643,"Ectromelia virus strain Mp5 genome assembly, chromosome: 1",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,55158,55619,207350
+OU343113.1,Ectromelia virus,12643,"Ectromelia virus strain Ishibashi genome assembly, chromosome: 1",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,55469,55930,207483
+JQ410350.1,Ectromelia virus ERPV,1452750,"Ectromelia virus ERPV culture-collection ATCC:VR-1431, complete genome",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,53526,53987,206527
+OU343159.1,Ectromelia virus,12643,"Ectromelia virus strain MouKre genome assembly, chromosome: 1",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,55558,56019,208043
+OU343158.1,Ectromelia virus,12643,"Ectromelia virus strain Mp1 genome assembly, chromosome: 1",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,54965,55426,206845
+OU343156.1,Ectromelia virus,12643,"Ectromelia virus strain Mill-Hill genome assembly, chromosome: 1",90.94827586206897,100.0,2.02419e-165,595.741,464,422,4,1,462,55120,55581,207113
+MG012796.1,Orthopoxvirus vaccinia,10245,"Orthopoxvirus vaccinia isolate CEyV2, complete genome",90.51724137931035,100.0,9.41763e-164,590.202,464,420,4,1,462,47780,48241,194711
+DQ437593.1,Cowpox virus,10243,"Cowpox virus strain Germany 91-3, complete genome",90.52631578947368,100.0,9.41763e-164,590.202,475,430,14,1,462,63737,64210,228250
+HQ420897.1,Cowpox virus,10243,"Cowpox virus strain Germany_1998_2, complete genome",90.52631578947368,100.0,9.41763e-164,590.202,475,430,14,1,462,64786,65259,224595

@@ -4,11 +4,91 @@
 | --- | --- |
 | [`docker-compose.local.yml`](./docker-compose.local.yml) | Minimal 2-sidecar (api + frontend) sanity check. Faster boot; no Celery. |
 | [`docker-compose.full.yml`](./docker-compose.full.yml) | **Full 6-sidecar mirror of the bundled Container App.** Use this for any debugging that touches Celery, Redis, the terminal exec channel, or cross-sidecar wiring. |
+| [`compose-with-log.sh`](./compose-with-log.sh) | Docker Compose wrapper used by `local-run.sh compose-full/compose-local`; captures compose output and detached container logs. |
 | [`quick-deploy.sh`](./quick-deploy.sh) | One-sidecar image bump on the live Azure Container App. ~30-90 s per cycle vs. 5-10 min for a full Bicep redeploy. |
 | [`postprovision.sh`](./postprovision.sh) | Full first-time / structural deploy — sidecar layout, env vars, secrets, probes, scale rules. Run via `azd up` or directly after sourcing `/tmp/azd-env.sh`. |
 | [`smoke_api.py`](./smoke_api.py) | HTTP smoke test against a running api sidecar. |
 | [`preflight-check.sh`](./preflight-check.sh) | Pre-`azd up` sanity. |
 | [`setup-app-registration.sh`](./setup-app-registration.sh) | One-shot Entra ID app registration creation. |
+| [`grant-local-rbac.sh`](./grant-local-rbac.sh) | One-shot: grant your `az login` user the minimum RBAC (Storage Blob Data Contributor, Storage Account Contributor, RG Reader, AcrPull) needed to drive a deployed environment from a local api sidecar. Idempotent; run once per fresh clone. |
+| [`storage-public-access.sh`](./storage-public-access.sh) | Manually flip a workload Storage account's `publicNetworkAccess` on (IP-allowlisted) / off for local debugging. The api also auto-opens it when `LOCAL_DEBUG_AUTO_OPEN_STORAGE=true` — see `api/services/storage_public_access.py`. |
+| [`local-run.sh`](./local-run.sh) | Direct terminal and VS Code task entrypoint for `api`, `worker`, `beat`, `web`, `redis`, `smoke`, `compose-full`, and `compose-local`; always routes through local logging. |
+| [`run-with-log.sh`](./run-with-log.sh) | Lower-level wrapper that mirrors any local dev command's stdout/stderr into `.logs/local/latest/*.log` for warning/error review. |
+
+---
+
+## Local logs
+
+VS Code dev tasks and direct terminal runs through `scripts/dev/local-run.sh`
+write project-local logs under `.logs/local/` so failures are visible from the
+workspace without relying on terminal scrollback:
+
+```text
+.logs/local/
+  latest -> 20260515T143012Z-12345
+  20260515T143012Z-12345/
+    api.log
+    worker.log
+    beat.log
+    web.log
+    redis.log
+    smoke.log
+    compose-full.log
+    compose-full-containers.log
+```
+
+Rules:
+
+- keep the newest 3 log sessions;
+- cap each log chunk at 1 MiB by default (`LOCAL_LOG_MAX_BYTES=1048576`);
+- keep at most 16 chunks per service in a session (`LOCAL_LOG_MAX_CHUNKS=16`),
+  rotating as a bounded ring so long-running debug sessions cannot grow
+  without limit;
+- flush the first few lines immediately, then batch file flushes every 50 lines
+  (`LOCAL_LOG_FLUSH_LINES=50`) to avoid per-line filesystem pressure;
+- keep console output unchanged while mirroring it to files;
+- set `LOCAL_LOG_CONSOLE=false` for high-volume runs when terminal rendering is
+  the bottleneck and file logs are enough;
+- reuse one freshly-created session for parallel task startup
+  (`LOCAL_LOG_SESSION_TTL_SECONDS=120`);
+- reject unsafe `LOCAL_LOG_SESSION` names and recover stale lock directories
+  (`LOCAL_LOG_LOCK_STALE_SECONDS=30`) so logging cannot hang future starts;
+- replay only the newest 200 lines when starting a detached Docker Compose log
+  follower (`COMPOSE_LOG_TAIL=200`);
+- ignore `.logs/` in git.
+
+Use `.logs/local/latest/api.log` first when looking for API warnings/errors,
+then compare `worker.log`, `beat.log`, and `web.log` to verify the local
+pipeline is healthy end to end.
+
+Direct examples:
+
+```bash
+scripts/dev/local-run.sh api
+scripts/dev/local-run.sh web
+scripts/dev/local-run.sh worker
+scripts/dev/local-run.sh beat
+scripts/dev/local-run.sh redis
+scripts/dev/local-run.sh smoke
+scripts/dev/local-run.sh compose-full -- up --build
+scripts/dev/local-run.sh compose-full -- up -d --build
+scripts/dev/local-run.sh compose-local -- up --build
+scripts/dev/local-run.sh compose-local -- up -d --build
+```
+
+Docker Compose logging:
+
+- foreground `compose-full -- up --build` writes `compose-full.log`;
+- detached `compose-full -- up -d --build` writes the command output to
+  `compose-full.log` and starts a background follower writing container output
+  to `compose-full-containers.log`;
+- `compose-local` uses the same pattern with `compose-local.log` and
+  `compose-local-containers.log`.
+- detached followers use `docker compose logs -f --tail ${COMPOSE_LOG_TAIL:-200}`
+  so an old noisy container cannot replay an unbounded backlog into the local
+  log pipeline.
+- starting a new detached compose run cleans up stale followers for the same
+  compose profile; `compose-full -- down|stop|rm` also stops its follower.
 
 ---
 
@@ -31,18 +111,32 @@ caching, image tag dict, terminal exec contract).
 ### Tier 2 — Local 6-sidecar compose (~30 s first build, ~5 s thereafter)
 
 ```bash
-docker compose -f scripts/dev/docker-compose.full.yml up --build
+scripts/dev/local-run.sh compose-full -- up --build
 ```
+
+For detached compose runs, use:
+
+```bash
+scripts/dev/local-run.sh compose-full -- up -d --build
+```
+
+This starts a background log follower. Check
+`.logs/local/latest/compose-full-containers.log` for the container stream.
 
 Then in another terminal:
 
 ```bash
-curl http://127.0.0.1:8080/api/health
-curl http://127.0.0.1:8080/api/health/celery               # queue snapshot
-curl -XPOST 'http://127.0.0.1:8080/api/health/celery/enqueue-noop?message=hi'
-curl http://127.0.0.1:8080/api/health/celery/result/<id>
-open http://127.0.0.1:8080/                                # SPA via api proxy
+curl http://127.0.0.1:18080/api/health
+curl http://127.0.0.1:18080/api/health/celery               # queue snapshot
+curl -XPOST 'http://127.0.0.1:18080/api/health/celery/enqueue-noop?message=hi'
+curl http://127.0.0.1:18080/api/health/celery/result/<id>
+open http://127.0.0.1:18080/                                # SPA via api proxy
 ```
+
+> The compose api binds **18080** on the host, not 8080, to avoid clashing
+> with the workspace `api: start` task (8080) and `web: dev` task (8090).
+> If 18080 is also taken on your machine, change the host-side port in
+> `docker-compose.full.yml`.
 
 `api/` is **bind-mounted** into the api / worker / beat containers and
 `uvicorn --reload` watches it — code edits show up live without a rebuild.
@@ -90,6 +184,11 @@ back to** `postprovision.sh` or `az deployment group create`.
 
 ## Common pitfalls
 
+- **WSL DNS**: WSL hosts ship a resolver at `10.255.255.254` that the
+  default Docker bridge cannot reach. The compose file works around this
+  with `dns: [8.8.8.8, 1.1.1.1]` per service and `build.network: host` on
+  every build block. If you copy this compose to a non-WSL host you can
+  drop both, but they are harmless if left in place.
 - **Don't expose the terminal sidecar's ttyd in compose.** It still binds
   loopback inside the terminal container; the api → terminal hop in compose
   uses `terminal:7682` (exec_server, which honours `EXEC_HOST=0.0.0.0`).

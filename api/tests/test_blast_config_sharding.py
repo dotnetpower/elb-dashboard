@@ -1,0 +1,291 @@
+"""Unit tests for the auto-sharding logic in api.services.blast_config."""
+
+from __future__ import annotations
+
+import configparser
+import io
+
+import pytest
+from api.services.blast_config import generate_config
+
+
+def _parse(content: str) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser()
+    parser.read_file(io.StringIO(content))
+    return parser
+
+
+def _base_params() -> dict[str, object]:
+    return {
+        "region": "koreacentral",
+        "resource_group": "rg-elb",
+        "storage_account": "elbstg01",
+        "aks_cluster_name": "elb-cluster",
+        "machine_type": "Standard_E16s_v5",
+        "num_nodes": 5,
+        "program": "blastn",
+        "db": "https://elbstg01.blob.core.windows.net/blast-db/core_nt/core_nt",
+        "query_blob_url": "https://elbstg01.blob.core.windows.net/queries/q.fa",
+        "results_url": "https://elbstg01.blob.core.windows.net/results/job-1",
+        "job_id": "job-1",
+        # Sharding-eligibility metadata supplied by the route layer.
+        "db_name": "core_nt",
+        "db_sharded": True,
+        "db_total_bytes": 269 * 1024**3,
+    }
+
+
+def test_auto_sharding_is_off_by_default_for_result_equivalence() -> None:
+    cfg = _parse(generate_config(_base_params()))
+    assert not cfg.has_option("blast", "db-partitions")
+    assert not cfg.has_option("blast", "db-partition-prefix")
+    assert not cfg.has_option("cluster", "exp-use-local-ssd")
+
+
+def test_approximate_sharding_opt_in_injects_partitions_and_prefix() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    cfg = _parse(generate_config(params))
+    # 269 GB on E16 (128 GB) → memory floor 5; num_nodes=5 → target 5 → preset 5
+    assert cfg.get("blast", "db-partitions") == "5"
+    assert cfg.get("blast", "db-partition-prefix") == (
+        "https://elbstg01.blob.core.windows.net/blast-db/"
+        "5shards/core_nt_shard_"
+    )
+    # Sharding requires the local-SSD init script.
+    assert cfg.get("cluster", "exp-use-local-ssd") == "true"
+
+
+def test_approximate_sharding_uses_full_dbsize_when_available() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["db_total_letters"] = 29_999_612
+    cfg = _parse(generate_config(params))
+    assert "-dbsize 29999612" in cfg.get("blast", "options")
+
+
+def test_effective_search_space_overrides_dbsize_for_precise_single_query() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["db_total_letters"] = 29_999_612
+    params["db_effective_search_space"] = 2_254_169_736
+    cfg = _parse(generate_config(params))
+    options = cfg.get("blast", "options")
+    assert "-searchsp 2254169736" in options
+    assert "-dbsize" not in options
+
+
+def test_effective_search_space_must_be_positive_integer() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["db_effective_search_space"] = 0
+    with pytest.raises(ValueError, match="db_effective_search_space"):
+        generate_config(params)
+
+
+def test_precise_sharding_requires_effective_search_space() -> None:
+    params = _base_params()
+    params["sharding_mode"] = "precise"
+    params["query_count"] = 1
+    with pytest.raises(ValueError, match="db_effective_search_space"):
+        generate_config(params)
+
+
+def test_precise_sharding_injects_searchsp() -> None:
+    params = _base_params()
+    params["sharding_mode"] = "precise"
+    params["query_count"] = 1
+    params["db_effective_search_space"] = 2_254_169_736
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-partitions") == "5"
+    assert "-searchsp 2254169736" in cfg.get("blast", "options")
+
+
+def test_precise_multi_query_uniform_search_space_injects_searchsp() -> None:
+    params = _base_params()
+    params["sharding_mode"] = "precise"
+    params["query_count"] = 2
+    params["query_effective_search_spaces"] = [2_254_169_736, 2_254_169_736]
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-partitions") == "5"
+    assert "-searchsp 2254169736" in cfg.get("blast", "options")
+
+
+def test_precise_multi_query_mixed_search_spaces_rejected() -> None:
+    params = _base_params()
+    params["sharding_mode"] = "precise"
+    params["query_count"] = 2
+    params["query_effective_search_spaces"] = [2_254_169_736, 3_000_000_000]
+    with pytest.raises(ValueError, match="query-group"):
+        generate_config(params)
+
+
+def test_precise_multi_query_mapping_search_spaces_rejected() -> None:
+    params = _base_params()
+    params["sharding_mode"] = "precise"
+    params["query_count"] = 2
+    params["query_effective_search_spaces"] = {"q1": 2_254_169_736, "q2": 2_254_169_736}
+    with pytest.raises(ValueError, match="list ordered"):
+        generate_config(params)
+
+
+def test_sharded_merge_allows_xml_outfmt() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["outfmt"] = 5
+    cfg = _parse(generate_config(params))
+    assert "-outfmt 5" in cfg.get("blast", "options")
+
+
+def test_sharded_merge_allows_additional_outfmt_equals_xml() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["additional_options"] = "-outfmt=5"
+    cfg = _parse(generate_config(params))
+    assert "-outfmt=5" in cfg.get("blast", "options")
+
+
+def test_sharded_merge_rejects_unsupported_outfmt() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["outfmt"] = 7
+    with pytest.raises(ValueError, match="outfmt 5"):
+        generate_config(params)
+
+
+def test_sharded_merge_rejects_additional_outfmt_equals_unsupported() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["additional_options"] = "-outfmt=7"
+    with pytest.raises(ValueError, match="outfmt 5"):
+        generate_config(params)
+
+
+def test_sharded_merge_allows_tabular_std_outfmt() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["outfmt"] = "6 std qlen"
+    cfg = _parse(generate_config(params))
+    assert "-outfmt 6 std qlen" in cfg.get("blast", "options")
+
+
+def test_unsharded_submit_allows_non_tabular_outfmt() -> None:
+    params = _base_params()
+    params["outfmt"] = 5
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "options") == "-outfmt 5"
+
+
+def test_auto_sharding_disabled_when_caller_opts_out() -> None:
+    params = _base_params()
+    params["disable_sharding"] = True
+    cfg = _parse(generate_config(params))
+    assert not cfg.has_option("blast", "db-partitions")
+    assert not cfg.has_option("blast", "db-partition-prefix")
+    # exp-use-local-ssd should NOT be forced on by us when sharding is off.
+    # (It may still be on if the caller asked for warmup, but our base
+    # params don't request warmup.)
+    assert not cfg.has_option("cluster", "exp-use-local-ssd")
+
+
+def test_legacy_db_auto_partition_maps_to_approximate_sharding() -> None:
+    params = _base_params()
+    params["db_auto_partition"] = True
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-auto-partition") == "true"
+
+
+def test_db_auto_partition_rejects_explicit_off_mode() -> None:
+    params = _base_params()
+    params["db_auto_partition"] = True
+    params["sharding_mode"] = "off"
+    with pytest.raises(ValueError, match="sharding_mode=approximate"):
+        generate_config(params)
+
+
+def test_db_auto_partition_allowed_with_approximate_sharding_opt_in() -> None:
+    params = _base_params()
+    params["db_sharded"] = False
+    params["db_auto_partition"] = True
+    params["allow_approximate_sharding"] = True
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-auto-partition") == "true"
+
+
+def test_auto_sharding_skipped_when_db_not_sharded() -> None:
+    params = _base_params()
+    params["db_sharded"] = False
+    cfg = _parse(generate_config(params))
+    assert not cfg.has_option("blast", "db-partitions")
+    assert not cfg.has_option("blast", "db-partition-prefix")
+
+
+def test_auto_sharding_skipped_when_metadata_missing() -> None:
+    # Route was unable to resolve the DB metadata — degrade silently
+    # (don't crash the submit, just don't auto-shard).
+    params = _base_params()
+    params.pop("db_total_bytes")
+    cfg = _parse(generate_config(params))
+    assert not cfg.has_option("blast", "db-partitions")
+
+
+def test_explicit_db_partitions_overrides_auto_sharding() -> None:
+    # Power-user manually sets db_partitions → respect it, do NOT recompute.
+    params = _base_params()
+    params["db_partitions"] = 8
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-partitions") == "8"
+    # The user-provided value should NOT trigger our auto-prefix injection.
+    # If they want a custom prefix, they must set db_partition_prefix too.
+    assert not cfg.has_option("blast", "db-partition-prefix")
+
+
+def test_explicit_db_partitions_conflict_with_off_mode() -> None:
+    params = _base_params()
+    params["db_partitions"] = 8
+    params["sharding_mode"] = "off"
+    with pytest.raises(ValueError, match="conflicts"):
+        generate_config(params)
+
+
+def test_explicit_db_partition_prefix_overrides_auto_sharding() -> None:
+    params = _base_params()
+    params["db_partition_prefix"] = "https://example.com/custom_shard_"
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-partition-prefix") == "https://example.com/custom_shard_"
+    # Did NOT auto-inject db-partitions either (caller is in full control).
+    assert not cfg.has_option("blast", "db-partitions")
+
+
+def test_auto_sharding_picks_higher_n_when_more_nodes() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["num_nodes"] = 10
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-partitions") == "10"
+
+
+def test_approximate_sharding_rejects_more_shards_than_nodes() -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["num_nodes"] = 1  # below the memory floor of 5 for 269 GB on E16
+    with pytest.raises(ValueError, match="at least one node per shard"):
+        generate_config(params)
+
+
+@pytest.mark.parametrize(
+    "machine_type,num_nodes,expected_n",
+    [
+        ("Standard_E32s_v5", 5, "5"),  # 256 GB RAM → mem floor 3 → nodes wins
+        ("Standard_E64s_v5", 3, "3"),  # 512 GB RAM → mem floor 2 → nodes wins
+    ],
+)
+def test_auto_sharding_respects_node_ram_capacity(
+    machine_type: str, num_nodes: int, expected_n: str
+) -> None:
+    params = _base_params()
+    params["allow_approximate_sharding"] = True
+    params["machine_type"] = machine_type
+    params["num_nodes"] = num_nodes
+    cfg = _parse(generate_config(params))
+    assert cfg.get("blast", "db-partitions") == expected_n

@@ -73,8 +73,9 @@ var apiImage      = useBootstrapImage ? bootstrapImage : '${acrLoginServer}/elb-
 var frontendImage = useBootstrapImage ? bootstrapImage : '${acrLoginServer}/elb-frontend:${frontendImageTag}'
 var terminalImage = useBootstrapImage ? bootstrapImage : '${acrLoginServer}/elb-terminal:${terminalImageTag}'
 
-var tableEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.table.core.windows.net'
-var blobEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.blob.core.windows.net'
+var storageDnsSuffix = environment().suffixes.storage
+var tableEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.table.${storageDnsSuffix}'
+var blobEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.blob.${storageDnsSuffix}'
 
 resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
@@ -160,6 +161,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'FRONTEND_UPSTREAM', value: 'http://127.0.0.1:8081' }
             { name: 'TERMINAL_UPSTREAM', value: 'http://127.0.0.1:7681' }
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
+            // Display-only contract for /api/terminal/ticket. The actual
+            // browser caller comes from the validated MSAL token; the shell
+            // process itself runs as this fixed Unix account in the terminal
+            // sidecar.
+            { name: 'TERMINAL_SHELL_USER', value: 'azureuser' }
             { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
@@ -210,7 +216,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             'worker'
             '--loglevel=info'
             '-Q'
-            'default,azure,blast,storage'
+            'default,acr,azure,blast,storage'
             '--concurrency=2'
           ]
           resources: {

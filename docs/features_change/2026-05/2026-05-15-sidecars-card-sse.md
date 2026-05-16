@@ -65,9 +65,15 @@ the live card supersedes them.
 ### Backend (`api/`)
 * New `api/services/cgroup_reporter.py` — pure-function helpers + a
   daemon-thread loop that publishes `sidecar:metrics:<name>` every 5 s.
-* New `api/services/sidecar_metrics.py` — single `MGET` over the six
+* New `api/services/sidecar_metrics.py` — single `MGET` over the reporter
   keys, fills Redis's own slot from `INFO memory` + `INFO cpu` deltas,
-  computes `health` from staleness (`>10 s` = degraded, `>15 s` = down).
+  computes `health` from staleness (`>10 s` = degraded, `>15 s` = down),
+  and isolates malformed reporter payloads per sidecar instead of failing
+  the whole dashboard snapshot.
+* Hardened Redis outage behavior — if Redis cannot serve the metrics `MGET`,
+  the API now returns a stable all-down degraded snapshot with
+  `degraded_reason = "redis_unavailable"` instead of bubbling an exception
+  to the route-level empty fallback or SSE error frames.
 * `api/main.py` — startup hook spawns the reporter unless
   `SIDECAR_REPORTER_DISABLED=true` (used in unit tests).
 * `api/celery_app.py` — `worker_init` / `beat_init` Celery signals fire
@@ -79,8 +85,9 @@ the live card supersedes them.
     (`event: snapshot` every 5 s, `: heartbeat` every 25 s).
 * New tests:
   * `api/tests/test_cgroup_reporter.py` — 5 cases covering CPU% math.
-  * `api/tests/test_sidecar_metrics.py` — 5 cases covering the
-    staleness classifier.
+  * `api/tests/test_sidecar_metrics.py` — 10 cases covering the staleness
+    classifier, malformed JSON, non-object payloads, bad timestamps, Redis
+    self-info degradation, Redis outage all-down snapshots, and CPU deltas.
 
 ### terminal sidecar
 * `terminal/Dockerfile` — installs `redis==5.2.0` into `/opt/elb/venv`,
@@ -117,9 +124,17 @@ the live card supersedes them.
 ## Validation evidence
 
 ```
+$ cd /home/moonchoi/dev/elb-dashboard && uv run ruff check api/services/sidecar_metrics.py api/tests/test_sidecar_metrics.py
+All checks passed!
+
+$ cd /home/moonchoi/dev/elb-dashboard && uv run pytest -q api/tests/test_sidecar_metrics.py
+..........                                                               [100%]
+10 passed in 0.06s
+
 $ cd /home/moonchoi/dev/elb-dashboard && uv run pytest -q api/tests
-..................................................................       [100%]
-66 passed in 9.59s
+........................................................................ [ 94%]
+....                                                                     [100%]
+76 passed in 9.69s
 
 $ cd web && npx tsc --noEmit -p .
 exit=0
@@ -131,21 +146,17 @@ $ curl -s -X POST http://localhost:8080/api/monitor/sidecars/ticket
 {"ticket":"…","ttl_seconds":30}
 
 $ TICKET=…; timeout 12 curl -sN "http://localhost:8080/api/monitor/sidecars/events?ticket=$TICKET"
-event: error
-data: {"code":"snapshot_failed"}
-event: error
-data: {"code":"tick_failed"}
-event: error
-data: {"code":"tick_failed"}
-# (no Redis in local dev — error frames every 5 s as expected; with
-#  Redis these would be `event: snapshot` with the JSON shape)
+event: snapshot
+data: {"degraded":true,"degraded_reason":"redis_unavailable",...}
+# (no Redis in local dev — the card still receives a renderable snapshot;
+#  with Redis these frames contain reporter metrics plus Redis self-info)
 ```
 
 Browser smoke (local dev, no Redis sidecar):
 * Card renders on the dashboard between the 4-up grid and BLAST Jobs.
-* Header shows `● Polling · 30s` (SSE attempted, fell back) and
-  `0/0 healthy`; `Loading` status badge while the snapshot endpoint
-  returns its empty `degraded` payload.
+* Header shows `● Polling · 30s` until SSE connects and `0/6 healthy`
+  when Redis is unavailable; the snapshot remains renderable with
+  `degraded_reason = "redis_unavailable"`.
 * All six sidecars render as **Down** with no animation — exactly the
   intended "honest" state.
 

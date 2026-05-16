@@ -4,11 +4,13 @@ import { useMsal } from "@azure/msal-react";
 import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
+import { LatestJobChip } from "@/components/LatestJobChip";
 import { useTheme } from "@/hooks/useTheme";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { apiLoginRequest } from "@/auth/msal";
 import { subscribeAuthSessionIssues, type AuthSessionIssue } from "@/auth/sessionEvents";
 import { useClusterReadiness, useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
+import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 
 import "./Layout.css";
 
@@ -172,6 +174,8 @@ export function Layout({ children }: PropsWithChildren) {
 
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { showHelp, setShowHelp } = useKeyboardShortcuts();
+  const autoRefreshMs = useAutoRefreshInterval();
+  const autoRefreshLabel = autoRefreshMs >= 1000 ? `${Math.round(autoRefreshMs / 1000)}s` : `${autoRefreshMs}ms`;
   const { theme, toggle: toggleTheme } = useTheme();
   const cluster = useClusterReadiness();
   const terminalSidecar = useTerminalSidecarHealth();
@@ -265,8 +269,14 @@ export function Layout({ children }: PropsWithChildren) {
 
         <div className="layout__spacer" />
 
+        {/* Researcher-first surface — latest BLAST job at a glance */}
+        <LatestJobChip />
+
         {/* #27 Live indicator with tooltip */}
-        <div className="layout__live" title="Dashboard data refreshes automatically every 30 seconds">
+        <div
+          className="layout__live"
+          title={`Dashboard cards refresh every ${autoRefreshLabel} (configurable from the Dashboard header)`}
+        >
           <div className="layout__live-dot" />
           Live
         </div>

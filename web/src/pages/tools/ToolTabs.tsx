@@ -45,6 +45,7 @@ import {
   type PrimerExampleValues,
   type TaxonomyExampleValues,
 } from "@/data/labToolExamples";
+import { formatAksSkuOption, useAksSkus } from "@/hooks/useAksSkus";
 import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
 import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import {
@@ -62,6 +63,7 @@ export function CostEstimatorTab({ meta }: { meta: TabMeta }) {
   const [hours, setHours] = useState(2);
   const [pdSize, setPdSize] = useState(1000);
   const [dbSize, setDbSize] = useState(50);
+  const { skus: skuOptions } = useAksSkus();
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -105,25 +107,9 @@ export function CostEstimatorTab({ meta }: { meta: TabMeta }) {
             value={sku}
             onChange={(e) => setSku(e.target.value)}
           >
-            {/* SKUs MUST come from api/services/aks_skus.py::ALLOWED_SKUS
-                (mirror of sibling AZURE_HPC_MACHINES). Picking anything
-                outside that allow-list breaks BLAST submit. */}
-            {[
-              "Standard_D8s_v3",
-              "Standard_D16s_v3",
-              "Standard_E16s_v3",
-              "Standard_E32s_v3",
-              "Standard_E16s_v5",
-              "Standard_E32s_v5",
-              "Standard_E48s_v5",
-              "Standard_E64s_v5",
-              "Standard_E32bs_v5",
-              "Standard_E64bs_v5",
-              "Standard_L32s_v3",
-              "Standard_L64s_v3",
-            ].map((s) => (
-              <option key={s} value={s}>
-                {s}
+            {skuOptions.map((option) => (
+              <option key={option.name} value={option.name}>
+                {formatAksSkuOption(option)}
               </option>
             ))}
           </select>

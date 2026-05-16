@@ -5,6 +5,7 @@ import { Loader2, Hammer, CheckCircle2, AlertTriangle } from "lucide-react";
 import { monitoringApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
+import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 
 // Short display names for long image paths
 const SHORT_NAMES: Record<string, string> = {
@@ -35,6 +36,7 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
   );
   const [showConfirm, setShowConfirm] = useState(false);
   const [expandedError, setExpandedError] = useState<string | null>(null);
+  const idleRefetchInterval = useAutoRefreshInterval();
 
   const query = useQuery({
     queryKey: ["acr", subscriptionId, resourceGroup, registryName],
@@ -42,9 +44,11 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
     enabled,
     refetchInterval: (q) => {
       const data = q.state.data;
+      // Keep a fast 10s poll while a build is active so progress is visible.
       if (buildStatus === "building") return 10_000;
       if (data?.building_images && data.building_images.length > 0) return 10_000;
-      return 60_000;
+      // Otherwise honour the user's chosen dashboard refresh cadence.
+      return idleRefetchInterval;
     },
   });
 
@@ -255,43 +259,30 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
 
       {query.data && (
         <>
-          {/* #11: Grid layout for registry metadata */}
+          {/* Registry summary cells (v3 dashboard chrome) */}
           <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))",
-              gap: "var(--space-2)",
-              fontSize: 12,
-              marginBottom: "var(--space-3)",
-            }}
+            className="dv3-cell-grid dv3-cell-grid--3"
+            style={{ marginBottom: "var(--space-3)" }}
           >
-            <div>
-              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>
-                Login Server
-              </div>
-              <div style={{ fontSize: 11, wordBreak: "break-all" }}>
+            <div className="cell">
+              <span className="label">Login Server</span>
+              <div
+                className="value mono"
+                style={{ wordBreak: "break-all", fontSize: 12 }}
+              >
                 {query.data.login_server}
               </div>
             </div>
-            <div>
-              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>
-                SKU
-              </div>
-              <div>{query.data.sku ?? "?"}</div>
+            <div className="cell">
+              <span className="label">SKU</span>
+              <div className="value">{query.data.sku ?? "?"}</div>
             </div>
-            <div>
-              <div className="muted" style={{ fontSize: 10, textTransform: "uppercase" }}>
-                Images
-              </div>
-              {/* #15: Progress indicator */}
-              <div
-                style={{
-                  color:
-                    builtCount === totalCount ? "var(--success)" : "var(--text-primary)",
-                  fontWeight: 600,
-                }}
-              >
-                {builtCount}/{totalCount} built
+            <div
+              className={`cell${builtCount === totalCount ? " success" : " accent"}`}
+            >
+              <span className="label">Images built</span>
+              <div className="value mono">
+                {builtCount}/{totalCount}
               </div>
             </div>
           </div>
@@ -320,163 +311,117 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: Props) 
             </div>
           )}
 
-          {/* Image table */}
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
-                {/* #14: Shortened "Image" header */}
-                <th
+          {/* Image table (v3 grid look) */}
+          <div className="dv3-acr-table">
+            <div className="th">Image</div>
+            <div className="th" style={{ textAlign: "center" }}>
+              Version
+            </div>
+            <div className="th" style={{ textAlign: "right" }}>
+              Status
+            </div>
+            {expectedImages.map(([img, tag]) => {
+              const result = buildResults.find((r) => r.image === `${img}:${tag}`);
+              const actualTags = query.data?.actual_tags?.[img] ?? [];
+              const isBuilt = actualTags.includes(tag);
+              const buildDetail = (query.data?.build_details ?? []).find(
+                (d: { image: string }) => d.image === `${img}:${tag}`,
+              );
+              const isBuilding = buildStatus === "building" || Boolean(buildDetail);
+              const shortName = SHORT_NAMES[img] || img.split("/").pop() || img;
+              const isFailed = result?.status === "failed";
+              const isCore = CORE_IMAGES.has(img);
+              const acrStatus = buildDetail?.status as string | undefined;
+              const liveStatus = buildDetail?.status as string | undefined;
+              const statusLabel = (s: string | undefined) => {
+                if (!s) return "Building";
+                if (s === "Queued") return "Starting";
+                if (s === "Running") return "Building";
+                return s;
+              };
+              return (
+                <div
+                  key={img}
                   style={{
-                    textAlign: "left",
-                    padding: "4px 0",
-                    color: "var(--text-faint)",
-                    fontSize: 10,
-                    textTransform: "uppercase",
-                    fontWeight: 500,
+                    display: "contents",
+                    opacity: isCore ? 1 : 0.65,
                   }}
                 >
-                  Image
-                </th>
-                {/* #13: "Version" instead of "Expected tag" */}
-                <th
-                  style={{
-                    padding: "4px 0",
-                    color: "var(--text-faint)",
-                    fontSize: 10,
-                    textTransform: "uppercase",
-                    fontWeight: 500,
-                  }}
-                >
-                  Version
-                </th>
-                <th
-                  style={{
-                    textAlign: "right",
-                    padding: "4px 0",
-                    color: "var(--text-faint)",
-                    fontSize: 10,
-                    textTransform: "uppercase",
-                    fontWeight: 500,
-                  }}
-                >
-                  Status
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {expectedImages.map(([img, tag]) => {
-                const result = buildResults.find((r) => r.image === `${img}:${tag}`);
-                const actualTags = query.data?.actual_tags?.[img] ?? [];
-                const isBuilt = actualTags.includes(tag);
-                const buildDetail = (query.data?.build_details ?? []).find(
-                  (d: { image: string }) => d.image === `${img}:${tag}`,
-                );
-                const isBuilding = buildStatus === "building" || Boolean(buildDetail);
-                const shortName = SHORT_NAMES[img] || img.split("/").pop() || img;
-                const isFailed = result?.status === "failed";
-                const isCore = CORE_IMAGES.has(img);
-                const acrStatus = buildDetail?.status as string | undefined;
-
-                return (
-                  <tr
-                    key={img}
-                    style={{
-                      borderBottom: "1px solid var(--border-weak)",
-                      opacity: isCore ? 1 : 0.55,
-                    }}
-                  >
-                    {/* #14: Short name with full path as title */}
-                    <td style={{ padding: "6px 0" }} title={img}>
-                      <strong style={{ fontSize: 12 }}>{shortName}</strong>
-                      {!isCore && (
-                        <span className="muted" style={{ fontSize: 9, marginLeft: 4 }}>
-                          (optional)
-                        </span>
-                      )}
-                    </td>
-                    <td style={{ padding: "6px 0", textAlign: "center" }}>
-                      <code style={{ fontSize: 11 }}>{tag}</code>
-                    </td>
-                    <td style={{ padding: "6px 0", textAlign: "right" }}>
-                      {/* #1: Multi-state badges — Built takes priority over stale build results */}
-                      {(() => {
-                        // Server-side build status (most accurate)
-                        const liveStatus = buildDetail?.status as string | undefined;
-                        // Map ACR status → user-friendly label
-                        const statusLabel = (s: string | undefined) => {
-                          if (!s) return "Building";
-                          if (s === "Queued") return "Starting";
-                          if (s === "Running") return "Building";
-                          return s;
-                        };
-                        return isBuilt ? (
-                          <span className="gt gt-g" style={{ fontSize: 9 }}>
-                            Built
-                          </span>
-                        ) : (isBuilding || liveStatus) && liveStatus !== "Failed" ? (
-                          <span
-                            style={{
-                              color:
-                                liveStatus === "Running" || liveStatus === "Queued"
-                                  ? "var(--accent)"
-                                  : "var(--text-muted)",
-                              fontSize: 10,
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: 3,
-                            }}
-                          >
-                            <Loader2 size={10} className="spin" />{" "}
-                            {statusLabel(liveStatus || acrStatus || result?.acr_status)}
-                          </span>
-                        ) : isFailed ? (
-                          <button
-                            onClick={() =>
-                              setExpandedError(expandedError === img ? null : img)
-                            }
-                            style={{
-                              background: "none",
-                              border: "none",
-                              cursor: "pointer",
-                              padding: 0,
-                            }}
-                          >
-                            <span className="gt gt-r" style={{ fontSize: 9 }}>
-                              Failed ▾
-                            </span>
-                          </button>
-                        ) : singleBuilding === img ? (
-                          <span
-                            style={{
-                              fontSize: 10,
-                              color: "var(--accent)",
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: 3,
-                            }}
-                          >
-                            <Loader2 size={10} className="spin" /> Starting
-                          </span>
-                        ) : (
-                          <button
-                            className="glass-button glass-button--primary"
-                            style={{ fontSize: 9, padding: "2px 8px", gap: 3 }}
-                            onClick={() => handleBuildSingle(img)}
-                            disabled={
-                              buildStatus === "building" || singleBuilding !== null
-                            }
-                            title={`Build ${shortName}`}
-                          >
-                            Build
-                          </button>
-                        );
-                      })()}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                  <div className="td repo" title={img}>
+                    <strong>{shortName}</strong>
+                    {!isCore && (
+                      <span
+                        className="muted"
+                        style={{ fontSize: 11, marginLeft: 4 }}
+                      >
+                        (optional)
+                      </span>
+                    )}
+                  </div>
+                  <div className="td tag">{tag}</div>
+                  <div className="td action">
+                    {isBuilt ? (
+                      <span className="dv3-pill dv3-pill-success">Built</span>
+                    ) : (isBuilding || liveStatus) && liveStatus !== "Failed" ? (
+                      <span
+                        style={{
+                          color:
+                            liveStatus === "Running" || liveStatus === "Queued"
+                              ? "var(--accent)"
+                              : "var(--text-muted)",
+                          fontSize: 12,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        <Loader2 size={11} className="spin" />
+                        {statusLabel(liveStatus || acrStatus || result?.acr_status)}
+                      </span>
+                    ) : isFailed ? (
+                      <button
+                        onClick={() =>
+                          setExpandedError(expandedError === img ? null : img)
+                        }
+                        style={{
+                          background: "none",
+                          border: "none",
+                          cursor: "pointer",
+                          padding: 0,
+                        }}
+                      >
+                        <span className="dv3-pill dv3-pill-danger">Failed ▾</span>
+                      </button>
+                    ) : singleBuilding === img ? (
+                      <span
+                        style={{
+                          fontSize: 12,
+                          color: "var(--accent)",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        <Loader2 size={11} className="spin" /> Starting
+                      </span>
+                    ) : (
+                      <button
+                        className="glass-button glass-button--primary"
+                        style={{ fontSize: 11, padding: "3px 9px", gap: 4 }}
+                        onClick={() => handleBuildSingle(img)}
+                        disabled={
+                          buildStatus === "building" || singleBuilding !== null
+                        }
+                        title={`Build ${shortName}`}
+                      >
+                        Build
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
 
           {/* #17: Expandable error details */}
           {expandedError &&

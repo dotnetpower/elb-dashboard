@@ -104,10 +104,11 @@ resource roleTable 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 // `azcopy` and the ADLS Gen2 SDK use for hierarchical-namespace operations.
 // File endpoint removed: no SMB mounts, so no file private endpoint needed.
 // ---------------------------------------------------------------------------
+var storageDnsSuffix = environment().suffixes.storage
 var endpointGroups = [
-  { suffix: 'blob',  zone: 'privatelink.blob.core.windows.net'  }
-  { suffix: 'dfs',   zone: 'privatelink.dfs.core.windows.net'   }
-  { suffix: 'table', zone: 'privatelink.table.core.windows.net' }
+  { suffix: 'blob',  zone: 'privatelink.blob.${storageDnsSuffix}'  }
+  { suffix: 'dfs',   zone: 'privatelink.dfs.${storageDnsSuffix}'   }
+  { suffix: 'table', zone: 'privatelink.table.${storageDnsSuffix}' }
 ]
 
 resource zones 'Microsoft.Network/privateDnsZones@2024-06-01' = [for g in endpointGroups: if (!allowPublicAccessForBootstrap) {

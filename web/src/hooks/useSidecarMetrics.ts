@@ -43,12 +43,31 @@ export interface SidecarsSnapshot {
   ts: number | null;
   revision: string;
   sidecars: Record<string, SidecarMetric>;
+  /**
+   * Counts of real events that occurred since the previous snapshot, drained
+   * atomically by the api sidecar. The SidecarsCard fires one animated
+   * particle along the matching topology row for every count. Missing on
+   * older backends — treat as zeros.
+   *
+   *   row1  Browser → frontend → api      every non-health request
+   *   row2  api → redis → worker          every Celery task enqueued by api
+   *   row3  beat → redis                   every scheduled task
+   *   row4  api ↔ terminal                 every /api/terminal/* request
+   */
+  events?: {
+    row1?: number;
+    row2?: number;
+    row3?: number;
+    row4?: number;
+  };
   degraded?: boolean;
   degraded_reason?: string;
 }
 
 const QUERY_KEY = ["sidecars-snapshot"] as const;
 const POLL_INTERVAL_MS = 30_000;
+const LIVE_STALE_MS = 15_000;
+const POLLING_STALE_MS = POLL_INTERVAL_MS + 15_000;
 const SSE_RETRY_DELAYS_MS = [5_000, 15_000, 45_000];
 
 async function fetchSnapshot(): Promise<SidecarsSnapshot> {
@@ -71,13 +90,21 @@ export interface UseSidecarMetricsResult {
   /** "live" = SSE delivering, "polling" = SSE failed and we're falling back. */
   source: "live" | "polling" | "connecting";
   lastUpdated: Date | null;
+  isStale: boolean;
+  staleAgeMs: number | null;
 }
 
 export function useSidecarMetrics(): UseSidecarMetricsResult {
   const queryClient = useQueryClient();
   const [source, setSource] = useState<"live" | "polling" | "connecting">("connecting");
+  const [now, setNow] = useState(() => Date.now());
   const sourceRef = useRef(source);
   sourceRef.current = source;
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Snapshot fetcher — initial load + polling fallback when SSE is down.
   const query = useQuery<SidecarsSnapshot>({
@@ -147,11 +174,17 @@ export function useSidecarMetrics(): UseSidecarMetricsResult {
     };
   }, [queryClient]);
 
+  const staleAfterMs = source === "live" ? LIVE_STALE_MS : POLLING_STALE_MS;
+  const staleAgeMs = query.dataUpdatedAt ? now - query.dataUpdatedAt : null;
+  const isStale = Boolean(query.data && staleAgeMs != null && staleAgeMs > staleAfterMs);
+
   return {
     data: query.data,
     isLoading: query.isLoading,
-    isError: query.isError && source !== "live",
+    isError: (query.isError && source !== "live") || isStale,
     source,
     lastUpdated: query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null,
+    isStale,
+    staleAgeMs,
   };
 }

@@ -34,14 +34,72 @@
         "api.celery_app",
         "worker",
         "-l",
-        "info"
+        "info",
+        "-Q",
+        "default,azure,blast,storage",
+        "--concurrency=2",
+        "--pool=solo"
       ],
       "cwd": "${workspaceFolder}",
       "env": {
         "PYTHONPATH": "${workspaceFolder}",
         "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
         "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
+        "OPS_REDIS_URL": "redis://127.0.0.1:6379/2",
         "LOG_LEVEL": "DEBUG"
+      },
+      "justMyCode": false,
+      "console": "integratedTerminal",
+      "preLaunchTask": "redis: ensure"
+    },
+    {
+      "name": "Beat: Celery Beat",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "celery",
+      "args": [
+        "-A",
+        "api.celery_app",
+        "beat",
+        "-l",
+        "info",
+        "--schedule=/tmp/elb-celerybeat-schedule",
+        "--pidfile=/tmp/elb-celerybeat.pid"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
+        "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
+        "OPS_REDIS_URL": "redis://127.0.0.1:6379/2",
+        "LOG_LEVEL": "DEBUG"
+      },
+      "justMyCode": false,
+      "console": "integratedTerminal",
+      "preLaunchTask": "redis: ensure"
+    },
+    {
+      "name": "Pytest: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q", "${file}"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Pytest: All (api/tests)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q", "api/tests"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
       },
       "justMyCode": false,
       "console": "integratedTerminal"
@@ -51,18 +109,41 @@
       "type": "chrome",
       "request": "launch",
       "url": "http://localhost:8090",
-      "webRoot": "${workspaceFolder}/web/src",
+      "webRoot": "${workspaceFolder}/web",
+      "sourceMapPathOverrides": {
+        "/src/*": "${workspaceFolder}/web/src/*",
+        "webpack:///src/*": "${workspaceFolder}/web/src/*"
+      },
       "preLaunchTask": "web: dev"
     }
   ],
   "compounds": [
     {
-      "name": "Full Stack",
+      "name": "Full Stack (api + web)",
       "configurations": ["API: FastAPI (uvicorn)", "Web: Vite Dev"],
       "stopAll": true,
-      "presentation": {
-        "order": 1
-      }
+      "presentation": { "order": 1 }
+    },
+    {
+      "name": "Backend (api + worker + beat)",
+      "configurations": [
+        "API: FastAPI (uvicorn)",
+        "Worker: Celery",
+        "Beat: Celery Beat"
+      ],
+      "stopAll": true,
+      "presentation": { "order": 2 }
+    },
+    {
+      "name": "Full Stack + Worker + Beat",
+      "configurations": [
+        "API: FastAPI (uvicorn)",
+        "Worker: Celery",
+        "Beat: Celery Beat",
+        "Web: Vite Dev"
+      ],
+      "stopAll": true,
+      "presentation": { "order": 3 }
     }
   ]
 }

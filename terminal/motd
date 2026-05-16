@@ -1,16 +1,9 @@
-============================================================
- ElasticBLAST on Azure — Browser Terminal Sidecar
-============================================================
- Identity:    Container App's user-assigned managed identity
-              (already logged in via az login --identity)
- Toolchain:   azure-cli, kubectl, azcopy, python3.11, tmux,
-              elastic-blast (pre-installed venv at /opt/elb/venv)
- Persistent:  None. /home/azureuser is ephemeral; az login uses MI on
-              every new session, and user files stage to workload Storage
-              via azcopy.
+██           ElasticBlast CLI  v0.1
+    ██         Signed in with Azure  /session
+      ██       Guard: protected shell  /help
+    ██         Trace: browser >>> api >>> ttyd >>> shell
+  ██     ▄▄▄▄▄
 
- Quick start:
-     az account show                   # confirm identity
-     elastic-blast --help              # CLI help
-     kubectl get nodes                 # if AKS is provisioned
-============================================================
+  Audit: every command in this session is recorded to ~/.elb-history/commands.<pid>.log
+         (by using this terminal you consent to this logging)
+

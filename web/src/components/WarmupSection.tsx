@@ -71,17 +71,49 @@ export function WarmupSection({
   const [startError, setStartError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
-  // Query downloaded databases from storage (to know which are available for warmup)
+  // Query downloaded databases from storage (to know which are available for warmup).
+  // Passing cluster topology asks the backend to attach a `warmup_plan` to each
+  // DB row — Phase 1 of the warmup pipeline. Cache key includes topology so
+  // this call is *not* deduped with the storage-card listing (which has no
+  // plan), matching the cluster-card listing's cache key shape.
   const downloadedQuery = useQuery({
-    queryKey: ["blast-databases-warmup", subscriptionId, storageAccount, storageResourceGroup],
+    queryKey: [
+      "blast-databases-warmup",
+      subscriptionId,
+      storageAccount,
+      storageResourceGroup,
+      nodeCount ?? 0,
+      nodeSku ?? "",
+    ],
     queryFn: () =>
-      blastApi.listDatabases(subscriptionId, storageAccount!, storageResourceGroup || resourceGroup),
+      blastApi.listDatabases(
+        subscriptionId,
+        storageAccount!,
+        storageResourceGroup || resourceGroup,
+        nodeCount && nodeCount > 0 && nodeSku
+          ? { numNodes: nodeCount, machineType: nodeSku }
+          : undefined,
+      ),
     enabled: Boolean(subscriptionId && storageAccount),
     staleTime: 120_000,
   });
   const downloadedNames = new Set(
     (downloadedQuery.data?.databases ?? []).map((d: { name: string }) => d.name),
   );
+  // Index plans by db name for O(1) lookup in the select / button.
+  const planByName = new Map(
+    (downloadedQuery.data?.databases ?? [])
+      .filter((d) => d.warmup_plan != null)
+      .map((d) => [d.name, d.warmup_plan!] as const),
+  );
+  const selectedPlan = selectedDb ? planByName.get(selectedDb) : undefined;
+  // Block Warmup if the planner says it cannot fit. Degenerate `no_db_size` is
+  // not actionable here (size missing → planner can't decide), so we let it
+  // through and rely on the orchestrator's own checks.
+  const selectedInfeasible =
+    selectedPlan != null &&
+    selectedPlan.feasible === false &&
+    selectedPlan.status !== "no_db_size";
 
   // Poll warmup orchestrator if one is active
   const orchQuery = useQuery({
@@ -126,6 +158,16 @@ export function WarmupSection({
 
   const handleStartWarmup = async () => {
     if (!selectedDb || !storageAccount) return;
+    // Defence in depth — the button is disabled when selectedInfeasible is
+    // true, but keyboard activation / future programmatic calls should also
+    // refuse. Showing the planner verdict in startError gives the user the
+    // same fix recommendations they would see in the inline advisory.
+    if (selectedInfeasible && selectedPlan) {
+      setStartError(
+        `Warmup blocked by feasibility planner: ${selectedPlan.message}`,
+      );
+      return;
+    }
     setStartError(null);
     setStarting(true);
     try {
@@ -340,16 +382,25 @@ export function WarmupSection({
               const warmDb = warmupDbs.find((d) => d.name === c.value);
               const isReady = warmDb?.status === "Ready";
               const isLoading = warmDb?.status === "Loading";
+              const plan = planByName.get(c.value);
+              const planBlocks =
+                plan != null &&
+                plan.feasible === false &&
+                plan.status !== "no_db_size";
               return (
                 <option
                   key={c.value}
                   value={c.value}
-                  disabled={!downloaded || isReady || isLoading}
+                  disabled={!downloaded || isReady || isLoading || planBlocks}
+                  title={planBlocks ? plan!.message : undefined}
                 >
                   {c.label} ({c.size})
                   {!downloaded ? " — not downloaded" : ""}
                   {isReady ? " — ready" : ""}
                   {isLoading ? " — loading..." : ""}
+                  {planBlocks
+                    ? ` — too large for current cluster (${plan!.status === "node_sku_too_small" ? "upgrade SKU" : "add nodes or upgrade SKU"})`
+                    : ""}
                 </option>
               );
             })}
@@ -357,7 +408,12 @@ export function WarmupSection({
           <button
             className="btn btn--primary btn--sm"
             onClick={handleStartWarmup}
-            disabled={!selectedDb || starting}
+            disabled={!selectedDb || starting || selectedInfeasible}
+            title={
+              selectedInfeasible
+                ? `Warmup not feasible: ${selectedPlan!.message}`
+                : undefined
+            }
             style={{ fontSize: 11, whiteSpace: "nowrap" }}
           >
             {starting ? (
@@ -367,6 +423,53 @@ export function WarmupSection({
             )}{" "}
             Warmup
           </button>
+        </div>
+      )}
+
+      {/* Phase 1 — surface the planner verdict for the currently selected
+          DB. Hidden when the plan is missing (no cluster topology yet) or
+          when the plan is silent (`ok`). For `ok_unknown_sku` we render an
+          amber notice; otherwise red with recommendations. */}
+      {selectedPlan && selectedPlan.status !== "ok" && (
+        <div
+          role={selectedInfeasible ? "alert" : "note"}
+          style={{
+            marginTop: 8,
+            padding: "8px 10px",
+            borderRadius: 6,
+            fontSize: 11,
+            background: selectedInfeasible
+              ? "rgba(224, 123, 138, 0.10)"
+              : "rgba(240, 198, 116, 0.10)",
+            border: `1px solid ${
+              selectedInfeasible
+                ? "rgba(224, 123, 138, 0.35)"
+                : "rgba(240, 198, 116, 0.35)"
+            }`,
+            color: "var(--text-primary)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>
+            {selectedInfeasible ? "Warmup blocked" : "Warmup advisory"}
+          </div>
+          <div className="muted">{selectedPlan.message}</div>
+          {selectedPlan.recommendations.length > 0 && (
+            <ul
+              style={{
+                margin: "2px 0 0 0",
+                paddingLeft: 16,
+                lineHeight: 1.5,
+                color: "var(--text-muted)",
+              }}
+            >
+              {selectedPlan.recommendations.map((rec, i) => (
+                <li key={i}>{rec}</li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

@@ -1,24 +1,26 @@
-"""Aggregator: read sidecar:metrics:* from Redis db 2 and add health flags.
+"""Aggregate control-plane sidecar metrics from Redis db 2.
 
-Sidecars are expected to publish snapshots to Redis db 2 every
-``REPORT_INTERVAL`` (default 5s). This module:
-  * fans out a single ``MGET`` to retrieve all of them in one round-trip,
-  * pulls Redis's own CPU/MEM via ``INFO`` (Redis itself does not run a
-    cgroup reporter — saves us a sidecar shell change),
-  * derives a coarse health enum (ok / degraded / down) from staleness +
-    presence,
-  * returns a stable JSON shape that both the snapshot endpoint
-    (``GET /api/monitor/sidecars``) and the SSE stream
-    (``GET /api/monitor/sidecars/events``) consume.
+Reporter sidecars publish ``sidecar:metrics:<name>`` JSON snapshots every few
+seconds. This service turns those raw entries into the stable payload consumed
+by ``GET /api/monitor/sidecars`` and the SSE stream.
+
+Design goals:
+  * one Redis ``MGET`` for reporter sidecars,
+  * Redis self-metrics from ``INFO`` without a separate reporter,
+  * malformed or stale entries isolated to that sidecar,
+  * Redis outages represented as an honest all-down snapshot, not a 500.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
-from typing import Any, Optional
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 import redis
 
@@ -26,37 +28,124 @@ LOGGER = logging.getLogger(__name__)
 
 KEY_PREFIX = "sidecar:metrics:"
 KNOWN_SIDECARS = ("frontend", "api", "worker", "beat", "terminal")
-DEFAULT_STALE_AFTER_SEC = 15.0  # 3× the 5s reporter interval.
+ALL_SIDECARS = (*KNOWN_SIDECARS, "redis")
+DEFAULT_STALE_AFTER_SEC = 15.0  # 3x the 5s reporter interval.
 DEFAULT_DEGRADED_AFTER_SEC = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class HealthThresholds:
+    degraded_after_sec: float = DEFAULT_DEGRADED_AFTER_SEC
+    stale_after_sec: float = DEFAULT_STALE_AFTER_SEC
+
+    def classify_ts(self, now: float, ts: float | None) -> str:
+        if ts is None or ts <= 0:
+            return "down"
+        age = max(0.0, now - ts)
+        if age > self.stale_after_sec:
+            return "down"
+        if age > self.degraded_after_sec:
+            return "degraded"
+        return "ok"
+
+
+DEFAULT_THRESHOLDS = HealthThresholds()
+
+
+@dataclass(slots=True)
+class RedisCpuSampler:
+    previous_ts: float | None = None
+    previous_cpu_total: float | None = None
+
+    def percent(self, now: float, cpu_total: float) -> float:
+        if self.previous_ts is None or self.previous_cpu_total is None:
+            self.previous_ts = now
+            self.previous_cpu_total = cpu_total
+            return 0.0
+
+        dt = max(1e-3, now - self.previous_ts)
+        cpu_pct = round(max(0.0, cpu_total - self.previous_cpu_total) / dt * 100.0, 1)
+        self.previous_ts = now
+        self.previous_cpu_total = cpu_total
+        return cpu_pct
+
+
+_REDIS_CPU_SAMPLER = RedisCpuSampler()
 
 
 def _redis_url() -> str:
     return os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
 
 
-def _classify(now: float, payload: Optional[dict]) -> str:
+def _ts_from_payload(payload: Mapping[str, Any]) -> float | None:
+    raw = payload.get("ts")
+    try:
+        ts = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return ts if math.isfinite(ts) else None
+
+
+def _classify(
+    now: float,
+    payload: Mapping[str, Any] | None,
+    thresholds: HealthThresholds = DEFAULT_THRESHOLDS,
+) -> str:
     if payload is None:
         return "down"
-    age = now - float(payload.get("ts", 0))
-    if age > DEFAULT_STALE_AFTER_SEC:
-        return "down"
-    if age > DEFAULT_DEGRADED_AFTER_SEC:
-        return "degraded"
-    return "ok"
+    return thresholds.classify_ts(now, _ts_from_payload(payload))
 
 
-def _redis_self_snapshot(client: redis.Redis) -> dict[str, Any]:
-    """Build a redis-sidecar entry directly from INFO (no reporter needed).
+def _down_entry(name: str, reason: str, error: str | None = None) -> dict[str, Any]:
+    entry: dict[str, Any] = {"name": name, "health": "down", "ts": None, "_error": reason}
+    if error:
+        entry["_detail"] = error[:120]
+    return entry
 
-    Notes:
-      * ``used_memory`` is the in-process working set; that's what ops
-        actually care about for the broker.
-      * Redis does not expose CPU% as a ratio, only counters (``used_cpu_sys``,
-        ``used_cpu_user``); compute a delta against the previous call so
-        the dashboard sees a meaningful number. We cache the previous
-        sample on the function attribute so the first call returns 0.0
-        and subsequent calls return real percentages.
-    """
+
+def _decode_reporter_entry(name: str, blob: object, now: float) -> dict[str, Any]:
+    if blob is None:
+        return _down_entry(name, "missing")
+    try:
+        decoded = json.loads(blob)
+    except (TypeError, ValueError):
+        return _down_entry(name, "bad_json")
+    if not isinstance(decoded, dict):
+        return _down_entry(name, "bad_payload")
+
+    entry = dict(decoded)
+    entry["name"] = name
+    entry["health"] = _classify(now, entry)
+    if entry["health"] == "down" and _ts_from_payload(entry) is None:
+        entry.setdefault("_error", "bad_ts")
+    return entry
+
+
+def _reporter_keys() -> list[str]:
+    return [f"{KEY_PREFIX}{name}" for name in KNOWN_SIDECARS]
+
+
+def _all_down_snapshot(now: float, reason: str, error: str | None = None) -> dict[str, Any]:
+    return {
+        "ts": now,
+        "revision": os.environ.get("CONTAINER_APP_REVISION", "local"),
+        "sidecars": {name: _down_entry(name, reason, error) for name in ALL_SIDECARS},
+        "events": {"row1": 0, "row2": 0, "row3": 0, "row4": 0},
+        "degraded": True,
+        "degraded_reason": reason,
+    }
+
+
+def _mget_reporters(client: redis.Redis) -> Sequence[object]:
+    raw = client.mget(_reporter_keys())
+    return raw if raw is not None else ()
+
+
+def _redis_self_snapshot(
+    client: redis.Redis,
+    now: float,
+    sampler: RedisCpuSampler = _REDIS_CPU_SAMPLER,
+) -> dict[str, Any]:
     try:
         info_mem = client.info("memory")
         info_cpu = client.info("cpu")
@@ -65,29 +154,25 @@ def _redis_self_snapshot(client: redis.Redis) -> dict[str, Any]:
         LOGGER.warning("redis self-info failed: %s", exc)
         return {
             "name": "redis",
-            "ts": time.time(),
+            "health": "degraded",
+            "ts": now,
             "cpu_pct": 0.0,
             "mem_bytes": 0,
             "mem_max_bytes": None,
             "mem_pct": None,
-            "_error": str(exc)[:120],
+            "_error": "redis_info_failed",
+            "_detail": str(exc)[:120],
         }
 
-    now = time.time()
-    cpu_total = float(info_cpu.get("used_cpu_sys", 0)) + float(info_cpu.get("used_cpu_user", 0))
-
-    prev = getattr(_redis_self_snapshot, "_prev", None)
-    if prev is not None:
-        dt = max(1e-3, now - prev["ts"])
-        cpu_pct = round(max(0.0, cpu_total - prev["cpu_total"]) / dt * 100.0, 1)
-    else:
-        cpu_pct = 0.0
-    _redis_self_snapshot._prev = {"ts": now, "cpu_total": cpu_total}  # type: ignore[attr-defined]
+    cpu_total = float(info_cpu.get("used_cpu_sys", 0)) + float(
+        info_cpu.get("used_cpu_user", 0)
+    )
 
     return {
         "name": "redis",
         "ts": now,
-        "cpu_pct": cpu_pct,
+        "health": "ok",
+        "cpu_pct": sampler.percent(now, cpu_total),
         "mem_bytes": int(info_mem.get("used_memory", 0)),
         "mem_max_bytes": int(info_mem.get("maxmemory", 0)) or None,
         "mem_pct": None,
@@ -95,52 +180,57 @@ def _redis_self_snapshot(client: redis.Redis) -> dict[str, Any]:
     }
 
 
-def collect_snapshot(redis_url: Optional[str] = None) -> dict[str, Any]:
+def collect_snapshot(
+    redis_url: str | None = None,
+    client: redis.Redis | None = None,
+    *,
+    drain_events: bool = True,
+) -> dict[str, Any]:
     """Return the unified payload consumed by the SPA card.
 
-    Shape::
+    Missing, malformed, or stale reporter entries surface as per-sidecar
+    ``health = "down"``. A Redis connection failure returns an all-down
+    degraded snapshot so the dashboard remains honest and renderable.
 
-        {
-          "ts": 1715745600.123,
-          "revision": "ca-elb-control--r0042",
-          "sidecars": {
-             "frontend": {"name": "frontend", "health": "ok",
-                          "cpu_pct": 1.2, "mem_bytes": 18874368, ...},
-             "api":      { ... },
-             ...
-             "redis":    { ... },
-          }
-        }
-
-    Reads are best-effort: a missing or malformed entry surfaces as
-    ``health = "down"`` so the UI can render an explicit failure rather
-    than a blank tile.
+    ``drain_events`` controls whether the UI animation event counters are
+    atomically read+reset by this call. The SSE stream is the canonical
+    drain (one consumer, every 5 s); HTTP poll callers (initial mount and
+    polling fallback) must pass ``drain_events=False`` so they don't race
+    with SSE for the same hash and steal events from the live stream.
     """
-    client = redis.Redis.from_url(redis_url or _redis_url(), socket_timeout=1.5)
+
     now = time.time()
+    redis_client = client or redis.Redis.from_url(redis_url or _redis_url(), socket_timeout=1.5)
 
-    keys = [f"{KEY_PREFIX}{n}" for n in KNOWN_SIDECARS]
-    raw = client.mget(keys)
+    try:
+        raw_entries = list(_mget_reporters(redis_client))
+    except redis.RedisError as exc:
+        LOGGER.warning("sidecar metrics mget failed: %s", exc)
+        return _all_down_snapshot(now, "redis_unavailable", str(exc))
+
     sidecars: dict[str, dict[str, Any]] = {}
-    for name, blob in zip(KNOWN_SIDECARS, raw):
-        if blob is None:
-            sidecars[name] = {"name": name, "health": "down", "ts": None}
-            continue
-        try:
-            payload = json.loads(blob)
-        except (TypeError, ValueError):
-            sidecars[name] = {"name": name, "health": "down", "ts": None, "_error": "bad_json"}
-            continue
-        payload["health"] = _classify(now, payload)
-        sidecars[name] = payload
+    for index, name in enumerate(KNOWN_SIDECARS):
+        blob = raw_entries[index] if index < len(raw_entries) else None
+        sidecars[name] = _decode_reporter_entry(name, blob, now)
 
-    # Redis itself — no reporter, computed from INFO.
-    redis_entry = _redis_self_snapshot(client)
-    redis_entry["health"] = _classify(now, redis_entry)
-    sidecars["redis"] = redis_entry
+    sidecars["redis"] = _redis_self_snapshot(redis_client, now)
+
+    # Drain UI animation events — see api.services.event_emitter. Failure
+    # returns a zero-filled dict so the SPA can render a stable shape.
+    # Non-draining callers (HTTP poll) get all-zero events without ever
+    # touching Redis so they cannot steal a tick from the SSE consumer.
+    if drain_events:
+        from api.services.event_emitter import drain as _drain_events
+
+        events = _drain_events(redis_client)
+    else:
+        from api.services.event_emitter import ROW_FIELDS as _ROW_FIELDS
+
+        events = {field: 0 for field in _ROW_FIELDS}
 
     return {
         "ts": now,
         "revision": os.environ.get("CONTAINER_APP_REVISION", "local"),
         "sidecars": sidecars,
+        "events": events,
     }

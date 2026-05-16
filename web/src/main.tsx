@@ -8,7 +8,15 @@ import { BrowserRouter } from "react-router-dom";
 import { msalInstance } from "@/auth/msal";
 import { App } from "@/App";
 import { ToastProvider } from "@/components/Toast";
+import { AutoRefreshProvider } from "@/hooks/useAutoRefresh";
 import "@/theme/glass.css";
+// JetBrains Mono — used by the browser terminal (xterm.js fontFamily).
+// Loading the four common variants here makes them available everywhere
+// in the SPA (xterm has its own font cache; importing once is enough).
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/700.css";
+import "@fontsource/jetbrains-mono/400-italic.css";
+import "@fontsource/jetbrains-mono/700-italic.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -68,11 +76,13 @@ async function bootstrap() {
     <StrictMode>
       <MsalProvider instance={msalInstance}>
         <QueryClientProvider client={queryClient}>
-          <BrowserRouter>
-            <ToastProvider>
-              <App />
-            </ToastProvider>
-          </BrowserRouter>
+          <AutoRefreshProvider>
+            <BrowserRouter>
+              <ToastProvider>
+                <App />
+              </ToastProvider>
+            </BrowserRouter>
+          </AutoRefreshProvider>
         </QueryClientProvider>
       </MsalProvider>
     </StrictMode>,

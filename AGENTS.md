@@ -15,9 +15,13 @@
 3. **Local bring-up**:
    ```bash
    uv sync --all-groups          # creates .venv on Python 3.12
-   uv run pytest -q api/tests    # 56 passing
-   uv run uvicorn api.main:app --reload --host 127.0.0.1 --port 8080
+   uv run pytest -q api/tests    # 100 passing
+   scripts/dev/local-run.sh api  # writes .logs/local/latest/api.log
    ```
+   When starting local servers directly from a terminal, use
+   `scripts/dev/local-run.sh <api|worker|beat|web|redis|smoke|compose-full|compose-local>`
+   instead of raw `uvicorn`, `celery`, `npm run dev`, or `docker compose` so
+   `.logs/local/latest/*.log` is always created for warning/error review.
 4. **Never** `pip install`, `func start`, or write a `requirements.txt`. See `.github/copilot-instructions.md` §11.
 
 ---
@@ -151,8 +155,13 @@ where the failure was found, but knowing them up front saves a lot of time.
 7. **Order in `api/main.py`:** any new `/api/*` router goes **above** the
    `frontend_proxy.router` include — otherwise the catch-all swallows your
    route and serves index.html.
-8. **Storage `publicNetworkAccess` is `Disabled` forever.** Do not add a
-   "5-minute toggle" or `bypass: AzureServices` workaround — see
+8. **Storage `publicNetworkAccess` is `Disabled` in production.** Do not add
+   a production code path, dashboard button, or environment toggle that
+   flips it on. The only sanctioned exception is the manual local-debug
+   helper [scripts/dev/storage-public-access.sh](./scripts/dev/storage-public-access.sh)
+   (`on` opens an IP-allowlisted window for the caller, `off` restores).
+   Do not bypass the script with `--default-action Allow`, `bypass:
+   AzureServices`, or a wider IP range — see
    [.github/copilot-instructions.md §9](./.github/copilot-instructions.md).
 9. **Never reach for Azure Run Command.** `ManagedClusters.begin_run_command`
    and `VirtualMachines.begin_run_command` were both removed (~30 s slow,

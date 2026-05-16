@@ -94,20 +94,6 @@ export function ConfigBar({ config, onChange, onOpenSettings }: Props) {
         </span>
       )}
 
-      {/* Read-only summary pills */}
-      <div className="env-pills">
-        {config.acrName && (
-          <div className="env-pill">
-            <div className="pill-dot" /> {config.acrName}
-          </div>
-        )}
-        {config.storageAccountName && (
-          <div className="env-pill">
-            <div className="pill-dot" /> {config.storageAccountName}
-          </div>
-        )}
-      </div>
-
       {/* Settings gear */}
       {onOpenSettings && (
         <button

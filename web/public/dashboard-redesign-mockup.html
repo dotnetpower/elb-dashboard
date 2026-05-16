@@ -1,0 +1,1489 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dashboard Redesign — Mockup (Option 3)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      /* === Tokens copied from db-shard-mockups.html (Grafana-flavoured glass) === */
+      :root {
+        --bg-canvas: #111217;
+        --bg-primary: #181b1f;
+        --bg-secondary: #1e2228;
+        --bg-tertiary: #242830;
+        --bg-hover: #282d36;
+        --border-weak: rgba(255, 255, 255, 0.06);
+        --border-medium: rgba(255, 255, 255, 0.1);
+        --border-focus: rgba(110, 159, 255, 0.45);
+        --text-primary: #e4e7ec;
+        --text-muted: #9da5b4;
+        --text-faint: #8a8f9e;
+        --accent: #6e9fff;
+        --success: #73bf69;
+        --warning: #f2994a;
+        --danger: #f2726f;
+        --purple: #b877d9;
+        --teal: #5ccab4;
+        --radius: 8px;
+        --shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.4),
+          0 4px 16px rgba(0, 0, 0, 0.15);
+        --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0;
+        background: var(--bg-canvas);
+        color: var(--text-primary);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+          sans-serif;
+        font-size: 15px;
+        line-height: 1.45;
+        background-image: radial-gradient(
+          1200px 600px at 20% 0%,
+          #1c2541 0%,
+          #0b132b 60%,
+          #050816 100%
+        );
+        min-height: 100vh;
+      }
+      .page { max-width: 1280px; margin: 0 auto; padding: 24px 32px 64px; }
+      h1 { font-size: 24px; margin: 0 0 6px; font-weight: 600; }
+      .lede {
+        color: var(--text-muted);
+        font-size: 14px;
+        margin: 0 0 28px;
+        max-width: 920px;
+      }
+
+      /* ========== Card chrome (the redesigned glass card) ========== */
+      .card {
+        background: var(--bg-primary);
+        border: 1px solid var(--border-weak);
+        border-radius: var(--radius);
+        padding: 14px 16px 16px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        box-shadow: var(--shadow-panel);
+      }
+      .card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding-bottom: 10px;
+        margin-bottom: 12px;
+        border-bottom: 1px solid var(--border-weak);
+      }
+      .card-head .title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-faint);
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .card-head .title .dot-svg { color: var(--accent); display: flex; }
+      .card-head .actions {
+        display: inline-flex;
+        gap: 4px;
+      }
+      .icon-btn {
+        background: transparent;
+        border: 1px solid var(--border-weak);
+        color: var(--text-faint);
+        width: 26px;
+        height: 26px;
+        border-radius: 4px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        transition: all 120ms;
+      }
+      .icon-btn:hover {
+        color: var(--text-primary);
+        border-color: var(--border-medium);
+        background: var(--bg-hover);
+      }
+
+      /* ========== Common micro-elements ========== */
+      .label {
+        font-size: 11px;
+        color: var(--text-faint);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-weight: 600;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        padding: 3px 9px;
+        border-radius: 4px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .pill-success {
+        background: rgba(115, 191, 105, 0.12);
+        color: var(--success);
+      }
+      .pill-accent { background: rgba(110, 159, 255, 0.12); color: var(--accent); }
+      .pill-warning { background: rgba(242, 153, 74, 0.12); color: var(--warning); }
+      .pill-purple { background: rgba(184, 119, 217, 0.12); color: var(--purple); }
+      .pill-teal { background: rgba(92, 202, 180, 0.12); color: var(--teal); }
+      .pill-faint {
+        background: var(--bg-tertiary);
+        color: var(--text-faint);
+        border: 1px solid var(--border-weak);
+      }
+      .code-chip {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        padding: 2px 7px;
+        border-radius: 3px;
+        background: var(--bg-tertiary);
+        color: var(--text-muted);
+        letter-spacing: 0.02em;
+      }
+      .pulse-dot {
+        width: 6px; height: 6px; border-radius: 50%;
+        background: var(--success);
+        box-shadow: 0 0 0 3px rgba(115, 191, 105, 0.18);
+      }
+      .pulse-dot.warn {
+        background: var(--warning);
+        box-shadow: 0 0 0 3px rgba(242, 153, 74, 0.18);
+      }
+      .pulse-dot.accent {
+        background: var(--accent);
+        box-shadow: 0 0 0 3px rgba(110, 159, 255, 0.18);
+      }
+
+      /* ========== Page grid ========== */
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .grid > .card.span-1 { min-width: 0; }
+
+      /* ========== AKS Cluster Card ========== */
+      .cluster-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 0;
+      }
+      .cluster-row .left {
+        display: flex; align-items: center; gap: 10px; min-width: 0;
+      }
+      .cluster-row .name {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+      .cluster-row .sub {
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      .cluster-meta {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1px;
+        background: var(--border-weak);
+        border-radius: 6px;
+        overflow: hidden;
+        margin-top: 8px;
+      }
+      .cluster-meta .cell {
+        background: var(--bg-secondary);
+        padding: 8px 10px;
+      }
+      .cluster-meta .cell .label { display: block; margin-bottom: 4px; }
+      .cluster-meta .cell .value {
+        font-size: 14px;
+        color: var(--text-primary);
+        font-weight: 500;
+      }
+      .cluster-meta .cell .value.mono {
+        font-family: var(--font-mono);
+        font-size: 13px;
+      }
+
+      .pool-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .pool-card {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-weak);
+        border-radius: 6px;
+        padding: 8px 10px;
+      }
+      .pool-card.system { border-left: 2px solid var(--warning); }
+      .pool-card.user { border-left: 2px solid var(--accent); }
+      .pool-card .head {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 6px;
+      }
+      .pool-card .head .role {
+        font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
+      }
+      .pool-card.system .head .role { color: var(--warning); }
+      .pool-card.user .head .role { color: var(--accent); }
+      .pool-card .head .pool-name { font-size: 12px; color: var(--text-faint); font-family: var(--font-mono); }
+      .pool-card .body {
+        font-size: 13px; color: var(--text-primary);
+        display: flex; align-items: baseline; gap: 6px;
+      }
+      .pool-card .body .count { font-size: 19px; font-weight: 600; }
+      .pool-card .body .sku { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); }
+      .pool-card .footer {
+        font-size: 11px; color: var(--text-faint);
+        margin-top: 5px;
+      }
+
+      /* New: Shard capacity strip — the headline addition for option 1 */
+      .shard-capacity {
+        margin-top: 10px;
+        padding: 10px 12px;
+        background: rgba(92, 202, 180, 0.05);
+        border: 1px solid rgba(92, 202, 180, 0.18);
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .shard-capacity .lead {
+        font-size: 11px;
+        color: var(--teal);
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        font-weight: 700;
+      }
+      .shard-capacity code {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        background: rgba(92, 202, 180, 0.10);
+        color: var(--teal);
+        padding: 2px 7px;
+        border-radius: 3px;
+        letter-spacing: 0.02em;
+      }
+      .shard-capacity .tail {
+        margin-left: auto;
+        color: var(--text-faint);
+        font-size: 11px;
+      }
+
+      /* Warmup chips strip */
+      .warmup-strip {
+        display: flex; gap: 6px; flex-wrap: wrap;
+        margin-top: 10px;
+      }
+      .warmup-chip {
+        display: inline-flex; align-items: center; gap: 5px;
+        font-size: 12px;
+        padding: 4px 9px;
+        border-radius: 4px;
+        background: rgba(115, 191, 105, 0.10);
+        color: var(--success);
+        border: 1px solid rgba(115, 191, 105, 0.22);
+        font-weight: 500;
+      }
+
+      /* ========== Storage Card ========== */
+      .storage-summary {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 1px;
+        background: var(--border-weak);
+        border-radius: 6px;
+        overflow: hidden;
+        margin-top: 8px;
+      }
+      .storage-summary .cell {
+        background: var(--bg-secondary);
+        padding: 10px;
+      }
+      .storage-summary .cell .label { display: block; margin-bottom: 5px; }
+      .storage-summary .cell .value {
+        font-size: 22px; font-weight: 600;
+        color: var(--text-primary);
+        font-family: var(--font-mono);
+      }
+      .storage-summary .cell .sub {
+        font-size: 12px; color: var(--text-muted);
+        margin-top: 3px;
+      }
+      .storage-summary .cell.warn .value { color: var(--warning); }
+
+      .container-list {
+        margin-top: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        background: var(--border-weak);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .container-row {
+        background: var(--bg-secondary);
+        padding: 9px 12px;
+        display: flex; align-items: center; gap: 10px;
+        font-size: 13px;
+      }
+      .container-row .name {
+        font-family: var(--font-mono);
+        color: var(--text-primary);
+        min-width: 90px;
+      }
+      .container-row .meta { color: var(--text-muted); }
+      .container-row .right { margin-left: auto; }
+
+      /* === BLAST DBs sub-section (modal-frame style from mockup) === */
+      .db-section {
+        margin-top: 14px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-weak);
+        border-radius: 6px;
+        padding: 8px;
+      }
+      .db-section-head {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 0 4px 8px;
+        border-bottom: 1px solid var(--border-weak);
+        margin-bottom: 6px;
+      }
+      .db-section-head .title {
+        font-size: 13px; font-weight: 600;
+        color: var(--text-primary);
+        display: flex; align-items: center; gap: 8px;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      .db-section-head .counts {
+        font-size: 12px; color: var(--text-muted);
+        font-family: var(--font-mono);
+      }
+      .db-row {
+        position: relative;
+        display: grid;
+        grid-template-columns: 18px 1fr auto;
+        column-gap: 10px;
+        align-items: start;
+        padding: 7px 8px;
+        border-radius: 4px;
+        margin-bottom: 1px;
+        text-align: left;
+        background: rgba(115, 191, 105, 0.04);
+        border: 1px solid rgba(115, 191, 105, 0.18);
+      }
+      .db-row.idle { background: transparent; border-color: transparent; }
+      .db-row.idle:hover { background: rgba(255, 255, 255, 0.025); }
+      .db-row .icon-col {
+        padding-top: 2px;
+        display: flex; align-items: center; justify-content: center;
+        width: 18px; height: 18px;
+      }
+      .db-row .dot {
+        width: 12px; height: 12px;
+        border-radius: 50%;
+        border: 1.5px solid var(--text-faint);
+        opacity: 0.35;
+      }
+      .db-row .dot.ready {
+        background: var(--success);
+        border-color: var(--success);
+        opacity: 1;
+        box-shadow: 0 0 0 3px rgba(115, 191, 105, 0.12);
+      }
+      .db-row .info-col { min-width: 0; }
+      .db-row .row-title {
+        display: flex; align-items: center; gap: 6px; min-width: 0;
+        font-size: 14px;
+      }
+      .db-row .row-title .name { font-weight: 600; }
+      .badge {
+        font-size: 11px;
+        padding: 2px 6px;
+        border-radius: 3px;
+        flex-shrink: 0;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .badge-N { background: rgba(110, 159, 255, 0.14); color: var(--accent); }
+      .badge-P { background: rgba(184, 119, 217, 0.14); color: var(--purple); }
+      .badge-size {
+        font-size: 13px; color: var(--text-muted); flex-shrink: 0;
+        font-weight: 400;
+      }
+      .row-desc {
+        font-size: 13px; color: var(--text-muted);
+        margin-top: 3px;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .row-meta {
+        font-size: 12px; color: var(--text-faint);
+        margin-top: 4px;
+        display: flex; gap: 9px; flex-wrap: wrap; align-items: center;
+      }
+      .row-meta code {
+        font-size: 12px;
+        background: var(--bg-tertiary);
+        padding: 2px 6px; border-radius: 3px;
+        font-family: var(--font-mono);
+      }
+      .right-col {
+        display: flex; align-items: center; justify-content: flex-end;
+        min-width: 64px;
+        padding-top: 1px;
+      }
+      .chip-ready {
+        font-size: 11px;
+        padding: 3px 9px;
+        border-radius: 4px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        background: rgba(115, 191, 105, 0.14);
+        color: var(--success);
+      }
+      .shard-chip {
+        font-size: 12px;
+        padding: 2px 7px;
+        border-radius: 3px;
+        background: rgba(92, 202, 180, 0.10);
+        color: var(--teal);
+        font-family: var(--font-mono);
+        letter-spacing: 0.02em;
+        cursor: default;
+        border-bottom: 1px dotted rgba(92, 202, 180, 0.4);
+      }
+
+      /* ========== ACR Card ========== */
+      .acr-table {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 1px;
+        background: var(--border-weak);
+        border-radius: 6px;
+        overflow: hidden;
+        margin-top: 8px;
+      }
+      .acr-table .th {
+        background: var(--bg-tertiary);
+        padding: 8px 12px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-faint);
+        font-weight: 700;
+      }
+      .acr-table .td {
+        background: var(--bg-secondary);
+        padding: 10px 12px;
+        font-size: 13px;
+        color: var(--text-primary);
+        display: flex; align-items: center;
+      }
+      .acr-table .td.repo { font-family: var(--font-mono); }
+      .acr-table .td.tag {
+        font-family: var(--font-mono);
+        color: var(--text-muted);
+      }
+
+      /* ========== Sidecars Topology Card (matches existing SidecarsCard) ========== */
+      .sse-pill {
+        display: inline-flex; align-items: center; gap: 5px;
+        font-size: 12px;
+        padding: 3px 9px;
+        border-radius: 999px;
+        background: rgba(110, 159, 255, 0.08);
+        border: 1px solid rgba(110, 159, 255, 0.22);
+        color: var(--text-muted);
+      }
+      .sse-pill .live-dot {
+        width: 6px; height: 6px; border-radius: 999px;
+        background: var(--accent);
+        box-shadow: 0 0 6px rgba(110, 159, 255, 0.55);
+      }
+      .topo-row {
+        display: grid;
+        grid-template-columns: 110px minmax(40px, 1fr) 188px minmax(40px, 1fr) 188px;
+        align-items: center;
+        column-gap: 8px;
+        padding: 10px 4px;
+        position: relative;
+      }
+      .topo-row .row-label {
+        font-size: 12px;
+        color: var(--text-faint);
+        text-align: right;
+        white-space: nowrap;
+      }
+      .row-badge {
+        margin-left: 6px;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: rgba(110, 159, 255, 0.16);
+        color: var(--accent);
+        border: 1px solid rgba(110, 159, 255, 0.32);
+      }
+      .topo-arrow {
+        position: relative;
+        height: 2px;
+        width: 100%;
+        background: linear-gradient(90deg, transparent 0%, var(--text-faint) 50%, transparent 100%);
+      }
+      .topo-arrow.degraded {
+        background: repeating-linear-gradient(90deg, var(--warning) 0 6px, transparent 6px 10px);
+      }
+      .topo-arrow::after {
+        content: "";
+        position: absolute;
+        right: -2px; top: -4px;
+        border-left: 5px solid var(--text-faint);
+        border-top: 4px solid transparent;
+        border-bottom: 4px solid transparent;
+      }
+      .topo-arrow.degraded::after { border-left-color: var(--warning); }
+      .topo-node {
+        width: 188px;
+        padding: 12px 14px;
+        border-radius: 12px;
+        position: relative;
+        z-index: 1;
+        background: var(--bg-tertiary);
+        border: 1px solid rgba(115, 191, 105, 0.35);
+        box-shadow: 0 0 16px rgba(115, 191, 105, 0.10);
+      }
+      .topo-node.degraded {
+        border-color: rgba(242, 153, 74, 0.45);
+        box-shadow: 0 0 16px rgba(242, 153, 74, 0.10);
+      }
+      .topo-node .head {
+        display: flex; align-items: center; gap: 8px;
+      }
+      .topo-node .status-dot {
+        width: 9px; height: 9px; border-radius: 999px;
+        background: var(--success); flex-shrink: 0;
+        box-shadow: 0 0 0 2px rgba(115, 191, 105, 0.18);
+      }
+      .topo-node.degraded .status-dot {
+        background: var(--warning);
+        box-shadow: 0 0 0 2px rgba(242, 153, 74, 0.18);
+      }
+      .topo-node .icon { color: var(--text-faint); display: flex; }
+      .topo-node .name { font-size: 14px; font-weight: 600; line-height: 1.2; }
+      .topo-node .health { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+      .topo-node .footer {
+        margin-top: 9px;
+        font-size: 12px;
+        color: var(--text-faint);
+        display: flex; justify-content: space-between;
+        font-family: var(--font-mono);
+      }
+      .topo-caption {
+        font-size: 12px;
+        color: var(--text-faint);
+        padding-left: 122px;
+        margin-top: -2px;
+        margin-bottom: 6px;
+        font-style: italic;
+      }
+      .topo-caption code {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        background: var(--bg-tertiary);
+        padding: 1px 5px;
+        border-radius: 3px;
+      }
+      .topo-particle {
+        position: absolute;
+        top: 50%;
+        width: 8px; height: 8px;
+        margin-top: -4px;
+        border-radius: 999px;
+        background: var(--accent);
+        box-shadow: 0 0 12px 2px rgba(110, 159, 255, 0.55);
+        pointer-events: none;
+        z-index: 0;
+        animation: topoRowParticle 1.6s linear infinite;
+      }
+      @keyframes topoRowParticle {
+        0%   { left: 118px;                             opacity: 0; }
+        5%   { opacity: 1; }
+        95%  { opacity: 1; }
+        100% { left: calc(100% - 12px);                 opacity: 0; }
+      }
+      .topo-particle.delay1 { animation-delay: 0.4s; }
+      .topo-particle.delay2 { animation-delay: 0.8s; }
+      .topo-particle.delay3 { animation-delay: 1.2s; }
+      .topo-particle.row3 { animation: topoRowParticleR3 0.9s linear infinite; }
+      @keyframes topoRowParticleR3 {
+        0%   { left: 118px;               opacity: 0; }
+        10%  { opacity: 1; }
+        90%  { opacity: 1; }
+        100% { left: calc(50% + 80px);    opacity: 0; }
+      }
+      .topo-legend {
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border-weak);
+        font-size: 12px;
+        color: var(--text-muted);
+        display: flex; gap: 16px; flex-wrap: wrap;
+      }
+      .topo-legend .legend-dot {
+        width: 8px; height: 8px; border-radius: 999px;
+        display: inline-block; margin-right: 4px; vertical-align: middle;
+      }
+
+      /* ========== Terminal Card ========== */
+      .terminal-status {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 12px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-weak);
+        border-radius: 6px;
+      }
+      .terminal-status .lead {
+        font-size: 14px; font-weight: 600;
+        display: flex; align-items: center; gap: 6px;
+      }
+      .terminal-status .sub {
+        font-size: 12px; color: var(--text-muted);
+        margin-top: 3px;
+      }
+      .terminal-status code {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        background: var(--bg-tertiary);
+        padding: 2px 6px; border-radius: 3px;
+      }
+      .term-info {
+        margin-top: 12px;
+        display: flex; flex-direction: column; gap: 8px;
+        font-size: 13px;
+        color: var(--text-muted);
+        line-height: 1.55;
+      }
+      .term-info code {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        background: var(--bg-tertiary);
+        padding: 2px 6px; border-radius: 3px;
+        color: var(--text-primary);
+      }
+      .term-cta {
+        margin-top: 14px;
+        display: inline-flex; align-items: center; gap: 6px;
+        justify-content: center;
+        background: rgba(110, 159, 255, 0.14);
+        color: var(--accent);
+        border: 1px solid rgba(110, 159, 255, 0.32);
+        padding: 9px 14px;
+        border-radius: 6px;
+        font-size: 13px; font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+        transition: all 120ms;
+      }
+      .term-cta:hover {
+        background: rgba(110, 159, 255, 0.22);
+        border-color: rgba(110, 159, 255, 0.5);
+      }
+
+      /* ========== Jobs Card ========== */
+      .jobs-summary {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1px;
+        background: var(--border-weak);
+        border-radius: 6px;
+        overflow: hidden;
+        margin-top: 8px;
+      }
+      .jobs-summary .cell { background: var(--bg-secondary); padding: 10px 12px; }
+      .jobs-summary .cell .label { display: block; margin-bottom: 4px; }
+      .jobs-summary .cell .value {
+        font-size: 21px; font-weight: 600;
+        font-family: var(--font-mono);
+        color: var(--text-primary);
+      }
+      .jobs-summary .cell.success .value { color: var(--success); }
+      .jobs-summary .cell.accent .value { color: var(--accent); }
+      .jobs-summary .cell.warn .value { color: var(--warning); }
+      .jobs-list {
+        margin-top: 10px;
+        display: flex; flex-direction: column; gap: 1px;
+        background: var(--border-weak);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .job-row {
+        background: var(--bg-secondary);
+        padding: 9px 12px;
+        display: grid;
+        grid-template-columns: auto 1fr auto auto auto;
+        gap: 12px;
+        align-items: center;
+        font-size: 13px;
+      }
+      .job-row .phase {
+        font-size: 11px; font-weight: 700;
+        padding: 3px 7px;
+        border-radius: 3px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        font-family: var(--font-mono);
+      }
+      .phase.running { background: rgba(110, 159, 255, 0.14); color: var(--accent); }
+      .phase.completed { background: rgba(115, 191, 105, 0.14); color: var(--success); }
+      .phase.failed { background: rgba(242, 114, 111, 0.14); color: var(--danger); }
+      .phase.deleted { background: var(--bg-tertiary); color: var(--text-faint); }
+      .job-row .name {
+        font-family: var(--font-mono);
+        color: var(--text-primary);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .job-row .meta { color: var(--text-muted); font-family: var(--font-mono); }
+      .job-row .right {
+        color: var(--text-faint);
+      }
+      .jobs-cta {
+        margin-top: 12px;
+        text-align: right;
+        font-size: 13px;
+      }
+      .jobs-cta a {
+        color: var(--accent);
+        text-decoration: none;
+        display: inline-flex; align-items: center; gap: 4px;
+      }
+
+      /* ========== ConfigBar (top strip) ========== */
+      .configbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-weak);
+        border-radius: var(--radius);
+        padding: 12px 16px;
+        margin-bottom: 16px;
+        font-size: 13px;
+        flex-wrap: wrap;
+      }
+      .configbar .group {
+        display: inline-flex; align-items: center; gap: 7px;
+      }
+      .configbar .lbl {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-faint);
+        font-weight: 700;
+      }
+      .configbar .val {
+        font-family: var(--font-mono);
+        font-size: 13px;
+        color: var(--text-primary);
+        background: var(--bg-tertiary);
+        padding: 4px 10px;
+        border-radius: 4px;
+        border: 1px solid var(--border-weak);
+      }
+      .configbar .sep {
+        width: 1px; height: 22px;
+        background: var(--border-weak);
+      }
+      .configbar .right {
+        margin-left: auto;
+        display: inline-flex; gap: 6px; align-items: center;
+      }
+
+      /* ========== Compare bar (before/after toggle for the user) ========== */
+      .compare-bar {
+        display: flex; gap: 10px; align-items: center;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-weak);
+        border-radius: var(--radius);
+        padding: 12px 16px;
+        margin-bottom: 24px;
+        font-size: 13px;
+        flex-wrap: wrap;
+      }
+      .compare-bar strong { color: var(--text-muted); font-weight: 500; }
+      .compare-bar .legend {
+        display: inline-flex; align-items: center; gap: 4px;
+        color: var(--text-faint);
+        font-size: 12px;
+      }
+      .compare-bar .legend code {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        background: var(--bg-tertiary);
+        padding: 2px 7px; border-radius: 3px;
+        color: var(--text-muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <h1>Dashboard Redesign — Option 3 시안</h1>
+      <p class="lede">
+        DB sharding mockup 의 디자인 토큰 (Grafana-flavoured glass — bg-primary,
+        bg-secondary 톤, JetBrains Mono code chip, uppercase letter-spaced label,
+        teal accent) 을 실제 대시보드 카드 4종에 적용한 모습입니다. 데이터는
+        지금 화면의 실제 값 (elb-cluster · elbstg01 · 16S/core_nt · 4/4 ACR
+        images) 을 그대로 사용했습니다.
+      </p>
+
+      <div class="compare-bar">
+        <strong>Tone notes</strong>
+        <span class="legend">
+          헤더 라벨 <code>UPPERCASE 11px 0.08em</code>
+        </span>
+        <span class="legend">
+          데이터 셀 <code>JetBrains Mono</code>
+        </span>
+        <span class="legend">
+          chip <code>1-2px / 6-8px radius 3-4</code>
+        </span>
+        <span class="legend">
+          새 요소 <span class="pill pill-teal">SHARD CAPACITY 라인</span>
+        </span>
+      </div>
+
+      <!-- ============ CONFIG BAR (compact strip on top) ============ -->
+      <div class="configbar">
+        <div class="group">
+          <span class="lbl">Sub</span>
+          <span class="val">My Subscription</span>
+        </div>
+        <div class="sep"></div>
+        <div class="group">
+          <span class="lbl">RG</span>
+          <span class="val">rg-elb-01</span>
+        </div>
+        <div class="sep"></div>
+        <div class="group">
+          <span class="lbl">Region</span>
+          <span class="val">koreacentral</span>
+        </div>
+        <div class="sep"></div>
+        <div class="group">
+          <span class="lbl">User</span>
+          <span class="val">moonchoi@…</span>
+          <span class="pill pill-success" style="margin-left: 4px;">signed in</span>
+        </div>
+        <div class="right">
+          <button class="icon-btn" title="Settings">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <!-- ============ AKS CLUSTER ============ -->
+        <div class="card">
+          <div class="card-head">
+            <div class="title">
+              <span class="dot-svg">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              </span>
+              AKS Cluster
+              <span class="pill pill-faint" style="margin-left: 4px;">1 cluster</span>
+            </div>
+            <div class="actions">
+              <button class="icon-btn" title="Refresh">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              </button>
+              <button class="icon-btn" title="Add cluster">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="cluster-row">
+            <div class="left">
+              <span class="pulse-dot"></span>
+              <span class="name">elb-cluster</span>
+              <span class="pill pill-success">Running</span>
+            </div>
+            <div class="actions">
+              <button class="icon-btn" title="Stop">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"/></svg>
+              </button>
+              <button class="icon-btn" title="Delete" style="color: var(--danger);">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="cluster-meta">
+            <div class="cell">
+              <span class="label">Region</span>
+              <div class="value">koreacentral</div>
+            </div>
+            <div class="cell">
+              <span class="label">K8s</span>
+              <div class="value mono">v1.31.10</div>
+            </div>
+            <div class="cell">
+              <span class="label">Provisioning</span>
+              <div class="value" style="color: var(--success);">Succeeded</div>
+            </div>
+            <div class="cell">
+              <span class="label">Workspace</span>
+              <div class="value" style="color: var(--success); display: inline-flex; align-items: center; gap: 4px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+                Ready
+              </div>
+            </div>
+          </div>
+
+          <div class="pool-grid">
+            <div class="pool-card system">
+              <div class="head">
+                <span class="role">SYSTEM</span>
+                <span class="pool-name">systempool</span>
+              </div>
+              <div class="body">
+                <span class="count">1</span>
+                <span class="sku">× D2s_v3</span>
+              </div>
+              <div class="footer">2 vCPU · 8 GiB</div>
+            </div>
+            <div class="pool-card user">
+              <div class="head">
+                <span class="role">USER</span>
+                <span class="pool-name">blastpool</span>
+              </div>
+              <div class="body">
+                <span class="count">3</span>
+                <span class="sku">× E32s_v5</span>
+              </div>
+              <div class="footer">32 vCPU · 256 GiB</div>
+            </div>
+          </div>
+
+          <!-- NEW: Option-1 shard capacity strip — fully integrated with the redesigned card -->
+          <div class="shard-capacity">
+            <span class="lead">Shard capacity</span>
+            <code>3 nodes</code>
+            <code>~128 GiB safe / shard</code>
+            <code>target N ≤ 10</code>
+            <span class="tail">auto-selected per submit</span>
+          </div>
+
+          <div class="warmup-strip">
+            <span class="warmup-chip">
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+              16S_ribosomal_RNA <span style="opacity: 0.7;">3/3</span>
+            </span>
+            <span class="warmup-chip">
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+              core_nt <span style="opacity: 0.7;">3/3</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- ============ STORAGE + BLAST DBs ============ -->
+        <div class="card">
+          <div class="card-head">
+            <div class="title">
+              <span class="dot-svg">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+              </span>
+              Storage Account
+              <span class="code-chip">elbstg01</span>
+            </div>
+            <div class="actions">
+              <button class="icon-btn" title="Open in portal">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="storage-summary">
+            <div class="cell">
+              <span class="label">Region</span>
+              <div class="value" style="font-size: 13px; font-family: inherit;">koreacentral</div>
+              <div class="sub">Standard_LRS · HNS</div>
+            </div>
+            <div class="cell">
+              <span class="label">Containers</span>
+              <div class="value">3</div>
+              <div class="sub">blast-db · queries · results</div>
+            </div>
+            <div class="cell warn">
+              <span class="label">Public access</span>
+              <div class="value" style="font-size: 13px; font-family: inherit; display: inline-flex; align-items: center; gap: 4px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                Enabled
+              </div>
+              <div class="sub">debug toggle is ON</div>
+            </div>
+          </div>
+
+          <div class="container-list">
+            <div class="container-row">
+              <span class="name">blast-db</span>
+              <span class="meta">RW</span>
+              <span class="right code-chip">Public None</span>
+            </div>
+            <div class="container-row">
+              <span class="name">queries</span>
+              <span class="meta">RW</span>
+              <span class="right code-chip">Public None</span>
+            </div>
+            <div class="container-row">
+              <span class="name">results</span>
+              <span class="meta">RW</span>
+              <span class="right code-chip">Public None</span>
+            </div>
+          </div>
+
+          <!-- BLAST Databases sub-section, mockup modal-frame style, with sharded chips -->
+          <div class="db-section">
+            <div class="db-section-head">
+              <div class="title">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                BLAST Databases
+                <span class="pill pill-success" style="margin-left: 4px;">2 ready</span>
+              </div>
+              <div style="display: inline-flex; gap: 8px; align-items: center;">
+                <span class="counts">2 / 9</span>
+                <button class="icon-btn" title="Expand"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg></button>
+              </div>
+            </div>
+
+            <div class="db-row">
+              <div class="icon-col"><span class="dot ready"></span></div>
+              <div class="info-col">
+                <div class="row-title">
+                  <span class="name">16S ribosomal RNA</span>
+                  <span class="badge badge-N">N</span>
+                  <span class="badge-size">~18 MB</span>
+                </div>
+                <div class="row-desc">Prokaryotic small subunit rRNA — ideal for microbial ID and metagenomics.</div>
+                <div class="row-meta">
+                  <code>16S_ribosomal_RNA</code>
+                  <span>8 files</span>
+                  <span>2026-04-29</span>
+                  <span class="shard-chip" title="Pre-built shard layouts: N = 1, 2, 3, 4, 5, 6, 8, 10. Auto-selected per submit.">Sharded · 8 layouts</span>
+                </div>
+              </div>
+              <div class="right-col">
+                <span class="chip-ready">Ready</span>
+              </div>
+            </div>
+
+            <div class="db-row">
+              <div class="icon-col"><span class="dot ready"></span></div>
+              <div class="info-col">
+                <div class="row-title">
+                  <span class="name">core_nt</span>
+                  <span class="badge badge-N">N</span>
+                  <span class="badge-size">~269 GiB</span>
+                </div>
+                <div class="row-desc">Curated nucleotide sequences from RefSeq + selected GenBank — broad coverage.</div>
+                <div class="row-meta">
+                  <code>core_nt</code>
+                  <span>1248 files</span>
+                  <span>2026-04-29</span>
+                  <span class="shard-chip" title="Pre-built shard layouts: N = 1, 2, 3, 4, 5, 6, 8, 10. Auto-selected per submit.">Sharded · 8 layouts</span>
+                </div>
+              </div>
+              <div class="right-col">
+                <span class="chip-ready">Ready</span>
+              </div>
+            </div>
+
+            <div class="db-row idle">
+              <div class="icon-col"><span class="dot"></span></div>
+              <div class="info-col">
+                <div class="row-title">
+                  <span class="name" style="color: var(--text-muted);">refseq_protein</span>
+                  <span class="badge badge-P">P</span>
+                  <span class="badge-size">~18 GiB</span>
+                </div>
+                <div class="row-desc" style="opacity: 0.6;">RefSeq curated protein sequences — taxonomic identification &amp; functional annotation.</div>
+              </div>
+              <div class="right-col">
+                <button class="icon-btn" title="Prepare DB" style="padding: 0 6px; width: auto; gap: 4px; font-size: 10px;">
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ============ ACR ============ -->
+        <div class="card">
+          <div class="card-head">
+            <div class="title">
+              <span class="dot-svg">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+              </span>
+              Container Registry
+              <span class="code-chip">elbacr01</span>
+            </div>
+            <div class="actions">
+              <button class="icon-btn" title="Refresh">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="storage-summary" style="grid-template-columns: 1fr 1fr;">
+            <div class="cell">
+              <span class="label">Login server</span>
+              <div class="value" style="font-size: 11px; font-family: var(--font-mono);">elbacr01.azurecr.io</div>
+            </div>
+            <div class="cell">
+              <span class="label">Images built</span>
+              <div class="value" style="color: var(--success);">4 / 4</div>
+              <div class="sub" style="color: var(--success);">all pinned tags match</div>
+            </div>
+          </div>
+
+          <div class="acr-table">
+            <div class="th">Repository</div>
+            <div class="th" style="text-align: right;">Tag</div>
+            <div class="th" style="text-align: right;">Status</div>
+
+            <div class="td repo">ncbi/elb</div>
+            <div class="td tag" style="justify-content: flex-end;">1.4.0</div>
+            <div class="td" style="justify-content: flex-end;"><span class="pill pill-success">OK</span></div>
+
+            <div class="td repo">ncbi/elasticblast-job-submit</div>
+            <div class="td tag" style="justify-content: flex-end;">4.1.0</div>
+            <div class="td" style="justify-content: flex-end;"><span class="pill pill-success">OK</span></div>
+
+            <div class="td repo">ncbi/elasticblast-query-split</div>
+            <div class="td tag" style="justify-content: flex-end;">0.1.4</div>
+            <div class="td" style="justify-content: flex-end;"><span class="pill pill-success">OK</span></div>
+
+            <div class="td repo">ncbi/openapi</div>
+            <div class="td tag" style="justify-content: flex-end;">4.9</div>
+            <div class="td" style="justify-content: flex-end;"><span class="pill pill-success">OK</span></div>
+          </div>
+        </div>
+
+        <!-- ============ SIDECARS — TOPOLOGY (matches existing SidecarsCard) ============ -->
+        <div class="card" style="grid-column: 1 / -1;">
+          <div class="card-head">
+            <div class="title">
+              <span class="dot-svg">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              </span>
+              Control Plane Sidecars
+              <span class="code-chip">ca-elb-control · revision 0017</span>
+            </div>
+            <div class="actions" style="gap: 8px; align-items: center;">
+              <span class="sse-pill"><span class="live-dot"></span>Near real-time · 5s</span>
+              <span style="font-size: 11px; color: var(--text-muted);">6/6 healthy</span>
+            </div>
+          </div>
+
+          <div class="topo-row">
+            <div class="row-label">Browser ↣<span class="row-badge">3</span></div>
+            <div class="topo-arrow"></div>
+            <div class="topo-node">
+              <div class="head">
+                <span class="status-dot"></span>
+                <span class="icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                </span>
+                <div style="flex: 1; min-width: 0;">
+                  <div class="name">frontend</div>
+                  <div class="health">Healthy</div>
+                </div>
+              </div>
+              <div class="footer">
+                <span>cpu 1%</span>
+                <span>mem 24%</span>
+              </div>
+            </div>
+            <div class="topo-arrow"></div>
+            <div class="topo-node">
+              <div class="head">
+                <span class="status-dot"></span>
+                <span class="icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                </span>
+                <div style="flex: 1; min-width: 0;">
+                  <div class="name">api</div>
+                  <div class="health">Healthy</div>
+                </div>
+              </div>
+              <div class="footer">
+                <span>cpu 4%</span>
+                <span>mem 18%</span>
+              </div>
+            </div>
+            <div class="topo-particle"></div>
+            <div class="topo-particle delay1"></div>
+            <div class="topo-particle delay2"></div>
+          </div>
+          <div class="topo-caption">
+            Public ingress lands on <code>api:8080</code>; api reverse-proxies non-<code>/api/*</code> requests to <code>frontend:8081</code>.
+          </div>
+
+          <div class="topo-row">
+            <div class="row-label">Async ↣<span class="row-badge">5</span></div>
+            <div class="topo-arrow"></div>
+            <div class="topo-node">
+              <div class="head">
+                <span class="status-dot"></span>
+                <span class="icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                </span>
+                <div style="flex: 1; min-width: 0;">
+                  <div class="name">redis</div>
+                  <div class="health">Healthy</div>
+                </div>
+              </div>
+              <div class="footer">
+                <span>cpu 0%</span>
+                <span>mem 1%</span>
+              </div>
+            </div>
+            <div class="topo-arrow"></div>
+            <div class="topo-node">
+              <div class="head">
+                <span class="status-dot"></span>
+                <span class="icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                </span>
+                <div style="flex: 1; min-width: 0;">
+                  <div class="name">worker</div>
+                  <div class="health">Healthy</div>
+                </div>
+              </div>
+              <div class="footer">
+                <span>cpu 2%</span>
+                <span>mem 14%</span>
+              </div>
+            </div>
+            <div class="topo-particle delay1"></div>
+            <div class="topo-particle delay3"></div>
+          </div>
+          <div class="topo-caption">
+            api produces tasks into the broker; worker pops and runs them.
+          </div>
+
+          <div class="topo-row">
+            <div class="row-label">Scheduled ↣<span class="row-badge">1</span></div>
+            <div class="topo-arrow"></div>
+            <div class="topo-node">
+              <div class="head">
+                <span class="status-dot"></span>
+                <span class="icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                </span>
+                <div style="flex: 1; min-width: 0;">
+                  <div class="name">beat</div>
+                  <div class="health">Healthy</div>
+                </div>
+              </div>
+              <div class="footer">
+                <span>cpu 0%</span>
+                <span>mem 4%</span>
+              </div>
+            </div>
+            <div style="grid-column: 4 / span 2; font-size: 10px; color: var(--text-faint); font-style: italic; padding-left: 14px;">
+              beat enqueues periodic jobs into the same redis broker.
+            </div>
+            <div class="topo-particle row3"></div>
+          </div>
+
+          <div class="topo-row">
+            <div class="row-label">ws / exec ↣<span class="row-badge">2</span></div>
+            <div class="topo-arrow"></div>
+            <div class="topo-node">
+              <div class="head">
+                <span class="status-dot"></span>
+                <span class="icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                </span>
+                <div style="flex: 1; min-width: 0;">
+                  <div class="name">api</div>
+                  <div class="health">Healthy</div>
+                </div>
+              </div>
+              <div class="footer">
+                <span>cpu 4%</span>
+                <span>mem 18%</span>
+              </div>
+            </div>
+            <div class="topo-arrow"></div>
+            <div class="topo-node">
+              <div class="head">
+                <span class="status-dot"></span>
+                <span class="icon">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                </span>
+                <div style="flex: 1; min-width: 0;">
+                  <div class="name">terminal</div>
+                  <div class="health">Healthy</div>
+                </div>
+              </div>
+              <div class="footer">
+                <span>cpu 0%</span>
+                <span>mem 6%</span>
+              </div>
+            </div>
+            <div class="topo-particle delay2"></div>
+          </div>
+          <div class="topo-caption">
+            api proxies <code>/api/terminal/ws</code> + the privileged exec channel on <code>:7682</code>; worker uses the same exec channel for shell-only tools (<code>azcopy</code>, <code>kubectl</code>, <code>elastic-blast</code>).
+          </div>
+
+          <div class="topo-legend">
+            <span><span class="legend-dot" style="background: var(--success); box-shadow: 0 0 0 2px rgba(115,191,105,0.18);"></span>Healthy</span>
+            <span><span class="legend-dot" style="background: var(--warning); box-shadow: 0 0 0 2px rgba(242,153,74,0.18);"></span>Degraded</span>
+            <span><span class="legend-dot" style="background: var(--danger); box-shadow: 0 0 0 2px rgba(242,114,111,0.18);"></span>Down</span>
+            <span style="color: var(--warning);">─ ─ ─ degraded link</span>
+            <span style="color: var(--accent);">● dot = real event since last tick</span>
+          </div>
+        </div>
+
+        <!-- ============ TERMINAL CARD ============ -->
+        <div class="card">
+          <div class="card-head">
+            <div class="title">
+              <span class="dot-svg">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              </span>
+              Terminal
+              <span class="code-chip">in-process sidecar</span>
+            </div>
+            <div class="actions">
+              <button class="icon-btn" title="Refresh">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="terminal-status">
+            <span class="pulse-dot"></span>
+            <div style="flex: 1;">
+              <div class="lead">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--success);"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                Sidecar healthy
+              </div>
+              <div class="sub">
+                ttyd loopback <code>127.0.0.1:7681</code> · upstream 200
+              </div>
+            </div>
+          </div>
+
+          <div class="term-info">
+            <div>• Authenticated via MSAL bearer + tenant role at the WebSocket upgrade (no SSH, no admin password).</div>
+            <div>• Pre-installed: <code>az</code>, <code>kubectl</code>, <code>azcopy</code>, <code>python3.12</code>, <code>tmux</code>, <code>elastic-blast</code> venv.</div>
+            <div>• Ephemeral: closing the browser does not stop work (tmux session persists for the life of the revision).</div>
+          </div>
+
+          <a class="term-cta">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            Open Terminal
+          </a>
+        </div>
+
+        <!-- ============ BLAST JOBS CARD ============ -->
+        <div class="card">
+          <div class="card-head">
+            <div class="title">
+              <span class="dot-svg">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+              </span>
+              BLAST Jobs
+              <span class="pill pill-faint" style="margin-left: 4px;">12 total · 1 active</span>
+            </div>
+            <div class="actions">
+              <a class="term-cta" style="font-size: 11px; padding: 4px 10px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                New search
+              </a>
+            </div>
+          </div>
+
+          <div class="jobs-summary">
+            <div class="cell"><span class="label">Total</span><div class="value">12</div></div>
+            <div class="cell accent"><span class="label">Active</span><div class="value">1</div></div>
+            <div class="cell success"><span class="label">Completed</span><div class="value">10</div></div>
+            <div class="cell warn"><span class="label">Failed</span><div class="value">1</div></div>
+          </div>
+
+          <div class="jobs-list">
+            <div class="job-row">
+              <span class="phase running">Running</span>
+              <span class="name">elb-20260516-014229-core_nt</span>
+              <span class="meta">core_nt</span>
+              <span class="meta">N=10</span>
+              <span class="right">3m 12s</span>
+            </div>
+            <div class="job-row">
+              <span class="phase completed">Completed</span>
+              <span class="name">elb-20260515-220841-16S</span>
+              <span class="meta">16S</span>
+              <span class="meta">N=8</span>
+              <span class="right">1m 47s</span>
+            </div>
+            <div class="job-row">
+              <span class="phase completed">Completed</span>
+              <span class="name">elb-20260515-180322-core_nt</span>
+              <span class="meta">core_nt</span>
+              <span class="meta">N=10</span>
+              <span class="right">8m 22s</span>
+            </div>
+            <div class="job-row">
+              <span class="phase failed">Failed</span>
+              <span class="name">elb-20260514-093115-refseq_protein</span>
+              <span class="meta">refseq_p</span>
+              <span class="meta">N=6</span>
+              <span class="right">45s</span>
+            </div>
+            <div class="job-row">
+              <span class="phase deleted">Deleted</span>
+              <span class="name">elb-20260513-141207-16S</span>
+              <span class="meta">16S</span>
+              <span class="meta">N=4</span>
+              <span class="right">—</span>
+            </div>
+          </div>
+
+          <div class="jobs-cta">
+            <a>View all 12 jobs →</a>
+          </div>
+        </div>
+      </div>
+
+      <p class="lede" style="margin-top: 28px; font-size: 12px;">
+        ※ 위는 mockup HTML 입니다. 승인 시 실제 React 카드 (ClusterCard ·
+        StorageCard · BlastDbSection · AcrCard · SidecarsCard) 의 chrome 과
+        chip 톤을 같은 토큰으로 교체합니다 — 데이터 fetch / state 로직은
+        그대로 유지.
+      </p>
+    </div>
+  </body>
+</html>

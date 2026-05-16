@@ -1,10 +1,13 @@
-"""Read-only monitoring helpers for AKS, Storage, ACR, and the Remote Terminal."""
+"""Azure resource monitoring facade.
+
+This module owns ARM-backed AKS, Storage, ACR, and legacy VM helpers. Direct
+Kubernetes API helpers live in ``api.services.k8s_monitoring`` and are
+re-exported here for existing route/task imports.
+"""
 
 from __future__ import annotations
 
 import logging
-import os
-import re
 from typing import Any
 
 from azure.core.credentials import TokenCredential
@@ -16,35 +19,69 @@ from api.services.azure_clients import (
     storage_client,
 )
 from api.services.image_tags import IMAGE_TAGS
+from api.services.k8s_monitoring import (
+    _get_k8s_session,
+    k8s_cancel_blast_job,
+    k8s_check_blast_status,
+    k8s_check_namespace_exists,
+    k8s_get_nodes,
+    k8s_get_pods,
+    k8s_get_service_ip,
+    k8s_pod_logs,
+    k8s_top_nodes,
+    k8s_warmup_status,
+)
 
 LOGGER = logging.getLogger(__name__)
+BLAST_POOL_NAME = "blastpool"
+
+__all__ = [
+    "_get_k8s_session",
+    "ensure_acr",
+    "ensure_storage_account",
+    "get_storage_summary",
+    "get_vm_status",
+    "k8s_cancel_blast_job",
+    "k8s_check_blast_status",
+    "k8s_check_namespace_exists",
+    "k8s_get_nodes",
+    "k8s_get_pods",
+    "k8s_get_service_ip",
+    "k8s_pod_logs",
+    "k8s_top_nodes",
+    "k8s_warmup_status",
+    "list_acr_repositories",
+    "list_aks_clusters",
+    "set_storage_public_access",
+]
 
 
 # ---------------------------------------------------------------------------
-# AKS
+# AKS ARM summary
 # ---------------------------------------------------------------------------
 def list_aks_clusters(
     credential: TokenCredential, subscription_id: str, resource_group: str
 ) -> list[dict[str, Any]]:
     client = aks_client(credential, subscription_id)
-    out: list[dict[str, Any]] = []
+    clusters: list[dict[str, Any]] = []
     for cluster in client.managed_clusters.list_by_resource_group(resource_group):
         pools = cluster.agent_pool_profiles or []
-        agent_pool = pools[0] if pools else None
-        pool_details = []
-        for p in pools:
-            pool_details.append({
-                "name": p.name,
-                "vm_size": p.vm_size,
-                "count": p.count,
-                "min_count": p.min_count,
-                "max_count": p.max_count,
-                "os_type": p.os_type,
-                "mode": p.mode,
-                "power_state": p.power_state.code if p.power_state else None,
-                "enable_auto_scaling": p.enable_auto_scaling,
-            })
-        out.append(
+        agent_pool = _select_workload_agent_pool(pools)
+        pool_details = [
+            {
+                "name": pool.name,
+                "vm_size": pool.vm_size,
+                "count": pool.count,
+                "min_count": pool.min_count,
+                "max_count": pool.max_count,
+                "os_type": pool.os_type,
+                "mode": pool.mode,
+                "power_state": pool.power_state.code if pool.power_state else None,
+                "enable_auto_scaling": pool.enable_auto_scaling,
+            }
+            for pool in pools
+        ]
+        clusters.append(
             {
                 "name": cluster.name,
                 "resource_group": resource_group,
@@ -54,677 +91,35 @@ def list_aks_clusters(
                 "power_state": cluster.power_state.code if cluster.power_state else None,
                 "node_count": agent_pool.count if agent_pool else None,
                 "node_sku": agent_pool.vm_size if agent_pool else None,
-                "kubelet_object_id": (
-                    cluster.identity_profile.get("kubeletidentity").object_id
-                    if cluster.identity_profile and "kubeletidentity" in cluster.identity_profile
+                "kubelet_object_id": _kubelet_object_id(cluster),
+                "agent_pools": pool_details,
+                "network_plugin": (
+                    cluster.network_profile.network_plugin
+                    if cluster.network_profile
                     else None
                 ),
-                "agent_pools": pool_details,
-                "network_plugin": cluster.network_profile.network_plugin if cluster.network_profile else None,
                 "fqdn": cluster.fqdn,
             }
         )
-    return out
+    return clusters
 
 
-# ---------------------------------------------------------------------------
-# AKS / VM Run Command is INTENTIONALLY NOT EXPOSED here.
-#
-# The previous `run_aks_command` wrapper around
-# `ManagedClusters.begin_run_command` was removed (zero callers, ~30 s slow
-# path). Every read-only operation the dashboard needs is already covered by
-# the direct Kubernetes API path below (`k8s_get_nodes`, `k8s_get_pods`,
-# `k8s_top_nodes`, `k8s_pod_logs`, `k8s_warmup_status`, …) which uses the
-# kubeconfig token from `_get_k8s_session` and finishes in tens of
-# milliseconds instead of tens of seconds.
-#
-# Do NOT bring back `begin_run_command` for new monitoring features. If a new
-# read-only need cannot be satisfied by the existing `k8s_*` helpers, add a
-# new `k8s_*` function that uses `_get_k8s_session()` rather than reaching
-# for `RunCommandRequest`. For commands that genuinely need shell tooling
-# (e.g. `azcopy`, `elastic-blast` CLI), see `api/services/terminal_exec.py`
-# for the contract that proxies into the loopback `terminal` sidecar.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Direct Kubernetes API access (fast — uses kubeconfig credentials)
-# ---------------------------------------------------------------------------
-import base64
-import tempfile
-import ssl
-import yaml  # type: ignore[import-untyped]
-
-# AKS AAD server application ID (fixed for all AKS clusters)
-_AKS_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
-
-
-def _get_k8s_session(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> tuple[Any, str]:
-    """Get a requests.Session configured for direct K8s API access.
-
-    Returns (session, server_url).
-    Uses AKS user credentials (kubeconfig) — supports both client-certificate
-    and AAD token-based auth.
-    """
-    import requests as _req
-
-    client = aks_client(credential, subscription_id)
-    creds = client.managed_clusters.list_cluster_user_credentials(
-        resource_group, cluster_name,
-    )
-    kubeconfig_bytes = creds.kubeconfigs[0].value
-    kc = yaml.safe_load(bytes(kubeconfig_bytes))
-
-    cluster_info = kc["clusters"][0]["cluster"]
-    server = cluster_info["server"]
-    ca_data = cluster_info.get("certificate-authority-data", "")
-    user_info = kc["users"][0]["user"]
-
-    session = _req.Session()
-
-    # Track temp files for cleanup. We populate this list as we write files,
-    # and clean them up on **any** failure path so a half-built session never
-    # leaks credential material on disk.
-    _temp_files: list[str] = []
-
-    def _cleanup_temp_files() -> None:
-        for f in _temp_files:
-            try:
-                os.unlink(f)
-            except OSError:
-                pass
-
-    try:
-        # Write CA cert (restricted permissions)
-        ca_file = None
-        if ca_data:
-            ca_bytes = base64.b64decode(ca_data)
-            ca_file = tempfile.NamedTemporaryFile(suffix=".crt", delete=False)
-            ca_file.write(ca_bytes)
-            ca_file.flush()
-            os.chmod(ca_file.name, 0o600)
-            _temp_files.append(ca_file.name)
-            session.verify = ca_file.name
-        else:
-            session.verify = True
-
-        # Auth: client certificate or AAD token
-        client_cert = user_info.get("client-certificate-data")
-        client_key = user_info.get("client-key-data")
-        if client_cert and client_key:
-            cert_file = tempfile.NamedTemporaryFile(suffix=".crt", delete=False)
-            cert_file.write(base64.b64decode(client_cert))
-            cert_file.flush()
-            os.chmod(cert_file.name, 0o600)
-            _temp_files.append(cert_file.name)
-            key_file = tempfile.NamedTemporaryFile(suffix=".key", delete=False)
-            key_file.write(base64.b64decode(client_key))
-            key_file.flush()
-            os.chmod(key_file.name, 0o600)
-            _temp_files.append(key_file.name)
-            session.cert = (cert_file.name, key_file.name)
-        else:
-            # Fallback: AAD token
-            token = credential.get_token(f"{_AKS_SERVER_APP_ID}/.default")
-            session.headers["Authorization"] = f"Bearer {token.token}"
-    except Exception:
-        _cleanup_temp_files()
-        try:
-            session.close()
-        except Exception:
-            pass
-        raise
-
-    # Register cleanup of temp files on session close
-    _orig_close = session.close
-    def _cleanup_close() -> None:
-        try:
-            _orig_close()
-        finally:
-            _cleanup_temp_files()
-    session.close = _cleanup_close  # type: ignore[assignment]
-
-    return session, server
-
-
-def k8s_get_nodes(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> list[dict[str, Any]]:
-    """Get nodes via direct K8s API."""
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        resp = session.get(f"{server}/api/v1/nodes", timeout=10)
-        resp.raise_for_status()
-        nodes = []
-        for item in resp.json().get("items", []):
-            meta = item.get("metadata", {})
-            status = item.get("status", {})
-            conditions = {c["type"]: c["status"] for c in status.get("conditions", [])}
-            info = status.get("nodeInfo", {})
-            addrs = {a["type"]: a["address"] for a in status.get("addresses", [])}
-            nodes.append({
-                "name": meta.get("name", ""),
-                "status": "Ready" if conditions.get("Ready") == "True" else "NotReady",
-                "roles": ",".join(k.replace("node-role.kubernetes.io/", "") for k in meta.get("labels", {}) if k.startswith("node-role.kubernetes.io/")) or "<none>",
-                "age": meta.get("creationTimestamp", ""),
-                "version": info.get("kubeletVersion", ""),
-                "internal_ip": addrs.get("InternalIP", ""),
-                "os_image": info.get("osImage", ""),
-                "kernel": info.get("kernelVersion", ""),
-                "runtime": info.get("containerRuntimeVersion", ""),
-            })
-        return nodes
-    finally:
-        session.close()
-
-
-def k8s_check_blast_status(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    namespace: str,
-    job_id: str | None = None,
-) -> dict[str, Any]:
-    """Check elastic-blast job status via direct K8s API (~1-3s vs ~30s for VM Run Command).
-
-    Returns: {"status": "running"|"completed"|"failed"|"creating"|"unknown",
-              "pods": int, "succeeded": int, "failed": int}
-
-    Critical correctness rules:
-    * elastic-blast Azure backend creates BLAST jobs in the **default**
-      namespace and labels them `app=blast` (vs `app=submit` for our own
-      submit-helper Job and `app=setup`/`app=finalizer` for elastic-blast's
-      own scaffolding). We **only** count `app=blast` jobs as the actual
-      BLAST search, otherwise our own submit-helper completing causes a
-      false "completed" before BLAST has even started.
-    * When ``job_id`` is provided we additionally filter pods by the
-      ``BLAST_ELB_JOB_ID`` env var so concurrent submits to the same cluster
-      don't pollute each other's status. (elastic-blast does not put the
-      job-id in the Job labels itself, so we read it off the pod spec.)
-    * Empty `app=blast` set means BLAST hasn't been scheduled yet — return
-      "creating", not "completed".
-    """
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        target_ns = namespace
-        ns_resp = session.get(f"{server}/api/v1/namespaces/{namespace}", timeout=10)
-        if ns_resp.status_code == 404:
-            target_ns = "default"
-
-        # BLAST pods carry the unique job_id in BLAST_ELB_JOB_ID env. Filter
-        # by it so concurrent submits don't bleed into each other's status.
-        pods_resp = session.get(
-            f"{server}/api/v1/namespaces/{target_ns}/pods",
-            params={"labelSelector": "app=blast"},
-            timeout=10,
-        )
-        if pods_resp.status_code != 200:
-            return {"status": "unknown", "pods": 0, "detail": f"pods API error: {pods_resp.status_code}"}
-
-        all_pods = pods_resp.json().get("items", [])
-        if job_id:
-            scoped_pods = []
-            for pod in all_pods:
-                for container in pod.get("spec", {}).get("containers", []):
-                    for env in container.get("env", []) or []:
-                        if env.get("name") == "BLAST_ELB_JOB_ID" and env.get("value") == job_id:
-                            scoped_pods.append(pod)
-                            break
-                    else:
-                        continue
-                    break
-            blast_pods = scoped_pods
-        else:
-            blast_pods = all_pods
-
-        pod_count = len(blast_pods)
-
-        # Get BLAST batch jobs (label `app=blast`). When job_id is set we
-        # cross-reference job names from the scoped pods so a different
-        # submit's "succeeded" doesn't leak through.
-        jobs_resp = session.get(
-            f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs",
-            params={"labelSelector": "app=blast"},
-            timeout=10,
-        )
-        if jobs_resp.status_code != 200:
-            return {"status": "unknown", "pods": pod_count,
-                    "detail": f"jobs API error: {jobs_resp.status_code}"}
-
-        all_jobs = jobs_resp.json().get("items", [])
-        if job_id and blast_pods:
-            scoped_job_names = set()
-            for pod in blast_pods:
-                for owner in pod.get("metadata", {}).get("ownerReferences", []) or []:
-                    if owner.get("kind") == "Job":
-                        scoped_job_names.add(owner.get("name", ""))
-            jobs = [j for j in all_jobs if j.get("metadata", {}).get("name") in scoped_job_names]
-        else:
-            jobs = all_jobs
-
-        if not jobs and not blast_pods:
-            return {"status": "creating", "pods": 0, "jobs": 0,
-                    "detail": "no app=blast jobs/pods yet", "namespace": target_ns}
-
-        total_succeeded = 0
-        total_failed = 0
-        total_active = 0
-        total_jobs = len(jobs)
-        for job in jobs:
-            status = job.get("status", {})
-            total_succeeded += status.get("succeeded", 0)
-            total_failed += status.get("failed", 0)
-            total_active += status.get("active", 0)
-
-        # A failed batch dominates because elastic-blast has no automatic
-        # retry — surface the failure even if other batches succeed.
-        if total_failed > 0:
-            blast_status = "failed"
-        elif total_active > 0:
-            blast_status = "running"
-        elif total_succeeded > 0 and total_succeeded >= total_jobs:
-            blast_status = "completed"
-        else:
-            # Jobs exist but show no progress (Pending, ImagePull) — keep
-            # "creating" so the orchestrator's MIN_POLLS guard doesn't lock
-            # in an empty "completed".
-            blast_status = "creating"
-
-        return {
-            "status": blast_status,
-            "pods": pod_count,
-            "jobs": total_jobs,
-            "succeeded": total_succeeded,
-            "failed": total_failed,
-            "active": total_active,
-            "namespace": target_ns,
-            "scoped_by_job_id": bool(job_id),
-        }
-    except Exception as e:
-        return {"status": "unknown", "pods": 0, "detail": str(e)[:200]}
-    finally:
-        session.close()
-
-
-def k8s_check_namespace_exists(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    namespace: str,
-) -> bool:
-    """Check if an elastic-blast cluster is warm and ready for job submission.
-
-    For local-SSD mode: checks if create-workspace DaemonSet exists in kube-system
-    (this persists across runs and indicates DB is loaded on nodes).
-    Also checks default namespace for vmtouch/elb pods as fallback.
-    """
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        # Check kube-system for create-workspace DaemonSet (local-SSD warm indicator)
-        resp = session.get(
-            f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            ds = resp.json()
-            ready = ds.get("status", {}).get("numberReady", 0)
-            if ready > 0:
-                return True
-
-        # Fallback: check default namespace for vmtouch/elastic-blast pods
-        resp = session.get(f"{server}/api/v1/namespaces/default/pods", timeout=10)
-        if resp.status_code == 200:
-            pods = resp.json().get("items", [])
-            elb_pods = [p for p in pods if "vmtouch" in p.get("metadata", {}).get("name", "")
-                        or "elb" in p.get("metadata", {}).get("name", "")]
-            return len(elb_pods) > 0
-        return False
-    except Exception:
-        return False
-    finally:
-        session.close()
-
-
-def k8s_warmup_status(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> dict[str, Any]:
-    """Detect warmup state by inspecting K8s resources created by elastic-blast prepare.
-
-    Returns:
-      {
-        "warm": bool,
-        "workspace_ready": int,       # create-workspace DaemonSet numberReady
-        "workspace_desired": int,     # create-workspace DaemonSet desiredNumberScheduled
-        "databases": [                # DBs detected from init-ssd Job env vars
-          {"name": "core_nt", "mol_type": "nucl", "status": "Complete", "nodes_ready": 10}
-        ],
-        "vmtouch_ready": int,         # vmtouch-db-cache DaemonSet numberReady (PVC mode)
-        "namespaces": ["elastic-blast-abc123"],  # elastic-blast namespaces found
-      }
-    """
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        result: dict[str, Any] = {
-            "warm": False,
-            "workspace_ready": 0,
-            "workspace_desired": 0,
-            "databases": [],
-            "vmtouch_ready": 0,
-            "namespaces": [],
-        }
-
-        # 1. create-workspace DaemonSet in kube-system
-        resp = session.get(
-            f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            ds = resp.json()
-            status = ds.get("status", {})
-            result["workspace_ready"] = status.get("numberReady", 0)
-            result["workspace_desired"] = status.get("desiredNumberScheduled", 0)
-            if result["workspace_ready"] > 0:
-                result["warm"] = True
-
-        # 2. vmtouch-db-cache DaemonSet in default namespace
-        resp = session.get(
-            f"{server}/apis/apps/v1/namespaces/default/daemonsets/vmtouch-db-cache",
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            ds = resp.json()
-            result["vmtouch_ready"] = ds.get("status", {}).get("numberReady", 0)
-            if result["vmtouch_ready"] > 0:
-                result["warm"] = True
-
-        # 3. Detect loaded DBs from init-ssd-* Jobs (created in default namespace)
-        resp = session.get(
-            f"{server}/apis/batch/v1/namespaces/default/jobs",
-            params={"labelSelector": "app=setup"},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            db_map: dict[str, dict[str, Any]] = {}
-            for job in resp.json().get("items", []):
-                job_name = job.get("metadata", {}).get("name", "")
-                if not job_name.startswith("init-ssd-"):
-                    continue
-                job_status = job.get("status", {})
-                succeeded = job_status.get("succeeded", 0)
-                failed = job_status.get("failed", 0)
-                active = job_status.get("active", 0)
-                # Extract ELB_DB from env vars
-                containers = (
-                    job.get("spec", {})
-                    .get("template", {})
-                    .get("spec", {})
-                    .get("containers", [])
-                )
-                db_name = ""
-                mol_type = ""
-                for c in containers:
-                    for env in c.get("env", []):
-                        if env.get("name") == "ELB_DB":
-                            db_name = env.get("value", "")
-                        elif env.get("name") == "ELB_DB_MOL_TYPE":
-                            mol_type = env.get("value", "")
-                if not db_name:
-                    continue
-                if db_name not in db_map:
-                    db_map[db_name] = {
-                        "name": db_name,
-                        "mol_type": mol_type,
-                        "nodes_ready": 0,
-                        "nodes_failed": 0,
-                        "nodes_active": 0,
-                        "total_jobs": 0,
-                    }
-                db_map[db_name]["total_jobs"] += 1
-                db_map[db_name]["nodes_ready"] += succeeded
-                db_map[db_name]["nodes_failed"] += failed
-                db_map[db_name]["nodes_active"] += active
-
-            for info in db_map.values():
-                total = info["total_jobs"]
-                if info["nodes_ready"] == total and total > 0:
-                    info["status"] = "Ready"
-                elif info["nodes_active"] > 0:
-                    info["status"] = "Loading"
-                elif info["nodes_failed"] > 0:
-                    info["status"] = "Failed"
-                else:
-                    info["status"] = "Unknown"
-            result["databases"] = list(db_map.values())
-
-        # 3b. Detect DBs from db-warmup DaemonSets (created by the control plane)
-        resp = session.get(
-            f"{server}/apis/apps/v1/namespaces/default/daemonsets",
-            params={"labelSelector": "app=db-warmup"},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            existing_db_names = {d["name"] for d in result["databases"]}
-            for ds in resp.json().get("items", []):
-                db_label = ds.get("metadata", {}).get("labels", {}).get("db", "")
-                if not db_label or db_label in existing_db_names:
-                    continue
-                ds_status = ds.get("status", {})
-                desired = ds_status.get("desiredNumberScheduled", 0)
-                ready = ds_status.get("numberReady", 0)
-                if desired == 0:
-                    continue
-                if ready == desired:
-                    status_str = "Ready"
-                elif ready > 0:
-                    status_str = "Loading"
-                else:
-                    status_str = "Loading"
-                result["databases"].append({
-                    "name": db_label,
-                    "mol_type": "",
-                    "nodes_ready": ready,
-                    "nodes_failed": 0,
-                    "nodes_active": desired - ready,
-                    "total_jobs": desired,
-                    "status": status_str,
-                })
-                if ready > 0:
-                    result["warm"] = True
-
-        # 4. Find elastic-blast namespaces (limit to 20 to prevent oversized responses)
-        resp = session.get(f"{server}/api/v1/namespaces", timeout=10)
-        if resp.status_code == 200:
-            for ns in resp.json().get("items", []):
-                ns_name = ns.get("metadata", {}).get("name", "")
-                if ns_name.startswith("elastic-blast-"):
-                    result["namespaces"].append(ns_name)
-                    if len(result["namespaces"]) >= 20:
-                        break
-
-        return result
-    except Exception as exc:
-        LOGGER.warning("k8s_warmup_status failed for %s: %s", cluster_name, str(exc)[:200])
-        return {
-            "warm": False,
-            "workspace_ready": 0,
-            "workspace_desired": 0,
-            "databases": [],
-            "vmtouch_ready": 0,
-            "namespaces": [],
-            "error": str(exc)[:200],
-        }
-    finally:
-        session.close()
-
-
-def k8s_get_service_ip(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    service_name: str,
-    namespace: str = "default",
-) -> str | None:
-    """Get the external IP of a K8s LoadBalancer service. Returns None if not found."""
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        resp = session.get(f"{server}/api/v1/namespaces/{namespace}/services/{service_name}", timeout=10)
-        if resp.status_code != 200:
-            return None
-        svc = resp.json()
-        ingress = svc.get("status", {}).get("loadBalancer", {}).get("ingress", [])
-        if ingress:
-            return ingress[0].get("ip")
+def _select_workload_agent_pool(pools: list[Any]) -> Any | None:
+    if not pools:
         return None
-    except Exception:
+    for pool in pools:
+        if str(getattr(pool, "name", "") or "").lower() == BLAST_POOL_NAME:
+            return pool
+    for pool in pools:
+        if str(getattr(pool, "mode", "") or "").lower() == "user":
+            return pool
+    return pools[0]
+
+
+def _kubelet_object_id(cluster: Any) -> str | None:
+    if not cluster.identity_profile or "kubeletidentity" not in cluster.identity_profile:
         return None
-    finally:
-        session.close()
-
-
-def k8s_get_pods(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    namespace: str | None = None,
-) -> list[dict[str, Any]]:
-    """Get pods via direct K8s API."""
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        url = f"{server}/api/v1/pods" if not namespace else f"{server}/api/v1/namespaces/{namespace}/pods"
-        resp = session.get(url, params={"fieldSelector": "status.phase!=Succeeded"}, timeout=10)
-        resp.raise_for_status()
-        pods = []
-        for item in resp.json().get("items", []):
-            meta = item.get("metadata", {})
-            spec = item.get("spec", {})
-            status = item.get("status", {})
-            containers = status.get("containerStatuses", [])
-            ready = sum(1 for c in containers if c.get("ready"))
-            total = len(spec.get("containers", []))
-            restarts = sum(c.get("restartCount", 0) for c in containers)
-            pods.append({
-                "namespace": meta.get("namespace", ""),
-                "name": meta.get("name", ""),
-                "ready": f"{ready}/{total}",
-                "status": status.get("phase", "Unknown"),
-                "restarts": restarts,
-                "age": meta.get("creationTimestamp", ""),
-                "node": spec.get("nodeName", ""),
-            })
-        return pods
-    finally:
-        session.close()
-
-
-def k8s_top_nodes(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> list[dict[str, Any]]:
-    """Get node resource usage via K8s metrics API."""
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        # Get capacity from nodes API
-        nodes_resp = session.get(f"{server}/api/v1/nodes", timeout=10)
-        nodes_resp.raise_for_status()
-        capacity: dict[str, dict[str, int]] = {}
-        for item in nodes_resp.json().get("items", []):
-            name = item["metadata"]["name"]
-            cap = item.get("status", {}).get("capacity", {})
-            cpu_str = cap.get("cpu", "0")
-            mem_str = cap.get("memory", "0")
-            cpu_m = int(cpu_str) * 1000 if not cpu_str.endswith("m") else int(cpu_str[:-1])
-            mem_ki = int(mem_str.replace("Ki", "")) if mem_str.endswith("Ki") else int(mem_str) // 1024
-            capacity[name] = {"cpu_m": cpu_m, "mem_ki": mem_ki}
-
-        # Get metrics
-        metrics_resp = session.get(f"{server}/apis/metrics.k8s.io/v1beta1/nodes", timeout=10)
-        metrics_resp.raise_for_status()
-        result = []
-        for item in metrics_resp.json().get("items", []):
-            name = item["metadata"]["name"]
-            usage = item.get("usage", {})
-            cpu_raw = usage.get("cpu", "0")
-            mem_raw = usage.get("memory", "0")
-
-            # Parse CPU (may be "123456789n" nanocores or "150m" millicores)
-            if cpu_raw.endswith("n"):
-                cpu_m = int(cpu_raw[:-1]) // 1_000_000
-            elif cpu_raw.endswith("m"):
-                cpu_m = int(cpu_raw[:-1])
-            else:
-                cpu_m = int(cpu_raw) * 1000
-
-            # Parse memory (may be "1234Ki" or bytes)
-            if mem_raw.endswith("Ki"):
-                mem_ki = int(mem_raw[:-2])
-            elif mem_raw.endswith("Mi"):
-                mem_ki = int(mem_raw[:-2]) * 1024
-            elif mem_raw.endswith("Gi"):
-                mem_ki = int(mem_raw[:-2]) * 1024 * 1024
-            else:
-                mem_ki = int(mem_raw) // 1024
-
-            cap = capacity.get(name, {"cpu_m": 1, "mem_ki": 1})
-            cpu_pct = round(cpu_m / cap["cpu_m"] * 100) if cap["cpu_m"] > 0 else 0
-            mem_mi = mem_ki // 1024
-            mem_total_mi = cap["mem_ki"] // 1024
-            mem_pct = round(mem_ki / cap["mem_ki"] * 100) if cap["mem_ki"] > 0 else 0
-
-            result.append({
-                "name": name,
-                "cpu": f"{cpu_m}m",
-                "cpu_pct": cpu_pct,
-                "memory": f"{mem_mi}Mi",
-                "memory_pct": mem_pct,
-                "memory_total": f"{mem_total_mi}Mi",
-            })
-        return result
-    finally:
-        session.close()
-
-
-def k8s_pod_logs(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    namespace: str,
-    pod_name: str,
-    tail_lines: int = 200,
-) -> str:
-    """Get pod logs via direct K8s API."""
-    # Validate namespace/pod_name — K8s names: lowercase alphanumeric + hyphens, start/end alphanumeric
-    _SAFE_K8S_NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-    if not _SAFE_K8S_NAME.match(namespace) or not _SAFE_K8S_NAME.match(pod_name):
-        raise ValueError("Invalid namespace or pod name")
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        resp = session.get(
-            f"{server}/api/v1/namespaces/{namespace}/pods/{pod_name}/log",
-            params={"tailLines": tail_lines},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return resp.text
-    finally:
-        session.close()
+    return cluster.identity_profile["kubeletidentity"].object_id
 
 
 # ---------------------------------------------------------------------------
@@ -748,11 +143,11 @@ def get_storage_summary(
         "is_hns_enabled": account.is_hns_enabled,
         "containers": [
             {
-                "name": c.name,
-                "public_access": c.public_access,
-                "last_modified_time": c.last_modified_time,
+                "name": container.name,
+                "public_access": container.public_access,
+                "last_modified_time": container.last_modified_time,
             }
-            for c in containers
+            for container in containers
         ],
     }
 
@@ -764,42 +159,41 @@ def set_storage_public_access(
     account_name: str,
     enabled: bool,
 ) -> dict[str, Any]:
-    """Toggle storage account public network access.
+    """Toggle public network posture for a local-debug Storage account.
 
-    If the storage account has VNet/service-endpoint rules configured
-    (networkRuleSet.virtualNetworkRules is non-empty), toggling
-    publicNetworkAccess to Disabled would break VNet-based access.
-    In that case, keep publicNetworkAccess=Enabled and only toggle
-    the defaultAction between Allow/Deny.
+    VNet/service-endpoint rules need ``publicNetworkAccess=Enabled`` plus a
+    restrictive ``defaultAction``. Accounts without VNet rules use the direct
+    publicNetworkAccess toggle.
     """
+
     client = storage_client(credential, subscription_id)
     LOGGER.info("set_storage_public_access account=%s enabled=%s", account_name, enabled)
 
-    # Check if service endpoint / VNet rules are configured
-    acct = client.storage_accounts.get_properties(resource_group, account_name)
-    vnet_rules = getattr(acct.network_rule_set, "virtual_network_rules", None) or []
-
+    account = client.storage_accounts.get_properties(resource_group, account_name)
+    vnet_rules = getattr(account.network_rule_set, "virtual_network_rules", None) or []
     if vnet_rules:
-        # Service Endpoint is configured — keep publicNetworkAccess=Enabled,
-        # toggle defaultAction only (Allow = open to allowed IPs/subnets,
-        # Deny = restrict to VNet rules + IP rules only)
-        LOGGER.info("VNet rules detected (%d) — toggling defaultAction only", len(vnet_rules))
-        from azure.mgmt.storage.models import NetworkRuleSet, DefaultAction
+        from azure.mgmt.storage.models import DefaultAction
+
         new_action = DefaultAction.ALLOW if enabled else DefaultAction.DENY
         update = client.storage_accounts.update(
             resource_group,
             account_name,
-            {"public_network_access": "Enabled", "network_rule_set": {"default_action": new_action.value}},
+            {
+                "public_network_access": "Enabled",
+                "network_rule_set": {"default_action": new_action.value},
+            },
         )
-        return {"public_network_access": update.public_network_access, "default_action": new_action.value}
-    else:
-        # No VNet rules — use the original publicNetworkAccess toggle
-        update = client.storage_accounts.update(
-            resource_group,
-            account_name,
-            {"public_network_access": "Enabled" if enabled else "Disabled"},
-        )
-        return {"public_network_access": update.public_network_access}
+        return {
+            "public_network_access": update.public_network_access,
+            "default_action": new_action.value,
+        }
+
+    update = client.storage_accounts.update(
+        resource_group,
+        account_name,
+        {"public_network_access": "Enabled" if enabled else "Disabled"},
+    )
+    return {"public_network_access": update.public_network_access}
 
 
 # ---------------------------------------------------------------------------
@@ -811,39 +205,32 @@ def list_acr_repositories(
     resource_group: str,
     registry_name: str,
 ) -> dict[str, Any]:
-    """Returns registry metadata with actual vs expected image tag status."""
-    mgmt = acr_client(credential, subscription_id)
-    registry = mgmt.registries.get(resource_group, registry_name)
+    """Return registry metadata with actual vs expected image tag status."""
+
+    management = acr_client(credential, subscription_id)
+    registry = management.registries.get(resource_group, registry_name)
     login_server = registry.login_server or f"{registry_name}.azurecr.io"
 
-    # Check which expected images actually exist via ACR mgmt API
     actual_tags: dict[str, list[str]] = {}
     building_images: list[str] = []
     build_details: list[dict[str, str]] = []
     try:
         from azure.mgmt.containerregistry import ContainerRegistryManagementClient
-        acr_preview = ContainerRegistryManagementClient(
+
+        preview = ContainerRegistryManagementClient(
             credential, subscription_id, api_version="2019-06-01-preview"
         )
-        for run in acr_preview.runs.list(resource_group, registry_name):
+        for run in preview.runs.list(resource_group, registry_name):
             if run.status == "Succeeded" and run.output_images:
-                for img in run.output_images:
-                    repo = img.repository or ""
-                    tag = img.tag or ""
-                    if repo and tag:
-                        actual_tags.setdefault(repo, [])
-                        if tag not in actual_tags[repo]:
-                            actual_tags[repo].append(tag)
+                _collect_succeeded_acr_images(actual_tags, run.output_images)
             elif run.status in ("Queued", "Started", "Running") and run.output_images:
-                for img in run.output_images:
-                    full = f"{img.repository or ''}:{img.tag or ''}"
-                    if full not in building_images:
-                        building_images.append(full)
-                        build_details.append({
-                            "image": full,
-                            "status": run.status or "Unknown",
-                            "run_id": run.run_id or "",
-                        })
+                _collect_building_acr_images(
+                    building_images,
+                    build_details,
+                    run.status or "Unknown",
+                    run.run_id or "",
+                    run.output_images,
+                )
     except Exception as exc:
         LOGGER.warning("ACR runs query failed (non-fatal): %s", type(exc).__name__)
 
@@ -858,8 +245,34 @@ def list_acr_repositories(
     }
 
 
+def _collect_succeeded_acr_images(actual_tags: dict[str, list[str]], images: list[Any]) -> None:
+    for image in images:
+        repo = image.repository or ""
+        tag = image.tag or ""
+        if not repo or not tag:
+            continue
+        actual_tags.setdefault(repo, [])
+        if tag not in actual_tags[repo]:
+            actual_tags[repo].append(tag)
+
+
+def _collect_building_acr_images(
+    building_images: list[str],
+    build_details: list[dict[str, str]],
+    status: str,
+    run_id: str,
+    images: list[Any],
+) -> None:
+    for image in images:
+        full = f"{image.repository or ''}:{image.tag or ''}"
+        if full in building_images:
+            continue
+        building_images.append(full)
+        build_details.append({"image": full, "status": status, "run_id": run_id})
+
+
 # ---------------------------------------------------------------------------
-# Remote Terminal VM
+# Remote Terminal VM (legacy status surface)
 # ---------------------------------------------------------------------------
 def get_vm_status(
     credential: TokenCredential,
@@ -871,46 +284,28 @@ def get_vm_status(
     vm = client.virtual_machines.get(resource_group, vm_name, expand="instanceView")
     statuses = vm.instance_view.statuses if vm.instance_view else []
     power_state = next(
-        (s.display_status for s in statuses if s.code and s.code.startswith("PowerState/")),
+        (
+            status.display_status
+            for status in statuses
+            if status.code and status.code.startswith("PowerState/")
+        ),
         None,
     )
 
-    # OS disk size
     os_disk_gb: int | None = None
     if vm.storage_profile and vm.storage_profile.os_disk:
         os_disk_gb = vm.storage_profile.os_disk.disk_size_gb
 
-    # Managed Identity
-    has_managed_identity = False
     identity_type: str | None = None
+    has_managed_identity = False
     if vm.identity:
         identity_type = vm.identity.type
-        has_managed_identity = identity_type in ("SystemAssigned", "SystemAssigned, UserAssigned")
+        has_managed_identity = identity_type in (
+            "SystemAssigned",
+            "SystemAssigned, UserAssigned",
+        )
 
-    # Public IP — resolve from NIC → IP config → public IP resource
-    public_ip: str | None = None
-    fqdn: str | None = None
-    try:
-        from azure.mgmt.network import NetworkManagementClient
-        net_client = NetworkManagementClient(credential, subscription_id)
-        if vm.network_profile and vm.network_profile.network_interfaces:
-            nic_id = vm.network_profile.network_interfaces[0].id
-            nic_parts = nic_id.split("/")
-            nic_rg = nic_parts[nic_parts.index("resourceGroups") + 1]
-            nic_name = nic_parts[-1]
-            nic = net_client.network_interfaces.get(nic_rg, nic_name)
-            if nic.ip_configurations:
-                pip_ref = nic.ip_configurations[0].public_ip_address
-                if pip_ref and pip_ref.id:
-                    pip_parts = pip_ref.id.split("/")
-                    pip_rg = pip_parts[pip_parts.index("resourceGroups") + 1]
-                    pip_name = pip_parts[-1]
-                    pip = net_client.public_ip_addresses.get(pip_rg, pip_name)
-                    public_ip = pip.ip_address
-                    if pip.dns_settings and pip.dns_settings.fqdn:
-                        fqdn = pip.dns_settings.fqdn
-    except Exception as exc:
-        LOGGER.debug("could not resolve public IP for %s: %s", vm_name, exc)
+    public_ip, fqdn = _resolve_vm_public_endpoint(credential, subscription_id, vm)
 
     return {
         "name": vm.name,
@@ -926,10 +321,41 @@ def get_vm_status(
     }
 
 
+def _resolve_vm_public_endpoint(
+    credential: TokenCredential,
+    subscription_id: str,
+    vm: Any,
+) -> tuple[str | None, str | None]:
+    try:
+        from azure.mgmt.network import NetworkManagementClient
+
+        if not vm.network_profile or not vm.network_profile.network_interfaces:
+            return None, None
+        network_client = NetworkManagementClient(credential, subscription_id)
+        nic_id = vm.network_profile.network_interfaces[0].id
+        nic_parts = nic_id.split("/")
+        nic_rg = nic_parts[nic_parts.index("resourceGroups") + 1]
+        nic_name = nic_parts[-1]
+        nic = network_client.network_interfaces.get(nic_rg, nic_name)
+        if not nic.ip_configurations:
+            return None, None
+        public_ip_ref = nic.ip_configurations[0].public_ip_address
+        if not public_ip_ref or not public_ip_ref.id:
+            return None, None
+        public_ip_parts = public_ip_ref.id.split("/")
+        public_ip_rg = public_ip_parts[public_ip_parts.index("resourceGroups") + 1]
+        public_ip_name = public_ip_parts[-1]
+        public_ip = network_client.public_ip_addresses.get(public_ip_rg, public_ip_name)
+        fqdn = public_ip.dns_settings.fqdn if public_ip.dns_settings else None
+        return public_ip.ip_address, fqdn
+    except Exception as exc:
+        LOGGER.debug("could not resolve public IP for %s: %s", vm.name, exc)
+        return None, None
+
+
 # ---------------------------------------------------------------------------
 # Resource creation (idempotent)
 # ---------------------------------------------------------------------------
-
 def _auto_assign_role(
     credential: TokenCredential,
     subscription_id: str,
@@ -938,21 +364,32 @@ def _auto_assign_role(
     role_definition_id: str,
 ) -> None:
     """Assign a role to a principal. Idempotent — ignores conflict."""
+
     import uuid as _uuid
+
     from azure.mgmt.authorization import AuthorizationManagementClient
+
     auth_client = AuthorizationManagementClient(credential, subscription_id)
     role_def = f"{scope}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
-    assignment_name = str(_uuid.uuid5(_uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_definition_id}"))
+    assignment_name = str(
+        _uuid.uuid5(_uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_definition_id}")
+    )
     try:
         auth_client.role_assignments.create(
-            scope, assignment_name,
+            scope,
+            assignment_name,
             {
                 "role_definition_id": role_def,
                 "principal_id": principal_id,
                 "principal_type": "User",
             },
         )
-        LOGGER.info("RBAC assigned role=%s principal=%s scope=%s", role_definition_id[:8], principal_id[:8], scope.split("/")[-1])
+        LOGGER.info(
+            "RBAC assigned role=%s principal=%s scope=%s",
+            role_definition_id[:8],
+            principal_id[:8],
+            scope.split("/")[-1],
+        )
     except Exception as exc:
         if "Conflict" in str(exc) or "RoleAssignmentExists" in str(exc):
             LOGGER.debug("Role already assigned, skipping")
@@ -968,7 +405,8 @@ def ensure_storage_account(
     region: str,
     caller_oid: str = "",
 ) -> None:
-    """Create a Standard_LRS HNS-enabled storage account + assign caller RBAC. Idempotent."""
+    """Create a Standard_LRS HNS-enabled storage account and default containers."""
+
     client = storage_client(credential, subscription_id)
     LOGGER.info("ensure_storage_account account=%s rg=%s", account_name, resource_group)
     poller = client.storage_accounts.begin_create(
@@ -986,20 +424,20 @@ def ensure_storage_account(
     )
     poller.result()
 
-    # Create default containers
-    blob_client = client.blob_containers
     for container_name in ("blast-db", "queries", "results"):
         try:
-            blob_client.create(resource_group, account_name, container_name, {})
-        except Exception:
-            pass  # container may already exist
+            client.blob_containers.create(resource_group, account_name, container_name, {})
+        except Exception:  # noqa: S110 - container may already exist
+            pass
 
-    # Auto-assign Storage Blob Data Contributor to the caller
     if caller_oid:
         _auto_assign_role(
-            credential, subscription_id, caller_oid,
-            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.Storage/storageAccounts/{account_name}",
-            "ba92f5b4-2d11-453d-a403-e96b0029c9fe",  # Storage Blob Data Contributor
+            credential,
+            subscription_id,
+            caller_oid,
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.Storage/storageAccounts/{account_name}",
+            "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
         )
 
 
@@ -1011,7 +449,8 @@ def ensure_acr(
     region: str,
     caller_oid: str = "",
 ) -> None:
-    """Create a Standard SKU ACR + assign caller RBAC. Idempotent."""
+    """Create a Standard SKU ACR and assign caller RBAC when requested."""
+
     client = acr_client(credential, subscription_id)
     LOGGER.info("ensure_acr registry=%s rg=%s", registry_name, resource_group)
     poller = client.registries.begin_create(
@@ -1026,10 +465,12 @@ def ensure_acr(
     )
     poller.result()
 
-    # Auto-assign AcrPush to the caller
     if caller_oid:
         _auto_assign_role(
-            credential, subscription_id, caller_oid,
-            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.ContainerRegistry/registries/{registry_name}",
-            "8311e382-0749-4cb8-b61a-304f252e45ec",  # AcrPush
+            credential,
+            subscription_id,
+            caller_oid,
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.ContainerRegistry/registries/{registry_name}",
+            "8311e382-0749-4cb8-b61a-304f252e45ec",
         )

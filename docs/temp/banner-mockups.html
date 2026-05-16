@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>ElasticBlast CLI banner mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,700;1,400;1,700&family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #05060a;
+    --panel: #0c0f17;
+    --panel-2: #11151f;
+    --border: rgba(255,255,255,0.08);
+    --muted: #6b7280;
+    --text: #d8def0;
+    --aqua: #4cdeff;
+    --blue: #7aa7ff;
+    --violet: #a878ff;
+    --pink: #ff5ccd;
+    --green: #6ad6a3;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 20% 0%, #1c2541 0%, #0b132b 60%, #050816 100%);
+    color: var(--text);
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    min-height: 100vh;
+  }
+  header {
+    padding: 32px 40px 8px;
+  }
+  header h1 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  header p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 20px;
+    padding: 20px 40px 60px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+  }
+  .card header.cardhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .card header.cardhead .title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--text);
+  }
+  .card header.cardhead .meta {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .term {
+    background: #04050a;
+    padding: 28px 32px;
+    color: #e5e9f5;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .term .meta-line {
+    color: #9aa3b8;
+    margin-bottom: 10px;
+    font-size: 12px;
+  }
+  .term .meta-line code { color: var(--aqua); }
+  .term .prompt {
+    color: var(--muted);
+    margin-top: 14px;
+    font-size: 13px;
+  }
+
+  /* ---------- Variant A : Big block chevron ---------- */
+  .a-block {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 24px;
+    align-items: center;
+  }
+  .a-block .chev {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 28px;
+    line-height: 1.0;
+    letter-spacing: -0.02em;
+    background: linear-gradient(180deg, var(--aqua) 0%, var(--blue) 35%, var(--violet) 65%, var(--pink) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 0 18px rgba(120, 200, 255, 0.18);
+    white-space: pre;
+  }
+  .a-block .info {
+    display: grid;
+    gap: 4px;
+  }
+  .a-block .wordmark {
+    font-style: italic;
+    font-weight: 700;
+    font-size: 22px;
+    background: linear-gradient(90deg, var(--aqua), var(--violet) 50%, var(--pink));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    letter-spacing: 0.02em;
+  }
+  .a-block .wordmark .ver { color: var(--muted); font-style: normal; font-weight: 400; margin-left: 8px; font-size: 14px; }
+  .a-block .row { font-size: 13px; color: #c9d0e1; }
+  .a-block .row .key { color: #fff; font-weight: 700; }
+  .a-block .row .ok  { color: var(--green); font-weight: 700; }
+  .a-block .row .arrow { color: var(--muted); }
+  .a-block .row .hint { color: var(--muted); margin-left: 8px; }
+
+  /* ---------- Variant B : Pixel SVG `>_` + huge wordmark ---------- */
+  .b-pixel { display: flex; align-items: flex-end; gap: 28px; }
+  .b-pixel svg.glyph { width: 140px; height: 130px; flex-shrink: 0; }
+  .b-pixel .right { display: flex; flex-direction: column; gap: 6px; }
+  .b-pixel .wordmark {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 22px;
+    letter-spacing: 0.02em;
+    background: linear-gradient(90deg, var(--aqua), var(--violet) 55%, var(--pink));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 0 22px rgba(168,120,255,0.25);
+  }
+  .b-pixel .tagline {
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+  .b-pixel .info {
+    margin-top: 14px;
+    display: grid;
+    gap: 3px;
+    font-size: 13px;
+    color: #c9d0e1;
+  }
+  .b-pixel .info .key { color: #fff; font-weight: 700; }
+  .b-pixel .info .ok  { color: var(--green); font-weight: 700; }
+  .b-pixel .info .arrow { color: var(--muted); }
+  .b-pixel .info .hint { color: var(--muted); margin-left: 6px; }
+
+  /* ---------- Variant C : Neon outline chevron ---------- */
+  .c-neon {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 32px;
+    align-items: center;
+  }
+  .c-neon .chev {
+    width: 120px;
+    height: 120px;
+    flex-shrink: 0;
+  }
+  .c-neon .right { display: flex; flex-direction: column; gap: 8px; }
+  .c-neon .wordmark {
+    font-family: 'VT323', monospace;
+    font-size: 44px;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    background: linear-gradient(90deg, var(--aqua), var(--violet) 60%, var(--pink));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 0 18px rgba(76, 222, 255, 0.25);
+  }
+  .c-neon .wordmark .ver {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px;
+    margin-left: 10px;
+    background: none;
+    -webkit-background-clip: initial;
+    color: var(--muted);
+    text-shadow: none;
+  }
+  .c-neon .underline {
+    width: 220px;
+    height: 6px;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--aqua), var(--pink));
+    box-shadow: 0 0 18px rgba(255, 92, 205, 0.35);
+  }
+  .c-neon .info {
+    margin-top: 10px;
+    display: grid;
+    gap: 3px;
+    font-size: 13px;
+    color: #c9d0e1;
+  }
+  .c-neon .info .key { color: #fff; font-weight: 700; }
+  .c-neon .info .ok  { color: var(--green); font-weight: 700; }
+  .c-neon .info .arrow { color: var(--muted); }
+  .c-neon .info .hint { color: var(--muted); margin-left: 6px; }
+
+  .legend {
+    margin: 0 auto 24px;
+    max-width: 1100px;
+    padding: 0 40px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .legend code {
+    background: rgba(255,255,255,0.05);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>ElasticBlast CLI &mdash; banner mockups</h1>
+    <p>Three drafts of the browser-terminal login splash. Pick one (or mix-and-match) and I'll wire it into <code>terminal/banner.sh</code>.</p>
+  </header>
+
+  <section class="grid">
+    <!-- Variant A: large block chevron rendered with monospace block characters -->
+    <article class="card">
+      <header class="cardhead">
+        <span class="title">Variant A &middot; Block chevron (pure terminal-safe)</span>
+        <span class="meta">monospace ANSI &middot; matches what real ttyd can draw</span>
+      </header>
+      <div class="term">
+        <div class="meta-line">Signed in: <code>dev-bypass@local</code> &middot; Shell: <code>azureuser</code> &middot; Session: <code>de78a52954c9</code></div>
+        <div class="a-block">
+          <pre class="chev">██▄
+  ██▄
+    ██
+  ██▀
+██▀  ▄▄▄▄▄▄▄▄</pre>
+          <div class="info">
+            <div class="wordmark"><em>ElasticBlast</em> <em>CLI</em><span class="ver">v0.1</span></div>
+            <div class="row"><span class="key">Signed in with Azure</span><span class="hint">/session</span></div>
+            <div class="row"><span class="key">Guard:</span> <span class="ok">protected shell</span><span class="hint">/help</span></div>
+            <div class="row"><span class="key">Trace:</span> browser <span class="arrow">&gt;&gt;&gt;</span> api <span class="arrow">&gt;&gt;&gt;</span> ttyd <span class="arrow">&gt;&gt;&gt;</span> shell</div>
+          </div>
+        </div>
+        <div class="prompt">azureuser@terminal:~$ <span style="background:#fff;color:#04050a;width:8px;display:inline-block;">&nbsp;</span></div>
+      </div>
+    </article>
+
+    <!-- Variant B: chunky 8-bit pixel SVG `>_` with Press Start 2P wordmark -->
+    <article class="card">
+      <header class="cardhead">
+        <span class="title">Variant B &middot; 8-bit pixel <code>&gt;_</code> + retro wordmark</span>
+        <span class="meta">SVG glyph &middot; would ship as a small banner image, not pure ANSI</span>
+      </header>
+      <div class="term">
+        <div class="meta-line">Signed in: <code>dev-bypass@local</code> &middot; Shell: <code>azureuser</code> &middot; Session: <code>de78a52954c9</code></div>
+        <div class="b-pixel">
+          <!-- Pixel `>_` rendered as a 14x13 grid of 10px squares -->
+          <svg class="glyph" viewBox="0 0 140 130" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="pixelGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%"  stop-color="#4cdeff"/>
+                <stop offset="50%" stop-color="#a878ff"/>
+                <stop offset="100%" stop-color="#ff5ccd"/>
+              </linearGradient>
+              <filter id="pixelGlow" x="-20%" y="-20%" width="140%" height="140%">
+                <feGaussianBlur stdDeviation="2" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
+            <g fill="url(#pixelGrad)" filter="url(#pixelGlow)">
+              <!-- top arm of `>` -->
+              <rect x="10"  y="10"  width="20" height="20"/>
+              <rect x="30"  y="20"  width="20" height="20"/>
+              <rect x="50"  y="30"  width="20" height="20"/>
+              <!-- vertex -->
+              <rect x="70"  y="40"  width="20" height="20"/>
+              <!-- bottom arm of `>` -->
+              <rect x="50"  y="50"  width="20" height="20"/>
+              <rect x="30"  y="60"  width="20" height="20"/>
+              <rect x="10"  y="70"  width="20" height="20"/>
+              <!-- underscore -->
+              <rect x="10"  y="100" width="120" height="14" rx="2"/>
+            </g>
+          </svg>
+          <div class="right">
+            <div class="wordmark">ElasticBlast CLI</div>
+            <div class="tagline">v0.1 &nbsp;&middot;&nbsp; browser-only control plane</div>
+            <div class="info">
+              <div><span class="key">Signed in with Azure</span> <span class="hint">/session</span></div>
+              <div><span class="key">Guard:</span> <span class="ok">protected shell</span> <span class="hint">/help</span></div>
+              <div><span class="key">Trace:</span> browser <span class="arrow">&gt;&gt;&gt;</span> api <span class="arrow">&gt;&gt;&gt;</span> ttyd <span class="arrow">&gt;&gt;&gt;</span> shell</div>
+            </div>
+          </div>
+        </div>
+        <div class="prompt" style="margin-top:18px;">azureuser@terminal:~$ <span style="background:#fff;color:#04050a;width:8px;display:inline-block;">&nbsp;</span></div>
+      </div>
+    </article>
+
+    <!-- Variant C: smooth neon outline chevron + VT323 calligraphic wordmark -->
+    <article class="card">
+      <header class="cardhead">
+        <span class="title">Variant C &middot; Neon outline <code>&gt;</code> + calligraphic wordmark</span>
+        <span class="meta">SVG chevron with glow &middot; closest to the Gemini-style splash you sent</span>
+      </header>
+      <div class="term">
+        <div class="meta-line">Signed in: <code>dev-bypass@local</code> &middot; Shell: <code>azureuser</code> &middot; Session: <code>de78a52954c9</code></div>
+        <div class="c-neon">
+          <svg class="chev" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="strokeGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#4cdeff"/>
+                <stop offset="55%" stop-color="#a878ff"/>
+                <stop offset="100%" stop-color="#ff5ccd"/>
+              </linearGradient>
+              <filter id="neonGlow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="3" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
+            <!-- chevron `>` -->
+            <polyline
+              points="20,18 90,60 20,102"
+              fill="none"
+              stroke="url(#strokeGrad)"
+              stroke-width="14"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              filter="url(#neonGlow)"/>
+          </svg>
+          <div class="right">
+            <div class="wordmark">ElasticBlast CLI<span class="ver">v0.1</span></div>
+            <div class="underline"></div>
+            <div class="info">
+              <div><span class="key">Signed in with Azure</span> <span class="hint">/session</span></div>
+              <div><span class="key">Guard:</span> <span class="ok">protected shell</span> <span class="hint">/help</span></div>
+              <div><span class="key">Trace:</span> browser <span class="arrow">&gt;&gt;&gt;</span> api <span class="arrow">&gt;&gt;&gt;</span> ttyd <span class="arrow">&gt;&gt;&gt;</span> shell</div>
+            </div>
+          </div>
+        </div>
+        <div class="prompt" style="margin-top:18px;">azureuser@terminal:~$ <span style="background:#fff;color:#04050a;width:8px;display:inline-block;">&nbsp;</span></div>
+      </div>
+    </article>
+  </section>
+
+  <p class="legend">
+    Variant A is the only one that maps 1:1 to what <code>ttyd</code> can render today (pure ANSI in <code>terminal/banner.sh</code>). B and C would require shipping the splash as an inline SVG/image overlay above xterm.js, not as raw shell output. Pick one and tell me which.
+  </p>
+</body>
+</html>

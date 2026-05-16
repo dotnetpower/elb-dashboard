@@ -13,6 +13,7 @@ import { ExternalLink, CheckCircle2, Info, AlertTriangle } from "lucide-react";
 
 import { fetchApiRaw } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
+import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 
 interface TerminalHealth {
   status: "ok" | "degraded" | "down";
@@ -30,10 +31,11 @@ async function fetchTerminalHealth(): Promise<TerminalHealth> {
 }
 
 export function TerminalCard() {
+  const refetchInterval = useAutoRefreshInterval();
   const health = useQuery({
     queryKey: ["terminal-sidecar-health"],
     queryFn: fetchTerminalHealth,
-    refetchInterval: 30_000,
+    refetchInterval,
     retry: false,
   });
 
@@ -68,19 +70,8 @@ export function TerminalCard() {
       onRefresh={() => health.refetch()}
       fetching={health.isFetching}
     >
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "10px 12px",
-            background: "var(--bg-secondary)",
-            border: "1px solid var(--border-weak)",
-            borderRadius: "var(--radius)",
-            fontSize: 12,
-          }}
-        >
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        <div className="dv3-terminal-status">
           <span
             style={{
               width: 10,
@@ -90,14 +81,11 @@ export function TerminalCard() {
               flexShrink: 0,
             }}
           />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 600 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="lead">
               {isOk ? (
                 <>
-                  <CheckCircle2
-                    size={12}
-                    style={{ display: "inline", marginRight: 4, verticalAlign: -1 }}
-                  />
+                  <CheckCircle2 size={14} strokeWidth={1.75} />
                   Sidecar healthy
                 </>
               ) : status === "checking" ? (
@@ -105,52 +93,43 @@ export function TerminalCard() {
               ) : isUnavailable ? (
                 <>
                   <Info
-                    size={12}
-                    style={{ display: "inline", marginRight: 4, verticalAlign: -1, color: "var(--text-muted)" }}
+                    size={14}
+                    strokeWidth={1.75}
+                    style={{ color: "var(--text-muted)" }}
                   />
                   Sidecar unavailable
                 </>
               ) : (
                 <>
-                  <AlertTriangle
-                    size={12}
-                    style={{ display: "inline", marginRight: 4, verticalAlign: -1 }}
-                  />
+                  <AlertTriangle size={14} strokeWidth={1.75} />
                   Sidecar {status}
                 </>
               )}
             </div>
-            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            <div className="sub">
               {isUnavailable ? (
                 "Not running in this environment. The terminal sidecar only ships with the deployed Container App (or a local docker-compose stack)."
               ) : (
                 <>
-                  ttyd loopback{" "}
-                  <code style={{ fontFamily: "var(--font-mono)" }}>127.0.0.1:7681</code>
-                  {health.data?.upstream_status ? ` · upstream ${health.data.upstream_status}` : ""}
+                  Listening on <code>127.0.0.1:7681</code>
+                  {health.data?.upstream_status
+                    ? ` · last probe HTTP ${health.data.upstream_status}`
+                    : ""}
                 </>
               )}
             </div>
           </div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 6,
-            fontSize: 11,
-            color: "var(--text-muted)",
-            lineHeight: 1.5,
-          }}
-        >
+        <div className="dv3-term-info">
           <div>
             • Authenticated via MSAL bearer + tenant role at the WebSocket upgrade
             (no SSH, no admin password).
           </div>
           <div>
-            • Pre-installed: <code>az</code>, <code>kubectl</code>, <code>azcopy</code>,
-            <code>python3.11</code>, <code>tmux</code>, <code>elastic-blast</code> venv.
+            • Pre-installed: <code>az</code>, <code>kubectl</code>,{" "}
+            <code>azcopy</code>, <code>python3.11</code>, <code>tmux</code>,{" "}
+            <code>elastic-blast</code> venv.
           </div>
           <div>
             • Ephemeral: closing the browser does not stop work (tmux session
@@ -159,25 +138,16 @@ export function TerminalCard() {
         </div>
 
         {isOk ? (
-          <Link
-            to="/terminal"
-            className="glass-button glass-button--primary"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              justifyContent: "center",
-              textDecoration: "none",
-            }}
-          >
+          <Link to="/terminal" className="dv3-term-cta">
             <ExternalLink size={14} />
             Open Terminal
           </Link>
         ) : (
           <button
             type="button"
-            className="glass-button"
+            className="dv3-term-cta"
             disabled
+            aria-disabled="true"
             title={
               isUnavailable
                 ? "Terminal sidecar is not available in this environment"
@@ -185,13 +155,6 @@ export function TerminalCard() {
                   ? "Checking sidecar status…"
                   : `Terminal sidecar is ${status} — cannot open`
             }
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              justifyContent: "center",
-              cursor: "not-allowed",
-            }}
           >
             <ExternalLink size={14} />
             Open Terminal

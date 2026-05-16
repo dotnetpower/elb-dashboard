@@ -1,0 +1,501 @@
+accession,scientific_name,taxid,hit_def,identity_pct,coverage_pct,evalue,bits,align_length,identities,gaps,query_from,query_to,hit_from,hit_to,subject_length
+OZ461628.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288101 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46509,46970,187624
+OZ254846.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4806V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47848,48309,196434
+OZ254305.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2280V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47593,48054,195588
+OZ254730.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4140V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47846,48307,196431
+PQ221562.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0513C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47933,48394,196737
+OZ254482.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3110V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48034,48495,196692
+OZ254748.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4186V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47844,48305,196419
+OZ254390.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2053C_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48149,48610,196903
+OZ254211.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3856V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47847,48308,196422
+OZ461723.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285721 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189578
+OZ254549.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3858V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47861,48322,196375
+OZ254252.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3919V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196408
+OZ254759.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPXV-GOM-927_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46978,47439,194088
+OZ461896.1,Monkeypox virus,10244,"Monkeypox virus isolate CL286797 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47234,47695,188103
+OZ254245.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3328V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47837,48298,196375
+OZ254189.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3377C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47861,48322,196464
+OZ461700.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285211 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47651,48112,189991
+OZ254687.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5143V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47848,48309,196440
+PQ221685.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0455V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47915,48376,196701
+OZ254751.1,Monkeypox virus,10244,"Monkeypox virus isolate skv-mpx0804C|Ibanda|ont|2024-06-10 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48051,48512,196852
+OZ461497.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287951 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47506,47967,188621
+OZ254901.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5197V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47832,48293,196405
+PQ281491.1,Monkeypox virus,10244,"Monkeypox virus isolate Monkeypox virus/Human/Thailand/DDCBIDI-002/2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48222,48683,197278
+PQ281490.1,Monkeypox virus,10244,"Monkeypox virus isolate Monkeypox virus/human/Thailand/DDCBIDI-001/2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48250,48711,197116
+OZ254347.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1006C_S11_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45029,45490,195288
+PQ221748.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1093V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47876,48337,196576
+OZ461512.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291454 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187978
+OZ461593.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287962 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187623
+OZ461620.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284939 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47593,48054,189924
+OZ461732.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287250 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47641,48102,189951
+OZ254681.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4128V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47831,48292,196367
+OZ461543.1,Monkeypox virus,10244,"Monkeypox virus isolate CL292489 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47231,47692,188752
+PQ221902.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPOX169C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47536,47997,195437
+OZ254811.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4604V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47832,48293,196403
+OZ254523.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3567V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47859,48320,196408
+OZ254421.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2653V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47839,48300,196395
+PQ221682.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0452V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47919,48380,196634
+OZ254227.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3531C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47850,48311,196441
+OZ414391.1,Monkeypox virus,10244,"Monkeypox virus isolate Monkeypox_PT0985_2026 genome assembly, complete genome: monopartite >gi|3203136347|emb|OZ414393.1| Monkeypox virus isolate Monkeypox_PT0990_2026 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46891,47352,195322
+PQ221764.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1289V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48011,48472,196777
+OZ254207.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1818C_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48051,48512,196864
+PQ221793.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1511C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48023,48484,196802
+PQ221505.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0035V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,41864,42325,184483
+PQ352030.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX 2027V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,45853,46314,188464
+PP601217.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0221V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46875,47336,195614
+OZ254789.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPX-347 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47526,47987,195450
+OZ254630.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4733V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196412
+OZ254904.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPXV-GOM-208_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47096,47557,195612
+OZ235128.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41668,42129,190465
+PV448277.1,Monkeypox virus,10244,"Monkeypox virus isolate MPXV_USA_2025_NY0100, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46933,47394,195403
+PQ221600.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0059C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47916,48377,196656
+PQ221833.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0kum, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48030,48491,196782
+OZ461552.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291595 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188786
+OZ413598.1,Monkeypox virus,10244,"Monkeypox virus isolate GIRL00012453 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46952,47413,194621
+PQ221747.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1085C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47876,48337,196542
+OZ461921.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288569 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188875
+OZ254633.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4472V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47848,48309,196441
+OZ254336.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2559V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48034,48495,196776
+OZ461629.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285285 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47290,47751,189630
+OZ461893.1,Monkeypox virus,10244,"Monkeypox virus isolate CL281982 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47230,47691,189572
+PQ352022.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX 1521V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47225,47686,189838
+PQ221898.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPOX157Or, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,45346,45807,191413
+OZ461925.1,Monkeypox virus,10244,"Monkeypox virus isolate CL286869 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47651,48112,189992
+PQ221814.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1660V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47910,48371,196612
+OZ254466.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3025V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48038,48499,196746
+PQ221803.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1554V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48044,48505,196847
+OZ462910.1,Monkeypox virus,10244,"Monkeypox virus isolate 2408EQT-WGT-I1011-000 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,42364,42825,185244
+OZ461938.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24148 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47543,48004,189872
+OZ254784.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4120C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47841,48302,196415
+PQ221583.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0030V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47918,48379,196739
+OZ254280.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3446V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47852,48313,196421
+OZ254360.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1076V_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48061,48522,196867
+OZ254638.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4952C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196428
+OZ462935.1,Monkeypox virus,10244,"Monkeypox virus isolate 2408EQT-WGT-I0012-000 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,42296,42757,185024
+OZ461942.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24267 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189550
+OZ254517.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3455V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47842,48303,196427
+OZ254512.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3263C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47851,48312,196433
+PQ221715.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0642V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47543,48004,196272
+PQ221781.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1458V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47545,48006,196251
+PQ221595.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0046C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47904,48365,196664
+OZ254786.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4474V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196389
+OZ462927.1,Monkeypox virus,10244,"Monkeypox virus isolate 2409EQT-MBK-I1012-000 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,42252,42713,185331
+OZ461470.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287864 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187743
+OZ254655.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4589V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47853,48314,196420
+OZ461697.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287679 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46093,46554,187410
+OZ461867.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284059 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189558
+OZ254834.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5082V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47834,48295,196426
+OZ254431.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1844V_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48039,48500,196812
+OZ254788.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPXV-GOM-209_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47178,47639,195711
+PP601184.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1769C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48006,48467,196792
+OZ254600.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4699V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196430
+OZ254331.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0926V_S14_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45168,45629,195452
+OZ254259.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3258S genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47847,48308,196418
+PX667572.1,Monkeypox virus,10244,"Monkeypox virus isolate Zaire-96-I-16_update, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48095,48556,196981
+PP601186.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1793V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48004,48465,196773
+OZ461846.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291318 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188950
+OZ235150.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41634,42095,190379
+MN702444.1,Monkeypox virus,10244,Monkeypox virus strain A5_contig_SPADES genomic sequence,100.0,100.0,0.0,828.419,462,462,0,1,462,41705,42166,190167
+OZ254345.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2541V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48105,48566,196843
+OZ254406.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2196C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47172,47633,195157
+PQ221724.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0732V, partial genome >gi|2792569986|gb|PQ221725.1| Monkeypox virus isolate 23MPX0738V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47557,48018,196244
+PQ221666.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0367C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47538,47999,196280
+OZ254206.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3435V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47834,48295,196376
+OZ461747.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285215 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47626,48087,189966
+PQ305790.1,Monkeypox virus,10244,"Monkeypox virus isolate 40_DRC_HGRK_SouthKivu_2023, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47945,48406,196323
+OZ413597.1,Monkeypox virus,10244,"Monkeypox virus isolate GIRL00007747 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47952,48413,196609
+PV002568.1,Monkeypox virus,10244,"Monkeypox virus isolate MPXV_USA_2024_GA0100, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46902,47363,195536
+PQ221644.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0245C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47563,48024,196253
+OZ235129.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41654,42115,190412
+OZ254529.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3572V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196424
+PQ221599.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0057C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47916,48377,196619
+OZ461871.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285301 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47576,48037,189916
+MN702446.1,Monkeypox virus,10244,Monkeypox virus strain 38c_contig_SPADES genomic sequence,100.0,100.0,0.0,828.419,462,462,0,1,462,47845,48306,190357
+OZ254476.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3221C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196435
+PQ221581.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0022V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48032,48493,196736
+OZ254819.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4951C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47835,48296,196530
+OZ462928.1,Monkeypox virus,10244,"Monkeypox virus isolate 2409EQT-MBK-I1002-000 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,42156,42617,185039
+MN702453.1,Monkeypox virus,10244,Monkeypox virus strain A1_contig_SPADES genomic sequence,100.0,100.0,0.0,828.419,462,462,0,1,462,47884,48345,189632
+PQ221660.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0357V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47462,47923,196113
+OZ254540.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3662V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47845,48306,196417
+OZ254250.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3923C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47855,48316,196415
+PQ221741.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1063V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47946,48407,196660
+OZ254578.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2663V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48010,48471,196730
+PQ305766.1,Monkeypox virus,10244,"Monkeypox virus isolate 7_DRC_HGRK_SouthKivu_2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47943,48404,196337
+OZ254308.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2706V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48015,48476,196739
+OZ461730.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24346 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,189544
+OZ254835.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4821V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47844,48305,196434
+PP601194.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0025V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48007,48468,196768
+OZ254539.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3827V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196435
+OZ235140.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41653,42114,190430
+OZ461503.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291622 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45735,46196,188044
+PP601222.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0230C, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46907,47368,195599
+PQ305820.1,Monkeypox virus,10244,"Monkeypox virus isolate 92_DRC_HGRK_SouthKivu_2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47227,47688,194938
+PQ221559.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0510V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48008,48469,196813
+OZ254769.1,Monkeypox virus,10244,"Monkeypox virus isolate skv-mpx919|Sud-Kivu|ont|2024-06-XX genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48057,48518,196870
+PQ221787.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1471V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48042,48503,196845
+OZ461591.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291453 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187977
+PQ221575.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0002S, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47883,48344,196660
+OZ254767.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4190V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47838,48299,196412
+OZ464494.1,Monkeypox virus,10244,"Monkeypox virus isolate CL292888 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47230,47691,188405
+OZ254636.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4204V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196429
+PQ305788.1,Monkeypox virus,10244,"Monkeypox virus isolate 38_DRC_HGRK_SouthKivu_2023, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47939,48400,196317
+OZ254594.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4785V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47847,48308,196437
+PQ221722.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0723V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47912,48373,196660
+OZ254842.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4772C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196409
+OZ254479.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3206V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47844,48305,196388
+OZ254495.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3445V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196438
+OZ254561.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2165C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47268,47729,195959
+OZ461705.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24062 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47810,48271,190150
+PP601205.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0188V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48061,48522,196853
+OZ254423.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1021C_S18_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45297,45758,195611
+PQ221624.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0130C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47827,48288,196574
+OZ254706.1,Monkeypox virus,10244,"Monkeypox virus isolate skv-mpx0262C|Bagira|ilm|2024-04-13 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,44843,45304,195074
+PQ221648.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0274S, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48015,48476,196789
+OZ254477.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3209V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47855,48316,196459
+OZ254547.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3780V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47851,48312,196427
+OZ254373.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1081C_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48064,48525,196874
+PQ221617.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0082V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47863,48324,196602
+OZ461710.1,Monkeypox virus,10244,"Monkeypox virus isolate CL283233 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189569
+OZ461847.1,Monkeypox virus,10244,"Monkeypox virus isolate CL292879 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47231,47692,188978
+PQ305767.1,Monkeypox virus,10244,"Monkeypox virus isolate 8_DRC_HGRK_SouthKivu_2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47954,48415,196332
+OZ254199.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4035V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196439
+OZ461491.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291609 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188934
+OZ461504.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291803 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,188748
+PP601225.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0240V, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46907,47368,195600
+OZ254429.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2051C_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48102,48563,196820
+PQ221680.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0383V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47912,48373,196678
+PQ221775.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1448C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48062,48523,196871
+OZ254639.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5189V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47825,48286,196432
+OZ254752.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4377C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47845,48306,196445
+OZ254531.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3570V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47851,48312,196388
+OZ254473.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3157V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47846,48307,196372
+OZ461495.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291450 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,189125
+OZ254629.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5086V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47863,48324,196457
+OZ254713.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4255V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47842,48303,196415
+PQ221788.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1478C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48057,48518,196867
+PQ221697.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0469C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47863,48324,196569
+OZ254790.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4119C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47842,48303,196415
+OZ461541.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291844 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47232,47693,188370
+OZ254607.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4563V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47848,48309,196424
+OZ254311.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4693V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196436
+OZ254619.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4958V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196348
+OZ254434.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1033V_S24_1_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45006,45467,195280
+OZ254559.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3969V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196426
+OZ254720.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4184V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47841,48302,196416
+OZ254448.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3207V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47847,48308,196388
+OZ254396.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2691V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47842,48303,196460
+OZ461936.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24491 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189502
+OZ461523.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291910 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,188742
+OZ461640.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284663 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47591,48052,189931
+PQ221684.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0454V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47891,48352,196646
+MN702451.1,Monkeypox virus,10244,Monkeypox virus strain A6_contig_SPADES genomic sequence,100.0,100.0,0.0,828.419,462,462,0,1,462,41748,42209,190413
+PQ221875.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0762V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47251,47712,195250
+OZ254623.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4191V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196409
+OZ461689.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287828 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187882
+OZ254806.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4787V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47832,48293,196370
+OZ254728.1,Monkeypox virus,10244,"Monkeypox virus isolate skv-mpx0794C|Ibanda|ont|2024-06-09 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48048,48509,196843
+PQ221815.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1661V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47947,48408,196722
+OZ254404.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0915C_S2_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45616,46077,196627
+OZ254589.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4048V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47846,48307,196460
+PQ305812.1,Monkeypox virus,10244,"Monkeypox virus isolate 76_DRC_HGRK_SouthKivu_2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46803,47264,195181
+OZ461965.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285462 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189577
+OZ461695.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284037 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47173,47634,189237
+PQ221569.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0611V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48029,48490,196828
+OZ461575.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288218 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187747
+OZ461797.1,Monkeypox virus,10244,"Monkeypox virus isolate CL286789 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189541
+OZ254853.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4704V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47839,48300,196411
+OZ462939.1,Monkeypox virus,10244,"Monkeypox virus isolate 2409EQT-MBK-I1011-000 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,42161,42622,185043
+OZ461803.1,Monkeypox virus,10244,"Monkeypox virus isolate CL286999 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47235,47696,188217
+OZ254566.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3909V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47850,48311,196427
+PQ221592.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0043C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47934,48395,196670
+OZ254340.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1698S_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48055,48516,196743
+OZ235149.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41692,42153,190420
+OZ254446.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2643V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47851,48312,196408
+OZ254778.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4156V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47843,48304,196453
+OZ461509.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291802 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47234,47695,188683
+PP601224.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0239V, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46907,47368,195597
+OZ254472.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3176V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47852,48313,196441
+OZ412552.1,Monkeypox virus,10244,"Monkeypox virus isolate ITM_25111331 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48011,48472,190751
+OZ461534.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291821 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47235,47696,188723
+PQ305794.1,Monkeypox virus,10244,"Monkeypox virus isolate 44_DRC_HGRK_SouthKivu_2023, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46803,47264,195181
+PQ305770.1,Monkeypox virus,10244,"Monkeypox virus isolate 16_DRC_HGRK_SouthKivu_2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46812,47273,195195
+OZ461613.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291077 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188922
+OZ254555.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3799V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196427
+OZ461970.1,Monkeypox virus,10244,"Monkeypox virus isolate CL292881 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47234,47695,188589
+OZ461568.1,Monkeypox virus,10244,"Monkeypox virus isolate CL292628 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,189150
+OZ254185.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2567V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48043,48504,196841
+OZ235142.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41652,42113,190465
+OZ254645.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4049V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196448
+OZ254371.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2948C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47846,48307,196439
+OZ461718.1,Monkeypox virus,10244,"Monkeypox virus isolate CL283235 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47242,47703,189573
+OZ461545.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291570 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188662
+PQ305786.1,Monkeypox virus,10244,"Monkeypox virus isolate 36_DRC_HGRK_SouthKivu_2023, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46801,47262,195179
+OZ461742.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285717 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189578
+OZ254445.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2526V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48041,48502,196874
+OZ461868.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288618 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187983
+OZ461665.1,Monkeypox virus,10244,"Monkeypox virus isolate CL282850 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47235,47696,189575
+OZ254635.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4890V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47850,48311,196420
+OZ461886.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24533 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189571
+PQ221539.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0409V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47918,48379,196684
+OZ254433.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1023E_S20_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45258,45719,195551
+OZ461752.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285703 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47236,47697,189561
+OZ461650.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291081 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188933
+PP601208.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0201V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46898,47359,195656
+OZ461528.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288303 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187983
+PQ221771.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1442C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47931,48392,196673
+OZ254302.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2296S genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47626,48087,195970
+PQ221636.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0197V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47967,48428,196748
+OZ254496.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3436V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47838,48299,196377
+PQ221854.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0578V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47520,47981,196189
+OZ254698.1,Monkeypox virus,10244,"Monkeypox virus isolate skv-mpx0301C|Kamituga|ilm|2024-04-XX genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45541,46002,195751
+OZ254294.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2634V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48026,48487,196741
+OZ461524.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291820 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,188706
+OZ461559.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291494 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188629
+OZ254571.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0947S_S22_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45545,46006,196216
+OZ461569.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291476 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,189113
+PQ221668.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0369V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47896,48357,196614
+PQ221523.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0222C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47871,48332,196552
+OZ235151.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41656,42117,190436
+OZ461913.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24229 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189538
+PQ240043.1,Monkeypox virus,10244,"Monkeypox virus isolate CU-ID24110, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46907,47368,195599
+PQ221629.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0147V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,44362,44823,192988
+OZ461833.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288616 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46093,46554,187548
+PQ628240.1,Monkeypox virus,10244,"Monkeypox virus isolate MPXV_UK_2024_0072, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46881,47342,195330
+OZ254665.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPX-344 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47246,47707,194882
+OZ461513.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291621 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47234,47695,188873
+OZ461781.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285749 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189540
+PX480709.1,Monkeypox virus,10244,"Monkeypox virus isolate MPXV_USA_2025_CA0102, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46516,46977,194702
+OZ254674.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5077V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47839,48300,196434
+OZ461498.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291575 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188765
+OZ254299.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1056S_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48055,48516,196877
+OZ254631.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4673V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47853,48314,196425
+PQ221509.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0113C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48007,48468,196754
+OZ254598.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5246V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47834,48295,196451
+OZ464498.1,Monkeypox virus,10244,"Monkeypox virus isolate CL292897 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47228,47689,188539
+OZ461950.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284740 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46569,47030,188276
+OZ235147.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41656,42117,190456
+OZ461766.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291082 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188943
+PQ221526.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0288C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48030,48491,196839
+PP601223.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0231V, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46907,47368,195606
+OZ254420.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3946C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47851,48312,196374
+OZ254313.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2832V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48109,48570,196763
+OZ254230.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3211V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47854,48315,196459
+PP601195.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0026V, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48005,48466,196761
+PQ221584.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0033C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48059,48520,196874
+PQ221751.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1109C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47993,48454,196715
+OZ254776.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPX-352 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47541,48002,195956
+OZ461537.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288151 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,189121
+OZ461587.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287980 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188604
+OZ461655.1,Monkeypox virus,10244,"Monkeypox virus isolate CL283010 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47230,47691,189550
+OZ254262.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3857V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47847,48308,196422
+PQ221518.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0173V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48061,48522,196872
+PQ221830.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1677C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47919,48380,196654
+OZ461676.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24247 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189553
+OZ254483.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3212V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47824,48285,196417
+PQ221495.1,Monkeypox virus,10244,"Monkeypox virus isolate 20MPX0003S, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47521,47982,196262
+PQ221607.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0070V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47548,48009,196345
+PQ221780.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1457V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47907,48368,196686
+PQ221515.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0158V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48064,48525,196863
+PQ221658.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0355V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47912,48373,196648
+OZ461519.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291818 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47232,47693,188688
+OZ461626.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24139 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,189446
+PQ221828.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1675S, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48029,48490,196835
+OZ254838.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4967V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47861,48322,196398
+OZ461765.1,Monkeypox virus,10244,"Monkeypox virus isolate CL286823 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47643,48104,189983
+OZ254214.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4042V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47844,48305,196409
+OZ254268.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3222V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196431
+OZ461483.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288328 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187816
+OZ254215.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3775V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196426
+OZ254765.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4391V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47842,48303,196417
+OZ235123.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41658,42119,190446
+PQ221669.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0370C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47896,48357,196603
+OZ254746.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4194V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47848,48309,196436
+OZ461564.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288123 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188792
+OZ461933.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291323 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47651,48112,188760
+OZ461922.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291381 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188806
+PQ305815.1,Monkeypox virus,10244,"Monkeypox virus isolate 80_DRC_HGRK_SouthKivu_2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46771,47232,195156
+OZ461646.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287451 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47232,47693,188055
+PQ221561.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0512V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47913,48374,196711
+PP601206.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0194V, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48037,48498,196806
+OZ461648.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285626 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47336,47797,189668
+OZ254553.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3860V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47846,48307,196420
+PQ221538.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0408C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47876,48337,196608
+OZ254357.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3101C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48051,48512,196696
+PQ221619.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0085C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47917,48378,196656
+OZ235143.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41635,42096,190366
+PQ221496.1,Monkeypox virus,10244,"Monkeypox virus isolate 21MPX0197C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48040,48501,196840
+OZ254266.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3503C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47846,48307,196419
+OZ235145.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41656,42117,190459
+OZ461527.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288108 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187787
+PQ221520.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0191V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48044,48505,196851
+OZ254184.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4032V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47850,48311,196441
+PQ221820.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1667C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47861,48322,196604
+PV394719.1,Monkeypox virus,10244,"Monkeypox virus isolate ZJ_JX_2025, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46862,47323,195313
+OZ461709.1,Monkeypox virus,10244,"Monkeypox virus isolate CL292827 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,188405
+PQ221524.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0223C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47872,48333,196573
+OZ461554.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291812 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,188611
+OZ461799.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287426 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47234,47695,188349
+OZ254460.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2637V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48036,48497,196742
+OZ254632.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4195V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47839,48300,196413
+PQ221641.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0216V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48046,48507,196875
+OZ254312.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2994C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47841,48302,196428
+OZ254342.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1079V_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48060,48521,196882
+OZ461623.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291404 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47651,48112,189086
+OZ254508.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3450V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47842,48303,196413
+PQ352025.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX 2091C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46315,46776,188967
+OZ461647.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288098 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188756
+OZ461772.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285782 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47559,48020,189899
+OZ235134.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41642,42103,190398
+KJ642613.1,Monkeypox virus,10244,"Monkeypox virus strain Congo_8, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47855,48316,196442
+OZ461679.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287837 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46493,46954,187209
+OZ254324.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1703C_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48031,48492,196837
+OZ461935.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24504 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47234,47695,189546
+OZ461751.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24399 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47421,47882,189760
+PQ221493.1,Monkeypox virus,10244,"Monkeypox virus isolate 18MPX0174C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47912,48373,196632
+PZ159695.1,Monkeypox virus,10244,"Monkeypox virus isolate MpxV/human/UK/MP-26-02/2026, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47626,48087,189962
+PQ221744.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1072C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48016,48477,196803
+OZ254690.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPX-365 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47474,47935,195403
+PQ221503.1,Monkeypox virus,10244,"Monkeypox virus isolate 22hMPX040Or, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47808,48269,196622
+OZ254191.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3360V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47852,48313,196386
+OZ254330.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2916V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196395
+PP601187.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1806V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48001,48462,196719
+OZ254453.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1018V_S15_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45263,45724,195546
+OZ254414.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2535V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48036,48497,196763
+PQ221844.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0513V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47734,48195,196425
+PQ221618.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0084C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47881,48342,196616
+OZ254699.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4057V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47841,48302,196442
+OZ254246.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3927V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196390
+PQ221774.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1447C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47957,48418,196771
+PQ221761.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1229V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47916,48377,196642
+PQ221723.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0727V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47911,48372,196618
+KP849469.1,Monkeypox virus,10244,"Monkeypox virus isolate Boende_DRC_2008, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48355,48816,197422
+PQ221628.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0140C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48032,48493,196831
+OZ254826.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5054V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47880,48341,196484
+PQ221504.1,Monkeypox virus,10244,"Monkeypox virus isolate 22hMPX040V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47999,48460,196811
+OZ461939.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285437 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189567
+OZ254898.1,Monkeypox virus,10244,"Monkeypox virus isolate skv-mpx924|Kimbi-Lulenge|ont|2024-06-01 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48042,48503,196855
+OZ461800.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287403 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47232,47693,187590
+OZ254335.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2830V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48037,48498,196768
+OZ461662.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284775 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189578
+OZ254376.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4528V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47856,48317,196458
+PQ221615.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0079V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47861,48322,196544
+OZ461493.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288288 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187977
+OZ461826.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287087 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47388,47849,189699
+PQ221626.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0135V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47908,48369,196576
+OZ461767.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287380 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47235,47696,188487
+OZ461880.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24256 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189265
+OZ254339.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2647V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47839,48300,196411
+OZ254287.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1812V_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48050,48511,196836
+PQ305816.1,Monkeypox virus,10244,"Monkeypox virus isolate 82_DRC_HGRK_SouthKivu_2023, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46708,47169,195086
+PQ221819.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1666C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47545,48006,196297
+PP601182.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1740C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48005,48466,196793
+PQ221807.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1636C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47828,48289,196522
+OZ254634.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4123V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196390
+OZ254351.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2761V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196435
+OZ254685.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5171V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47837,48298,196280
+OZ244989.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46946,47407,195459
+OZ461555.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291457 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46044,46505,186346
+PQ221638.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0199V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,43085,43546,191738
+OZ254418.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1015V_S12_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45274,45735,195531
+OZ461544.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288102 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187623
+PQ221795.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1529V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48044,48505,196838
+OZ235132.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41658,42119,190446
+OZ254475.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3213V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47836,48297,196430
+MN702452.1,Monkeypox virus,10244,Monkeypox virus strain A2_contig_SPADES genomic sequence,100.0,100.0,0.0,828.419,462,462,0,1,462,47884,48345,190244
+OZ254599.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4111C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47839,48300,196412
+PP601226.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0242V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46868,47329,195579
+OZ254843.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4631V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47854,48315,196426
+OZ461763.1,Monkeypox virus,10244,"Monkeypox virus isolate CL280932 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47234,47695,189581
+OZ461703.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285607 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189550
+OZ254271.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2588V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48058,48519,196680
+PQ221536.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0406V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47920,48381,196692
+OZ254816.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4852V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47845,48306,196393
+OZ464500.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288605 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47637,48098,188800
+PQ221510.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0127C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47913,48374,196719
+OZ461944.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288610 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46509,46970,187976
+OZ461743.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287404 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47235,47696,188408
+OZ461571.1,Monkeypox virus,10244,"Monkeypox virus isolate CL292624 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47233,47694,188709
+MN702447.1,Monkeypox virus,10244,Monkeypox virus strain 18_contig_SPADES genomic sequence,100.0,100.0,0.0,828.419,462,462,0,1,462,41211,41672,189841
+OZ254196.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4764C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47845,48306,196422
+OZ254533.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3498C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47842,48303,196413
+PQ221529.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0292C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48035,48496,196746
+OZ254712.1,Monkeypox virus,10244,"Monkeypox virus isolate skv-mpx0286C|Nyantende|ilm|2024-04-09 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45264,45725,195411
+PQ221678.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0380C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47918,48379,196692
+PQ221651.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0288C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48028,48489,196801
+PQ221907.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPOX187Or, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46253,46714,192325
+PQ221877.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0764V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47234,47695,195236
+OZ254543.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3866V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47848,48309,196434
+OZ461614.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284966 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189570
+OZ254864.1,Monkeypox virus,10244,"Monkeypox virus isolate skv-mpx0759Or|Uvira|ont|2024-06-06 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48042,48503,196852
+OZ254783.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5262V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47878,48339,196472
+PQ221507.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0049C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47556,48017,196238
+PP601185.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1786C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47993,48454,196731
+OZ254381.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2925V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48048,48509,196680
+OZ462925.1,Monkeypox virus,10244,"Monkeypox virus isolate 2409EQT-WGT-I1028-000 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,42260,42721,185162
+PQ221563.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0515C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47882,48343,196580
+OZ462915.1,Monkeypox virus,10244,"Monkeypox virus isolate 2409EQT-MBK-I1014-000 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,42156,42617,184988
+OZ254696.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPX-381 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47179,47640,195076
+OZ254239.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3916V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47852,48313,196398
+PQ221577.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0014V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47900,48361,196693
+OZ461911.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24351 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189527
+OZ254505.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3230V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47819,48280,196409
+OZ254223.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3890V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47845,48306,196451
+OZ461585.1,Monkeypox virus,10244,"Monkeypox virus isolate CL288127 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,188999
+OZ254208.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3388V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47850,48311,196455
+PQ220061.1,Monkeypox virus,10244,"Monkeypox virus isolate MPXV_DRC_2024_O7, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46800,47261,195182
+OZ254507.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3322V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47865,48326,196409
+OZ254416.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX1702C_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48079,48540,196883
+PQ221596.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0047C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47915,48376,196640
+OZ461479.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291809 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47235,47696,188705
+PQ221543.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0421C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47933,48394,196719
+OZ461694.1,Monkeypox virus,10244,"Monkeypox virus isolate CL287085 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189550
+OZ254770.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5252V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47864,48325,196482
+OZ254821.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4850V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47843,48304,196448
+OZ254584.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4784C genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47842,48303,196411
+OZ461654.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284970 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189567
+OZ254488.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3371V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47854,48315,196451
+PP601198.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0041V, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48008,48469,196753
+PP601197.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0038V, complete genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48027,48488,196807
+PQ221530.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0296C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48019,48480,196763
+PQ305763.1,Monkeypox virus,10244,"Monkeypox virus isolate 3_DRC_HGRK_SouthKivu_2024, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47569,48030,195759
+OZ305314.1,Monkeypox virus,10244,"Monkeypox virus isolate PFPX-011/L818124 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45856,46317,192787
+PQ221786.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX1470V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,48055,48516,196879
+OZ254316.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2058V_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48449,48910,197059
+OZ254413.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2054C_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48190,48651,196988
+OZ254568.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2759V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47841,48302,196445
+OZ254565.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2060C_ont genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,48108,48569,196829
+OZ254353.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3161V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47846,48307,196447
+OZ254236.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3911V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47849,48310,196450
+OZ254672.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4667V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47852,48313,196447
+PQ221608.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0072C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,42132,42593,190920
+PQ221605.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0064C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47546,48007,196283
+OZ254652.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4600V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47853,48314,196421
+OZ235144.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,41662,42123,190431
+PQ221705.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0489V, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47906,48367,196669
+OZ461820.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24134 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47613,48074,189909
+OZ461969.1,Monkeypox virus,10244,"Monkeypox virus isolate CL285451 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189567
+PQ221491.1,Monkeypox virus,10244,"Monkeypox virus isolate 18MPX0172C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47840,48301,196599
+OZ461768.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24340 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47232,47693,189523
+PQ221863.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0592C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47532,47993,196237
+PV844899.1,Monkeypox virus,10244,"Monkeypox virus isolate MPXV_ITA_202505_INMI-PTV, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,46917,47378,195311
+OZ461914.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291364 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,46508,46969,187977
+OZ254831.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4988V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47860,48321,196474
+PQ221542.1,Monkeypox virus,10244,"Monkeypox virus isolate 22MPX0420C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47913,48374,196640
+OZ254415.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2766V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47846,48307,196455
+OZ254641.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX5087V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47839,48300,196434
+OZ461681.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284974 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189569
+OZ254794.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4321V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47850,48311,196425
+OZ461892.1,Monkeypox virus,10244,"Monkeypox virus isolate MPX24507 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47579,48040,189891
+OZ461487.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291442 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47650,48111,189167
+PQ221593.1,Monkeypox virus,10244,"Monkeypox virus isolate 23MPX0044C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47924,48385,196648
+OZ461661.1,Monkeypox virus,10244,"Monkeypox virus isolate CL284597 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47238,47699,189541
+PQ221894.1,Monkeypox virus,10244,"Monkeypox virus isolate RDC-NKV-GOM-MPOX109C, partial genome",100.0,100.0,0.0,828.419,462,462,0,1,462,47547,48008,195407
+OZ461476.1,Monkeypox virus,10244,"Monkeypox virus isolate CL291542 genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47235,47696,188942
+OZ235136.1,Monkeypox virus,10244,"Monkeypox virus genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,40706,41167,189522
+OZ254372.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX0919V_S6_ilm genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,45575,46036,196551
+OZ254281.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX3454V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47832,48293,196373
+OZ254642.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX4729V genome assembly, complete genome: monopartite",100.0,100.0,0.0,828.419,462,462,0,1,462,47852,48313,196393
+OZ461726.1,Monkeypox virus,10244,"Monkeypox virus isolate CL283257 genome assembly, complete genome: monopartite",99.78354978354979,100.0,0.0,824.726,462,461,0,1,462,47238,47699,189578
+OZ254455.1,Monkeypox virus,10244,"Monkeypox virus isolate 24MPX2528V genome assembly, complete genome: monopartite",99.78354978354979,100.0,0.0,824.726,462,461,0,1,462,48030,48491,196789

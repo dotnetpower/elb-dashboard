@@ -65,6 +65,10 @@ function JobRow({
   const cluster = job.infrastructure?.cluster_name;
   const upn = job.owner_upn;
   const shortUser = upn ? upn.split("@")[0] : null;
+  const splitChildren = job.split_children;
+  const splitLabel = splitChildren
+    ? `${splitChildren.child_count} child jobs`
+    : null;
 
   return (
     <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
@@ -123,6 +127,23 @@ function JobRow({
                   }}
                 >
                   <Server size={8} strokeWidth={1.5} /> {cluster}
+                </span>
+              )}
+              {splitLabel && (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 2,
+                    padding: "0 4px",
+                    borderRadius: 3,
+                    background: "var(--glass-bg-strong)",
+                  }}
+                  title={Object.entries(splitChildren?.children_by_status ?? {})
+                    .map(([status, count]) => `${status}: ${count}`)
+                    .join(", ")}
+                >
+                  {splitLabel}
                 </span>
               )}
             </div>
@@ -335,11 +356,37 @@ export function BlastJobs() {
     },
   });
 
-  const allJobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data?.jobs]);
+  const localJobs = useMemo(
+    () => jobsQuery.data?.jobs ?? [],
+    [jobsQuery.data?.jobs],
+  );
+  const allJobs = useMemo(() => {
+    const merged = [...localJobs];
+    merged.sort(
+      (a, b) =>
+        new Date(b.created_at || 0).getTime() -
+        new Date(a.created_at || 0).getTime(),
+    );
+    return merged;
+  }, [localJobs]);
+
+  // Surface the degraded reason from `/api/blast/jobs` so the user sees why
+  // the canonical listing is empty instead of guessing.
+  const degradedNotice = useMemo(() => {
+    const data = jobsQuery.data as
+      | { jobs: BlastJobSummary[]; degraded?: boolean; degraded_reason?: string; message?: string }
+      | undefined;
+    if (!data?.degraded) return null;
+    if (allJobs.length > 0) return null;
+    return {
+      reason: data.degraded_reason ?? "unknown",
+      message: data.message ?? "Job state storage is unavailable.",
+    };
+  }, [jobsQuery.data, allJobs.length]);
 
   // Filter + search
   const filtered = useMemo(() => {
-    let list = [...allJobs].reverse();
+    let list = [...allJobs];
     if (filter !== "all") {
       list = list.filter((j) => {
         const phase = j.phase || j.status;
@@ -390,8 +437,9 @@ export function BlastJobs() {
   const handleDelete = useCallback((id: string) => setDeleteTarget(id), []);
 
   return (
-    <div className="page-stack">
+    <div className="page-stack jobs-page">
       <header
+        className="jobs-header"
         style={{
           display: "flex",
           alignItems: "flex-start",
@@ -401,7 +449,7 @@ export function BlastJobs() {
         }}
       >
         <div className="page-header" style={{ marginBottom: 0 }}>
-          <div className="page-header__title">BLAST Jobs</div>
+          <div className="page-header__title">ElasticBLAST Jobs</div>
           <div className="page-header__desc">
             {allJobs.length} total · {counts.running} running · {counts.completed}{" "}
             completed · {counts.failed} failed
@@ -434,13 +482,13 @@ export function BlastJobs() {
           )}
         </div>
         <div style={{ display: "flex", gap: "var(--space-3)" }}>
-          {cluster.hasRunningCluster ? (
+          {cluster.hasRunningCluster || cluster.isLoading || cluster.isError ? (
             <Link
               to="/blast/submit"
               className="glass-button glass-button--primary"
               style={{ textDecoration: "none" }}
             >
-              New search
+              <Search size={13} strokeWidth={1.5} /> New Search
             </Link>
           ) : (
             <button
@@ -454,7 +502,7 @@ export function BlastJobs() {
               }
               style={{ cursor: "not-allowed" }}
             >
-              New search
+              <Search size={13} strokeWidth={1.5} /> New Search
             </button>
           )}
           <button
@@ -483,6 +531,7 @@ export function BlastJobs() {
       {/* Filter bar + Search */}
       {allJobs.length > 0 && (
         <div
+          className="jobs-filter-bar"
           style={{
             display: "flex",
             alignItems: "center",
@@ -554,11 +603,36 @@ export function BlastJobs() {
       {/* Empty states */}
       {allJobs.length === 0 && !jobsQuery.isLoading && (
         <section
-          className="glass-card"
+          className="glass-card jobs-empty"
           style={{ textAlign: "center", padding: "var(--space-7)" }}
         >
           <p className="muted">No BLAST jobs yet.</p>
-          {cluster.hasRunningCluster ? (
+          {degradedNotice && (
+            <div
+              style={{
+                margin: "var(--space-3) auto var(--space-4)",
+                maxWidth: 520,
+                padding: "10px 14px",
+                background: "rgba(240,198,116,0.08)",
+                border: "1px solid rgba(240,198,116,0.25)",
+                borderRadius: 8,
+                fontSize: 12,
+                textAlign: "left",
+                color: "var(--text-primary)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <AlertTriangle size={12} style={{ color: "var(--warning)" }} />
+                <strong style={{ fontSize: 11, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+                  Job listing degraded · {degradedNotice.reason}
+                </strong>
+              </div>
+              <div className="muted" style={{ fontSize: 11, lineHeight: 1.4 }}>
+                {degradedNotice.message}
+              </div>
+            </div>
+          )}
+          {cluster.hasRunningCluster || cluster.isLoading || cluster.isError ? (
             <Link
               to="/blast/submit"
               className="glass-button glass-button--primary"
@@ -596,7 +670,7 @@ export function BlastJobs() {
       )}
       {filtered.length === 0 && allJobs.length > 0 && !jobsQuery.isLoading && (
         <section
-          className="glass-card"
+          className="glass-card jobs-empty"
           style={{ textAlign: "center", padding: "var(--space-5)" }}
         >
           <p className="muted">

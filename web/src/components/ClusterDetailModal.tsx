@@ -1,12 +1,46 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import { Loader2, Maximize2, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Copy,
+  Loader2,
+  Maximize2,
+  X,
+} from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
 import type { AksAgentPool, WarmupDbInfo, WarmupStatus } from "@/api/endpoints";
 import { ClusterModalKubectl } from "@/components/ClusterDiagnostics";
 import { WarmupSection } from "@/components/WarmupSection";
+
+// ---------------------------------------------------------------------------
+// Helpers — shared with ClusterDiagnostics; kept duplicated here on purpose
+// so the card body can render a compact summary without importing the whole
+// diagnostics module (and pulling its tree-shake exclusions).
+// ---------------------------------------------------------------------------
+
+const SYSTEM_POOL_HINTS = ["systempool", "system", "agentpool"];
+
+function isSystemPool(pool: string | undefined): boolean {
+  if (!pool) return false;
+  const p = pool.toLowerCase();
+  return SYSTEM_POOL_HINTS.some((h) => p === h || p.startsWith(h));
+}
+
+function fmtCores(milli: number): string {
+  if (milli <= 0) return "0";
+  if (milli < 10_000) return (milli / 1000).toFixed(2);
+  return (milli / 1000).toFixed(1);
+}
+
+function fmtGiB(ki: number): string {
+  if (ki <= 0) return "0";
+  const gib = ki / 1024 / 1024;
+  if (gib >= 100) return gib.toFixed(0);
+  if (gib >= 10) return gib.toFixed(1);
+  return gib.toFixed(2);
+}
 
 export function ClusterDetails({
   clusterName,
@@ -28,6 +62,7 @@ export function ClusterDetails({
   nodeCount,
   terminalResourceGroup,
   terminalVmName,
+  kubeletObjectId,
 }: {
   clusterName: string;
   powerState: string | null;
@@ -48,6 +83,7 @@ export function ClusterDetails({
   nodeCount?: number | null;
   terminalResourceGroup?: string;
   terminalVmName?: string;
+  kubeletObjectId?: string | null;
 }) {
   const isRunning = powerState === "Running" && !isTransitioning;
   const [showModal, setShowModal] = useState(false);
@@ -62,18 +98,53 @@ export function ClusterDetails({
     refetchInterval: isRunning ? 60_000 : false,
   });
 
-  const nodeMetrics = (topQuery.data?.nodes ?? []).map((n) => {
-    const short = n.name.replace(/^aks-/, "").replace(/-vmss\d+$/, "");
+  // Aggregate the per-node metrics into the compact card-body summary.
+  // The full per-node breakdown lives in the modal's Cluster Diagnostics
+  // section so we don't render the same rows twice on the dashboard.
+  const summary = useMemo(() => {
+    const nodes = topQuery.data?.nodes ?? [];
+    let cpuUsedM = 0;
+    let cpuTotalM = 0;
+    let memUsedKi = 0;
+    let memTotalKi = 0;
+    let systemCount = 0;
+    let userCount = 0;
+    let notReady = 0;
+    let hot = 0;
+    const pressureFlags = new Set<string>();
+    for (const n of nodes) {
+      cpuUsedM += n.cpu_m ?? 0;
+      cpuTotalM += n.cpu_capacity_m ?? 0;
+      memUsedKi += n.mem_ki ?? 0;
+      memTotalKi += n.mem_capacity_ki ?? 0;
+      if (isSystemPool(n.pool)) systemCount += 1;
+      else userCount += 1;
+      if (n.ready === false) notReady += 1;
+      if (n.cpu_pct > 80 || n.memory_pct > 80) hot += 1;
+      const conds = n.conditions ?? {};
+      if (conds.MemoryPressure === "True") pressureFlags.add("MemoryPressure");
+      if (conds.DiskPressure === "True") pressureFlags.add("DiskPressure");
+      if (conds.PIDPressure === "True") pressureFlags.add("PIDPressure");
+    }
+    const cpuPct =
+      cpuTotalM > 0 ? Math.round((cpuUsedM / cpuTotalM) * 1000) / 10 : 0;
+    const memPct =
+      memTotalKi > 0 ? Math.round((memUsedKi / memTotalKi) * 1000) / 10 : 0;
     return {
-      name: short,
-      fullName: n.name,
-      cpu: n.cpu,
-      cpuPct: n.cpu_pct,
-      mem: n.memory,
-      memPct: n.memory_pct,
-      memTotal: n.memory_total ?? "?",
+      total: nodes.length,
+      systemCount,
+      userCount,
+      cpuUsedM,
+      cpuTotalM,
+      memUsedKi,
+      memTotalKi,
+      cpuPct,
+      memPct,
+      notReady,
+      hot,
+      pressure: [...pressureFlags],
     };
-  });
+  }, [topQuery.data]);
 
   // ESC + body scroll lock for modal
   useEffect(() => {
@@ -90,194 +161,236 @@ export function ClusterDetails({
     };
   }, [showModal]);
 
+  const healthy =
+    summary.total > 0 &&
+    summary.notReady === 0 &&
+    summary.pressure.length === 0;
+
   return (
     <div style={{ marginTop: "var(--space-2)" }}>
-      {/* Node Resources table — matching ACR card style */}
-      {isRunning && nodeMetrics.length > 0 && (
-        <div style={{ marginTop: 4 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
-                <th
+      {/* ── Compact node-resources summary strip ──
+          One-line aggregate: pool dots, totals, health. The per-node table
+          lives in the modal's Cluster Diagnostics section so we don't repeat
+          the same data twice on the dashboard.
+          #3 — Rendered as a <button> so the click-to-expand affordance is
+          discoverable (cursor + keyboard + visible Maximize2 icon). */}
+      {isRunning && summary.total > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowModal(true)}
+          aria-label="Open per-node breakdown"
+          title="Open per-node breakdown"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "8px 10px",
+            borderRadius: 6,
+            border: "1px solid var(--border-weak)",
+            background: "var(--bg-secondary)",
+            fontSize: 11,
+            flexWrap: "wrap",
+            cursor: "pointer",
+            width: "100%",
+            textAlign: "left",
+            color: "inherit",
+            font: "inherit",
+          }}
+        >
+          {/* Pool dots */}
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            {summary.systemCount > 0 && (
+              <span
+                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                title={`${summary.systemCount} system node${summary.systemCount === 1 ? "" : "s"}`}
+              >
+                <span
                   style={{
-                    textAlign: "left",
-                    padding: "4px 0",
-                    color: "var(--text-faint)",
-                    fontSize: 10,
-                    textTransform: "uppercase",
-                    fontWeight: 500,
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: "var(--warning)",
                   }}
+                />
+                <span
+                  className="muted"
+                  style={{ fontSize: 10, fontFamily: "var(--font-mono)" }}
                 >
-                  Node
-                  {topQuery.isFetching && (
-                    <Loader2
-                      size={9}
-                      className="spin"
-                      style={{ marginLeft: 4, verticalAlign: "middle" }}
-                    />
-                  )}
-                </th>
-                <th
+                  {summary.systemCount}
+                </span>
+              </span>
+            )}
+            {summary.userCount > 0 && (
+              <span
+                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                title={`${summary.userCount} user node${summary.userCount === 1 ? "" : "s"}`}
+              >
+                <span
                   style={{
-                    textAlign: "right",
-                    padding: "4px 0",
-                    color: "var(--text-faint)",
-                    fontSize: 10,
-                    textTransform: "uppercase",
-                    fontWeight: 500,
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: "var(--accent)",
                   }}
+                />
+                <span
+                  className="muted"
+                  style={{ fontSize: 10, fontFamily: "var(--font-mono)" }}
                 >
-                  CPU
-                </th>
-                <th
+                  {summary.userCount}
+                </span>
+              </span>
+            )}
+            <span
+              className="muted"
+              style={{
+                fontSize: 9,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              {summary.total} {summary.total === 1 ? "node" : "nodes"}
+            </span>
+          </span>
+          <span className="muted" style={{ fontSize: 11 }}>·</span>
+          {/* CPU aggregate */}
+          <span
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            title={`${summary.cpuUsedM}m of ${summary.cpuTotalM}m`}
+          >
+            <span
+              className="muted"
+              style={{
+                fontSize: 9,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              CPU
+            </span>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
+              <span style={{ color: "var(--text-primary)" }}>
+                {fmtCores(summary.cpuUsedM)}
+              </span>
+              <span className="muted"> / {fmtCores(summary.cpuTotalM)} cores</span>{" "}
+              <span className="muted">({summary.cpuPct}%)</span>
+            </span>
+          </span>
+          <span className="muted" style={{ fontSize: 11 }}>·</span>
+          {/* Memory aggregate */}
+          <span
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            title={`${Math.round(summary.memUsedKi / 1024)}Mi of ${Math.round(summary.memTotalKi / 1024)}Mi`}
+          >
+            <span
+              className="muted"
+              style={{
+                fontSize: 9,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              MEM
+            </span>
+            <span style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
+              <span style={{ color: "var(--text-primary)" }}>
+                {fmtGiB(summary.memUsedKi)}
+              </span>
+              <span className="muted"> / {fmtGiB(summary.memTotalKi)} GiB</span>{" "}
+              <span className="muted">({summary.memPct}%)</span>
+            </span>
+          </span>
+          {/* Health flag — pushed right */}
+          <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+            {healthy && (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  fontSize: 10,
+                  color: "var(--success)",
+                  fontWeight: 500,
+                }}
+              >
+                <span
                   style={{
-                    textAlign: "right",
-                    padding: "4px 0",
-                    color: "var(--text-faint)",
-                    fontSize: 10,
-                    textTransform: "uppercase",
-                    fontWeight: 500,
+                    width: 7,
+                    height: 7,
+                    borderRadius: "50%",
+                    background: "var(--success)",
                   }}
+                />
+                all Ready
+              </span>
+            )}
+            {summary.notReady > 0 && (
+              <span
+                className="dv3-pill dv3-pill-danger"
+                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+              >
+                <AlertTriangle size={10} strokeWidth={1.75} />
+                {summary.notReady} NotReady
+              </span>
+            )}
+            {summary.pressure.length > 0 && (
+              <span
+                className="dv3-pill dv3-pill-warning"
+                title={summary.pressure.join(", ")}
+              >
+                {summary.pressure.length === 1
+                  ? summary.pressure[0]
+                  : `${summary.pressure.length} pressure`}
+              </span>
+            )}
+            {summary.notReady === 0 &&
+              summary.pressure.length === 0 &&
+              summary.hot > 0 && (
+                <span
+                  className="dv3-pill dv3-pill-warning"
+                  title="One or more nodes above 80% CPU/memory"
                 >
-                  Memory
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {nodeMetrics.map((n) => (
-                <tr
-                  key={n.fullName}
-                  style={{ borderBottom: "1px solid var(--border-weak)" }}
-                >
-                  <td style={{ padding: "5px 0", fontSize: 11 }} title={n.fullName}>
-                    <span className="muted">{n.name}</span>
-                  </td>
-                  <td style={{ padding: "5px 0", textAlign: "right" }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "flex-end",
-                        gap: 6,
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: 48,
-                          height: 5,
-                          background: "var(--bg-tertiary)",
-                          borderRadius: 3,
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: `${Math.max(n.cpuPct, 2)}%`,
-                            height: "100%",
-                            background:
-                              n.cpuPct > 80
-                                ? "var(--danger)"
-                                : n.cpuPct > 50
-                                  ? "var(--warning)"
-                                  : "var(--accent)",
-                            borderRadius: 3,
-                            transition: "width 0.6s ease",
-                          }}
-                        />
-                      </div>
-                      <code
-                        style={{
-                          fontSize: 10,
-                          color: "var(--text-secondary)",
-                          minWidth: 50,
-                          textAlign: "right",
-                        }}
-                      >
-                        {n.cpu}
-                      </code>
-                      <span
-                        style={{
-                          fontSize: 9,
-                          color: "var(--text-faint)",
-                          minWidth: 28,
-                          textAlign: "right",
-                        }}
-                      >
-                        {n.cpuPct}%
-                      </span>
-                    </div>
-                  </td>
-                  <td style={{ padding: "5px 0", textAlign: "right" }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "flex-end",
-                        gap: 6,
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: 48,
-                          height: 5,
-                          background: "var(--bg-tertiary)",
-                          borderRadius: 3,
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: `${Math.max(n.memPct, 2)}%`,
-                            height: "100%",
-                            background:
-                              n.memPct > 80
-                                ? "var(--danger)"
-                                : n.memPct > 50
-                                  ? "var(--warning)"
-                                  : "var(--purple, #a78bfa)",
-                            borderRadius: 3,
-                            transition: "width 0.6s ease",
-                          }}
-                        />
-                      </div>
-                      <code
-                        style={{
-                          fontSize: 10,
-                          color: "var(--text-secondary)",
-                          minWidth: 50,
-                          textAlign: "right",
-                        }}
-                      >
-                        {n.mem}
-                      </code>
-                      <span
-                        style={{
-                          fontSize: 9,
-                          color: "var(--text-faint)",
-                          minWidth: 28,
-                          textAlign: "right",
-                        }}
-                      >
-                        {n.memPct}%
-                      </span>
-                      {n.memTotal && n.memTotal !== "?" && (
-                        <span
-                          className="muted"
-                          style={{ fontSize: 8, minWidth: 30, textAlign: "right" }}
-                        >
-                          / {n.memTotal}
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  {summary.hot} hot
+                </span>
+              )}
+            {topQuery.isFetching && (
+              <Loader2
+                size={10}
+                className="spin"
+                style={{ color: "var(--text-faint)" }}
+              />
+            )}
+            {/* #3 — explicit modal-open affordance so users can tell the
+                whole strip is clickable. Sits to the right of the health
+                pill, opacity 0.6 when idle for low chrome. */}
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 3,
+                fontSize: 10,
+                color: "var(--accent)",
+                opacity: 0.7,
+                paddingLeft: 6,
+                borderLeft: "1px solid var(--border-weak)",
+              }}
+            >
+              <Maximize2 size={11} strokeWidth={1.75} />
+              <span
+                style={{
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  fontSize: 9,
+                }}
+              >
+                Details
+              </span>
+            </span>
+          </span>
+        </button>
       )}
 
-      {isRunning && topQuery.isLoading && nodeMetrics.length === 0 && (
+      {isRunning && topQuery.isLoading && summary.total === 0 && (
         <div
           className="muted"
           style={{
@@ -297,25 +410,6 @@ export function ClusterDetails({
           Start the cluster to view node metrics.
         </div>
       )}
-
-      {/* Open modal button */}
-      <button
-        onClick={() => setShowModal(true)}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          marginTop: 6,
-          background: "none",
-          border: "none",
-          color: "var(--accent)",
-          cursor: "pointer",
-          padding: 0,
-          fontSize: 10,
-        }}
-      >
-        <Maximize2 size={10} /> View full details
-      </button>
 
       {/* Full details modal */}
       {showModal &&
@@ -539,6 +633,80 @@ export function ClusterDetails({
 
               {/* ── Scrollable body ── */}
               <div style={{ overflowY: "auto", flex: 1, padding: "16px 24px 24px" }}>
+                {/* ── Identity ── */}
+                {kubeletObjectId && (
+                  <div style={{ marginBottom: 20 }}>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        marginBottom: 8,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 3,
+                          height: 14,
+                          borderRadius: 2,
+                          background: "var(--purple)",
+                        }}
+                      />
+                      Identity
+                    </div>
+                    <div
+                      style={{
+                        borderRadius: 8,
+                        border: "1px solid var(--border-weak)",
+                        padding: "10px 12px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <span
+                        className="muted"
+                        style={{
+                          fontSize: 9,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.06em",
+                        }}
+                      >
+                        Kubelet OID
+                      </span>
+                      <code
+                        style={{
+                          fontSize: 11,
+                          fontFamily: "var(--font-mono)",
+                          color: "var(--text-primary)",
+                          wordBreak: "break-all",
+                        }}
+                      >
+                        {kubeletObjectId}
+                      </code>
+                      <button
+                        className="glass-button"
+                        style={{ padding: "2px 8px", fontSize: 10 }}
+                        onClick={() => navigator.clipboard.writeText(kubeletObjectId)}
+                        title="Copy OID"
+                      >
+                        <Copy size={11} strokeWidth={1.5} /> Copy
+                      </button>
+                      <span
+                        className="muted"
+                        style={{
+                          fontSize: 10,
+                          marginLeft: "auto",
+                        }}
+                      >
+                        AcrPull on the registry must be granted to this object id.
+                      </span>
+                    </div>
+                  </div>
+                )}
                 {/* ── Node Pools table ── */}
                 {agentPools && agentPools.length > 0 && (
                   <div style={{ marginBottom: 20 }}>

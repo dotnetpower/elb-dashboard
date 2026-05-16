@@ -3,35 +3,24 @@ import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, Plus, AlertTriangle, CheckCircle2, X } from "lucide-react";
 
-import { monitoringApi, aksApi } from "@/api/endpoints";
+import { aksApi, monitoringApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ClusterItem } from "@/components/ClusterItem";
+import {
+  DEFAULT_AKS_SKU,
+  DEFAULT_AKS_SYSTEM_SKU,
+  describeAksSku,
+  formatAksSkuOption,
+  groupAksSkus,
+  useAksSkus,
+} from "@/hooks/useAksSkus";
+import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 
-const DEFAULT_SKU = "Standard_E32s_v5";
 const DEFAULT_NODE_COUNT = 10;
-
-// NOTE: SKUs here MUST be a subset of api/services/aks_skus.py::ALLOWED_SKUS
-// (which mirrors elastic_blast.azure_traits.AZURE_HPC_MACHINES in the sibling
-// repo). Adding a SKU outside that allow-list makes BLAST submit fail with
-// `NotImplementedError: Cannot get properties for ...`.
-// #13: Human-readable SKU descriptions with approximate hourly cost
-const SKU_INFO: Record<string, { desc: string; costPerNode: number }> = {
-  Standard_E16s_v5: { desc: "16 cores, 128 GB RAM \u2014 small databases", costPerNode: 1.01 },
-  Standard_E32s_v5: {
-    desc: "32 cores, 256 GB RAM \u2014 large databases (recommended default)",
-    costPerNode: 2.02,
-  },
-  Standard_E48s_v5: {
-    desc: "48 cores, 384 GB RAM \u2014 very large databases",
-    costPerNode: 3.02,
-  },
-  Standard_E64s_v5: {
-    desc: "64 cores, 512 GB RAM \u2014 maximum performance",
-    costPerNode: 4.03,
-  },
-};
+const DEFAULT_SYSTEM_NODE_COUNT = 1;
+const MAX_SYSTEM_NODE_COUNT = 3;
 
 const CLUSTER_NAME_RE = /^[a-zA-Z][a-zA-Z0-9-]{1,62}$/;
 
@@ -59,11 +48,12 @@ export function ClusterCard({
   terminalVmName,
 }: Props) {
   const enabled = Boolean(subscriptionId && resourceGroup);
+  const refetchInterval = useAutoRefreshInterval();
   const query = useQuery({
     queryKey: ["aks", subscriptionId, resourceGroup],
     queryFn: () => monitoringApi.aks(subscriptionId, resourceGroup),
     enabled,
-    refetchInterval: 30_000,
+    refetchInterval,
   });
 
   const noClusters = query.data?.clusters.length === 0;
@@ -71,8 +61,10 @@ export function ClusterCard({
   // Provision form state
   const [showProvision, setShowProvision] = useState(false);
   const [clusterName, setClusterName] = useState("elb-cluster");
-  const [nodeSku, setNodeSku] = useState(DEFAULT_SKU);
+  const [nodeSku, setNodeSku] = useState(DEFAULT_AKS_SKU);
   const [nodeCount, setNodeCount] = useState(DEFAULT_NODE_COUNT);
+  const [systemVmSize, setSystemVmSize] = useState(DEFAULT_AKS_SYSTEM_SKU);
+  const [systemNodeCount, setSystemNodeCount] = useState(DEFAULT_SYSTEM_NODE_COUNT);
   const [provStatus, setProvStatus] = useState<"idle" | "creating" | "done" | "error">(
     "idle",
   );
@@ -91,13 +83,21 @@ export function ClusterCard({
     Map<string, "starting" | "stopping">
   >(new Map());
 
-  // Available SKUs
-  const skuQuery = useQuery({
-    queryKey: ["aks-skus"],
-    queryFn: () => aksApi.listSkus(),
-    enabled,
-    staleTime: 600_000,
-  });
+  const {
+    skus: skuOptions,
+    defaultSystemSku,
+    groupLabels,
+    groupOrder,
+  } = useAksSkus({ enabled });
+
+  // Adopt the backend's system-pool default the first time it loads. The
+  // bundled fallback uses the same value so this is a no-op offline.
+  useEffect(() => {
+    if (defaultSystemSku && systemVmSize === DEFAULT_AKS_SYSTEM_SKU) {
+      setSystemVmSize(defaultSystemSku);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultSystemSku]);
 
   useEffect(() => {
     if (provStatus !== "creating") return;
@@ -132,6 +132,11 @@ export function ClusterCard({
         cluster_name: clusterName,
         node_sku: nodeSku,
         node_count: nodeCount,
+        // Sibling repo's two-pool layout (constants.py):
+        //   systempool (mode=System, CriticalAddonsOnly taint)
+        //   blastpool  (mode=User, workload=blast taint)
+        system_vm_size: systemVmSize,
+        system_node_count: systemNodeCount,
         acr_resource_group: acrResourceGroup || "",
         acr_name: acrName || "",
         storage_resource_group: storageResourceGroup || resourceGroup,
@@ -243,7 +248,17 @@ export function ClusterCard({
   }, [provStatus, query.data, clusterName]);
 
   const clusterNameValid = CLUSTER_NAME_RE.test(clusterName);
-  const estimatedCost = (SKU_INFO[nodeSku]?.costPerNode ?? 1.34) * nodeCount;
+  const selectedSku = skuOptions.find((option) => option.name === nodeSku);
+  const selectedSystemSku = skuOptions.find(
+    (option) => option.name === systemVmSize,
+  );
+  const blastCost = (selectedSku?.hourlyUsd ?? 1.34) * nodeCount;
+  const systemCost = (selectedSystemSku?.hourlyUsd ?? 0.096) * systemNodeCount;
+  const estimatedCost = blastCost + systemCost;
+
+  // Pre-compute the two pool dropdowns so the JSX stays declarative.
+  const blastGroups = groupAksSkus(skuOptions, "blast", groupOrder, groupLabels);
+  const systemGroups = groupAksSkus(skuOptions, "system", groupOrder, groupLabels);
 
   const formatTime = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
 
@@ -436,62 +451,165 @@ export function ClusterCard({
                   )}
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                  <div>
-                    <label
-                      style={{
-                        fontSize: 11,
-                        color: "var(--text-muted)",
-                        display: "block",
-                        marginBottom: 4,
-                      }}
-                    >
-                      Node SKU
-                    </label>
-                    <select
-                      value={nodeSku}
-                      onChange={(e) => setNodeSku(e.target.value)}
-                      className="glass-input"
-                      style={{ width: "100%", fontSize: 13 }}
-                    >
-                      {(skuQuery.data?.skus || [{ name: DEFAULT_SKU, vCPUs: 0, memoryGiB: 0, category: "", series: "" }]).map((s) => {
-                        const name = s.name;
-                        const detail = s.vCPUs ? ` (${s.vCPUs} vCPUs, ${s.memoryGiB} GB)` : "";
-                        return (
-                          <option key={name} value={name}>
-                            {name}{detail}
-                          </option>
-                        );
-                      })}
-                    </select>
-                    <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
-                      {SKU_INFO[nodeSku]?.desc || ""}
+                <div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: "var(--text-primary)",
+                      marginBottom: 8,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                    }}
+                  >
+                    Workload pool ·{" "}
+                    <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>
+                      blastpool
+                    </span>
+                  </div>
+                  <div
+                    style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}
+                  >
+                    <div>
+                      <label
+                        style={{
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                          display: "block",
+                          marginBottom: 4,
+                        }}
+                      >
+                        Node SKU
+                      </label>
+                      <select
+                        value={nodeSku}
+                        onChange={(e) => setNodeSku(e.target.value)}
+                        className="glass-input"
+                        style={{ width: "100%", fontSize: 13 }}
+                      >
+                        {blastGroups.map((group) => (
+                          <optgroup key={group.id} label={`── ${group.label} ──`}>
+                            {group.skus.map((option) => (
+                              <option key={option.name} value={option.name}>
+                                {formatAksSkuOption(option)}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                      <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+                        {describeAksSku(selectedSku)}
+                      </div>
+                    </div>
+                    <div>
+                      <label
+                        style={{
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                          display: "block",
+                          marginBottom: 4,
+                        }}
+                      >
+                        Node Count
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={nodeCount}
+                        onChange={(e) =>
+                          setNodeCount(
+                            Math.max(1, Math.min(100, parseInt(e.target.value) || 1)),
+                          )
+                        }
+                        className="glass-input"
+                        style={{ width: "100%", fontSize: 13 }}
+                      />
                     </div>
                   </div>
-                  <div>
-                    <label
-                      style={{
-                        fontSize: 11,
-                        color: "var(--text-muted)",
-                        display: "block",
-                        marginBottom: 4,
-                      }}
-                    >
-                      Node Count
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={nodeCount}
-                      onChange={(e) =>
-                        setNodeCount(
-                          Math.max(1, Math.min(100, parseInt(e.target.value) || 1)),
-                        )
-                      }
-                      className="glass-input"
-                      style={{ width: "100%", fontSize: 13 }}
-                    />
+                </div>
+
+                <div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: "var(--text-primary)",
+                      marginBottom: 8,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.5,
+                    }}
+                  >
+                    System pool ·{" "}
+                    <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>
+                      systempool · CriticalAddonsOnly
+                    </span>
+                  </div>
+                  <div
+                    style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}
+                  >
+                    <div>
+                      <label
+                        style={{
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                          display: "block",
+                          marginBottom: 4,
+                        }}
+                      >
+                        System VM size
+                      </label>
+                      <select
+                        value={systemVmSize}
+                        onChange={(e) => setSystemVmSize(e.target.value)}
+                        className="glass-input"
+                        style={{ width: "100%", fontSize: 13 }}
+                      >
+                        {systemGroups.map((group) => (
+                          <optgroup key={group.id} label={`── ${group.label} ──`}>
+                            {group.skus.map((option) => (
+                              <option key={option.name} value={option.name}>
+                                {formatAksSkuOption(option)}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                      <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+                        Hosts CoreDNS / metrics-server / CSI · {describeAksSku(selectedSystemSku)}
+                      </div>
+                    </div>
+                    <div>
+                      <label
+                        style={{
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                          display: "block",
+                          marginBottom: 4,
+                        }}
+                      >
+                        System node count (1–{MAX_SYSTEM_NODE_COUNT})
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={MAX_SYSTEM_NODE_COUNT}
+                        value={systemNodeCount}
+                        onChange={(e) =>
+                          setSystemNodeCount(
+                            Math.max(
+                              1,
+                              Math.min(
+                                MAX_SYSTEM_NODE_COUNT,
+                                parseInt(e.target.value) || 1,
+                              ),
+                            ),
+                          )
+                        }
+                        className="glass-input"
+                        style={{ width: "100%", fontSize: 13 }}
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -554,8 +672,11 @@ export function ClusterCard({
                   <strong style={{ color: "var(--text-primary)" }}>
                     ~${estimatedCost.toFixed(2)}/hr
                   </strong>
-                  <span style={{ margin: "0 8px" }}>·</span>
-                  {nodeCount} × {nodeSku} nodes
+                  <div style={{ fontSize: 11, marginTop: 4 }}>
+                    blastpool: {nodeCount} × {nodeSku} (~${blastCost.toFixed(2)}/hr) ·
+                    systempool: {systemNodeCount} × {systemVmSize} (~$
+                    {systemCost.toFixed(2)}/hr)
+                  </div>
                   {!region && (
                     <span style={{ color: "var(--danger)", marginLeft: 8 }}>
                       Region required
@@ -641,10 +762,10 @@ export function ClusterCard({
             </div>
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                {nodeSku} × {nodeCount} nodes
+                blastpool {nodeCount} × {nodeSku}
               </div>
               <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                Est. 5–10 minutes
+                systempool {systemNodeCount} × {systemVmSize} · Est. 5–10 min
               </div>
             </div>
           </div>
@@ -682,6 +803,47 @@ export function ClusterCard({
         </div>
       )}
 
+      {/* #6 — Compact "+ Add Cluster" pill above the list when clusters
+          already exist; the big dashed CTA at the bottom only renders when
+          the list is empty (see below). Right-aligned so it doesn't compete
+          with the cluster headers underneath. */}
+      {enabled && !query.isLoading && !noClusters && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            marginBottom: "var(--space-2)",
+          }}
+        >
+          <button
+            onClick={() => setShowProvision(true)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              padding: "3px 9px",
+              background: "none",
+              border: "1px solid var(--border-medium)",
+              borderRadius: 999,
+              color: "var(--text-muted)",
+              fontSize: 11,
+              cursor: "pointer",
+              transition: "border-color 0.15s, color 0.15s",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = "var(--accent)";
+              e.currentTarget.style.color = "var(--accent)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = "var(--border-medium)";
+              e.currentTarget.style.color = "var(--text-muted)";
+            }}
+          >
+            <Plus size={12} strokeWidth={1.5} /> Add Cluster
+          </button>
+        </div>
+      )}
+
       {/* Existing clusters */}
       <ul
         style={{
@@ -689,7 +851,7 @@ export function ClusterCard({
           padding: 0,
           listStyle: "none",
           display: "grid",
-          gap: "var(--space-3)",
+          gap: "var(--space-2)",
         }}
       >
         {query.data?.clusters.map((c) => (
@@ -713,8 +875,10 @@ export function ClusterCard({
         ))}
       </ul>
 
-      {/* Add Cluster button — visible when data loaded (not during initial load) */}
-      {enabled && !query.isLoading && (
+      {/* #6 — The big dashed "Add Cluster" CTA only renders when the list
+          is empty. When clusters exist, the compact pill above the list
+          (rendered earlier) is the entry point. */}
+      {enabled && !query.isLoading && noClusters && (
         <button
           onClick={() => setShowProvision(true)}
           style={{
@@ -742,7 +906,7 @@ export function ClusterCard({
             e.currentTarget.style.color = "var(--text-muted)";
           }}
         >
-          <Plus size={14} strokeWidth={1.5} /> Add Cluster
+          <Plus size={14} strokeWidth={1.5} /> Provision your first cluster
         </button>
       )}
 

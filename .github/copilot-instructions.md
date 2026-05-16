@@ -195,14 +195,24 @@ All numbers must come from real Azure / Kubernetes APIs. Never fabricate or cach
 
 ## 9. Storage Network Isolation (HARD REQUIREMENT)
 
-**Every Storage account in scope is `publicNetworkAccess: Disabled` from day 1.** The Container App reaches platform Storage exclusively over private endpoints from inside the platform VNet. There is **no temporary public-window toggle** for control-plane traffic, no `bypass: AzureServices` workaround.
+**Production posture is `publicNetworkAccess: Disabled` on every workload Storage account, period.** The deployed Container App reaches platform Storage exclusively over private endpoints from inside the platform VNet. There is **no production code path that flips this on**, no `bypass: AzureServices` workaround for production traffic.
+
+**Local-debug exception (manual, IP-allowlist only).** A developer iterating from a laptop cannot reach the data plane through the private endpoint, so the BLAST Databases / Queries / Results screens render the `network_blocked` degraded state. To exercise those code paths locally, run [scripts/dev/storage-public-access.sh](../scripts/dev/storage-public-access.sh):
+
+```
+scripts/dev/storage-public-access.sh on   # publicNetworkAccess=Enabled, defaultAction=Deny, ipRules=[<your IP>]
+# ... debug ...
+scripts/dev/storage-public-access.sh off  # back to publicNetworkAccess=Disabled
+```
+
+This is intentionally a manual shell command, not a dashboard button or environment toggle — the friction is the safety mechanism. RBAC (`Storage Blob Data Reader` / `Contributor`) is unchanged and still enforced; the script only opens the network surface to the caller's public IP. Do not check in any wrapper that calls this without explicit confirmation, and do not leave the surface open after debugging.
 
 Consequences for the code:
 
-* All browser uploads/downloads of queries/results are **streamed through the `api` sidecar** (1 MiB chunks for download, 4 MiB block uploads, semaphore-capped to 4 concurrent transfers).
+* All browser uploads/downloads of queries/results are **streamed through the `api` sidecar** (1 MiB chunks for download, 4 MiB block uploads, semaphore-capped to 4 concurrent transfers). This stays true regardless of the local-debug toggle state.
 * **Never** issue SAS tokens to the browser. Never return a Storage URL the browser is expected to fetch directly.
 * `elastic-blast` itself runs inside the `terminal` sidecar (same VNet) and reaches Storage via the same private endpoint, so the historical `publicNetworkAccess=Enabled` requirement during `submit/status/delete` does **not** apply here.
-* The dashboard's Storage card surfaces the `publicNetworkAccess` value; if it ever shows **Enabled** in steady state, treat it as an incident and remediate.
+* The dashboard's Storage card surfaces the `publicNetworkAccess` value. **Enabled with `defaultAction=Deny` + a non-empty `ipRules` is an acceptable local-debug state**, but `Enabled` with `defaultAction=Allow`, or `Enabled` left over after debugging in a deployed environment, is an incident — remediate by running `storage-public-access.sh off`.
 
 ---
 

@@ -940,3 +940,68 @@ Target rules:
   once the Container Apps Environment and AKS can communicate privately.
 - Continue to surface AKS node, pod, warmup, and job state through API routes;
   do not make the browser talk to AKS directly.
+
+## Post-deploy Smoke Checklist (RBAC + discovery)
+
+The single most common production regression is the SPA's discovery
+wizard rendering an empty list because the shared UAMI cannot reach ARM
+control-plane LIST operations. Run this after every `azd provision` or
+after any change to identity / role assignments.
+
+1. **MI is attached to the Container App.**
+   ```bash
+   az containerapp show --name ca-elb-control --resource-group rg-<env> \
+     --query 'identity'
+   ```
+   Expect `type: UserAssigned` and the UAMI's resource id under
+   `userAssignedIdentities`.
+
+2. **`AZURE_CLIENT_ID` env matches the UAMI's clientId on the api sidecar.**
+   ```bash
+   az containerapp show --name ca-elb-control --resource-group rg-<env> \
+     --query "properties.template.containers[?name=='api'].env[?name=='AZURE_CLIENT_ID'].value"
+   ```
+   Should be the UAMI's `clientId` (not the app registration id, not zeros).
+
+3. **One-shot end-to-end probe.** Curl the api ingress (auth-gated —
+   the response references subscription ids so it is hidden behind
+   the standard MSAL bearer):
+   ```bash
+   TOKEN=$(az account get-access-token --resource api://<api-app-client-id> \
+     --query accessToken -o tsv)
+   curl -fsS -H "Authorization: Bearer $TOKEN" \
+     https://<ingress-fqdn>/api/health/azure-discovery | jq
+   ```
+   All three steps (`credential`, `subscriptions_list`,
+   `resource_groups_list`) must report `status: ok`. If any step is
+   `error` or `subscriptions_list.count_capped_at_5` is `0`, the
+   `hint` field tells you exactly which `az role assignment create`
+   to run. Subscription ids in the response are masked (`b0523…`)
+   and display names are dropped. The probe is read-only; do not
+   poll it from a dashboard.
+
+4. **Subscription-scope Reader is in place.** Bicep
+   ([infra/modules/subscriptionRoles.bicep](../infra/modules/subscriptionRoles.bicep))
+   does this automatically when `assignSubscriptionReader=true`
+   (the default). If the deployer lacks `User Access Administrator`,
+   the deployment fails the role assignment with a 403; recover by:
+   ```bash
+   az role assignment create --role Reader \
+     --scope /subscriptions/<sub> \
+     --assignee-object-id <uami-objectId> \
+     --assignee-principal-type ServicePrincipal
+   ```
+   then re-run `azd provision` (the bicep is idempotent).
+
+5. **Logs.** All `/api/arm/list_*` failures now log the exception type,
+   sanitised message, and traceback. Tail the api sidecar:
+   ```bash
+   az containerapp logs show --name ca-elb-control --resource-group rg-<env> \
+     --container api --follow | grep -iE 'list_(subscriptions|resource_groups|storage|acrs|vms)'
+   ```
+   A repeated `AuthorizationFailed` line is the smoking gun for missing
+   sub-scope Reader.
+
+The local-compose equivalent of this failure mode (no host `az login`
+mounted) is documented in
+[docs/features_change/2026-05/2026-05-15-dev-compose-az-cli-mount.md](features_change/2026-05/2026-05-15-dev-compose-az-cli-mount.md).

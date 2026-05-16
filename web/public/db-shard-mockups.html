@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <title>DB Sharding — UI Mockups (3 variants)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      /* === Tokens copied verbatim from web/src/theme/glass.css === */
+      :root {
+        --bg-canvas: #111217;
+        --bg-primary: #181b1f;
+        --bg-secondary: #1e2228;
+        --bg-tertiary: #242830;
+        --bg-hover: #282d36;
+        --border-weak: rgba(255, 255, 255, 0.06);
+        --border-medium: rgba(255, 255, 255, 0.1);
+        --border-focus: rgba(110, 159, 255, 0.45);
+        --text-primary: #e4e7ec;
+        --text-muted: #9da5b4;
+        --text-faint: #8a8f9e;
+        --accent: #6e9fff;
+        --success: #73bf69;
+        --warning: #f2994a;
+        --danger: #f2726f;
+        --purple: #b877d9;
+        --teal: #5ccab4;
+        --radius: 8px;
+        --shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.15);
+        --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0;
+        background: var(--bg-canvas);
+        color: var(--text-primary);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        font-size: 14px;
+        line-height: 1.4;
+        background-image: radial-gradient(1200px 600px at 20% 0%, #1c2541 0%, #0b132b 60%, #050816 100%);
+        min-height: 100vh;
+      }
+
+      .page { max-width: 880px; margin: 0 auto; padding: 24px 32px 64px; }
+      h1 { font-size: 22px; margin: 0 0 6px; font-weight: 600; }
+      .lede { color: var(--text-muted); font-size: 13px; margin: 0 0 28px; max-width: 820px; }
+
+      .scenario-controls {
+        display: flex; gap: 8px; align-items: center;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-weak);
+        border-radius: var(--radius);
+        padding: 10px 14px;
+        margin-bottom: 24px;
+        font-size: 12px;
+        flex-wrap: wrap;
+      }
+      .scenario-controls strong { color: var(--text-muted); font-weight: 500; }
+      .scenario-controls button {
+        background: transparent;
+        border: 1px solid var(--border-weak);
+        color: var(--text-faint);
+        padding: 4px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 11px;
+        transition: all 120ms;
+      }
+      .scenario-controls button:hover { color: var(--text-primary); border-color: var(--border-medium); }
+      .scenario-controls button.active {
+        background: rgba(110, 159, 255, 0.12);
+        color: var(--accent);
+        border-color: rgba(110, 159, 255, 0.32);
+      }
+
+      .grid {
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+      }
+
+      .variant {
+        background: var(--bg-primary);
+        border: 1px solid var(--border-weak);
+        border-radius: var(--radius);
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .variant-head {
+        display: flex; align-items: baseline; justify-content: space-between;
+        margin-bottom: 14px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--border-weak);
+      }
+      .variant-head h2 { font-size: 14px; font-weight: 600; margin: 0; color: var(--text-primary); }
+      .variant-head .tag { font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em; }
+      .variant-desc { color: var(--text-muted); font-size: 12px; margin: 0 0 16px; min-height: 48px; }
+
+      /* === Shared "modal" container that mimics BlastDbModal === */
+      .modal-frame {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-weak);
+        border-radius: 6px;
+        padding: 8px;
+      }
+
+      /* Shared db row baseline (matches existing BlastDbRow.tsx) */
+      .db-row {
+        position: relative;
+        display: grid;
+        grid-template-columns: 20px 1fr auto;
+        column-gap: 10px;
+        align-items: start;
+        padding: 8px 10px;
+        border-radius: 6px;
+        margin-bottom: 2px;
+        text-align: left;
+        background: rgba(115,191,105,0.04);
+        border: 1px solid rgba(115,191,105,0.18);
+        transition: background 120ms, border-color 120ms;
+      }
+      .db-row.idle { background: transparent; border-color: transparent; }
+      .db-row.idle:hover { background: rgba(255,255,255,0.02); }
+      .db-row.warming {
+        background: rgba(110,159,255,0.04);
+        border-color: rgba(110,159,255,0.18);
+      }
+
+      .icon-col { padding-top: 2px; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; }
+      .dot {
+        width: 14px; height: 14px;
+        border-radius: 50%;
+        border: 1.5px solid var(--text-faint);
+        opacity: 0.35;
+      }
+      .dot.ready { background: var(--success); border-color: var(--success); opacity: 1;
+        box-shadow: 0 0 0 3px rgba(115,191,105,0.12); }
+      .dot.warming { border-color: var(--accent); border-top-color: transparent; animation: spin 1s linear infinite; opacity: 1; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .info-col { min-width: 0; }
+      .row-title {
+        display: flex; align-items: center; gap: 8px; min-width: 0;
+        font-size: 12px;
+      }
+      .row-title .name { font-weight: 600; }
+      .badge {
+        font-size: 9px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        flex-shrink: 0;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .badge-N { background: rgba(110,159,255,0.14); color: var(--accent); }
+      .badge-P { background: rgba(184,119,217,0.14); color: var(--purple); }
+      .badge-size { font-size: 11px; color: var(--text-muted); flex-shrink: 0; font-weight: 400; }
+
+      .row-desc {
+        font-size: 11px; color: var(--text-muted);
+        margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .row-meta {
+        font-size: 11px; color: var(--text-faint);
+        margin-top: 4px;
+        display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+      }
+      .row-meta code {
+        font-size: 10px;
+        background: var(--bg-tertiary);
+        padding: 1px 5px; border-radius: 3px;
+        font-family: var(--font-mono);
+      }
+      .row-meta .ok { color: var(--success); }
+
+      .right-col {
+        display: flex; align-items: center; justify-content: flex-end;
+        min-width: 84px; padding-top: 1px;
+      }
+      .chip {
+        font-size: 10px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .chip-ready { background: rgba(115,191,105,0.14); color: var(--success); }
+      .chip-warming { background: rgba(110,159,255,0.14); color: var(--accent); font-family: var(--font-mono); }
+
+      /* === A: Inline Compact (single-line additive chip) === */
+      .v-A .shard-chip {
+        font-size: 10px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        background: rgba(92,202,180,0.10);
+        color: var(--teal);
+        font-family: var(--font-mono);
+        letter-spacing: 0.02em;
+        cursor: default;
+      }
+      .v-A .shard-chip[title] { border-bottom: 1px dotted rgba(92,202,180,0.4); }
+      .v-A .shard-chip.suggest {
+        background: rgba(110,159,255,0.10);
+        color: var(--accent);
+      }
+
+      /* === B: Stacked Strip with shard ladder === */
+      .v-B .shard-strip {
+        margin-top: 6px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 5px 8px;
+        background: rgba(255,255,255,0.02);
+        border: 1px solid var(--border-weak);
+        border-radius: 4px;
+        font-size: 11px;
+        color: var(--text-muted);
+        flex-wrap: wrap;
+        min-width: 0;
+      }
+      .v-B .shard-strip .label {
+        color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+        flex-shrink: 0;
+      }
+      .v-B .ladder {
+        display: flex; gap: 3px; align-items: center;
+        flex-shrink: 0;
+      }
+      .v-B .ladder .step {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        min-width: 20px; height: 18px; padding: 0 4px;
+        display: inline-flex; align-items: center; justify-content: center;
+        border-radius: 3px;
+        background: var(--bg-tertiary);
+        color: var(--text-faint);
+        border: 1px solid transparent;
+      }
+      .v-B .ladder .step.ready { color: var(--text-primary); background: rgba(115,191,105,0.10); border-color: rgba(115,191,105,0.22); }
+      .v-B .ladder .step.suggest { background: rgba(110,159,255,0.16); color: var(--accent); border-color: rgba(110,159,255,0.42); }
+      .v-B .ladder .step.warming { background: rgba(110,159,255,0.10); color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+      @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+      .v-B .strip-tail { color: var(--text-faint); font-size: 10px; margin-left: auto; white-space: nowrap; }
+
+      /* === C: Expandable Detail (accordion) === */
+      .v-C .row-with-expand { cursor: pointer; }
+      .v-C .row-with-expand:hover { background: rgba(255,255,255,0.025); border-color: rgba(115,191,105,0.30); }
+      .v-C .micro-S {
+        font-size: 8px;
+        padding: 0px 4px;
+        border-radius: 2px;
+        font-family: var(--font-mono);
+        font-weight: 700;
+        letter-spacing: 0.05em;
+      }
+      .v-C .micro-S.has { background: rgba(92,202,180,0.16); color: var(--teal); }
+      .v-C .expanded-detail {
+        margin: 4px 8px 6px 38px;
+        padding: 10px 12px;
+        background: var(--bg-canvas);
+        border: 1px solid var(--border-weak);
+        border-radius: 4px;
+        font-size: 11px;
+        animation: slideIn 200ms ease-out;
+      }
+      @keyframes slideIn {
+        from { opacity: 0; transform: translateY(-4px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .v-C .expanded-detail .head {
+        display: flex; gap: 12px; align-items: center;
+        padding-bottom: 8px; margin-bottom: 8px;
+        border-bottom: 1px solid var(--border-weak);
+      }
+      .v-C .expanded-detail .head .label { color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+      .v-C .expanded-detail .head .value { color: var(--text-primary); font-family: var(--font-mono); font-size: 11px; }
+      .v-C .expanded-detail .head .value.accent { color: var(--accent); }
+      .v-C .shard-table {
+        width: 100%; border-collapse: collapse; font-size: 11px;
+        font-family: var(--font-mono);
+      }
+      .v-C .shard-table th, .v-C .shard-table td {
+        padding: 4px 8px; text-align: left;
+        border-bottom: 1px solid var(--border-weak);
+      }
+      .v-C .shard-table th { color: var(--text-faint); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; font-size: 9px; }
+      .v-C .shard-table tr.suggest { background: rgba(110,159,255,0.06); }
+      .v-C .shard-table tr.suggest td:first-child { color: var(--accent); font-weight: 600; }
+      .v-C .shard-table .ok { color: var(--success); }
+      .v-C .shard-table .miss { color: var(--text-faint); opacity: 0.4; }
+      .v-C .footnote { color: var(--text-faint); font-size: 10px; margin-top: 8px; line-height: 1.5; }
+
+      /* === Annotation block at bottom === */
+      .annotations {
+        margin-top: 24px;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-weak);
+        border-radius: var(--radius);
+        padding: 18px 22px;
+      }
+      .annotations h3 { margin: 0 0 12px; font-size: 13px; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; }
+      .ann-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+      .ann-grid h4 { margin: 0 0 6px; font-size: 12px; color: var(--text-primary); font-weight: 600; }
+      .ann-grid ul { margin: 4px 0 0 0; padding-left: 16px; }
+      .ann-grid li { margin-bottom: 3px; }
+      .ann-grid .pro { color: var(--success); }
+      .ann-grid .con { color: var(--warning); }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <h1>BLAST DB sharding — UI 시안 3종</h1>
+      <p class="lede">
+        같은 데이터 (<code style="color: var(--accent); font-family: var(--font-mono);">core_nt</code>, 269 GB, 83 volumes, 8 shard sets ready)에 대해
+        정보 표시 방식과 밀도를 다르게 한 3가지 시안. 위쪽 버튼으로 상태(idle / warming / ready / re-warmup)를
+        전환해서 각 시안이 어떻게 반응하는지 직접 비교하세요.
+      </p>
+
+      <div class="scenario-controls">
+        <strong>Scenario:</strong>
+        <button data-state="idle">Not warmed</button>
+        <button data-state="warming">Warming up</button>
+        <button data-state="ready" class="active">Ready (sharded)</button>
+        <button data-state="rewarmup">Update available</button>
+        <strong style="margin-left: 24px;">Cluster preview:</strong>
+        <button data-cluster="5">E16 × 5 nodes</button>
+        <button data-cluster="8" class="active">E16 × 8 nodes</button>
+        <button data-cluster="10">E16 × 10 nodes</button>
+      </div>
+
+      <div class="grid">
+        <!-- ============================ A: INLINE ============================ -->
+        <section class="variant v-A">
+          <div class="variant-head">
+            <h2>A — Inline Compact</h2>
+            <span class="tag">Minimal change</span>
+          </div>
+          <p class="variant-desc">
+            기존 row를 그대로 두고 meta line에 작은 chip 1~2개만 추가. 정보 밀도 가장 낮음, 시각적 변화 가장 적음.
+            샤딩이 "기본 동작"이라는 정책에 맞춰 라벨도 잔잔하게.
+          </p>
+          <div class="modal-frame">
+            <div class="db-row" id="row-A">
+              <div class="icon-col"><div class="dot ready"></div></div>
+              <div class="info-col">
+                <div class="row-title">
+                  <span class="name">Core nucleotide (NCBI)</span>
+                  <span class="badge badge-N">N</span>
+                  <span class="badge-size">269 GB</span>
+                </div>
+                <div class="row-desc">Curated NCBI nucleotide reference, all organisms</div>
+                <div class="row-meta">
+                  <code>core_nt</code>
+                  <span class="ok">269 GB</span>
+                  <span>83 files</span>
+                  <span>2026-05-12</span>
+                  <code>v:2026-05-09</code>
+                  <span class="shard-chip" title="Auto-sharding ready for cluster sizes 1, 2, 3, 4, 5, 6, 8, 10">Sharded · 8 layouts</span>
+                  <span class="shard-chip suggest" title="Will use N=8 shards for current cluster (E16 × 8 nodes)">→ N=8</span>
+                </div>
+              </div>
+              <div class="right-col"><span class="chip chip-ready">Ready</span></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============================ B: STRIP ============================ -->
+        <section class="variant v-B">
+          <div class="variant-head">
+            <h2>B — Shard Ladder Strip</h2>
+            <span class="tag">Visual + dense</span>
+          </div>
+          <p class="variant-desc">
+            row 아래에 얇은 strip으로 "샤드 사다리"를 표시. 8개의 preset N 값을 작은 박스로 보여주고, 현재 클러스터에
+            매칭되는 N을 highlight. 한눈에 어떤 layout이 준비됐고 무엇을 사용할지 보임.
+          </p>
+          <div class="modal-frame">
+            <div class="db-row" id="row-B">
+              <div class="icon-col"><div class="dot ready"></div></div>
+              <div class="info-col">
+                <div class="row-title">
+                  <span class="name">Core nucleotide (NCBI)</span>
+                  <span class="badge badge-N">N</span>
+                  <span class="badge-size">269 GB</span>
+                </div>
+                <div class="row-desc">Curated NCBI nucleotide reference, all organisms</div>
+                <div class="row-meta">
+                  <code>core_nt</code>
+                  <span class="ok">269 GB</span>
+                  <span>83 files</span>
+                  <span>2026-05-12</span>
+                  <code>v:2026-05-09</code>
+                </div>
+                <div class="shard-strip">
+                  <span class="label">Shards</span>
+                  <div class="ladder" id="ladder-B">
+                    <span class="step ready">1</span>
+                    <span class="step ready">2</span>
+                    <span class="step ready">3</span>
+                    <span class="step ready">4</span>
+                    <span class="step ready">5</span>
+                    <span class="step ready">6</span>
+                    <span class="step ready suggest">8</span>
+                    <span class="step ready">10</span>
+                  </div>
+                  <span class="strip-tail">8/8 layouts · auto-pick <strong style="color: var(--accent);">N=8</strong> for current cluster</span>
+                </div>
+              </div>
+              <div class="right-col"><span class="chip chip-ready">Ready</span></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============================ C: EXPANDABLE ============================ -->
+        <section class="variant v-C">
+          <div class="variant-head">
+            <h2>C — Expandable Detail</h2>
+            <span class="tag">Default tiny, opt-in deep</span>
+          </div>
+          <p class="variant-desc">
+            기본 표시는 작은 <code style="font-family: var(--font-mono); font-size: 11px; background: var(--bg-tertiary); padding: 1px 4px; border-radius: 2px;">S</code> 마이크로 배지 하나만. 클릭하면 펼쳐지면서 N 별 상태 + 추천값 + 메모리 마진 등
+            상세 정보. 평소엔 깨끗하고, 필요할 때만 깊이.
+          </p>
+          <div class="modal-frame">
+            <div class="db-row row-with-expand" id="row-C" onclick="document.getElementById('expand-C').style.display=document.getElementById('expand-C').style.display==='block'?'none':'block'">
+              <div class="icon-col"><div class="dot ready"></div></div>
+              <div class="info-col">
+                <div class="row-title">
+                  <span class="name">Core nucleotide (NCBI)</span>
+                  <span class="badge badge-N">N</span>
+                  <span class="micro-S has" title="Sharded — click to expand">S</span>
+                  <span class="badge-size">269 GB</span>
+                </div>
+                <div class="row-desc">Curated NCBI nucleotide reference, all organisms</div>
+                <div class="row-meta">
+                  <code>core_nt</code>
+                  <span class="ok">269 GB</span>
+                  <span>83 files</span>
+                  <span>2026-05-12</span>
+                  <code>v:2026-05-09</code>
+                </div>
+              </div>
+              <div class="right-col"><span class="chip chip-ready">Ready</span></div>
+            </div>
+            <div class="expanded-detail" id="expand-C" style="display: block;">
+              <div class="head">
+                <span><span class="label">Volumes</span> <span class="value">83</span></span>
+                <span><span class="label">Total</span> <span class="value">269 GB</span></span>
+                <span><span class="label">Auto-pick</span> <span class="value accent">N = 8</span></span>
+                <span><span class="label">Per shard</span> <span class="value">~33.6 GB / 26% RAM</span></span>
+              </div>
+              <table class="shard-table">
+                <thead>
+                  <tr>
+                    <th>N</th><th>Per-shard size</th><th>RAM use (E16 / 128 GB)</th><th>Status</th><th>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td>1</td><td>269 GB</td><td>—</td><td class="ok">ready</td><td>full DB on every node</td></tr>
+                  <tr><td>2</td><td>134.5 GB</td><td>over budget</td><td class="ok">ready</td><td>memory pressure expected</td></tr>
+                  <tr><td>3</td><td>89.7 GB</td><td>70%</td><td class="ok">ready</td><td>tight</td></tr>
+                  <tr><td>4</td><td>67.3 GB</td><td>53%</td><td class="ok">ready</td><td>borderline</td></tr>
+                  <tr><td>5</td><td>53.8 GB</td><td>42%</td><td class="ok">ready</td><td>safe</td></tr>
+                  <tr><td>6</td><td>44.8 GB</td><td>35%</td><td class="ok">ready</td><td>safe</td></tr>
+                  <tr class="suggest"><td>8</td><td>33.6 GB</td><td>26%</td><td class="ok">ready</td><td>auto-pick (matches 8 nodes)</td></tr>
+                  <tr><td>10</td><td>26.9 GB</td><td>21%</td><td class="ok">ready</td><td>v3 fastest config</td></tr>
+                </tbody>
+              </table>
+              <p class="footnote">
+                Shard layout auto-selected at submit time using <code style="font-family: var(--font-mono); background: var(--bg-tertiary); padding: 1px 4px; border-radius: 2px;">max(num_nodes, ceil(db / (RAM × 0.5)))</code>.
+                Pre-built alias files cost ~50 KB total across all 8 layouts; original DB volumes are not duplicated.
+              </p>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="annotations">
+        <h3>Trade-offs</h3>
+        <div class="ann-grid">
+          <div>
+            <h4>A — Inline Compact</h4>
+            <ul>
+              <li class="pro">기존 layout 거의 그대로 — 학습 비용 0</li>
+              <li class="pro">스캔하기 쉬운 한 줄</li>
+              <li class="con">메타 line이 더 빽빽해짐</li>
+              <li class="con">상세 정보(메모리 마진 등) 표시 못함 → tooltip에 의존</li>
+            </ul>
+          </div>
+          <div>
+            <h4>B — Shard Ladder Strip</h4>
+            <ul>
+              <li class="pro">한눈에 어떤 N이 준비됐는지 보임</li>
+              <li class="pro">현재 클러스터와의 매칭 highlight로 결정 근거가 시각적</li>
+              <li class="pro">warmup 진행 시 박스가 하나씩 채워지는 애니메이션 가능</li>
+              <li class="con">row 높이 +30px → 스크롤 압박</li>
+              <li class="con">리스트가 길어지면 strip이 반복돼 노이즈</li>
+            </ul>
+          </div>
+          <div>
+            <h4>C — Expandable Detail</h4>
+            <ul>
+              <li class="pro">평소 화면이 깨끗 (마이크로 배지 1개)</li>
+              <li class="pro">필요할 때 정확한 숫자 (RAM %, 마진, 추천 사유) 모두 제공</li>
+              <li class="pro">power user 친화적 — table로 비교 가능</li>
+              <li class="con">기본값에선 sharding이 잘 됐는지 확인하려면 한 번 클릭 필요</li>
+              <li class="con">accordion 상태 관리 필요</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const ladder = ["1","2","3","4","5","6","8","10"];
+
+      function setState(state) {
+        // Active button highlight
+        document.querySelectorAll('button[data-state]').forEach(b => b.classList.toggle('active', b.dataset.state === state));
+        // Apply to all 3 variants
+        ['A','B','C'].forEach(v => applyState(v, state));
+      }
+      function setCluster(n) {
+        document.querySelectorAll('button[data-cluster]').forEach(b => b.classList.toggle('active', b.dataset.cluster === n));
+        // Re-apply current state to refresh highlight
+        const active = document.querySelector('button[data-state].active');
+        applyState('A', active.dataset.state, n);
+        applyState('B', active.dataset.state, n);
+        applyState('C', active.dataset.state, n);
+      }
+
+      function applyState(variant, state, clusterN) {
+        const row = document.getElementById('row-' + variant);
+        const cluster = clusterN || document.querySelector('button[data-cluster].active').dataset.cluster;
+        const dot = row.querySelector('.dot');
+        const right = row.querySelector('.right-col');
+        // Reset row classes
+        row.classList.remove('idle', 'warming');
+        dot.classList.remove('ready', 'warming');
+
+        if (state === 'idle') {
+          row.classList.add('idle');
+          right.innerHTML = '<button style="background: rgba(110,159,255,0.14); color: var(--accent); border: 1px solid rgba(110,159,255,0.32); padding: 3px 10px; border-radius: 4px; font-size: 11px; cursor: pointer;">↓ Get</button>';
+          // Hide sharding chips
+          if (variant === 'A') row.querySelectorAll('.shard-chip').forEach(c => c.style.display = 'none');
+          if (variant === 'B') row.querySelector('.shard-strip').style.display = 'none';
+          if (variant === 'C') row.querySelector('.micro-S').style.display = 'none';
+          if (variant === 'C') document.getElementById('expand-C').style.display = 'none';
+        } else if (state === 'warming') {
+          row.classList.add('warming');
+          dot.classList.add('warming');
+          right.innerHTML = '<span class="chip chip-warming">37%</span>';
+          // Variant-specific warming display
+          if (variant === 'A') {
+            const chips = row.querySelectorAll('.shard-chip');
+            chips[0].style.display = '';
+            chips[0].textContent = 'Sharding · 3/8 layouts';
+            chips[0].style.color = 'var(--accent)';
+            chips[0].style.background = 'rgba(110,159,255,0.10)';
+            chips[1].style.display = 'none';
+          }
+          if (variant === 'B') {
+            const strip = row.querySelector('.shard-strip');
+            strip.style.display = '';
+            const steps = strip.querySelectorAll('.step');
+            steps.forEach((s, i) => {
+              s.classList.remove('ready', 'suggest', 'warming');
+              if (i < 3) s.classList.add('ready');
+              else if (i === 3) s.classList.add('warming');
+            });
+            strip.querySelector('.strip-tail').innerHTML = 'building shard layouts… <strong style="color: var(--accent);">3 / 8</strong>';
+          }
+          if (variant === 'C') {
+            row.querySelector('.micro-S').style.display = '';
+            row.querySelector('.micro-S').textContent = 'S…';
+            row.querySelector('.micro-S').style.color = 'var(--accent)';
+            row.querySelector('.micro-S').style.background = 'rgba(110,159,255,0.16)';
+            document.getElementById('expand-C').style.display = 'none';
+          }
+        } else if (state === 'ready') {
+          dot.classList.add('ready');
+          right.innerHTML = '<span class="chip chip-ready">Ready</span>';
+          // Show full sharding info, suggest based on cluster
+          const idx = ladder.indexOf(cluster);
+          if (variant === 'A') {
+            const chips = row.querySelectorAll('.shard-chip');
+            chips[0].style.display = '';
+            chips[0].textContent = 'Sharded · 8 layouts';
+            chips[0].style.color = 'var(--teal)';
+            chips[0].style.background = 'rgba(92,202,180,0.10)';
+            chips[1].style.display = '';
+            chips[1].textContent = '→ N=' + cluster;
+          }
+          if (variant === 'B') {
+            const strip = row.querySelector('.shard-strip');
+            strip.style.display = '';
+            const steps = strip.querySelectorAll('.step');
+            steps.forEach((s, i) => {
+              s.classList.remove('warming', 'suggest');
+              s.classList.add('ready');
+              if (i === idx) s.classList.add('suggest');
+            });
+            strip.querySelector('.strip-tail').innerHTML = '8/8 layouts · auto-pick <strong style="color: var(--accent);">N=' + cluster + '</strong> for current cluster';
+          }
+          if (variant === 'C') {
+            row.querySelector('.micro-S').style.display = '';
+            row.querySelector('.micro-S').textContent = 'S';
+            row.querySelector('.micro-S').style.color = 'var(--teal)';
+            row.querySelector('.micro-S').style.background = 'rgba(92,202,180,0.16)';
+            // Update suggested row in detail
+            document.querySelectorAll('#expand-C .shard-table tbody tr').forEach((tr, i) => {
+              tr.classList.toggle('suggest', i === idx);
+              const note = tr.querySelector('td:last-child');
+              if (i === idx) note.textContent = 'auto-pick (matches ' + cluster + ' nodes)';
+              else if (i === 7) note.textContent = 'v3 fastest config';
+              else if (i === 6) note.textContent = i === idx ? '' : '';
+            });
+            // Update head auto-pick value
+            const acc = document.querySelector('#expand-C .head .value.accent');
+            if (acc) acc.textContent = 'N = ' + cluster;
+          }
+        } else if (state === 'rewarmup') {
+          dot.classList.add('ready');
+          dot.style.background = 'var(--warning)';
+          dot.style.borderColor = 'var(--warning)';
+          dot.style.boxShadow = '0 0 0 3px rgba(242,153,74,0.12)';
+          right.innerHTML = '<button style="background: transparent; color: var(--warning); border: 1px solid rgba(242,153,74,0.30); padding: 3px 10px; border-radius: 4px; font-size: 11px; cursor: pointer;">↓ Update</button>';
+          if (variant === 'A') {
+            const chips = row.querySelectorAll('.shard-chip');
+            chips[0].style.display = '';
+            chips[0].textContent = 'Sharded (will rebuild)';
+            chips[0].style.color = 'var(--warning)';
+            chips[0].style.background = 'rgba(242,153,74,0.10)';
+            chips[1].style.display = 'none';
+          }
+          if (variant === 'B') {
+            const strip = row.querySelector('.shard-strip');
+            strip.style.display = '';
+            strip.querySelector('.strip-tail').innerHTML = '<span style="color: var(--warning);">new DB version available — update will rebuild shard aliases (~50 KB)</span>';
+          }
+          if (variant === 'C') {
+            row.querySelector('.micro-S').style.display = '';
+            row.querySelector('.micro-S').textContent = 'S↑';
+            row.querySelector('.micro-S').style.color = 'var(--warning)';
+            row.querySelector('.micro-S').style.background = 'rgba(242,153,74,0.16)';
+          }
+        }
+      }
+
+      document.querySelectorAll('button[data-state]').forEach(b =>
+        b.addEventListener('click', () => setState(b.dataset.state))
+      );
+      document.querySelectorAll('button[data-cluster]').forEach(b =>
+        b.addEventListener('click', () => setCluster(b.dataset.cluster))
+      );
+
+      // Initial render: ready state, 8 nodes
+      setState('ready');
+    </script>
+  </body>
+</html>

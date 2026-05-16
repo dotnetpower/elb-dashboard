@@ -30,6 +30,7 @@ celery_app = Celery(
         "api.tasks.acr",
         "api.tasks.blast",
         "api.tasks.storage",
+        "api.tasks.openapi",
     ],
 )
 # Belt-and-braces: force this Celery instance to be both `default_app`
@@ -52,8 +53,12 @@ celery_app.conf.update(
     task_default_queue="default",
     task_routes={
         "api.tasks.azure.*": {"queue": "azure"},
+        "api.tasks.acr.*": {"queue": "acr"},
         "api.tasks.blast.*": {"queue": "blast"},
         "api.tasks.storage.*": {"queue": "storage"},
+        # OpenAPI deploys talk to AKS / MSI / Authorization, same as
+        # `provision_aks` — share the azure queue.
+        "api.tasks.openapi.*": {"queue": "azure"},
     },
     # Beat schedule lives in Storage state (loaded by the StorageScheduler in
     # phase 2). The default in-memory schedule is empty.
@@ -77,14 +82,18 @@ def _start_reporter(sender_name: str) -> None:
 
         name = os.environ.get("SIDECAR_NAME", sender_name)
         start_in_thread(name)
-    except Exception:  # noqa: BLE001 — never crash the worker over telemetry
+    except Exception:
         import logging
         logging.getLogger(__name__).warning(
             "cgroup reporter failed to start in %s", sender_name, exc_info=True
         )
 
 
-from celery.signals import beat_init, worker_init  # noqa: E402 — keep near user
+from celery.signals import (  # noqa: E402 — keep near user
+    beat_init,
+    before_task_publish,
+    worker_init,
+)
 
 
 @worker_init.connect
@@ -95,3 +104,20 @@ def _on_worker_init(**_kwargs):
 @beat_init.connect
 def _on_beat_init(**_kwargs):
     _start_reporter("beat")
+
+
+# ---------------------------------------------------------------------------
+# UI animation events — the SidecarsCard topology graph fires a particle
+# along Row 2 (api → redis → worker) every time the api enqueues a task
+# and along Row 3 (beat → redis) every time beat does. before_task_publish
+# fires in the *producer* process, so the SIDECAR_NAME env decides which
+# row gets the credit. Failures are swallowed inside event_emitter.emit.
+# ---------------------------------------------------------------------------
+_PRODUCER_ROLE = os.environ.get("SIDECAR_NAME", "api")
+
+
+@before_task_publish.connect
+def _on_before_task_publish(**_kwargs):
+    from api.services.event_emitter import ROW_ASYNC, ROW_SCHED, emit
+
+    emit(ROW_SCHED if _PRODUCER_ROLE == "beat" else ROW_ASYNC)

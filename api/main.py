@@ -25,6 +25,7 @@ import logging
 import os
 import secrets
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -34,6 +35,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api import __version__
+
 # Import celery_app eagerly so it is registered as the current/default
 # Celery instance BEFORE any route handler imports `api.tasks.*` (whose
 # `@shared_task` decorators bind to the current Celery app at call time).
@@ -50,6 +52,7 @@ from api.routes import (
     resources,
     storage,
     stubs,
+    elastic_blast,
     tasks,
     terminal_legacy,
     terminal_ws,
@@ -61,6 +64,22 @@ logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
     format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
 )
+
+# Silence verbose third-party loggers regardless of LOG_LEVEL — at DEBUG these
+# dump full HTTP request/response headers on every Azure SDK call and were the
+# single biggest CPU + log-volume drain during local dev. Override with
+# AZURE_LOG_LEVEL=DEBUG when you genuinely need wire-level traces.
+_azure_log_level = os.environ.get("AZURE_LOG_LEVEL", "WARNING").upper()
+for _name in (
+    "azure.core.pipeline.policies.http_logging_policy",
+    "azure.identity",
+    "azure.identity._internal.decorators",
+    "azure.identity._credentials.default",
+    "urllib3.connectionpool",
+    "httpx",
+    "watchfiles",
+):
+    logging.getLogger(_name).setLevel(_azure_log_level)
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
@@ -84,13 +103,44 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             raise
         elapsed_ms = (time.monotonic() - t0) * 1000
         response.headers["x-request-id"] = rid
+        path = request.url.path
         # Skip noisy /api/health probe logs (they fire every 10s).
-        if request.url.path != "/api/health":
+        if path != "/api/health":
             LOGGER.info(
                 "req rid=%s method=%s path=%s status=%d elapsed=%.0fms",
-                rid, request.method, request.url.path, response.status_code, elapsed_ms,
+                rid, request.method, path, response.status_code, elapsed_ms,
             )
+        # Emit a UI animation event for the SidecarsCard topology graph.
+        # Health probes and the SSE/snapshot endpoints themselves are
+        # excluded so the dashboard's own polling doesn't generate
+        # phantom traffic. See api.services.event_emitter.
+        if path != "/api/health" and not path.startswith("/api/monitor/sidecars"):
+            from api.services.event_emitter import (
+                ROW_HTTP,
+                ROW_TERM,
+            )
+            from api.services.event_emitter import (
+                emit as _emit_event,
+            )
+            _emit_event(ROW_TERM if path.startswith("/api/terminal") else ROW_HTTP)
         return response
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """App lifespan — currently only used to drain the sidecar SSE
+    broadcaster cleanly on shutdown so subscribers see an EOF instead of
+    a half-closed socket. See `api.routes.monitor._SidecarBroadcaster`.
+    """
+    try:
+        yield
+    finally:
+        try:
+            from api.routes.monitor import _SIDECAR_BROADCASTER
+
+            await _SIDECAR_BROADCASTER.close()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("sidecar broadcaster shutdown failed: %s", exc)
 
 
 def create_app() -> FastAPI:
@@ -99,6 +149,7 @@ def create_app() -> FastAPI:
         version=__version__,
         docs_url="/api/docs" if os.environ.get("ENABLE_DOCS", "false").lower() == "true" else None,
         redoc_url=None,
+        lifespan=_lifespan,
     )
 
     # Per-request id + timing logging.
@@ -142,6 +193,7 @@ def create_app() -> FastAPI:
     app.include_router(arm.router)  # carries /api/arm prefix
     app.include_router(resources.router)  # carries /api/resources prefix
     app.include_router(storage.router)  # carries /api/storage prefix
+    app.include_router(elastic_blast.router)  # external /api/v1/elastic-blast facade
     app.include_router(terminal_ws.router)  # WebSocket + ticket + health
     app.include_router(terminal_legacy.router)  # /api/terminal/{vm}/* → 410 Gone
     app.include_router(tasks.router)  # GET /api/tasks/{id} — Celery task status
@@ -179,7 +231,7 @@ def create_app() -> FastAPI:
 
             sidecar_name = os.environ.get("SIDECAR_NAME", "api")
             start_in_thread(sidecar_name)
-        except Exception as exc:  # noqa: BLE001 — reporter must not crash startup
+        except Exception as exc:
             LOGGER.warning("cgroup reporter not started: %s", exc)
 
     LOGGER.info("api sidecar started, version=%s", __version__)

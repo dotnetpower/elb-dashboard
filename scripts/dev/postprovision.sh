@@ -81,9 +81,19 @@ build_image() {
   local dockerfile="${2:-}"
   local context="${3:-}"
   local log="$LOG_DIR/build-${image_name}.log"
+  local extra_args=()
   if [ -z "$image_name" ] || [ -z "$dockerfile" ] || [ -z "$context" ]; then
     echo "build_image: missing arg (image=$image_name dockerfile=$dockerfile context=$context)" >&2
     return 1
+  fi
+  if [ "$image_name" = "elb-frontend" ]; then
+    extra_args=(
+      --build-arg "VITE_API_BASE_URL="
+      --build-arg "VITE_AUTH_DEV_BYPASS=false"
+      --build-arg "VITE_AZURE_REDIRECT_URI=__RUNTIME__"
+      --build-arg "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID"
+      --build-arg "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL"
+    )
   fi
   {
     echo "[build-$image_name] starting at $(date -u +%H:%M:%S)"
@@ -92,6 +102,7 @@ build_image() {
       --image "${image_name}:${TAG}" \
       --image "${image_name}:latest" \
       --file "$dockerfile" \
+      "${extra_args[@]}" \
       "$context" \
       --output none
     rc=$?

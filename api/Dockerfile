@@ -57,3 +57,23 @@ CMD ["uvicorn", "api.main:app", \
      "--workers", "2", \
      "--proxy-headers", \
      "--forwarded-allow-ips", "*"]
+
+
+# ---------------------------------------------------------------------------
+# Optional dev stage — adds the Azure CLI so the local docker compose stack
+# can use the developer's host `az login` (mounted via ~/.azure) instead of
+# the production Managed Identity. This stage is opt-in via
+# `build.target: dev` in scripts/dev/docker-compose.full.yml. Production
+# images still use the `runtime` stage and stay slim.
+# ---------------------------------------------------------------------------
+FROM runtime AS dev
+USER 0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg lsb-release apt-transport-https \
+    && curl -sL https://aka.ms/InstallAzureCLIDeb | bash \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Stay as root — compose runs api/worker/beat with user: 0:0 for bind-mount
+# friendliness, and AZURE_CONFIG_DIR is set in compose to point at the
+# bind-mounted host ~/.azure so DefaultAzureCredential's AzureCliCredential
+# link works.
+

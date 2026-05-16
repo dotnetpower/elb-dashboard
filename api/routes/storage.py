@@ -133,6 +133,23 @@ def prepare_db(
     _check(db_name, _RE_DB_NAME, "db_name")
 
     cred = get_credential()
+
+    # Local-debug only: when LOCAL_DEBUG_AUTO_OPEN_STORAGE=true is set on a
+    # developer laptop (NOT in a Container App), open the workload Storage
+    # account's public network surface to this caller's IP so the server-side
+    # copy below can actually reach the data plane. In production the api
+    # sidecar already reaches Storage via the private endpoint and this is a
+    # no-op. See api/services/storage_public_access.py and project policy §9.
+    from api.services.storage_public_access import ensure_local_storage_access
+
+    access = ensure_local_storage_access(cred, sub, storage_rg, account_name)
+    if access.get("action") == "failed":
+        LOGGER.warning(
+            "prepare_db: local-debug auto-open failed for %s: %s",
+            account_name,
+            access.get("error"),
+        )
+
     try:
         latest_dir = _resolve_latest_dir()
     except Exception as exc:
@@ -209,8 +226,48 @@ def prepare_db(
             db_name, started, skipped, errors,
         )
 
+        # Auto-shard step: as soon as the NCBI key enumeration is in hand,
+        # we know every volume name and can publish the manifest+.nal alias
+        # files for every preset shard count. The blobs they reference do
+        # not have to exist yet — the AKS init script will download them
+        # lazily at job runtime. ~50 KB total per DB across all presets.
+        from api.services.db_sharding import (
+            PRESET_SHARD_SETS,
+            derive_volumes_from_keys,
+            upload_shard_set,
+        )
+
+        shard_sets_created: list[int] = []
+        try:
+            volumes = derive_volumes_from_keys(db_name, all_keys)
+            for n in PRESET_SHARD_SETS:
+                if n > len(volumes):
+                    continue  # small DB, fewer volumes than this preset
+                try:
+                    upload_shard_set(
+                        cred, account_name, db_name, n, volumes,
+                    )
+                    shard_sets_created.append(n)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "shard set N=%d failed for %s: %s",
+                        n, db_name, sanitise(str(exc))[:200],
+                    )
+        except LookupError:
+            # No volumes detected (e.g. key list was empty or unfamiliar
+            # extension layout). Leave sharded=False.
+            LOGGER.info(
+                "auto-shard skipped for %s: no volumes detected", db_name
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "auto-shard failed for %s: %s",
+                db_name, sanitise(str(exc))[:200],
+            )
+
         # Drop a metadata blob alongside the DB so the dashboard can show
-        # source_version / downloaded_at without contacting NCBI again.
+        # source_version / downloaded_at / sharding state without
+        # contacting NCBI again.
         try:
             metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
             metadata_blob.upload_blob(
@@ -220,6 +277,8 @@ def prepare_db(
                         "source_version": latest_dir,
                         "downloaded_at": datetime.now(UTC).isoformat(),
                         "file_count": started + skipped,
+                        "sharded": bool(shard_sets_created),
+                        "shard_sets": shard_sets_created,
                     }
                 ).encode("utf-8"),
                 overwrite=True,
@@ -232,10 +291,14 @@ def prepare_db(
     Thread(target=_do_copies, daemon=True, name=f"prepare-db-{db_name}").start()
 
     LOGGER.info(
-        "prepare_db started oid=%s db=%s files=%d source=%s",
-        caller.object_id, db_name, len(all_keys), latest_dir,
+        "prepare_db started oid=%s db=%s files=%d source=%s access=%s",
+        caller.object_id,
+        db_name,
+        len(all_keys),
+        latest_dir,
+        access.get("action"),
     )
-    return {
+    response: dict[str, Any] = {
         "ok": True,
         "db_name": db_name,
         # Async — actual progress is observed by polling /api/blast/databases.
@@ -248,3 +311,113 @@ def prepare_db(
         ),
         "async": True,
     }
+    if access.get("action") in ("opened", "ip_added"):
+        response["local_debug_storage_opened"] = {
+            "ip": access.get("ip"),
+            "previous_public": access.get("previous_public"),
+            "off_hint": access.get("off_hint"),
+        }
+        response["output"] += (
+            f" Local-debug: temporarily opened Storage to {access.get('ip')} "
+            f"(was publicNetworkAccess={access.get('previous_public')}). Run "
+            f"`{access.get('off_hint')}` when done."
+        )
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Local-debug helpers — surface the Storage public-access toggle in the UI
+# but only when the api process is NOT running inside a Container App. The
+# Container-App guard lives in api.services.storage_public_access and is the
+# load-bearing safety check; do not bypass it.
+# ---------------------------------------------------------------------------
+@router.get("/local-debug")
+def storage_local_debug_status(
+    subscription_id: str = "",
+    resource_group: str = "",
+    account_name: str = "",
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return whether the dashboard should expose the local-debug toggle.
+
+    Always returns 200. ``is_local`` is the only field the SPA needs to gate
+    the button visibility. ``public_access``, ``default_action``, and
+    ``ip_rules`` are best-effort context for the confirmation modal.
+    """
+    from api.services.storage_public_access import (
+        is_running_locally,
+        read_local_storage_state,
+    )
+
+    if not is_running_locally():
+        # Deployed: the toggle button must never appear in the UI.
+        return {"is_local": False}
+
+    if not (subscription_id and resource_group and account_name):
+        # Local but no account scope yet — still tell the SPA we are local so
+        # it can render the affordance once the user picks an RG / account.
+        return {
+            "is_local": True,
+            "public_access": None,
+            "default_action": None,
+            "ip_rules": [],
+            "caller_ip": None,
+            "caller_ip_in_rules": False,
+        }
+
+    try:
+        _check(subscription_id, _RE_SUB, "subscription_id")
+        _check(resource_group, _RE_RG, "resource_group")
+        _check(account_name, _RE_STORAGE_ACCOUNT, "account_name")
+    except HTTPException:
+        return {"is_local": True, "error": "invalid scope parameters"}
+
+    cred = get_credential()
+    return read_local_storage_state(cred, subscription_id, resource_group, account_name)
+
+
+@router.post("/local-debug/open")
+def storage_local_debug_open(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Open the workload Storage account's public network surface to the
+    caller's IP. Local-only (refuses inside a Container App).
+
+    The request is the explicit operator confirmation, so the env-var gate
+    (``LOCAL_DEBUG_AUTO_OPEN_STORAGE``) is bypassed. The Container-App guard
+    is NOT bypassed — see ``ensure_local_storage_access(force=True)``.
+    """
+    from api.services.storage_public_access import (
+        ensure_local_storage_access,
+        is_running_locally,
+    )
+
+    if not is_running_locally():
+        raise HTTPException(
+            status_code=403,
+            detail="storage local-debug toggle is unavailable in deployed environments",
+        )
+
+    sub = body.get("subscription_id", "")
+    rg = body.get("resource_group", "")
+    account_name = body.get("account_name", "")
+    if not all([sub, rg, account_name]):
+        raise HTTPException(
+            400, "subscription_id, resource_group, account_name required"
+        )
+    _check(sub, _RE_SUB, "subscription_id")
+    _check(rg, _RE_RG, "resource_group")
+    _check(account_name, _RE_STORAGE_ACCOUNT, "account_name")
+
+    cred = get_credential()
+    result = ensure_local_storage_access(cred, sub, rg, account_name, force=True)
+    LOGGER.info(
+        "storage_local_debug_open oid=%s account=%s action=%s",
+        caller.object_id,
+        account_name,
+        result.get("action"),
+    )
+    if result.get("action") == "failed":
+        raise HTTPException(500, f"could not open storage: {result.get('error')}")
+    return result

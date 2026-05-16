@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Variant B · 8-bit pixel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Press+Start+2P&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="banner-common.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>Variant B &middot; 8-bit pixel <code>&gt;_</code> + retro wordmark</h1>
+  <p class="sub">SVG glyph &middot; would be rendered as an HTML overlay above xterm.js, not as raw shell output.</p>
+  <article class="card">
+    <div class="cardhead"><span class="title">Variant B</span><span class="meta">SVG overlay above xterm.js</span></div>
+    <div class="term">
+      <div class="meta-line">Signed in: <code>dev-bypass@local</code> &middot; Shell: <code>azureuser</code> &middot; Session: <code>de78a52954c9</code></div>
+      <div class="b-pixel">
+        <svg class="glyph" viewBox="0 0 140 130" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="pixelGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%"  stop-color="#4cdeff"/>
+              <stop offset="50%" stop-color="#a878ff"/>
+              <stop offset="100%" stop-color="#ff5ccd"/>
+            </linearGradient>
+            <filter id="pixelGlow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="2" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <g fill="url(#pixelGrad)" filter="url(#pixelGlow)">
+            <rect x="10"  y="10"  width="20" height="20"/>
+            <rect x="30"  y="20"  width="20" height="20"/>
+            <rect x="50"  y="30"  width="20" height="20"/>
+            <rect x="70"  y="40"  width="20" height="20"/>
+            <rect x="50"  y="50"  width="20" height="20"/>
+            <rect x="30"  y="60"  width="20" height="20"/>
+            <rect x="10"  y="70"  width="20" height="20"/>
+            <rect x="10"  y="100" width="120" height="14" rx="2"/>
+          </g>
+        </svg>
+        <div class="right">
+          <div class="wordmark">ElasticBlast CLI</div>
+          <div class="tagline">v0.1 &nbsp;&middot;&nbsp; browser-only control plane</div>
+          <div class="info row">
+            <div><span class="key">Signed in with Azure</span> <span class="hint">/session</span></div>
+            <div><span class="key">Guard:</span> <span class="ok">protected shell</span> <span class="hint">/help</span></div>
+            <div><span class="key">Trace:</span> browser <span class="arrow">&gt;&gt;&gt;</span> api <span class="arrow">&gt;&gt;&gt;</span> ttyd <span class="arrow">&gt;&gt;&gt;</span> shell</div>
+          </div>
+        </div>
+      </div>
+      <div class="prompt">azureuser@terminal:~$ <span class="cursor">&nbsp;</span></div>
+    </div>
+  </article>
+</div>
+</body>
+</html>

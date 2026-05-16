@@ -8,7 +8,16 @@ from typing import Any
 
 from api.services.aks_skus import (
     AZURE_VM_HOURLY_USD as _ALLOWED_PRICES,
+)
+from api.services.aks_skus import (
     DEFAULT_SKU,
+)
+from api.services.sharding_precision import (
+    build_precision_report,
+    normalize_sharding_mode,
+    option_value,
+    outfmt_is_merge_compatible,
+    uniform_query_effective_search_space,
 )
 
 
@@ -18,6 +27,18 @@ def generate_config(params: dict[str, Any]) -> str:
     Returns the INI text suitable for writing to a file or uploading.
     """
     cfg = configparser.ConfigParser()
+
+    def _positive_int_option(key: str) -> int | None:
+        raw = params.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} must be a positive integer") from exc
+        if value <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+        return value
 
     # [cloud-provider]
     cfg.add_section("cloud-provider")
@@ -72,8 +93,15 @@ def generate_config(params: dict[str, Any]) -> str:
     cfg.set("blast", "queries", params.get("query_blob_url", ""))
     cfg.set("blast", "results", params.get("results_url", ""))
 
+    sharding_mode = normalize_sharding_mode(params)
+
     # DB partitioning / sharding
     if params.get("db_auto_partition"):
+        if sharding_mode == "off":
+            raise ValueError(
+                "db_auto_partition requires sharding_mode=approximate or precise; "
+                "partitioned BLAST output is not guaranteed to match full-DB BLAST"
+            )
         cfg.set("blast", "db-auto-partition", "true")
     db_partitions = params.get("db_partitions")
     if db_partitions and int(db_partitions) > 0:
@@ -82,8 +110,73 @@ def generate_config(params: dict[str, Any]) -> str:
     if db_partition_prefix:
         cfg.set("blast", "db-partition-prefix", db_partition_prefix)
 
+    # Experimental DB sharding for warmed DBs.
+    #
+    # Correctness policy (2026-05): sharded BLAST output is not guaranteed
+    # to be byte/row-equivalent to a full-DB BLAST+ or NCBI Web BLAST run.
+    # Shard-local e-value statistics, max_target_seqs pruning, output-format
+    # specific merge semantics, and tie-breaking all need an explicit
+    # equivalence gate before this can be a default submit path. Keep the
+    # automatic injection behind an intentionally loud opt-in flag so normal
+    # dashboard submits preserve full-DB semantics.
+    user_set_partitions = bool(params.get("db_partitions"))
+    user_set_prefix = bool(params.get("db_partition_prefix"))
+    auto_shard_eligible = (
+        sharding_mode != "off"
+        and not params.get("disable_sharding")
+        and not user_set_partitions
+        and not user_set_prefix
+        and bool(params.get("db_sharded"))
+        and bool(params.get("db_total_bytes"))
+        and bool(params.get("db_name"))
+        and bool(params.get("storage_account"))
+    )
+    if auto_shard_eligible:
+        # Local import keeps the module free of an unconditional storage
+        # dependency at import time (blast_config is also used in unit
+        # tests that don't have azure-storage-blob installed by default
+        # in some restricted environments).
+        from api.services.db_sharding import (
+            partition_prefix_for,
+            select_partitions_for_submit,
+        )
+        n = select_partitions_for_submit(
+            db_total_bytes=int(params["db_total_bytes"]),
+            num_nodes=int(params.get("num_nodes", 1)),
+            machine_type=params.get("machine_type", DEFAULT_SKU),
+        )
+        # The current Azure local-SSD shard template pins shard N to node
+        # ordinal N. If the memory floor asks for more shards than nodes,
+        # jobs for the missing ordinals would never schedule. Refuse instead
+        # of silently producing a broken ElasticBLAST config.
+        num_nodes = int(params.get("num_nodes", 1))
+        if n > num_nodes:
+            raise ValueError(
+                "approximate sharding requires at least one node per shard; "
+                f"selected {n} shards for {num_nodes} nodes"
+            )
+        cfg.set("blast", "db-partitions", str(n))
+        cfg.set("blast", "db-partition-prefix", partition_prefix_for(
+            account_name=str(params["storage_account"]),
+            db_name=str(params["db_name"]),
+            num_shards=n,
+            container=container_name,
+        ))
+        # Sharding requires the local-SSD init script
+        # (init-db-shard-aks.sh). Force it on even if the caller did not
+        # request warmup mode — the alternative (init-db-partitioned-aks.sh)
+        # cannot consume our manifest+.nal layout.
+        cfg.set("cluster", "exp-use-local-ssd", "true")
+
     # Build options string
     options_parts: list[str] = []
+    additional = params.get("additional_options", "").strip()
+
+    def _additional_has_blast_option(option: str) -> bool:
+        import re as _re_option
+
+        return bool(_re_option.search(rf"(?<!\S){_re_option.escape(option)}(?!\S)", additional))
+
     evalue = params.get("evalue")
     if evalue is not None:
         options_parts.append(f"-evalue {evalue}")
@@ -91,6 +184,7 @@ def generate_config(params: dict[str, Any]) -> str:
     if max_target_seqs is not None:
         options_parts.append(f"-max_target_seqs {max_target_seqs}")
     outfmt = params.get("outfmt")
+    outfmt_str: str | None = None
     if outfmt is not None:
         # outfmt is rendered into the generated K8s Job YAML by elastic-blast.
         # Quotes / shell metas inside the value break that YAML (kubectl apply
@@ -101,6 +195,28 @@ def generate_config(params: dict[str, Any]) -> str:
         if _re_outfmt.search(r'["\'`;&|$(){}\\\n\r]', outfmt_str):
             raise ValueError(f"outfmt contains forbidden characters: {outfmt_str[:50]}")
         options_parts.append(f"-outfmt {outfmt_str}")
+
+    if cfg.has_option("blast", "db-partitions") or cfg.has_option("blast", "db-auto-partition"):
+        additional_outfmt = option_value(additional, "-outfmt") if additional else None
+        merge_outfmt = additional_outfmt if additional_outfmt is not None else outfmt_str
+        if not outfmt_is_merge_compatible(merge_outfmt):
+            raise ValueError(
+                "sharded BLAST result merge currently supports only outfmt 5, "
+                "outfmt 6, or outfmt '6 std...'"
+            )
+
+        report = build_precision_report(
+            params,
+            query_count=params.get("query_count"),
+            db_stats_available=bool(params.get("db_total_letters")),
+        )
+        if sharding_mode == "precise" and not report.eligible:
+            raise ValueError("; ".join(report.blocking_errors))
+        if sharding_mode == "precise" and report.precision_level in {
+            "precise_tabular_split",
+            "precise_xml_split",
+        }:
+            raise ValueError("query-group split is required for mixed query search spaces")
     word_size = params.get("word_size")
     if word_size is not None:
         options_parts.append(f"-word_size {word_size}")
@@ -110,7 +226,24 @@ def generate_config(params: dict[str, Any]) -> str:
     gap_extend = params.get("gap_extend")
     if gap_extend is not None:
         options_parts.append(f"-gapextend {gap_extend}")
-    additional = params.get("additional_options", "").strip()
+
+    effective_search_space = _positive_int_option("db_effective_search_space")
+    if effective_search_space is None:
+        effective_search_space = uniform_query_effective_search_space(
+            params,
+            _positive_int_option("query_count"),
+        )
+    if effective_search_space and not _additional_has_blast_option("-searchsp"):
+        options_parts.append(f"-searchsp {effective_search_space}")
+    elif (
+        cfg.has_option("blast", "db-partitions")
+        and not _additional_has_blast_option("-searchsp")
+        and not _additional_has_blast_option("-dbsize")
+    ):
+        db_total_letters = _positive_int_option("db_total_letters")
+        if db_total_letters:
+            options_parts.append(f"-dbsize {db_total_letters}")
+
     if additional:
         # Reject shell metacharacters to prevent command injection
         import re

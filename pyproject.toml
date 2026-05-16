@@ -65,6 +65,10 @@ ignore = [
   "S101", # asserts in tests are fine
   "S104", # bind 0.0.0.0 — uvicorn binds inside the container
 ]
+# `×` (U+00D7 MULTIPLICATION SIGN) is intentionally used in human-facing
+# strings (e.g. "1 × Standard_E32s_v5") — keep it readable and stop ruff
+# from flagging it as confusable with ASCII `x`.
+allowed-confusables = ["×"]
 
 [tool.ruff.lint.per-file-ignores]
 "api/tests/**" = ["S105", "S106"]

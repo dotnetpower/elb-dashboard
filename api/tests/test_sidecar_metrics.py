@@ -7,7 +7,41 @@ which is the only piece of branchy business logic.
 
 from __future__ import annotations
 
-from api.services.sidecar_metrics import _classify
+import json
+import time
+from typing import Any
+
+import redis
+from api.services.sidecar_metrics import ALL_SIDECARS, RedisCpuSampler, _classify, collect_snapshot
+
+
+class FakeRedis:
+    def __init__(
+        self,
+        raw_entries: list[object] | None = None,
+        *,
+        fail_mget: bool = False,
+        fail_info: bool = False,
+    ) -> None:
+        self.raw_entries = raw_entries or []
+        self.fail_mget = fail_mget
+        self.fail_info = fail_info
+
+    def mget(self, _keys: list[str]) -> list[object]:
+        if self.fail_mget:
+            raise redis.RedisError("redis is unavailable")
+        return self.raw_entries
+
+    def info(self, section: str) -> dict[str, Any]:
+        if self.fail_info:
+            raise redis.RedisError("info failed")
+        if section == "memory":
+            return {"used_memory": 1024, "maxmemory": 0}
+        if section == "cpu":
+            return {"used_cpu_sys": 1.0, "used_cpu_user": 2.0}
+        if section == "server":
+            return {"redis_version": "7.2-test"}
+        return {}
 
 
 def test_classify_missing_payload_is_down() -> None:
@@ -31,3 +65,61 @@ def test_classify_stale_payload_is_down() -> None:
 def test_classify_handles_zero_ts() -> None:
     # Defensive: a payload with no ts at all should be treated as down.
     assert _classify(now=100.0, payload={}) == "down"
+
+
+def test_classify_handles_bad_ts() -> None:
+    assert _classify(now=100.0, payload={"ts": "not-a-number"}) == "down"
+
+
+def test_collect_snapshot_isolates_bad_reporter_payloads() -> None:
+    now = time.time()
+    client = FakeRedis(
+        [
+            json.dumps({"name": "wrong", "ts": now, "cpu_pct": 1.2}),
+            b"{bad-json",
+            json.dumps(["not", "a", "dict"]),
+            json.dumps({"ts": "not-a-number"}),
+            None,
+        ]
+    )
+
+    snapshot = collect_snapshot(client=client)  # type: ignore[arg-type]
+    sidecars = snapshot["sidecars"]
+
+    assert sidecars["frontend"]["name"] == "frontend"
+    assert sidecars["frontend"]["health"] == "ok"
+    assert sidecars["api"]["_error"] == "bad_json"
+    assert sidecars["worker"]["_error"] == "bad_payload"
+    assert sidecars["beat"]["_error"] == "bad_ts"
+    assert sidecars["terminal"]["_error"] == "missing"
+    assert sidecars["redis"]["health"] == "ok"
+
+
+def test_collect_snapshot_returns_all_down_when_redis_unavailable() -> None:
+    snapshot = collect_snapshot(client=FakeRedis(fail_mget=True))  # type: ignore[arg-type]
+
+    assert snapshot["degraded"] is True
+    assert snapshot["degraded_reason"] == "redis_unavailable"
+    assert set(snapshot["sidecars"]) == set(ALL_SIDECARS)
+    assert {entry["health"] for entry in snapshot["sidecars"].values()} == {"down"}
+
+
+def test_collect_snapshot_degrades_only_redis_when_info_fails() -> None:
+    now = time.time()
+    client = FakeRedis(
+        [json.dumps({"name": name, "ts": now}) for name in ALL_SIDECARS if name != "redis"],
+        fail_info=True,
+    )
+
+    snapshot = collect_snapshot(client=client)  # type: ignore[arg-type]
+
+    assert snapshot["sidecars"]["frontend"]["health"] == "ok"
+    assert snapshot["sidecars"]["redis"]["health"] == "degraded"
+    assert snapshot["sidecars"]["redis"]["_error"] == "redis_info_failed"
+
+
+def test_redis_cpu_sampler_uses_deltas() -> None:
+    sampler = RedisCpuSampler()
+
+    assert sampler.percent(now=10.0, cpu_total=4.0) == 0.0
+    assert sampler.percent(now=12.0, cpu_total=5.0) == 50.0

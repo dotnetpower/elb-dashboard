@@ -11,7 +11,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "3.4",
+    "elb-openapi": "4.9",
 }
 
 # GitHub source repo for ACR Build Tasks.
@@ -19,11 +19,14 @@ SOURCE_REPO = "https://github.com/dotnetpower/elastic-blast-azure.git"
 SOURCE_BRANCH = "master"
 
 # Build info per image: context subdirectory within the repo, Dockerfile path
-# relative to the context.
+# relative to the context. Image-name → build args mirror exactly what the
+# upstream `make azure-build` recipes in
+# https://github.com/dotnetpower/elastic-blast-azure invoke (see each
+# `docker-XXX/Makefile` `az acr build -f Dockerfile.azure --image …`).
 IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
     "ncbi/elb": {
         "context": "docker-blast",
-        "dockerfile": "Dockerfile",
+        "dockerfile": "Dockerfile.azure",
     },
     "ncbi/elasticblast-job-submit": {
         # Dockerfile.azure COPYs both files local to docker-job-submit/ and
@@ -47,7 +50,7 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
     },
     "ncbi/elasticblast-query-split": {
         "context": "docker-qs",
-        "dockerfile": "Dockerfile",
+        "dockerfile": "Dockerfile.azure",
     },
     "elb-openapi": {
         "context": "docker-openapi",

@@ -43,6 +43,9 @@ param allowedOrigins string = ''
 @description('If true, every backing resource (Storage, Key Vault, ACR) gets publicNetworkAccess=Disabled and private endpoints. The very first deploy must keep this false so the postprovision hook can push images and seed secrets; flip to true on the second azd provision.')
 param lockdownPrivateNetworking bool = false
 
+@description('If true, grants the shared UAMI subscription-scope Reader so the SPA discovery wizard can list RGs / storage accounts / ACRs / VMs across the subscription. Requires the deployer to have User Access Administrator (or Owner). Set to false in restricted tenants and run the equivalent `az role assignment create` from docs/auth.md by hand.')
+param assignSubscriptionReader bool = true
+
 // ---------------------------------------------------------------------------
 // Resource tagging (CAF-aligned)
 // ---------------------------------------------------------------------------
@@ -138,6 +141,20 @@ module identity 'modules/identity.bicep' = {
     location: location
     identityName: identityName
     tags: tags
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subscription-scope Reader for the shared UAMI (SPA discovery wizard).
+// See infra/modules/subscriptionRoles.bicep for the rationale — without
+// this the wizard's RG / storage / ACR list calls succeed-but-empty in
+// production, mirroring the local-compose "no az login" failure mode.
+// ---------------------------------------------------------------------------
+module subscriptionRoles 'modules/subscriptionRoles.bicep' = if (assignSubscriptionReader) {
+  name: 'sub-roles-${resourceToken}'
+  // Sub-scope (no `scope:` clause) — main.bicep already targets subscription.
+  params: {
+    uamiPrincipalId: identity.outputs.identityPrincipalId
   }
 }
 

@@ -18,7 +18,17 @@ export function Breadcrumb() {
   const { pathname } = useLocation();
   const parts = pathname.split("/").filter(Boolean);
 
-  if (parts.length === 0) return null;
+  // On the dashboard root, still show "Dashboard" as the current crumb so
+  // every page in the app has the same header layout (breadcrumb → title
+  // → actions). The crumb is non-clickable on root because that *is* the
+  // current page.
+  if (parts.length === 0) {
+    return (
+      <nav className="breadcrumb" aria-label="Breadcrumb">
+        <span className="breadcrumb__current">Dashboard</span>
+      </nav>
+    );
+  }
 
   const crumbs: { label: string; path: string }[] = [{ label: "Dashboard", path: "/" }];
 

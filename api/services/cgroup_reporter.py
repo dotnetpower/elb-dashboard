@@ -55,6 +55,13 @@ DEFAULT_TTL = 30
 DEFAULT_DB = 2  # Reserve db 0 for Celery broker, db 1 for results, db 2 for ops metrics.
 REDIS_KEY_PREFIX = "sidecar:metrics:"
 
+# Linux clock-tick rate. Used to convert /proc/<pid>/stat utime+stime jiffies
+# to microseconds so the procfs fallback can reuse `compute_cpu_pct` unchanged.
+try:
+    _CLK_TCK = os.sysconf("SC_CLK_TCK")
+except (ValueError, OSError):
+    _CLK_TCK = 100  # POSIX default; matches every Linux distro we run on.
+
 
 @dataclass(frozen=True)
 class CgroupReading:
@@ -76,6 +83,34 @@ def _read_cpu_stat() -> int:
         # cgroup v1 layout — different filenames; we don't support it.
         raise RuntimeError("cgroup v2 not available; v1 layout not supported")
     raise RuntimeError("usage_usec missing from cpu.stat")
+
+
+def _read_proc_self_cpu_usec() -> int:
+    """Return self-process cumulative cpu usage in microseconds.
+
+    Reads fields 14 (utime) + 15 (stime) from /proc/self/stat — the same
+    counters ``ps`` and ``top`` use. Cheap (~30 µs).
+    """
+    with open("/proc/self/stat", encoding="utf-8") as f:
+        raw = f.read()
+    # The comm field (field 2) is parenthesised and may contain spaces;
+    # split on the trailing ')' to keep field indexing correct.
+    rhs = raw.rsplit(")", 1)[1].split()
+    # rhs[0] is field 3 (state). utime=14 → rhs[11], stime=15 → rhs[12].
+    utime_jiffies = int(rhs[11])
+    stime_jiffies = int(rhs[12])
+    return (utime_jiffies + stime_jiffies) * 1_000_000 // _CLK_TCK
+
+
+def _read_proc_self_rss_bytes() -> int:
+    """Return self-process resident set size in bytes from /proc/self/status."""
+    with open("/proc/self/status", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("VmRSS:"):
+                # Format: "VmRSS:\t   12345 kB"
+                kb = int(line.split()[1])
+                return kb * 1024
+    raise RuntimeError("VmRSS missing from /proc/self/status")
 
 
 def _read_memory_current() -> int:
@@ -100,6 +135,22 @@ def read_cgroup() -> CgroupReading:
     return CgroupReading(
         cpu_usec=_read_cpu_stat(),
         mem_bytes=_read_memory_current(),
+        ts=time.time(),
+    )
+
+
+def read_procfs_self() -> CgroupReading:
+    """Self-process snapshot via /proc/self/* — used when cgroup v2 is not
+    available (e.g. WSL2 host root cgroup, macOS dev laptops via WSL).
+
+    Reuses the ``CgroupReading`` shape so the rest of the loop is unchanged.
+    Reports per-process metrics, not the whole cgroup, but for local dev that
+    is exactly what the operator wants to see for the api/worker/beat python
+    processes anyway.
+    """
+    return CgroupReading(
+        cpu_usec=_read_proc_self_cpu_usec(),
+        mem_bytes=_read_proc_self_rss_bytes(),
         ts=time.time(),
     )
 
@@ -139,16 +190,43 @@ def report_loop(
     client = redis.Redis.from_url(url, socket_timeout=1.5)
     host = socket.gethostname()
     mem_max = _read_memory_max()
+
+    # Prefer the container's own cgroup; fall back to /proc/self/* on hosts
+    # where cgroup v2 is mounted but the root cgroup lacks per-controller
+    # files (WSL2 host) or where this process isn't in its own scope. The
+    # fallback reports self-process metrics, which is what a developer
+    # running `uvicorn` / `celery` from a laptop actually wants to see.
+    reader = read_cgroup
+    mode = "cgroup"
     try:
         prev = read_cgroup()
-    except Exception as exc:  # noqa: BLE001 — we want to log and keep trying
-        LOGGER.warning("cgroup_reporter[%s]: initial read failed: %s", name, exc)
-        return
+    except Exception as cgroup_exc:  # noqa: BLE001
+        try:
+            prev = read_procfs_self()
+        except Exception as procfs_exc:  # noqa: BLE001
+            LOGGER.warning(
+                "cgroup_reporter[%s]: initial read failed (cgroup=%s, procfs=%s)",
+                name,
+                cgroup_exc,
+                procfs_exc,
+            )
+            return
+        reader = read_procfs_self
+        mode = "procfs"
+        # mem_max only makes sense in cgroup mode — in procfs mode the
+        # process is bounded by the host, not a container limit.
+        mem_max = None
+        LOGGER.info(
+            "cgroup_reporter[%s]: cgroup unavailable (%s); using procfs fallback",
+            name,
+            cgroup_exc,
+        )
 
     LOGGER.info(
-        "cgroup_reporter[%s]: started (host=%s interval=%.1fs ttl=%ds mem_max=%s)",
+        "cgroup_reporter[%s]: started (host=%s mode=%s interval=%.1fs ttl=%ds mem_max=%s)",
         name,
         host,
+        mode,
         interval,
         ttl,
         mem_max if mem_max is not None else "unbounded",
@@ -161,7 +239,7 @@ def report_loop(
         elif stop_event is None:
             time.sleep(interval)
         try:
-            cur = read_cgroup()
+            cur = reader()
             cpu_pct = compute_cpu_pct(prev, cur)
             mem_pct = round(cur.mem_bytes / mem_max * 100, 1) if mem_max else None
             payload = {
@@ -172,6 +250,7 @@ def report_loop(
                 "mem_bytes": cur.mem_bytes,
                 "mem_max_bytes": mem_max,
                 "mem_pct": mem_pct,
+                "source": mode,
             }
             _publish(client, name, payload, ttl)
             prev = cur

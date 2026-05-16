@@ -2,17 +2,36 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "redis: ensure",
+      "detail": "Start a local Redis container on 127.0.0.1:6379 (idempotent). Used by worker/beat.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["redis"],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "close": true
+      }
+    },
+    {
+      "label": "redis: stop",
+      "detail": "Stop and remove the local Redis container.",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "docker rm -f elb-dev-redis >/dev/null 2>&1 && echo 'redis stopped' || echo 'redis was not running'"
+      ],
+      "problemMatcher": []
+    },
+    {
       "label": "api: start",
       "type": "shell",
-      "command": "uv run uvicorn api.main:app --reload --host 127.0.0.1 --port 8080",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["api"],
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "PYTHONPATH": "${workspaceFolder}",
-          "AUTH_DEV_BYPASS": "true",
-          "LOG_LEVEL": "DEBUG",
-          "ENABLE_DOCS": "true"
-        }
+        "cwd": "${workspaceFolder}"
       },
       "isBackground": true,
       "problemMatcher": {
@@ -32,16 +51,12 @@
     {
       "label": "worker: start",
       "type": "shell",
-      "command": "uv run celery -A api.celery_app worker -l info",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["worker"],
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "PYTHONPATH": "${workspaceFolder}",
-          "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
-          "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
-          "LOG_LEVEL": "DEBUG"
-        }
+        "cwd": "${workspaceFolder}"
       },
+      "dependsOn": ["redis: ensure"],
       "isBackground": true,
       "problemMatcher": {
         "pattern": {
@@ -60,16 +75,12 @@
     {
       "label": "beat: start",
       "type": "shell",
-      "command": "uv run celery -A api.celery_app beat -l info",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["beat"],
       "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "PYTHONPATH": "${workspaceFolder}",
-          "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
-          "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
-          "LOG_LEVEL": "DEBUG"
-        }
+        "cwd": "${workspaceFolder}"
       },
+      "dependsOn": ["redis: ensure"],
       "isBackground": true,
       "problemMatcher": {
         "pattern": {
@@ -88,9 +99,10 @@
     {
       "label": "web: dev",
       "type": "shell",
-      "command": "npm run dev",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["web"],
       "options": {
-        "cwd": "${workspaceFolder}/web"
+        "cwd": "${workspaceFolder}"
       },
       "isBackground": true,
       "problemMatcher": {
@@ -111,6 +123,45 @@
       "label": "fullstack: start",
       "dependsOn": ["api: start", "web: dev"],
       "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "backend: start (api+worker+beat)",
+      "dependsOn": ["api: start", "worker: start", "beat: start"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "tests: pytest",
+      "type": "shell",
+      "command": "uv run pytest -q api/tests",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}"
+        }
+      },
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "smoke: api",
+      "detail": "Run scripts/dev/smoke_api.py against the local api on 127.0.0.1:8080.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["smoke"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "lint: ruff",
+      "type": "shell",
+      "command": "uv run ruff check api",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
       "problemMatcher": []
     }
   ]

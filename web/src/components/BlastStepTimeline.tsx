@@ -64,6 +64,8 @@ export const FAILURE_PHASES = new Set([
   "failed",
   "error",
   "submit_failed",
+  "split_submit_invalid",
+  "split_results_merge_invalid",
   "warmup_failed",
 ]);
 
@@ -71,6 +73,15 @@ type StepState = "done" | "active" | "pending" | "error" | "skipped";
 
 const PHASE_TO_STEP: Record<string, string> = {
   submit_failed: "submitting",
+  reading_split_query: "uploading",
+  splitting_queries: "configuring",
+  split_children_submitted: "submitting",
+  split_children_aggregating: "running",
+  split_children_merge_ready: "exporting_results",
+  split_results_waiting_for_artifacts: "exporting_results",
+  split_results_merging: "exporting_results",
+  split_submit_invalid: "submitting",
+  split_results_merge_invalid: "exporting_results",
   warmup_failed: "warming_up",
 };
 
@@ -82,6 +93,15 @@ export const PHASE_MESSAGES: Record<string, string> = {
   warming_up: "Preparing cluster with DB shards on local SSD (warmup)...",
   warmup_failed: "Cluster warmup failed.",
   submitting: "Submitting job to AKS cluster...",
+  reading_split_query: "Reading the original query from Storage...",
+  splitting_queries: "Splitting queries by effective search space...",
+  split_children_submitted: "Submitted split child jobs to AKS...",
+  split_children_aggregating: "Waiting for split child jobs to finish...",
+  split_children_merge_ready: "Split child jobs are ready for result assembly...",
+  split_results_waiting_for_artifacts: "Waiting for split child result artifacts...",
+  split_results_merging: "Assembling split child results...",
+  split_submit_invalid: "Split submit request is invalid.",
+  split_results_merge_invalid: "Split result assembly failed validation.",
   running: "BLAST search is running on the cluster...",
   exporting_results: "Verifying result files and exporting logs from cluster...",
   completed: "Job completed successfully!",

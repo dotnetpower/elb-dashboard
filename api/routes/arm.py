@@ -57,7 +57,12 @@ def list_subscriptions(
         subs.sort(key=lambda x: x["displayName"])
         return subs
     except Exception as exc:
-        LOGGER.warning("list_subscriptions failed: %s", type(exc).__name__)
+        LOGGER.warning(
+            "list_subscriptions failed: %s: %s",
+            type(exc).__name__,
+            sanitise(str(exc)),
+            exc_info=True,
+        )
         # Subscriptions list is critical for the SPA's first render. Returning
         # an empty array (rather than 500) lets the SPA show "no subscriptions
         # available" with a Reload action instead of crashing.
@@ -79,7 +84,12 @@ def list_resource_groups(
         groups.sort(key=lambda x: x["name"])
         return groups
     except Exception as exc:
-        LOGGER.warning("list_resource_groups failed: %s", type(exc).__name__)
+        LOGGER.warning(
+            "list_resource_groups failed: %s: %s",
+            type(exc).__name__,
+            sanitise(str(exc)),
+            exc_info=True,
+        )
         return []
 
 
@@ -144,7 +154,12 @@ def list_storage_accounts(
         accounts.sort(key=lambda x: x["name"])
         return accounts
     except Exception as exc:
-        LOGGER.warning("list_storage_accounts failed: %s", type(exc).__name__)
+        LOGGER.warning(
+            "list_storage_accounts failed: %s: %s",
+            type(exc).__name__,
+            sanitise(str(exc)),
+            exc_info=True,
+        )
         return []
 
 
@@ -164,7 +179,12 @@ def list_acrs(
         registries.sort(key=lambda x: x["name"])
         return registries
     except Exception as exc:
-        LOGGER.warning("list_acrs failed: %s", type(exc).__name__)
+        LOGGER.warning(
+            "list_acrs failed: %s: %s",
+            type(exc).__name__,
+            sanitise(str(exc)),
+            exc_info=True,
+        )
         return []
 
 
@@ -184,5 +204,10 @@ def list_vms(
         vms.sort(key=lambda x: x["name"])
         return vms
     except Exception as exc:
-        LOGGER.warning("list_vms failed: %s", type(exc).__name__)
+        LOGGER.warning(
+            "list_vms failed: %s: %s",
+            type(exc).__name__,
+            sanitise(str(exc)),
+            exc_info=True,
+        )
         return []

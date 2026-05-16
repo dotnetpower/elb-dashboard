@@ -30,9 +30,9 @@ export const COST_EXAMPLES: ExamplePreset<CostExampleValues>[] = [
   {
     id: "production-survey",
     label: "Production survey",
-    description: "3 × E16s_v5, 2h, 1 TB PD, 50 GB DB (current default)",
+    description: "3 × E32s_v5, 2h, 1 TB PD, 50 GB DB (current default)",
     recommended: true,
-    values: { sku: "Standard_E16s_v5", nodes: 3, hours: 2, pdSize: 1000, dbSize: 50 },
+    values: { sku: "Standard_E32s_v5", nodes: 3, hours: 2, pdSize: 1000, dbSize: 50 },
   },
   {
     id: "whole-genome-large",

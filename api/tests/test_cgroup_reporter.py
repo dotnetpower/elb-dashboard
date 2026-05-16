@@ -10,7 +10,6 @@ from __future__ import annotations
 import time
 
 import pytest
-
 from api.services.cgroup_reporter import CgroupReading, compute_cpu_pct
 
 
@@ -46,3 +45,28 @@ def test_compute_cpu_pct_handles_real_clock_drift() -> None:
     b = CgroupReading(cpu_usec=500_000, mem_bytes=0, ts=a.ts + 5.0001)
     pct = compute_cpu_pct(a, b)
     assert pct == pytest.approx(10.0, abs=0.05)
+
+
+def test_read_procfs_self_returns_positive_reading() -> None:
+    """procfs fallback must work on any Linux host (including WSL2)."""
+    from api.services.cgroup_reporter import read_procfs_self
+
+    r = read_procfs_self()
+    assert r.cpu_usec >= 0
+    assert r.mem_bytes > 0  # any running Python process has VmRSS > 0
+    assert r.ts > 0
+
+
+def test_procfs_fallback_compatible_with_compute_cpu_pct() -> None:
+    """Two procfs readings must be safe to feed into compute_cpu_pct."""
+    from api.services.cgroup_reporter import compute_cpu_pct, read_procfs_self
+
+    a = read_procfs_self()
+    # Burn a tiny bit of CPU so utime+stime move forward.
+    s = 0
+    for i in range(50_000):
+        s += i
+    b = read_procfs_self()
+    pct = compute_cpu_pct(a, b)
+    assert pct >= 0.0
+    assert pct < 1000.0  # sanity bound — single Python loop can't peg 10 cores

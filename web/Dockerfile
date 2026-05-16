@@ -12,6 +12,19 @@ COPY web/package.json web/package-lock.json* ./
 RUN npm ci
 
 COPY web/ ./
+
+# Vite bakes VITE_* values into the static bundle. Keep committed env files
+# generic; production builds pass real values from azd/postprovision as args.
+ARG VITE_API_BASE_URL=""
+ARG VITE_AUTH_DEV_BYPASS=false
+ARG VITE_AZURE_REDIRECT_URI=__RUNTIME__
+ARG VITE_AZURE_TENANT_ID=common
+ARG VITE_AZURE_CLIENT_ID=""
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
+    VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS \
+    VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI \
+    VITE_AZURE_TENANT_ID=$VITE_AZURE_TENANT_ID \
+    VITE_AZURE_CLIENT_ID=$VITE_AZURE_CLIENT_ID
 RUN npm run build
 
 

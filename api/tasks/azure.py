@@ -73,14 +73,56 @@ def provision_aks(
     cluster_name: str,
     node_sku: str,
     node_count: int,
+    system_vm_size: str = "",
+    system_node_count: int = 1,
     acr_resource_group: str = "",
     acr_name: str = "",
     storage_resource_group: str = "",
     storage_account: str = "",
     caller_oid: str = "",
 ) -> dict[str, Any]:
-    """Provision an AKS cluster via Azure SDK."""
+    """Provision an AKS cluster with the sibling repo's two-pool layout.
+
+    Layout (mirrors ``elastic-blast-azure`` ``constants.py`` exactly):
+
+    * ``systempool`` (mode=System) \u2014 small CriticalAddonsOnly pool that
+      hosts CoreDNS / metrics-server / csi-azuredisk-node etc. Default
+      VM size: ``Standard_D2s_v3``. Taint: ``CriticalAddonsOnly=true:NoSchedule``.
+    * ``blastpool`` (mode=User)   \u2014 the workload pool. Carries the
+      ``workload=blast`` label and matching ``workload=blast:NoSchedule``
+      taint so only Pods with the explicit toleration land here.
+    """
+    from api.services.aks_skus import (
+        DEFAULT_SKU,
+        DEFAULT_SYSTEM_SKU,
+        SKU_BY_NAME,
+        is_allowed,
+    )
+
     _update_state(job_id, "creating_cluster")
+
+    # Validate / fall back to defaults defensively \u2014 the route layer
+    # already enforces this but a stale enqueue payload should not poison
+    # the cluster shape.
+    sys_sku = system_vm_size or DEFAULT_SYSTEM_SKU
+    blast_sku = node_sku or DEFAULT_SKU
+    if not is_allowed(sys_sku):
+        LOGGER.warning("system_vm_size %r not in allow-list; falling back to %s",
+                       sys_sku, DEFAULT_SYSTEM_SKU)
+        sys_sku = DEFAULT_SYSTEM_SKU
+    if not is_allowed(blast_sku):
+        LOGGER.warning("node_sku %r not in allow-list; falling back to %s",
+                       blast_sku, DEFAULT_SKU)
+        blast_sku = DEFAULT_SKU
+    sys_role = SKU_BY_NAME[sys_sku].role
+    if sys_role not in ("system", "both"):
+        LOGGER.warning(
+            "system_vm_size %r is flagged role=%s (expected system/both); "
+            "falling back to %s", sys_sku, sys_role, DEFAULT_SYSTEM_SKU,
+        )
+        sys_sku = DEFAULT_SYSTEM_SKU
+    sys_count = max(1, min(int(system_node_count or 1), 3))
+    blast_count = max(1, int(node_count or 1))
 
     cred = get_credential()
     aks = aks_client(cred, subscription_id)
@@ -92,25 +134,48 @@ def provision_aks(
         ManagedClusterIdentity,
     )
 
+    # Mirror the sibling constants exactly so kubectl manifests that
+    # reference the pool name/label/taint stay valid.
+    SYSTEM_POOL_NAME = "systempool"
+    BLAST_POOL_NAME = "blastpool"
+    BLAST_LABEL_KEY = "workload"
+    BLAST_LABEL_VALUE = "blast"
+    BLAST_TAINT = f"{BLAST_LABEL_KEY}={BLAST_LABEL_VALUE}:NoSchedule"
+    SYSTEM_TAINT = "CriticalAddonsOnly=true:NoSchedule"
+
     cluster_params = ManagedCluster(
         location=region,
         identity=ManagedClusterIdentity(type="SystemAssigned"),
         dns_prefix=cluster_name,
         agent_pool_profiles=[
             ManagedClusterAgentPoolProfile(
-                name="nodepool1",
-                count=node_count,
-                vm_size=node_sku,
+                name=SYSTEM_POOL_NAME,
+                count=sys_count,
+                vm_size=sys_sku,
                 os_type="Linux",
                 mode="System",
                 type="VirtualMachineScaleSets",
                 enable_auto_scaling=False,
+                node_taints=[SYSTEM_TAINT],
+            ),
+            ManagedClusterAgentPoolProfile(
+                name=BLAST_POOL_NAME,
+                count=blast_count,
+                vm_size=blast_sku,
+                os_type="Linux",
+                mode="User",
+                type="VirtualMachineScaleSets",
+                enable_auto_scaling=False,
+                node_labels={BLAST_LABEL_KEY: BLAST_LABEL_VALUE},
+                node_taints=[BLAST_TAINT],
             ),
         ],
         tags={
             "app": "elastic-blast",
             "managedBy": "elb-dashboard",
             "owner": caller_oid or "unknown",
+            "elb-system-pool": SYSTEM_POOL_NAME,
+            "elb-blast-pool": BLAST_POOL_NAME,
         },
     )
 
@@ -121,7 +186,11 @@ def provision_aks(
         )
         # Poll until done (this can take 5-10 minutes)
         result = poller.result()
-        LOGGER.info("AKS cluster %s provisioned: %s", cluster_name, result.provisioning_state)
+        LOGGER.info(
+            "AKS cluster %s provisioned: state=%s system=%s\u00d7%s blast=%s\u00d7%s",
+            cluster_name, result.provisioning_state,
+            sys_sku, sys_count, blast_sku, blast_count,
+        )
     except Exception as exc:
         _update_state(job_id, "failed", status="failed", error_code=str(exc)[:500])
         raise
@@ -139,8 +208,14 @@ def provision_aks(
     return {
         "cluster_name": cluster_name,
         "provisioning_state": "Succeeded",
-        "node_count": node_count,
-        "node_sku": node_sku,
+        "node_count": blast_count,
+        "node_sku": blast_sku,
+        "system_node_count": sys_count,
+        "system_vm_size": sys_sku,
+        "pools": [
+            {"name": SYSTEM_POOL_NAME, "mode": "System", "vm_size": sys_sku, "count": sys_count},
+            {"name": BLAST_POOL_NAME, "mode": "User", "vm_size": blast_sku, "count": blast_count},
+        ],
     }
 
 

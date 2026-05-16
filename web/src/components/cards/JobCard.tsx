@@ -7,22 +7,38 @@ import { blastApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
 import { useClusterReadiness } from "@/hooks/usePrerequisites";
-import { statusColor } from "@/constants";
+import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 
 const TERMINAL_PHASES = ["completed", "failed", "submit_failed", "error", "deleted"];
+const FAILED_PHASES = ["failed", "submit_failed", "error"];
 const MAX_DASHBOARD_JOBS = 5;
 
+/** Map a backend phase string to the dv3-job-row phase class. */
+function phaseClass(raw: string | undefined): string {
+  const p = (raw || "").toLowerCase();
+  if (p === "completed") return "completed";
+  if (FAILED_PHASES.includes(p)) return "failed";
+  if (p === "deleted") return "deleted";
+  if (!p) return "idle";
+  return "running";
+}
+
 export function JobCard() {
+  const refetchInterval = useAutoRefreshInterval();
   const query = useQuery({
     queryKey: ["blast-jobs"],
     queryFn: () => blastApi.listJobs(),
-    refetchInterval: 30_000,
+    refetchInterval,
   });
   const cluster = useClusterReadiness();
 
   const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
   const running = jobs.filter(
     (j) => !TERMINAL_PHASES.includes(j.phase || j.status),
+  ).length;
+  const completed = jobs.filter((j) => (j.phase || j.status) === "completed").length;
+  const failed = jobs.filter((j) =>
+    FAILED_PHASES.includes(j.phase || j.status),
   ).length;
 
   // Show running jobs first, then most recent, capped at MAX_DASHBOARD_JOBS
@@ -89,97 +105,73 @@ export function JobCard() {
           Failed to load jobs: {formatApiError(query.error, "blast")}
         </div>
       )}
-      {query.isLoading && <div className="muted">Loading jobs...</div>}
-      {!query.isLoading && jobs.length === 0 && !query.isError && (
-        <div className="muted">No jobs yet.</div>
+      {query.isLoading && <div className="muted">Loading jobs…</div>}
+
+      {/* 4-cell summary strip */}
+      {!query.isLoading && !query.isError && (
+        <div className="dv3-cell-grid dv3-cell-grid--4">
+          <div className="cell">
+            <span className="label">Total</span>
+            <div className="value mono">{jobs.length}</div>
+          </div>
+          <div className={`cell${running > 0 ? " accent" : ""}`}>
+            <span className="label">Active</span>
+            <div className="value mono">{running}</div>
+          </div>
+          <div className={`cell${completed > 0 ? " success" : ""}`}>
+            <span className="label">Completed</span>
+            <div className="value mono">{completed}</div>
+          </div>
+          <div className={`cell${failed > 0 ? " warn" : ""}`}>
+            <span className="label">Failed</span>
+            <div className="value mono">{failed}</div>
+          </div>
+        </div>
       )}
-      {displayed.length > 0 && (
-        <ul
-          style={{
-            padding: 0,
-            margin: 0,
-            listStyle: "none",
-            display: "flex",
-            flexDirection: "column",
-            gap: "var(--space-2)",
-          }}
+
+      {!query.isLoading && jobs.length === 0 && !query.isError && (
+        <div
+          className="muted"
+          style={{ marginTop: "var(--space-3)", fontSize: 13 }}
         >
+          No jobs yet.
+        </div>
+      )}
+
+      {displayed.length > 0 && (
+        <div className="dv3-jobs-list">
           {displayed.map((job) => {
             const phase = job.phase || job.status;
-            const color = statusColor(phase);
+            const cls = phaseClass(phase);
             return (
-              <li key={job.job_id}>
-                <Link
-                  to={`/blast/jobs/${encodeURIComponent(job.job_id)}`}
-                  className="glass-card"
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "var(--space-3)",
-                    padding: "var(--space-2) var(--space-3)",
-                    textDecoration: "none",
-                    color: "inherit",
-                  }}
-                >
-                  <span
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: 999,
-                      background: color,
-                      flexShrink: 0,
-                    }}
-                  />
-                  <span
-                    style={{
-                      flex: 1,
-                      fontSize: 13,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {job.job_title ||
-                      `${job.program ?? ""} · ${(job.db ?? "").split("/").pop() ?? job.job_id}`}
-                  </span>
-                  {job.job_title && (
-                    <span className="muted" style={{ fontSize: 10, flexShrink: 0 }}>
-                      {job.job_id.slice(0, 12)}
-                    </span>
-                  )}
-                  <span
-                    className="muted"
-                    style={{
-                      fontSize: 11,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.04em",
-                    }}
-                  >
-                    {phase}
-                  </span>
-                </Link>
-              </li>
+              <Link
+                key={job.job_id}
+                to={`/blast/jobs/${encodeURIComponent(job.job_id)}`}
+                className="dv3-job-row"
+              >
+                <span className={`phase ${cls}`}>{phase || "queued"}</span>
+                <span className="name">
+                  {job.job_title ||
+                    `${job.program ?? ""} · ${(job.db ?? "").split("/").pop() ?? job.job_id}`}
+                </span>
+                <span className="meta">
+                  {job.job_title ? job.job_id.slice(0, 12) : ""}
+                </span>
+                <span className="right">
+                  <ArrowRight size={12} strokeWidth={1.75} />
+                </span>
+              </Link>
             );
           })}
-        </ul>
+        </div>
       )}
 
       {hasMore && (
-        <Link
-          to="/blast/jobs"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 4,
-            marginTop: "var(--space-2)",
-            fontSize: 11,
-            color: "var(--accent)",
-            textDecoration: "none",
-          }}
-        >
-          View all {jobs.length} jobs <ArrowRight size={12} />
-        </Link>
+        <div className="dv3-jobs-cta">
+          <Link to="/blast/jobs">
+            View all {jobs.length} jobs <ArrowRight size={12} />
+          </Link>
+        </div>
       )}
     </MonitorCard>
   );

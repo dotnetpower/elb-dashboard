@@ -234,6 +234,7 @@ obj/
 # Test outputs
 coverage/
 .vitest-cache/
+.logs/
 
 # OS
 .DS_Store

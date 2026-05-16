@@ -24,9 +24,9 @@ export function ToolsPage() {
   const activeMeta = TAB_INDEX[activeTab];
 
   return (
-    <div className="page-stack">
+    <div className="page-stack mono-page lab-tools-page">
       <header
-        className="page-header"
+        className="page-header mono-header"
         style={{
           display: "flex",
           alignItems: "flex-start",
@@ -42,7 +42,7 @@ export function ToolsPage() {
             style={{ display: "flex", alignItems: "center", gap: 10 }}
           >
             <Wrench size={22} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
-            Lab Tools
+            ElasticBLAST Lab Tools
           </div>
           <div className="page-header__desc">
             Pre-flight estimators, sequence utilities, and operations consoles for
@@ -80,6 +80,7 @@ export function ToolsPage() {
 
       <nav
         aria-label="Lab tool categories"
+        className="mono-tab-groups"
         style={{ display: "flex", flexDirection: "column", gap: 8 }}
       >
         {TAB_GROUPS.map((group) => (

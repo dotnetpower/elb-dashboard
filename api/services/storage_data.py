@@ -2,20 +2,119 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import re
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 from azure.core.credentials import TokenCredential
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, ContentSettings
 
 LOGGER = logging.getLogger(__name__)
+_BLOB_FILE_ID_PREFIX = "b64_"
+
+
+def encode_blob_file_id(blob_name: str) -> str:
+    encoded = base64.urlsafe_b64encode(blob_name.encode("utf-8")).decode("ascii")
+    return f"{_BLOB_FILE_ID_PREFIX}{encoded.rstrip('=')}"
+
+
+def decode_blob_file_id(file_id: str) -> str | None:
+    if not file_id.startswith(_BLOB_FILE_ID_PREFIX):
+        return None
+    value = file_id[len(_BLOB_FILE_ID_PREFIX) :]
+    padding = "=" * (-len(value) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(f"{value}{padding}").decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        raise ValueError("invalid file_id") from None
+    if ".." in decoded or decoded.startswith("/") or "?" in decoded or "#" in decoded:
+        raise ValueError("invalid file_id")
+    return decoded
+
+
+def safe_download_filename(blob_name: str) -> str:
+    name = blob_name.rsplit("/", 1)[-1].strip() or "blast-result.out"
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:128]
+    return name or "blast-result.out"
+
+
+def result_media_type(filename: str) -> str:
+    lowered = filename.lower()
+    if lowered.endswith(".gz"):
+        return "application/gzip"
+    if lowered.endswith(".xml"):
+        return "application/xml"
+    if lowered.endswith((".out", ".log", ".txt")):
+        return "text/plain"
+    return "application/octet-stream"
 
 
 def _blob_service(credential: TokenCredential, account_name: str) -> BlobServiceClient:
+    # Fail fast on network-blocked accounts (publicNetworkAccess: Disabled)
+    # instead of letting the SDK retry for ~30s. The api sidecar is the only
+    # legitimate caller in production and reaches Storage via the private
+    # endpoint, so failures here mean either RBAC deny or local dev — both of
+    # which want a quick degraded response, not a long retry storm.
     return BlobServiceClient(
         account_url=f"https://{account_name}.blob.core.windows.net",
         credential=credential,
+        retry_total=0,
+        connection_timeout=5,
+        read_timeout=10,
+    )
+
+
+def _validate_blob_path(blob_path: str) -> None:
+    if (
+        ".." in blob_path
+        or blob_path.startswith("/")
+        or "?" in blob_path
+        or "#" in blob_path
+    ):
+        raise ValueError("invalid blob_path: path traversal not allowed")
+
+
+def upload_blob_bytes(
+    credential: TokenCredential,
+    account_name: str,
+    container: str,
+    blob_path: str,
+    data: bytes | Iterable[bytes],
+    *,
+    content_type: str = "application/octet-stream",
+) -> str:
+    """Upload bytes to blob storage. Returns the blob URL."""
+    _validate_blob_path(blob_path)
+    svc = _blob_service(credential, account_name)
+    blob = svc.get_blob_client(container, blob_path)
+    blob.upload_blob(
+        data,
+        overwrite=True,
+        content_settings=ContentSettings(content_type=content_type),
+    )
+    return blob.url
+
+
+def upload_blob_text(
+    credential: TokenCredential,
+    account_name: str,
+    container: str,
+    blob_path: str,
+    text: str,
+    *,
+    content_type: str = "text/plain; charset=utf-8",
+) -> str:
+    """Upload UTF-8 text to blob storage. Returns the blob URL."""
+    return upload_blob_bytes(
+        credential,
+        account_name,
+        container,
+        blob_path,
+        text.encode("utf-8"),
+        content_type=content_type,
     )
 
 
@@ -27,12 +126,23 @@ def upload_query_text(
     fasta_text: str,
 ) -> str:
     """Upload FASTA text to blob storage. Returns the blob URL."""
-    if ".." in blob_path or blob_path.startswith("/"):
-        raise ValueError("invalid blob_path: path traversal not allowed")
-    svc = _blob_service(credential, account_name)
-    blob = svc.get_blob_client(container, blob_path)
-    blob.upload_blob(fasta_text.encode("utf-8"), overwrite=True)
-    return blob.url
+    return upload_blob_text(credential, account_name, container, blob_path, fasta_text)
+
+
+def upload_group_fasta(
+    credential: TokenCredential,
+    account_name: str,
+    query_blob_path: str,
+    group_fasta: str,
+) -> str:
+    """Upload a query-group FASTA payload to the queries container."""
+    return upload_query_text(
+        credential,
+        account_name,
+        "queries",
+        query_blob_path,
+        group_fasta,
+    )
 
 
 def read_blob_text(
@@ -43,12 +153,25 @@ def read_blob_text(
     max_bytes: int = 4096,
 ) -> str:
     """Read the first max_bytes of a text blob. Returns UTF-8 text."""
-    if ".." in blob_path or blob_path.startswith("/"):
-        raise ValueError("invalid blob_path: path traversal not allowed")
+    _validate_blob_path(blob_path)
     svc = _blob_service(credential, account_name)
     blob = svc.get_blob_client(container, blob_path)
     data = blob.download_blob(offset=0, length=max_bytes).readall()
     return data.decode("utf-8", errors="replace")
+
+
+def stream_blob_bytes(
+    credential: TokenCredential,
+    account_name: str,
+    container: str,
+    blob_path: str,
+) -> Iterator[bytes]:
+    """Stream a blob through the api sidecar without issuing browser SAS."""
+    _validate_blob_path(blob_path)
+    svc = _blob_service(credential, account_name)
+    blob = svc.get_blob_client(container, blob_path)
+    downloader = blob.download_blob()
+    yield from downloader.chunks()
 
 
 def list_result_blobs(
@@ -64,6 +187,7 @@ def list_result_blobs(
     for blob in cc.list_blobs(name_starts_with=prefix):
         blobs.append(
             {
+                "file_id": encode_blob_file_id(blob.name),
                 "name": blob.name,
                 "size": blob.size,
                 "last_modified": blob.last_modified.isoformat() if blob.last_modified else None,
@@ -80,6 +204,99 @@ def list_result_blobs(
 # transfers). When that route is implemented, add a `stream_blob_to_response`
 # helper here that returns an async iterator the FastAPI route can await — do
 # NOT bring back `generate_blob_sas` / `get_user_delegation_key`.
+
+
+def classify_storage_failure(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    account_name: str,
+    exc: BaseException,
+) -> dict[str, Any]:
+    """Classify a Storage data-plane exception into a UI-friendly degraded shape.
+
+    Azure Storage returns the same ``AuthorizationFailure`` error code for two
+    very different conditions:
+
+    * **Network deny** — ``publicNetworkAccess: Disabled`` (or ``networkAcls``
+      explicitly denies the caller) and the request did not arrive from a
+      private endpoint. This is the steady-state for this project (see
+      ``.github/copilot-instructions.md`` §9) and is **expected** when running
+      the api sidecar from a developer laptop.
+    * **RBAC deny** — the storage data plane is reachable but the caller lacks
+      the ``Storage Blob Data *`` role at the account / container scope.
+
+    To distinguish the two we look at the account's ``publicNetworkAccess``
+    via ARM (management plane, which is reachable from anywhere with the right
+    role). The result is the dict shape consumed by ``/api/blast/*`` routes.
+    """
+    err_str = str(exc)
+    err_type = type(exc).__name__
+
+    if (
+        "ResourceNotFound" in err_str
+        or "AccountNotFound" in err_str
+        or "ContainerNotFound" in err_str
+    ):
+        suffix = f" in resource group '{resource_group}'." if resource_group else "."
+        return {
+            "degraded": True,
+            "degraded_reason": "not_found",
+            "message": f"Storage container or account '{account_name}' not found{suffix}",
+        }
+
+    is_auth_like = (
+        "AuthorizationFailure" in err_str
+        or "AuthorizationPermissionMismatch" in err_str
+        or "This request is not authorized" in err_str
+    )
+    if not is_auth_like:
+        return {
+            "degraded": True,
+            "degraded_reason": err_type,
+            "message": f"Storage call failed: {err_type}",
+        }
+
+    public_state: str | None = None
+    if subscription_id and resource_group:
+        try:
+            from api.services.azure_clients import storage_client
+
+            sc = storage_client(credential, subscription_id)
+            account = sc.storage_accounts.get_properties(resource_group, account_name)
+            raw = getattr(account, "public_network_access", None)
+            public_state = str(raw) if raw is not None else None
+        except Exception as arm_exc:
+            LOGGER.debug("classify_storage_failure ARM check failed: %s", arm_exc)
+
+    if public_state == "Disabled":
+        return {
+            "degraded": True,
+            "degraded_reason": "network_blocked",
+            "public_access_disabled": True,
+            "message": (
+                f"Storage account '{account_name}' has publicNetworkAccess: Disabled "
+                "(production posture — see project policy §9). Data-plane access only "
+                "works from inside the platform VNet via the private endpoint, so this "
+                "view is unavailable from local development. To debug locally, open an "
+                "IP-allowlisted window with "
+                f"`scripts/dev/storage-public-access.sh on --account {account_name} "
+                f"--rg {resource_group or '<resource-group>'}` and close it again with "
+                "`storage-public-access.sh off` when done. In a deployed environment, "
+                "run `azd up` and verify from the Container App."
+            ),
+        }
+
+    return {
+        "degraded": True,
+        "degraded_reason": "access_denied",
+        "message": (
+            f"Cannot read data from storage account '{account_name}'. "
+            "Assign 'Storage Blob Data Reader' (or Contributor for write) on the "
+            "storage account to your az login identity, then wait a few minutes "
+            "for RBAC propagation."
+        ),
+    }
 
 
 def list_databases(
@@ -104,6 +321,7 @@ def list_databases(
     cc = svc.get_container_client(container)
     db_info: dict[str, dict[str, Any]] = {}
     metadata_blobs: dict[str, str] = {}  # db_name -> metadata json content
+    blastdb_json_blobs: dict[str, str] = {}  # db_name -> BLAST v5 .njs content
     for blob in cc.list_blobs():
         parts = blob.name.split("/")
         name = parts[-1]  # file name without directory prefix
@@ -115,11 +333,26 @@ def list_databases(
             try:
                 bc = cc.get_blob_client(blob.name)
                 metadata_blobs[meta_db_name] = bc.download_blob().readall().decode("utf-8")
-            except Exception:
-                pass
+            except Exception as exc:
+                LOGGER.debug("metadata blob read skipped for %s: %s", blob.name, exc)
             continue
+        if name.endswith(".njs"):
+            base = re.sub(r"\.\d+$", "", name[:-4])
+            try:
+                bc = cc.get_blob_client(blob.name)
+                blastdb_json_blobs[base] = bc.download_blob().readall().decode("utf-8")
+            except Exception as exc:
+                LOGGER.debug("BLAST DB metadata read skipped for %s: %s", blob.name, exc)
         # Skip staging artifacts
         if parts[0] in ("custom-db-build",) or (len(parts) >= 2 and parts[1] == ".staging"):
+            continue
+        # Skip prepare-db shard layout artifacts. ensure_shard_sets() writes
+        # files under `{N}shards/{db}_shard_{i:02d}/...` (manifest + .nal).
+        # Without this guard, the .nal at e.g.
+        # `1shards/16S_ribosomal_RNA_shard_00/16S_ribosomal_RNA_shard_00.nal`
+        # would be parsed as a brand-new "DB" called
+        # `16S_ribosomal_RNA_shard_00`, polluting the dashboard.
+        if re.match(r"^\d+shards$", parts[0]):
             continue
         # Check if file has a known BLAST extension
         for ext in _DB_EXTS:
@@ -144,19 +377,81 @@ def list_databases(
                     db_info[base]["total_bytes"] += blob.size or 0
                     blob_modified = blob.last_modified
                     if blob_modified:
-                        mod_str = blob_modified.isoformat() if hasattr(blob_modified, "isoformat") else str(blob_modified)
+                        mod_str = (
+                            blob_modified.isoformat()
+                            if hasattr(blob_modified, "isoformat")
+                            else str(blob_modified)
+                        )
                         prev = db_info[base]["last_modified"]
                         if not prev or mod_str > prev:
                             db_info[base]["last_modified"] = mod_str
                 break
-    # Enrich with metadata (source_version, downloaded_at)
+    # Enrich with metadata (source_version, downloaded_at, sharding info)
     import json as _json
     for db_name, info in db_info.items():
+        # Default sharding fields so the frontend can rely on their presence.
+        info.setdefault("sharded", False)
+        info.setdefault("shard_sets", [])
+        info.setdefault("sharding_in_progress", False)
+        info.setdefault("sharding_started_at", None)
+        info.setdefault("sharding_error", None)
+        if db_name in blastdb_json_blobs:
+            try:
+                blast_meta = _json.loads(blastdb_json_blobs[db_name])
+                for source, target in (
+                    ("number-of-letters", "total_letters"),
+                    ("number-of-sequences", "total_sequences"),
+                    ("bytes-to-cache", "bytes_to_cache"),
+                    ("bytes-total", "bytes_total"),
+                ):
+                    value = blast_meta.get(source)
+                    if isinstance(value, (int, float)) and value > 0:
+                        info[target] = int(value)
+            except Exception as exc:
+                LOGGER.debug("BLAST DB .njs metadata parse skipped for %s: %s", db_name, exc)
         if db_name in metadata_blobs:
             try:
                 meta = _json.loads(metadata_blobs[db_name])
                 info["source_version"] = meta.get("source_version")
                 info["downloaded_at"] = meta.get("downloaded_at")
-            except Exception:
-                pass
+                # Sharding metadata written by the prepare-db pipeline once
+                # the per-DB shard set upload completes. Both keys are
+                # optional — older metadata blobs (pre-2026-05) won't have
+                # them, in which case the defaults above hold.
+                if isinstance(meta.get("sharded"), bool):
+                    info["sharded"] = meta["sharded"]
+                shard_sets = meta.get("shard_sets")
+                if isinstance(shard_sets, list):
+                    # Coerce to a sorted list of unique ints for a stable
+                    # contract with the SPA.
+                    info["shard_sets"] = sorted(
+                        {
+                            int(n)
+                            for n in shard_sets
+                            if isinstance(n, (int, str)) and str(n).isdigit()
+                        }
+                    )
+                # In-flight shard state surfaced from the daemon-thread
+                # writer in /api/blast/databases/{db}/shard. The SPA
+                # renders these directly so a page reload still shows
+                # "sharding…" while a background thread is running.
+                if isinstance(meta.get("sharding_in_progress"), bool):
+                    info["sharding_in_progress"] = meta["sharding_in_progress"]
+                if isinstance(meta.get("sharding_started_at"), str):
+                    info["sharding_started_at"] = meta["sharding_started_at"]
+                if isinstance(meta.get("sharding_error"), str):
+                    info["sharding_error"] = meta["sharding_error"][:300]
+                # Allow metadata to override total_bytes if the prepare-db
+                # pipeline computed it more precisely than blob enumeration
+                # (e.g. for very large multi-volume DBs).
+                if (
+                    isinstance(meta.get("total_bytes"), (int, float))
+                    and meta["total_bytes"] > 0
+                ):
+                    info["total_bytes"] = int(meta["total_bytes"])
+                for key in ("total_letters", "total_sequences", "bytes_to_cache", "bytes_total"):
+                    if isinstance(meta.get(key), (int, float)) and meta[key] > 0:
+                        info[key] = int(meta[key])
+            except Exception as exc:
+                LOGGER.debug("metadata blob parse skipped for %s: %s", db_name, exc)
     return sorted(db_info.values(), key=lambda d: d["name"])

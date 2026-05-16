@@ -23,8 +23,11 @@
 
 set -uo pipefail
 
-# Ensure $HOME exists and is writable (the Azure Files mount may shadow it).
-export HOME="${HOME:-/home/azureuser}"
+# Ensure the operator home is stable even if the base image contributes a
+# different default HOME for another user.
+export HOME="${TERMINAL_HOME:-/home/azureuser}"
+export USER="${USER:-azureuser}"
+export SHELL="${SHELL:-/bin/bash}"
 mkdir -p "$HOME/.azure" "$HOME/.kube" 2>/dev/null || true
 
 # Print the MOTD as part of the first shell login.
@@ -60,8 +63,9 @@ trap 'shutdown HUP'  SIGHUP
 # REPORTER_PID in `wait -n` because losing telemetry must NOT cycle the
 # revision (ttyd / exec_server failures are the actual liveness signals).
 # ---------------------------------------------------------------------------
-SIDECAR_NAME="${SIDECAR_NAME:-terminal}" \
-  /opt/elb/venv/bin/python3 /usr/local/bin/elb-cgroup-reporter "$SIDECAR_NAME" &
+SIDECAR_NAME="${SIDECAR_NAME:-terminal}"
+export SIDECAR_NAME
+/opt/elb/venv/bin/python3 /usr/local/bin/elb-cgroup-reporter "$SIDECAR_NAME" &
 REPORTER_PID=$!
 
 # ---------------------------------------------------------------------------
@@ -76,16 +80,17 @@ EXEC_PID=$!
 # Each browser session attaches (or creates) a tmux session named "elb" so
 # refreshing the browser does not lose work.
 # ---------------------------------------------------------------------------
+TTYD_HOST="${TTYD_HOST:-127.0.0.1}"
 /usr/local/bin/ttyd \
   -p 7681 \
-  -i 127.0.0.1 \
+  -i "$TTYD_HOST" \
   -W \
   -t enableZmodem=false \
   -t fontSize=14 \
-  /bin/bash --login &
+  /usr/bin/tmux new-session -A -D -s elb /bin/bash --login &
 TTYD_PID=$!
 
-echo "elb-supervisor: ttyd pid=$TTYD_PID exec_server pid=$EXEC_PID reporter pid=$REPORTER_PID" >&2
+echo "elb-supervisor: ttyd host=$TTYD_HOST pid=$TTYD_PID exec_server pid=$EXEC_PID reporter pid=$REPORTER_PID" >&2
 
 # Block until either critical child (ttyd / exec_server) exits. The reporter
 # is intentionally NOT waited on — telemetry loss must not cycle the revision.

@@ -1,28 +1,41 @@
 """Allowed AKS node SKUs for ElasticBLAST on Azure.
 
-Single source of truth in this repo. **Mirror of**
+This module mirrors the sibling repository's
 ``src/elastic_blast/azure_traits.py::AZURE_HPC_MACHINES`` and
-``ELB_DFLT_AZURE_MACHINE_TYPE`` in the sibling `elastic-blast-azure` repo.
+``src/elastic_blast/constants.py::ELB_DFLT_AZURE_MACHINE_TYPE`` /
+``ELB_DFLT_AZURE_SYSTEM_VM_SIZE``.
 
-If a user picks a SKU that is **not** in ``ALLOWED_SKUS`` the BLAST submit
-will fail in the cluster with::
+Keep one source of truth here: ``SKU_CATALOG``. Public allow-lists, pricing
+tables, route payloads, and validators are derived from it so they cannot
+drift from each other.
 
-    NotImplementedError: Cannot get properties for <sku>
+Node pool layout mirror (from sibling ``constants.py``):
 
-raised by ``elastic_blast.azure_traits.get_machine_properties``. So:
-
-- Every dropdown / picker in the SPA must source its options from
-  ``ALLOWED_SKUS`` (or the ``/api/aks/skus`` endpoint, which reads from here).
-- Every default in the backend (job templates, cost estimator, etc.) must
-  use ``DEFAULT_SKU``.
-- When the sibling repo bumps ``AZURE_HPC_MACHINES`` or
-  ``ELB_DFLT_AZURE_MACHINE_TYPE``, update this module in the same PR (just
-  like ``image_tags.py``).
+* ``ELB_AZURE_SYSTEM_POOL_NAME = 'systempool'`` — small CriticalAddonsOnly
+  pool that hosts CoreDNS / metrics-server / csi-azuredisk-node etc.
+  Default VM size: ``ELB_DFLT_AZURE_SYSTEM_VM_SIZE = 'Standard_D2s_v3'``.
+* ``ELB_AZURE_BLAST_POOL_NAME = 'blastpool'`` — user pool that runs every
+  ElasticBLAST workload pod. Default VM size:
+  ``ELB_DFLT_AZURE_MACHINE_TYPE = 'Standard_E32s_v5'``.
+* Blast nodes get label ``workload=blast`` and taint
+  ``workload=blast:NoSchedule``; system nodes get taint
+  ``CriticalAddonsOnly=true:NoSchedule``.
 """
 
 from __future__ import annotations
 
-from typing import TypedDict
+from dataclasses import dataclass
+from typing import Literal, TypedDict
+
+
+SkuRole = Literal["system", "blast", "both"]
+"""Which AKS node pool the SKU is intended for.
+
+* ``system`` — only suitable for the small ``systempool`` (≤2 vCPU class).
+* ``blast``  — only suitable for the workload ``blastpool`` (HPC / large
+  memory / large storage SKUs).
+* ``both``   — general-purpose SKUs that can run either pool.
+"""
 
 
 class SkuSpec(TypedDict):
@@ -32,232 +45,233 @@ class SkuSpec(TypedDict):
     vCPUs: int
     memoryGiB: int
     category: str
-    series: str  # e.g. "E-v3", "E-v5", "E-v5-bs", "L-v3", "L-v3-as"
+    series: str
+    hourlyUsd: float
+    role: SkuRole
+    group: str
 
 
-# Sibling default — keep in sync with
-# ``src/elastic_blast/constants.py::ELB_DFLT_AZURE_MACHINE_TYPE``.
-DEFAULT_SKU: str = "Standard_E32s_v5"
+class SkuListResponse(TypedDict):
+    """HTTP response shape for ``GET /api/aks/skus``."""
 
-# Mirror of ``AZURE_HPC_MACHINES`` from
-# ``src/elastic_blast/azure_traits.py``. Keep ordering grouped by series so
-# the SPA dropdown reads naturally.
-ALLOWED_SKUS: dict[str, SkuSpec] = {
-    # E-series v3 (memory-optimized, prior generation)
-    "Standard_E16s_v3": {
-        "name": "Standard_E16s_v3",
-        "vCPUs": 16,
-        "memoryGiB": 128,
-        "category": "memory",
-        "series": "E-v3",
-    },
-    "Standard_E32s_v3": {
-        "name": "Standard_E32s_v3",
-        "vCPUs": 32,
-        "memoryGiB": 256,
-        "category": "memory",
-        "series": "E-v3",
-    },
-    "Standard_E48s_v3": {
-        "name": "Standard_E48s_v3",
-        "vCPUs": 48,
-        "memoryGiB": 384,
-        "category": "memory",
-        "series": "E-v3",
-    },
-    "Standard_E64s_v3": {
-        "name": "Standard_E64s_v3",
-        "vCPUs": 64,
-        "memoryGiB": 432,
-        "category": "memory",
-        "series": "E-v3",
-    },
-    # E-series v5 (memory-optimized, current default — Ice Lake)
-    "Standard_E16s_v5": {
-        "name": "Standard_E16s_v5",
-        "vCPUs": 16,
-        "memoryGiB": 128,
-        "category": "memory",
-        "series": "E-v5",
-    },
-    "Standard_E32s_v5": {
-        "name": "Standard_E32s_v5",
-        "vCPUs": 32,
-        "memoryGiB": 256,
-        "category": "memory",
-        "series": "E-v5",
-    },
-    "Standard_E48s_v5": {
-        "name": "Standard_E48s_v5",
-        "vCPUs": 48,
-        "memoryGiB": 384,
-        "category": "memory",
-        "series": "E-v5",
-    },
-    "Standard_E64s_v5": {
-        "name": "Standard_E64s_v5",
-        "vCPUs": 64,
-        "memoryGiB": 512,
-        "category": "memory",
-        "series": "E-v5",
-    },
-    "Standard_E96s_v5": {
-        "name": "Standard_E96s_v5",
-        "vCPUs": 96,
-        "memoryGiB": 672,
-        "category": "memory",
-        "series": "E-v5",
-    },
-    # E-series v5 with NVMe (best for warmup/local-SSD mode)
-    "Standard_E16bs_v5": {
-        "name": "Standard_E16bs_v5",
-        "vCPUs": 16,
-        "memoryGiB": 128,
-        "category": "memory-nvme",
-        "series": "E-v5-bs",
-    },
-    "Standard_E32bs_v5": {
-        "name": "Standard_E32bs_v5",
-        "vCPUs": 32,
-        "memoryGiB": 256,
-        "category": "memory-nvme",
-        "series": "E-v5-bs",
-    },
-    "Standard_E48bs_v5": {
-        "name": "Standard_E48bs_v5",
-        "vCPUs": 48,
-        "memoryGiB": 384,
-        "category": "memory-nvme",
-        "series": "E-v5-bs",
-    },
-    "Standard_E64bs_v5": {
-        "name": "Standard_E64bs_v5",
-        "vCPUs": 64,
-        "memoryGiB": 512,
-        "category": "memory-nvme",
-        "series": "E-v5-bs",
-    },
-    "Standard_E96bs_v5": {
-        "name": "Standard_E96bs_v5",
-        "vCPUs": 96,
-        "memoryGiB": 672,
-        "category": "memory-nvme",
-        "series": "E-v5-bs",
-    },
-    # D-series v3 (general purpose) — only the sibling-allowed sizes
-    "Standard_D8s_v3": {
-        "name": "Standard_D8s_v3",
-        "vCPUs": 8,
-        "memoryGiB": 32,
-        "category": "general",
-        "series": "D-v3",
-    },
-    "Standard_D16s_v3": {
-        "name": "Standard_D16s_v3",
-        "vCPUs": 16,
-        "memoryGiB": 64,
-        "category": "general",
-        "series": "D-v3",
-    },
-    "Standard_D32s_v3": {
-        "name": "Standard_D32s_v3",
-        "vCPUs": 32,
-        "memoryGiB": 128,
-        "category": "general",
-        "series": "D-v3",
-    },
-    "Standard_D64s_v3": {
-        "name": "Standard_D64s_v3",
-        "vCPUs": 64,
-        "memoryGiB": 256,
-        "category": "general",
-        "series": "D-v3",
-    },
-    # L-series v3 (storage-optimized, large NVMe — for TB-scale BLAST DB)
-    "Standard_L8s_v3": {
-        "name": "Standard_L8s_v3",
-        "vCPUs": 8,
-        "memoryGiB": 64,
-        "category": "storage",
-        "series": "L-v3",
-    },
-    "Standard_L16s_v3": {
-        "name": "Standard_L16s_v3",
-        "vCPUs": 16,
-        "memoryGiB": 128,
-        "category": "storage",
-        "series": "L-v3",
-    },
-    "Standard_L32s_v3": {
-        "name": "Standard_L32s_v3",
-        "vCPUs": 32,
-        "memoryGiB": 256,
-        "category": "storage",
-        "series": "L-v3",
-    },
-    "Standard_L64s_v3": {
-        "name": "Standard_L64s_v3",
-        "vCPUs": 64,
-        "memoryGiB": 512,
-        "category": "storage",
-        "series": "L-v3",
-    },
+    skus: list[SkuSpec]
+    default: str
+    default_sku: str
+    default_system_sku: str
+    group_labels: dict[str, str]
+    group_order: list[str]
+    degraded: bool
+    degraded_reason: str
+
+
+# Display label per SKU group. Stable strings — the SPA dropdown uses
+# them as <optgroup label=...> so they are user-visible.
+SKU_GROUP_LABELS: dict[str, str] = {
+    "system": "System pool (D-series, 2–4 vCPU)",
+    "hpc": "HPC — InfiniBand (HB / HC)",
+    "memory-v5": "Memory-optimised — E v5",
+    "memory-bs-v5": "Memory-optimised + NVMe — E bs v5",
+    "memory-v3": "Memory-optimised — E v3",
+    "general": "General purpose — D v3",
+    "storage-v3": "Storage-optimised — L v3",
+    "storage-as-v3": "Storage-optimised — L as v3",
 }
 
+# Stable ordering for the SPA dropdown <optgroup>s. Anything not listed
+# here is appended in catalog order.
+SKU_GROUP_ORDER: tuple[str, ...] = (
+    "system",
+    "hpc",
+    "memory-v5",
+    "memory-bs-v5",
+    "memory-v3",
+    "general",
+    "storage-v3",
+    "storage-as-v3",
+)
 
-# Approximate Pay-As-You-Go hourly USD prices (koreacentral). Values come
-# from sibling ``azure_traits.py::AZURE_VM_HOURLY_PRICES``. Only SKUs that
-# also appear in ``ALLOWED_SKUS`` are listed; the cost estimator must reject
-# anything outside this dict.
+
+@dataclass(frozen=True, slots=True)
+class SkuCatalogEntry:
+    """Internal catalog row. Everything else is derived from this."""
+
+    name: str
+    vcpus: int
+    memory_gib: int
+    category: str
+    series: str
+    hourly_usd: float
+    role: SkuRole
+    group: str
+
+    def to_public(self) -> SkuSpec:
+        return {
+            "name": self.name,
+            "vCPUs": self.vcpus,
+            "memoryGiB": self.memory_gib,
+            "category": self.category,
+            "series": self.series,
+            "hourlyUsd": self.hourly_usd,
+            "role": self.role,
+            "group": self.group,
+        }
+
+
+def _sku(
+    name: str,
+    vcpus: int,
+    memory_gib: int,
+    category: str,
+    series: str,
+    hourly_usd: float,
+    *,
+    role: SkuRole = "blast",
+    group: str = "",
+) -> SkuCatalogEntry:
+    return SkuCatalogEntry(
+        name=name,
+        vcpus=vcpus,
+        memory_gib=memory_gib,
+        category=category,
+        series=series,
+        hourly_usd=hourly_usd,
+        role=role,
+        group=group or category,
+    )
+
+
+# Sibling defaults: constants.py.
+DEFAULT_SKU: str = "Standard_E32s_v5"  # ELB_DFLT_AZURE_MACHINE_TYPE
+DEFAULT_SYSTEM_SKU: str = "Standard_D2s_v3"  # ELB_DFLT_AZURE_SYSTEM_VM_SIZE
+
+
+# Mirror of sibling azure_traits.py::AZURE_HPC_MACHINES plus matching
+# azure_traits.py::AZURE_VM_HOURLY_PRICES, with system-pool SKUs from
+# sibling constants.py. Ordering is UI dropdown ordering.
+SKU_CATALOG: tuple[SkuCatalogEntry, ...] = (
+    # --- System pool SKUs (small, low-cost, CriticalAddonsOnly) -----------
+    _sku("Standard_D2s_v3", 2, 8, "general", "D-v3", 0.096,
+         role="system", group="system"),
+    _sku("Standard_D4s_v3", 4, 16, "general", "D-v3", 0.192,
+         role="system", group="system"),
+    # --- Blast pool SKUs ---------------------------------------------------
+    _sku("Standard_HB120rs_v3", 120, 480, "hpc", "HB-v3", 3.600, group="hpc"),
+    _sku("Standard_HC44rs", 44, 352, "hpc", "HC", 3.168, group="hpc"),
+    _sku("Standard_HB60rs", 60, 240, "hpc", "HB-v2", 2.280, group="hpc"),
+    _sku("Standard_D8s_v3", 8, 32, "general", "D-v3", 0.384, group="general"),
+    _sku("Standard_D16s_v3", 16, 64, "general", "D-v3", 0.768, group="general"),
+    _sku("Standard_D32s_v3", 32, 128, "general", "D-v3", 1.536, group="general"),
+    _sku("Standard_D64s_v3", 64, 256, "general", "D-v3", 3.072, group="general"),
+    _sku("Standard_E64s_v3", 64, 432, "memory", "E-v3", 3.629, group="memory-v3"),
+    _sku("Standard_E64is_v3", 64, 504, "memory-isolated", "E-v3-isolated", 3.629, group="memory-v3"),
+    _sku("Standard_E16s_v5", 16, 128, "memory", "E-v5", 1.008, group="memory-v5"),
+    _sku("Standard_E32s_v5", 32, 256, "memory", "E-v5", 2.016, group="memory-v5"),
+    _sku("Standard_E48s_v5", 48, 384, "memory", "E-v5", 3.024, group="memory-v5"),
+    _sku("Standard_E64s_v5", 64, 512, "memory", "E-v5", 4.032, group="memory-v5"),
+    _sku("Standard_E96s_v5", 96, 672, "memory", "E-v5", 6.048, group="memory-v5"),
+    _sku("Standard_E16bs_v5", 16, 128, "memory-nvme", "E-v5-bs", 1.192, group="memory-bs-v5"),
+    _sku("Standard_E32bs_v5", 32, 256, "memory-nvme", "E-v5-bs", 2.432, group="memory-bs-v5"),
+    _sku("Standard_E48bs_v5", 48, 384, "memory-nvme", "E-v5-bs", 3.576, group="memory-bs-v5"),
+    _sku("Standard_E64bs_v5", 64, 512, "memory-nvme", "E-v5-bs", 4.864, group="memory-bs-v5"),
+    _sku("Standard_E96bs_v5", 96, 672, "memory-nvme", "E-v5-bs", 7.296, group="memory-bs-v5"),
+    _sku("Standard_L8s_v3", 8, 64, "storage", "L-v3", 0.624, group="storage-v3"),
+    _sku("Standard_L16s_v3", 16, 128, "storage", "L-v3", 1.248, group="storage-v3"),
+    _sku("Standard_L32s_v3", 32, 256, "storage", "L-v3", 2.496, group="storage-v3"),
+    _sku("Standard_L48s_v3", 48, 384, "storage", "L-v3", 3.744, group="storage-v3"),
+    _sku("Standard_L64s_v3", 64, 512, "storage", "L-v3", 4.992, group="storage-v3"),
+    _sku("Standard_L80s_v3", 80, 640, "storage", "L-v3", 6.240, group="storage-v3"),
+    _sku("Standard_L8as_v3", 8, 64, "storage", "L-v3-as", 0.624, group="storage-as-v3"),
+    _sku("Standard_L16as_v3", 16, 128, "storage", "L-v3-as", 1.248, group="storage-as-v3"),
+    _sku("Standard_L32as_v3", 32, 256, "storage", "L-v3-as", 2.496, group="storage-as-v3"),
+    _sku("Standard_L48as_v3", 48, 384, "storage", "L-v3-as", 3.744, group="storage-as-v3"),
+    _sku("Standard_L64as_v3", 64, 512, "storage", "L-v3-as", 4.992, group="storage-as-v3"),
+    _sku("Standard_L80as_v3", 80, 640, "storage", "L-v3-as", 6.240, group="storage-as-v3"),
+)
+
+SKU_BY_NAME: dict[str, SkuCatalogEntry] = {sku.name: sku for sku in SKU_CATALOG}
+
+# Backwards-compatible public module constants.
+ALLOWED_SKUS: dict[str, SkuSpec] = {
+    sku.name: sku.to_public() for sku in SKU_CATALOG
+}
 AZURE_VM_HOURLY_USD: dict[str, float] = {
-    # D-v3
-    "Standard_D8s_v3": 0.384,
-    "Standard_D16s_v3": 0.768,
-    "Standard_D32s_v3": 1.536,
-    "Standard_D64s_v3": 3.072,
-    # E-v3
-    "Standard_E16s_v3": 1.008,
-    "Standard_E32s_v3": 2.016,
-    "Standard_E48s_v3": 3.024,
-    "Standard_E64s_v3": 3.629,
-    # E-v5
-    "Standard_E16s_v5": 1.008,
-    "Standard_E32s_v5": 2.016,
-    "Standard_E48s_v5": 3.024,
-    "Standard_E64s_v5": 4.032,
-    "Standard_E96s_v5": 6.048,
-    # E-v5 with NVMe
-    "Standard_E16bs_v5": 1.192,
-    "Standard_E32bs_v5": 2.432,
-    "Standard_E48bs_v5": 3.648,
-    "Standard_E64bs_v5": 4.864,
-    "Standard_E96bs_v5": 7.296,
-    # L-v3
-    "Standard_L8s_v3": 0.624,
-    "Standard_L16s_v3": 1.248,
-    "Standard_L32s_v3": 2.496,
-    "Standard_L64s_v3": 4.992,
+    sku.name: sku.hourly_usd for sku in SKU_CATALOG
 }
 
 
 def is_allowed(sku: str) -> bool:
     """Return True if ``sku`` is in the elastic-blast allow-list."""
 
-    return sku in ALLOWED_SKUS
+    return sku in SKU_BY_NAME
 
 
 def list_skus() -> list[SkuSpec]:
     """Return the allow-list as a list, suitable for JSON serialisation."""
 
-    return list(ALLOWED_SKUS.values())
+    return [sku.to_public() for sku in SKU_CATALOG]
 
 
-# Self-check: the default we hand back to the SPA must be in the allow-list
-# and have a price entry. A drift here means a sibling-repo bump was missed.
-assert DEFAULT_SKU in ALLOWED_SKUS, (
-    f"DEFAULT_SKU {DEFAULT_SKU!r} missing from ALLOWED_SKUS — "
-    "out of sync with sibling azure_traits.py::AZURE_HPC_MACHINES"
-)
-assert DEFAULT_SKU in AZURE_VM_HOURLY_USD, (
-    f"DEFAULT_SKU {DEFAULT_SKU!r} missing from AZURE_VM_HOURLY_USD"
-)
+def sku_list_response(
+    *,
+    degraded: bool = True,
+    degraded_reason: str = "static_skus_celery_task_pending",
+) -> SkuListResponse:
+    """Build the stable ``GET /api/aks/skus`` response payload.
+
+    ``group_labels`` / ``group_order`` mirror the SPA dropdown grouping so
+    the frontend never has to hardcode the per-series labels (see
+    ``web/src/hooks/useAksSkus.ts``).
+    """
+
+    used_groups = {sku.group for sku in SKU_CATALOG}
+    ordered = [g for g in SKU_GROUP_ORDER if g in used_groups]
+    # Tail: any group not in the canonical order, in catalog order.
+    seen = set(ordered)
+    for sku in SKU_CATALOG:
+        if sku.group not in seen:
+            ordered.append(sku.group)
+            seen.add(sku.group)
+
+    return {
+        "skus": list_skus(),
+        "default": DEFAULT_SKU,
+        "default_sku": DEFAULT_SKU,
+        "default_system_sku": DEFAULT_SYSTEM_SKU,
+        "group_labels": {g: SKU_GROUP_LABELS[g] for g in ordered},
+        "group_order": ordered,
+        "degraded": degraded,
+        "degraded_reason": degraded_reason,
+    }
+
+
+def _assert_catalog_consistency() -> None:
+    names = [sku.name for sku in SKU_CATALOG]
+    if len(names) != len(set(names)):
+        raise AssertionError("SKU_CATALOG contains duplicate names")
+    if DEFAULT_SKU not in SKU_BY_NAME:
+        raise AssertionError(f"DEFAULT_SKU {DEFAULT_SKU!r} missing from SKU_CATALOG")
+    if DEFAULT_SYSTEM_SKU not in SKU_BY_NAME:
+        raise AssertionError(
+            f"DEFAULT_SYSTEM_SKU {DEFAULT_SYSTEM_SKU!r} missing from SKU_CATALOG"
+        )
+    if SKU_BY_NAME[DEFAULT_SYSTEM_SKU].role not in ("system", "both"):
+        raise AssertionError(
+            f"DEFAULT_SYSTEM_SKU {DEFAULT_SYSTEM_SKU!r} is not flagged as a system SKU"
+        )
+    if SKU_BY_NAME[DEFAULT_SKU].role not in ("blast", "both"):
+        raise AssertionError(
+            f"DEFAULT_SKU {DEFAULT_SKU!r} is not flagged as a blast SKU"
+        )
+    if any(sku.hourly_usd <= 0 for sku in SKU_CATALOG):
+        raise AssertionError("SKU_CATALOG contains a non-positive price")
+    if set(ALLOWED_SKUS) != set(AZURE_VM_HOURLY_USD):
+        raise AssertionError("SKU allow-list and pricing table drifted apart")
+    # Every group used in the catalog must have a display label so the SPA
+    # never renders a bare optgroup id.
+    used_groups = {sku.group for sku in SKU_CATALOG}
+    missing = used_groups - set(SKU_GROUP_LABELS)
+    if missing:
+        raise AssertionError(f"SKU groups missing display labels: {sorted(missing)}")
+
+
+_assert_catalog_consistency()
