@@ -63,8 +63,7 @@ resource acrPullForUami 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-// AcrPush role for the same UAMI so the postprovision hook can build/push
-// images via `az acr build` using the same identity.
+// AcrPush role for the same UAMI so runtime image builds can push images.
 var acrPushRoleId = '8311e382-0749-4cb8-b61a-304f252e45ec'
 
 resource acrPushForUami 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -74,6 +73,22 @@ resource acrPushForUami 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     principalId: uamiPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPushRoleId)
+  }
+}
+
+// ACR Tasks (`az acr build` / SDK scheduleRun) are management-plane actions,
+// not data-plane push operations. AcrPush alone cannot call
+// Microsoft.ContainerRegistry/registries/scheduleRun/action, so the worker MI
+// needs Contributor at registry scope to build runtime ElasticBLAST images.
+var contributorRoleId = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
+
+resource acrContributorForUami 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(acr.id, uamiPrincipalId, contributorRoleId)
+  scope: acr
+  properties: {
+    principalId: uamiPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', contributorRoleId)
   }
 }
 

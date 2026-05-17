@@ -286,6 +286,16 @@ services:
         condition: service_started
       terminal:
         condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/app/.venv/bin/celery -A api.celery_app:celery_app inspect ping -d celery@$$(hostname) --timeout=5 | grep -q pong",
+        ]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
 
   # ---------------------------------------------------------------------
   # 6. beat — celery beat singleton; same image as api
@@ -326,6 +336,16 @@ services:
         condition: service_healthy
       api:
         condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -s /tmp/celerybeat.pid && kill -0 $$(cat /tmp/celerybeat.pid)",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
 networks:
   elb:

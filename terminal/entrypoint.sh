@@ -70,9 +70,14 @@ REPORTER_PID=$!
 
 # ---------------------------------------------------------------------------
 # Start exec server (background). Uses python3.12 explicitly so PATH order
-# changes can never silently swap interpreters.
+# changes can never silently swap interpreters. Give programmatic exec calls a
+# separate Azure CLI cache from the interactive browser terminal; API/Celery
+# submissions may log in with managed identity, while the user's ttyd shell
+# still owns /home/azureuser/.azure.
 # ---------------------------------------------------------------------------
-/usr/bin/python3.12 /usr/local/bin/elb-exec-server &
+mkdir -p "${EXEC_AZURE_CONFIG_DIR:-/tmp/elb-exec-azure}" 2>/dev/null || true
+AZURE_CONFIG_DIR="${EXEC_AZURE_CONFIG_DIR:-/tmp/elb-exec-azure}" \
+  /usr/bin/python3.12 /usr/local/bin/elb-exec-server &
 EXEC_PID=$!
 
 # ---------------------------------------------------------------------------

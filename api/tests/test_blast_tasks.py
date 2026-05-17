@@ -210,7 +210,9 @@ def test_extract_db_name_handles_every_input_shape() -> None:
     assert blast._extract_db_name("") == ""
 
 
-def test_build_config_auto_resolves_metadata_but_does_not_shard_by_default(monkeypatch) -> None:
+def test_build_config_auto_resolves_metadata_without_sharding_but_uses_local_ssd(
+    monkeypatch,
+) -> None:
     # Fake metadata.json contents the prepare-db pipeline would have written.
     fake_meta = {
         "db_name": "core_nt",
@@ -232,7 +234,7 @@ def test_build_config_auto_resolves_metadata_but_does_not_shard_by_default(monke
     cfg = _parse_ini(content)
     assert not cfg.has_option("blast", "db-partitions")
     assert not cfg.has_option("blast", "db-partition-prefix")
-    assert not cfg.has_option("cluster", "exp-use-local-ssd")
+    assert cfg.get("cluster", "exp-use-local-ssd") == "true"
 
 
 def test_build_config_approximate_sharding_opt_in_injects_partitions(monkeypatch) -> None:
@@ -786,6 +788,55 @@ def test_dispatch_split_child_submits_records_terminal_failure(
         "job-123-qg1",
         {"status": "failed", "phase": "submit_failed", "error_code": "boom"},
     )
+
+
+def test_ensure_terminal_azure_cli_login_uses_existing_account() -> None:
+    calls: list[list[str]] = []
+
+    def fake_terminal_run(*, argv: list[str], timeout_seconds: int, **_kwargs: object):
+        calls.append(argv)
+        assert timeout_seconds == 30
+        return {"exit_code": 0, "stdout": "operator@example.test\n", "stderr": ""}
+
+    blast._ensure_terminal_azure_cli_login(fake_terminal_run)
+
+    assert calls == [["az", "account", "show", "--query", "user.name", "--output", "tsv"]]
+
+
+def test_ensure_terminal_azure_cli_login_falls_back_to_managed_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_CLIENT_ID", "client-id-123")
+    calls: list[list[str]] = []
+
+    def fake_terminal_run(*, argv: list[str], timeout_seconds: int, **_kwargs: object):
+        calls.append(argv)
+        if len(calls) == 1:
+            assert timeout_seconds == 30
+            return {"exit_code": 1, "stdout": "", "stderr": "Please run az login"}
+        assert timeout_seconds == 120
+        return {"exit_code": 0, "stdout": "[]", "stderr": ""}
+
+    blast._ensure_terminal_azure_cli_login(fake_terminal_run)
+
+    assert calls == [
+        ["az", "account", "show", "--query", "user.name", "--output", "tsv"],
+        ["az", "login", "--identity", "--username", "client-id-123"],
+    ]
+
+
+def test_ensure_terminal_azure_cli_login_raises_when_identity_login_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
+
+    def fake_terminal_run(*, argv: list[str], **_kwargs: object):
+        if argv[:3] == ["az", "account", "show"]:
+            return {"exit_code": 1, "stdout": "", "stderr": "Please run az login"}
+        return {"exit_code": 1, "stdout": "", "stderr": "identity unavailable"}
+
+    with pytest.raises(blast.TerminalAzureLoginError, match="identity unavailable"):
+        blast._ensure_terminal_azure_cli_login(fake_terminal_run)
 
 
 def test_run_split_parent_submission_dispatches_children_without_raw_fasta(

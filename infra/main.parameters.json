@@ -22,6 +22,12 @@
     },
     "lockdownPrivateNetworking": {
       "value": "${LOCKDOWN_PRIVATE_NETWORKING=false}"
+    },
+    "assignSubscriptionReader": {
+      "value": "${ASSIGN_SUBSCRIPTION_READER=true}"
+    },
+    "assignControlPlaneRoles": {
+      "value": "${ASSIGN_CONTROL_PLANE_ROLES=true}"
     }
   }
 }

@@ -1,23 +1,28 @@
 # Get Started
 
-This guide takes a fresh clone of `dotnetpower/elb-dashboard` from a clean machine to a working ElasticBLAST control plane, then through the smallest end-to-end BLAST smoke test: one small AKS workload node, the small `16S_ribosomal_RNA` database, one inline FASTA query, and a downloaded result.
+This guide takes a fresh clone of `dotnetpower/elb-dashboard` from a clean machine to a deployed ElasticBLAST control plane. It also includes an optional smallest end-to-end BLAST smoke test for tenants where AKS policy allows the workload cluster to stay running.
 
 The production target is one Azure Container App with six sidecars: `frontend`, `api`, `worker`, `beat`, `redis`, and `terminal`. The browser is the primary user interface after deployment. Local commands are only for installing tools, deploying the control plane, and validating the first environment.
 
 ## What This Guide Proves
 
-Follow the phases in order:
+Follow the phases in order for deployment:
 
 1. Install prerequisites on Windows/WSL2, macOS, Linux, or a clean Azure VM.
 2. Clone the repository and verify Python/Node dependencies.
 3. Create or reuse the Microsoft Entra App Registration.
 4. Deploy the bundled Container App with `azd up`.
 5. Sign in to the deployed web app.
+
+The remaining phases are an optional smoke test after deployment:
+
 6. Build the ElasticBLAST runtime images in ACR.
 7. Prepare the small `16S_ribosomal_RNA` BLAST database.
 8. Provision the smallest practical AKS cluster.
 9. Submit a small `blastn` job and download the result.
 10. Clean up the smoke resources, or lock the platform down for steady state.
+
+If your tenant policy stops or blocks AKS clusters, stop after Phase 5. Deployment is validated by `/api/health`, the six-sidecar Container App layout, and successful sign-in to the dashboard.
 
 ## Cost And Cleanup Guardrails
 
@@ -53,7 +58,7 @@ Delete or stop the AKS cluster after the smoke run if you are not actively using
 | Docker | 20.x+ | optional local Redis / Compose | Not required for `azd up`. |
 | VS Code | current | optional | Useful because this repo includes local dev tasks. |
 
-You also need an Azure subscription where you can create resource groups, managed identities, role assignments, ACR, Storage, Container Apps, and AKS. First-time deployment is easiest with `Owner`, or with `Contributor` plus `User Access Administrator`.
+You also need an Azure subscription where you can create resource groups, managed identities, role assignments, ACR, Storage, and Container Apps. First-time deployment is easiest with `Owner`, or with `Contributor` plus `User Access Administrator`. The optional BLAST smoke test also needs permission and tenant policy allowance to create and run AKS.
 
 If your tenant blocks App Registration creation or admin consent, ask an Entra administrator to run the App Registration step or grant consent for you.
 
@@ -220,6 +225,14 @@ Keep the printed App ID. You will use it as `API_CLIENT_ID` in the next phase.
 
 ## Phase 3: Deploy The Control Plane With azd
 
+Use an interactive Azure Developer CLI login for deployment:
+
+```bash
+azd auth login --use-device-code --tenant-id "$(az account show --query tenantId -o tsv)"
+```
+
+Do not rely on `azd auth login --managed-identity` for the clean-machine deployment path. It can acquire an ARM token, but `azd` may still fail while resolving the deployer principal for Bicep role-assignment parameters. Interactive `azd` login is the supported path for this guide.
+
 Create an Azure Developer CLI environment. Use a short lowercase name because it is used in resource names and tags:
 
 ```bash
@@ -229,6 +242,8 @@ azd env set API_CLIENT_ID <app-id-from-setup-app-registration>
 azd env set ALLOWED_ORIGINS ""
 azd env set LOCKDOWN_PRIVATE_NETWORKING false
 ```
+
+Leave `DEPLOYER_PRINCIPAL_ID` unset unless your administrator explicitly gives you a principal object id to use. The default parameters treat it as optional, which avoids forcing principal lookup in managed-identity-only validation environments.
 
 Run the preflight check:
 
@@ -259,6 +274,12 @@ curl -fsS "$APP_URL/api/health" | python -m json.tool
 
 Expected result: HTTP `200` with `"status":"ok"`.
 
+If you want to capture the deployment result for later smoke-test commands:
+
+```bash
+azd env get-values | tee /tmp/elb-azd-values.env
+```
+
 Also confirm the Container App is running the full sidecar layout:
 
 ```bash
@@ -273,6 +294,8 @@ az containerapp show \
 Expected containers: `frontend`, `api`, `worker`, `beat`, `redis`, and `terminal`.
 If a later `azd provision` changes the app back to a bootstrap-only revision,
 restore the sidecar layout before continuing with the smoke test.
+
+At this point the deployment portion is complete. In tenants where AKS is blocked or automatically stopped by policy, pause here and do not continue into the smoke-test phases.
 
 ## Phase 4: Add The Deployed Redirect URI
 
@@ -709,7 +732,16 @@ To validate the Azure deployment phases from the VM, sign in interactively from 
 ```bash
 az login --use-device-code
 az account set --subscription "<your-subscription-name-or-id>"
+azd auth login --use-device-code --tenant-id "$(az account show --query tenantId -o tsv)"
 ```
+
+Run `azd up` from the VM only after the app registration step has produced `API_CLIENT_ID`. The expected deployment checkpoint is:
+
+- `azd up` finishes successfully.
+- `curl "$APP_URL/api/health"` returns HTTP `200` with `"status":"ok"`.
+- `az containerapp show ... --query 'properties.template.containers[].name'` lists `frontend`, `api`, `worker`, `beat`, `redis`, and `terminal`.
+
+Do not continue into AKS smoke testing from this appendix when tenant policy stops or blocks AKS. The clean VM deployment proof ends at the Container App health and sidecar checks.
 
 When validation is finished, delete the VM resource group:
 
@@ -751,7 +783,7 @@ cd ..
 
 If `scripts/dev/local-run.sh redis` fails on Windows, start Docker Desktop and verify WSL integration is enabled for your Ubuntu distribution.
 
-If `azd up` fails on a role assignment, confirm your account has `Owner` or `User Access Administrator` on the subscription. In restricted tenants, ask an Azure administrator to perform the role assignment step described in `docs/auth.md`.
+If `azd up` fails on a role assignment, confirm your account has `Owner` or `User Access Administrator` on the subscription. In restricted tenants, ask an Azure administrator to perform the role assignment step described in `docs/auth.md`. If the failure happens while resolving a deployer principal under managed identity, sign in with `azd auth login --use-device-code` and leave `DEPLOYER_PRINCIPAL_ID` unset unless your administrator provides it.
 
 If the deployed app signs in locally but not in Azure, confirm the deployed Container App origin was added as a SPA redirect URI in the App Registration.
 
@@ -782,7 +814,7 @@ Then wait 1-5 minutes for RBAC propagation.
 
 ## Validation Log
 
-Use this checklist when updating this guide:
+Use this checklist when updating the deployment path in this guide:
 
 | Step | Evidence |
 | --- | --- |
@@ -791,6 +823,11 @@ Use this checklist when updating this guide:
 | Web setup | `cd web && npm ci` |
 | Local backend | `scripts/dev/local-run.sh api`, `curl http://127.0.0.1:8085/api/health` |
 | Azure deployment | `azd up`, `curl "$APP_URL/api/health"` |
+
+Optional smoke-test evidence, only in tenants where AKS is allowed to run:
+
+| Step | Evidence |
+| --- | --- |
 | Runtime images | ACR card shows all required tags or `az acr repository show-tags` confirms them |
 | Database | Storage card shows `16S_ribosomal_RNA` or blob list count is positive |
 | AKS | `az aks show` returns `Succeeded` and `Running` |
@@ -798,14 +835,19 @@ Use this checklist when updating this guide:
 | Terminal | browser terminal runs `az account show` |
 | BLAST result | job reaches `Completed`; downloaded result contains `<BlastOutput>` |
 
-Last full maintainer validation: 2026-05-17 in `koreacentral`, using a clean
-Ubuntu 24.04 VM for prerequisites, Container App revision
-`ca-elb-control--0000040`, AKS `elb-smoke-aks` with `systempool` =
-`Standard_D2s_v3` x1 and `blastpool` = `Standard_D8s_v3` x1, database
-`16S_ribosomal_RNA` copied as 12 blobs / 18,433,197 bytes, one 791-byte FASTA
-query, `blastn -outfmt 5 -max_target_seqs 5`, result blob
-`results/elb-smoke-16s-r3/job-6445053ac15a400d9e653b167013d929/batch_000-blastn-16S_ribosomal_RNA.out.gz`,
-gzip size 1,971 bytes, XML size 17,918 bytes, and `<BlastOutput>` verified.
+Last deployment-only maintainer validation: 2026-05-17 in `koreacentral`, using
+a clean Ubuntu 24.04 VM sized `Standard_D4s_v5`. The clean VM completed
+repository clone/setup, `uv run pytest -q api/tests` with 583 passing tests,
+`cd web && npm test -- --run` with 152 passing tests, `npm run build`,
+`uv run ruff check api`, and `azd up`. The deployed Container App URL was
+`https://ca-elb-control.purplestone-ed1e00cc.koreacentral.azurecontainerapps.io`,
+`/api/health` returned `{"status":"ok","version":"0.0.1"}`, and the app
+revision contained the expected six sidecars: `api`, `frontend`, `worker`,
+`beat`, `redis`, and `terminal`.
+
+AKS and BLAST submit validation were intentionally paused after deployment in a
+tenant where policy stops AKS. Resume the optional smoke phases only when AKS is
+allowed to remain running long enough for the job lifecycle.
 
 ## Next Reading
 

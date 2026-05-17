@@ -35,10 +35,17 @@ def _base_params() -> dict[str, object]:
     }
 
 
-def test_auto_sharding_is_off_by_default_for_result_equivalence() -> None:
+def test_auto_sharding_is_off_but_local_ssd_is_on_by_default() -> None:
     cfg = _parse(generate_config(_base_params()))
     assert not cfg.has_option("blast", "db-partitions")
     assert not cfg.has_option("blast", "db-partition-prefix")
+    assert cfg.get("cluster", "exp-use-local-ssd") == "true"
+
+
+def test_local_ssd_can_be_explicitly_disabled_for_baseline_debugging() -> None:
+    params = _base_params()
+    params["use_local_ssd"] = False
+    cfg = _parse(generate_config(params))
     assert not cfg.has_option("cluster", "exp-use-local-ssd")
 
 
@@ -271,10 +278,8 @@ def test_auto_sharding_disabled_when_caller_opts_out() -> None:
     cfg = _parse(generate_config(params))
     assert not cfg.has_option("blast", "db-partitions")
     assert not cfg.has_option("blast", "db-partition-prefix")
-    # exp-use-local-ssd should NOT be forced on by us when sharding is off.
-    # (It may still be on if the caller asked for warmup, but our base
-    # params don't request warmup.)
-    assert not cfg.has_option("cluster", "exp-use-local-ssd")
+    # Disabling shard partitioning must not re-enable the shared PV/PVC path.
+    assert cfg.get("cluster", "exp-use-local-ssd") == "true"
 
 
 def test_legacy_db_auto_partition_maps_to_approximate_sharding() -> None:

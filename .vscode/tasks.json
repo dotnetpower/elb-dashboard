@@ -120,10 +120,62 @@
       }
     },
     {
+      "label": "terminal-exec: start",
+      "detail": "Start the local loopback exec server on 127.0.0.1:7682 so api/worker can run azcopy/kubectl/elastic-blast locally.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["terminal-exec"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^.*$",
+          "file": 1,
+          "location": 2,
+          "message": 3
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "exec_server_started",
+          "endsPattern": "exec_server_started"
+        }
+      }
+    },
+    {
       "label": "fullstack: start",
-      "detail": "Start the full local control plane: api, worker, beat, and web.",
-      "dependsOn": ["api: start", "worker: start", "beat: start", "web: dev"],
+      "detail": "Start the host-mode local control plane: api, worker, beat, web, and terminal-exec.",
+      "dependsOn": [
+        "api: start",
+        "worker: start",
+        "beat: start",
+        "web: dev",
+        "terminal-exec: start"
+      ],
       "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
+      "label": "fullstack: compose start",
+      "detail": "Start the full 6-sidecar Container Apps layout locally with Docker Compose on http://127.0.0.1:18080/.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["compose-full", "--", "up", "-d", "--build"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "fullstack: compose stop",
+      "detail": "Stop the local 6-sidecar Docker Compose stack.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["compose-full", "--", "down", "--remove-orphans"],
+      "options": { "cwd": "${workspaceFolder}" },
       "problemMatcher": []
     },
     {

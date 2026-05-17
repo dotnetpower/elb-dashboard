@@ -131,6 +131,7 @@ export function buildSubmitRequest({
     mem_request: "8Gi",
     mem_limit: "24Gi",
     enable_warmup: form.enable_warmup,
+    use_local_ssd: true,
     db_auto_partition: form.sharding_mode !== "off",
     sharding_mode: form.sharding_mode,
     db_effective_search_space: dbEffectiveSearchSpace,

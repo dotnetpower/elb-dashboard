@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from azure.core.credentials import TokenCredential
+from azure.core.exceptions import ResourceNotFoundError
 
 from api.services.azure_clients import (
     acr_client,
@@ -409,20 +410,23 @@ def ensure_storage_account(
 
     client = storage_client(credential, subscription_id)
     LOGGER.info("ensure_storage_account account=%s rg=%s", account_name, resource_group)
-    poller = client.storage_accounts.begin_create(
-        resource_group,
-        account_name,
-        {
-            "location": region,
-            "sku": {"name": "Standard_LRS"},
-            "kind": "StorageV2",
-            "is_hns_enabled": True,
-            "public_network_access": "Disabled",
-            "minimum_tls_version": "TLS1_2",
-            "tags": {"managed-by": "elb-dashboard"},
-        },
-    )
-    poller.result()
+    try:
+        client.storage_accounts.get_properties(resource_group, account_name)
+    except ResourceNotFoundError:
+        poller = client.storage_accounts.begin_create(
+            resource_group,
+            account_name,
+            {
+                "location": region,
+                "sku": {"name": "Standard_LRS"},
+                "kind": "StorageV2",
+                "is_hns_enabled": True,
+                "public_network_access": "Disabled",
+                "minimum_tls_version": "TLS1_2",
+                "tags": {"managed-by": "elb-dashboard"},
+            },
+        )
+        poller.result()
 
     for container_name in ("blast-db", "queries", "results"):
         try:

@@ -23,8 +23,6 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   Box,
-  ChevronDown,
-  ChevronUp,
   Cpu,
   Database,
   HardDrive,
@@ -77,11 +75,6 @@ interface Props {
   resourceGroup: string;
   isRunning: boolean;
   transition?: "starting" | "stopping";
-  /** Toggle callback for the "Show / Hide details" button. */
-  onOpenDetail?: () => void;
-  /** Whether the deep-detail rows below the bento are currently visible.
-   *  Drives the button label + icon so the toggle state is discoverable. */
-  detailsExpanded?: boolean;
 }
 
 export function ClusterBento({
@@ -90,8 +83,6 @@ export function ClusterBento({
   resourceGroup,
   isRunning,
   transition,
-  onOpenDetail,
-  detailsExpanded = false,
 }: Props) {
   // ---- data sources -------------------------------------------------------
   const { topQuery, summary: nodeSummary } = useNodeSummary({
@@ -254,14 +245,9 @@ export function ClusterBento({
     if (isAksProvisioningFailed(cluster)) return "degraded";
     if (!isRunning) return "down";
     if (cluster.power_state && cluster.power_state !== "Running") return "down";
+    if (nodeSummary.notReady > 0 || nodeSummary.pressure.length > 0) return "degraded";
     if (cpuPct != null && cpuPct >= 0.95) return "degraded";
     if (memPct != null && memPct >= 0.95) return "degraded";
-    if (apiErrors > 5) return "degraded";
-    if (failed15m > 0) return "degraded";
-    // p95 latency above the SLA threshold downgrades the header — without
-    // this branch a cluster routinely returning 2.3s requests still rendered
-    // as Healthy because none of the other signals tripped.
-    if (p95 != null && p95 > P95_DEGRADED_MS) return "degraded";
     if (jobsDegraded && metricsDegraded && eventsDegraded && nodeSummary.total === 0) {
       return "unknown";
     }
@@ -271,13 +257,12 @@ export function ClusterBento({
     cluster,
     cpuPct,
     memPct,
-    apiErrors,
-    failed15m,
-    p95,
     jobsDegraded,
     metricsDegraded,
     eventsDegraded,
     nodeSummary.total,
+    nodeSummary.notReady,
+    nodeSummary.pressure.length,
   ]);
 
   const showReadinessPanel = !isRunning || transition != null;
@@ -286,8 +271,6 @@ export function ClusterBento({
       <ClusterReadinessBento
         cluster={cluster}
         transition={transition}
-        onOpenDetail={onOpenDetail}
-        detailsExpanded={detailsExpanded}
       />
     );
   }
@@ -356,36 +339,6 @@ export function ClusterBento({
             }}
           >
             <HealthPill health={health} />
-            {onOpenDetail && (
-              <button
-                type="button"
-                className="glass-button"
-                onClick={onOpenDetail}
-                aria-expanded={detailsExpanded}
-                title={
-                  detailsExpanded
-                    ? "Hide pool, node, and per-database detail"
-                    : "Show pool, node, and per-database detail"
-                }
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 4,
-                  padding: "4px 10px",
-                  fontSize: 11,
-                  fontWeight: 500,
-                  color: "var(--accent)",
-                  borderColor: "rgba(122, 167, 255, 0.35)",
-                }}
-              >
-                {detailsExpanded ? (
-                  <ChevronUp size={11} strokeWidth={1.75} />
-                ) : (
-                  <ChevronDown size={11} strokeWidth={1.75} />
-                )}
-                {detailsExpanded ? "Hide details" : "Show details"}
-              </button>
-            )}
           </div>
         </div>
         <div style={{ marginTop: 10 }}>
@@ -638,10 +591,8 @@ export function ClusterBento({
                 {activeJobs.slice(0, ACTIVE_JOBS_PREVIEW).map((j) => (
                   <JobRow key={j.jobId} j={j} dense />
                 ))}
-                {activeJobs.length > ACTIVE_JOBS_PREVIEW && onOpenDetail && (
-                  <button
-                    type="button"
-                    onClick={onOpenDetail}
+                {activeJobs.length > ACTIVE_JOBS_PREVIEW && (
+                  <div
                     style={{
                       marginTop: 4,
                       padding: "6px 10px",
@@ -650,11 +601,10 @@ export function ClusterBento({
                       borderRadius: 6,
                       color: "var(--text-muted)",
                       fontSize: 11,
-                      cursor: "pointer",
                     }}
                   >
-                    +{activeJobs.length - ACTIVE_JOBS_PREVIEW} more — open detail
-                  </button>
+                    +{activeJobs.length - ACTIVE_JOBS_PREVIEW} more active jobs
+                  </div>
                 )}
               </>
             )}
@@ -757,13 +707,9 @@ function DegradedHint({ reason }: { reason: string }) {
 function ClusterReadinessBento({
   cluster,
   transition,
-  onOpenDetail,
-  detailsExpanded,
 }: {
   cluster: AksClusterSummary;
   transition?: "starting" | "stopping";
-  onOpenDetail?: () => void;
-  detailsExpanded: boolean;
 }) {
   const provisioningLabel = getAksProvisioningLabel(cluster);
   const isStarting =
@@ -915,23 +861,6 @@ function ClusterReadinessBento({
             value={cluster.k8s_version ?? "—"}
           />
         </div>
-        {onOpenDetail && cluster.power_state === "Running" && (
-          <button
-            type="button"
-            className="glass-button"
-            onClick={onOpenDetail}
-            aria-expanded={detailsExpanded}
-            style={{
-              marginTop: 12,
-              fontSize: 11,
-              padding: "5px 10px",
-              color: "var(--accent)",
-            }}
-          >
-            {detailsExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}{" "}
-            {detailsExpanded ? "Hide details" : "Show details"}
-          </button>
-        )}
       </BentoCell>
     </div>
   );

@@ -20,7 +20,6 @@ import { useClusterDbChips } from "./useClusterDbChips";
 import { useClusterShardMutation } from "./useClusterShardMutation";
 
 const CLUSTER_COLLAPSED_KEY = "elb-cluster-collapsed-";
-const CLUSTER_DETAILS_EXPANDED_KEY = "elb-cluster-details-expanded-";
 
 // ClusterItem — collapsible per-cluster card (stopped clusters collapsed by default)
 // ---------------------------------------------------------------------------
@@ -83,18 +82,6 @@ export function ClusterItem({
     });
   };
 
-  // Whether the legacy "deep technical" rows (PoolCardsGrid +
-  // DatabaseChipStrip + ClusterDetails) are visible below the bento.
-  // Collapsed by default — the bento covers the dashboard summary
-  // story; the deep rows are kept available for sharding actions and
-  // node detail.
-  const [detailsExpanded, setDetailsExpanded] = useState(() => {
-    try {
-      return localStorage.getItem(CLUSTER_DETAILS_EXPANDED_KEY + c.name) === "1";
-    } catch {
-      return false;
-    }
-  });
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
     readAutoWarmupDbs(),
   );
@@ -109,18 +96,6 @@ export function ClusterItem({
       window.removeEventListener("storage", refresh);
     };
   }, []);
-  const toggleDetailsExpanded = () => {
-    setDetailsExpanded((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(CLUSTER_DETAILS_EXPANDED_KEY + c.name, next ? "1" : "0");
-      } catch {
-        /* noop */
-      }
-      return next;
-    });
-  };
-
   const clusterNumNodes = c.node_count ?? 0;
   const clusterMachineType = c.node_sku ?? "";
 
@@ -248,8 +223,6 @@ export function ClusterItem({
             resourceGroup={resourceGroup}
             isRunning={showOperationalDetails}
             transition={trans}
-            onOpenDetail={toggleDetailsExpanded}
-            detailsExpanded={detailsExpanded}
           />
 
           {/* Sharding chips remain a primary action surface — keep visible. */}
@@ -266,13 +239,9 @@ export function ClusterItem({
             />
           )}
 
-          {/*
-            "Deep technical" detail — collapsed by default. Toggled by
-            the bento's "Open" button (which calls `onOpenDetail` →
-            `toggleDetailsExpanded`).  Surfaces per-pool node breakdown,
-            sharding capacity ceiling, and the existing modal opener.
-          */}
-          {showOperationalDetails && detailsExpanded && (
+          {/* Operational detail stays visible so node breakdown and sharding
+              controls are discoverable without a secondary show/hide toggle. */}
+          {showOperationalDetails && (
             <>
               {c.agent_pools && c.agent_pools.length > 0 && (
                 <PoolCardsGrid agentPools={c.agent_pools} />

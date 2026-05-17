@@ -115,8 +115,11 @@ def generate_config(params: dict[str, Any]) -> str:
     cfg.set("cluster", "num-nodes", str(params.get("num_nodes", 1)))
     cfg.set("cluster", "pd-size", params.get("pd_size", "3000Gi"))
 
-    # Local SSD for DB sharding (warmup mode)
-    if params.get("enable_warmup") or params.get("use_local_ssd"):
+    # The dashboard runs ElasticBLAST against the AKS node-local cache by
+    # default. Without this flag upstream ElasticBLAST falls back to its shared
+    # PV/PVC init path, which is not part of this control plane's runtime shape.
+    use_local_ssd = _bool_option("use_local_ssd")
+    if use_local_ssd is not False or params.get("enable_warmup"):
         cfg.set("cluster", "exp-use-local-ssd", "true")
 
     # Warm cluster reuse mode
