@@ -44,12 +44,16 @@ def provision(_: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
 
 
 @router.get("/status/{instance_id}")
-def status(instance_id: str = Path(...), _: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
+def status(
+    instance_id: str = Path(...), _: CallerIdentity = Depends(require_caller)
+) -> dict[str, Any]:
     raise _gone(f"terminal/status/{instance_id}")
 
 
 @router.get("/{vm_name}/password")
-def password(vm_name: str = Path(...), _: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
+def password(
+    vm_name: str = Path(...), _: CallerIdentity = Depends(require_caller)
+) -> dict[str, Any]:
     raise _gone(f"terminal/{vm_name}/password")
 
 
@@ -64,7 +68,9 @@ def stop(vm_name: str = Path(...), _: CallerIdentity = Depends(require_caller)) 
 
 
 @router.post("/{vm_name}/destroy")
-def destroy(vm_name: str = Path(...), _: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
+def destroy(
+    vm_name: str = Path(...), _: CallerIdentity = Depends(require_caller)
+) -> dict[str, Any]:
     raise _gone(f"terminal/{vm_name}/destroy")
 
 
@@ -78,5 +84,7 @@ def open_ssh(
 
 
 @router.get("/{vm_name}/health")
-def vm_health(vm_name: str = Path(...), _: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
+def vm_health(
+    vm_name: str = Path(...), _: CallerIdentity = Depends(require_caller)
+) -> dict[str, Any]:
     raise _gone(f"terminal/{vm_name}/health")

@@ -164,9 +164,7 @@ def _redis_self_snapshot(
             "_detail": str(exc)[:120],
         }
 
-    cpu_total = float(info_cpu.get("used_cpu_sys", 0)) + float(
-        info_cpu.get("used_cpu_user", 0)
-    )
+    cpu_total = float(info_cpu.get("used_cpu_sys", 0)) + float(info_cpu.get("used_cpu_user", 0))
 
     return {
         "name": "redis",

@@ -11,11 +11,53 @@ TOOL_VERSIONS = REPO_ROOT / "terminal" / "tool-versions.sh"
 MANUAL_CONTENT = REPO_ROOT / "web" / "src" / "pages" / "terminal" / "terminalManualContent.ts"
 
 
-LINUX_TOOLS = ["nano", "vim-tiny", "less", "tree", "net-tools", "iproute2", "iputils-ping", "dnsutils"]
-BIO_TOOLS = ["mafft", "seqkit", "samtools", "bcftools", "bedtools", "fastqc", "hmmer", "emboss", "clustalo", "muscle"]
-VERSION_LABELS = ["blastn", "makeblastdb", "mafft", "seqkit", "samtools", "bcftools", "bedtools", "fastqc", "hmmer", "emboss", "clustalo", "az", "kubectl", "azcopy"]
+LINUX_TOOLS = [
+    "nano",
+    "vim-tiny",
+    "less",
+    "tree",
+    "net-tools",
+    "iproute2",
+    "iputils-ping",
+    "dnsutils",
+]
+BIO_TOOLS = [
+    "mafft",
+    "seqkit",
+    "samtools",
+    "bcftools",
+    "bedtools",
+    "fastqc",
+    "hmmer",
+    "emboss",
+    "clustalo",
+    "muscle",
+]
+VERSION_LABELS = [
+    "blastn",
+    "makeblastdb",
+    "mafft",
+    "seqkit",
+    "samtools",
+    "bcftools",
+    "bedtools",
+    "fastqc",
+    "hmmer",
+    "emboss",
+    "clustalo",
+    "az",
+    "kubectl",
+    "azcopy",
+]
 MANUAL_SECTIONS = ["Linux Basics", "Files", "BLAST", "Sequence Tools", "Azure", "Troubleshooting"]
-MANUAL_COMMANDS = ["nano notes.txt", "tree -L 2", "blastn -version", "mafft input.fa > aligned.fa", "az login --use-device-code", "ifconfig"]
+MANUAL_COMMANDS = [
+    "nano notes.txt",
+    "tree -L 2",
+    "blastn -version",
+    "mafft input.fa > aligned.fa",
+    "az login --use-device-code",
+    "ifconfig",
+]
 
 
 def test_terminal_dockerfile_installs_linux_and_sequence_tools() -> None:

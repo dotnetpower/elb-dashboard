@@ -49,12 +49,12 @@ LOGGER = logging.getLogger(__name__)
 # documented so the UI can map each code to a coloured banner without
 # guessing at the backend's intent.
 WarmupStatus = Literal[
-    "ok",                    # warmup is safe to start as-is
-    "ok_unknown_sku",        # warmup is safe but SKU lookup fell back to a default RAM
-    "no_db_size",            # planner refused: we don't know how big the DB is
-    "no_nodes",              # planner refused: cluster has 0 BLAST nodes
-    "node_sku_too_small",    # per-pod budget exceeded even after clamping to MAX preset
-    "cluster_too_small",     # per-node budget exceeded; user must add nodes
+    "ok",  # warmup is safe to start as-is
+    "ok_unknown_sku",  # warmup is safe but SKU lookup fell back to a default RAM
+    "no_db_size",  # planner refused: we don't know how big the DB is
+    "no_nodes",  # planner refused: cluster has 0 BLAST nodes
+    "node_sku_too_small",  # per-pod budget exceeded even after clamping to MAX preset
+    "cluster_too_small",  # per-node budget exceeded; user must add nodes
 ]
 
 # Fallback per-node RAM when the SKU is not in our catalog. Conservative
@@ -94,11 +94,11 @@ class WarmupPlan:
     db_gib: float
 
     # Sharding decision (what would be selected at submit time).
-    chosen_shards: int           # what ``select_partitions_for_submit`` returns now
-    target_shards: int           # ideal N before clamping (may exceed presets)
+    chosen_shards: int  # what ``select_partitions_for_submit`` returns now
+    target_shards: int  # ideal N before clamping (may exceed presets)
     per_shard_gib: float
-    per_node_gib: float          # db_gib / num_nodes — independent of N
-    shards_per_node: int         # ceil(chosen_shards / num_nodes)
+    per_node_gib: float  # db_gib / num_nodes — independent of N
+    shards_per_node: int  # ceil(chosen_shards / num_nodes)
 
     # Ordered list of remediation strings; the first entry is the cheapest.
     recommendations: tuple[str, ...]
@@ -293,7 +293,11 @@ def compute_warmup_feasibility(
 
     LOGGER.debug(
         "warmup_plan db_gib=%.2f nodes=%d sku=%s -> chosen=%d feasible=%s",
-        db_gib, num_nodes, machine_type, chosen_shards, True,
+        db_gib,
+        num_nodes,
+        machine_type,
+        chosen_shards,
+        True,
     )
     return WarmupPlan(
         feasible=True,
@@ -385,7 +389,5 @@ def _sku_upgrade_recommendations(
     candidates.sort(key=lambda t: (t[0], t[1]))
     suggestions: list[str] = []
     for _hourly, name, ram in candidates[:2]:
-        suggestions.append(
-            f"Upgrade blastpool SKU to {name} ({ram} GiB RAM per node)."
-        )
+        suggestions.append(f"Upgrade blastpool SKU to {name} ({ram} GiB RAM per node).")
     return tuple(suggestions)

@@ -58,6 +58,7 @@ def readiness() -> dict[str, Any]:
     # 1. Redis (Celery broker)
     try:
         from api.celery_app import celery_app
+
         conn = celery_app.connection()
         conn.ensure_connection(max_retries=1, timeout=2)
         conn.close()
@@ -69,6 +70,7 @@ def readiness() -> dict[str, Any]:
     # 2. Azure credential (can we get a token?)
     try:
         from api.services import get_credential
+
         cred = get_credential()
         # Just check the credential object exists — don't make an ARM call
         components["azure_credential"] = {"status": "ok", "type": type(cred).__name__}
@@ -79,14 +81,18 @@ def readiness() -> dict[str, Any]:
     # 3. Terminal sidecar
     try:
         from api.services.terminal_exec import healthz
+
         th = healthz()
-        components["terminal_sidecar"] = {"status": "ok" if th.get("status") == "ok" else "degraded"}
+        components["terminal_sidecar"] = {
+            "status": "ok" if th.get("status") == "ok" else "degraded"
+        }
     except Exception:
         components["terminal_sidecar"] = {"status": "down"}
         # Non-critical — terminal being down doesn't block BLAST submit
 
     status_code = 200 if overall_ok else 503
     from fastapi.responses import JSONResponse
+
     return JSONResponse(
         content={
             "status": "ready" if overall_ok else "not_ready",
@@ -114,34 +120,38 @@ def celery_diag() -> dict[str, Any]:
     #    between api and worker sidecars).
     try:
         from api.celery_app import celery_app
+
         out["producer_conf"] = {
             "default_queue": celery_app.conf.task_default_queue,
             "task_routes": dict(celery_app.conf.task_routes or {}),
             "broker_url": celery_app.conf.broker_url,
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         out["errors"].append(f"producer_conf: {type(exc).__name__}: {exc}")
 
     # 1. Redis queue lengths via raw redis client (no kombu wrapper)
     try:
         import redis as _redis
+
         from api.celery_app import CELERY_BROKER_URL
+
         r = _redis.Redis.from_url(CELERY_BROKER_URL, socket_timeout=2)
         for q in ("default", "azure", "blast", "storage", "celery"):
             try:
                 out["queues"][q] = r.llen(q)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 out["queues"][q] = f"err:{type(exc).__name__}"
         out["broker_url"] = CELERY_BROKER_URL
         out["redis_keys_db0"] = sorted(
             k.decode() for k in r.keys("*") if not k.startswith(b"_kombu")
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         out["errors"].append(f"redis: {type(exc).__name__}: {exc}")
 
     # 2. Celery worker inspect (active / reserved / scheduled / registered)
     try:
         from api.celery_app import celery_app
+
         insp = celery_app.control.inspect(timeout=2)
         out["workers"] = {
             "active": insp.active(),
@@ -151,7 +161,7 @@ def celery_diag() -> dict[str, Any]:
             "stats": insp.stats(),
             "ping": insp.ping(),
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         out["errors"].append(f"inspect: {type(exc).__name__}: {exc}")
 
     return out
@@ -161,6 +171,7 @@ def celery_diag() -> dict[str, Any]:
 def celery_enqueue_noop(message: str = "diag-ping") -> dict[str, Any]:
     """Diagnostic-only: enqueue a no-op task. Returns task_id for status polling."""
     from api.tasks.azure import diag_noop
+
     res = diag_noop.delay(message=message)
     return {"task_id": res.id, "queue": "azure", "message": message}
 
@@ -169,7 +180,9 @@ def celery_enqueue_noop(message: str = "diag-ping") -> dict[str, Any]:
 def celery_task_result(task_id: str) -> dict[str, Any]:
     """Diagnostic-only: get a celery task result without auth."""
     from celery.result import AsyncResult
+
     from api.celery_app import celery_app
+
     r = AsyncResult(task_id, app=celery_app)
     out: dict[str, Any] = {
         "task_id": task_id,
@@ -186,7 +199,7 @@ def celery_task_result(task_id: str) -> dict[str, Any]:
 
 @router.get("/health/azure-discovery")
 def azure_discovery_probe(
-    caller: "CallerIdentity" = Depends(_require_caller_lazy),
+    caller: CallerIdentity = Depends(_require_caller_lazy),
 ) -> dict[str, Any]:
     """Diagnostic-only: prove the api can list subscriptions / RGs end-to-end.
 
@@ -208,6 +221,7 @@ def azure_discovery_probe(
     from a dashboard — use it as a one-shot post-deploy sanity check.
     """
     from azure.mgmt.resource import SubscriptionClient
+
     from api.services import get_credential
     from api.services.azure_clients import resource_client
     from api.services.sanitise import sanitise

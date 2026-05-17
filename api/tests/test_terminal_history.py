@@ -75,12 +75,8 @@ def test_session_log_records_start_and_end(tmp_path: Path) -> None:
     assert "\tstart\n" in body, f"expected a start marker, got: {body!r}"
     assert "\tend\n" in body, f"expected an end marker, got: {body!r}"
     # Both markers must carry the same PID.
-    start_pids = [
-        line.split("\t")[1] for line in body.splitlines() if line.endswith("\tstart")
-    ]
-    end_pids = [
-        line.split("\t")[1] for line in body.splitlines() if line.endswith("\tend")
-    ]
+    start_pids = [line.split("\t")[1] for line in body.splitlines() if line.endswith("\tstart")]
+    end_pids = [line.split("\t")[1] for line in body.splitlines() if line.endswith("\tend")]
     assert start_pids and end_pids
     assert set(start_pids) == set(end_pids)
     # The session line must record the username so audits can attribute
@@ -132,4 +128,3 @@ def test_resourcing_does_not_duplicate_start_record(tmp_path: Path) -> None:
     body = sessions_log.read_text()
     starts = [ln for ln in body.splitlines() if ln.endswith("\tstart")]
     assert len(starts) == 1, f"expected exactly one start record, got: {body!r}"
-

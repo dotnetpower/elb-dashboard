@@ -18,6 +18,6 @@ from __future__ import annotations
 from api import celery_app as _celery_app  # noqa: F401
 
 # Import task modules so Celery auto-discovers @shared_task decorators.
-from api.tasks import acr, azure, blast, storage  # noqa: F401, E402
+from api.tasks import acr, azure, blast, storage
 
 __all__ = ["acr", "azure", "blast", "storage"]

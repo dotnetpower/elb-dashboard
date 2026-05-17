@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
-
 
 # ---------------------------------------------------------------------------
 # Validators
@@ -134,6 +133,7 @@ class WarmupRequest(BaseModel):
 # ---------------------------------------------------------------------------
 class ErrorResponse(BaseModel):
     """RFC 7807-inspired error envelope returned by all non-2xx responses."""
+
     code: str
     message: str
     request_id: str | None = None
@@ -144,6 +144,7 @@ class ErrorResponse(BaseModel):
 
 class TaskAcceptedResponse(BaseModel):
     """Returned by all mutation endpoints that enqueue a Celery task."""
+
     id: str  # job_id
     task_id: str  # Celery AsyncResult id
     status: str = "queued"
@@ -155,4 +156,4 @@ def new_job_id() -> str:
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")

@@ -169,9 +169,9 @@ def build_query_split_execution_plan(
         group_options["sharding_mode"] = "precise"
         group_options["query_count"] = len(group.query_indices)
         group_options["db_effective_search_space"] = group.effective_search_space
-        group_options["query_effective_search_spaces"] = [
-            group.effective_search_space
-        ] * len(group.query_indices)
+        group_options["query_effective_search_spaces"] = [group.effective_search_space] * len(
+            group.query_indices
+        )
 
         query_blob_path = f"split/{parent_job_id}/{group.group_id}/query.fa"
         items.append(

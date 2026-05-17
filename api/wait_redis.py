@@ -4,7 +4,11 @@
 Usage (in container command):
   python3 /app/wait_redis.py celery -A api.celery_app:celery_app worker ...
 """
-import os, socket, sys, time
+
+import os
+import socket
+import sys
+import time
 
 host = os.environ.get("REDIS_HOST", "127.0.0.1")
 port = int(os.environ.get("REDIS_PORT", "6379"))
@@ -25,7 +29,9 @@ while time.monotonic() < deadline:
         print(f"  waiting for Redis {host}:{port} (attempt {attempt})...", flush=True)
         time.sleep(2)
 else:
-    print(f"FATAL: Redis not reachable at {host}:{port} after {timeout}s", file=sys.stderr, flush=True)
+    print(
+        f"FATAL: Redis not reachable at {host}:{port} after {timeout}s", file=sys.stderr, flush=True
+    )
     sys.exit(1)
 
-os.execvp(sys.argv[1], sys.argv[1:])
+os.execvp(sys.argv[1], sys.argv[1:])  # noqa: S606

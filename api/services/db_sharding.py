@@ -86,9 +86,7 @@ class ShardLayout:
 
     def __post_init__(self) -> None:
         if self.num_shards != len(self.shards):
-            raise ValueError(
-                f"num_shards={self.num_shards} but len(shards)={len(self.shards)}"
-            )
+            raise ValueError(f"num_shards={self.num_shards} but len(shards)={len(self.shards)}")
 
 
 # ---------------------------------------------------------------------------
@@ -96,9 +94,7 @@ class ShardLayout:
 # ---------------------------------------------------------------------------
 def _validate_db_name(db_name: str) -> None:
     if not _RE_DB_NAME.match(db_name or ""):
-        raise ValueError(
-            f"invalid db_name {db_name!r} — must match {_RE_DB_NAME.pattern}"
-        )
+        raise ValueError(f"invalid db_name {db_name!r} — must match {_RE_DB_NAME.pattern}")
 
 
 def _validate_shard_count(n: int) -> None:
@@ -143,11 +139,9 @@ def list_db_volumes(
     # Track every blob's size so we can report total DB bytes (the marker
     # file alone is only a fraction of the volume's total bytes).
     blob_sizes: dict[str, int] = {}
-    marker_re = re.compile(
-        rf"^{re.escape(db_name)}(?:\.(\d+))?\.(?:nsq|psq)$"
-    )
+    marker_re = re.compile(rf"^{re.escape(db_name)}(?:\.(\d+))?\.(?:nsq|psq)$")
     for blob in cc.list_blobs(name_starts_with=prefix):
-        leaf = blob.name[len(prefix):]
+        leaf = blob.name[len(prefix) :]
         if "/" in leaf:
             # Skip nested staging artefacts — volumes always live at the
             # immediate level under ``{db}/``.
@@ -164,9 +158,7 @@ def list_db_volumes(
             )
 
     if not volume_size:
-        raise LookupError(
-            f"no BLAST volume files under {container}/{db_name}/ in {account_name!r}"
-        )
+        raise LookupError(f"no BLAST volume files under {container}/{db_name}/ in {account_name!r}")
 
     # Second pass: attribute each blob's bytes to its volume by filename
     # prefix. ``core_nt.00.nhr``, ``core_nt.00.nin``, ``core_nt.00.nsq`` →
@@ -178,9 +170,7 @@ def list_db_volumes(
             volume_size[m.group(1)] += size
             continue
         # Single-volume match.
-        if db_name in volume_size and re.match(
-            rf"^{re.escape(db_name)}\.[a-z]{{2,4}}$", leaf
-        ):
+        if db_name in volume_size and re.match(rf"^{re.escape(db_name)}\.[a-z]{{2,4}}$", leaf):
             volume_size[db_name] += size
 
     volumes = sorted(volume_size.keys(), key=_volume_sort_key)
@@ -243,9 +233,7 @@ def derive_volumes_from_keys(db_name: str, keys: Iterable[str]) -> list[str]:
     :func:`list_db_volumes` (alias files are never volumes).
     """
     _validate_db_name(db_name)
-    marker_re = re.compile(
-        rf"^{re.escape(db_name)}(?:\.(\d+))?\.(?:nsq|psq)$"
-    )
+    marker_re = re.compile(rf"^{re.escape(db_name)}(?:\.(\d+))?\.(?:nsq|psq)$")
     seen: set[str] = set()
     for raw in keys:
         leaf = raw.rsplit("/", 1)[-1]
@@ -453,12 +441,8 @@ def ensure_shard_sets(
         }
     """
     _validate_db_name(db_name)
-    volumes, total_bytes = list_db_volumes(
-        credential, account_name, db_name, container=container
-    )
-    stats = read_blastdb_stats(
-        credential, account_name, db_name, container=container
-    )
+    volumes, total_bytes = list_db_volumes(credential, account_name, db_name, container=container)
+    stats = read_blastdb_stats(credential, account_name, db_name, container=container)
 
     successful: list[int] = []
     created = 0
@@ -471,7 +455,9 @@ def ensure_shard_sets(
             # have N=2..10 layouts. This is fine.
             LOGGER.info(
                 "db_sharding: db=%s skipping N=%d (only %d volumes)",
-                db_name, n, len(volumes),
+                db_name,
+                n,
+                len(volumes),
             )
             continue
         try:
@@ -489,7 +475,9 @@ def ensure_shard_sets(
         except Exception as exc:
             LOGGER.warning(
                 "db_sharding: db=%s N=%d failed: %s",
-                db_name, n, str(exc)[:200],
+                db_name,
+                n,
+                str(exc)[:200],
             )
             errors.append({"num_shards": n, "error": str(exc)[:200]})
 
@@ -561,7 +549,8 @@ def select_partitions_for_submit(
         node_ram_gib = 64
         LOGGER.warning(
             "db_sharding: machine_type %r not in SKU catalog, assuming %d GiB RAM",
-            machine_type, node_ram_gib,
+            machine_type,
+            node_ram_gib,
         )
     else:
         node_ram_gib = sku.memory_gib

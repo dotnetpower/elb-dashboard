@@ -54,6 +54,7 @@ _ROLE_AKS_CLUSTER_USER = "4abbcc35-e782-43d8-92c5-2d3f1bd2253f"
 
 def _now_iso() -> str:
     from datetime import datetime
+
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
@@ -83,10 +84,7 @@ def _assign_role_idempotent(
 ) -> bool:
     """Create a role assignment; return True on create / already-exists."""
 
-    role_def = (
-        f"{scope}/providers/Microsoft.Authorization/roleDefinitions/"
-        f"{role_definition_id}"
-    )
+    role_def = f"{scope}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
     name = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_definition_id}"))
     try:
         auth_client.role_assignments.create(
@@ -98,8 +96,12 @@ def _assign_role_idempotent(
                 "principal_type": "ServicePrincipal",
             },
         )
-        LOGGER.info("RBAC role=%s principal=%s scope=%s assigned",
-                    label, principal_id[:8], scope.split("/")[-1])
+        LOGGER.info(
+            "RBAC role=%s principal=%s scope=%s assigned",
+            label,
+            principal_id[:8],
+            scope.split("/")[-1],
+        )
         return True
     except Exception as exc:
         msg = str(exc)
@@ -128,11 +130,7 @@ def _setup_workload_identity(
     # 1. OIDC issuer URL from the cluster (must already be enabled).
     aks = aks_client(cred, subscription_id)
     cluster = aks.managed_clusters.get(resource_group, cluster_name)
-    oidc_url = (
-        cluster.oidc_issuer_profile.issuer_url
-        if cluster.oidc_issuer_profile
-        else ""
-    ) or ""
+    oidc_url = (cluster.oidc_issuer_profile.issuer_url if cluster.oidc_issuer_profile else "") or ""
     if not oidc_url:
         raise RuntimeError(
             f"AKS cluster {cluster_name!r} does not expose an OIDC issuer "
@@ -238,9 +236,7 @@ def _build_manifests(
             "name": K8S_SA_NAME,
             "namespace": K8S_NAMESPACE,
             "annotations": (
-                {"azure.workload.identity/client-id": mi_client_id}
-                if mi_client_id
-                else {}
+                {"azure.workload.identity/client-id": mi_client_id} if mi_client_id else {}
             ),
             "labels": {"azure.workload.identity/use": "true"},
         },
@@ -401,11 +397,17 @@ def _kubectl_apply(
     # collisions across concurrent deploys.
     kubeconfig_path = f"/tmp/exec/kubeconfig-{uuid.uuid4().hex}"  # noqa: S108
     az_argv = [
-        "az", "aks", "get-credentials",
-        "--subscription", subscription_id,
-        "--resource-group", resource_group,
-        "--name", cluster_name,
-        "--file", kubeconfig_path,
+        "az",
+        "aks",
+        "get-credentials",
+        "--subscription",
+        subscription_id,
+        "--resource-group",
+        resource_group,
+        "--name",
+        cluster_name,
+        "--file",
+        kubeconfig_path,
         "--overwrite-existing",
         "--admin",  # bypasses AAD interactive login from inside the sidecar
         "--only-show-errors",
@@ -470,9 +472,7 @@ def deploy_openapi_service(
     image_tag = IMAGE_TAGS.get("elb-openapi", "4.9")
     effective_acr_resource_group = acr_resource_group or "rg-elbacr-01"
     image = (
-        f"{acr_name}.azurecr.io/elb-openapi:{image_tag}"
-        if acr_name
-        else f"elb-openapi:{image_tag}"
+        f"{acr_name}.azurecr.io/elb-openapi:{image_tag}" if acr_name else f"elb-openapi:{image_tag}"
     )
 
     # ----- 1. Workload Identity (MI + federated cred + roles) -------------
@@ -550,7 +550,11 @@ def deploy_openapi_service(
     for _ in range(12):  # ~120 s
         try:
             ip = k8s_get_service_ip(
-                cred, subscription_id, resource_group, cluster_name, "elb-openapi",
+                cred,
+                subscription_id,
+                resource_group,
+                cluster_name,
+                "elb-openapi",
             )
         except Exception:
             ip = None
@@ -562,7 +566,9 @@ def deploy_openapi_service(
     elapsed = int(time.time() - started)
     LOGGER.info(
         "openapi deploy done image=%s external_ip=%s elapsed=%ss",
-        image, external_ip or "<pending>", elapsed,
+        image,
+        external_ip or "<pending>",
+        elapsed,
     )
     return {
         "status": "succeeded",

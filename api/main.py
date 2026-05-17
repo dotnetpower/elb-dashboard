@@ -47,6 +47,7 @@ from api import __version__
 from api import celery_app as _celery_app  # noqa: F401
 from api.routes import (
     arm,
+    elastic_blast,
     frontend_proxy,
     health,
     me,
@@ -54,7 +55,6 @@ from api.routes import (
     resources,
     storage,
     stubs,
-    elastic_blast,
     tasks,
     terminal_legacy,
     terminal_ws,
@@ -88,10 +88,10 @@ for _name in (
 # DETAIL inspector buffer. SSE/WebSocket cannot be safely body-buffered (the
 # response never ends). High-volume self-poll paths would self-amplify.
 _INSPECTOR_EXCLUDE_PREFIXES: tuple[str, ...] = (
-    "/api/monitor/sidecars",       # SSE topology + high-volume snapshot
-    "/api/monitor/metrics",        # would self-amplify
+    "/api/monitor/sidecars",  # SSE topology + high-volume snapshot
+    "/api/monitor/metrics",  # would self-amplify
     "/api/monitor/sidecar-requests",  # would self-amplify
-    "/api/terminal/ws",            # WebSocket upgrade
+    "/api/terminal/ws",  # WebSocket upgrade
 )
 _INSPECTOR_EXCLUDE_EXACT: frozenset[str] = frozenset({"/api/health"})
 
@@ -126,7 +126,7 @@ def _decode_jwt_upn(authz: str | None) -> str | None:
     try:
         pad = "=" * (-len(parts[1]) % 4)
         payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
-    except Exception:  # noqa: BLE001 — never let display logic crash a request
+    except Exception:
         return None
     upn = payload.get("upn") or payload.get("preferred_username")
     return str(upn)[:128] if upn else None
@@ -157,21 +157,20 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         # Per-request DETAIL inspector — buffer request body BEFORE handing
         # the request to the route, then replay via _receive so the route
         # handler still sees it. Skipped for SSE/WebSocket/health/metrics.
-        capture = (
-            os.environ.get("REQUEST_DETAIL_CAPTURE_ENABLED", "true").lower() != "false"
-            and _inspector_should_capture(path)
-        )
+        capture = os.environ.get(
+            "REQUEST_DETAIL_CAPTURE_ENABLED", "true"
+        ).lower() != "false" and _inspector_should_capture(path)
         captured_request_body: bytes | None = None
         if capture and method in {"POST", "PUT", "PATCH", "DELETE"}:
             try:
                 raw = await request.body()
                 captured_request_body = raw[:_INSPECTOR_MAX_BUFFER_BYTES]
 
-                async def _replay_receive(_body: bytes = raw):  # noqa: B008
+                async def _replay_receive(_body: bytes = raw):
                     return {"type": "http.request", "body": _body, "more_body": False}
 
                 request._receive = _replay_receive  # type: ignore[attr-defined]
-            except Exception:  # noqa: BLE001 — never block the route on capture
+            except Exception:
                 captured_request_body = None
 
         try:
@@ -180,22 +179,31 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             elapsed_ms = (time.monotonic() - t0) * 1000
             LOGGER.exception(
                 "req_failed rid=%s method=%s path=%s elapsed=%.0fms err=%s",
-                rid, method, path, elapsed_ms, type(exc).__name__,
+                rid,
+                method,
+                path,
+                elapsed_ms,
+                type(exc).__name__,
             )
             # Record the failure so the metrics endpoint sees it as an
             # error sample. status=0 marks "exception, no response".
             try:
                 from api.services.request_metrics import metrics as _metrics
-                if path.startswith("/api/") and path != "/api/health" \
-                        and not path.startswith("/api/monitor/sidecars") \
-                        and not path.startswith("/api/monitor/metrics"):
+
+                if (
+                    path.startswith("/api/")
+                    and path != "/api/health"
+                    and not path.startswith("/api/monitor/sidecars")
+                    and not path.startswith("/api/monitor/metrics")
+                ):
                     _metrics().record(path=path, status=0, duration_ms=elapsed_ms)
-            except Exception:  # noqa: BLE001 — metrics must never crash the app
+            except Exception:  # noqa: S110
                 pass
             # And surface the failure in the inspector buffer too.
             if capture:
                 try:
                     from api.services.request_metrics import record_detail as _rd
+
                     _rd(
                         request_id=rid,
                         method=method,
@@ -212,7 +220,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                         response_content_type=None,
                         response_size_bytes=None,
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: S110
                     pass
             raise
 
@@ -256,7 +264,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                     headers=headers,
                     media_type=response.media_type,
                 )
-            except Exception:  # noqa: BLE001 — capture must never break the response
+            except Exception:
                 captured_response_body = None
 
         response.headers["x-request-id"] = rid
@@ -264,7 +272,11 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         if path != "/api/health":
             LOGGER.info(
                 "req rid=%s method=%s path=%s status=%d elapsed=%.0fms",
-                rid, method, path, response.status_code, elapsed_ms,
+                rid,
+                method,
+                path,
+                response.status_code,
+                elapsed_ms,
             )
         # Record into the latency/error ring buffer.  Skip:
         #   - /api/health (10s probe, would bias rate)
@@ -272,21 +284,26 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         #   - /api/monitor/metrics (would self-amplify)
         #   - non-/api paths (frontend asset proxy)
         try:
-            if path.startswith("/api/") and path != "/api/health" \
-                    and not path.startswith("/api/monitor/sidecars") \
-                    and not path.startswith("/api/monitor/metrics"):
+            if (
+                path.startswith("/api/")
+                and path != "/api/health"
+                and not path.startswith("/api/monitor/sidecars")
+                and not path.startswith("/api/monitor/metrics")
+            ):
                 from api.services.request_metrics import metrics as _metrics
+
                 _metrics().record(
                     path=path,
                     status=response.status_code,
                     duration_ms=elapsed_ms,
                 )
-        except Exception:  # noqa: BLE001 — metrics must never crash the app
+        except Exception:  # noqa: S110
             pass
         # Per-request DETAIL inspector record (full headers + body).
         if capture:
             try:
                 from api.services.request_metrics import record_detail as _rd
+
                 _rd(
                     request_id=rid,
                     method=method,
@@ -303,7 +320,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                     response_content_type=response.headers.get("content-type"),
                     response_size_bytes=captured_response_size,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: S110
                 pass
         # Emit a UI animation event for the SidecarsCard topology graph.
         # Health probes and the SSE/snapshot endpoints themselves are
@@ -317,6 +334,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             from api.services.event_emitter import (
                 emit as _emit_event,
             )
+
             _emit_event(ROW_TERM if path.startswith("/api/terminal") else ROW_HTTP)
         return response
 
@@ -334,7 +352,7 @@ async def _lifespan(app: FastAPI):
             from api.routes.monitor import _SIDECAR_BROADCASTER
 
             await _SIDECAR_BROADCASTER.close()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             LOGGER.warning("sidecar broadcaster shutdown failed: %s", exc)
 
 

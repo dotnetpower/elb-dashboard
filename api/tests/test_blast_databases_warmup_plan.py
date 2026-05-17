@@ -4,6 +4,7 @@ Mocks the storage list_databases call so we do not touch Azure, then
 verifies the planner output is attached when (and only when) the SPA
 supplies cluster topology.
 """
+
 from __future__ import annotations
 
 import os
@@ -45,14 +46,14 @@ _FAKE_DBS: list[dict[str, Any]] = [
 @pytest.fixture()
 def fake_list_databases(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bypass Azure SDK by replacing list_databases with a fixture."""
+
     def _fake(_cred: Any, _account: str) -> list[dict[str, Any]]:
         # Return deep copies so the route's enrichment cannot leak across calls.
         import copy
+
         return copy.deepcopy(_FAKE_DBS)
 
-    monkeypatch.setattr(
-        "api.services.storage_data.list_databases", _fake, raising=True
-    )
+    monkeypatch.setattr("api.services.storage_data.list_databases", _fake, raising=True)
 
     # Also short-circuit the local-debug auto-open helper so the test does
     # not try to call ARM. Returning {} == "no action taken".
@@ -69,9 +70,7 @@ def fake_list_databases(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 # Backward compat — no cluster info -> no warmup_plan field
 # ---------------------------------------------------------------------------
-def test_no_cluster_params_omits_warmup_plan(
-    client: TestClient, fake_list_databases: None
-) -> None:
+def test_no_cluster_params_omits_warmup_plan(client: TestClient, fake_list_databases: None) -> None:
     r = client.get(
         "/api/blast/databases",
         params={

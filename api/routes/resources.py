@@ -63,7 +63,10 @@ def ensure_rg(
     cred = get_credential()
     try:
         network_svc.ensure_resource_group(
-            cred, body["subscription_id"], body["resource_group"], body["region"],
+            cred,
+            body["subscription_id"],
+            body["resource_group"],
+            body["region"],
         )
     except Exception as exc:
         LOGGER.warning("ensure_rg failed: %s", type(exc).__name__)
@@ -73,7 +76,10 @@ def ensure_rg(
 
     LOGGER.info(
         "ensure_rg by oid=%s sub=%s rg=%s region=%s",
-        caller.object_id, body["subscription_id"], body["resource_group"], body["region"],
+        caller.object_id,
+        body["subscription_id"],
+        body["resource_group"],
+        body["region"],
     )
     return {
         "resource_group": body["resource_group"],
@@ -111,7 +117,9 @@ def ensure_storage(
 
     LOGGER.info(
         "ensure_storage by oid=%s account=%s region=%s",
-        caller.object_id, body["account_name"], body["region"],
+        caller.object_id,
+        body["account_name"],
+        body["region"],
     )
     return {
         "account_name": body["account_name"],
@@ -143,13 +151,13 @@ def ensure_acr(
         )
     except Exception as exc:
         LOGGER.warning("ensure_acr failed: %s", type(exc).__name__)
-        raise HTTPException(
-            500, f"failed to create ACR: {sanitise(str(exc))[:200]}"
-        ) from exc
+        raise HTTPException(500, f"failed to create ACR: {sanitise(str(exc))[:200]}") from exc
 
     LOGGER.info(
         "ensure_acr by oid=%s registry=%s region=%s",
-        caller.object_id, body["registry_name"], body["region"],
+        caller.object_id,
+        body["registry_name"],
+        body["region"],
     )
     return {
         "registry_name": body["registry_name"],

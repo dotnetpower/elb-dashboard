@@ -506,9 +506,7 @@ def _ensure_job_read_allowed(job_id: str, caller: CallerIdentity) -> None:
     except Exception as exc:
         if dev_bypass:
             return
-        LOGGER.warning(
-            "job authorisation lookup failed (failing closed): %s", type(exc).__name__
-        )
+        LOGGER.warning("job authorisation lookup failed (failing closed): %s", type(exc).__name__)
         raise HTTPException(503, {"code": "auth_lookup_unavailable"}) from exc
     if state and state.owner_oid and state.owner_oid != caller.object_id:
         raise HTTPException(403, "not owner")
@@ -2473,9 +2471,7 @@ def blast_job_results_export(
         )
 
     if format == "json":
-        body = json.dumps(
-            {"job_id": job_id, "hits": all_hits, "total": len(all_hits)}, default=str
-        )
+        body = json.dumps({"job_id": job_id, "hits": all_hits, "total": len(all_hits)}, default=str)
         return StreamingResponse(
             iter([body.encode("utf-8")]),
             media_type="application/json",
@@ -2486,9 +2482,7 @@ def blast_job_results_export(
     # the file does not get a bunch of blank trailing columns for vanilla
     # `-outfmt 6` output.
     delimiter = "\t" if format == "tsv" else ","
-    extras_present = [
-        col for col in EXPORT_EXTRA_COLUMNS if any(col in hit for hit in all_hits)
-    ]
+    extras_present = [col for col in EXPORT_EXTRA_COLUMNS if any(col in hit for hit in all_hits)]
     columns = list(EXPORT_DEFAULT_COLUMNS) + extras_present
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=columns, delimiter=delimiter, extrasaction="ignore")

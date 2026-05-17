@@ -83,10 +83,10 @@ def _capacity() -> int:
 
 @dataclass(frozen=True, slots=True)
 class _Sample:
-    ts: float          # epoch seconds (monotonic-anchored wall clock — see record())
-    path: str          # normalised request path
-    status: int        # HTTP status code (0 if dispatch raised)
-    duration_ms: float # wall-clock latency in milliseconds
+    ts: float  # epoch seconds (monotonic-anchored wall clock — see record())
+    path: str  # normalised request path
+    status: int  # HTTP status code (0 if dispatch raised)
+    duration_ms: float  # wall-clock latency in milliseconds
 
 
 # Path collapsing: well-known UUID/job-id/cluster patterns -> {placeholder}.
@@ -182,9 +182,7 @@ class _RequestMetrics:
         buckets that pre-date the window.
         """
         if window_seconds <= 0 or window_seconds > MAX_WINDOW_SECONDS:
-            raise ValueError(
-                f"window_seconds must be in (0, {MAX_WINDOW_SECONDS}]"
-            )
+            raise ValueError(f"window_seconds must be in (0, {MAX_WINDOW_SECONDS}]")
         rpm_buckets = max(1, min(int(rpm_buckets), max(1, window_seconds // 60)))
         now = time.time()
         window = float(window_seconds)
@@ -275,10 +273,7 @@ def _percentile(sorted_values: list[float], q: float) -> float | None:
 def _empty_rpm(*, now: float, buckets: int) -> list[dict[str, object]]:
     bucket_size = 60.0
     oldest = now - buckets * bucket_size
-    return [
-        {"t_end": oldest + (i + 1) * bucket_size, "count": 0}
-        for i in range(buckets)
-    ]
+    return [{"t_end": oldest + (i + 1) * bucket_size, "count": 0} for i in range(buckets)]
 
 
 # Module-level singleton.  __init__ is cheap so we instantiate eagerly.
@@ -322,7 +317,7 @@ class _DetailSample:
     ts: float
     request_id: str
     method: str
-    path: str               # raw path (not collapsed) — operator wants the actual URL
+    path: str  # raw path (not collapsed) — operator wants the actual URL
     status: int
     duration_ms: float
     caller: str | None
@@ -366,8 +361,7 @@ def is_capturable_content_type(content_type: str | None) -> bool:
         return False
     ct = content_type.split(";", 1)[0].strip().lower()
     return any(
-        ct == prefix.rstrip("/") or ct.startswith(prefix)
-        for prefix in DETAIL_CAPTURABLE_TYPES
+        ct == prefix.rstrip("/") or ct.startswith(prefix) for prefix in DETAIL_CAPTURABLE_TYPES
     )
 
 
@@ -482,4 +476,3 @@ def record_detail(
 def reset_details_for_tests() -> None:
     """Clear the detail buffer. ONLY for unit tests."""
     _DETAILS.clear()
-

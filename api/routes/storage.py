@@ -154,9 +154,7 @@ def prepare_db(
         latest_dir = _resolve_latest_dir()
     except Exception as exc:
         LOGGER.warning("NCBI latest-dir lookup failed: %s", type(exc).__name__)
-        raise HTTPException(
-            502, f"could not contact NCBI: {sanitise(str(exc))[:200]}"
-        ) from exc
+        raise HTTPException(502, f"could not contact NCBI: {sanitise(str(exc))[:200]}") from exc
 
     try:
         all_keys = _list_keys(latest_dir, db_name)
@@ -204,9 +202,7 @@ def prepare_db(
             except Exception as e:
                 if "PendingCopyOperation" in str(e):
                     return (blob_name, "skipped")
-                LOGGER.warning(
-                    "Copy failed for %s: %s", blob_name, sanitise(str(e))[:200]
-                )
+                LOGGER.warning("Copy failed for %s: %s", blob_name, sanitise(str(e))[:200])
                 return (blob_name, "error")
 
         started = skipped = errors = 0
@@ -223,7 +219,10 @@ def prepare_db(
 
         LOGGER.info(
             "DB prepare done for %s: %d started, %d skipped, %d errors",
-            db_name, started, skipped, errors,
+            db_name,
+            started,
+            skipped,
+            errors,
         )
 
         # Auto-shard step: as soon as the NCBI key enumeration is in hand,
@@ -245,24 +244,29 @@ def prepare_db(
                     continue  # small DB, fewer volumes than this preset
                 try:
                     upload_shard_set(
-                        cred, account_name, db_name, n, volumes,
+                        cred,
+                        account_name,
+                        db_name,
+                        n,
+                        volumes,
                     )
                     shard_sets_created.append(n)
                 except Exception as exc:
                     LOGGER.warning(
                         "shard set N=%d failed for %s: %s",
-                        n, db_name, sanitise(str(exc))[:200],
+                        n,
+                        db_name,
+                        sanitise(str(exc))[:200],
                     )
         except LookupError:
             # No volumes detected (e.g. key list was empty or unfamiliar
             # extension layout). Leave sharded=False.
-            LOGGER.info(
-                "auto-shard skipped for %s: no volumes detected", db_name
-            )
+            LOGGER.info("auto-shard skipped for %s: no volumes detected", db_name)
         except Exception as exc:
             LOGGER.warning(
                 "auto-shard failed for %s: %s",
-                db_name, sanitise(str(exc))[:200],
+                db_name,
+                sanitise(str(exc))[:200],
             )
 
         # Drop a metadata blob alongside the DB so the dashboard can show
@@ -284,9 +288,7 @@ def prepare_db(
                 overwrite=True,
             )
         except Exception as e:
-            LOGGER.warning(
-                "metadata write failed for %s: %s", db_name, sanitise(str(e))[:200]
-            )
+            LOGGER.warning("metadata write failed for %s: %s", db_name, sanitise(str(e))[:200])
 
     Thread(target=_do_copies, daemon=True, name=f"prepare-db-{db_name}").start()
 
@@ -403,9 +405,7 @@ def storage_local_debug_open(
     rg = body.get("resource_group", "")
     account_name = body.get("account_name", "")
     if not all([sub, rg, account_name]):
-        raise HTTPException(
-            400, "subscription_id, resource_group, account_name required"
-        )
+        raise HTTPException(400, "subscription_id, resource_group, account_name required")
     _check(sub, _RE_SUB, "subscription_id")
     _check(rg, _RE_RG, "resource_group")
     _check(account_name, _RE_STORAGE_ACCOUNT, "account_name")

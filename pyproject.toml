@@ -65,6 +65,7 @@ extend-exclude = [".venv", "venv", "__pycache__", "legacy"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "RUF"]
 ignore = [
+  "B008", # FastAPI dependency injection intentionally uses Depends/Query/Body defaults
   "S101", # asserts in tests are fine
   "S104", # bind 0.0.0.0 — uvicorn binds inside the container
 ]

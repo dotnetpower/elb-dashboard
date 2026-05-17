@@ -88,6 +88,7 @@ def _start_reporter(sender_name: str) -> None:
         start_in_thread(name)
     except Exception:
         import logging
+
         logging.getLogger(__name__).warning(
             "cgroup reporter failed to start in %s", sender_name, exc_info=True
         )

@@ -147,8 +147,7 @@ def download_file(job_id: str, file_id: str) -> DownloadedFile:
     with httpx.Client(base_url=_base_url(), timeout=_STREAM_TIMEOUT, headers=_headers()) as client:
         try:
             resp = client.get(
-                f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}/files/"
-                f"{_path_segment(file_id)}"
+                f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}/files/{_path_segment(file_id)}"
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -174,8 +173,7 @@ def stream_file(job_id: str, file_id: str) -> StreamedFile:
     try:
         request = client.build_request(
             "GET",
-            f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}/files/"
-            f"{_path_segment(file_id)}",
+            f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}/files/{_path_segment(file_id)}",
         )
         resp = client.send(request, stream=True)
         resp.raise_for_status()

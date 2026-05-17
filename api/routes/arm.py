@@ -197,10 +197,7 @@ def list_vms(
     cred = get_credential()
     try:
         client = compute_client(cred, subscription_id)
-        vms = [
-            {"name": v.name, "location": v.location}
-            for v in client.virtual_machines.list(rg)
-        ]
+        vms = [{"name": v.name, "location": v.location} for v in client.virtual_machines.list(rg)]
         vms.sort(key=lambda x: x["name"])
         return vms
     except Exception as exc:

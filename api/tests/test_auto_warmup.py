@@ -65,9 +65,7 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
 
     assert result["status"] == "completed"
     assert result["clusters"][0]["status"] == "triggered"
-    assert result["clusters"][0]["enqueued"] == [
-        {"db": "core_nt", "task_id": "warmup-task-1"}
-    ]
+    assert result["clusters"][0]["enqueued"] == [{"db": "core_nt", "task_id": "warmup-task-1"}]
     assert calls[0]["task_name"] == "api.tasks.storage.warmup_database"
     assert calls[0]["queue"] == "storage"
     assert calls[0]["kwargs"]["database_name"] == "core_nt"

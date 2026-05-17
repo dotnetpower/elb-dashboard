@@ -34,12 +34,14 @@ class _FakeBlobClient:
     def get_blob_properties(self):
         if self.name not in self._store:
             from azure.core.exceptions import ResourceNotFoundError
+
             raise ResourceNotFoundError(self.name)
         return MagicMock(name=self.name)
 
     def download_blob(self):
         if self.name not in self._store:
             from azure.core.exceptions import ResourceNotFoundError
+
             raise ResourceNotFoundError(self.name)
         data = self._store[self.name]
         m = MagicMock()
@@ -247,10 +249,7 @@ def test_select_partitions_rejects_invalid_inputs() -> None:
 # ---------------------------------------------------------------------------
 def test_partition_prefix_matches_v3_layout_convention() -> None:
     p = dbs.partition_prefix_for("elbstg01", "core_nt", 10)
-    assert p == (
-        "https://elbstg01.blob.core.windows.net/blast-db/"
-        "10shards/core_nt_shard_"
-    )
+    assert p == ("https://elbstg01.blob.core.windows.net/blast-db/10shards/core_nt_shard_")
 
 
 # ---------------------------------------------------------------------------
@@ -356,9 +355,7 @@ def test_upload_shard_set_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None
 def test_ensure_shard_sets_skips_oversized_presets(monkeypatch: pytest.MonkeyPatch) -> None:
     # 3-volume DB → only N=1, 2, 3 are achievable; N=4..10 should be skipped.
     njs = json.dumps({"number-of-letters": 3_000, "number-of-sequences": 3}).encode()
-    blobs = [
-        _FakeBlob(f"smalldb/smalldb.{i:02d}.nsq", 1_000) for i in range(3)
-    ]
+    blobs = [_FakeBlob(f"smalldb/smalldb.{i:02d}.nsq", 1_000) for i in range(3)]
     blobs.append(_FakeBlob("smalldb/smalldb.njs", len(njs)))
     container = _FakeContainerClient(blobs, store={"smalldb/smalldb.njs": njs})
     _patch_blob_service(monkeypatch, container)

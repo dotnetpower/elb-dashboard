@@ -188,8 +188,7 @@ def build_precision_report(
     merge_format = merge_format_for_outfmt(outfmt)
     if merge_format is None:
         blockers.append(
-            "sharded result merge currently supports only outfmt 5, outfmt 6, "
-            "or outfmt '6 std...'"
+            "sharded result merge currently supports only outfmt 5, outfmt 6, or outfmt '6 std...'"
         )
 
     if not db_stats_available and not positive_int(opts.get("db_total_letters")):
@@ -270,9 +269,7 @@ def build_precision_report(
                 "ordered list with one positive integer per query"
             )
         elif len(query_search_spaces) != query_count:
-            blockers.append(
-                "query_effective_search_spaces count must match query_count"
-            )
+            blockers.append("query_effective_search_spaces count must match query_count")
         elif uniform_query_search_space is None:
             split_query_search_spaces = True
     if effective_search_space is None:

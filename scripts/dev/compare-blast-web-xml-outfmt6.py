@@ -24,6 +24,7 @@ VALUE_COLUMNS = [
     "evalue",
     "bits",
     "align_length",
+    "mismatches",
     "gaps",
     "query_from",
     "query_to",
@@ -49,6 +50,8 @@ OUTFMT6_COLUMNS = [
 ]
 
 OPTIONAL_OUTFMT6_COLUMNS = ["score"]
+
+TIE_SCORE_COLUMNS = ["score", "evalue", "identity_pct", "align_length", "mismatches", "gaps"]
 
 
 @dataclass(frozen=True)
@@ -87,9 +90,11 @@ def _versioned_accession(hit: ET.Element) -> str:
 def _read_web_xml(path: Path) -> list[Row]:
     root = ET.parse(path).getroot()  # noqa: S314 - BLAST XML evidence files.
     rows: list[Row] = []
-    query_id = root.findtext(".//Iteration_query-ID") or root.findtext(
-        ".//Iteration_query-def"
-    ) or "Query_1"
+    query_id = (
+        root.findtext(".//Iteration_query-ID")
+        or root.findtext(".//Iteration_query-def")
+        or "Query_1"
+    )
     for hit in root.findall(".//Iteration_hits/Hit"):
         hsp = hit.find("Hit_hsps/Hsp")
         if hsp is None:
@@ -150,6 +155,27 @@ def _normalised_values(row: Row) -> dict[str, str | None]:
     }
 
 
+def _score_signature(row: Row) -> dict[str, str | None]:
+    values = _normalised_values(row)
+    if values.get("score") is None:
+        values["score"] = values.get("bits")
+    return {column: values.get(column) for column in TIE_SCORE_COLUMNS}
+
+
+def _counter_payload(rows: list[Row]) -> list[dict[str, Any]]:
+    counts: dict[tuple[tuple[str, str | None], ...], int] = {}
+    signatures: dict[tuple[tuple[str, str | None], ...], dict[str, str | None]] = {}
+    for row in rows:
+        signature = _score_signature(row)
+        key = tuple(signature.items())
+        counts[key] = counts.get(key, 0) + 1
+        signatures[key] = signature
+    return [
+        {"count": count, "signature": signatures[key]}
+        for key, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    ]
+
+
 def _value_differences(
     web_values: dict[str, str | None], candidate_values: dict[str, str | None]
 ) -> dict[str, dict[str, str | None]]:
@@ -159,7 +185,10 @@ def _value_differences(
         if web_values[column] != candidate_values[column]
     }
     for column in OPTIONAL_VALUE_COLUMNS:
-        if candidate_values.get(column) is not None and web_values[column] != candidate_values[column]:
+        if (
+            candidate_values.get(column) is not None
+            and web_values[column] != candidate_values[column]
+        ):
             differences[column] = {"web": web_values[column], "candidate": candidate_values[column]}
     if (
         "bits" in differences
@@ -191,17 +220,18 @@ def compare(web_rows: list[Row], candidate_rows: list[Row]) -> dict[str, Any]:
         accession: row for accession, row in zip(web_accessions, web_rows, strict=True)
     }
     candidate_by_accession = {
-        accession: row
-        for accession, row in zip(candidate_accessions, candidate_rows, strict=True)
+        accession: row for accession, row in zip(candidate_accessions, candidate_rows, strict=True)
     }
     shared = sorted(set(web_accessions) & set(candidate_accessions))
 
     mismatches = []
+    mismatch_accessions = set()
     for accession in shared:
         web_values = _normalised_values(web_by_accession[accession])
         candidate_values = _normalised_values(candidate_by_accession[accession])
         differences = _value_differences(web_values, candidate_values)
         if differences:
+            mismatch_accessions.add(accession)
             mismatches.append(
                 {
                     "accession": accession,
@@ -212,17 +242,50 @@ def compare(web_rows: list[Row], candidate_rows: list[Row]) -> dict[str, Any]:
             )
 
     exact_order = web_accessions == candidate_accessions
+    top_n_candidate_rows = candidate_rows[: len(web_rows)]
+    top_n_signatures = _counter_payload(top_n_candidate_rows)
+    web_signatures = _counter_payload(web_rows)
+    shared_signature = (
+        web_signatures[0]["signature"]
+        if len(web_signatures) == 1
+        and len(top_n_signatures) == 1
+        and web_signatures[0]["signature"] == top_n_signatures[0]["signature"]
+        else None
+    )
+    missing_from_pool = [
+        accession for accession in web_accessions if accession not in candidate_by_accession
+    ]
+    tie_window_equivalent = bool(
+        web_rows
+        and candidate_rows
+        and not missing_from_pool
+        and not mismatch_accessions
+        and shared_signature is not None
+    )
     return {
         "equivalent": exact_order and not mismatches,
+        "tie_window_equivalent": tie_window_equivalent,
+        "tie_window": {
+            "description": (
+                "All Web rows are present in the candidate pool with identical primary HSP "
+                "values, and the Web top-N and candidate top-N occupy one shared score class."
+            ),
+            "candidate_pool_rows": len(candidate_rows),
+            "candidate_top_n_rows": len(top_n_candidate_rows),
+            "web_rows_missing_from_candidate_pool": len(missing_from_pool),
+            "web_rows_with_value_mismatch": len(mismatch_accessions),
+            "shared_score_signature": shared_signature,
+            "web_score_classes": web_signatures[:10],
+            "candidate_top_n_score_classes": top_n_signatures[:10],
+            "first_20_missing_from_candidate_pool": missing_from_pool[:20],
+        },
         "web_rows": len(web_rows),
         "candidate_rows": len(candidate_rows),
         "shared_accessions": len(shared),
         "web_only": len(set(web_accessions) - set(candidate_accessions)),
         "candidate_only": len(set(candidate_accessions) - set(web_accessions)),
         "same_top_accession": bool(
-            web_accessions
-            and candidate_accessions
-            and web_accessions[0] == candidate_accessions[0]
+            web_accessions and candidate_accessions and web_accessions[0] == candidate_accessions[0]
         ),
         "top10_overlap": len(set(web_accessions[:10]) & set(candidate_accessions[:10])),
         "top100_overlap": len(set(web_accessions[:100]) & set(candidate_accessions[:100])),
@@ -249,6 +312,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate", required=True, type=Path, help="BLAST outfmt 6 output")
     parser.add_argument("--query-id", help="only compare candidate rows for this qseqid")
     parser.add_argument("--json", type=Path, help="optional JSON report output path")
+    parser.add_argument(
+        "--accept-tie-window",
+        action="store_true",
+        help="exit successfully when strict order fails but the top-N tie-window is equivalent",
+    )
     args = parser.parse_args(argv)
 
     report = build_report(args.web_xml, args.candidate, query_id=args.query_id)
@@ -256,7 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.write_text(payload, encoding="utf-8")
     sys.stdout.write(payload)
-    return 0 if report["equivalent"] else 1
+    return (
+        0
+        if report["equivalent"] or (args.accept_tie_window and report["tie_window_equivalent"])
+        else 1
+    )
 
 
 if __name__ == "__main__":

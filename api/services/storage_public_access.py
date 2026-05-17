@@ -132,9 +132,7 @@ def ensure_local_storage_access(
     elif not is_local_debug_auto_open_enabled():
         return {
             "action": "noop",
-            "reason": (
-                f"{ENV_OPT_IN} not enabled or running inside a Container App"
-            ),
+            "reason": (f"{ENV_OPT_IN} not enabled or running inside a Container App"),
         }
 
     cache_key = (subscription_id, resource_group, account_name)
@@ -167,9 +165,7 @@ def ensure_local_storage_access(
     existing_ips: list[str] = []
     if network_rule_set is not None:
         for rule in getattr(network_rule_set, "ip_rules", None) or []:
-            ip_value = getattr(rule, "ip_address_or_range", None) or getattr(
-                rule, "value", None
-            )
+            ip_value = getattr(rule, "ip_address_or_range", None) or getattr(rule, "value", None)
             if ip_value:
                 existing_ips.append(str(ip_value))
 
@@ -178,9 +174,7 @@ def ensure_local_storage_access(
         return {"action": "failed", "error": "could not detect caller public IP"}
 
     already_ok = (
-        public_state == "Enabled"
-        and default_action == "Deny"
-        and caller_ip in existing_ips
+        public_state == "Enabled" and default_action == "Deny" and caller_ip in existing_ips
     )
     if already_ok:
         result = {
@@ -297,16 +291,12 @@ def read_local_storage_state(
     ip_rules: list[str] = []
     if network_rule_set is not None:
         for rule in getattr(network_rule_set, "ip_rules", None) or []:
-            value = getattr(rule, "ip_address_or_range", None) or getattr(
-                rule, "value", None
-            )
+            value = getattr(rule, "ip_address_or_range", None) or getattr(rule, "value", None)
             if value:
                 ip_rules.append(str(value))
 
     state["public_access"] = public_state or "Disabled"
     state["default_action"] = default_action or None
     state["ip_rules"] = ip_rules
-    state["caller_ip_in_rules"] = (
-        state["caller_ip"] is not None and state["caller_ip"] in ip_rules
-    )
+    state["caller_ip_in_rules"] = state["caller_ip"] is not None and state["caller_ip"] in ip_rules
     return state

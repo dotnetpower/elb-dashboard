@@ -128,15 +128,15 @@ def test_list_databases_only_marks_verified_defaults_as_web_blast_searchsp(
 @pytest.mark.parametrize(
     "bad_name",
     [
-        "Capitalized",          # uppercase not allowed
-        "with-dash",            # hyphen not allowed
-        "ab",                   # too short
-        "a" * 25,               # too long
+        "Capitalized",  # uppercase not allowed
+        "with-dash",  # hyphen not allowed
+        "ab",  # too short
+        "a" * 25,  # too long
         "victim.blob.core.windows.net",  # full-URL injection
-        "",                     # empty
+        "",  # empty
         "name with space",
-        "name?query=x",         # querystring injection
-        "name/extra",           # path injection
+        "name?query=x",  # querystring injection
+        "name/extra",  # path injection
     ],
 )
 def test_blob_service_rejects_invalid_account_names(bad_name: str) -> None:
@@ -159,4 +159,3 @@ def test_blob_service_accepts_valid_account_names() -> None:
     assert storage_data._STORAGE_ACCOUNT_NAME_RE.fullmatch("elbstg01")
     assert storage_data._STORAGE_ACCOUNT_NAME_RE.fullmatch("abc")
     assert storage_data._STORAGE_ACCOUNT_NAME_RE.fullmatch("a" * 24)
-

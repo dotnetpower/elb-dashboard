@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from api.services.query_grouping import (
     QueryGroupPlan,
     QueryGroupPlanItem,
@@ -57,7 +56,9 @@ def test_query_group_plan_rejects_mapping_input() -> None:
 
 def test_materialize_group_fastas_preserves_headers_sequences_and_group_order() -> None:
     metadata = parse_fasta_metadata(
-        ">q1 first description\nAAAA\nAA\n>q2 second description\nCCCC\n>q3 third description\nGG GG\n"
+        ">q1 first description\nAAAA\nAA\n"
+        ">q2 second description\nCCCC\n"
+        ">q3 third description\nGG GG\n"
     )
     plan = build_query_group_plan(metadata, [225, 300, 225])
 
@@ -127,7 +128,7 @@ def test_query_split_execution_plan_as_dict_omits_raw_fasta() -> None:
 
     payload = plan.as_dict()
     assert "query_fasta" not in payload["groups"][0]
-    assert payload["groups"][0]["query_fasta_bytes"] == len(">q1\nAAAA\n".encode("utf-8"))
+    assert payload["groups"][0]["query_fasta_bytes"] == len(b">q1\nAAAA\n")
 
 
 def test_query_split_execution_plan_rejects_unsafe_parent_job_id() -> None:

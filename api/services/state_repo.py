@@ -103,6 +103,7 @@ def _sanitise_odata_value(v: str) -> str:
     Additionally reject any control characters.
     """
     import re
+
     if re.search(r"[\x00-\x1f]", v):
         raise ValueError("control characters not allowed in OData value")
     return v.replace("'", "''")
@@ -122,14 +123,10 @@ class JobStateRepository:
         self._cred = get_credential()
 
     def _state_client(self) -> TableClient:
-        return TableClient(
-            endpoint=self._endpoint, table_name="jobstate", credential=self._cred
-        )
+        return TableClient(endpoint=self._endpoint, table_name="jobstate", credential=self._cred)
 
     def _history_client(self) -> TableClient:
-        return TableClient(
-            endpoint=self._endpoint, table_name="jobhistory", credential=self._cred
-        )
+        return TableClient(endpoint=self._endpoint, table_name="jobhistory", credential=self._cred)
 
     def _ensure_table(self, table_name: str) -> None:
         key = (self._endpoint, table_name)
@@ -208,9 +205,7 @@ class JobStateRepository:
         with self._state_client() as t:
             rows = []
             try:
-                entities = t.query_entities(
-                    f"owner_oid eq '{safe_oid}'", results_per_page=limit
-                )
+                entities = t.query_entities(f"owner_oid eq '{safe_oid}'", results_per_page=limit)
                 for e in entities:
                     rows.append(JobState.from_entity(dict(e)))
                     if len(rows) >= limit:
@@ -306,9 +301,7 @@ class JobStateRepository:
         with self._history_client() as t:
             rows = []
             try:
-                entities = t.query_entities(
-                    f"PartitionKey eq '{safe_id}'", results_per_page=limit
-                )
+                entities = t.query_entities(f"PartitionKey eq '{safe_id}'", results_per_page=limit)
                 for e in entities:
                     rows.append(dict(e))
                     if len(rows) >= limit:

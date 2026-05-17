@@ -22,7 +22,7 @@ import time
 
 from azure.core.credentials import TokenCredential
 
-from api.services.azure_clients import kv_secret_client, kv_mgmt_client
+from api.services.azure_clients import kv_mgmt_client, kv_secret_client
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ def _get_oid_from_credential(credential: TokenCredential) -> str:
 
 def _get_existing_vault(client, resource_group: str, vault_name: str):
     """Return the vault object if it exists, else None."""
-    from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+    from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 
     try:
         return client.vaults.get(resource_group, vault_name)
@@ -66,17 +66,21 @@ def _build_access_policies(
     """Build access policy entries for the MI and optionally the caller."""
     policies: list[dict] = []
     if mi_oid:
-        policies.append({
-            "tenant_id": tenant_id,
-            "object_id": mi_oid,
-            "permissions": {"secrets": _MI_SECRET_PERMISSIONS},
-        })
+        policies.append(
+            {
+                "tenant_id": tenant_id,
+                "object_id": mi_oid,
+                "permissions": {"secrets": _MI_SECRET_PERMISSIONS},
+            }
+        )
     if caller_oid and caller_oid != mi_oid:
-        policies.append({
-            "tenant_id": tenant_id,
-            "object_id": caller_oid,
-            "permissions": {"secrets": _CALLER_SECRET_PERMISSIONS},
-        })
+        policies.append(
+            {
+                "tenant_id": tenant_id,
+                "object_id": caller_oid,
+                "permissions": {"secrets": _CALLER_SECRET_PERMISSIONS},
+            }
+        )
     return policies
 
 
@@ -116,7 +120,8 @@ def _ensure_vault_config(
         LOGGER.info(
             "Vault %s uses RBAC authorization — skipping permission-model PATCH; "
             "MI %s must hold 'Key Vault Secrets Officer' on the vault.",
-            vault_name, mi_oid,
+            vault_name,
+            mi_oid,
         )
         return
 
@@ -128,11 +133,10 @@ def _ensure_vault_config(
             {"properties": {"public_network_access": "Enabled"}},
         )
 
-    existing_oids = {
-        p.object_id for p in (getattr(props, "access_policies", None) or [])
-    }
+    existing_oids = {p.object_id for p in (getattr(props, "access_policies", None) or [])}
     policies_to_add = [
-        p for p in _build_access_policies(tenant_id, mi_oid, caller_oid)
+        p
+        for p in _build_access_policies(tenant_id, mi_oid, caller_oid)
         if p["object_id"] not in existing_oids
     ]
     if policies_to_add:
@@ -187,20 +191,30 @@ def _try_assign_secrets_officer(
                     }
                 },
             )
-            LOGGER.info("Assigned 'Key Vault Secrets Officer' to %s %s on %s", label, principal_id, vault_id)
+            LOGGER.info(
+                "Assigned 'Key Vault Secrets Officer' to %s %s on %s", label, principal_id, vault_id
+            )
             time.sleep(15)  # RBAC propagation
         except Exception as exc:
             msg = str(exc)
             if "RoleAssignmentExists" in msg or "Conflict" in msg:
                 LOGGER.debug("Role already assigned for %s on %s", label, vault_id)
                 return
-            if "AuthorizationFailed" in msg or "InsufficientPermissions" in msg or "does not have authorization" in msg:
+            if (
+                "AuthorizationFailed" in msg
+                or "InsufficientPermissions" in msg
+                or "does not have authorization" in msg
+            ):
                 LOGGER.warning(
                     "Cannot self-grant 'Key Vault Secrets Officer' to %s on %s. "
                     "Run as admin: az role assignment create "
                     "--assignee-object-id %s --assignee-principal-type %s "
                     "--role 'Key Vault Secrets Officer' --scope '%s'",
-                    label, vault_id, principal_id, principal_type, vault_id,
+                    label,
+                    vault_id,
+                    principal_id,
+                    principal_type,
+                    vault_id,
                 )
                 return
             LOGGER.warning("Role assignment for %s failed: %s", label, msg[:200])
@@ -233,7 +247,9 @@ def ensure_keyvault(
     existing = _get_existing_vault(client, resource_group, vault_name)
     if existing:
         LOGGER.info("Key Vault %s already exists", vault_name)
-        _ensure_vault_config(client, resource_group, vault_name, existing, tenant_id, mi_oid, caller_oid)
+        _ensure_vault_config(
+            client, resource_group, vault_name, existing, tenant_id, mi_oid, caller_oid
+        )
         if getattr(existing.properties, "enable_rbac_authorization", False):
             vault_id = (
                 f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"

@@ -16,10 +16,10 @@ import logging
 from azure.core.credentials import TokenCredential
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
-from azure.mgmt.keyvault import KeyVaultManagementClient
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerregistry import ContainerRegistryManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
+from azure.mgmt.keyvault import KeyVaultManagementClient
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.storage import StorageManagementClient

@@ -77,12 +77,13 @@ ts "                 tail -f $LOG_DIR/build-*.log"
 #    parent process waits for all three and reports any failures.
 # ---------------------------------------------------------------------------
 build_image() {
-  local image_name="${1:-}"
-  local dockerfile="${2:-}"
-  local context="${3:-}"
+  local pid_var="${1:-}"
+  local image_name="${2:-}"
+  local dockerfile="${3:-}"
+  local context="${4:-}"
   local log="$LOG_DIR/build-${image_name}.log"
   local extra_args=()
-  if [ -z "$image_name" ] || [ -z "$dockerfile" ] || [ -z "$context" ]; then
+  if [ -z "$pid_var" ] || [ -z "$image_name" ] || [ -z "$dockerfile" ] || [ -z "$context" ]; then
     echo "build_image: missing arg (image=$image_name dockerfile=$dockerfile context=$context)" >&2
     return 1
   fi
@@ -109,13 +110,13 @@ build_image() {
     echo "[build-$image_name] finished at $(date -u +%H:%M:%S), rc=$rc"
     exit $rc
   } > "$log" 2>&1 &
-  echo $!
+  printf -v "$pid_var" '%s' "$!"
 }
 
 ts "==> Building 3 images in parallel via az acr build (no local Docker needed)"
-PID_API=$(build_image      "elb-api"      "$REPO_ROOT/api/Dockerfile"  "$REPO_ROOT")
-PID_FRONTEND=$(build_image "elb-frontend" "$REPO_ROOT/web/Dockerfile"      "$REPO_ROOT")
-PID_TERMINAL=$(build_image "elb-terminal" "$REPO_ROOT/terminal/Dockerfile" "$REPO_ROOT/terminal")
+build_image PID_API      "elb-api"      "$REPO_ROOT/api/Dockerfile"      "$REPO_ROOT"
+build_image PID_FRONTEND "elb-frontend" "$REPO_ROOT/web/Dockerfile"      "$REPO_ROOT"
+build_image PID_TERMINAL "elb-terminal" "$REPO_ROOT/terminal/Dockerfile" "$REPO_ROOT/terminal"
 
 ts "    elb-api:      pid=$PID_API"
 ts "    elb-frontend: pid=$PID_FRONTEND"

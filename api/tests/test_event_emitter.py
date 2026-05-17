@@ -152,6 +152,7 @@ def test_drain_zero_on_redis_error():
 
                 def execute(self_inner):
                     import redis as _r
+
                     raise _r.RedisError("nope")
 
             return _P()

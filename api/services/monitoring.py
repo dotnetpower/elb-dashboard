@@ -96,9 +96,7 @@ def list_aks_clusters(
                 "kubelet_object_id": _kubelet_object_id(cluster),
                 "agent_pools": pool_details,
                 "network_plugin": (
-                    cluster.network_profile.network_plugin
-                    if cluster.network_profile
-                    else None
+                    cluster.network_profile.network_plugin if cluster.network_profile else None
                 ),
                 "fqdn": cluster.fqdn,
             }

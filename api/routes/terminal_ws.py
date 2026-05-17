@@ -138,9 +138,7 @@ async def ws_terminal(
         return
 
     upstream_url = (
-        TERMINAL_UPSTREAM.rstrip("/")
-        .replace("http://", "ws://")
-        .replace("https://", "wss://")
+        TERMINAL_UPSTREAM.rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
         + "/ws"
     )
 
@@ -171,9 +169,7 @@ async def ws_terminal(
             break
 
     if upstream is None:
-        LOGGER.warning(
-            "terminal proxy upstream connect failed after retries: %s", last_exc
-        )
+        LOGGER.warning("terminal proxy upstream connect failed after retries: %s", last_exc)
         try:
             await websocket.close(code=1011, reason="upstream unavailable")
         except Exception as close_exc:
@@ -194,6 +190,7 @@ async def ws_terminal(
     upstream_closed = False
 
     try:
+
         async def b2u() -> None:
             """Browser -> ttyd."""
             nonlocal browser_closed

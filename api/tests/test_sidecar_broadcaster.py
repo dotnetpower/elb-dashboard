@@ -13,7 +13,6 @@ import asyncio
 import json
 
 import pytest
-
 from api.routes import monitor
 
 
@@ -103,9 +102,7 @@ async def test_drain_task_stops_when_last_subscriber_leaves(fresh_broadcaster):
     await asyncio.sleep(0.2)
     snapshots_before = counter["n"]
     await asyncio.sleep(0.3)
-    assert counter["n"] == snapshots_before, (
-        "drain loop kept ticking after last subscriber left"
-    )
+    assert counter["n"] == snapshots_before, "drain loop kept ticking after last subscriber left"
     assert bc._task is None
 
 

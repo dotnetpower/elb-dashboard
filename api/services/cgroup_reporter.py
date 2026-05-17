@@ -43,7 +43,6 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 import redis
 
@@ -81,7 +80,7 @@ def _read_cpu_stat() -> int:
                     return int(line.split()[1])
     except FileNotFoundError:
         # cgroup v1 layout — different filenames; we don't support it.
-        raise RuntimeError("cgroup v2 not available; v1 layout not supported")
+        raise RuntimeError("cgroup v2 not available; v1 layout not supported") from None
     raise RuntimeError("usage_usec missing from cpu.stat")
 
 
@@ -118,7 +117,7 @@ def _read_memory_current() -> int:
         return int(f.read().strip())
 
 
-def _read_memory_max() -> Optional[int]:
+def _read_memory_max() -> int | None:
     """Memory limit in bytes (None if unbounded)."""
     try:
         with open(f"{CGROUP_ROOT}/memory.max", encoding="utf-8") as f:
@@ -176,8 +175,8 @@ def report_loop(
     name: str,
     interval: float = DEFAULT_INTERVAL,
     ttl: int = DEFAULT_TTL,
-    redis_url: Optional[str] = None,
-    stop_event: Optional[threading.Event] = None,
+    redis_url: str | None = None,
+    stop_event: threading.Event | None = None,
 ) -> None:
     """Blocking reporter loop. Run in a daemon thread or dedicated process.
 
@@ -200,10 +199,10 @@ def report_loop(
     mode = "cgroup"
     try:
         prev = read_cgroup()
-    except Exception as cgroup_exc:  # noqa: BLE001
+    except Exception as cgroup_exc:
         try:
             prev = read_procfs_self()
-        except Exception as procfs_exc:  # noqa: BLE001
+        except Exception as procfs_exc:
             LOGGER.warning(
                 "cgroup_reporter[%s]: initial read failed (cgroup=%s, procfs=%s)",
                 name,
@@ -258,7 +257,7 @@ def report_loop(
             LOGGER.warning("cgroup_reporter[%s]: redis error: %s", name, exc)
             # Don't update prev so the next successful publish reflects the
             # true CPU window since the last good reading.
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             LOGGER.warning("cgroup_reporter[%s]: tick failed: %s", name, exc)
 
 

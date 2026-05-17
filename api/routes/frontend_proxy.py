@@ -40,7 +40,7 @@ _client: httpx.AsyncClient | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
-    global _client  # noqa: PLW0603
+    global _client
     if _client is None:
         _client = httpx.AsyncClient(
             base_url=FRONTEND_UPSTREAM,
@@ -76,9 +76,7 @@ async def reverse_proxy(full_path: str, request: Request) -> Response:
     if request.url.query:
         upstream_url = f"{upstream_url}?{request.url.query}"
 
-    upstream_headers = {
-        k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP
-    }
+    upstream_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
 
     client = _get_client()
     try:

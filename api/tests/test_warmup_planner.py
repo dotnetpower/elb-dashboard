@@ -149,6 +149,7 @@ def test_node_sku_too_small_recommendations_have_required_capacity() -> None:
     for rec in sku_recs:
         # The recommendation embeds the RAM as "(N GiB RAM per node)" — parse it.
         import re
+
         m = re.search(r"\((\d+) GiB RAM per node\)", rec)
         assert m, f"could not parse RAM from rec: {rec}"
         ram = int(m.group(1))
@@ -185,9 +186,7 @@ def test_zero_nodes_returns_no_nodes() -> None:
 
 def test_negative_db_size_raises() -> None:
     with pytest.raises(ValueError, match="db_total_bytes must be non-negative"):
-        compute_warmup_feasibility(
-            db_total_bytes=-1, num_nodes=3, machine_type="Standard_E32s_v5"
-        )
+        compute_warmup_feasibility(db_total_bytes=-1, num_nodes=3, machine_type="Standard_E32s_v5")
 
 
 def test_negative_node_count_raises() -> None:

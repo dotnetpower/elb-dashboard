@@ -64,9 +64,10 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
     assert "init-db-shard-aks.sh" in manifest["data"]
     assert "blast-vmtouch-aks.sh" in manifest["data"]
     assert "azcopy login --identity" in manifest["data"]["init-db-shard-aks.sh"]
-    assert "AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}" in manifest["data"][
-        "init-db-shard-aks.sh"
-    ]
+    assert (
+        "AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}"
+        in manifest["data"]["init-db-shard-aks.sh"]
+    )
     assert "taxonomy4blast.sqlite3" in manifest["data"]["init-db-shard-aks.sh"]
     assert "vmtouch" in manifest["data"]["blast-vmtouch-aks.sh"]
 

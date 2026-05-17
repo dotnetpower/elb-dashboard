@@ -64,7 +64,9 @@ def build_images(
     from azure.mgmt.containerregistry import ContainerRegistryManagementClient
 
     mgmt = ContainerRegistryManagementClient(
-        cred, subscription_id, api_version=_BUILD_API_VERSION,
+        cred,
+        subscription_id,
+        api_version=_BUILD_API_VERSION,
     )
 
     targets = images or list(IMAGE_TAGS.keys())
@@ -87,7 +89,12 @@ def build_images(
 
         try:
             _schedule_acr_build(
-                mgmt, resource_group, registry_name, image_name, tag, build_info,
+                mgmt,
+                resource_group,
+                registry_name,
+                image_name,
+                tag,
+                build_info,
             )
             results.append({"image": full_image, "status": "scheduled"})
             LOGGER.info("ACR build scheduled: %s in %s", full_image, registry_name)
@@ -140,18 +147,14 @@ def _schedule_acr_build(
     # `dockerfile` is documented as relative to `context`, so the
     # basename inside the per-image working directory is what
     # ``docker build -f`` should see.
-    ctx_dir = (
-        build_info.get("build_context_dir")
-        or build_info.get("context")
-        or "."
-    )
+    ctx_dir = build_info.get("build_context_dir") or build_info.get("context") or "."
     dockerfile_in_ctx = build_info["dockerfile"]
     if dockerfile_in_ctx.startswith(f"{ctx_dir}/"):
         dockerfile_in_ctx = dockerfile_in_ctx[len(ctx_dir) + 1 :]
 
     steps: list[str] = []
     if pre_cmd:
-        steps.append("  - cmd: >\n" f"      bash -lc {shlex.quote(pre_cmd)}")
+        steps.append(f"  - cmd: >\n      bash -lc {shlex.quote(pre_cmd)}")
     steps.append(
         "  - build: >\n"
         f"      -t {{{{.Run.Registry}}}}/{image_ref}\n"
@@ -172,5 +175,7 @@ def _schedule_acr_build(
     )
 
     mgmt.registries.begin_schedule_run(
-        resource_group, registry_name, request,
+        resource_group,
+        registry_name,
+        request,
     )

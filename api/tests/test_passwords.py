@@ -5,7 +5,6 @@ from __future__ import annotations
 import string
 
 import pytest
-
 from api.services.passwords import generate_admin_password
 
 

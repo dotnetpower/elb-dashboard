@@ -27,7 +27,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, TypedDict
 
-
 SkuRole = Literal["system", "blast", "both"]
 """Which AKS node pool the SKU is intended for.
 
@@ -67,7 +66,7 @@ class SkuListResponse(TypedDict):
 # Display label per SKU group. Stable strings — the SPA dropdown uses
 # them as <optgroup label=...> so they are user-visible.
 SKU_GROUP_LABELS: dict[str, str] = {
-    "system": "System pool (D-series, 2–4 vCPU)",
+    "system": "System pool (D-series, 2-4 vCPU)",
     "hpc": "HPC — InfiniBand (HB / HC)",
     "memory-v5": "Memory-optimised — E v5",
     "memory-bs-v5": "Memory-optimised + NVMe — E bs v5",
@@ -150,10 +149,8 @@ DEFAULT_SYSTEM_SKU: str = "Standard_D2s_v3"  # ELB_DFLT_AZURE_SYSTEM_VM_SIZE
 # sibling constants.py. Ordering is UI dropdown ordering.
 SKU_CATALOG: tuple[SkuCatalogEntry, ...] = (
     # --- System pool SKUs (small, low-cost, CriticalAddonsOnly) -----------
-    _sku("Standard_D2s_v3", 2, 8, "general", "D-v3", 0.096,
-         role="system", group="system"),
-    _sku("Standard_D4s_v3", 4, 16, "general", "D-v3", 0.192,
-         role="system", group="system"),
+    _sku("Standard_D2s_v3", 2, 8, "general", "D-v3", 0.096, role="system", group="system"),
+    _sku("Standard_D4s_v3", 4, 16, "general", "D-v3", 0.192, role="system", group="system"),
     # --- Blast pool SKUs ---------------------------------------------------
     _sku("Standard_HB120rs_v3", 120, 480, "hpc", "HB-v3", 3.600, group="hpc"),
     _sku("Standard_HC44rs", 44, 352, "hpc", "HC", 3.168, group="hpc"),
@@ -163,7 +160,9 @@ SKU_CATALOG: tuple[SkuCatalogEntry, ...] = (
     _sku("Standard_D32s_v3", 32, 128, "general", "D-v3", 1.536, group="general"),
     _sku("Standard_D64s_v3", 64, 256, "general", "D-v3", 3.072, group="general"),
     _sku("Standard_E64s_v3", 64, 432, "memory", "E-v3", 3.629, group="memory-v3"),
-    _sku("Standard_E64is_v3", 64, 504, "memory-isolated", "E-v3-isolated", 3.629, group="memory-v3"),
+    _sku(
+        "Standard_E64is_v3", 64, 504, "memory-isolated", "E-v3-isolated", 3.629, group="memory-v3"
+    ),
     _sku("Standard_E16s_v5", 16, 128, "memory", "E-v5", 1.008, group="memory-v5"),
     _sku("Standard_E32s_v5", 32, 256, "memory", "E-v5", 2.016, group="memory-v5"),
     _sku("Standard_E48s_v5", 48, 384, "memory", "E-v5", 3.024, group="memory-v5"),
@@ -191,12 +190,8 @@ SKU_CATALOG: tuple[SkuCatalogEntry, ...] = (
 SKU_BY_NAME: dict[str, SkuCatalogEntry] = {sku.name: sku for sku in SKU_CATALOG}
 
 # Backwards-compatible public module constants.
-ALLOWED_SKUS: dict[str, SkuSpec] = {
-    sku.name: sku.to_public() for sku in SKU_CATALOG
-}
-AZURE_VM_HOURLY_USD: dict[str, float] = {
-    sku.name: sku.hourly_usd for sku in SKU_CATALOG
-}
+ALLOWED_SKUS: dict[str, SkuSpec] = {sku.name: sku.to_public() for sku in SKU_CATALOG}
+AZURE_VM_HOURLY_USD: dict[str, float] = {sku.name: sku.hourly_usd for sku in SKU_CATALOG}
 
 
 def is_allowed(sku: str) -> bool:
@@ -251,17 +246,13 @@ def _assert_catalog_consistency() -> None:
     if DEFAULT_SKU not in SKU_BY_NAME:
         raise AssertionError(f"DEFAULT_SKU {DEFAULT_SKU!r} missing from SKU_CATALOG")
     if DEFAULT_SYSTEM_SKU not in SKU_BY_NAME:
-        raise AssertionError(
-            f"DEFAULT_SYSTEM_SKU {DEFAULT_SYSTEM_SKU!r} missing from SKU_CATALOG"
-        )
+        raise AssertionError(f"DEFAULT_SYSTEM_SKU {DEFAULT_SYSTEM_SKU!r} missing from SKU_CATALOG")
     if SKU_BY_NAME[DEFAULT_SYSTEM_SKU].role not in ("system", "both"):
         raise AssertionError(
             f"DEFAULT_SYSTEM_SKU {DEFAULT_SYSTEM_SKU!r} is not flagged as a system SKU"
         )
     if SKU_BY_NAME[DEFAULT_SKU].role not in ("blast", "both"):
-        raise AssertionError(
-            f"DEFAULT_SKU {DEFAULT_SKU!r} is not flagged as a blast SKU"
-        )
+        raise AssertionError(f"DEFAULT_SKU {DEFAULT_SKU!r} is not flagged as a blast SKU")
     if any(sku.hourly_usd <= 0 for sku in SKU_CATALOG):
         raise AssertionError("SKU_CATALOG contains a non-positive price")
     if set(ALLOWED_SKUS) != set(AZURE_VM_HOURLY_USD):

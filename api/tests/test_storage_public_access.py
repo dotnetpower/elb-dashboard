@@ -72,9 +72,7 @@ def _make_account(public: str, ip_rules: list[str]) -> SimpleNamespace:
 def test_ensure_already_open(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
     sc = MagicMock()
-    sc.storage_accounts.get_properties.return_value = _make_account(
-        "Enabled", ["1.2.3.4"]
-    )
+    sc.storage_accounts.get_properties.return_value = _make_account("Enabled", ["1.2.3.4"])
     with (
         patch("api.services.azure_clients.storage_client", return_value=sc),
         patch.object(spa, "_detect_caller_ip", return_value="1.2.3.4"),
@@ -105,9 +103,7 @@ def test_ensure_opens_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     update_params = args[2]
     assert update_params.public_network_access == "Enabled"
     assert update_params.network_rule_set.default_action == "Deny"
-    assert [r.ip_address_or_range for r in update_params.network_rule_set.ip_rules] == [
-        "9.9.9.9"
-    ]
+    assert [r.ip_address_or_range for r in update_params.network_rule_set.ip_rules] == ["9.9.9.9"]
 
 
 def test_ensure_appends_caller_ip_when_partially_open(
@@ -115,9 +111,7 @@ def test_ensure_appends_caller_ip_when_partially_open(
 ) -> None:
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
     sc = MagicMock()
-    sc.storage_accounts.get_properties.return_value = _make_account(
-        "Enabled", ["1.1.1.1"]
-    )
+    sc.storage_accounts.get_properties.return_value = _make_account("Enabled", ["1.1.1.1"])
     with (
         patch("api.services.azure_clients.storage_client", return_value=sc),
         patch.object(spa, "_detect_caller_ip", return_value="2.2.2.2"),
@@ -164,9 +158,7 @@ def test_ensure_already_open_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """Second call within TTL must NOT hit ARM or ipify (CPU hot path)."""
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
     sc = MagicMock()
-    sc.storage_accounts.get_properties.return_value = _make_account(
-        "Enabled", ["1.2.3.4"]
-    )
+    sc.storage_accounts.get_properties.return_value = _make_account("Enabled", ["1.2.3.4"])
     with (
         patch("api.services.azure_clients.storage_client", return_value=sc),
         patch.object(spa, "_detect_caller_ip", return_value="1.2.3.4") as det,

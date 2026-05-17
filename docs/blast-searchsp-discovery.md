@@ -622,9 +622,135 @@ equivalence still fails: shared accessions are `1 / 500`, top-10 overlap is `0`,
 and both Web and local candidates contain hundreds of 462/462 perfect matches at
 the same score. When the candidate rows include raw score as an optional 13th
 outfmt 6 column, `value_mismatch_count` drops to `0`; the previous bit-score
-difference was only outfmt 6 display precision (`828` vs Web XML `828.419`).
-This is now a tied-hit subset/order and database snapshot issue, not a
-`searchsp`, DUST score, or missing-taxonomy-file issue.
+difference was only outfmt 6 display precision (`828` vs Web XML `828.419`). At
+that point the remaining hypotheses were tied-hit subset/order and database
+snapshot/subset differences, not `searchsp`, DUST score, or missing taxonomy
+files.
+
+Follow-up on 2026-05-17 separated the two remaining hypotheses. A wider cached
+local-SSD probe extracted all 500 Web XML accessions, checked them against the
+current warmed `core_nt` shard volumes with `blastdbcmd`, searched those exact
+accessions with Web-style hard masking, and also built a deduplicated local
+candidate pool from 10 short node-local probes.
+
+Evidence directory:
+`docs/temp/f3l-core-nt-2026-05-17/web-top500-local-status/`.
+
+Key files:
+
+- `web-top500-accessions.txt`
+- `web-top500-values.tsv`
+- `webgap-probe-00.log` through `webgap-probe-09.log`
+- `web-top500-local-status.json`
+- `merged-wide-webmask-dedup.outfmt6.tsv`
+- `current-web-vs-merged-wide-webmask.tie-window.json`
+
+Result:
+
+| Question | Answer |
+| --- | ---: |
+| Web XML rows | `500` |
+| Web accessions present in current cached DB | `500 / 500` |
+| Web accessions returned by targeted local BLAST | `500 / 500` |
+| Web accessions present in the deduplicated wide local pool | `500 / 500` |
+| Web accessions with identical primary HSP/value fields | `500 / 500` |
+| Deduplicated wide local pool size | `11,261` accessions |
+| Web overlap with local wide top 500 | `32 / 500` |
+| Web overlap with local wide top 1,000 | `75 / 500` |
+| Web overlap with local wide top 5,000 | `332 / 500` |
+
+The wide local pool contains `9,118` unique accessions in the same top score
+class: `100.000%` identity, length `462`, mismatches `0`, gaps `0`, e-value `0`,
+raw score `448`, displayed bit score `828`. The Web top 500 is entirely inside
+that same score class and every Web accession has the same primary local HSP
+values. The strict order still differs (`top10_overlap = 0`, `top100_overlap =
+1` in strict rank comparison), but the new comparator report sets
+`tie_window_equivalent = true` for the wide candidate pool.
+
+**Important interpretation: biological equivalence is not strict rank identity.**
+
+For this MPXV F3L oracle, "biologically equivalent" means the Web BLAST hits are
+present in the current local `core_nt` database and have the same primary HSP
+evidence: same accession availability, same 462 nt perfect alignment, same query
+and subject coordinates, same mismatch/gap counts, same e-value, same bit score,
+and same raw score. In other words, the scientific BLAST statement is the same:
+the query has thousands of indistinguishable 462/462 perfect matches in the
+filtered MPXV/core_nt hit set.
+
+It does **not** mean the first 500 displayed rows, or their order, are identical
+to NCBI Web BLAST. Web BLAST chooses 500 rows from a tied score window containing
+thousands of equally scoring hits. The local sharded pipeline can reproduce the
+hit evidence and can report tie-window equivalence, but exact Web top-500
+membership/order requires the Web-side tied-hit truncation order (or a matching
+same-snapshot full-run order) as an additional oracle.
+
+This closes the DB-snapshot/subset question for the current MPXV F3L Web XML
+oracle: the Web top-500 accessions are not absent from the current cached DB and
+do not have different HSP values. The remaining difference is top-N membership
+and ordering inside a very large tied score window. For user-facing equivalence
+claims, strict accession order should remain a separate mode from biological
+tie-window equivalence.
+
+An additional tie-break search tested whether the Web top-500 order can be
+reconstructed from metadata available in the current sharded BLAST DB. The probe
+extracted `blastdbcmd` metadata for the perfect-hit pool (`%a`, `%o`, `%g`, `%l`,
+`%T`, `%t`) and scored candidate orderings against the Web XML order.
+
+Additional evidence files:
+
+- `perfect-hit-metadata.tsv`
+- `perfect-hit-volume-oids.tsv`
+- `tie-break-key-score-report.json`
+- `tie-break-merge-strategy-score-report.json`
+- `tie-break-volume-oid-report.json`
+- `tie-break-hash-score-report.json`
+
+Result: simple public/local keys do not explain Web ordering. The best tested
+metadata key (`year_desc_oid_asc`) reached only `33 / 500` Web overlap in its
+top 500. DB OID ascending/descending, GI ascending/descending, length, title,
+year, shard-local BLAST output order, concatenating shard output, and
+round-robin merging shard output all stayed in the same low-overlap range
+(`0..36 / 500`). A short NCBI E-utilities check showed the public Entrez
+`txid10244[Organism:exp]` relevance/date order starts with the latest `PZ*`
+records, not the Web BLAST top accession `PX485240.1`, so the Web strict order
+is not reproduced by the default public Entrez sort either.
+
+Follow-up probes also ruled out the most plausible hidden local keys:
+
+- Direct per-volume `blastdbcmd` lookup recovered accession -> `core_nt.NN` +
+  volume-local OID for all `9,280` metadata rows, including all `500 / 500` Web
+  accessions. Sorting perfect-hit candidates by volume/OID or coordinate +
+  volume/OID still peaked at `36 / 500` Web top-500 overlap.
+- The Web XML contains exactly one HSP per top-500 hit, and every hit has the
+  same total raw score (`448`) and bit score (`828.419`). Hidden multi-HSP total
+  score is therefore not the missing tie-breaker for this oracle.
+- Hash-like orderings over accession/title strings (`crc32`, `adler32`, `md5`,
+  `sha1`, `sha256`, plus bucketed hash variants) stayed random-like; the best
+  tested hash candidate reached only `40 / 500` Web top-500 overlap.
+- The Web top-500 rank sequence jumps across volumes and shards almost every
+  row. In the first 100 Web ranks, shard runs are overwhelmingly length 1, and
+  the top-500 volume distribution is broad rather than contiguous. This does not
+  resemble volume scan order, shard concatenation, or a simple round-robin merge.
+- `blastdbcmd` cannot emit `-entry all` together with `-taxids`, so the taxid
+  subset iteration order cannot be obtained through that CLI. The warmed node's
+  `/blast/blastdb` did not expose a readable `taxonomy4blast.sqlite3` posting
+  table; the current local evidence path exposes taxid membership, not the
+  Web-side posting-list order used during tied hit truncation.
+
+This means strict Web top-N list/order matching needs one of these additional
+inputs:
+
+1. A same-snapshot full local BLAST run whose output order matches Web, so the
+  sharded finalizer can learn and preserve the full-run tie order.
+2. A reliable Web/NCBI internal tie-order oracle for the filtered `core_nt`
+  subset, such as the exact database ordinal/posting-list order used by Web
+  BLAST after `ENTREZ_QUERY` filtering.
+3. A product decision to report strict accession order separately from
+  tie-window equivalence when thousands of hits share identical HSP scores.
+
+Without one of those, a deterministic sharded merge can be stable and
+biologically equivalent, but it cannot honestly claim byte-for-byte or
+rank-for-rank Web top-500 identity for this query.
 
 Performance note: the latest warmed `core_nt` shard jobs completed in `17s` to
 `19s`, so the remaining equivalence work should focus on hit-positive golden

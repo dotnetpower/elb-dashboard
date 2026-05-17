@@ -7,7 +7,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ _LOCAL_STATE_ENV = "ELB_LOCAL_STATE_DIR"
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _clean_db_names(values: Any) -> list[str]:
@@ -113,7 +113,9 @@ class AutoWarmupPreference:
             resource_group=str(value.get("resource_group") or ""),
             cluster_name=str(value.get("cluster_name") or ""),
             storage_account=str(value.get("storage_account") or ""),
-            storage_resource_group=str(value.get("storage_resource_group") or value.get("resource_group") or ""),
+            storage_resource_group=str(
+                value.get("storage_resource_group") or value.get("resource_group") or ""
+            ),
             region=str(value.get("region") or ""),
             databases=_clean_db_names(value.get("databases")),
             programs=_clean_programs(value.get("programs")),

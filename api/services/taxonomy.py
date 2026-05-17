@@ -346,9 +346,7 @@ def _parse_taxonomy_xml(body: bytes, *, expected_taxid: int) -> dict[str, Any]:
 
     genetic_code = _xml_text(_find_subelement(taxon, "GeneticCode", "GCName")) or None
     genetic_code_id_text = _xml_text(_find_subelement(taxon, "GeneticCode", "GCId"))
-    mito_genetic_code = (
-        _xml_text(_find_subelement(taxon, "MitoGeneticCode", "MGCName")) or None
-    )
+    mito_genetic_code = _xml_text(_find_subelement(taxon, "MitoGeneticCode", "MGCName")) or None
     mito_genetic_code_id_text = _xml_text(_find_subelement(taxon, "MitoGeneticCode", "MGCId"))
 
     create_date = _xml_text(taxon.find("CreateDate")) or None
@@ -530,10 +528,18 @@ def clear_taxonomy_detail_cache() -> None:
 # for the cladogram visualisation.  Caches per (parent_taxid, rank) pair.
 # ---------------------------------------------------------------------------
 
-_MAJOR_RANKS_SET = frozenset([
-    "superkingdom", "kingdom", "phylum", "class",
-    "order", "family", "genus", "species",
-])
+_MAJOR_RANKS_SET = frozenset(
+    [
+        "superkingdom",
+        "kingdom",
+        "phylum",
+        "class",
+        "order",
+        "family",
+        "genus",
+        "species",
+    ]
+)
 
 _SIBLINGS_CACHE_LOCK = threading.Lock()
 _SIBLINGS_CACHE: dict[tuple[int, str, int], tuple[float, list[dict[str, Any]]]] = {}
@@ -620,7 +626,9 @@ def _fetch_siblings_at_rank(
 
 
 def fetch_taxonomy_tree(
-    taxid: int, *, sibling_limit: int = 3,
+    taxid: int,
+    *,
+    sibling_limit: int = 3,
 ) -> dict[str, Any]:
     """Build a tree payload: full lineage + siblings at each major rank.
 
@@ -641,12 +649,13 @@ def fetch_taxonomy_tree(
     lineage_ex: list[dict[str, Any]] = detail["lineage_ex"]
 
     # Append the selected organism itself (lineage_ex only has ancestors).
-    lineage = lineage_ex + [
+    lineage = [
+        *lineage_ex,
         {
             "taxid": detail["taxid"],
             "scientific_name": detail["scientific_name"],
             "rank": detail["rank"],
-        }
+        },
     ]
 
     # Identify major-rank nodes and their predecessors.

@@ -638,7 +638,7 @@ async def sidecars_snapshot(
     """
     try:
         return collect_snapshot(drain_events=False)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return _graceful(
             "sidecars_snapshot",
             exc,
@@ -786,7 +786,7 @@ class _SidecarBroadcaster:
         # keeps the broadcaster the sole drainer.
         try:
             initial = await asyncio.to_thread(collect_snapshot, drain_events=False)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             LOGGER.warning("sidecar broadcaster: initial snapshot failed: %s", exc)
             initial = {
                 "ts": None,
@@ -828,7 +828,7 @@ class _SidecarBroadcaster:
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):  # noqa: S110
                 pass
 
     async def _run(self) -> None:
@@ -839,7 +839,7 @@ class _SidecarBroadcaster:
                 try:
                     snap = await asyncio.to_thread(collect_snapshot)
                     payload = f"event: snapshot\ndata: {_json.dumps(snap)}\n\n"
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     LOGGER.warning("sidecar broadcaster: tick failed: %s", exc)
                     payload = 'event: error\ndata: {"code":"tick_failed"}\n\n'
                 # Snapshot the subscriber set so unsubscribe() during fan-out

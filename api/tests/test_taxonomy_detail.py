@@ -137,8 +137,8 @@ def test_fetch_taxonomy_detail_rejects_xxe_payload(monkeypatch: pytest.MonkeyPat
 
     taxonomy.clear_taxonomy_detail_cache()
     xxe = (
-        b"<?xml version=\"1.0\"?>\n"
-        b"<!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n"
+        b'<?xml version="1.0"?>\n'
+        b'<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>\n'
         b"<TaxaSet><Taxon><TaxId>9606</TaxId>"
         b"<ScientificName>&xxe;</ScientificName></Taxon></TaxaSet>"
     )
@@ -174,7 +174,7 @@ def test_fetch_taxonomy_detail_requires_taxon_element(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         taxonomy,
         "_request_bytes",
-        lambda *_a, **_kw: b"<?xml version=\"1.0\"?><TaxaSet></TaxaSet>",
+        lambda *_a, **_kw: b'<?xml version="1.0"?><TaxaSet></TaxaSet>',
     )
 
     with pytest.raises(taxonomy.TaxonomySearchUnavailable):
