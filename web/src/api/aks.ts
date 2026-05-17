@@ -1,5 +1,6 @@
 import { api } from "@/api/client";
 import type { OrchestrationStatus } from "@/api/shared";
+import type { AutoWarmupPreference } from "@/api/monitoring";
 
 export interface AksProvisionRequest {
   subscription_id: string;
@@ -74,11 +75,17 @@ export const aksApi = {
       cluster_name: clusterName,
     }),
 
-  start: (subscriptionId: string, rg: string, clusterName: string) =>
+  start: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    autoWarmup?: Partial<AutoWarmupPreference>,
+  ) =>
     api.post<{ cluster_name: string; status: string }>("/aks/start", {
       subscription_id: subscriptionId,
       resource_group: rg,
       cluster_name: clusterName,
+      ...(autoWarmup ? { auto_warmup: autoWarmup } : {}),
     }),
 
   stop: (subscriptionId: string, rg: string, clusterName: string) =>

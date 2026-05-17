@@ -133,8 +133,8 @@ curl http://127.0.0.1:18080/api/health/celery/result/<id>
 open http://127.0.0.1:18080/                                # SPA via api proxy
 ```
 
-> The compose api binds **18080** on the host, not 8080, to avoid clashing
-> with the workspace `api: start` task (8080) and `web: dev` task (8090).
+> The compose api binds **18080** on the host, not 8085, to avoid clashing
+> with the workspace `api: start` task (8085) and `web: dev` task (8090).
 > If 18080 is also taken on your machine, change the host-side port in
 > `docker-compose.full.yml`.
 

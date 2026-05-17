@@ -30,6 +30,8 @@ import {
   buildDiagnosticRunbookDraft,
   DEFAULT_DIAGNOSTIC_CONTEXT,
   DIAGNOSTIC_WORKFLOWS,
+  evaluateDiagnosticHardeningReview,
+  evaluateDiagnosticMaturity,
   getDiagnosticWorkflow,
   triageBlastOutfmt6,
   type ControlRole,
@@ -100,9 +102,31 @@ export function TerminalCockpit({
     () => analyzeDiagnosticTriage(diagnosticContext, blastTriage),
     [blastTriage, diagnosticContext],
   );
+  const hardeningReview = useMemo(
+    () => evaluateDiagnosticHardeningReview(command, diagnosticContext, blastTriage),
+    [blastTriage, command, diagnosticContext],
+  );
+  const maturity = useMemo(
+    () => evaluateDiagnosticMaturity(command, diagnosticContext, blastTriage),
+    [blastTriage, command, diagnosticContext],
+  );
+  const failedHardeningReview = hardeningReview.filter((item) => !item.passed);
+  const blockerCount = failedHardeningReview.filter((item) => item.severity === "blocker").length;
+  const warningCount = failedHardeningReview.filter((item) => item.severity === "warning").length;
+  const passedHardeningCount = hardeningReview.length - failedHardeningReview.length;
   const cockpitGuards = useMemo(
-    () => [...diagnosticGuards, ...triageGuards],
-    [diagnosticGuards, triageGuards],
+    () => [
+      ...diagnosticGuards,
+      ...triageGuards,
+      ...failedHardeningReview
+        .filter((item) => item.severity !== "advisory")
+        .slice(0, 8)
+        .map((item) => ({
+          level: item.severity === "blocker" ? "critical" as const : "warning" as const,
+          message: item.rationale,
+        })),
+    ],
+    [diagnosticGuards, failedHardeningReview, triageGuards],
   );
   const runbookDraft = useMemo(
     () => buildDiagnosticRunbookDraft(diagnosticContext, blastTriage, cockpitGuards),
@@ -121,7 +145,15 @@ export function TerminalCockpit({
   const guardedCount = INNOVATION_CAPABILITIES.filter((item) => item.status === "guarded").length;
   const foundationCount = INNOVATION_CAPABILITIES.filter((item) => item.status === "foundation").length;
   const insertCommand = normaliseCommandForTerminalInsert(command);
-  const canInsert = insertCommand.length > 0 && analysis.risk !== "high";
+  const terminalReady = connectionStatus === "connected";
+  const canInsert = terminalReady && insertCommand.length > 0 && analysis.risk !== "high";
+  const insertTitle = !terminalReady
+    ? "Terminal must be connected before running commands"
+    : insertCommand.length === 0
+      ? "Type a command before running it"
+      : analysis.risk === "high"
+        ? "High-risk commands must be copied and reviewed manually"
+        : "Insert and run the reviewed command";
 
   const updateDiagnosticContext = <K extends keyof DiagnosticSampleContext>(
     key: K,
@@ -190,7 +222,7 @@ export function TerminalCockpit({
             className="glass-button"
             onClick={() => onInsertCommand(insertCommand)}
             disabled={!canInsert}
-            title={canInsert ? "Insert the reviewed command" : "High-risk commands must be copied and reviewed manually"}
+            title={insertTitle}
           >
             <SendToBack size={13} strokeWidth={1.5} />
             Insert
@@ -328,6 +360,73 @@ export function TerminalCockpit({
             <strong>Interpretation</strong>
             {diagnosticWorkflow.interpretationChecks.map((check) => <small key={check}>{check}</small>)}
           </div>
+        </div>
+      </section>
+
+      <section className="terminal-cockpit__panel terminal-cockpit__panel--maturity">
+        <div className="terminal-cockpit__panel-title">
+          <Gauge size={14} strokeWidth={1.5} />
+          Maturity Ladder
+          <span className="terminal-cockpit__coverage-count">
+            Level {maturity.currentLevel}/10
+          </span>
+        </div>
+        <div className="terminal-cockpit__maturity-hero">
+          <strong>{maturity.nextLevel ? `Next: Level ${maturity.nextLevel.level}` : "Level 10 reached"}</strong>
+          <span>{maturity.nextLevel?.label ?? "Audit-Ready Evidence Package"}</span>
+          <small>{maturity.nextLevel?.critique ?? "No open level criteria remain for the current evidence package."}</small>
+        </div>
+        {maturity.nextActions.length > 0 && (
+          <div className="terminal-cockpit__maturity-actions">
+            {maturity.nextActions.map((action) => (
+              <span key={action}>{action}</span>
+            ))}
+          </div>
+        )}
+        <div className="terminal-cockpit__maturity-list" aria-label="Diagnostic maturity levels">
+          {maturity.levels.map((level) => (
+            <div className="terminal-cockpit__maturity-level" data-state={level.status} key={level.level}>
+              <span>{level.level}</span>
+              <div>
+                <strong>{level.label}</strong>
+                <small>{level.objective}</small>
+                {level.status === "current" && level.openCriteria.length > 0 && (
+                  <em>{level.openCriteria.join(" · ")}</em>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="terminal-cockpit__panel terminal-cockpit__panel--review">
+        <div className="terminal-cockpit__panel-title">
+          <FileSearch size={14} strokeWidth={1.5} />
+          Cold Review
+          <span className="terminal-cockpit__coverage-count">
+            {passedHardeningCount}/{hardeningReview.length} passed
+          </span>
+        </div>
+        <div className="terminal-cockpit__review-summary">
+          <span data-state={blockerCount > 0 ? "danger" : "success"}>{blockerCount} blockers</span>
+          <span data-state={warningCount > 0 ? "warning" : "success"}>{warningCount} warnings</span>
+          <span>{failedHardeningReview.length} open checks</span>
+        </div>
+        <div className="terminal-cockpit__review-list">
+          {failedHardeningReview.map((item) => (
+            <div className="terminal-cockpit__review-item" data-severity={item.severity} key={item.id}>
+              <span>{item.category}</span>
+              <strong>{item.label}</strong>
+              <small>{item.rationale}</small>
+            </div>
+          ))}
+          {failedHardeningReview.length === 0 && (
+            <div className="terminal-cockpit__review-item" data-severity="advisory">
+              <span>ready</span>
+              <strong>No open hardening checks</strong>
+              <small>The current command, context, and triage passed the Cockpit review checklist.</small>
+            </div>
+          )}
         </div>
       </section>
 

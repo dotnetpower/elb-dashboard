@@ -147,6 +147,8 @@ export const api = {
   getText: (path: string) => requestText(path),
   post: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "POST", body: JSON.stringify(body) }),
+  put: <T>(path: string, body: unknown) =>
+    request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
 
@@ -176,6 +178,7 @@ export function formatApiError(err: unknown, context?: string): string {
   if (!(err instanceof Error)) return String(err);
   const apiErr = err as Partial<ApiError>;
   const base = err.message || "Unknown error";
+  const structuredMessage = apiErrorMessage(apiErr.body);
 
   if (apiErr.status === 403) {
     const hint = (context && RBAC_HINTS[context]) || RBAC_HINTS["default"];
@@ -186,6 +189,9 @@ export function formatApiError(err: unknown, context?: string): string {
   }
   if (apiErr.status === 404) {
     return "Resource not found. It may have been deleted or not yet created.";
+  }
+  if (apiErr.status === 400 || apiErr.status === 409 || apiErr.status === 422) {
+    return structuredMessage ?? base;
   }
   if (apiErr.status === 500) {
     // Hide internal details; show a clean message with the original reason if short enough
@@ -208,6 +214,7 @@ export function formatApiError(err: unknown, context?: string): string {
         "This Lab Tool route has no backend implementation in this build yet."
       );
     }
+    if (structuredMessage) return structuredMessage;
     return "Service temporarily unavailable. The Function App may be starting up — try again in a moment.";
   }
   // Network errors
@@ -215,6 +222,38 @@ export function formatApiError(err: unknown, context?: string): string {
     return "Network error — check your internet connection or try again.";
   }
   return base;
+}
+
+function apiErrorMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  if ("message" in body && typeof body.message === "string") {
+    return body.message;
+  }
+  if ("detail" in body) {
+    const detail = body.detail;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail === "object") {
+      if ("message" in detail && typeof detail.message === "string") {
+        return detail.message;
+      }
+      if ("code" in detail && typeof detail.code === "string") {
+        return detail.code;
+      }
+    }
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((item) => {
+          if (!item || typeof item !== "object") return null;
+          const msg = "msg" in item && typeof item.msg === "string" ? item.msg : null;
+          const loc =
+            "loc" in item && Array.isArray(item.loc) ? item.loc.join(".") : null;
+          return msg ? (loc ? `${loc}: ${msg}` : msg) : null;
+        })
+        .filter((item): item is string => Boolean(item));
+      if (messages.length > 0) return messages.join("; ");
+    }
+  }
+  return null;
 }
 
 /** Check if an error is a 403 Forbidden. */

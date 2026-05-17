@@ -13,7 +13,7 @@ Examples:
   scripts/dev/local-run.sh web
   scripts/dev/local-run.sh worker
   scripts/dev/local-run.sh terminal-exec   # exec_server.py on 127.0.0.1:7682 so api/worker can run kubectl/az locally
-  scripts/dev/local-run.sh smoke -- --url http://127.0.0.1:8080
+  scripts/dev/local-run.sh smoke -- --url http://127.0.0.1:8085
   scripts/dev/local-run.sh compose-full -- up -d --build
 
 Environment defaults can be overridden before invoking the script.
@@ -45,6 +45,12 @@ with_celery_env() {
   export CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://127.0.0.1:6379/0}
   export CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://127.0.0.1:6379/1}
   export OPS_REDIS_URL=${OPS_REDIS_URL:-redis://127.0.0.1:6379/2}
+}
+
+with_local_storage_env() {
+  local storage_account=${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}
+  export AZURE_TABLE_ENDPOINT=${AZURE_TABLE_ENDPOINT:-https://${storage_account}.table.core.windows.net}
+  export AZURE_BLOB_ENDPOINT=${AZURE_BLOB_ENDPOINT:-https://${storage_account}.blob.core.windows.net}
 }
 
 # Default token + upstream so `local-run.sh api` and `local-run.sh worker`
@@ -96,22 +102,25 @@ case "$service" in
     with_common_env
     with_celery_env
     with_terminal_exec_env
+    with_local_storage_env
     export AUTH_DEV_BYPASS=${AUTH_DEV_BYPASS:-true}
     export ENABLE_DOCS=${ENABLE_DOCS:-true}
     export LOCAL_DEBUG_AUTO_OPEN_STORAGE=${LOCAL_DEBUG_AUTO_OPEN_STORAGE:-true}
     cd "$project_root/api"
-    exec "$run_with_log" api -- uv run uvicorn api.main:app --reload --reload-dir . --reload-exclude 'tests/*' --host 127.0.0.1 --port 8080 "$@"
+    exec "$run_with_log" api -- uv run uvicorn api.main:app --reload --reload-dir . --reload-exclude 'tests/*' --host 127.0.0.1 --port 8085 "$@"
     ;;
   worker)
     with_common_env
     with_celery_env
     with_terminal_exec_env
+    with_local_storage_env
     cd "$project_root"
     exec "$run_with_log" worker -- uv run celery -A api.celery_app worker -l info -Q default,acr,azure,blast,storage --concurrency=2 "$@"
     ;;
   beat)
     with_common_env
     with_celery_env
+    with_local_storage_env
     cd "$project_root"
     exec "$run_with_log" beat -- uv run celery -A api.celery_app beat -l info --schedule=/tmp/elb-celerybeat-schedule --pidfile=/tmp/elb-celerybeat.pid "$@"
     ;;
@@ -127,6 +136,12 @@ case "$service" in
     # can drive kubectl/az/azcopy without the docker-compose terminal sidecar.
     # Requires az/kubectl/azcopy on PATH (the exec_server's allowlist).
     with_terminal_exec_env
+    local_elb_root=${LOCAL_ELASTIC_BLAST_AZURE_ROOT:-$HOME/dev/elastic-blast-azure}
+    if [[ -x "$local_elb_root/venv/bin/elastic-blast" ]]; then
+      export PATH="$local_elb_root/venv/bin:$PATH"
+      export PYTHONPATH="$local_elb_root/src${PYTHONPATH:+:$PYTHONPATH}"
+    fi
+    export AZCOPY_AUTO_LOGIN_TYPE=${AZCOPY_AUTO_LOGIN_TYPE:-AZCLI}
     for bin in az kubectl azcopy; do
       if ! command -v "$bin" >/dev/null 2>&1; then
         echo "ERROR: '$bin' not found on PATH — install it before running terminal-exec." >&2
@@ -138,7 +153,7 @@ case "$service" in
     ;;
   smoke)
     cd "$project_root"
-    exec "$run_with_log" smoke -- uv run python scripts/dev/smoke_api.py --url http://127.0.0.1:8080 "$@"
+    exec "$run_with_log" smoke -- uv run python scripts/dev/smoke_api.py --url http://127.0.0.1:8085 "$@"
     ;;
   compose-full)
     exec "$compose_with_log" full "$@"

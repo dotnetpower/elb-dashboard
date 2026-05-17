@@ -15,6 +15,10 @@ The Browser Terminal needs to be more than a raw shell for non-Linux researchers
 - Added molecular-diagnostic workflow presets for Pathogen ID, 16S / ITS ID, AMR gene screening, primer specificity, and custom DB validation.
 - Added sample context fields, control-sample awareness, diagnostic guard warnings, BLAST outfmt 6 triage, and evidence-summary runbook copy.
 - Added privacy and interpretation hardening: sample IDs that look identifying are blocked by a critical guard, NTC / negative-control hits are flagged, and generated summaries explicitly remain evidence summaries rather than diagnostic conclusions.
+- Added a Cold Review panel with 30+ molecular-diagnostic hardening checks across sample context, controls, input QC, database provenance, command shape, BLAST triage, interpretation boundaries, reporting, and operations.
+- The Cold Review turns critique into actionable open checks instead of treating the terminal as "optimal" by default.
+- Added a 1-10 Maturity Ladder so the terminal improves stepwise from raw shell usage to an audit-ready molecular-diagnostic evidence package.
+- The ladder exposes the next level, the critique for that level, and the specific open criteria instead of skipping directly from level 1 to level 10.
 
 ## API / IaC diff summary
 
@@ -24,6 +28,6 @@ The Browser Terminal needs to be more than a raw shell for non-Linux researchers
 
 ## Validation evidence
 
-- `cd web && npm run test -- src/pages/terminal/terminalDiagnosticModel.test.ts src/pages/terminal/terminalCockpitModel.test.ts src/pages/terminal/wheelScroll.test.ts src/pages/remoteTerminalProtocol.test.ts` -> 4 files / 22 tests passed.
+- `cd web && npm run test -- src/pages/terminal/terminalDiagnosticModel.test.ts src/pages/terminal/terminalCockpitModel.test.ts src/pages/remoteTerminalProtocol.test.ts` -> 3 files / 24 tests passed, including the 30+ Cold Review checklist and 1-10 Maturity Ladder coverage.
 - `cd web && npm run build` -> passed.
-- Browser smoke at `http://127.0.0.1:8090/terminal` confirmed the Cockpit panel, Command Preview, Diagnostic Context, Diagnostic Guards, BLAST Result Triage, Workflow Palette, Session Chapters, Innovation Coverage, and terminal frame render together without overlap.
+- Browser smoke at `http://127.0.0.1:18080/terminal` confirmed the Cockpit panel, Command Preview, Diagnostic Context, Diagnostic Guards, Maturity Ladder, Cold Review, BLAST Result Triage, Workflow Palette, Session Chapters, Innovation Coverage, and terminal frame render together without overlap.

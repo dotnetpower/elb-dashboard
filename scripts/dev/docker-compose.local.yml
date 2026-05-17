@@ -9,11 +9,11 @@
 #   scripts/dev/local-run.sh compose-local -- up -d --build  # detached + log follower
 #
 # Then:
-#   curl http://127.0.0.1:8080/api/health      # 200 from api
+#   curl http://127.0.0.1:8085/api/health      # 200 from api
 #   curl http://127.0.0.1:8081/                # 200 SPA from frontend
 #
 # Phase 2 will extend this compose with worker, beat, redis, and terminal
-# sidecars and switch the api to act as the single ingress port (8080) that
+# sidecars and switch the api to act as the single ingress port (8085 on host) that
 # proxies non-/api/* traffic to the frontend.
 
 services:
@@ -30,7 +30,7 @@ services:
       LOG_LEVEL: DEBUG
       ENABLE_DOCS: "true"
     ports:
-      - "8080:8080"
+      - "8085:8080"
 
   frontend:
     build:

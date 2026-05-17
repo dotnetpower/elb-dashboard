@@ -8,7 +8,7 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}/opt/elb/elastic-blast-azure/src"
 export AZCOPY_AUTO_LOGIN_TYPE="${AZCOPY_AUTO_LOGIN_TYPE:-AZCLI}"
 export ELB_SKIP_DB_VERIFY="${ELB_SKIP_DB_VERIFY:-true}"
 export ELB_DISABLE_AUTO_SHUTDOWN="${ELB_DISABLE_AUTO_SHUTDOWN:-1}"
-export PATH="/opt/elb/venv/bin:$PATH"
+export PATH="/opt/elb/venv/bin:/opt/elb/elastic-blast-azure/bin:$PATH"
 
 if [[ $- == *i* && -z "${ELB_MOTD_SHOWN:-}" ]]; then
   export ELB_MOTD_SHOWN=1

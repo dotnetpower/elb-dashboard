@@ -6,6 +6,9 @@ import {
   buildDiagnosticRunbookDraft,
   DEFAULT_DIAGNOSTIC_CONTEXT,
   DIAGNOSTIC_WORKFLOWS,
+  evaluateDiagnosticHardeningReview,
+  evaluateDiagnosticMaturity,
+  getDiagnosticHardeningCheckCount,
   parseBlastOutfmt6,
   triageBlastOutfmt6,
 } from "./terminalDiagnosticModel";
@@ -123,5 +126,110 @@ describe("terminal diagnostic model", () => {
 
     expect(draft).toContain("Sample: S-001");
     expect(draft).toContain("Interpretation boundary: this is an evidence summary, not a diagnostic conclusion.");
+  });
+
+  it("keeps at least thirty cold-review hardening checks active", () => {
+    expect(getDiagnosticHardeningCheckCount()).toBeGreaterThanOrEqual(30);
+  });
+
+  it("turns the cold-review critique into actionable failed checks", () => {
+    const triage = triageBlastOutfmt6("", "pathogen-id");
+    const review = evaluateDiagnosticHardeningReview(
+      "blastn -query query.fa -db nt -out hits.tsv",
+      DEFAULT_DIAGNOSTIC_CONTEXT,
+      triage,
+    );
+
+    expect(review.length).toBeGreaterThanOrEqual(30);
+    expect(review.filter((item) => !item.passed).map((item) => item.id)).toEqual(
+      expect.arrayContaining([
+        "sample-id-present",
+        "organism-group-recorded",
+        "database-versioned",
+        "blast-tabular-qcovs",
+        "top-hit-present",
+      ]),
+    );
+    expect(review).toContainEqual(
+      expect.objectContaining({ id: "sample-id-deidentified", passed: true }),
+    );
+  });
+
+  it("marks identifying sample ids and negative-control hits as blockers", () => {
+    const triage = triageBlastOutfmt6(
+      "q1\tspeciesA\t99.5\t1450\t0\t0\t1\t1450\t1\t1450\t1e-100\t500\t98",
+      "pathogen-id",
+    );
+    const review = evaluateDiagnosticHardeningReview(
+      "blastn -query query.fa -db nt -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qcovs' -max_target_seqs 10 -out hits.tsv",
+      { ...DEFAULT_DIAGNOSTIC_CONTEXT, sampleId: "patient-12345678", controlRole: "negative-control" },
+      triage,
+    );
+
+    expect(review).toContainEqual(
+      expect.objectContaining({ id: "sample-id-deidentified", severity: "blocker", passed: false }),
+    );
+    expect(review).toContainEqual(
+      expect.objectContaining({ id: "ntc-no-hits", severity: "blocker", passed: false }),
+    );
+  });
+
+  it("stages maturity as a ten-level ladder instead of jumping to audit-ready", () => {
+    const maturity = evaluateDiagnosticMaturity(
+      "az account show -o table",
+      DEFAULT_DIAGNOSTIC_CONTEXT,
+      triageBlastOutfmt6("", "pathogen-id"),
+    );
+
+    expect(maturity.levels).toHaveLength(10);
+    expect(maturity.currentLevel).toBe(2);
+    expect(maturity.nextLevel).toMatchObject({ level: 3, label: "Sample Context" });
+    expect(maturity.nextActions).toEqual(
+      expect.arrayContaining(["Sample id is present and de-identified"]),
+    );
+  });
+
+  it("does not let a QC-only command pass the reviewable BLAST command level", () => {
+    const maturity = evaluateDiagnosticMaturity(
+      "seqkit stats query.fa",
+      {
+        ...DEFAULT_DIAGNOSTIC_CONTEXT,
+        sampleId: "S-001",
+        organismGroup: "Respiratory bacteria",
+        database: "nt release 2026-05",
+      },
+      triageBlastOutfmt6("", "pathogen-id"),
+    );
+
+    expect(maturity.currentLevel).toBe(6);
+    expect(maturity.nextLevel).toMatchObject({ level: 7, label: "Reviewable BLAST Command" });
+    expect(maturity.nextActions).toContain("A BLAST command is being reviewed");
+  });
+
+  it("reaches level ten only with context, QC, database provenance, triage, and reproducibility metadata", () => {
+    const command = [
+      "seqkit stats query.fa",
+      "blastn -version",
+      "az account show -o table",
+      "blastn -query query.fa -db nt -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qcovs' -max_target_seqs 10 -out hits.tsv",
+    ].join(" && ");
+    const triage = triageBlastOutfmt6(
+      "q1\tspeciesA\t99.5\t1450\t0\t0\t1\t1450\t1\t1450\t1e-100\t500\t98",
+      "pathogen-id",
+    );
+    const maturity = evaluateDiagnosticMaturity(
+      command,
+      {
+        ...DEFAULT_DIAGNOSTIC_CONTEXT,
+        sampleId: "S-001",
+        organismGroup: "Respiratory bacteria",
+        database: "nt release 2026-05",
+      },
+      triage,
+    );
+
+    expect(maturity.currentLevel).toBe(10);
+    expect(maturity.nextLevel).toBeNull();
+    expect(maturity.nextActions).toEqual([]);
   });
 });

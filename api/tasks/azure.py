@@ -7,24 +7,25 @@ assignments. All tasks are idempotent.
 from __future__ import annotations
 
 import logging
-import time
+from datetime import UTC
 from typing import Any
 
 from celery import shared_task
 
+from api.services import get_credential
 from api.services.azure_clients import (
     acr_client,
     aks_client,
-    resource_client,
+    storage_client,
 )
-from api.services import get_credential
 
 LOGGER = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    from datetime import datetime
+
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 @shared_task(name="api.tasks.azure.diag_noop", bind=True, max_retries=0)
@@ -38,6 +39,7 @@ def _update_state(task_id: str, phase: str, status: str = "running", **extra: An
     """Best-effort state update to the job state repo."""
     try:
         from api.services.state_repo import JobStateRepository
+
         repo = JobStateRepository()
         state = repo.get(task_id)
         if state:
@@ -51,6 +53,74 @@ def _update_state(task_id: str, phase: str, status: str = "running", **extra: An
             repo.append_history(task_id, {"phase": phase, "status": status, **extra})
     except Exception as exc:
         LOGGER.warning("state update failed for %s: %s", task_id, exc)
+
+
+def _build_cluster_params(
+    *,
+    region: str,
+    cluster_name: str,
+    sys_sku: str,
+    sys_count: int,
+    blast_sku: str,
+    blast_count: int,
+    caller_oid: str,
+) -> Any:
+    """Build the AKS managed cluster model used by the provision task."""
+    from azure.mgmt.containerservice.models import (
+        ManagedCluster,
+        ManagedClusterAgentPoolProfile,
+        ManagedClusterIdentity,
+        ManagedClusterStorageProfile,
+        ManagedClusterStorageProfileBlobCSIDriver,
+    )
+
+    # Mirror the sibling constants exactly so kubectl manifests that
+    # reference the pool name/label/taint stay valid.
+    SYSTEM_POOL_NAME = "systempool"
+    BLAST_POOL_NAME = "blastpool"
+    BLAST_LABEL_KEY = "workload"
+    BLAST_LABEL_VALUE = "blast"
+    BLAST_TAINT = f"{BLAST_LABEL_KEY}={BLAST_LABEL_VALUE}:NoSchedule"
+    SYSTEM_TAINT = "CriticalAddonsOnly=true:NoSchedule"
+
+    return ManagedCluster(
+        location=region,
+        identity=ManagedClusterIdentity(type="SystemAssigned"),
+        dns_prefix=cluster_name,
+        storage_profile=ManagedClusterStorageProfile(
+            blob_csi_driver=ManagedClusterStorageProfileBlobCSIDriver(enabled=True)
+        ),
+        agent_pool_profiles=[
+            ManagedClusterAgentPoolProfile(
+                name=SYSTEM_POOL_NAME,
+                count=sys_count,
+                vm_size=sys_sku,
+                os_type="Linux",
+                mode="System",
+                type="VirtualMachineScaleSets",
+                enable_auto_scaling=False,
+                node_taints=[SYSTEM_TAINT],
+            ),
+            ManagedClusterAgentPoolProfile(
+                name=BLAST_POOL_NAME,
+                count=blast_count,
+                vm_size=blast_sku,
+                os_type="Linux",
+                mode="User",
+                type="VirtualMachineScaleSets",
+                enable_auto_scaling=False,
+                node_labels={BLAST_LABEL_KEY: BLAST_LABEL_VALUE},
+                node_taints=[BLAST_TAINT],
+            ),
+        ],
+        tags={
+            "app": "elastic-blast",
+            "managedBy": "elb-dashboard",
+            "owner": caller_oid or "unknown",
+            "elb-system-pool": SYSTEM_POOL_NAME,
+            "elb-blast-pool": BLAST_POOL_NAME,
+        },
+    )
 
 
 @shared_task(
@@ -107,18 +177,20 @@ def provision_aks(
     sys_sku = system_vm_size or DEFAULT_SYSTEM_SKU
     blast_sku = node_sku or DEFAULT_SKU
     if not is_allowed(sys_sku):
-        LOGGER.warning("system_vm_size %r not in allow-list; falling back to %s",
-                       sys_sku, DEFAULT_SYSTEM_SKU)
+        LOGGER.warning(
+            "system_vm_size %r not in allow-list; falling back to %s", sys_sku, DEFAULT_SYSTEM_SKU
+        )
         sys_sku = DEFAULT_SYSTEM_SKU
     if not is_allowed(blast_sku):
-        LOGGER.warning("node_sku %r not in allow-list; falling back to %s",
-                       blast_sku, DEFAULT_SKU)
+        LOGGER.warning("node_sku %r not in allow-list; falling back to %s", blast_sku, DEFAULT_SKU)
         blast_sku = DEFAULT_SKU
     sys_role = SKU_BY_NAME[sys_sku].role
     if sys_role not in ("system", "both"):
         LOGGER.warning(
-            "system_vm_size %r is flagged role=%s (expected system/both); "
-            "falling back to %s", sys_sku, sys_role, DEFAULT_SYSTEM_SKU,
+            "system_vm_size %r is flagged role=%s (expected system/both); falling back to %s",
+            sys_sku,
+            sys_role,
+            DEFAULT_SYSTEM_SKU,
         )
         sys_sku = DEFAULT_SYSTEM_SKU
     sys_count = max(1, min(int(system_node_count or 1), 3))
@@ -127,82 +199,54 @@ def provision_aks(
     cred = get_credential()
     aks = aks_client(cred, subscription_id)
 
-    # Build cluster parameters
-    from azure.mgmt.containerservice.models import (
-        ManagedCluster,
-        ManagedClusterAgentPoolProfile,
-        ManagedClusterIdentity,
-    )
-
-    # Mirror the sibling constants exactly so kubectl manifests that
-    # reference the pool name/label/taint stay valid.
     SYSTEM_POOL_NAME = "systempool"
     BLAST_POOL_NAME = "blastpool"
-    BLAST_LABEL_KEY = "workload"
-    BLAST_LABEL_VALUE = "blast"
-    BLAST_TAINT = f"{BLAST_LABEL_KEY}={BLAST_LABEL_VALUE}:NoSchedule"
-    SYSTEM_TAINT = "CriticalAddonsOnly=true:NoSchedule"
 
-    cluster_params = ManagedCluster(
-        location=region,
-        identity=ManagedClusterIdentity(type="SystemAssigned"),
-        dns_prefix=cluster_name,
-        agent_pool_profiles=[
-            ManagedClusterAgentPoolProfile(
-                name=SYSTEM_POOL_NAME,
-                count=sys_count,
-                vm_size=sys_sku,
-                os_type="Linux",
-                mode="System",
-                type="VirtualMachineScaleSets",
-                enable_auto_scaling=False,
-                node_taints=[SYSTEM_TAINT],
-            ),
-            ManagedClusterAgentPoolProfile(
-                name=BLAST_POOL_NAME,
-                count=blast_count,
-                vm_size=blast_sku,
-                os_type="Linux",
-                mode="User",
-                type="VirtualMachineScaleSets",
-                enable_auto_scaling=False,
-                node_labels={BLAST_LABEL_KEY: BLAST_LABEL_VALUE},
-                node_taints=[BLAST_TAINT],
-            ),
-        ],
-        tags={
-            "app": "elastic-blast",
-            "managedBy": "elb-dashboard",
-            "owner": caller_oid or "unknown",
-            "elb-system-pool": SYSTEM_POOL_NAME,
-            "elb-blast-pool": BLAST_POOL_NAME,
-        },
+    cluster_params = _build_cluster_params(
+        region=region,
+        cluster_name=cluster_name,
+        sys_sku=sys_sku,
+        sys_count=sys_count,
+        blast_sku=blast_sku,
+        blast_count=blast_count,
+        caller_oid=caller_oid,
     )
 
     _update_state(job_id, "arm_create_or_update")
     try:
         poller = aks.managed_clusters.begin_create_or_update(
-            resource_group, cluster_name, cluster_params,
+            resource_group,
+            cluster_name,
+            cluster_params,
         )
         # Poll until done (this can take 5-10 minutes)
         result = poller.result()
         LOGGER.info(
             "AKS cluster %s provisioned: state=%s system=%s\u00d7%s blast=%s\u00d7%s",
-            cluster_name, result.provisioning_state,
-            sys_sku, sys_count, blast_sku, blast_count,
+            cluster_name,
+            result.provisioning_state,
+            sys_sku,
+            sys_count,
+            blast_sku,
+            blast_count,
         )
     except Exception as exc:
         _update_state(job_id, "failed", status="failed", error_code=str(exc)[:500])
         raise
 
-    # Attach ACR if specified
-    if acr_name and acr_resource_group:
-        _update_state(job_id, "attaching_acr")
-        try:
-            _attach_acr(cred, subscription_id, resource_group, cluster_name, acr_resource_group, acr_name)
-        except Exception as exc:
-            LOGGER.warning("ACR attach failed (non-fatal): %s", exc)
-            _update_state(job_id, "acr_attach_failed_nonfatal")
+    _update_state(job_id, "ensuring_rbac")
+    rbac_summary = _ensure_aks_runtime_rbac(
+        cred,
+        subscription_id,
+        resource_group,
+        cluster_name,
+        acr_resource_group=acr_resource_group,
+        acr_name=acr_name,
+        storage_resource_group=storage_resource_group or resource_group,
+        storage_account=storage_account,
+    )
+    if rbac_summary["roles_failed"]:
+        _update_state(job_id, "rbac_ensure_failed_nonfatal", rbac=rbac_summary)
 
     _update_state(job_id, "completed", status="completed")
     return {
@@ -212,6 +256,8 @@ def provision_aks(
         "node_sku": blast_sku,
         "system_node_count": sys_count,
         "system_vm_size": sys_sku,
+        "roles_assigned": rbac_summary["roles_assigned"],
+        "roles_failed": rbac_summary["roles_failed"],
         "pools": [
             {"name": SYSTEM_POOL_NAME, "mode": "System", "vm_size": sys_sku, "count": sys_count},
             {"name": BLAST_POOL_NAME, "mode": "User", "vm_size": blast_sku, "count": blast_count},
@@ -229,6 +275,7 @@ def _attach_acr(
 ) -> None:
     """Grant AcrPull to the AKS kubelet identity on the ACR."""
     from azure.mgmt.authorization import AuthorizationManagementClient
+    from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
 
     aks_cl = aks_client(cred, subscription_id)
     cluster = aks_cl.managed_clusters.get(resource_group, cluster_name)
@@ -248,20 +295,25 @@ def _attach_acr(
     # AcrPull role definition ID (well-known)
     acr_pull_role = "7f951dda-4ed3-4680-a7ca-43fe172d538d"
 
-    auth_cl = AuthorizationManagementClient(cred, subscription_id)
     import uuid
-    role_assignment_id = str(uuid.uuid4())
+
+    auth_cl = AuthorizationManagementClient(cred, subscription_id)
+    role_definition_id = (
+        f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/"
+        f"roleDefinitions/{acr_pull_role}"
+    )
+    role_assignment_id = str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"{acr_scope}|{kubelet_oid}|{acr_pull_role}")
+    )
     try:
         auth_cl.role_assignments.create(
             scope=acr_scope,
             role_assignment_name=role_assignment_id,
-            parameters={
-                "properties": {
-                    "role_definition_id": f"{acr_scope}/providers/Microsoft.Authorization/roleDefinitions/{acr_pull_role}",
-                    "principal_id": kubelet_oid,
-                    "principal_type": "ServicePrincipal",
-                }
-            },
+            parameters=RoleAssignmentCreateParameters(
+                role_definition_id=role_definition_id,
+                principal_id=kubelet_oid,
+                principal_type="ServicePrincipal",
+            ),
         )
         LOGGER.info("AcrPull role assigned to %s on %s", kubelet_oid, acr_name)
     except Exception as exc:
@@ -269,6 +321,115 @@ def _attach_acr(
             LOGGER.info("AcrPull role already assigned")
         else:
             raise
+
+
+def _grant_storage_blob_contributor_to_aks(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    storage_resource_group: str,
+    storage_account: str,
+) -> None:
+    """Grant Storage Blob Data Contributor to the AKS kubelet identity."""
+    from azure.mgmt.authorization import AuthorizationManagementClient
+    from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
+
+    aks_cl = aks_client(cred, subscription_id)
+    cluster = aks_cl.managed_clusters.get(resource_group, cluster_name)
+
+    kubelet_oid = None
+    if cluster.identity_profile and "kubeletidentity" in cluster.identity_profile:
+        kubelet_oid = cluster.identity_profile["kubeletidentity"].object_id
+
+    if not kubelet_oid:
+        LOGGER.warning("No kubelet identity found, skipping Storage Blob Data Contributor")
+        return
+
+    storage = storage_client(cred, subscription_id).storage_accounts.get_properties(
+        storage_resource_group,
+        storage_account,
+    )
+    storage_scope = storage.id
+    blob_contributor_role = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+
+    import uuid
+
+    auth_cl = AuthorizationManagementClient(cred, subscription_id)
+    role_definition_id = (
+        f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/"
+        f"roleDefinitions/{blob_contributor_role}"
+    )
+    role_assignment_id = str(
+        uuid.uuid5(uuid.NAMESPACE_URL, f"{storage_scope}|{kubelet_oid}|{blob_contributor_role}")
+    )
+    try:
+        auth_cl.role_assignments.create(
+            scope=storage_scope,
+            role_assignment_name=role_assignment_id,
+            parameters=RoleAssignmentCreateParameters(
+                role_definition_id=role_definition_id,
+                principal_id=kubelet_oid,
+                principal_type="ServicePrincipal",
+            ),
+        )
+        LOGGER.info(
+            "Storage Blob Data Contributor role assigned to %s on %s",
+            kubelet_oid,
+            storage_account,
+        )
+    except Exception as exc:
+        if "RoleAssignmentExists" in str(exc):
+            LOGGER.info("Storage Blob Data Contributor role already assigned")
+        else:
+            raise
+
+
+def _ensure_aks_runtime_rbac(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    *,
+    acr_resource_group: str = "",
+    acr_name: str = "",
+    storage_resource_group: str = "",
+    storage_account: str = "",
+) -> dict[str, Any]:
+    """Best-effort runtime RBAC ensure for the AKS kubelet identity."""
+    roles_assigned: list[str] = []
+    roles_failed: dict[str, str] = {}
+
+    if acr_name and acr_resource_group:
+        try:
+            _attach_acr(
+                cred, subscription_id, resource_group, cluster_name, acr_resource_group, acr_name
+            )
+            roles_assigned.append("AcrPull")
+        except Exception as exc:
+            LOGGER.warning("AcrPull assignment failed (non-fatal): %s", exc)
+            roles_failed["AcrPull"] = str(exc)[:300]
+
+    if storage_account and storage_resource_group:
+        try:
+            _grant_storage_blob_contributor_to_aks(
+                cred,
+                subscription_id,
+                resource_group,
+                cluster_name,
+                storage_resource_group,
+                storage_account,
+            )
+            roles_assigned.append("Storage Blob Data Contributor")
+        except Exception as exc:
+            LOGGER.warning("Storage Blob Data Contributor assignment failed (non-fatal): %s", exc)
+            roles_failed["Storage Blob Data Contributor"] = str(exc)[:300]
+
+    return {
+        "cluster_name": cluster_name,
+        "roles_assigned": roles_assigned,
+        "roles_failed": roles_failed,
+    }
 
 
 @shared_task(
@@ -286,14 +447,49 @@ def start_aks(
     subscription_id: str,
     resource_group: str,
     cluster_name: str,
+    auto_warmup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Start a stopped AKS cluster."""
+    """Start a stopped AKS cluster.
+
+    Side effects: starts the AKS control plane/node pools. When an Auto warm
+    preference is supplied, persists it and queues storage warmup reconciliation
+    after AKS start completes so the browser can be refreshed safely.
+    """
     cred = get_credential()
     aks = aks_client(cred, subscription_id)
     poller = aks.managed_clusters.begin_start(resource_group, cluster_name)
     poller.result()
     LOGGER.info("AKS cluster %s started", cluster_name)
-    return {"cluster_name": cluster_name, "action": "start", "status": "completed"}
+    auto_warmup_task_id = ""
+    if auto_warmup:
+        try:
+            from api.celery_app import celery_app
+            from api.services.auto_warmup import (
+                normalise_preference,
+                save_auto_warmup_preference,
+            )
+
+            pref_payload = {
+                **auto_warmup,
+                "subscription_id": subscription_id,
+                "resource_group": resource_group,
+                "cluster_name": cluster_name,
+            }
+            pref = save_auto_warmup_preference(normalise_preference(pref_payload))
+            task = celery_app.send_task(
+                "api.tasks.storage.reconcile_auto_warmup",
+                kwargs={"preference": pref.to_dict(), "force": True},
+                queue="storage",
+            )
+            auto_warmup_task_id = task.id
+        except Exception as exc:
+            LOGGER.warning("auto warm reconcile enqueue failed after AKS start: %s", exc)
+    return {
+        "cluster_name": cluster_name,
+        "action": "start",
+        "status": "completed",
+        "auto_warmup_task_id": auto_warmup_task_id,
+    }
 
 
 @shared_task(
@@ -355,20 +551,19 @@ def assign_aks_roles(
     cluster_name: str,
     acr_resource_group: str = "",
     acr_name: str = "",
+    storage_resource_group: str = "",
+    storage_account: str = "",
 ) -> dict[str, Any]:
-    """Assign RBAC roles (AcrPull, Storage Blob Data Contributor) to AKS kubelet."""
+    """Assign runtime RBAC roles to the AKS kubelet identity."""
     cred = get_credential()
-    roles_assigned: list[str] = []
-
-    if acr_name and acr_resource_group:
-        try:
-            _attach_acr(cred, subscription_id, resource_group, cluster_name, acr_resource_group, acr_name)
-            roles_assigned.append("AcrPull")
-        except Exception as exc:
-            LOGGER.warning("AcrPull assignment failed: %s", exc)
-
-    return {
-        "cluster_name": cluster_name,
-        "roles_assigned": roles_assigned,
-        "status": "completed",
-    }
+    summary = _ensure_aks_runtime_rbac(
+        cred,
+        subscription_id,
+        resource_group,
+        cluster_name,
+        acr_resource_group=acr_resource_group,
+        acr_name=acr_name,
+        storage_resource_group=storage_resource_group or resource_group,
+        storage_account=storage_account,
+    )
+    return {**summary, "status": "completed"}

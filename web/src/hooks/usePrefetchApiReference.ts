@@ -23,6 +23,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { aksApi, monitoringApi } from "@/api/endpoints";
 import { SVC_NAME } from "@/pages/apiReference/constants";
+import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 interface PrefetchInput {
   /** Active subscription. Empty string skips the prefetch. */
@@ -70,14 +71,11 @@ export function usePrefetchApiReference(cfg: PrefetchInput): void {
 
       // After (1) lands the cluster name shows up in the cache; chain
       // (3) and (4) onto it so they can run before the user navigates.
-      const clustersData = qc.getQueryData<{ clusters?: { name: string; power_state?: string }[] }>([
-        "aks",
-        sub,
-        rg,
-      ]);
+      const clustersData = qc.getQueryData<{
+        clusters?: { name: string; power_state?: string; provisioning_state?: string }[];
+      }>(["aks", sub, rg]);
       const clusterName = clustersData?.clusters?.[0]?.name;
-      const clusterRunning =
-        !clustersData?.clusters?.[0]?.power_state || clustersData.clusters[0].power_state === "Running";
+      const clusterRunning = isAksWorkloadReady(clustersData?.clusters?.[0]);
       if (!clusterName || !clusterRunning) return;
 
       try {

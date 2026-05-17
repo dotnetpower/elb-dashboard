@@ -51,6 +51,8 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
     assert response.json()["job_id"] == "aaaaaaaaaaaa"
     assert captured["submission_source"] == "external_api"
     assert "external_correlation_id" not in captured
+    assert captured["taxid"] == 3431483
+    assert captured["is_inclusive"] is False
     assert captured["options"]["outfmt"] == 5
     assert captured["batch_len"] == 462
     assert "caller_oid" not in captured
@@ -235,6 +237,35 @@ def test_canonical_jobs_list_merges_external_when_table_unconfigured(monkeypatch
     assert body["jobs"][0]["job_id"] == "aaaaaaaaaaaa"
     assert body["jobs"][0]["source"] == "external_api"
     assert body["jobs"][0]["infrastructure"] == {"cluster_name": "elb-cluster"}
+    assert "degraded" not in body
+
+
+def test_canonical_jobs_list_reports_external_detail_code(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast, state_repo
+
+    class EmptyRepo:
+        def list_for_owner(self, *_args, **_kwargs):
+            return []
+
+    def list_jobs_unavailable():
+        raise HTTPException(
+            503,
+            detail={"code": "openapi_not_configured", "message": "ELB_OPENAPI_BASE_URL is not set"},
+        )
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", EmptyRepo)
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs_unavailable)
+    client = TestClient(app)
+
+    response = client.get("/api/blast/jobs")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["jobs"] == []
+    assert body["external_degraded"] is True
+    assert body["external_degraded_reason"] == "openapi_not_configured"
     assert "degraded" not in body
 
 

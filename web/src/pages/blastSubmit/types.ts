@@ -1,6 +1,6 @@
 import type { RefObject } from "react";
 
-import type { BlastDatabase } from "@/api/endpoints";
+import type { BlastDatabase, WarmupDbInfo } from "@/api/endpoints";
 import type { FormState, PROGRAMS } from "@/pages/blastSubmitModel";
 
 export type SetBlastField = <K extends keyof FormState>(key: K, value: FormState[K]) => void;
@@ -30,7 +30,14 @@ export interface DatabaseSectionProps {
   set: SetBlastField;
   programMeta: ProgramMeta;
   databases?: BlastDatabase[];
+  warmDbs?: Map<string, WarmupDbInfo>;
+  warmupKnown: boolean;
   dbWarning: string | null;
   dbMissingFromStorage: boolean;
   dbBaseName: string;
+}
+
+export interface TaxonomyFilterSectionProps {
+  form: FormState;
+  set: SetBlastField;
 }

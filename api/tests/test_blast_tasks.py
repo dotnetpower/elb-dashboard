@@ -55,7 +55,12 @@ def test_build_config_content_targets_existing_cluster_and_storage_urls() -> Non
         program="blastn",
         database="pdbnt",
         query_file="queries/input.fa",
-        options={"machine_type": "Standard_E32s_v5", "num_nodes": 2},
+        options={
+            "acr_name": "elbacr01",
+            "acr_resource_group": "rg-elbacr-01",
+            "machine_type": "Standard_E32s_v5",
+            "num_nodes": 2,
+        },
     )
 
     cfg = _parse_ini(content)
@@ -63,9 +68,12 @@ def test_build_config_content_targets_existing_cluster_and_storage_urls() -> Non
     assert cfg.get("cluster", "name") == "aks-elb"
     assert cfg.get("cluster", "machine-type") == "Standard_E32s_v5"
     assert cfg.get("cluster", "num-nodes") == "2"
+    assert cfg.get("cluster", "reuse") == "true"
+    assert cfg.get("cloud-provider", "azure-acr-name") == "elbacr01"
+    assert cfg.get("cloud-provider", "azure-acr-resource-group") == "rg-elbacr-01"
     assert cfg.get("blast", "db") == "https://stelb.blob.core.windows.net/blast-db/pdbnt/pdbnt"
     assert cfg.get("blast", "queries") == "https://stelb.blob.core.windows.net/queries/input.fa"
-    assert cfg.get("blast", "results") == "https://stelb.blob.core.windows.net/results"
+    assert cfg.get("blast", "results") == "https://stelb.blob.core.windows.net/results/job-123"
     assert cfg.get("cloud-provider", "azure-storage-account-container") == "blast-db"
 
 
@@ -97,13 +105,12 @@ def test_build_config_content_rejects_relative_path_traversal() -> None:
         )
 
 
-def test_elastic_blast_argv_uses_stdin_json_and_idempotency() -> None:
+def test_elastic_blast_argv_uses_cfg_file() -> None:
     argv = blast._elastic_blast_argv("submit", "abc-123")
 
-    assert argv[:4] == ["elastic-blast", "submit", "--cfg", "-"]
-    assert "--json" in argv
-    assert argv[argv.index("--idempotency-key") + 1] == "abc-123"
-    assert argv[argv.index("--correlation-id") + 1] == "abc-123"
+    assert argv == ["elastic-blast", "submit", "--cfg", "elastic-blast.ini"]
+    assert "--json" not in argv
+    assert "--idempotency-key" not in argv
     assert "bash" not in argv
 
 
@@ -197,9 +204,7 @@ def test_extract_db_name_handles_every_input_shape() -> None:
     assert blast._extract_db_name("blast-db/core_nt") == "core_nt"
     assert blast._extract_db_name("blast-db/core_nt/core_nt") == "core_nt"
     assert (
-        blast._extract_db_name(
-            "https://elbstg01.blob.core.windows.net/blast-db/core_nt/core_nt"
-        )
+        blast._extract_db_name("https://elbstg01.blob.core.windows.net/blast-db/core_nt/core_nt")
         == "core_nt"
     )
     assert blast._extract_db_name("") == ""
@@ -213,9 +218,7 @@ def test_build_config_auto_resolves_metadata_but_does_not_shard_by_default(monke
         "shard_sets": [1, 2, 3, 4, 5, 6, 8, 10],
         "total_bytes": 269 * 1024**3,
     }
-    monkeypatch.setattr(
-        blast, "_resolve_db_metadata", lambda *a, **k: fake_meta
-    )
+    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -241,9 +244,7 @@ def test_build_config_approximate_sharding_opt_in_injects_partitions(monkeypatch
         "total_bytes": 269 * 1024**3,
         "total_letters": 123_456_789,
     }
-    monkeypatch.setattr(
-        blast, "_resolve_db_metadata", lambda *a, **k: fake_meta
-    )
+    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -262,8 +263,7 @@ def test_build_config_approximate_sharding_opt_in_injects_partitions(monkeypatch
     # 269 GB on E16 (128 GB) → memory floor 5; nodes=5 → preset 5
     assert cfg.get("blast", "db-partitions") == "5"
     assert cfg.get("blast", "db-partition-prefix") == (
-        "https://elbstg01.blob.core.windows.net/blast-db/"
-        "5shards/core_nt_shard_"
+        "https://elbstg01.blob.core.windows.net/blast-db/5shards/core_nt_shard_"
     )
     assert cfg.get("cluster", "exp-use-local-ssd") == "true"
     assert "-dbsize 123456789" in cfg.get("blast", "options")
@@ -298,6 +298,112 @@ def test_build_config_metadata_effective_search_space_injects_searchsp(monkeypat
     assert "-dbsize" not in options
 
 
+def test_build_config_core_nt_calibrated_search_space_injects_searchsp(monkeypatch) -> None:
+    calibrated_search_space = 32_156_241_807_668
+
+    fake_meta = {
+        "db_name": "core_nt",
+        "sharded": True,
+        "shard_sets": [10],
+        "total_bytes": 269 * 1024**3,
+        "total_letters": 1_041_443_571_674,
+        "effective_search_space": calibrated_search_space,
+    }
+    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
+    content = blast._build_config_content(
+        job_id="job-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        program="blastn",
+        database="core_nt",
+        query_file="queries/q.fa",
+        options={
+            "machine_type": "Standard_E16s_v5",
+            "num_nodes": 10,
+            "sharding_mode": "precise",
+            "outfmt": 6,
+            "query_count": 1,
+        },
+    )
+
+    options = _parse_ini(content).get("blast", "options")
+    assert "-searchsp 32156241807668" in options
+    assert "-dbsize" not in options
+
+
+def test_node_warmup_ready_check_allows_ready_sharded_submit(monkeypatch) -> None:
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    def fake_warmup_status(*_args, **_kwargs):
+        return {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Ready",
+                    "nodes_ready": 10,
+                    "total_jobs": 10,
+                }
+            ]
+        }
+
+    monkeypatch.setattr("api.services.monitoring.k8s_warmup_status", fake_warmup_status)
+
+    ready = blast._ensure_node_warmup_ready_for_submit(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        database="core_nt",
+        options={"sharding_mode": "precise", "enable_warmup": True},
+    )
+
+    assert ready is not None
+    assert ready["status"] == "Ready"
+
+
+def test_node_warmup_ready_check_retries_loading_sharded_submit(monkeypatch) -> None:
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *_a, **_k: {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Loading",
+                    "nodes_ready": 6,
+                    "nodes_active": 4,
+                    "total_jobs": 10,
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(blast.WarmupNotReadyError) as err:
+        blast._ensure_node_warmup_ready_for_submit(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            database="core_nt",
+            options={"db_auto_partition": True, "enable_warmup": True},
+        )
+
+    assert err.value.retryable is True
+    assert "6/10" in str(err.value)
+
+
+def test_node_warmup_ready_check_skips_unsharded_submit() -> None:
+    assert (
+        blast._ensure_node_warmup_ready_for_submit(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            database="core_nt",
+            options={"sharding_mode": "off", "enable_warmup": True},
+        )
+        is None
+    )
+
+
 def test_build_config_skips_auto_shard_when_metadata_missing(monkeypatch) -> None:
     monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: None)
     content = blast._build_config_content(
@@ -315,13 +421,20 @@ def test_build_config_skips_auto_shard_when_metadata_missing(monkeypatch) -> Non
 
 
 def test_build_config_caller_provided_metadata_wins(monkeypatch) -> None:
-    # If the caller already passed db_sharded in options (e.g. benchmark
-    # runner overriding behaviour), do NOT re-resolve.
+    # Storage metadata is still resolved when the caller passes a coarse
+    # db_sharded flag, but explicit caller values must not be overwritten.
     called = []
     monkeypatch.setattr(
         blast,
         "_resolve_db_metadata",
-        lambda *a, **k: (called.append(1), None)[1],
+        lambda *a, **k: (
+            called.append(1),
+            {
+                "db_name": "core_nt",
+                "sharded": True,
+                "total_bytes": 269 * 1024**3,
+            },
+        )[1],
     )
     content = blast._build_config_content(
         job_id="job-1",
@@ -338,8 +451,43 @@ def test_build_config_caller_provided_metadata_wins(monkeypatch) -> None:
         },
     )
     cfg = _parse_ini(content)
-    assert called == []  # resolver was NOT invoked
+    assert called == [1]
     assert not cfg.has_option("blast", "db-partitions")
+
+
+def test_build_config_db_sharded_flag_still_resolves_missing_metadata(monkeypatch) -> None:
+    fake_meta = {
+        "db_name": "core_nt",
+        "sharded": True,
+        "shard_sets": [10],
+        "total_bytes": 269 * 1024**3,
+        "total_letters": 1_041_443_571_674,
+        "effective_search_space": 32_156_241_807_668,
+    }
+    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
+    content = blast._build_config_content(
+        job_id="job-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        program="blastn",
+        database="core_nt",
+        query_file="queries/q.fa",
+        options={
+            "machine_type": "Standard_E16s_v5",
+            "num_nodes": 10,
+            "db_sharded": True,
+            "sharding_mode": "precise",
+            "query_count": 1,
+            "outfmt": 5,
+        },
+    )
+    cfg = _parse_ini(content)
+    assert cfg.get("blast", "db-partitions") == "10"
+    assert cfg.get("blast", "db-partition-prefix") == (
+        "https://elbstg01.blob.core.windows.net/blast-db/10shards/core_nt_shard_"
+    )
+    assert "-searchsp 32156241807668" in cfg.get("blast", "options")
 
 
 def test_build_config_disable_sharding_blocks_auto_inject(monkeypatch) -> None:
@@ -535,9 +683,16 @@ def test_dispatch_split_child_submits_creates_state_and_runs_terminal(
     terminal_calls: list[dict[str, object]] = []
 
     def fake_terminal_run(
-        *, argv: list[str], stdin: str, timeout_seconds: int
+        *, argv: list[str], stdin: str, stdin_file: str, timeout_seconds: int
     ) -> dict[str, object]:
-        terminal_calls.append({"argv": argv, "stdin": stdin, "timeout_seconds": timeout_seconds})
+        terminal_calls.append(
+            {
+                "argv": argv,
+                "stdin": stdin,
+                "stdin_file": stdin_file,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
         return {"exit_code": 0, "stdout": '{"decision":"accepted"}\n', "stderr": ""}
 
     child = {
@@ -577,6 +732,7 @@ def test_dispatch_split_child_submits_creates_state_and_runs_terminal(
     assert "query_fasta" not in created[0].payload
     assert terminal_calls[0]["argv"] == blast._elastic_blast_argv("submit", "job-123-qg1")
     assert terminal_calls[0]["stdin"] == "[blast]\nqueries=x\n"
+    assert terminal_calls[0]["stdin_file"] == "elastic-blast.ini"
     assert ("job-123-qg1", {"status": "running", "phase": "submitting"}) in updates
     assert history[-1][1] == "submitted"
 
@@ -602,9 +758,9 @@ def test_dispatch_split_child_submits_records_terminal_failure(
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: FakeRepo())
 
     def fake_terminal_run(
-        *, argv: list[str], stdin: str, timeout_seconds: int
+        *, argv: list[str], stdin: str, stdin_file: str, timeout_seconds: int
     ) -> dict[str, object]:
-        del argv, stdin, timeout_seconds
+        del argv, stdin, stdin_file, timeout_seconds
         return {"exit_code": 2, "stdout": "", "stderr": "boom"}
 
     result = blast._dispatch_split_child_submits(
@@ -658,8 +814,7 @@ def test_run_split_parent_submission_dispatches_children_without_raw_fasta(
                 "query_blob_path": group.query_blob_path,
                 "query_file": group.query_file,
                 "query_blob_url": (
-                    "https://elbstg01.blob.core.windows.net/queries/"
-                    f"{group.query_blob_path}"
+                    f"https://elbstg01.blob.core.windows.net/queries/{group.query_blob_path}"
                 ),
                 "query_fasta_bytes": len(group.query_fasta.encode("utf-8")),
                 "options": group.options,
@@ -1844,10 +1999,11 @@ def test_split_parent_storage_submit_to_finalize_e2e(
         raise AssertionError(f"unexpected blob read: {container}/{blob_path}")
 
     def fake_terminal_run(
-        *, argv: list[str], stdin: str, timeout_seconds: int
+        *, argv: list[str], stdin: str, stdin_file: str, timeout_seconds: int
     ) -> dict[str, object]:
         assert argv[0] == "elastic-blast"
         assert "AAAA" not in stdin and "CCCC" not in stdin
+        assert stdin_file == "elastic-blast.ini"
         assert timeout_seconds == 600
         return {"exit_code": 0, "stdout": '{"decision":"accepted"}\n', "stderr": ""}
 

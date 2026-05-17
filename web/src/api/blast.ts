@@ -26,7 +26,10 @@ export interface BlastSubmitRequest {
   word_size?: number;
   gap_open?: number;
   gap_extend?: number;
+  low_complexity_filter?: boolean;
   additional_options?: string;
+  taxid?: number;
+  is_inclusive?: boolean;
   machine_type?: string;
   num_nodes?: number;
   pd_size?: string;
@@ -39,7 +42,11 @@ export interface BlastSubmitRequest {
   db_auto_partition?: boolean;
   sharding_mode?: "off" | "approximate" | "precise";
   db_effective_search_space?: number;
+  db_total_bytes?: number;
+  db_total_letters?: number;
   query_effective_search_spaces?: number[];
+  query_count?: number;
+  shard_sets?: number[];
   /** Legacy opt-out retained for older callers; automatic sharding is off by default. */
   disable_sharding?: boolean;
   /** Required to enable any approximate sharded/partitioned BLAST path. */
@@ -55,8 +62,12 @@ export interface BlastSubmitRequest {
 }
 
 export interface BlastSubmitResponse {
+  id?: string;
   job_id: string;
   instance_id: string;
+  task_id?: string;
+  status?: string;
+  statusQueryGetUri?: string;
 }
 
 export interface BlastJobSummary {
@@ -72,6 +83,13 @@ export interface BlastJobSummary {
   runtime_status?: string;
   custom_status?: unknown;
   output?: unknown;
+  /**
+   * Original submit body — the BlastSubmitRequest payload as it was POSTed.
+   * Used by "Duplicate / Re-run" + "Export config" on BlastResults to
+   * rehydrate the BlastSubmit form. May be absent on legacy jobs that
+   * pre-date payload persistence; callers must null-check.
+   */
+  payload?: Record<string, unknown>;
   config_snapshot?: Record<string, unknown>;
   infrastructure?: {
     subscription_id?: string;
@@ -95,6 +113,14 @@ export interface BlastJobSummary {
       effective_search_space?: number | null;
     }>;
   };
+  /** Server-derived: completed split children count. */
+  splits_done?: number;
+  /** Server-derived: failed split children count. */
+  splits_failed?: number;
+  /** Server-derived: total split children count (mirrors split_children.child_count). */
+  splits_total?: number;
+  /** Display-only label for the query (filename or first sequence id). */
+  query_label?: string;
   owner_upn?: string;
   error?: string;
 }
@@ -117,6 +143,9 @@ export interface BlastDatabase {
   total_bytes?: number;
   total_letters?: number;
   total_sequences?: number;
+  web_blast_searchsp?: number;
+  web_blast_searchsp_scope?: string;
+  web_blast_searchsp_evidence?: string;
   last_modified?: string;
   source_version?: string;
   downloaded_at?: string;
@@ -136,6 +165,78 @@ export interface BlastDatabase {
    * the warmup pipeline (api/services/warmup_planner.py).
    */
   warmup_plan?: BlastWarmupPlan;
+}
+
+export interface TaxonomySearchResult {
+  taxid: number;
+  scientific_name: string;
+  common_name?: string | null;
+  rank: string;
+  /** Optional NCBI division (e.g. "Primates") — present when esummary returns it. */
+  division?: string | null;
+  /** Empty in the list payload; populated by `getTaxonomyDetail` on selection. */
+  lineage: string;
+  matched_name: string;
+  synonyms: string[];
+}
+
+export interface TaxonomySearchResponse {
+  query: string;
+  count: number;
+  source: "ncbi_eutils";
+  cached: boolean;
+  results: TaxonomySearchResult[];
+}
+
+export interface TaxonomyLineageNode {
+  taxid: number;
+  scientific_name: string;
+  rank: string;
+}
+
+export interface TaxonomyDetail {
+  taxid: number;
+  scientific_name: string;
+  common_name: string | null;
+  rank: string;
+  division: string | null;
+  parent_taxid: number | null;
+  authority: string | null;
+  synonyms: string[];
+  equivalent_names: string[];
+  misspellings: string[];
+  lineage: string;
+  lineage_ex: TaxonomyLineageNode[];
+  genetic_code: string | null;
+  genetic_code_id: number | null;
+  mito_genetic_code: string | null;
+  mito_genetic_code_id: number | null;
+  create_date: string | null;
+  update_date: string | null;
+  pub_date: string | null;
+  source: "ncbi_eutils";
+  cached: boolean;
+}
+
+export interface TaxonomyImageResponse {
+  name: string;
+  /** Wikipedia upload.wikimedia.org thumbnail URL, or null when unavailable. */
+  image_url: string | null;
+  /** Wikipedia article URL, or null when not found. */
+  page_url: string | null;
+  source: "wikipedia";
+  cached: boolean;
+}
+
+export interface TaxonomyTreeResponse {
+  taxid: number;
+  scientific_name: string;
+  rank: string;
+  lineage: TaxonomyLineageNode[];
+  /** Keyed by parent taxid — sibling taxa at the same rank as the lineage child. */
+  siblings: Record<string, TaxonomyLineageNode[]>;
+  cached: boolean;
+  source: "ncbi_eutils";
 }
 
 export type BlastWarmupStatus =
@@ -220,7 +321,23 @@ export const blastApi = {
     terminal_resource_group?: string;
     terminal_vm_name?: string;
     db: string;
+    additional_options?: string;
+    taxid?: number;
+    is_inclusive?: boolean;
+    allow_approximate_sharding?: boolean;
+    db_auto_partition?: boolean;
+    db_total_bytes?: number;
+    db_total_letters?: number;
+    db_effective_search_space?: number;
+    disable_sharding?: boolean;
+    enable_warmup?: boolean;
+    evalue?: number;
+    max_target_seqs?: number;
+    outfmt?: number;
     query_data?: string;
+    shard_sets?: number[];
+    sharding_mode?: "off" | "approximate" | "precise";
+    word_size?: number;
   }) =>
     api.post<{
       ready: boolean;
@@ -267,6 +384,24 @@ export const blastApi = {
 
   submit: (req: BlastSubmitRequest) =>
     api.post<BlastSubmitResponse>("/blast/jobs", req),
+
+  searchTaxonomy: (query: string, limit = 10) =>
+    api.get<TaxonomySearchResponse>(
+      `/blast/taxonomy/search?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(String(limit))}`,
+    ),
+
+  getTaxonomyDetail: (taxid: number) =>
+    api.get<TaxonomyDetail>(`/blast/taxonomy/detail/${encodeURIComponent(String(taxid))}`),
+
+  getTaxonomyImage: (scientificName: string) =>
+    api.get<TaxonomyImageResponse>(
+      `/blast/taxonomy/image?name=${encodeURIComponent(scientificName)}`,
+    ),
+
+  getTaxonomyTree: (taxid: number, siblingLimit = 3) =>
+    api.get<TaxonomyTreeResponse>(
+      `/blast/taxonomy/tree/${encodeURIComponent(String(taxid))}?sibling_limit=${siblingLimit}`,
+    ),
 
   submitStatus: (instanceId: string) =>
     api.get<OrchestrationStatus<unknown>>(
@@ -446,6 +581,12 @@ export const blastApi = {
       status: string;
       message?: string;
       stats: BlastAggregateStats | null;
+      degraded?: boolean;
+      degraded_reason?: string;
+      files_parsed?: number;
+      total_files?: number;
+      read_failures?: number;
+      truncated?: boolean;
     }>(
       `/blast/jobs/${encodeURIComponent(jobId)}/results/aggregate?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}`,
     ),

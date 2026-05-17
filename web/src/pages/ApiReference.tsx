@@ -11,6 +11,7 @@ import { ApiHero } from "@/pages/apiReference/ApiHero";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { parseSpec } from "@/pages/apiReference/spec";
 import { TagSection } from "@/pages/apiReference/TagSection";
+import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 export function ApiReference() {
   const [savedConfig] = useState(() => loadSavedConfig());
@@ -28,7 +29,7 @@ export function ApiReference() {
   const clusterName = clustersQuery.data?.clusters?.[0]?.name ?? "";
   const clusters = clustersQuery.data?.clusters ?? [];
   const firstCluster = clusters[0];
-  const clusterStopped = firstCluster && firstCluster.power_state !== "Running";
+  const clusterStopped = firstCluster && !isAksWorkloadReady(firstCluster);
 
   const acrRg = savedConfig?.acrResourceGroup ?? "";
   const acrName = savedConfig?.acrName ?? "";

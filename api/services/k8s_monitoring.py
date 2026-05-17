@@ -16,18 +16,105 @@ import logging
 import os
 import re
 import tempfile
+import threading
+import time
+from dataclasses import dataclass
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 from azure.core.credentials import TokenCredential
 
 from api.services.azure_clients import aks_client
+from api.services.warmup_jobs import (
+    DEFAULT_WARMUP_APP_LABEL,
+    attach_pod_progress_to_database_status,
+    build_warmup_scripts_configmap,
+    database_status_from_warmup_jobs,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 _AKS_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
 _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,63}$")
 _SAFE_K8S_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+_K8S_CREDENTIAL_CACHE_TTL_SECONDS = 300.0
+
+
+@dataclass(frozen=True)
+class _K8sCredentialMaterial:
+    server: str
+    ca_data: bytes | None
+    client_cert: bytes | None
+    client_key: bytes | None
+    expires_at: float
+
+
+_K8S_CREDENTIAL_CACHE: dict[tuple[str, str, str, bool], _K8sCredentialMaterial] = {}
+_K8S_CREDENTIAL_CACHE_LOCK = threading.Lock()
+
+
+def reset_k8s_credential_cache() -> None:
+    """Clear cached AKS kubeconfig material. Test-only."""
+    with _K8S_CREDENTIAL_CACHE_LOCK:
+        _K8S_CREDENTIAL_CACHE.clear()
+
+
+def _k8s_credential_cache_ttl() -> float:
+    raw = os.environ.get("K8S_CREDENTIAL_CACHE_TTL_SECONDS", "")
+    if raw:
+        try:
+            return max(0.0, min(float(raw), 3600.0))
+        except ValueError:
+            return _K8S_CREDENTIAL_CACHE_TTL_SECONDS
+    return _K8S_CREDENTIAL_CACHE_TTL_SECONDS
+
+
+def _get_k8s_credential_material(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    *,
+    admin: bool,
+) -> _K8sCredentialMaterial:
+    cache_key = (subscription_id, resource_group, cluster_name, admin)
+    now = time.monotonic()
+    with _K8S_CREDENTIAL_CACHE_LOCK:
+        cached = _K8S_CREDENTIAL_CACHE.get(cache_key)
+    if cached is not None and cached.expires_at > now:
+        return cached
+
+    client = aks_client(credential, subscription_id)
+    if admin:
+        creds = client.managed_clusters.list_cluster_admin_credentials(
+            resource_group,
+            cluster_name,
+        )
+    else:
+        creds = client.managed_clusters.list_cluster_user_credentials(
+            resource_group,
+            cluster_name,
+        )
+    kubeconfig_bytes = creds.kubeconfigs[0].value
+    kubeconfig = yaml.safe_load(bytes(kubeconfig_bytes))
+
+    cluster_info = kubeconfig["clusters"][0]["cluster"]
+    user_info = kubeconfig["users"][0]["user"]
+    ca_data = cluster_info.get("certificate-authority-data", "")
+    client_cert = user_info.get("client-certificate-data")
+    client_key = user_info.get("client-key-data")
+
+    material = _K8sCredentialMaterial(
+        server=cluster_info["server"],
+        ca_data=base64.b64decode(ca_data) if ca_data else None,
+        client_cert=base64.b64decode(client_cert) if client_cert else None,
+        client_key=base64.b64decode(client_key) if client_key else None,
+        expires_at=now + _k8s_credential_cache_ttl(),
+    )
+    if material.expires_at > now:
+        with _K8S_CREDENTIAL_CACHE_LOCK:
+            _K8S_CREDENTIAL_CACHE[cache_key] = material
+    return material
 
 
 def _get_k8s_session(
@@ -35,6 +122,8 @@ def _get_k8s_session(
     subscription_id: str,
     resource_group: str,
     cluster_name: str,
+    *,
+    admin: bool = False,
 ) -> tuple[Any, str]:
     """Return ``(requests.Session, server_url)`` for direct K8s API calls.
 
@@ -45,18 +134,13 @@ def _get_k8s_session(
 
     import requests as _requests
 
-    client = aks_client(credential, subscription_id)
-    creds = client.managed_clusters.list_cluster_user_credentials(
+    material = _get_k8s_credential_material(
+        credential,
+        subscription_id,
         resource_group,
         cluster_name,
+        admin=admin,
     )
-    kubeconfig_bytes = creds.kubeconfigs[0].value
-    kubeconfig = yaml.safe_load(bytes(kubeconfig_bytes))
-
-    cluster_info = kubeconfig["clusters"][0]["cluster"]
-    server = cluster_info["server"]
-    ca_data = cluster_info.get("certificate-authority-data", "")
-    user_info = kubeconfig["users"][0]["user"]
 
     session = _requests.Session()
     temp_files: list[str] = []
@@ -80,16 +164,14 @@ def _get_k8s_session(
         return handle.name
 
     try:
-        if ca_data:
-            session.verify = write_secret_file(".crt", base64.b64decode(ca_data))
+        if material.ca_data:
+            session.verify = write_secret_file(".crt", material.ca_data)
         else:
             session.verify = True
 
-        client_cert = user_info.get("client-certificate-data")
-        client_key = user_info.get("client-key-data")
-        if client_cert and client_key:
-            cert_path = write_secret_file(".crt", base64.b64decode(client_cert))
-            key_path = write_secret_file(".key", base64.b64decode(client_key))
+        if material.client_cert and material.client_key:
+            cert_path = write_secret_file(".crt", material.client_cert)
+            key_path = write_secret_file(".key", material.client_key)
             session.cert = (cert_path, key_path)
         else:
             token = credential.get_token(f"{_AKS_SERVER_APP_ID}/.default")
@@ -111,7 +193,7 @@ def _get_k8s_session(
             cleanup_temp_files()
 
     session.close = cleanup_close  # type: ignore[assignment]
-    return session, server
+    return session, material.server
 
 
 def _namespace_or_default(session: Any, server: str, namespace: str) -> str:
@@ -144,9 +226,7 @@ def k8s_get_nodes(
 ) -> list[dict[str, Any]]:
     """Return cluster nodes from the Kubernetes API."""
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         response = session.get(f"{server}/api/v1/nodes", timeout=10)
         response.raise_for_status()
@@ -157,11 +237,14 @@ def k8s_get_nodes(
             conditions = {c["type"]: c["status"] for c in status.get("conditions", [])}
             info = status.get("nodeInfo", {})
             addresses = {a["type"]: a["address"] for a in status.get("addresses", [])}
-            roles = ",".join(
-                key.replace("node-role.kubernetes.io/", "")
-                for key in meta.get("labels", {})
-                if key.startswith("node-role.kubernetes.io/")
-            ) or "<none>"
+            roles = (
+                ",".join(
+                    key.replace("node-role.kubernetes.io/", "")
+                    for key in meta.get("labels", {})
+                    if key.startswith("node-role.kubernetes.io/")
+                )
+                or "<none>"
+            )
             nodes.append(
                 {
                     "name": meta.get("name", ""),
@@ -180,6 +263,188 @@ def k8s_get_nodes(
         session.close()
 
 
+def k8s_ready_warmup_node_names(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    *,
+    preferred_pool: str = "blastpool",
+) -> list[str]:
+    """Return Ready node names suitable for node-local DB warmup Jobs."""
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        response = session.get(f"{server}/api/v1/nodes", timeout=10)
+        response.raise_for_status()
+        return _candidate_warmup_node_names(
+            response.json().get("items", []), preferred_pool=preferred_pool
+        )
+    finally:
+        session.close()
+
+
+def _candidate_warmup_node_names(
+    nodes: list[dict[str, Any]], *, preferred_pool: str = "blastpool"
+) -> list[str]:
+    candidates: list[tuple[str, str, str]] = []
+    for node in nodes:
+        metadata = node.get("metadata", {}) or {}
+        spec = node.get("spec", {}) or {}
+        status = node.get("status", {}) or {}
+        name = str(metadata.get("name") or "")
+        if not name or spec.get("unschedulable") is True:
+            continue
+        conditions = {
+            item.get("type"): item.get("status")
+            for item in status.get("conditions", []) or []
+            if isinstance(item, dict)
+        }
+        if conditions.get("Ready") != "True":
+            continue
+        labels = metadata.get("labels", {}) or {}
+        pool = str(labels.get("agentpool") or labels.get("kubernetes.azure.com/agentpool") or "")
+        mode = str(labels.get("kubernetes.azure.com/mode") or "")
+        candidates.append((name, pool, mode))
+
+    preferred = [name for name, pool, _mode in candidates if pool == preferred_pool]
+    if preferred:
+        return sorted(preferred)
+
+    user_nodes = [
+        name
+        for name, pool, mode in candidates
+        if mode.lower() != "system" and pool.lower() not in {"system", "systempool"}
+    ]
+    if user_nodes:
+        return sorted(user_nodes)
+    return sorted(name for name, _pool, _mode in candidates)
+
+
+def k8s_ensure_job_manifests(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    jobs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create Kubernetes Jobs if missing, leaving existing Jobs untouched."""
+
+    session, server = _get_k8s_session(
+        credential, subscription_id, resource_group, cluster_name, admin=True
+    )
+    try:
+        return _ensure_job_manifests(session, server, jobs)
+    finally:
+        session.close()
+
+
+def k8s_ensure_warmup_scripts_configmap(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any]:
+    """Create or update the ConfigMap mounted by warmup Jobs."""
+
+    session, server = _get_k8s_session(
+        credential, subscription_id, resource_group, cluster_name, admin=True
+    )
+    try:
+        manifest = build_warmup_scripts_configmap()
+        return _ensure_configmap(session, server, manifest)
+    finally:
+        session.close()
+
+
+def _ensure_configmap(session: Any, server: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    metadata = manifest.get("metadata", {}) or {}
+    namespace = str(metadata.get("namespace") or "default")
+    name = str(metadata.get("name") or "")
+    if not name:
+        raise ValueError("configmap name is required")
+    url = f"{server}/api/v1/namespaces/{namespace}/configmaps/{name}"
+    response = session.get(url, timeout=10)
+    if response.status_code == 404:
+        create = session.post(
+            f"{server}/api/v1/namespaces/{namespace}/configmaps",
+            json=manifest,
+            timeout=10,
+        )
+        if create.status_code not in {200, 201}:
+            return {"status": "error", "name": name, "status_code": create.status_code}
+        return {"status": "created", "name": name}
+    if response.status_code != 200:
+        return {"status": "error", "name": name, "status_code": response.status_code}
+
+    existing = response.json()
+    if existing.get("data") == manifest.get("data"):
+        return {"status": "unchanged", "name": name}
+    manifest = {
+        **manifest,
+        "metadata": {
+            **metadata,
+            "resourceVersion": existing.get("metadata", {}).get("resourceVersion"),
+        },
+    }
+    update = session.put(url, json=manifest, timeout=10)
+    if update.status_code not in {200, 201}:
+        return {"status": "error", "name": name, "status_code": update.status_code}
+    return {"status": "updated", "name": name}
+
+
+def _ensure_job_manifests(session: Any, server: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    created: list[str] = []
+    existing: list[str] = []
+    errors: list[dict[str, Any]] = []
+    for job in jobs:
+        metadata = job.get("metadata", {}) or {}
+        namespace = str(metadata.get("namespace") or "default")
+        name = str(metadata.get("name") or "")
+        if not _SAFE_K8S_NAME_RE.match(namespace) or not _SAFE_K8S_NAME_RE.match(name):
+            errors.append({"name": name, "namespace": namespace, "error": "invalid job identity"})
+            continue
+
+        url = f"{server}/apis/batch/v1/namespaces/{namespace}/jobs"
+        get_response = session.get(f"{url}/{name}", timeout=10)
+        if get_response.status_code == 200:
+            existing.append(name)
+            continue
+        if get_response.status_code not in (404,):
+            errors.append(
+                {
+                    "name": name,
+                    "namespace": namespace,
+                    "status_code": get_response.status_code,
+                    "error": get_response.text[:300],
+                }
+            )
+            continue
+
+        create_response = session.post(url, json=job, timeout=10)
+        if create_response.status_code in (200, 201, 202):
+            created.append(name)
+        elif create_response.status_code == 409:
+            existing.append(name)
+        else:
+            errors.append(
+                {
+                    "name": name,
+                    "namespace": namespace,
+                    "status_code": create_response.status_code,
+                    "error": create_response.text[:300],
+                }
+            )
+    return {
+        "created": created,
+        "existing": existing,
+        "errors": errors,
+        "created_count": len(created),
+        "existing_count": len(existing),
+        "error_count": len(errors),
+    }
+
+
 def k8s_check_blast_status(
     credential: TokenCredential,
     subscription_id: str,
@@ -194,9 +459,7 @@ def k8s_check_blast_status(
     so the honest status is ``creating`` rather than ``completed``.
     """
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         target_ns = _namespace_or_default(session, server, namespace)
         pods_response = session.get(
@@ -233,11 +496,7 @@ def k8s_check_blast_status(
         all_jobs = jobs_response.json().get("items", [])
         if job_id and blast_pods:
             scoped_names = _owned_job_names(blast_pods)
-            jobs = [
-                job
-                for job in all_jobs
-                if job.get("metadata", {}).get("name") in scoped_names
-            ]
+            jobs = [job for job in all_jobs if job.get("metadata", {}).get("name") in scoped_names]
         else:
             jobs = all_jobs
 
@@ -297,9 +556,7 @@ def k8s_cancel_blast_job(
     if not _K8S_LABEL_VALUE_RE.match(job_id):
         raise ValueError("job_id is not a valid Kubernetes label value")
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         target_ns = _namespace_or_default(session, server, namespace)
         deleted: list[dict[str, Any]] = []
@@ -329,6 +586,77 @@ def k8s_cancel_blast_job(
         session.close()
 
 
+def k8s_release_warmup_cache(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    db_name: str,
+    namespace: str = "default",
+) -> dict[str, Any]:
+    """Release node-local warmup resources for one database.
+
+    The operation removes the Kubernetes resources that keep the dashboard's
+    warm-cache state alive. Node-local kernel/page cache may drain gradually,
+    but subsequent status checks no longer report the DB as warmed.
+    """
+
+    db_label = _warmup_db_label_value(db_name)
+    if not _K8S_LABEL_VALUE_RE.match(db_label):
+        raise ValueError("db_name is not a valid Kubernetes label value")
+
+    session, server = _get_k8s_session(
+        credential, subscription_id, resource_group, cluster_name, admin=True
+    )
+    try:
+        target_ns = _namespace_or_default(session, server, namespace)
+        deleted: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+
+        targets = [
+            (
+                "jobs",
+                f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs",
+                f"app={DEFAULT_WARMUP_APP_LABEL},db={db_label}",
+            ),
+            (
+                "legacy-daemonsets",
+                f"{server}/apis/apps/v1/namespaces/{target_ns}/daemonsets",
+                f"app=db-warmup,db={db_label}",
+            ),
+        ]
+
+        for kind, url, selector in targets:
+            response = session.delete(
+                url,
+                params={"labelSelector": selector, "propagationPolicy": "Background"},
+                timeout=10,
+            )
+            item = {"kind": kind, "selector": selector, "status_code": response.status_code}
+            if response.status_code in (200, 201, 202, 404):
+                deleted.append(item)
+            else:
+                errors.append({**item, "detail": response.text[:200]})
+
+        return {
+            "status": "released" if not errors else "partial",
+            "database": db_name,
+            "db_label": db_label,
+            "namespace": target_ns,
+            "deleted": deleted,
+            "errors": errors,
+        }
+    finally:
+        session.close()
+
+
+def _warmup_db_label_value(value: str) -> str:
+    label = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-_.")
+    if not label:
+        return "db"
+    return label[:63].rstrip("-_.") or "db"
+
+
 def k8s_check_namespace_exists(
     credential: TokenCredential,
     subscription_id: str,
@@ -338,9 +666,7 @@ def k8s_check_namespace_exists(
 ) -> bool:
     """Return whether ElasticBLAST warmup resources appear to exist."""
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         response = session.get(
             f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
@@ -374,9 +700,7 @@ def k8s_warmup_status(
 ) -> dict[str, Any]:
     """Detect warmup state by inspecting ElasticBLAST Kubernetes resources."""
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         result: dict[str, Any] = {
             "warm": False,
@@ -411,9 +735,18 @@ def k8s_warmup_status(
             timeout=10,
         )
         if response.status_code == 200:
-            result["databases"] = _database_status_from_setup_jobs(
-                response.json().get("items", [])
-            )
+            result["databases"] = _database_status_from_setup_jobs(response.json().get("items", []))
+
+        response = session.get(
+            f"{server}/apis/batch/v1/namespaces/default/jobs",
+            params={"labelSelector": f"app={DEFAULT_WARMUP_APP_LABEL}"},
+            timeout=10,
+        )
+        if response.status_code == 200:
+            warmup_databases = database_status_from_warmup_jobs(response.json().get("items", []))
+            pods, logs_by_pod = _warmup_pods_and_logs(session, server)
+            attach_pod_progress_to_database_status(warmup_databases, pods, logs_by_pod)
+            _merge_database_statuses(result, warmup_databases)
 
         response = session.get(
             f"{server}/apis/apps/v1/namespaces/default/daemonsets",
@@ -496,6 +829,65 @@ def _database_status_from_setup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
     return list(db_map.values())
 
 
+def _merge_database_statuses(result: dict[str, Any], incoming: list[dict[str, Any]]) -> None:
+    existing = {database["name"]: database for database in result["databases"]}
+    for database in incoming:
+        name = database.get("name")
+        if not name:
+            continue
+        if name in existing:
+            current = existing[name]
+            for key in ("nodes_ready", "nodes_failed", "nodes_active", "total_jobs"):
+                current[key] = max(int(current.get(key) or 0), int(database.get(key) or 0))
+            if database.get("status") == "Ready" or current.get("status") != "Ready":
+                current["status"] = database.get("status", current.get("status", "Unknown"))
+            if database.get("shards"):
+                current["shards"] = sorted(
+                    set(current.get("shards", [])) | set(database.get("shards", []))
+                )
+            for key in (
+                "progress_pct",
+                "started_at",
+                "elapsed_seconds",
+                "estimated_remaining_seconds",
+                "active_phase",
+                "active_phase_label",
+                "phase_counts",
+                "pod_statuses",
+            ):
+                if key in database:
+                    current[key] = database[key]
+        else:
+            result["databases"].append(database)
+            existing[name] = database
+        if database.get("status") == "Ready":
+            result["warm"] = True
+
+
+def _warmup_pods_and_logs(session: Any, server: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    response = session.get(
+        f"{server}/api/v1/namespaces/default/pods",
+        params={"labelSelector": f"app={DEFAULT_WARMUP_APP_LABEL}"},
+        timeout=10,
+    )
+    if response.status_code != 200:
+        return [], {}
+    pods = response.json().get("items", [])
+    logs_by_pod: dict[str, str] = {}
+    for pod in pods[:12]:
+        name = pod.get("metadata", {}).get("name", "")
+        if not name:
+            continue
+        log_response = session.get(
+            f"{server}/api/v1/namespaces/default/pods/{name}/log",
+            params={"container": "warmup", "tailLines": 80},
+            timeout=2,
+        )
+        if log_response.status_code == 200:
+            logs_by_pod[name] = log_response.text[-8000:]
+    return pods, logs_by_pod
+
+
 def _append_warmup_daemonsets(result: dict[str, Any], daemonsets: list[dict[str, Any]]) -> None:
     existing_db_names = {database["name"] for database in result["databases"]}
     for daemonset in daemonsets:
@@ -532,9 +924,7 @@ def k8s_get_service_ip(
 ) -> str | None:
     """Return the external IP of a Kubernetes LoadBalancer service."""
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         response = session.get(
             f"{server}/api/v1/namespaces/{namespace}/services/{service_name}",
@@ -559,9 +949,7 @@ def k8s_get_pods(
 ) -> list[dict[str, Any]]:
     """Return non-succeeded pods via the Kubernetes API."""
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         url = (
             f"{server}/api/v1/pods"
@@ -615,9 +1003,7 @@ def k8s_top_nodes(
     the dashboard can colour rows by pool and flag NotReady nodes inline.
     """
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         capacity = _node_capacity_with_meta(session, server)
         response = session.get(f"{server}/apis/metrics.k8s.io/v1beta1/nodes", timeout=10)
@@ -678,9 +1064,7 @@ def _node_capacity(session: Any, server: str) -> dict[str, dict[str, int]]:
     return capacity
 
 
-def _node_capacity_with_meta(
-    session: Any, server: str
-) -> dict[str, dict[str, Any]]:
+def _node_capacity_with_meta(session: Any, server: str) -> dict[str, dict[str, Any]]:
     """Like ``_node_capacity`` but also returns pool / Ready / conditions.
 
     A single ``/api/v1/nodes`` GET feeds both capacity and metadata so we do
@@ -695,11 +1079,7 @@ def _node_capacity_with_meta(
         status = item.get("status", {})
         cap = status.get("capacity", {})
         # AKS labels system / user pools with ``agentpool=<name>``.
-        pool = (
-            labels.get("agentpool")
-            or labels.get("kubernetes.azure.com/agentpool")
-            or ""
-        )
+        pool = labels.get("agentpool") or labels.get("kubernetes.azure.com/agentpool") or ""
         # Ready + pressure flags from the conditions array.
         ready = False
         conditions: dict[str, str] = {}
@@ -755,9 +1135,7 @@ def k8s_pod_logs(
     if not _SAFE_K8S_NAME_RE.match(namespace) or not _SAFE_K8S_NAME_RE.match(pod_name):
         raise ValueError("Invalid namespace or pod name")
 
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name
-    )
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
         response = session.get(
             f"{server}/api/v1/namespaces/{namespace}/pods/{pod_name}/log",
@@ -768,3 +1146,103 @@ def k8s_pod_logs(
         return response.text
     finally:
         session.close()
+
+
+def k8s_list_events(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    *,
+    namespace: str | None = None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """Return recent k8s events sorted newest-first.
+
+    `namespace=None` returns events across all namespaces (cluster-wide
+    `/api/v1/events`).  Otherwise scoped to one namespace, which is
+    validated against the same DNS-1123 regex as pod names.
+
+    The output schema is intentionally flat and small — only the fields
+    the dashboard's Live Activity rail consumes.  Free-form `message`
+    is left as-is here; the caller is responsible for sanitising it
+    before sending to the SPA (see `api.routes.monitor.aks_events`).
+    """
+
+    if namespace is not None and not _SAFE_K8S_NAME_RE.match(namespace):
+        raise ValueError("Invalid namespace")
+    if limit <= 0 or limit > 1000:
+        raise ValueError("limit must be in (0, 1000]")
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        if namespace:
+            url = f"{server}/api/v1/namespaces/{namespace}/events"
+        else:
+            url = f"{server}/api/v1/events"
+        # We pull a generous slice (`limit*4` capped at 500) and sort
+        # client-side because the K8s API doesn't reliably honour
+        # ordering across paginated reads.  500 events is ~50 KiB JSON
+        # which is well within budget for one dashboard tile.
+        params = {"limit": min(500, max(limit * 4, 100))}
+        response = session.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        items = response.json().get("items", []) or []
+    finally:
+        session.close()
+
+    out: list[dict[str, Any]] = []
+
+    # Defence in depth: every free-form string we surface gets a length
+    # cap.  Even though the route layer also runs `sanitise()` on
+    # `message`, we cap *here* so a malformed event with multi-MB
+    # fields can't bloat the JSON response between this helper and the
+    # route.  Caps mirror what the dashboard can actually display
+    # (Live Activity rail truncates to ~110 chars).
+    def _capped(value: Any, limit: int) -> str:
+        s = str(value or "")
+        return s[:limit]
+
+    for ev in items:
+        if not isinstance(ev, dict):
+            continue
+        meta = ev.get("metadata", {}) if isinstance(ev.get("metadata"), dict) else {}
+        involved = (
+            ev.get("involvedObject", {}) if isinstance(ev.get("involvedObject"), dict) else {}
+        )
+        source = ev.get("source", {}) if isinstance(ev.get("source"), dict) else {}
+        last_ts = (
+            ev.get("lastTimestamp") or ev.get("eventTime") or meta.get("creationTimestamp") or ""
+        )
+        # `count` is sometimes a float in malformed payloads; coerce
+        # safely and clamp to a sane upper bound to avoid surfacing
+        # eye-watering "1.7M events" badges from a single misbehaving
+        # controller.
+        try:
+            count_val = max(1, min(int(float(ev.get("count") or 1)), 1_000_000))
+        except (TypeError, ValueError):
+            count_val = 1
+        # Type field is a closed enum in K8s — coerce anything else to
+        # "Normal" so the frontend's classifier doesn't have to defend
+        # against attacker-controlled severity strings.
+        ev_type = str(ev.get("type") or "Normal")
+        if ev_type not in ("Normal", "Warning"):
+            ev_type = "Normal"
+        out.append(
+            {
+                "namespace": _capped(meta.get("namespace") or involved.get("namespace"), 63),
+                "name": _capped(meta.get("name"), 253),
+                "type": ev_type,
+                "reason": _capped(ev.get("reason"), 64),
+                "message": _capped(ev.get("message"), 1024),
+                "count": count_val,
+                "last_timestamp": _capped(last_ts, 32),
+                "involved_kind": _capped(involved.get("kind"), 64),
+                "involved_name": _capped(involved.get("name"), 253),
+                "source_component": _capped(source.get("component"), 64),
+                "source_host": _capped(source.get("host"), 253),
+            }
+        )
+
+    out.sort(key=lambda e: e.get("last_timestamp") or "", reverse=True)
+    return out[:limit]

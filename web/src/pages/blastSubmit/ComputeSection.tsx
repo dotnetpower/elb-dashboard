@@ -10,8 +10,8 @@ import {
   getWorkloadNodeSku,
   selectWorkloadPool,
 } from "@/pages/blastSubmit/computeEnvironment";
+import type { ShardingAvailability } from "@/pages/blastSubmit/shardingAvailability";
 import { SectionHeader } from "@/pages/blastSubmit/ui";
-import { selectPartitionsForSubmit } from "@/utils/dbSharding";
 
 export function ComputeSection({
   subId,
@@ -24,10 +24,9 @@ export function ComputeSection({
   isDbAlreadyWarm,
   warmDbInfo,
   selectedDbShortName,
-  dbSharded,
   dbShardSets,
-  dbTotalBytes,
   warmupPlan,
+  shardingAvailability,
 }: {
   subId: string;
   workloadRg: string;
@@ -39,23 +38,30 @@ export function ComputeSection({
   isDbAlreadyWarm: boolean;
   warmDbInfo?: WarmupDbInfo;
   selectedDbShortName: string;
-  /** Selected DB has pre-built shard layouts in storage. */
-  dbSharded?: boolean;
   /** Sorted preset N values that are pre-built (e.g. [1,2,3,4,5,6,8,10]). */
   dbShardSets?: number[];
-  /** DB size in bytes — used to compute the auto-pick N for the preview. */
-  dbTotalBytes?: number;
   /**
    * Server-computed warmup feasibility for the selected DB on the selected
    * cluster. Drives the inline advisory below the warmup checkbox and the
    * submit-blocking logic in the parent page.
    */
   warmupPlan?: BlastWarmupPlan;
+  shardingAvailability: ShardingAvailability;
 }) {
+  const shardingOptions = [
+    shardingAvailability.options.off,
+    shardingAvailability.options.approximate,
+    shardingAvailability.options.precise,
+  ];
+  const selectedShardingOption = shardingAvailability.options[form.sharding_mode];
+  const shardedUnavailableReason =
+    shardingAvailability.options.precise.reason ?? shardingAvailability.options.approximate.reason;
+  const offUnavailableReason = shardingAvailability.options.off.reason;
+
   return (
     <section className="glass-card blast-section">
       <SectionHeader
-        step={4}
+        step={5}
         icon={<Server size={16} strokeWidth={1.5} />}
         title="Compute Environment"
         subtitle="Select an AKS cluster to run the search"
@@ -117,83 +123,93 @@ export function ComputeSection({
             <Zap size={14} style={{ color: "var(--warning)" }} />
             Performance
           </div>
-          <label
+          <div
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 8,
-              cursor: isDbAlreadyWarm ? "default" : "pointer",
-              fontSize: 12,
-              marginBottom: 6,
-              opacity: isDbAlreadyWarm ? 0.8 : 1,
+              justifyContent: "space-between",
+              gap: 10,
+              padding: "7px 9px",
+              borderRadius: 6,
+              background: isDbAlreadyWarm ? "rgba(106,214,163,0.08)" : "rgba(255,255,255,0.04)",
+              border: `1px solid ${isDbAlreadyWarm ? "rgba(106,214,163,0.24)" : "var(--glass-border)"}`,
+              fontSize: 11,
+              marginBottom: 10,
             }}
           >
-            <input
-              type="checkbox"
-              checked={isDbAlreadyWarm || form.enable_warmup}
-              disabled={isDbAlreadyWarm}
-              onChange={(event) => set("enable_warmup", event.target.checked)}
-              style={{ accentColor: isDbAlreadyWarm ? "var(--success)" : "var(--accent)" }}
-            />
             <span>
-              Warmup cluster{" "}
+              DB cache{" "}
               {isDbAlreadyWarm ? (
                 <span style={{ color: "var(--success)", fontWeight: 500 }}>
-                  — cached on {warmDbInfo?.nodes_ready}/{warmDbInfo?.total_jobs} nodes
+                  Ready on {warmDbInfo?.nodes_ready}/{warmDbInfo?.total_jobs} nodes
                 </span>
               ) : (
-                <span className="muted">(prepare DB shards on local SSD before BLAST)</span>
+                <span className="muted">Not warmed on this cluster</span>
               )}
             </span>
-          </label>
+            <span className="muted" style={{ textAlign: "right" }}>
+              {isDbAlreadyWarm ? "Sharded modes available when capacity fits" : "Run baseline mode or warm the DB first"}
+            </span>
+          </div>
           <div style={{ marginTop: 8, marginBottom: 6 }}>
             <div className="muted" style={{ fontSize: 10, marginBottom: 6 }}>
               DB sharding mode
             </div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {[
-                ["off", "Off"],
-                ["approximate", "Fast shard"],
-                ["precise", "Precise shard"],
-              ].map(([mode, label]) => {
-                const active = form.sharding_mode === mode;
+              {shardingOptions.map((option) => {
+                const active = form.sharding_mode === option.mode;
                 return (
                   <button
-                    key={mode}
+                    key={option.mode}
                     type="button"
                     className="glass-button"
+                    disabled={!option.enabled}
+                    title={option.reason ?? option.description}
                     onClick={() => {
-                      set("sharding_mode", mode as FormState["sharding_mode"]);
-                      set("db_auto_partition", mode !== "off");
+                      if (!option.enabled) return;
+                      set("sharding_mode", option.mode);
+                      set("db_auto_partition", option.mode !== "off");
+                      set("disable_sharding", false);
                     }}
                     style={{
                       minHeight: 28,
                       padding: "4px 10px",
                       borderRadius: 6,
                       fontSize: 11,
+                      cursor: option.enabled ? "pointer" : "not-allowed",
                       background: active ? "rgba(122,167,255,0.18)" : "var(--glass-bg)",
                       borderColor: active ? "rgba(122,167,255,0.45)" : "var(--glass-border)",
-                      color: active ? "var(--text-primary)" : "var(--text-muted)",
+                      color: active ? "var(--text-primary)" : option.enabled ? "var(--text-muted)" : "var(--text-faint)",
+                      opacity: option.enabled ? 1 : 0.48,
                     }}
                   >
-                    {label}
+                    {option.label}
                   </button>
                 );
               })}
             </div>
-            {form.sharding_mode !== "off" && (
-              <div className="muted" style={{ fontSize: 10, marginTop: 6, lineHeight: 1.5 }}>
-                {form.sharding_mode === "precise"
-                  ? "Precise shard requires single-query metadata, tabular output, and effective search space."
-                  : "Fast shard uses prepared DB shards and may differ from full-DB BLAST."}
+            <div className="muted" style={{ fontSize: 10, marginTop: 6, lineHeight: 1.5 }}>
+              {selectedShardingOption.description}
+            </div>
+            {!selectedShardingOption.enabled && selectedShardingOption.reason && (
+              <div style={{ color: "var(--warning)", fontSize: 10, marginTop: 4, lineHeight: 1.5 }}>
+                {selectedShardingOption.reason}
+              </div>
+            )}
+            {form.sharding_mode === "off" && shardedUnavailableReason && (
+              <div style={{ color: "var(--warning)", fontSize: 10, marginTop: 4, lineHeight: 1.5 }}>
+                Sharded modes disabled: {shardedUnavailableReason}
+              </div>
+            )}
+            {offUnavailableReason && form.sharding_mode !== "off" && (
+              <div style={{ color: "var(--text-faint)", fontSize: 10, marginTop: 4, lineHeight: 1.5 }}>
+                Off disabled: {offUnavailableReason}
               </div>
             )}
           </div>
-          {(form.enable_warmup || isDbAlreadyWarm) && (
+          {isDbAlreadyWarm && (
             <div className="muted" style={{ fontSize: 10, marginTop: 6, lineHeight: 1.5 }}>
-              {isDbAlreadyWarm
-                ? `${selectedDbShortName} is already loaded on all cluster nodes. BLAST will start immediately without download delay.`
-                : "The prepare step will create the cluster, download DB shards to node SSDs, then submit BLAST with reuse=true. This adds ~5-10 min setup but significantly improves search performance for large databases."}
+              {selectedDbShortName} is already loaded on this cluster. BLAST can reuse node-local DB files instead of downloading before each run.
             </div>
           )}
           <WarmupPlanAdvisory
@@ -202,12 +218,8 @@ export function ComputeSection({
             onDisableWarmup={() => set("enable_warmup", false)}
           />
           <ShardingPreview
-            cluster={selectedCluster}
-            dbSharded={dbSharded}
             dbShardSets={dbShardSets}
-            dbTotalBytes={dbTotalBytes}
-            disabled={form.disable_sharding}
-            onToggleDisabled={(value) => set("disable_sharding", value)}
+            capacityPlan={shardingAvailability.capacityPlan}
           />
         </div>
       )}
@@ -216,12 +228,8 @@ export function ComputeSection({
 }
 
 interface ShardingPreviewProps {
-  cluster: AksClusterSummary;
-  dbSharded?: boolean;
   dbShardSets?: number[];
-  dbTotalBytes?: number;
-  disabled: boolean;
-  onToggleDisabled: (value: boolean) => void;
+  capacityPlan: ShardingAvailability["capacityPlan"];
 }
 
 /**
@@ -238,27 +246,15 @@ interface ShardingPreviewProps {
  * off.
  */
 function ShardingPreview({
-  cluster,
-  dbSharded,
   dbShardSets,
-  dbTotalBytes,
-  disabled,
-  onToggleDisabled,
+  capacityPlan,
 }: ShardingPreviewProps) {
-  if (!dbSharded || !dbShardSets || dbShardSets.length === 0) {
+  if (!capacityPlan || !dbShardSets || dbShardSets.length === 0) {
     // No sharding metadata yet (or DB not warmed) — render nothing rather
     // than a misleading placeholder.
     return null;
   }
-  const numNodes = getWorkloadNodeCount(cluster) || 1;
-  const sku = getWorkloadNodeSku(cluster) || "Standard_E32s_v5";
-  const totalBytes = dbTotalBytes && dbTotalBytes > 0 ? dbTotalBytes : 0;
-  // Always route through the helper so `pickedN` is guaranteed to be one
-  // of the pre-built presets (matches what the backend would pick). When
-  // the DB size is unknown we still want N >= numNodes — the helper
-  // handles that branch with `minByRam = 0`.
-  const pickedN = selectPartitionsForSubmit(totalBytes, numNodes, sku, dbShardSets);
-  const perShardGib = totalBytes > 0 ? totalBytes / 1024 ** 3 / pickedN : null;
+  const accent = capacityPlan.feasible ? "var(--accent)" : "var(--warning)";
 
   return (
     <div
@@ -275,7 +271,7 @@ function ShardingPreview({
           gap: 8,
           flexWrap: "wrap",
           fontSize: 11,
-          color: disabled ? "var(--text-faint)" : "var(--text-muted)",
+          color: "var(--text-muted)",
         }}
       >
         <span
@@ -283,51 +279,28 @@ function ShardingPreview({
             fontSize: 10,
             padding: "1px 6px",
             borderRadius: 3,
-            color: disabled ? "var(--text-faint)" : "var(--accent)",
-            background: disabled
-              ? "rgba(255,255,255,0.04)"
-              : "rgba(110,159,255,0.10)",
-            border: `1px solid ${disabled ? "var(--glass-border)" : "rgba(110,159,255,0.28)"}`,
+            color: accent,
+            background: capacityPlan.feasible ? "rgba(110,159,255,0.10)" : "rgba(240,198,116,0.08)",
+            border: `1px solid ${capacityPlan.feasible ? "rgba(110,159,255,0.28)" : "rgba(240,198,116,0.28)"}`,
             fontWeight: 500,
             whiteSpace: "nowrap",
             letterSpacing: 0.1,
-            textDecoration: disabled ? "line-through" : "none",
           }}
-          title={`Pre-built shard layouts: N = ${dbShardSets.join(", ")}. Auto-selected to fit ${numNodes}-node ${sku} cluster within safe RAM headroom.`}
+          title={`Pre-built shard layouts: N = ${dbShardSets.join(", ")}. Selected against ${capacityPlan.numNodes}-node ${capacityPlan.machineType} cluster within safe RAM headroom.`}
         >
-          Auto-shard · N={pickedN}
+          Shard capacity · N={capacityPlan.pickedN}
         </span>
-        <span style={{ textDecoration: disabled ? "line-through" : "none" }}>
-          {numNodes} {numNodes === 1 ? "node" : "nodes"} · {sku.replace("Standard_", "")}
-          {perShardGib !== null && (
-            <> · ~{perShardGib < 10 ? perShardGib.toFixed(1) : Math.round(perShardGib)} GiB/shard</>
-          )}
+        <span>
+          {capacityPlan.numNodes} {capacityPlan.numNodes === 1 ? "node" : "nodes"} · {capacityPlan.machineType.replace("Standard_", "")}
+          {" · "}
+          ~{capacityPlan.perShardGib < 10 ? capacityPlan.perShardGib.toFixed(1) : Math.round(capacityPlan.perShardGib)} GiB/shard
         </span>
       </div>
-      <label
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          marginTop: 6,
-          fontSize: 10,
-          color: "var(--text-faint)",
-          cursor: "pointer",
-        }}
-      >
-        <input
-          type="checkbox"
-          checked={disabled}
-          onChange={(event) => onToggleDisabled(event.target.checked)}
-          style={{ accentColor: "var(--warning)", width: 11, height: 11 }}
-        />
-        <span>
-          Disable sharding{" "}
-          <span style={{ color: "var(--text-faint)" }}>
-            (advanced — single-volume mode is significantly slower)
-          </span>
-        </span>
-      </label>
+      {!capacityPlan.feasible && capacityPlan.reason && (
+        <div style={{ color: "var(--warning)", fontSize: 10, marginTop: 5, lineHeight: 1.45 }}>
+          {capacityPlan.reason}
+        </div>
+      )}
     </div>
   );
 }

@@ -4,11 +4,12 @@ const tenantId = import.meta.env.VITE_AZURE_TENANT_ID ?? "common";
 const clientId = import.meta.env.VITE_AZURE_CLIENT_ID ?? "";
 // Resolve redirect URI at runtime — never bake in localhost for production.
 // .env.production sets VITE_AZURE_REDIRECT_URI=__RUNTIME__ to override .env.local.
-// Any non-URL value (empty, undefined, __RUNTIME__) falls back to window.location.origin.
+// Any non-URL value (empty, undefined, __RUNTIME__) falls back to the browser origin.
 function resolveRedirectUri(): string {
   const env = import.meta.env.VITE_AZURE_REDIRECT_URI;
   if (typeof env === "string" && env.startsWith("http")) return env;
-  return window.location.origin;
+  if (typeof window !== "undefined") return window.location.origin;
+  return "http://localhost:8090";
 }
 const redirectUri = resolveRedirectUri();
 

@@ -60,9 +60,13 @@ celery_app.conf.update(
         # `provision_aks` — share the azure queue.
         "api.tasks.openapi.*": {"queue": "azure"},
     },
-    # Beat schedule lives in Storage state (loaded by the StorageScheduler in
-    # phase 2). The default in-memory schedule is empty.
-    beat_schedule={},
+    beat_schedule={
+        "auto-warmup-reconcile": {
+            "task": "api.tasks.storage.reconcile_auto_warmup",
+            "schedule": 60.0,
+            "options": {"queue": "storage"},
+        },
+    },
     timezone="UTC",
     enable_utc=True,
 )

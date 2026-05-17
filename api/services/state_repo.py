@@ -11,17 +11,18 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from azure.core.exceptions import ResourceNotFoundError
-from azure.data.tables import TableClient, UpdateMode
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.data.tables import TableClient, TableServiceClient, UpdateMode
 
 from api.services import get_credential
 
 LOGGER = logging.getLogger(__name__)
 
 _TABLE_ENDPOINT_ENV = "AZURE_TABLE_ENDPOINT"  # eg https://stelb*.table.core.windows.net
+_ENSURED_TABLES: set[tuple[str, str]] = set()
 
 
 @dataclass
@@ -87,7 +88,7 @@ class JobState:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _ulid_like() -> str:
@@ -130,12 +131,27 @@ class JobStateRepository:
             endpoint=self._endpoint, table_name="jobhistory", credential=self._cred
         )
 
+    def _ensure_table(self, table_name: str) -> None:
+        key = (self._endpoint, table_name)
+        if key in _ENSURED_TABLES:
+            return
+        with TableServiceClient(endpoint=self._endpoint, credential=self._cred) as service:
+            try:
+                service.create_table_if_not_exists(table_name)
+            except AttributeError:
+                try:
+                    service.create_table(table_name)
+                except ResourceExistsError:
+                    pass
+        _ENSURED_TABLES.add(key)
+
     # --- jobstate ---
 
     def create(self, state: JobState) -> JobState:
         if not state.created_at:
             state.created_at = _now_iso()
         state.updated_at = state.created_at
+        self._ensure_table("jobstate")
         with self._state_client() as t:
             t.create_entity(state.to_entity())
         self.append_history(state.job_id, "created", {"status": state.status, "phase": state.phase})
@@ -146,6 +162,7 @@ class JobStateRepository:
             try:
                 e = t.get_entity(partition_key=job_id, row_key="current")
             except ResourceNotFoundError:
+                self._ensure_table("jobstate")
                 return None
         return JobState.from_entity(dict(e))
 
@@ -163,6 +180,7 @@ class JobStateRepository:
             try:
                 e = dict(t.get_entity(partition_key=job_id, row_key="current"))
             except ResourceNotFoundError as exc:
+                self._ensure_table("jobstate")
                 raise KeyError(job_id) from exc
             if status is not None:
                 e["status"] = status
@@ -188,30 +206,76 @@ class JobStateRepository:
     def list_for_owner(self, owner_oid: str, limit: int = 50) -> list[JobState]:
         safe_oid = _sanitise_odata_value(owner_oid)
         with self._state_client() as t:
-            entities = t.query_entities(
-                f"owner_oid eq '{safe_oid}'", results_per_page=limit
-            )
             rows = []
-            for e in entities:
-                rows.append(JobState.from_entity(dict(e)))
-                if len(rows) >= limit:
-                    break
+            try:
+                entities = t.query_entities(
+                    f"owner_oid eq '{safe_oid}'", results_per_page=limit
+                )
+                for e in entities:
+                    rows.append(JobState.from_entity(dict(e)))
+                    if len(rows) >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
         rows.sort(key=lambda r: r.created_at or "", reverse=True)
         return rows
 
     def list_children(self, parent_job_id: str, limit: int = 100) -> list[JobState]:
         safe_parent = _sanitise_odata_value(parent_job_id)
         with self._state_client() as t:
-            entities = t.query_entities(
-                f"parent_job_id eq '{safe_parent}'", results_per_page=limit
-            )
             rows = []
-            for e in entities:
-                rows.append(JobState.from_entity(dict(e)))
-                if len(rows) >= limit:
-                    break
+            try:
+                entities = t.query_entities(
+                    f"parent_job_id eq '{safe_parent}'", results_per_page=limit
+                )
+                for e in entities:
+                    rows.append(JobState.from_entity(dict(e)))
+                    if len(rows) >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
         rows.sort(key=lambda r: r.created_at or "")
         return rows
+
+    def list_children_for_owner(
+        self,
+        owner_oid: str,
+        parent_job_ids: list[str],
+        *,
+        limit: int = 5000,
+    ) -> dict[str, list[JobState]]:
+        """Return child job rows grouped by parent id using one Table query.
+
+        Azure Tables does not give us a secondary index on ``parent_job_id``.
+        The previous dashboard path queried once per parent, which made the
+        Jobs card pay N sequential Table scans. This owner-scoped query keeps
+        the same security boundary and filters the parent set in process.
+        """
+        parent_set = {parent for parent in parent_job_ids if parent}
+        if not parent_set:
+            return {}
+        safe_oid = _sanitise_odata_value(owner_oid)
+        grouped: dict[str, list[JobState]] = {parent: [] for parent in parent_set}
+        with self._state_client() as t:
+            try:
+                entities = t.query_entities(
+                    f"owner_oid eq '{safe_oid}' and parent_job_id ne ''",
+                    results_per_page=limit,
+                )
+                seen = 0
+                for e in entities:
+                    row = JobState.from_entity(dict(e))
+                    if row.parent_job_id not in parent_set:
+                        continue
+                    grouped.setdefault(row.parent_job_id, []).append(row)
+                    seen += 1
+                    if seen >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+        for rows in grouped.values():
+            rows.sort(key=lambda r: r.created_at or "")
+        return grouped
 
     # --- jobhistory ---
 
@@ -229,6 +293,7 @@ class JobStateRepository:
             }
             if payload is not None:
                 entity["payload_json"] = json.dumps(payload, default=str)
+            self._ensure_table("jobhistory")
             with self._history_client() as t:
                 t.create_entity(entity)
         except Exception as exc:
@@ -239,13 +304,16 @@ class JobStateRepository:
     def get_history(self, job_id: str, limit: int = 200) -> list[dict[str, Any]]:
         safe_id = _sanitise_odata_value(job_id)
         with self._history_client() as t:
-            entities = t.query_entities(
-                f"PartitionKey eq '{safe_id}'", results_per_page=limit
-            )
             rows = []
-            for e in entities:
-                rows.append(dict(e))
-                if len(rows) >= limit:
-                    break
+            try:
+                entities = t.query_entities(
+                    f"PartitionKey eq '{safe_id}'", results_per_page=limit
+                )
+                for e in entities:
+                    rows.append(dict(e))
+                    if len(rows) >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobhistory")
         rows.sort(key=lambda r: r["RowKey"])
         return rows

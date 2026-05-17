@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import shlex
 from typing import Any
 
 from celery import shared_task
@@ -150,7 +151,7 @@ def _schedule_acr_build(
 
     steps: list[str] = []
     if pre_cmd:
-        steps.append(f"  - cmd: bash -c \"{pre_cmd}\"")
+        steps.append("  - cmd: >\n" f"      bash -lc {shlex.quote(pre_cmd)}")
     steps.append(
         "  - build: >\n"
         f"      -t {{{{.Run.Registry}}}}/{image_ref}\n"

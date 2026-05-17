@@ -25,7 +25,7 @@ import {
 } from "@/pages/remoteTerminalProtocol";
 import { TerminalManual } from "@/pages/terminal/TerminalManual";
 import { TerminalCockpit } from "@/pages/terminal/TerminalCockpit";
-import { attachTerminalWheelScroller } from "@/pages/terminal/wheelScroll";
+import { normaliseCommandForTerminalInsert } from "@/pages/terminal/terminalCockpitModel";
 
 interface TicketResponse {
   ticket: string;
@@ -44,6 +44,8 @@ interface TerminalSessionInfo {
   shellUser: string;
 }
 
+type TerminalSidePanel = "cockpit" | "manual" | null;
+
 const TERMINAL_TICKET_TIMEOUT_MS = 8_000;
 
 export default function RemoteTerminal() {
@@ -56,16 +58,19 @@ export default function RemoteTerminal() {
     "connecting",
   );
   const [error, setError] = useState<string | null>(null);
-  const [cockpitOpen, setCockpitOpen] = useState(true);
-  const [manualOpen, setManualOpen] = useState(false);
+  const [sidePanel, setSidePanel] = useState<TerminalSidePanel>("cockpit");
 
   const handleCopyManualCommand = (command: string) => {
     void navigator.clipboard.writeText(command);
   };
 
   const handleInsertCommand = (command: string) => {
-    termRef.current?.paste(command);
-    termRef.current?.focus();
+    const terminal = termRef.current;
+    const runnableCommand = normaliseCommandForTerminalInsert(command);
+    if (!terminal || status !== "connected" || runnableCommand.length === 0) return;
+    terminal.paste(runnableCommand);
+    terminal.input("\r");
+    terminal.focus();
   };
 
   useEffect(() => {
@@ -77,6 +82,7 @@ export default function RemoteTerminal() {
       fontSize: 14,
       lineHeight: 1.0,
       letterSpacing: 0,
+      scrollback: 10_000,
       theme: {
         background: "#0b0e14",
         foreground: "#d4d4d4",
@@ -130,7 +136,6 @@ export default function RemoteTerminal() {
 
     let cancelled = false;
     let inputDisposable: { dispose: () => void } | null = null;
-    attachTerminalWheelScroller(term);
     let focusTimer: number | null = null;
     let ticketTimeout: number | null = null;
     let reconnectTimer: number | null = null;
@@ -378,8 +383,8 @@ export default function RemoteTerminal() {
         <button
           type="button"
           className="glass-button terminal-manual-toggle"
-          onClick={() => setCockpitOpen((isOpen) => !isOpen)}
-          aria-expanded={cockpitOpen}
+          onClick={() => setSidePanel((current) => (current === "cockpit" ? null : "cockpit"))}
+          aria-expanded={sidePanel === "cockpit"}
           aria-controls="terminal-cockpit"
           title="Open the terminal cockpit"
         >
@@ -389,8 +394,8 @@ export default function RemoteTerminal() {
         <button
           type="button"
           className="glass-button terminal-manual-toggle"
-          onClick={() => setManualOpen((isOpen) => !isOpen)}
-          aria-expanded={manualOpen}
+          onClick={() => setSidePanel((current) => (current === "manual" ? null : "manual"))}
+          aria-expanded={sidePanel === "manual"}
           aria-controls="terminal-manual"
           title="Open the terminal manual"
         >
@@ -437,11 +442,11 @@ export default function RemoteTerminal() {
       </div>
 
       <div
-        className={`terminal-workspace${manualOpen || cockpitOpen ? " terminal-workspace--manual" : ""}`}
+        className={`terminal-workspace${sidePanel ? " terminal-workspace--manual" : ""}`}
       >
-        {(cockpitOpen || manualOpen) && (
+        {sidePanel && (
           <div className="terminal-side-panels">
-            {cockpitOpen && (
+            {sidePanel === "cockpit" && (
               <div id="terminal-cockpit" className="terminal-cockpit-wrap">
                 <TerminalCockpit
                   connectionStatus={status}
@@ -452,9 +457,13 @@ export default function RemoteTerminal() {
                 />
               </div>
             )}
-            {manualOpen && (
+            {sidePanel === "manual" && (
               <div id="terminal-manual" className="terminal-manual-wrap">
-                <TerminalManual onCopyCommand={handleCopyManualCommand} />
+                <TerminalManual
+                  onCopyCommand={handleCopyManualCommand}
+                  onInsertCommand={handleInsertCommand}
+                  canInsertCommand={status === "connected"}
+                />
               </div>
             )}
           </div>

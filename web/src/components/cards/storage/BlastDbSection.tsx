@@ -70,7 +70,7 @@ export function BlastDbSection({
           )}
           {!publicAccessDisabled && downloadedDbs.size > 0 && (
             <span className="dv3-pill dv3-pill-success">
-              {downloadedDbs.size} ready
+              {downloadedDbs.size} downloaded
             </span>
           )}
           {updatesAvailable > 0 && (
@@ -79,7 +79,7 @@ export function BlastDbSection({
             </span>
           )}
           <span className="counts">
-            {downloadedDbs.size}/{DB_CATALOG.length}
+            {downloadedDbs.size}/{DB_CATALOG.length} catalog
           </span>
           <button
             className="glass-button"

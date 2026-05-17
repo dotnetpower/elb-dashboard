@@ -53,6 +53,11 @@ def result_media_type(filename: str) -> str:
 
 
 def _blob_service(credential: TokenCredential, account_name: str) -> BlobServiceClient:
+    # Validate the account name so a forged querystring can't redirect the
+    # api sidecar's MI to an attacker-controlled URL. Azure storage account
+    # names are 3-24 lowercase alphanumeric characters.
+    if not _STORAGE_ACCOUNT_NAME_RE.fullmatch(account_name):
+        raise ValueError(f"invalid storage account name: {account_name!r}")
     # Fail fast on network-blocked accounts (publicNetworkAccess: Disabled)
     # instead of letting the SDK retry for ~30s. The api sidecar is the only
     # legitimate caller in production and reaches Storage via the private
@@ -67,13 +72,11 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
     )
 
 
+_STORAGE_ACCOUNT_NAME_RE = re.compile(r"^[a-z0-9]{3,24}$")
+
+
 def _validate_blob_path(blob_path: str) -> None:
-    if (
-        ".." in blob_path
-        or blob_path.startswith("/")
-        or "?" in blob_path
-        or "#" in blob_path
-    ):
+    if ".." in blob_path or blob_path.startswith("/") or "?" in blob_path or "#" in blob_path:
         raise ValueError("invalid blob_path: path traversal not allowed")
 
 
@@ -312,10 +315,38 @@ def list_databases(
     """
     # Known BLAST DB file extensions
     _DB_EXTS = {
-        ".nhd", ".nhi", ".nhr", ".nin", ".nnd", ".nni", ".nog", ".nsq", ".nxm",
-        ".nal", ".ndb", ".njs", ".nos", ".not", ".ntf", ".nto",
-        ".phd", ".phi", ".phr", ".pin", ".pnd", ".pni", ".pog", ".psq", ".pxm",
-        ".pal", ".pdb", ".pjs", ".pos", ".pot", ".ptf", ".pto",
+        ".nhd",
+        ".nhi",
+        ".nhr",
+        ".nin",
+        ".nnd",
+        ".nni",
+        ".nog",
+        ".nsq",
+        ".nxm",
+        ".nal",
+        ".ndb",
+        ".njs",
+        ".nos",
+        ".not",
+        ".ntf",
+        ".nto",
+        ".phd",
+        ".phi",
+        ".phr",
+        ".pin",
+        ".pnd",
+        ".pni",
+        ".pog",
+        ".psq",
+        ".pxm",
+        ".pal",
+        ".pdb",
+        ".pjs",
+        ".pos",
+        ".pot",
+        ".ptf",
+        ".pto",
     }
     svc = _blob_service(credential, account_name)
     cc = svc.get_container_client(container)
@@ -388,6 +419,9 @@ def list_databases(
                 break
     # Enrich with metadata (source_version, downloaded_at, sharding info)
     import json as _json
+
+    from api.services.web_blast_searchsp import WEB_BLAST_SEARCHSP_DEFAULTS
+
     for db_name, info in db_info.items():
         # Default sharding fields so the frontend can rely on their presence.
         info.setdefault("sharded", False)
@@ -444,14 +478,21 @@ def list_databases(
                 # Allow metadata to override total_bytes if the prepare-db
                 # pipeline computed it more precisely than blob enumeration
                 # (e.g. for very large multi-volume DBs).
-                if (
-                    isinstance(meta.get("total_bytes"), (int, float))
-                    and meta["total_bytes"] > 0
-                ):
+                if isinstance(meta.get("total_bytes"), (int, float)) and meta["total_bytes"] > 0:
                     info["total_bytes"] = int(meta["total_bytes"])
                 for key in ("total_letters", "total_sequences", "bytes_to_cache", "bytes_total"):
                     if isinstance(meta.get(key), (int, float)) and meta[key] > 0:
                         info[key] = int(meta[key])
+                for source_key in ("effective_search_space", "db_effective_search_space"):
+                    if isinstance(meta.get(source_key), (int, float)) and meta[source_key] > 0:
+                        info["db_effective_search_space"] = int(meta[source_key])
+                        info["db_effective_search_space_source"] = "storage_metadata"
+                        break
             except Exception as exc:
                 LOGGER.debug("metadata blob parse skipped for %s: %s", db_name, exc)
+        default_searchsp = WEB_BLAST_SEARCHSP_DEFAULTS.get(db_name)
+        if default_searchsp is not None:
+            info.setdefault("web_blast_searchsp", default_searchsp.value)
+            info.setdefault("web_blast_searchsp_scope", default_searchsp.scope)
+            info.setdefault("web_blast_searchsp_evidence", default_searchsp.evidence)
     return sorted(db_info.values(), key=lambda d: d["name"])

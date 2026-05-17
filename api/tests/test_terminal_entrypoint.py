@@ -12,5 +12,6 @@ def test_ttyd_attaches_to_persistent_tmux_session() -> None:
     body = ENTRYPOINT.read_text()
 
     assert "/usr/local/bin/ttyd" in body
-    assert "/usr/bin/tmux new-session -A -D -s elb /bin/bash --login" in body
+    assert "/usr/bin/tmux new-session -A -s elb /bin/bash --login" in body
+    assert "new-session -A -D" not in body
     assert "  /bin/bash --login &" not in body

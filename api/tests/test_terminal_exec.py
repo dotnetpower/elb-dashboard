@@ -206,7 +206,7 @@ def test_run_sanitises_stdout(
 def test_run_times_out_and_returns_124(
     exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _install_stub(tmp_path, "az", '#!/bin/bash\nsleep 5\n')
+    _install_stub(tmp_path, "az", "#!/bin/bash\nsleep 5\n")
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
 
     from api.services import terminal_exec
@@ -214,6 +214,32 @@ def test_run_times_out_and_returns_124(
     result = terminal_exec.run(["az", "slow"], timeout_seconds=1)
     assert result["timed_out"] is True
     assert result["exit_code"] == 124
+
+
+def test_run_writes_stdin_file_before_exec(
+    exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _install_stub(tmp_path, "az", '#!/bin/bash\ncat "$1"\n')
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+
+    from api.services import terminal_exec
+
+    result = terminal_exec.run(
+        ["az", "elastic-blast.ini"],
+        stdin="[blast]\nqueries=x\n",
+        stdin_file="elastic-blast.ini",
+    )
+    assert result["exit_code"] == 0
+    assert "queries=x" in result["stdout"]
+
+
+def test_run_rejects_unsafe_stdin_file(
+    exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services import terminal_exec
+
+    with pytest.raises(terminal_exec.TerminalExecError, match="400"):
+        terminal_exec.run(["az", "version"], stdin="x", stdin_file="../cfg.ini")
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +281,7 @@ def test_concurrency_cap_returns_503(
     exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """With max_concurrency=2, a third concurrent request must get 503."""
-    _install_stub(tmp_path, "az", '#!/bin/bash\nsleep 1\n')
+    _install_stub(tmp_path, "az", "#!/bin/bash\nsleep 1\n")
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
 
     from api.services import terminal_exec

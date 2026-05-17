@@ -24,11 +24,11 @@
 #   scripts/dev/local-run.sh compose-full -- up -d --build  # detached + log follower
 #
 # Then in another terminal:
-#   curl http://127.0.0.1:8080/api/health         # 200 from api
-#   curl http://127.0.0.1:8080/api/me             # 200 with dev-bypass identity
-#   curl http://127.0.0.1:8080/api/health/celery  # queue snapshot
-#   curl -XPOST 'http://127.0.0.1:8080/api/health/celery/enqueue-noop?message=hi'
-#   open http://127.0.0.1:8080/                   # SPA via api → vite dev
+#   curl http://127.0.0.1:18080/api/health         # 200 from api
+#   curl http://127.0.0.1:18080/api/me             # 200 with dev-bypass identity
+#   curl http://127.0.0.1:18080/api/health/celery  # queue snapshot
+#   curl -XPOST 'http://127.0.0.1:18080/api/health/celery/enqueue-noop?message=hi'
+#   open http://127.0.0.1:18080/                   # SPA via api -> vite dev
 #
 # Tear down:
 #   docker compose -f scripts/dev/docker-compose.full.yml down -v

@@ -30,11 +30,49 @@ export interface AksClusterSummary {
 export interface WarmupDbInfo {
   name: string;
   mol_type: string;
-  status: "Ready" | "Loading" | "Failed" | "Unknown";
+  status:
+    | "Ready"
+    | "Loading"
+    | "Failed"
+    | "Unknown"
+    | "Partial"
+    | "Released"
+    | "Blocked"
+    | "Pressure";
   nodes_ready: number;
   nodes_failed: number;
   nodes_active: number;
   total_jobs: number;
+  shards?: string[];
+  progress_pct?: number;
+  started_at?: string;
+  elapsed_seconds?: number;
+  estimated_remaining_seconds?: number;
+  active_phase?:
+    | "waiting"
+    | "starting"
+    | "copying_files"
+    | "verifying_db"
+    | "touching_memory"
+    | "completed"
+    | "failed"
+    | "unknown";
+  active_phase_label?: string;
+  active_message?: string;
+  active_last_log?: string;
+  phase_counts?: Record<string, number>;
+  pod_statuses?: WarmupPodStatus[];
+}
+
+export interface WarmupPodStatus {
+  pod: string;
+  shard: string;
+  node: string;
+  phase: string;
+  phase_label: string;
+  message: string;
+  last_log?: string;
+  started_at?: string;
 }
 
 export interface WarmupStatus {
@@ -45,6 +83,27 @@ export interface WarmupStatus {
   vmtouch_ready: number;
   namespaces: string[];
   error?: string;
+}
+
+export interface AutoWarmupPreference {
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+  storage_account: string;
+  storage_resource_group: string;
+  region?: string;
+  databases: string[];
+  programs?: Record<string, string>;
+  enabled: boolean;
+  acr_resource_group?: string;
+  acr_name?: string;
+  terminal_resource_group?: string;
+  terminal_vm_name?: string;
+  machine_type?: string;
+  num_nodes?: number;
+  last_ready?: boolean;
+  last_triggered_at?: string;
+  updated_at?: string;
 }
 
 export interface StorageSummary {
@@ -272,6 +331,21 @@ export const monitoringApi = {
     terminal_vm_name?: string;
   }) => api.post<{ instance_id: string; db: string }>("/warmup/start", body),
 
+  releaseWarmup: (body: {
+    subscription_id: string;
+    resource_group: string;
+    aks_cluster_name: string;
+    db: string;
+  }) =>
+    api.post<{
+      db: string;
+      status: "released" | "partial";
+      database: string;
+      namespace?: string;
+      deleted?: { kind: string; selector: string; status_code: number }[];
+      errors?: { kind: string; selector: string; status_code: number; detail?: string }[];
+    }>("/warmup/release", body),
+
   warmupOrchStatus: (instanceId: string) =>
     api.get<{
       instance_id: string;
@@ -283,4 +357,109 @@ export const monitoringApi = {
       } | null;
       output: { status: string; db: string; error?: string } | null;
     }>(`/warmup/${encodeURIComponent(instanceId)}/status`),
+
+  saveAutoWarmupPreference: (body: AutoWarmupPreference) =>
+    api.put<{ status: string; preference: AutoWarmupPreference }>(
+      "/warmup/auto-preference",
+      body,
+    ),
+
+  /** Per-process API request metrics. Window in seconds (60..86400). */
+  requestMetrics: (
+    params: {
+      windowSeconds?: number;
+      pathPrefix?: string;
+      rpmBuckets?: number;
+    } = {},
+  ) => {
+    const w = params.windowSeconds ?? 900;
+    const b = params.rpmBuckets ?? 60;
+    const pp = params.pathPrefix
+      ? `&path_prefix=${encodeURIComponent(params.pathPrefix)}`
+      : "";
+    return api.get<RequestMetricsSummary>(
+      `/monitor/metrics?window_seconds=${w}&rpm_buckets=${b}${pp}`,
+    );
+  },
+
+  /** Most recent N captured requests (newest first) for the HTTP inspector
+   * panel on the SidecarsCard. Sensitive headers (Authorization, Cookie,
+   * X-Api-Key, …) are redacted server-side at capture time. */
+  sidecarRequests: (limit: number = 200) =>
+    api.get<SidecarRequestsResponse>(
+      `/monitor/sidecar-requests?limit=${Math.max(1, Math.min(1000, limit))}`,
+    ),
+
+  /** k8s events for the cluster (optionally namespace-scoped). */
+  aksEvents: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    opts: { namespace?: string; limit?: number } = {},
+  ) => {
+    const ns = opts.namespace ? `&namespace=${encodeURIComponent(opts.namespace)}` : "";
+    const lim = opts.limit ?? 30;
+    return api.get<{ events: K8sEvent[]; degraded?: boolean; degraded_reason?: string }>(
+      `/monitor/aks/events?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&limit=${lim}${ns}`,
+    );
+  },
 };
+
+export interface RequestMetricsSummary {
+  window_seconds: number;
+  now_ts: number;
+  path_prefix: string | null;
+  total: number;
+  errors: number;
+  error_rate: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  p99_ms: number | null;
+  rpm: { t_end: number; count: number }[];
+  by_path: { path: string; count: number; errors: number; p95_ms: number | null }[];
+  degraded?: boolean;
+  degraded_reason?: string;
+}
+
+export interface SidecarRequestHeader {
+  name: string;
+  value: string;
+}
+
+export interface SidecarRequestSample {
+  ts: number;
+  request_id: string;
+  method: string;
+  path: string;
+  status: number;
+  duration_ms: number;
+  caller: string | null;
+  client_ip: string | null;
+  request_headers: SidecarRequestHeader[];
+  request_body: string | null;
+  request_body_truncated: boolean;
+  response_headers: SidecarRequestHeader[];
+  response_body: string | null;
+  response_body_truncated: boolean;
+  response_size_bytes: number | null;
+}
+
+export interface SidecarRequestsResponse {
+  items: SidecarRequestSample[];
+  count: number;
+  capacity: number;
+}
+
+export interface K8sEvent {
+  namespace: string;
+  name: string;
+  type: "Normal" | "Warning" | string;
+  reason: string;
+  message: string;
+  count: number;
+  last_timestamp: string;
+  involved_kind: string;
+  involved_name: string;
+  source_component: string;
+  source_host: string;
+}

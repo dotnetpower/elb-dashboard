@@ -17,11 +17,12 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchApiRaw } from "@/api/client";
 import { monitoringApi } from "@/api/endpoints";
 import { loadSavedConfig } from "@/components/SetupWizard";
+import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 export interface ClusterReadiness {
   /** A cluster resource is present in the workload RG. */
   hasAnyCluster: boolean;
-  /** At least one cluster reports power_state === "Running". */
+  /** At least one cluster is provisioned and reports power_state === "Running". */
   hasRunningCluster: boolean;
   /** Query is still loading and the answer is unknown. */
   isLoading: boolean;
@@ -36,7 +37,7 @@ export function useClusterReadiness(): ClusterReadiness {
   const enabled = Boolean(subId && workloadRg);
 
   const query = useQuery({
-    queryKey: ["aks-clusters", subId, workloadRg],
+    queryKey: ["aks", subId, workloadRg],
     queryFn: () => monitoringApi.aks(subId, workloadRg),
     enabled,
     refetchInterval: 30_000,
@@ -46,7 +47,7 @@ export function useClusterReadiness(): ClusterReadiness {
   const clusters = query.data?.clusters ?? [];
   return {
     hasAnyCluster: clusters.length > 0,
-    hasRunningCluster: clusters.some((c) => c.power_state === "Running"),
+    hasRunningCluster: clusters.some(isAksWorkloadReady),
     isLoading: enabled && query.isLoading,
     isError: query.isError,
   };

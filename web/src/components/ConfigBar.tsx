@@ -5,6 +5,7 @@ import type { MonitoringConfig } from "@/pages/Dashboard";
 import { SubscriptionPicker } from "@/components/SubscriptionPicker";
 import { ResourcePicker } from "@/components/ResourcePicker";
 import { armProxyApi } from "@/api/endpoints";
+import { isAksManagedResourceGroup } from "@/lib/aksManagedRg";
 
 interface Props {
   config: MonitoringConfig;
@@ -18,20 +19,38 @@ export function ConfigBar({ config, onChange, onOpenSettings }: Props) {
   const rgFetcher = sub
     ? async () => {
         const groups = await armProxyApi.listResourceGroups(sub);
-        // Only enable RGs that carry at least one elb-* tag (our workspace marker).
-        // Untagged RGs are listed but disabled so users can see they exist
-        // without accidentally picking one that the dashboard cannot manage.
+        // Classify each RG and disable the ones the dashboard cannot
+        // manage as a workspace:
+        //   * AKS-managed node RGs (default `MC_…` name or
+        //     `aks-managed-cluster-name` tag) — owned by AKS, never a
+        //     workspace.
+        //   * RGs without any `elb-*` tag — listed so users can see they
+        //     exist, but disabled to prevent accidental selection.
         const items = groups.map((g) => {
           const tags = g.tags ?? {};
+          const isAksManaged = isAksManagedResourceGroup({
+            name: g.name,
+            tags,
+          });
           const isElb = Object.keys(tags).some((k) => k.startsWith("elb-"));
+          let description = g.location;
+          let disabled = false;
+          if (isAksManaged) {
+            description = `${g.location} · AKS-managed (node RG)`;
+            disabled = true;
+          } else if (!isElb) {
+            description = `${g.location} · no elb-* tag`;
+            disabled = true;
+          }
           return {
             value: g.name,
             label: g.name,
-            description: isElb ? g.location : `${g.location} · no elb-* tag`,
-            disabled: !isElb,
+            description,
+            disabled,
           };
         });
-        // Tagged (selectable) RGs first, then untagged; keep alpha order within each bucket.
+        // Selectable (elb-tagged) RGs first, then disabled rows; keep
+        // alpha order within each bucket.
         items.sort((a, b) => {
           if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
           return a.label.localeCompare(b.label);

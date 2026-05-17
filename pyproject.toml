@@ -40,6 +40,9 @@ dependencies = [
 
   # Pydantic for request/response models
   "pydantic==2.9.2",
+
+  # XML parsing hardened against XXE / billion-laughs (NCBI Taxonomy efetch)
+  "defusedxml==0.7.1",
 ]
 
 [dependency-groups]

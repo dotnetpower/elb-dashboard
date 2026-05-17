@@ -40,6 +40,43 @@ def generate_config(params: dict[str, Any]) -> str:
             raise ValueError(f"{key} must be a positive integer")
         return value
 
+    def _taxonomy_filter_option() -> tuple[str, int] | None:
+        if isinstance(params.get("taxid"), bool):
+            raise ValueError("taxid must be a positive integer")
+        taxid = _positive_int_option("taxid")
+        if taxid is None:
+            return None
+        is_inclusive = params.get("is_inclusive")
+        if is_inclusive is None:
+            inclusive = True
+        elif isinstance(is_inclusive, bool):
+            inclusive = is_inclusive
+        elif isinstance(is_inclusive, str):
+            lowered = is_inclusive.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                inclusive = True
+            elif lowered in {"0", "false", "no", "off"}:
+                inclusive = False
+            else:
+                raise ValueError("is_inclusive must be a boolean")
+        else:
+            raise ValueError("is_inclusive must be a boolean")
+        return ("-taxids" if inclusive else "-negative_taxids", taxid)
+
+    def _bool_option(key: str) -> bool | None:
+        raw = params.get(key)
+        if raw in (None, ""):
+            return None
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            lowered = raw.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        raise ValueError(f"{key} must be a boolean")
+
     # [cloud-provider]
     cfg.add_section("cloud-provider")
     cfg.set("cloud-provider", "azure-region", params.get("region", "koreacentral"))
@@ -95,14 +132,15 @@ def generate_config(params: dict[str, Any]) -> str:
 
     sharding_mode = normalize_sharding_mode(params)
 
-    # DB partitioning / sharding
+    # DB partitioning / sharding. ``db_auto_partition`` is a control-plane hint
+    # only: the Azure runtime used by this dashboard expects explicit
+    # db-partitions/db-partition-prefix values when sharding is selected.
     if params.get("db_auto_partition"):
         if sharding_mode == "off":
             raise ValueError(
                 "db_auto_partition requires sharding_mode=approximate or precise; "
                 "partitioned BLAST output is not guaranteed to match full-DB BLAST"
             )
-        cfg.set("blast", "db-auto-partition", "true")
     db_partitions = params.get("db_partitions")
     if db_partitions and int(db_partitions) > 0:
         cfg.set("blast", "db-partitions", str(db_partitions))
@@ -140,6 +178,7 @@ def generate_config(params: dict[str, Any]) -> str:
             partition_prefix_for,
             select_partitions_for_submit,
         )
+
         n = select_partitions_for_submit(
             db_total_bytes=int(params["db_total_bytes"]),
             num_nodes=int(params.get("num_nodes", 1)),
@@ -156,12 +195,16 @@ def generate_config(params: dict[str, Any]) -> str:
                 f"selected {n} shards for {num_nodes} nodes"
             )
         cfg.set("blast", "db-partitions", str(n))
-        cfg.set("blast", "db-partition-prefix", partition_prefix_for(
-            account_name=str(params["storage_account"]),
-            db_name=str(params["db_name"]),
-            num_shards=n,
-            container=container_name,
-        ))
+        cfg.set(
+            "blast",
+            "db-partition-prefix",
+            partition_prefix_for(
+                account_name=str(params["storage_account"]),
+                db_name=str(params["db_name"]),
+                num_shards=n,
+                container=container_name,
+            ),
+        )
         # Sharding requires the local-SSD init script
         # (init-db-shard-aks.sh). Force it on even if the caller did not
         # request warmup mode — the alternative (init-db-partitioned-aks.sh)
@@ -175,7 +218,7 @@ def generate_config(params: dict[str, Any]) -> str:
     def _additional_has_blast_option(option: str) -> bool:
         import re as _re_option
 
-        return bool(_re_option.search(rf"(?<!\S){_re_option.escape(option)}(?!\S)", additional))
+        return bool(_re_option.search(rf"(?<!\S){_re_option.escape(option)}(?:\s|=|$)", additional))
 
     evalue = params.get("evalue")
     if evalue is not None:
@@ -183,6 +226,16 @@ def generate_config(params: dict[str, Any]) -> str:
     max_target_seqs = params.get("max_target_seqs")
     if max_target_seqs is not None:
         options_parts.append(f"-max_target_seqs {max_target_seqs}")
+    taxonomy_filter = _taxonomy_filter_option()
+    if taxonomy_filter is not None:
+        taxonomy_option, taxonomy_id = taxonomy_filter
+        if _additional_has_blast_option("-taxids") or _additional_has_blast_option(
+            "-negative_taxids"
+        ):
+            raise ValueError(
+                "taxid conflicts with taxonomy filters already present in additional_options"
+            )
+        options_parts.append(f"{taxonomy_option} {taxonomy_id}")
     outfmt = params.get("outfmt")
     outfmt_str: str | None = None
     if outfmt is not None:
@@ -192,6 +245,7 @@ def generate_config(params: dict[str, Any]) -> str:
         # error surfaces here, not 60 s later in the cluster.
         outfmt_str = str(outfmt).strip()
         import re as _re_outfmt
+
         if _re_outfmt.search(r'["\'`;&|$(){}\\\n\r]', outfmt_str):
             raise ValueError(f"outfmt contains forbidden characters: {outfmt_str[:50]}")
         options_parts.append(f"-outfmt {outfmt_str}")
@@ -220,6 +274,19 @@ def generate_config(params: dict[str, Any]) -> str:
     word_size = params.get("word_size")
     if word_size is not None:
         options_parts.append(f"-word_size {word_size}")
+    low_complexity_filter = _bool_option("low_complexity_filter")
+    if (
+        low_complexity_filter is not None
+        and str(params.get("program", "blastn")).strip() == "blastn"
+        and not _additional_has_blast_option("-dust")
+    ):
+        options_parts.append(f"-dust {'yes' if low_complexity_filter else 'no'}")
+    if (
+        low_complexity_filter is True
+        and str(params.get("program", "blastn")).strip() == "blastn"
+        and not _additional_has_blast_option("-soft_masking")
+    ):
+        options_parts.append("-soft_masking false")
     gap_open = params.get("gap_open")
     if gap_open is not None:
         options_parts.append(f"-gapopen {gap_open}")
@@ -247,6 +314,7 @@ def generate_config(params: dict[str, Any]) -> str:
     if additional:
         # Reject shell metacharacters to prevent command injection
         import re
+
         _SHELL_META = re.compile(r"[;&|`$(){}\\!\n\r]")
         if _SHELL_META.search(additional):
             raise ValueError(f"additional_options contains forbidden characters: {additional[:50]}")

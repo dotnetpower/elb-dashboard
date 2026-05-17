@@ -143,6 +143,10 @@ export interface FormState {
   mismatch_score: string;
   low_complexity_filter: boolean;
   additional_options: string;
+  taxid: string;
+  taxid_label: string;
+  taxid_rank: string;
+  is_inclusive: boolean;
   selectedCluster: string;
   optimize: string;
   enable_warmup: boolean;
@@ -161,7 +165,7 @@ export const INITIAL: FormState = {
   job_title: "",
   evalue: 0.05,
   max_target_seqs: 100,
-  outfmt: 7,
+  outfmt: 5,
   word_size: "",
   gap_open: "",
   gap_extend: "",
@@ -169,13 +173,28 @@ export const INITIAL: FormState = {
   mismatch_score: "",
   low_complexity_filter: true,
   additional_options: "",
+  taxid: "",
+  taxid_label: "",
+  taxid_rank: "",
+  is_inclusive: true,
   selectedCluster: "",
   optimize: "megablast",
-  enable_warmup: true,
+  enable_warmup: false,
   sharding_mode: "off",
   db_auto_partition: false,
   disable_sharding: false,
 };
+
+export function parsePositiveTaxid(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^[1-9]\d*$/.test(trimmed)) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+export function hasStructuredTaxidOptionConflict(additionalOptions: string): boolean {
+  return /(?:^|\s)-(?:negative_)?taxids(?:\s|=|$)/.test(additionalOptions);
+}
 
 export function buildCommandString(form: FormState, programMeta: (typeof PROGRAMS)[0]): string {
   const dbName = form.db.split("/").pop() || form.db;
@@ -193,6 +212,10 @@ export function buildCommandString(form: FormState, programMeta: (typeof PROGRAM
   if (form.low_complexity_filter && form.program === "blastn") parts.push("-dust", "yes");
   if (form.query_from && form.query_to) {
     parts.push("-query_loc", `${form.query_from}-${form.query_to}`);
+  }
+  const taxid = parsePositiveTaxid(form.taxid);
+  if (taxid) {
+    parts.push(form.is_inclusive ? "-taxids" : "-negative_taxids", String(taxid));
   }
   if (form.additional_options?.trim()) parts.push(form.additional_options.trim());
   parts.push("-query", "query.fasta", "-out", "results.out");

@@ -46,7 +46,21 @@ IMAGE_BUILD_INFO: dict[str, dict[str, str]] = {
         "context": "",
         "dockerfile": "docker-job-submit/Dockerfile.azure",
         "build_context_dir": "docker-job-submit",
-        "pre_build_cmd": "cp -r src/elastic_blast/templates docker-job-submit/",
+        "pre_build_cmd": " && ".join(
+            [
+                "cp -r src/elastic_blast/templates docker-job-submit/",
+                (
+                    "sed -i 's|COPY templates/pvc-rwm-aks.yaml.template /templates/|"
+                    "COPY templates/ /templates/|' docker-job-submit/Dockerfile.azure"
+                ),
+                (
+                    r"sed -i 's|if ! $ELB_USE_LOCAL_SSD ; then|"
+                    r"if ! $ELB_USE_LOCAL_SSD \&\& "
+                    r"[ x${ELB_CLOUD_PROVIDER:-azure} = xgcp ] ; then|' "
+                    "docker-job-submit/cloud-job-submit-aks.sh"
+                ),
+            ]
+        ),
     },
     "ncbi/elasticblast-query-split": {
         "context": "docker-qs",

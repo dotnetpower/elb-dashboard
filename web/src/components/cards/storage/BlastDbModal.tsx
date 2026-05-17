@@ -11,6 +11,10 @@ import {
 import { BlastDbCustomInput } from "@/components/cards/storage/BlastDbCustomInput";
 import { BlastDbLargeConfirm } from "@/components/cards/storage/BlastDbLargeConfirm";
 import { BlastDbRow } from "@/components/cards/storage/BlastDbRow";
+import {
+  readAutoWarmupDbs,
+  setAutoWarmupDb,
+} from "@/components/cards/storage/autoWarmupPrefs";
 import type { UseBlastDbReturn } from "@/components/cards/storage/useBlastDb";
 
 const CATEGORIES = ["Small / Test", "Medium", "Large"] as const;
@@ -30,6 +34,9 @@ interface BlastDbModalProps {
  */
 export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
   const [confirmLargeDb, setConfirmLargeDb] = useState<string | null>(null);
+  const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(
+    () => readAutoWarmupDbs(),
+  );
 
   // ESC key closes
   useEffect(() => {
@@ -72,6 +79,10 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
   const startDownload = (name: string) => {
     void handleDownload(name);
     setConfirmLargeDb(null);
+  };
+
+  const toggleAutoWarmup = (name: string, checked: boolean) => {
+    setAutoWarmupDbs(setAutoWarmupDb(name, checked));
   };
 
   const degraded = (dbQuery.data as { degraded?: boolean; message?: string } | undefined)
@@ -335,8 +346,13 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                         latestVersion={latestVersion}
                         elapsed={elapsed}
                         downloadDisabled={downloading !== null}
+                        autoWarmupChecked={autoWarmupDbs.has(db.value)}
+                        autoWarmupDisabled={!isDownloaded}
                         onDownload={() => startDownload(db.value)}
                         onConfirmLarge={() => setConfirmLargeDb(db.value)}
+                        onToggleAutoWarmup={(checked) =>
+                          toggleAutoWarmup(db.value, checked)
+                        }
                       />
                     );
                   })}

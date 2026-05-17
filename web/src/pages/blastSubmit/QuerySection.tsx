@@ -1,7 +1,27 @@
-import { AlertTriangle, ArrowRight, CheckCircle2, Dna, Upload, X } from "lucide-react";
+import { useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  Copy,
+  Dna,
+  FileText,
+  RefreshCw,
+  Upload,
+  X,
+} from "lucide-react";
 
 import { MAX_UPLOAD_BYTES } from "@/constants";
-import { EXAMPLE_FASTA } from "@/pages/blastSubmitModel";
+import {
+  baseComposition,
+  deduplicateFasta,
+  hasAmbiguousBases,
+  looksLikeNucleotide,
+  parseFasta,
+  primerDiagnostics,
+  reverseComplementFasta,
+} from "@/pages/blastSubmit/fastaUtils";
+import { QUERY_EXAMPLE_TEMPLATES, type QueryExampleTemplate } from "@/pages/blastSubmit/queryExamples";
 import type { QuerySectionProps } from "@/pages/blastSubmit/types";
 import { SectionHeader, Tip } from "@/pages/blastSubmit/ui";
 
@@ -14,6 +34,109 @@ export function QuerySection({
   seqCount,
   charCount,
 }: QuerySectionProps) {
+  const [exampleModalOpen, setExampleModalOpen] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+
+  // Sequence-level diagnostics. Computed off the concatenation of every
+  // parsed record so the GC% / IUPAC warning describe the whole query
+  // rather than the first record only. blastn-only — protein sequences
+  // are detected and skipped automatically by `looksLikeNucleotide`.
+  const diagnostics = useMemo(() => {
+    if (!form.query_data.trim()) return null;
+    const records = parseFasta(form.query_data);
+    const concat = records.map((r) => r.sequence).join("");
+    if (!concat) return null;
+    const nucleotide = looksLikeNucleotide(concat);
+    if (!nucleotide) return { nucleotide: false } as const;
+    const stats = baseComposition(concat);
+    return {
+      nucleotide: true,
+      gc: stats.gc,
+      ambiguous: stats.ambiguous,
+      hasIupac: hasAmbiguousBases(concat),
+    } as const;
+  }, [form.query_data]);
+
+  // tblastn uses a *protein* query against a translated nucleotide DB,
+  // so GC% / reverse-complement make no sense for it. blastx uses a
+  // nucleotide query translated into protein — the query IS nucleotide.
+  const isNucleotideProgram = form.program === "blastn" || form.program === "blastx" || form.program === "tblastx";
+
+  // Per-record primer-design diagnostics. Only activated for short
+  // nucleotide oligos (≤ 50 nt) because Tm/hairpin/self-dimer are
+  // primer/probe concepts — they would be meaningless noise for a
+  // multi-kb genomic query. Skips records that fail nucleotide sanity.
+  const primerFindings = useMemo(() => {
+    if (!isNucleotideProgram) return [];
+    if (!form.query_data.trim()) return [];
+    const records = parseFasta(form.query_data);
+    const out: Array<{
+      id: string;
+      length: number;
+      diagnostics: NonNullable<ReturnType<typeof primerDiagnostics>>;
+    }> = [];
+    for (const record of records) {
+      if (record.sequence.length === 0 || record.sequence.length > 50) continue;
+      const d = primerDiagnostics(record.sequence);
+      if (!d) continue;
+      // FASTA header is the raw ">name description" line; take the first
+      // whitespace-delimited token as the display id.
+      const id = record.header.trim().split(/\s+/)[0] || "(unnamed)";
+      out.push({ id, length: record.sequence.length, diagnostics: d });
+    }
+    return out;
+  }, [form.query_data, isNucleotideProgram]);
+
+  const loadFromText = (text: string) => {
+    if (text.length === 0) return;
+    set("query_data", text);
+  };
+
+  const handleFile = (file: File) => {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      toast(`File too large. Max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`, "error");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        loadFromText(reader.result);
+        toast(`Loaded ${file.name}`, "success");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleReverseComplement = () => {
+    if (!form.query_data.trim()) return;
+    if (!isNucleotideProgram) {
+      toast("Reverse complement only applies to nucleotide programs (blastn / tblastn / tblastx).", "info");
+      return;
+    }
+    const flipped = reverseComplementFasta(form.query_data);
+    set("query_data", flipped);
+    toast("Reverse-complemented all sequences.", "success");
+  };
+
+  const handleDeduplicate = () => {
+    if (!form.query_data.trim()) return;
+    const { text, removed, kept } = deduplicateFasta(form.query_data);
+    if (removed === 0) {
+      toast(`No duplicates — ${kept} unique sequences.`, "info");
+      return;
+    }
+    set("query_data", text);
+    toast(`Removed ${removed} duplicate sequence${removed === 1 ? "" : "s"}; ${kept} unique kept.`, "success");
+  };
+
+  const loadExample = (example: QueryExampleTemplate) => {
+    set("query_data", example.fasta);
+    set("program", "blastn");
+    if (!form.job_title.trim()) set("job_title", example.label);
+    setExampleModalOpen(false);
+    toast(`Example loaded — ${example.label}`, "info");
+  };
+
   return (
     <section className="glass-card glass-card--strong blast-section">
       <SectionHeader
@@ -23,17 +146,43 @@ export function QuerySection({
         subtitle="Paste FASTA sequence(s) or upload a file"
       />
 
-      <div className="blast-textarea-wrap">
+      <div
+        className={`blast-textarea-wrap${dragActive ? " blast-textarea-wrap--drag" : ""}`}
+        onDragEnter={(event) => {
+          event.preventDefault();
+          if (event.dataTransfer.types.includes("Files")) setDragActive(true);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          setDragActive(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragActive(false);
+          const file = event.dataTransfer.files?.[0];
+          if (file) handleFile(file);
+        }}
+      >
         <textarea
           className="glass-input blast-textarea"
           rows={10}
           value={form.query_data}
           onChange={(event) => set("query_data", event.target.value)}
           placeholder={
-            ">sequence_id description\nATCGATCG...\n\nPaste your FASTA sequence here, or click 'Load example' below."
+            ">sequence_id description\nATCGATCG...\n\nPaste FASTA, drop a .fasta file, or click 'Load example' below."
           }
           spellCheck={false}
         />
+        {dragActive && (
+          <div className="blast-textarea-drop">
+            <Upload size={18} strokeWidth={1.5} />
+            <span>Drop FASTA file to load</span>
+          </div>
+        )}
         {form.query_data && (
           <div className="blast-textarea-stats">
             {isFasta ? (
@@ -51,9 +200,32 @@ export function QuerySection({
             </span>
             <span className="blast-textarea-stats__sep" />
             <span>{charCount.toLocaleString()} characters</span>
+            {diagnostics?.nucleotide && (
+              <>
+                <span className="blast-textarea-stats__sep" />
+                <span title="Total GC% across all parsed nucleotide sequences.">
+                  GC {diagnostics.gc.toFixed(1)}%
+                </span>
+                {diagnostics.hasIupac && (
+                  <>
+                    <span className="blast-textarea-stats__sep" />
+                    <span
+                      style={{ color: "var(--warning)" }}
+                      title="Contains IUPAC ambiguity codes (R, Y, S, W, K, M, B, D, H, V). Consider disabling DUST or relaxing filtering."
+                    >
+                      <AlertTriangle size={10} /> IUPAC codes
+                    </span>
+                  </>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>
+
+      {primerFindings.length > 0 && (
+        <PrimerDiagnosticsPanel findings={primerFindings} />
+      )}
 
       <div className="blast-query-actions">
         <label className="glass-button blast-action-btn" style={{ cursor: "pointer" }}>
@@ -66,29 +238,37 @@ export function QuerySection({
             onChange={(event) => {
               const file = event.target.files?.[0];
               if (!file) return;
-              if (file.size > MAX_UPLOAD_BYTES) {
-                toast(`File too large. Max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`, "error");
-                return;
-              }
-              const reader = new FileReader();
-              reader.onload = () => {
-                if (typeof reader.result === "string") set("query_data", reader.result);
-              };
-              reader.readAsText(file);
+              handleFile(file);
             }}
           />
         </label>
         <button
           className="glass-button blast-action-btn"
-          onClick={() => {
-            set("query_data", EXAMPLE_FASTA);
-            set("program", "blastn");
-            toast("Example loaded — E. coli 16S rRNA (matches 16S_ribosomal_RNA DB)", "info");
-          }}
+          onClick={() => setExampleModalOpen(true)}
           type="button"
         >
           <Dna size={13} /> Load example
         </button>
+        {form.query_data && isNucleotideProgram && (
+          <button
+            className="glass-button blast-action-btn"
+            onClick={handleReverseComplement}
+            type="button"
+            title="Replace each sequence with its reverse complement (5'→3' becomes 3'→5'). Useful for primer-pair sanity checks."
+          >
+            <RefreshCw size={13} strokeWidth={1.5} /> Reverse complement
+          </button>
+        )}
+        {form.query_data && seqCount > 1 && (
+          <button
+            className="glass-button blast-action-btn"
+            onClick={handleDeduplicate}
+            type="button"
+            title="Remove sequences that are exact duplicates of an earlier record."
+          >
+            <Copy size={13} strokeWidth={1.5} /> Deduplicate
+          </button>
+        )}
         {form.query_data && (
           <button
             className="glass-button blast-action-btn"
@@ -133,6 +313,169 @@ export function QuerySection({
           maxLength={200}
         />
       </label>
+
+      {exampleModalOpen && (
+        <QueryExampleDialog
+          examples={QUERY_EXAMPLE_TEMPLATES}
+          onClose={() => setExampleModalOpen(false)}
+          onSelect={loadExample}
+        />
+      )}
     </section>
+  );
+}
+
+function QueryExampleDialog({
+  examples,
+  onClose,
+  onSelect,
+}: {
+  examples: QueryExampleTemplate[];
+  onClose: () => void;
+  onSelect: (example: QueryExampleTemplate) => void;
+}) {
+  return (
+    <div className="glass-dialog-backdrop" onClick={onClose}>
+      <div
+        className="glass-card glass-card--strong glass-dialog query-example-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="query-example-dialog-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="query-example-dialog__header">
+          <div>
+            <div className="glass-badge">FASTA templates</div>
+            <h3 id="query-example-dialog-title">Load Query Example</h3>
+          </div>
+          <button className="glass-button" type="button" onClick={onClose} aria-label="Close examples">
+            <X size={14} strokeWidth={1.5} />
+          </button>
+        </div>
+        <div className="query-example-grid">
+          {examples.map((example) => (
+            <button
+              key={example.id}
+              type="button"
+              className="query-example-card"
+              onClick={() => onSelect(example)}
+            >
+              <div className="query-example-card__topline">
+                <span>{example.group}</span>
+                <span>{example.length.toLocaleString()} bp</span>
+              </div>
+              <div className="query-example-card__title">
+                <FileText size={13} strokeWidth={1.5} />
+                {example.label}
+              </div>
+              <p>{example.description}</p>
+              <div className="query-example-card__meta">
+                <span>{example.sequenceCount} sequence</span>
+                {example.recommendedDb && <span>{example.recommendedDb}</span>}
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Tm-color rule of thumb used by the molecular-diagnostics community:
+// PCR primers/probes are happiest in 55–65 °C; outside that band the
+// assay needs special handling (long extension, touchdown PCR, etc.).
+function tmColour(tm: number | null): string {
+  if (tm === null) return "var(--text-muted)";
+  if (tm < 50 || tm > 70) return "var(--danger)";
+  if (tm < 55 || tm > 65) return "var(--warning)";
+  return "var(--success)";
+}
+
+function PrimerDiagnosticsPanel({
+  findings,
+}: {
+  findings: Array<{
+    id: string;
+    length: number;
+    diagnostics: import("@/pages/blastSubmit/fastaUtils").PrimerDiagnostics;
+  }>;
+}) {
+  return (
+    <div
+      className="glass-card"
+      style={{
+        padding: 12,
+        marginTop: 8,
+        marginBottom: 12,
+        background: "rgba(255,255,255,0.04)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 8,
+          fontSize: 12,
+          color: "var(--text-muted)",
+        }}
+      >
+        <Dna size={13} strokeWidth={1.5} />
+        <span style={{ fontWeight: 600 }}>Primer / probe diagnostics</span>
+        <span title="Only sequences ≤ 50 nt are scanned. Tm uses the Wallace rule for ≤ 13 nt and the salt-adjusted GC formula otherwise.">
+          (≤ 50 nt only)
+        </span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {findings.map((f) => {
+          const { tm, gc, gcRun, hairpinLength, selfDimerLength } = f.diagnostics;
+          const hairpinWarn = hairpinLength >= 4;
+          const dimerWarn = selfDimerLength >= 4;
+          const gcRunWarn = gcRun >= 4; // > 3 G/C run = high mispriming risk
+          return (
+            <div
+              key={`${f.id}-${f.length}`}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                fontSize: 12,
+                color: "var(--text-primary)",
+                flexWrap: "wrap",
+              }}
+            >
+              <span style={{ minWidth: 120, fontFamily: "monospace", color: "var(--text-muted)" }}>
+                {f.id} ({f.length} nt)
+              </span>
+              <span
+                style={{ color: tmColour(tm), fontVariantNumeric: "tabular-nums" }}
+                title="Estimated melting temperature."
+              >
+                Tm {tm === null ? "—" : `${tm.toFixed(1)} °C`}
+              </span>
+              <span style={{ color: "var(--text-muted)" }} title="GC content.">
+                GC {gc.toFixed(0)}%
+              </span>
+              <span
+                style={{ color: gcRunWarn ? "var(--warning)" : "var(--text-muted)" }}
+                title="Longest consecutive G/C run. Runs ≥ 4 raise mispriming risk."
+              >
+                GC-run {gcRun}
+              </span>
+              {hairpinWarn && (
+                <span style={{ color: "var(--warning)" }} title="Potential hairpin / self-complementary stem detected.">
+                  <AlertTriangle size={11} /> hairpin stem {hairpinLength}
+                </span>
+              )}
+              {dimerWarn && (
+                <span style={{ color: "var(--warning)" }} title="Potential self-dimer (3′-complementary overlap) detected.">
+                  <AlertTriangle size={11} /> self-dimer {selfDimerLength}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

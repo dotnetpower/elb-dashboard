@@ -49,8 +49,7 @@ def test_approximate_sharding_opt_in_injects_partitions_and_prefix() -> None:
     # 269 GB on E16 (128 GB) → memory floor 5; num_nodes=5 → target 5 → preset 5
     assert cfg.get("blast", "db-partitions") == "5"
     assert cfg.get("blast", "db-partition-prefix") == (
-        "https://elbstg01.blob.core.windows.net/blast-db/"
-        "5shards/core_nt_shard_"
+        "https://elbstg01.blob.core.windows.net/blast-db/5shards/core_nt_shard_"
     )
     # Sharding requires the local-SSD init script.
     assert cfg.get("cluster", "exp-use-local-ssd") == "true"
@@ -176,6 +175,96 @@ def test_unsharded_submit_allows_non_tabular_outfmt() -> None:
     assert cfg.get("blast", "options") == "-outfmt 5"
 
 
+def test_low_complexity_filter_injects_dust_for_blastn() -> None:
+    params = _base_params()
+    params["low_complexity_filter"] = True
+    cfg = _parse(generate_config(params))
+    options = cfg.get("blast", "options")
+    assert "-dust yes" in options
+    assert "-soft_masking false" in options
+
+
+def test_low_complexity_filter_can_disable_dust_for_blastn() -> None:
+    params = _base_params()
+    params["low_complexity_filter"] = False
+    cfg = _parse(generate_config(params))
+    options = cfg.get("blast", "options")
+    assert "-dust no" in options
+    assert "-soft_masking" not in options
+
+
+def test_low_complexity_filter_respects_explicit_dust_option() -> None:
+    params = _base_params()
+    params["low_complexity_filter"] = True
+    params["additional_options"] = "-dust no"
+    cfg = _parse(generate_config(params))
+    options = cfg.get("blast", "options")
+    assert options.count("-dust") == 1
+    assert "-dust no" in options
+    assert "-soft_masking false" in options
+
+
+def test_low_complexity_filter_respects_explicit_soft_masking_option() -> None:
+    params = _base_params()
+    params["low_complexity_filter"] = True
+    params["additional_options"] = "-soft_masking true"
+    cfg = _parse(generate_config(params))
+    options = cfg.get("blast", "options")
+    assert "-dust yes" in options
+    assert options.count("-soft_masking") == 1
+    assert "-soft_masking true" in options
+
+
+def test_taxid_filter_includes_taxonomy_by_default() -> None:
+    params = _base_params()
+    params["taxid"] = 3431483
+    cfg = _parse(generate_config(params))
+    options = cfg.get("blast", "options")
+    assert "-taxids 3431483" in options
+    assert "-negative_taxids" not in options
+
+
+def test_taxid_filter_excludes_taxonomy_when_not_inclusive() -> None:
+    params = _base_params()
+    params["taxid"] = "3431483"
+    params["is_inclusive"] = False
+    cfg = _parse(generate_config(params))
+    options = cfg.get("blast", "options")
+    assert "-negative_taxids 3431483" in options
+    assert "-taxids 3431483" not in options
+
+
+def test_taxid_filter_rejects_invalid_taxid() -> None:
+    params = _base_params()
+    params["taxid"] = 0
+    with pytest.raises(ValueError, match="taxid must be a positive integer"):
+        generate_config(params)
+
+
+def test_taxid_filter_rejects_bool_taxid() -> None:
+    params = _base_params()
+    params["taxid"] = True
+    with pytest.raises(ValueError, match="taxid must be a positive integer"):
+        generate_config(params)
+
+
+def test_taxid_filter_rejects_ambiguous_inclusive_flag() -> None:
+    params = _base_params()
+    params["taxid"] = 3431483
+    params["is_inclusive"] = "maybe"
+    with pytest.raises(ValueError, match="is_inclusive must be a boolean"):
+        generate_config(params)
+
+
+@pytest.mark.parametrize("additional", ["-taxids 2", "-negative_taxids=2"])
+def test_taxid_filter_rejects_additional_taxonomy_conflict(additional: str) -> None:
+    params = _base_params()
+    params["taxid"] = 3431483
+    params["additional_options"] = additional
+    with pytest.raises(ValueError, match="taxid conflicts"):
+        generate_config(params)
+
+
 def test_auto_sharding_disabled_when_caller_opts_out() -> None:
     params = _base_params()
     params["disable_sharding"] = True
@@ -192,7 +281,8 @@ def test_legacy_db_auto_partition_maps_to_approximate_sharding() -> None:
     params = _base_params()
     params["db_auto_partition"] = True
     cfg = _parse(generate_config(params))
-    assert cfg.get("blast", "db-auto-partition") == "true"
+    assert cfg.get("blast", "db-partitions") == "5"
+    assert not cfg.has_option("blast", "db-auto-partition")
 
 
 def test_db_auto_partition_rejects_explicit_off_mode() -> None:
@@ -209,7 +299,8 @@ def test_db_auto_partition_allowed_with_approximate_sharding_opt_in() -> None:
     params["db_auto_partition"] = True
     params["allow_approximate_sharding"] = True
     cfg = _parse(generate_config(params))
-    assert cfg.get("blast", "db-auto-partition") == "true"
+    assert not cfg.has_option("blast", "db-auto-partition")
+    assert not cfg.has_option("blast", "db-partitions")
 
 
 def test_auto_sharding_skipped_when_db_not_sharded() -> None:

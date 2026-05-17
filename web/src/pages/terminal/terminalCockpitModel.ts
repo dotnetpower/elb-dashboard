@@ -254,4 +254,8 @@ export const INNOVATION_CAPABILITIES: InnovationCapability[] = [
   { id: "blast-triage", label: "BLAST Result Triage", status: "live", icon: FileSearch },
   { id: "controls", label: "Control Sample Awareness", status: "live", icon: CheckCircle2 },
   { id: "evidence-summary", label: "Evidence Summary Boundary", status: "live", icon: FileStack },
+  { id: "cold-review", label: "Cold Review Checklist", status: "live", icon: SearchCheck },
+  { id: "maturity-ladder", label: "1-10 Maturity Ladder", status: "live", icon: Gauge },
+  { id: "input-qc-gates", label: "Input QC Gates", status: "live", icon: CheckCircle2 },
+  { id: "db-provenance-gates", label: "DB Provenance Gates", status: "live", icon: Database },
 ];

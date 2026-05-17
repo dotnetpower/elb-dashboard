@@ -125,6 +125,7 @@ def _payload(
     argv: list[str],
     *,
     stdin: str | None,
+    stdin_file: str | None,
     cwd: str | None,
     timeout_seconds: int,
 ) -> dict[str, Any]:
@@ -133,6 +134,7 @@ def _payload(
     return {
         "argv": list(argv),
         "stdin": stdin,
+        "stdin_file": stdin_file,
         "cwd": cwd,
         "timeout_seconds": int(timeout_seconds),
     }
@@ -167,6 +169,7 @@ def run(
     argv: list[str],
     *,
     stdin: str | None = None,
+    stdin_file: str | None = None,
     cwd: str | None = None,
     timeout_seconds: int = 60,
 ) -> dict[str, Any]:
@@ -179,6 +182,10 @@ def run(
         (currently ``{azcopy, kubectl, elastic-blast, elb, az}``).
     stdin : str | None
         Data piped to the subprocess's stdin. ``None`` means closed stdin.
+    stdin_file : str | None
+        Relative file path to write ``stdin`` into inside the execution cwd
+        before starting the subprocess. Useful for CLIs that require a config
+        file path and do not accept ``-`` as stdin.
     cwd : str | None
         Absolute path to run in. ``None`` means a fresh ``/tmp/exec/<uuid>``
         directory that the exec server will clean up.
@@ -198,7 +205,13 @@ def run(
         When the exec server is unreachable, returns a non-2xx status, or
         rejects the request (bad allowlist / body size / concurrency).
     """
-    body = _payload(argv, stdin=stdin, cwd=cwd, timeout_seconds=timeout_seconds)
+    body = _payload(
+        argv,
+        stdin=stdin,
+        stdin_file=stdin_file,
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+    )
     try:
         with httpx.Client(timeout=_http_timeout(timeout_seconds)) as client:
             resp = client.post(_upstream() + "/exec", headers=_headers(), json=body)
@@ -207,8 +220,7 @@ def run(
 
     if resp.status_code != 200:
         raise TerminalExecError(
-            f"exec server returned {resp.status_code}: "
-            f"{sanitise(resp.text)[:300]}"
+            f"exec server returned {resp.status_code}: {sanitise(resp.text)[:300]}"
         )
 
     result = resp.json()
@@ -223,6 +235,7 @@ def stream(
     argv: list[str],
     *,
     stdin: str | None = None,
+    stdin_file: str | None = None,
     cwd: str | None = None,
     timeout_seconds: int = 300,
 ) -> Iterator[dict[str, Any]]:
@@ -242,7 +255,13 @@ def stream(
     each ``line`` field through ``api.services.sanitise.sanitise`` before
     forwarding to any HTTP / WebSocket boundary.
     """
-    body = _payload(argv, stdin=stdin, cwd=cwd, timeout_seconds=timeout_seconds)
+    body = _payload(
+        argv,
+        stdin=stdin,
+        stdin_file=stdin_file,
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+    )
     try:
         with httpx.Client(timeout=_stream_http_timeout()) as client:
             with client.stream(
@@ -251,8 +270,7 @@ def stream(
                 if resp.status_code != 200:
                     raw = resp.read().decode("utf-8", errors="replace")
                     raise TerminalExecError(
-                        f"exec server returned {resp.status_code}: "
-                        f"{sanitise(raw)[:300]}"
+                        f"exec server returned {resp.status_code}: {sanitise(raw)[:300]}"
                     )
                 for raw_line in resp.iter_lines():
                     if not raw_line:
@@ -280,7 +298,6 @@ def healthz() -> dict[str, Any]:
         raise TerminalExecError(f"exec server unreachable: {exc}") from exc
     if resp.status_code != 200:
         raise TerminalExecError(
-            f"exec server /healthz returned {resp.status_code}: "
-            f"{sanitise(resp.text)[:200]}"
+            f"exec server /healthz returned {resp.status_code}: {sanitise(resp.text)[:200]}"
         )
     return resp.json()

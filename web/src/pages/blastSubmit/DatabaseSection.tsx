@@ -11,6 +11,8 @@ export function DatabaseSection({
   set,
   programMeta,
   databases,
+  warmDbs,
+  warmupKnown,
   dbWarning,
   dbMissingFromStorage,
   dbBaseName,
@@ -38,6 +40,12 @@ export function DatabaseSection({
               {databases.map((database) => {
                 const info = DB_DESCRIPTIONS[database.name];
                 const isCustom = database.source === "custom";
+                const warmInfo = warmDbs?.get(database.name);
+                const warmLabel = warmInfo
+                  ? `Warm ${warmInfo.nodes_ready}/${warmInfo.total_jobs}`
+                  : warmupKnown
+                    ? "Not warm"
+                    : null;
                 const label = info
                   ? `${info.label} (${database.name}) — ${info.size}`
                   : isCustom
@@ -45,7 +53,7 @@ export function DatabaseSection({
                     : database.name;
                 return (
                   <option key={database.name} value={buildDatabasePath(database)}>
-                    {label}
+                    {warmLabel ? `${label} — ${warmLabel}` : label}
                   </option>
                 );
               })}
@@ -69,6 +77,9 @@ export function DatabaseSection({
                         <Database size={10} />
                         <span>{database.name}</span>
                         {info && <span className="blast-db-chip__size">{info.size}</span>}
+                        {warmDbs?.has(database.name) && (
+                          <span className="blast-db-chip__size">Warm</span>
+                        )}
                       </button>
                     );
                   })}

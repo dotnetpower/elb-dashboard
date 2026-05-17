@@ -14,6 +14,7 @@ Sharded BLAST precision checks now treat `outfmt 5` as a supported XML merge for
 - `api.services.blast_config` permits sharded `outfmt 5` while continuing to reject unsupported formats.
 - `api.tasks.blast` aggregates XML child merge reports and assembles parent XML output via `BlastOutput_iterations` concatenation.
 - `terminal/merge-sharded-results.sh` is synchronized with the sibling runtime XML-aware merge helper.
+- `scripts/dev/verify-local-blast-xml-sharding.sh` provides a Docker-backed local smoke using real `makeblastdb` and `blastn` from the terminal image.
 - `web/src/api/blast.ts` includes XML precision levels in the typed precision response.
 
 ## Supported precision levels
@@ -44,3 +45,4 @@ The merged XML is structurally valid and deterministic for the same child artifa
 - Sibling runtime validation: `PYTHONPATH=src python -m pytest -q tests/azure` -> 289 passed, 7 skipped.
 - Sibling targeted validation: `PYTHONPATH=src python -m pytest -q tests/azure/test_db_partitioning.py` -> 38 passed.
 - Synthetic XML semantic equivalence smoke: expected full-order `['subject_best', 'subject_bit']` matched merged sharded order `['subject_best', 'subject_bit']`.
+- Local real BLAST+ XML smoke via the terminal image: full DB hit order `['subject_best', 'subject_bit']` matched merged shard hit order, and HSP tuples matched exactly when every shard run used the same `-searchsp 4096`.

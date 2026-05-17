@@ -21,6 +21,8 @@ Auth contract:
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import secrets
@@ -30,7 +32,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -82,6 +84,63 @@ for _name in (
     logging.getLogger(_name).setLevel(_azure_log_level)
 
 
+# Paths excluded from BOTH the aggregate metrics buffer AND the per-request
+# DETAIL inspector buffer. SSE/WebSocket cannot be safely body-buffered (the
+# response never ends). High-volume self-poll paths would self-amplify.
+_INSPECTOR_EXCLUDE_PREFIXES: tuple[str, ...] = (
+    "/api/monitor/sidecars",       # SSE topology + high-volume snapshot
+    "/api/monitor/metrics",        # would self-amplify
+    "/api/monitor/sidecar-requests",  # would self-amplify
+    "/api/terminal/ws",            # WebSocket upgrade
+)
+_INSPECTOR_EXCLUDE_EXACT: frozenset[str] = frozenset({"/api/health"})
+
+# Hard cap on how many bytes the middleware will buffer when capturing
+# request OR response body for the inspector. The detail buffer itself
+# truncates at 4 KiB; this is a safety ceiling so a misclassified content
+# type (e.g. a 100 MiB JSON dump) cannot OOM the api sidecar.
+_INSPECTOR_MAX_BUFFER_BYTES = 64 * 1024
+
+
+def _inspector_should_capture(path: str) -> bool:
+    """True iff the per-request DETAIL inspector should record this path."""
+    if not path.startswith("/api/"):
+        return False
+    if path in _INSPECTOR_EXCLUDE_EXACT:
+        return False
+    return not any(path.startswith(p) for p in _INSPECTOR_EXCLUDE_PREFIXES)
+
+
+def _decode_jwt_upn(authz: str | None) -> str | None:
+    """Best-effort caller extraction for the inspector — NOT auth.
+
+    Just base64-decodes the JWT payload (no signature verify) and pulls
+    `upn` / `preferred_username`. The route's own `require_caller`
+    dependency is the real auth gate; this is for display only.
+    """
+    if not authz or not authz.lower().startswith("bearer "):
+        return None
+    parts = authz.split(" ", 1)[1].strip().split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        pad = "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+    except Exception:  # noqa: BLE001 — never let display logic crash a request
+        return None
+    upn = payload.get("upn") or payload.get("preferred_username")
+    return str(upn)[:128] if upn else None
+
+
+def _extract_client_ip(request: Request) -> str | None:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()[:64]
+    if request.client and request.client.host:
+        return request.client.host[:64]
+    return None
+
+
 class RequestIdMiddleware(BaseHTTPMiddleware):
     """Stamp every request with an X-Request-Id (in & out) and log a one-line
     completion record. Lets us correlate SPA errors with backend traces in
@@ -92,24 +151,160 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         rid = request.headers.get("x-request-id") or secrets.token_hex(8)
         request.state.request_id = rid
         t0 = time.monotonic()
+        path = request.url.path
+        method = request.method
+
+        # Per-request DETAIL inspector — buffer request body BEFORE handing
+        # the request to the route, then replay via _receive so the route
+        # handler still sees it. Skipped for SSE/WebSocket/health/metrics.
+        capture = (
+            os.environ.get("REQUEST_DETAIL_CAPTURE_ENABLED", "true").lower() != "false"
+            and _inspector_should_capture(path)
+        )
+        captured_request_body: bytes | None = None
+        if capture and method in {"POST", "PUT", "PATCH", "DELETE"}:
+            try:
+                raw = await request.body()
+                captured_request_body = raw[:_INSPECTOR_MAX_BUFFER_BYTES]
+
+                async def _replay_receive(_body: bytes = raw):  # noqa: B008
+                    return {"type": "http.request", "body": _body, "more_body": False}
+
+                request._receive = _replay_receive  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 — never block the route on capture
+                captured_request_body = None
+
         try:
             response = await call_next(request)
         except Exception as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000
             LOGGER.exception(
                 "req_failed rid=%s method=%s path=%s elapsed=%.0fms err=%s",
-                rid, request.method, request.url.path, elapsed_ms, type(exc).__name__,
+                rid, method, path, elapsed_ms, type(exc).__name__,
             )
+            # Record the failure so the metrics endpoint sees it as an
+            # error sample. status=0 marks "exception, no response".
+            try:
+                from api.services.request_metrics import metrics as _metrics
+                if path.startswith("/api/") and path != "/api/health" \
+                        and not path.startswith("/api/monitor/sidecars") \
+                        and not path.startswith("/api/monitor/metrics"):
+                    _metrics().record(path=path, status=0, duration_ms=elapsed_ms)
+            except Exception:  # noqa: BLE001 — metrics must never crash the app
+                pass
+            # And surface the failure in the inspector buffer too.
+            if capture:
+                try:
+                    from api.services.request_metrics import record_detail as _rd
+                    _rd(
+                        request_id=rid,
+                        method=method,
+                        path=path,
+                        status=0,
+                        duration_ms=elapsed_ms,
+                        caller=_decode_jwt_upn(request.headers.get("authorization")),
+                        client_ip=_extract_client_ip(request),
+                        request_headers=list(request.headers.items()),
+                        request_body=captured_request_body,
+                        request_content_type=request.headers.get("content-type"),
+                        response_headers=[],
+                        response_body=None,
+                        response_content_type=None,
+                        response_size_bytes=None,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             raise
+
         elapsed_ms = (time.monotonic() - t0) * 1000
+
+        # Buffer response body for the inspector (and rebuild the response
+        # with the buffered bytes so the client still sees it). Capped so a
+        # misclassified content type can't OOM us.
+        captured_response_body: bytes | None = None
+        captured_response_size: int | None = None
+        if capture:
+            try:
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode("utf-8")
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > _INSPECTOR_MAX_BUFFER_BYTES:
+                        # Drain the rest into a sentinel — keep client
+                        # whole, but don't keep buffering for the inspector.
+                        break
+                # If we broke out early, drain remainder into chunks too so
+                # the client still gets the full payload.
+                if total > _INSPECTOR_MAX_BUFFER_BYTES:
+                    async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+                        if isinstance(chunk, str):
+                            chunk = chunk.encode("utf-8")
+                        chunks.append(chunk)
+                full = b"".join(chunks)
+                captured_response_body = full[:_INSPECTOR_MAX_BUFFER_BYTES]
+                captured_response_size = len(full)
+                # Rebuild response with the buffered body. Content-Length
+                # is recomputed by Starlette from the body.
+                headers = dict(response.headers)
+                headers.pop("content-length", None)
+                response = Response(
+                    content=full,
+                    status_code=response.status_code,
+                    headers=headers,
+                    media_type=response.media_type,
+                )
+            except Exception:  # noqa: BLE001 — capture must never break the response
+                captured_response_body = None
+
         response.headers["x-request-id"] = rid
-        path = request.url.path
         # Skip noisy /api/health probe logs (they fire every 10s).
         if path != "/api/health":
             LOGGER.info(
                 "req rid=%s method=%s path=%s status=%d elapsed=%.0fms",
-                rid, request.method, path, response.status_code, elapsed_ms,
+                rid, method, path, response.status_code, elapsed_ms,
             )
+        # Record into the latency/error ring buffer.  Skip:
+        #   - /api/health (10s probe, would bias rate)
+        #   - /api/monitor/sidecars/* (SSE topology poll, also high-volume)
+        #   - /api/monitor/metrics (would self-amplify)
+        #   - non-/api paths (frontend asset proxy)
+        try:
+            if path.startswith("/api/") and path != "/api/health" \
+                    and not path.startswith("/api/monitor/sidecars") \
+                    and not path.startswith("/api/monitor/metrics"):
+                from api.services.request_metrics import metrics as _metrics
+                _metrics().record(
+                    path=path,
+                    status=response.status_code,
+                    duration_ms=elapsed_ms,
+                )
+        except Exception:  # noqa: BLE001 — metrics must never crash the app
+            pass
+        # Per-request DETAIL inspector record (full headers + body).
+        if capture:
+            try:
+                from api.services.request_metrics import record_detail as _rd
+                _rd(
+                    request_id=rid,
+                    method=method,
+                    path=path,
+                    status=response.status_code,
+                    duration_ms=elapsed_ms,
+                    caller=_decode_jwt_upn(request.headers.get("authorization")),
+                    client_ip=_extract_client_ip(request),
+                    request_headers=list(request.headers.items()),
+                    request_body=captured_request_body,
+                    request_content_type=request.headers.get("content-type"),
+                    response_headers=list(response.headers.items()),
+                    response_body=captured_response_body,
+                    response_content_type=response.headers.get("content-type"),
+                    response_size_bytes=captured_response_size,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         # Emit a UI animation event for the SidecarsCard topology graph.
         # Health probes and the SSE/snapshot endpoints themselves are
         # excluded so the dashboard's own polling doesn't generate

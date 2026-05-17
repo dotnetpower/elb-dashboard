@@ -49,8 +49,8 @@ export function GettingStartedGuide({
       done: hasCluster,
       action: hasCluster ? null : { label: "Go to Dashboard → AKS card → Add Cluster", to: "/" },
       detail: hasCluster
-        ? clusterRunning ? "Cluster is running" : "Cluster exists but is stopped. Start it from the Dashboard."
-        : 'Click "+ Add Cluster" on the AKS card. Recommended: Standard_E16s_v5, 3 nodes for standard workloads. For large databases (nt, nr), use Standard_E32s_v5 or higher.',
+        ? clusterRunning ? "Cluster is ready" : "Cluster exists but is not ready yet. Wait for provisioning to finish, or start it from the Dashboard if it is stopped."
+        : 'Click "+ Add Cluster" on the AKS card. Default: Standard_E16s_v5, 10 nodes for standard workloads. For large databases (nt, nr), use Standard_E32s_v5 or higher.',
     },
     {
       id: "terminal",

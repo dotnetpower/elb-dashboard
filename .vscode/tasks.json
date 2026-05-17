@@ -121,7 +121,8 @@
     },
     {
       "label": "fullstack: start",
-      "dependsOn": ["api: start", "web: dev"],
+      "detail": "Start the full local control plane: api, worker, beat, and web.",
+      "dependsOn": ["api: start", "worker: start", "beat: start", "web: dev"],
       "dependsOrder": "parallel",
       "problemMatcher": []
     },
@@ -149,7 +150,7 @@
     },
     {
       "label": "smoke: api",
-      "detail": "Run scripts/dev/smoke_api.py against the local api on 127.0.0.1:8080.",
+      "detail": "Run scripts/dev/smoke_api.py against the local api on 127.0.0.1:8085.",
       "type": "shell",
       "command": "${workspaceFolder}/scripts/dev/local-run.sh",
       "args": ["smoke"],

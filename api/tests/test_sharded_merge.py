@@ -9,40 +9,59 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[2] / "terminal" / "merge-sharded-results.sh"
 
 
-def _blast_xml(query_id: str, hits: list[tuple[str, str, float]]) -> str:
-        hit_xml = []
-        for index, (subject, evalue, bitscore) in enumerate(hits, start=1):
-                hit_xml.append(
-                        f"""        <Hit>
-                    <Hit_num>{index}</Hit_num>
-                    <Hit_id>{subject}</Hit_id>
-                    <Hit_def>{subject}</Hit_def>
-                    <Hit_hsps>
-                        <Hsp>
-                            <Hsp_num>1</Hsp_num>
-                            <Hsp_bit-score>{bitscore}</Hsp_bit-score>
-                            <Hsp_score>{int(bitscore)}</Hsp_score>
-                            <Hsp_evalue>{evalue}</Hsp_evalue>
-                        </Hsp>
-                    </Hit_hsps>
-                </Hit>"""
-                )
-        return f"""<?xml version="1.0"?>
+def _blast_xml(
+    query_id: str,
+    hits: list[tuple[str, str, float]],
+    *,
+    db_len: int = 1000,
+    db_num: int = 1,
+    eff_space: int = 17928,
+    hsp_len: int = 1,
+) -> str:
+    hit_xml = []
+    for index, (subject, evalue, bitscore) in enumerate(hits, start=1):
+        hit_xml.append(
+            f"""        <Hit>
+          <Hit_num>{index}</Hit_num>
+          <Hit_id>{subject}</Hit_id>
+          <Hit_def>{subject}</Hit_def>
+          <Hit_hsps>
+            <Hsp>
+              <Hsp_num>1</Hsp_num>
+              <Hsp_bit-score>{bitscore}</Hsp_bit-score>
+              <Hsp_score>{int(bitscore)}</Hsp_score>
+              <Hsp_evalue>{evalue}</Hsp_evalue>
+            </Hsp>
+          </Hit_hsps>
+        </Hit>"""
+        )
+    return f"""<?xml version="1.0"?>
 <BlastOutput>
-    <BlastOutput_program>blastn</BlastOutput_program>
-    <BlastOutput_version>BLASTN 2.17.0+</BlastOutput_version>
-    <BlastOutput_db>child-db</BlastOutput_db>
-    <BlastOutput_iterations>
-        <Iteration>
-            <Iteration_iter-num>1</Iteration_iter-num>
-            <Iteration_query-ID>{query_id}</Iteration_query-ID>
-            <Iteration_query-def>{query_id}</Iteration_query-def>
-            <Iteration_query-len>10</Iteration_query-len>
-            <Iteration_hits>
+  <BlastOutput_program>blastn</BlastOutput_program>
+  <BlastOutput_version>BLASTN 2.17.0+</BlastOutput_version>
+  <BlastOutput_db>child-db</BlastOutput_db>
+  <BlastOutput_iterations>
+    <Iteration>
+      <Iteration_iter-num>1</Iteration_iter-num>
+      <Iteration_query-ID>{query_id}</Iteration_query-ID>
+      <Iteration_query-def>{query_id}</Iteration_query-def>
+      <Iteration_query-len>10</Iteration_query-len>
+      <Iteration_hits>
 {chr(10).join(hit_xml)}
-            </Iteration_hits>
-        </Iteration>
-    </BlastOutput_iterations>
+      </Iteration_hits>
+            <Iteration_stat>
+                <Statistics>
+                    <Statistics_db-num>{db_num}</Statistics_db-num>
+                    <Statistics_db-len>{db_len}</Statistics_db-len>
+                    <Statistics_hsp-len>{hsp_len}</Statistics_hsp-len>
+                    <Statistics_eff-space>{eff_space}</Statistics_eff-space>
+                    <Statistics_kappa>0.46</Statistics_kappa>
+                    <Statistics_lambda>1.28</Statistics_lambda>
+                    <Statistics_entropy>0.85</Statistics_entropy>
+                </Statistics>
+            </Iteration_stat>
+    </Iteration>
+  </BlastOutput_iterations>
 </BlastOutput>
 """
 
@@ -132,7 +151,9 @@ def test_merge_sharded_results_writes_valid_xml(tmp_path: Path) -> None:
         shard_dir = tmp_path / shard
         shard_dir.mkdir()
         with gzip.open(shard_dir / "batch.out.gz", "wt") as handle:
-            handle.write(_blast_xml("Query_1", hits))
+            db_len = 1000 if shard == "shard_00" else 2000
+            db_num = 1 if shard == "shard_00" else 2
+            handle.write(_blast_xml("Query_1", hits, db_len=db_len, db_num=db_num))
 
     subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
         [
@@ -155,6 +176,12 @@ def test_merge_sharded_results_writes_valid_xml(tmp_path: Path) -> None:
         "subject_best",
         "subject_bit",
     ]
+    statistics = xml_root.find(".//Iteration_stat/Statistics")
+    assert statistics is not None
+    assert statistics.findtext("Statistics_db-len") == "3000"
+    assert statistics.findtext("Statistics_db-num") == "3"
+    assert statistics.findtext("Statistics_eff-space") == "17928"
+    assert statistics.findtext("Statistics_hsp-len") == "4"
     report = json.loads(report_json.read_text())
     assert report["outfmt"] == 5
     assert report["format"] == "blast_xml"

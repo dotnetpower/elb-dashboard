@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # grant-local-rbac.sh — grant the locally signed-in az user the minimum
 # RBAC roles needed to drive a deployed elb-dashboard from a developer
-# laptop (api running on 127.0.0.1:8080).
+# laptop (api running on 127.0.0.1:8085).
 #
 # Why this exists
 # ---------------
@@ -18,6 +18,7 @@
 #
 #   on workload Storage account (e.g. elbstg01):
 #     - Storage Blob Data Contributor    (data plane: copy DBs, read/list blobs)
+#     - Storage Table Data Contributor   (data plane: jobstate / jobhistory rows)
 #     - Storage Account Contributor      (control plane: lets the local-debug
 #                                         auto-open helper toggle publicNetworkAccess
 #                                         + ipRules — see api/services/storage_public_access.py)
@@ -132,6 +133,7 @@ fi
 # (role-name, scope) pairs to apply.
 ASSIGNMENTS=(
   "Storage Blob Data Contributor|$STORAGE_SCOPE"
+  "Storage Table Data Contributor|$STORAGE_SCOPE"
   "Storage Account Contributor|$STORAGE_SCOPE"
   "Reader|$STORAGE_RG_SCOPE"
 )

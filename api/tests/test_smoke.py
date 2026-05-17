@@ -3,6 +3,7 @@
 Runs against the FastAPI app via TestClient. No Azure cloud calls — tests
 that require the cloud are skipped automatically.
 """
+
 from __future__ import annotations
 
 import os
@@ -52,6 +53,8 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
         ("GET", "/api/monitor/aks?resource_group=rg-x"),
         ("GET", "/api/monitor/storage?resource_group=rg-x&account_name=stx"),
         ("GET", "/api/monitor/jobs"),
+        ("GET", "/api/monitor/metrics"),
+        ("GET", "/api/monitor/aks/events?resource_group=rg-x&cluster_name=cx"),
         ("GET", "/api/arm/subscriptions"),
         ("POST", "/api/resources/ensure-rg"),
         ("POST", "/api/storage/prepare-db"),
@@ -85,6 +88,94 @@ def test_auth_required_with_invalid_token_returns_401(client: TestClient) -> Non
     assert "invalid token" in r.json().get("detail", "").lower()
 
 
+def test_metrics_endpoint_returns_summary_with_dev_bypass(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/api/monitor/metrics` is wired and returns the documented schema.
+
+    Reset the buffer so the test is deterministic regardless of which
+    other tests ran first under the same process.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.services import request_metrics as rm
+
+    rm.reset_for_tests()
+
+    r = client.get("/api/monitor/metrics?window_seconds=60")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["window_seconds"] == 60
+    assert body["degraded"] is True
+    assert body["degraded_reason"] == "no_samples"
+    assert body["p95_ms"] is None
+    assert isinstance(body["rpm"], list) and len(body["rpm"]) == 1
+
+
+def test_metrics_endpoint_rejects_path_prefix_outside_api(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    r = client.get("/api/monitor/metrics?path_prefix=/etc/passwd")
+    assert r.status_code == 400
+
+
+def test_monitor_aks_uses_snapshot_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.services import monitor_cache
+
+    monitor_cache.reset_monitor_snapshot_cache()
+    calls = 0
+
+    def fake_list_aks_clusters(*_args: object, **_kwargs: object):
+        nonlocal calls
+        calls += 1
+        return [{"name": f"aks-{calls}"}]
+
+    monkeypatch.setattr("api.routes.monitor.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        fake_list_aks_clusters,
+    )
+
+    first = client.get("/api/monitor/aks?subscription_id=sub&resource_group=rg-elb")
+    second = client.get("/api/monitor/aks?subscription_id=sub&resource_group=rg-elb")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert calls == 1
+    assert first.json()["clusters"] == [{"name": "aks-1"}]
+    assert first.json()["cache"]["state"] == "refreshed"
+    assert second.json()["clusters"] == [{"name": "aks-1"}]
+    assert second.json()["cache"]["state"] == "fresh"
+    monitor_cache.reset_monitor_snapshot_cache()
+
+
+def test_aks_events_rejects_invalid_namespace(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    r = client.get("/api/monitor/aks/events?resource_group=rg-x&cluster_name=cx&namespace=../etc")
+    assert r.status_code == 400
+
+
+def test_aks_events_rejects_invalid_resource_group(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    r = client.get("/api/monitor/aks/events?resource_group=../etc/passwd&cluster_name=cx")
+    assert r.status_code == 400
+
+
+def test_aks_events_rejects_invalid_cluster_name(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    r = client.get("/api/monitor/aks/events?resource_group=rg-x&cluster_name=bad%20name%21")
+    assert r.status_code == 400
+
+
 def test_blast_submit_blocks_invalid_precise_sharding_before_queue(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -97,7 +188,7 @@ def test_blast_submit_blocks_invalid_precise_sharding_before_queue(
             "cluster_name": "elb-cluster",
             "storage_account": "elbstg01",
             "program": "blastn",
-            "database": "core_nt",
+            "database": "unknown_nt",
             "query_file": "queries/q.fa",
             "options": {
                 "sharding_mode": "precise",
@@ -199,6 +290,34 @@ def test_blast_preflight_allows_precise_multi_query_split_search_spaces(
     assert precision_check["precision"]["merge_strategy"] == "query_group_split_tabular_top_n"
 
 
+def test_blast_preflight_accepts_aks_cluster_name_alias(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
+    )
+
+    r = client.post(
+        "/api/blast/pre-flight",
+        json={
+            "resource_group": "rg-elb",
+            "aks_cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "db": "core_nt",
+            "query_data": ">q1\nAAAA\n",
+            "sharding_mode": "off",
+            "outfmt": 5,
+        },
+    )
+
+    assert r.status_code == 200
+    aks_check = next(item for item in r.json()["checks"] if item["id"] == "aks_cluster")
+    assert aks_check["status"] == "pass"
+
+
 def test_blast_submit_allows_mixed_precise_split_parent_queue(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -236,8 +355,7 @@ def test_blast_submit_allows_mixed_precise_split_parent_queue(
                 "db_sharded": True,
                 "db_partitions": 5,
                 "db_partition_prefix": (
-                    "https://elbstg01.blob.core.windows.net/blast-db/"
-                    "5shards/core_nt_shard_"
+                    "https://elbstg01.blob.core.windows.net/blast-db/5shards/core_nt_shard_"
                 ),
                 "db_total_letters": 123456,
             },
@@ -250,6 +368,116 @@ def test_blast_submit_allows_mixed_precise_split_parent_queue(
     assert calls[0]["caller_oid"] == "00000000-0000-0000-0000-000000000000"
     assert calls[0]["caller_tenant_id"] == "common"
     assert calls[0]["options"]["query_effective_search_spaces"] == [225, 300]
+
+
+def test_blast_submit_merges_top_level_precision_metadata(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
+    )
+    calls: list[dict[str, object]] = []
+
+    class FakeAsyncResult:
+        id = "task-456"
+
+    def fake_delay(**kwargs: object) -> FakeAsyncResult:
+        calls.append(kwargs)
+        return FakeAsyncResult()
+
+    monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
+
+    r = client.post(
+        "/api/blast/submit",
+        json={
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "database": "core_nt",
+            "query_file": "queries/original/input.fa",
+            "query_count": 1,
+            "shard_sets": [1, 2, 4],
+            "options": {
+                "sharding_mode": "precise",
+                "outfmt": 5,
+                "db_effective_search_space": 123456,
+                "db_total_letters": 123456,
+            },
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["job_id"]
+    assert calls[0]["options"]["query_count"] == 1
+    assert calls[0]["options"]["shard_sets"] == [1, 2, 4]
+
+
+def test_canonical_dashboard_submit_uploads_inline_query(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
+    )
+    uploads: list[dict[str, object]] = []
+    calls: list[dict[str, object]] = []
+
+    def fake_upload_query_text(
+        credential: object,
+        account_name: str,
+        container: str,
+        blob_path: str,
+        fasta_text: str,
+    ) -> str:
+        uploads.append(
+            {
+                "account_name": account_name,
+                "container": container,
+                "blob_path": blob_path,
+                "fasta_text": fasta_text,
+            }
+        )
+        return f"https://{account_name}.blob.core.windows.net/{container}/{blob_path}"
+
+    class FakeAsyncResult:
+        id = "task-789"
+
+    def fake_delay(**kwargs: object) -> FakeAsyncResult:
+        calls.append(kwargs)
+        return FakeAsyncResult()
+
+    monkeypatch.setattr("api.services.storage_data.upload_query_text", fake_upload_query_text)
+    monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
+
+    r = client.post(
+        "/api/blast/jobs",
+        json={
+            "resource_group": "rg-elb",
+            "aks_cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "db": "core_nt",
+            "query_data": ">q1\nAAAA\n",
+            "outfmt": 5,
+            "sharding_mode": "off",
+        },
+    )
+
+    assert r.status_code == 202
+    assert r.json()["job_id"]
+    assert uploads[0]["account_name"] == "elbstg01"
+    assert uploads[0]["container"] == "queries"
+    assert str(uploads[0]["blob_path"]).startswith("uploads/")
+    assert calls[0]["cluster_name"] == "elb-cluster"
+    assert calls[0]["database"] == "core_nt"
+    assert str(calls[0]["query_file"]).startswith("queries/uploads/")
+    assert calls[0]["options"]["query_count"] == 1
 
 
 def test_blast_submit_blocks_precise_mapping_search_spaces(
@@ -407,9 +635,7 @@ def test_azure_discovery_probe_sanitises_subscription_ids(
         lambda *_a, **_kw: _FakeResourceClient(),
         raising=True,
     )
-    monkeypatch.setattr(
-        "azure.mgmt.resource.SubscriptionClient", _FakeSubClient, raising=True
-    )
+    monkeypatch.setattr("azure.mgmt.resource.SubscriptionClient", _FakeSubClient, raising=True)
     _ = health_mod
 
     r = client.get("/api/health/azure-discovery")

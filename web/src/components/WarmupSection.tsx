@@ -5,25 +5,61 @@
  * start a standalone warmup for downloaded databases. Uses the warmup/start
  * orchestrator endpoint.
  */
-import { useState, useEffect } from "react";
-import { Flame, Loader2, RefreshCw, CheckCircle2, AlertTriangle } from "lucide-react";
-import { type UseQueryResult, useQuery } from "@tanstack/react-query";
+import { useState, useEffect, useMemo } from "react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Database,
+  Flame,
+  Loader2,
+  RefreshCw,
+  Snowflake,
+  Trash2,
+} from "lucide-react";
+import {
+  type UseQueryResult,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { monitoringApi, blastApi } from "@/api/endpoints";
-import type { WarmupDbInfo, WarmupStatus } from "@/api/endpoints";
+import type { K8sNodeMetrics, WarmupDbInfo, WarmupStatus } from "@/api/endpoints";
+import type { BlastDatabase, BlastWarmupPlan } from "@/api/blast";
 import { formatApiError } from "@/api/client";
+import { isSystemPool } from "@/components/ClusterDetailModal/k8sFormat";
 
 // Databases that make sense to warmup (must be downloaded to storage first)
 const WARMUP_CANDIDATES = [
-  { value: "16S_ribosomal_RNA", label: "16S ribosomal RNA", program: "blastn", size: "~18 MB" },
-  { value: "18S_fungal_sequences", label: "18S fungal sequences", program: "blastn", size: "~3 MB" },
-  { value: "ITS_RefSeq_Fungi", label: "ITS RefSeq Fungi", program: "blastn", size: "~8 MB" },
+  {
+    value: "16S_ribosomal_RNA",
+    label: "16S ribosomal RNA",
+    program: "blastn",
+    size: "~18 MB",
+  },
+  {
+    value: "18S_fungal_sequences",
+    label: "18S fungal sequences",
+    program: "blastn",
+    size: "~3 MB",
+  },
+  {
+    value: "ITS_RefSeq_Fungi",
+    label: "ITS RefSeq Fungi",
+    program: "blastn",
+    size: "~8 MB",
+  },
   { value: "pdbnt", label: "PDB nucleotide", program: "blastn", size: "~200 MB" },
   { value: "swissprot", label: "SwissProt", program: "blastp", size: "~300 MB" },
   { value: "core_nt", label: "Core nucleotide", program: "blastn", size: "~250 GB" },
   { value: "nt", label: "Nucleotide collection", program: "blastn", size: "~400 GB" },
   { value: "nr", label: "Non-redundant protein", program: "blastp", size: "~300 GB" },
-  { value: "refseq_protein", label: "RefSeq protein", program: "blastp", size: "~100 GB" },
+  {
+    value: "refseq_protein",
+    label: "RefSeq protein",
+    program: "blastp",
+    size: "~100 GB",
+  },
 ] as const;
 
 interface Props {
@@ -39,6 +75,7 @@ interface Props {
   region?: string;
   nodeSku?: string | null;
   nodeCount?: number | null;
+  nodeMetrics?: K8sNodeMetrics[];
   terminalResourceGroup?: string;
   terminalVmName?: string;
 }
@@ -56,10 +93,12 @@ export function WarmupSection({
   region,
   nodeSku,
   nodeCount,
+  nodeMetrics = [],
   terminalResourceGroup,
   terminalVmName,
 }: Props) {
   const [selectedDb, setSelectedDb] = useState("");
+  const queryClient = useQueryClient();
   const [warmupInstanceId, setWarmupInstanceId] = useState<string | null>(() => {
     try {
       const stored = localStorage.getItem(`elb-warmup-${clusterName}`);
@@ -97,14 +136,15 @@ export function WarmupSection({
     enabled: Boolean(subscriptionId && storageAccount),
     staleTime: 120_000,
   });
-  const downloadedNames = new Set(
-    (downloadedQuery.data?.databases ?? []).map((d: { name: string }) => d.name),
-  );
   // Index plans by db name for O(1) lookup in the select / button.
-  const planByName = new Map(
-    (downloadedQuery.data?.databases ?? [])
-      .filter((d) => d.warmup_plan != null)
-      .map((d) => [d.name, d.warmup_plan!] as const),
+  const planByName = useMemo(
+    () =>
+      new Map(
+        (downloadedQuery.data?.databases ?? [])
+          .filter((d) => d.warmup_plan != null)
+          .map((d) => [d.name, d.warmup_plan!] as const),
+      ),
+    [downloadedQuery.data?.databases],
   );
   const selectedPlan = selectedDb ? planByName.get(selectedDb) : undefined;
   // Block Warmup if the planner says it cannot fit. Degenerate `no_db_size` is
@@ -114,6 +154,40 @@ export function WarmupSection({
     selectedPlan != null &&
     selectedPlan.feasible === false &&
     selectedPlan.status !== "no_db_size";
+
+  const capacity = useMemo(() => summariseWarmupCapacity(nodeMetrics), [nodeMetrics]);
+  const warmupRows = useMemo(
+    () =>
+      buildWarmupRows({
+        databases: downloadedQuery.data?.databases ?? [],
+        warmupDbs,
+        planByName,
+        capacity,
+      }),
+    [downloadedQuery.data?.databases, warmupDbs, planByName, capacity],
+  );
+
+  const releaseMutation = useMutation({
+    mutationFn: (dbName: string) =>
+      monitoringApi.releaseWarmup({
+        subscription_id: subscriptionId,
+        resource_group: resourceGroup,
+        aks_cluster_name: clusterName,
+        db: `blast-db/${dbName}`,
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        warmupQuery?.refetch(),
+        downloadedQuery.refetch(),
+        queryClient.invalidateQueries({
+          queryKey: ["warmup-status", subscriptionId, resourceGroup, clusterName],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["warmup-status-submit", subscriptionId, resourceGroup, clusterName],
+        }),
+      ]);
+    },
+  });
 
   // Poll warmup orchestrator if one is active
   const orchQuery = useQuery({
@@ -156,30 +230,32 @@ export function WarmupSection({
     }
   }, [orchQuery.data, clusterName, warmupQuery]);
 
-  const handleStartWarmup = async () => {
-    if (!selectedDb || !storageAccount) return;
+  const handleStartWarmup = async (dbName = selectedDb) => {
+    if (!dbName || !storageAccount || warmupInstanceId) return;
     // Defence in depth — the button is disabled when selectedInfeasible is
     // true, but keyboard activation / future programmatic calls should also
     // refuse. Showing the planner verdict in startError gives the user the
     // same fix recommendations they would see in the inline advisory.
-    if (selectedInfeasible && selectedPlan) {
-      setStartError(
-        `Warmup blocked by feasibility planner: ${selectedPlan.message}`,
-      );
+    const plan = planByName.get(dbName);
+    const infeasible =
+      plan != null && plan.feasible === false && plan.status !== "no_db_size";
+    if (infeasible && plan) {
+      setStartError(`Warmup blocked by feasibility planner: ${plan.message}`);
       return;
     }
     setStartError(null);
+    setSelectedDb(dbName);
     setStarting(true);
     try {
-      const candidate = WARMUP_CANDIDATES.find((c) => c.value === selectedDb);
+      const candidate = WARMUP_CANDIDATES.find((c) => c.value === dbName);
       const resp = await monitoringApi.startWarmup({
         subscription_id: subscriptionId,
         resource_group: resourceGroup,
         storage_account: storageAccount,
         storage_resource_group: storageResourceGroup || resourceGroup,
         region: region || "koreacentral",
-        db: `blast-db/${selectedDb}`,
-        db_display_name: selectedDb,
+        db: `blast-db/${dbName}`,
+        db_display_name: dbName,
         program: candidate?.program || "blastn",
         aks_cluster_name: clusterName,
         machine_type: nodeSku || undefined,
@@ -225,11 +301,7 @@ export function WarmupSection({
       >
         <Flame size={14} strokeWidth={1.5} /> DB Warmup
         {warmupQuery?.isFetching && (
-          <Loader2
-            size={10}
-            className="spin"
-            style={{ color: "var(--text-faint)" }}
-          />
+          <Loader2 size={10} className="spin" style={{ color: "var(--text-faint)" }} />
         )}
         <button
           className="glass-button"
@@ -241,67 +313,46 @@ export function WarmupSection({
         </button>
       </h4>
 
-      {/* Currently warm databases */}
-      {warmupDbs.length > 0 && (
-        <div style={{ marginBottom: "var(--space-2)" }}>
+      <WarmupCapacityBanner capacity={capacity} nodeSku={nodeSku} nodeCount={nodeCount} />
+
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          marginBottom: "var(--space-2)",
+        }}
+      >
+        {downloadedQuery.isLoading ? (
           <div
-            style={{
-              fontSize: 10,
-              color: "var(--text-faint)",
-              textTransform: "uppercase",
-              marginBottom: 4,
-            }}
+            className="muted"
+            style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}
           >
-            Cached on nodes
+            <Loader2 size={12} className="spin" /> Loading database cache candidates...
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {warmupDbs.map((db) => (
-              <span
-                key={db.name}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 4,
-                  fontSize: 11,
-                  padding: "3px 10px",
-                  borderRadius: 10,
-                  background:
-                    db.status === "Ready"
-                      ? "rgba(106,214,163,0.1)"
-                      : db.status === "Loading"
-                        ? "rgba(122,167,255,0.1)"
-                        : "rgba(224,123,138,0.1)",
-                  color:
-                    db.status === "Ready"
-                      ? "var(--success)"
-                      : db.status === "Loading"
-                        ? "var(--accent)"
-                        : "var(--danger)",
-                  border: `1px solid ${
-                    db.status === "Ready"
-                      ? "rgba(106,214,163,0.2)"
-                      : db.status === "Loading"
-                        ? "rgba(122,167,255,0.2)"
-                        : "rgba(224,123,138,0.2)"
-                  }`,
-                }}
-              >
-                {db.status === "Loading" ? (
-                  <Loader2 size={10} className="spin" />
-                ) : db.status === "Ready" ? (
-                  <CheckCircle2 size={10} strokeWidth={1.5} />
-                ) : (
-                  <AlertTriangle size={10} strokeWidth={1.5} />
-                )}
-                {db.name}
-                <span style={{ opacity: 0.6, fontSize: 10 }}>
-                  {db.nodes_ready}/{db.total_jobs} nodes
-                </span>
-              </span>
-            ))}
+        ) : warmupRows.length === 0 ? (
+          <div className="muted" style={{ fontSize: 11 }}>
+            No downloaded databases are available for node cache warmup yet.
           </div>
-        </div>
-      )}
+        ) : (
+          warmupRows.map((row) => (
+            <WarmupDbRow
+              key={row.name}
+              row={row}
+              actionsDisabled={Boolean(warmupInstanceId) || !storageAccount}
+              starting={starting && selectedDb === row.name}
+              releasing={
+                releaseMutation.isPending && releaseMutation.variables === row.name
+              }
+              onWarm={() => {
+                setSelectedDb(row.name);
+                void handleStartWarmup(row.name);
+              }}
+              onRelease={() => releaseMutation.mutate(row.name)}
+            />
+          ))
+        )}
+      </div>
 
       {/* Active warmup orchestrator status */}
       {warmupInstanceId && orchQuery.data && (
@@ -335,9 +386,7 @@ export function WarmupSection({
         >
           {!orchFinished && <Loader2 size={12} className="spin" />}
           {orchFinished && orchSuccess && <CheckCircle2 size={12} strokeWidth={1.5} />}
-          {orchFinished && !orchSuccess && (
-            <AlertTriangle size={12} strokeWidth={1.5} />
-          )}
+          {orchFinished && !orchSuccess && <AlertTriangle size={12} strokeWidth={1.5} />}
           <div>
             <strong>Warmup {orchDb ? `(${orchDb})` : ""}</strong>:{" "}
             {orchPhase === "enabling_storage"
@@ -350,79 +399,8 @@ export function WarmupSection({
                     ? "Completed"
                     : orchPhase === "failed"
                       ? `Failed: ${orchQuery.data?.output?.error?.slice(0, 100) ?? "unknown"}`
-                      : orchPhase ?? orchQuery.data.runtime_status}
+                      : (orchPhase ?? orchQuery.data.runtime_status)}
           </div>
-        </div>
-      )}
-
-      {/* Start warmup — DB selector */}
-      {!warmupInstanceId && storageAccount && (
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
-          <select
-            className="form-input"
-            value={selectedDb}
-            onChange={(e) => setSelectedDb(e.target.value)}
-            style={{
-              fontSize: 11,
-              padding: "4px 8px",
-              minWidth: 180,
-              flex: 1,
-            }}
-          >
-            <option value="">Select database to warmup...</option>
-            {WARMUP_CANDIDATES.map((c) => {
-              const downloaded = downloadedNames.has(c.value);
-              const warmDb = warmupDbs.find((d) => d.name === c.value);
-              const isReady = warmDb?.status === "Ready";
-              const isLoading = warmDb?.status === "Loading";
-              const plan = planByName.get(c.value);
-              const planBlocks =
-                plan != null &&
-                plan.feasible === false &&
-                plan.status !== "no_db_size";
-              return (
-                <option
-                  key={c.value}
-                  value={c.value}
-                  disabled={!downloaded || isReady || isLoading || planBlocks}
-                  title={planBlocks ? plan!.message : undefined}
-                >
-                  {c.label} ({c.size})
-                  {!downloaded ? " — not downloaded" : ""}
-                  {isReady ? " — ready" : ""}
-                  {isLoading ? " — loading..." : ""}
-                  {planBlocks
-                    ? ` — too large for current cluster (${plan!.status === "node_sku_too_small" ? "upgrade SKU" : "add nodes or upgrade SKU"})`
-                    : ""}
-                </option>
-              );
-            })}
-          </select>
-          <button
-            className="btn btn--primary btn--sm"
-            onClick={handleStartWarmup}
-            disabled={!selectedDb || starting || selectedInfeasible}
-            title={
-              selectedInfeasible
-                ? `Warmup not feasible: ${selectedPlan!.message}`
-                : undefined
-            }
-            style={{ fontSize: 11, whiteSpace: "nowrap" }}
-          >
-            {starting ? (
-              <Loader2 size={11} className="spin" />
-            ) : (
-              <Flame size={11} strokeWidth={1.5} />
-            )}{" "}
-            Warmup
-          </button>
         </div>
       )}
 
@@ -495,4 +473,512 @@ export function WarmupSection({
       )}
     </div>
   );
+}
+
+interface WarmupCapacity {
+  nodes: number;
+  memoryPct: number | null;
+  minFreeGiB: number | null;
+  memoryPressure: boolean;
+  pressureFlags: string[];
+}
+
+interface WarmupRow {
+  name: string;
+  label: string;
+  sizeLabel: string;
+  storageLabel: string;
+  shardLabel: string;
+  cacheLabel: string;
+  cacheTone: "ready" | "loading" | "blocked" | "pressure" | "neutral";
+  detail: string;
+  plan?: BlastWarmupPlan;
+  warm?: WarmupDbInfo;
+  canWarm: boolean;
+  canRelease: boolean;
+  primaryAction: "warm" | "rewarm" | "release" | "none";
+  blockedReason?: string;
+}
+
+function summariseWarmupCapacity(nodes: K8sNodeMetrics[]): WarmupCapacity {
+  const userNodes = nodes.filter((n) => !isSystemPool(n.pool));
+  const targetNodes = userNodes.length > 0 ? userNodes : nodes;
+  let memUsedKi = 0;
+  let memTotalKi = 0;
+  let minFreeGiB: number | null = null;
+  const pressureFlags = new Set<string>();
+  for (const node of targetNodes) {
+    const used = node.mem_ki ?? 0;
+    const total = node.mem_capacity_ki ?? 0;
+    memUsedKi += used;
+    memTotalKi += total;
+    if (total > 0) {
+      const freeGiB = Math.max(0, total - used) / 1024 / 1024;
+      minFreeGiB = minFreeGiB == null ? freeGiB : Math.min(minFreeGiB, freeGiB);
+    }
+    const conds = node.conditions ?? {};
+    for (const key of ["MemoryPressure", "DiskPressure", "PIDPressure"] as const) {
+      if (conds[key] === "True") pressureFlags.add(key);
+    }
+  }
+  const memoryPct =
+    memTotalKi > 0 ? Math.round((memUsedKi / memTotalKi) * 1000) / 10 : null;
+  return {
+    nodes: targetNodes.length,
+    memoryPct,
+    minFreeGiB,
+    memoryPressure:
+      pressureFlags.has("MemoryPressure") || (memoryPct != null && memoryPct >= 85),
+    pressureFlags: [...pressureFlags],
+  };
+}
+
+function buildWarmupRows({
+  databases,
+  warmupDbs,
+  planByName,
+  capacity,
+}: {
+  databases: BlastDatabase[];
+  warmupDbs: WarmupDbInfo[];
+  planByName: Map<string, BlastWarmupPlan>;
+  capacity: WarmupCapacity;
+}): WarmupRow[] {
+  const names = new Set<string>();
+  for (const db of databases) names.add(db.name);
+  for (const db of warmupDbs) names.add(db.name);
+  for (const candidate of WARMUP_CANDIDATES) names.add(candidate.value);
+
+  return [...names]
+    .map((name) => {
+      const db = databases.find((item) => item.name === name);
+      const warm = warmupDbs.find((item) => item.name === name);
+      const candidate = WARMUP_CANDIDATES.find((item) => item.value === name);
+      const plan = planByName.get(name);
+      const downloaded = Boolean(db);
+      const sharded = Boolean(db?.sharded && (db.shard_sets?.length ?? 0) > 0);
+      const warmReady = warm?.status === "Ready";
+      const warming = warm?.status === "Loading";
+      const failed = warm?.status === "Failed";
+      const partial =
+        warm != null &&
+        !warmReady &&
+        !warming &&
+        !failed &&
+        warm.nodes_ready > 0 &&
+        warm.nodes_ready < warm.total_jobs;
+      const blocked =
+        plan != null && plan.feasible === false && plan.status !== "no_db_size";
+      const pressure = capacity.memoryPressure && (warmReady || warming);
+
+      let cacheLabel = "Not warm";
+      let cacheTone: WarmupRow["cacheTone"] = "neutral";
+      if (pressure) {
+        cacheLabel = `Memory pressure · ${warm?.nodes_ready ?? 0}/${warm?.total_jobs ?? "?"}`;
+        cacheTone = "pressure";
+      } else if (warmReady) {
+        cacheLabel = `Warm · ${warm.nodes_ready}/${warm.total_jobs} nodes`;
+        cacheTone = "ready";
+      } else if (warming) {
+        cacheLabel = `${shortWarmupPhase(warm)} · ${warm.nodes_ready}/${warm.total_jobs} nodes`;
+        cacheTone = "loading";
+      } else if (partial) {
+        cacheLabel = `Partial · ${warm!.nodes_ready}/${warm!.total_jobs} nodes`;
+        cacheTone = "pressure";
+      } else if (failed) {
+        cacheLabel = `Failed · ${warm!.nodes_failed}/${warm!.total_jobs} nodes`;
+        cacheTone = "blocked";
+      } else if (blocked) {
+        cacheLabel = "Blocked";
+        cacheTone = "blocked";
+      }
+
+      const canWarm = downloaded && !warming && !blocked && !warmReady;
+      const canRelease = Boolean(warm);
+      const primaryAction: WarmupRow["primaryAction"] = warmReady
+        ? "release"
+        : warm
+          ? "rewarm"
+          : canWarm
+            ? "warm"
+            : "none";
+      const shardLabel = sharded
+        ? `${db!.shard_sets!.join("/")}-way shards`
+        : db?.sharding_in_progress
+          ? "Sharding"
+          : "Not sharded";
+      const detail = plan
+        ? `Needs about ${plan.per_node_gib.toFixed(1)} GiB per node; safe budget ${plan.safe_node_budget_gib.toFixed(1)} GiB.`
+        : downloaded
+          ? "Warmup fit has not been estimated for this cluster yet."
+          : "Download the database before warming it on AKS nodes.";
+      const warmupProgress = warm ? formatWarmupProgress(warm) : undefined;
+
+      return {
+        name,
+        label: candidate?.label ?? name,
+        sizeLabel: db?.total_bytes
+          ? formatBytes(db.total_bytes)
+          : (candidate?.size ?? "—"),
+        storageLabel: downloaded ? "Downloaded" : "Not downloaded",
+        shardLabel,
+        cacheLabel,
+        cacheTone,
+        detail: warmupProgress ?? detail,
+        plan,
+        warm,
+        canWarm,
+        canRelease,
+        primaryAction,
+        blockedReason: blocked
+          ? plan!.message
+          : downloaded
+            ? undefined
+            : "Database is not downloaded.",
+      };
+    })
+    .filter((row) => row.storageLabel === "Downloaded" || row.warm != null)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function formatWarmupProgress(warm: WarmupDbInfo): string | undefined {
+  if (warm.status !== "Loading" && warm.status !== "Partial") return undefined;
+  const phase = warm.active_phase_label ?? shortWarmupPhase(warm);
+  const message = warm.active_message ? ` · ${warm.active_message}` : "";
+  const progress = `${warm.nodes_ready}/${warm.total_jobs} nodes ready`;
+  const active = warm.nodes_active > 0 ? ` · ${warm.nodes_active} active` : "";
+  const elapsed = formatDuration(warm.elapsed_seconds);
+  const remaining = formatDuration(warm.estimated_remaining_seconds);
+  const phaseCounts = formatPhaseCounts(warm.phase_counts);
+  if (remaining) {
+    return `${phase}${message} · ${progress}${active} · ${elapsed ?? "just started"} elapsed · about ${remaining} remaining${phaseCounts ? ` · ${phaseCounts}` : ""}.`;
+  }
+  if (elapsed) {
+    return `${phase}${message} · ${progress}${active} · ${elapsed} elapsed · ETA after the first shard finishes${phaseCounts ? ` · ${phaseCounts}` : ""}.`;
+  }
+  return `${phase}${message} · ${progress}${active} · ETA after the first shard finishes${phaseCounts ? ` · ${phaseCounts}` : ""}.`;
+}
+
+function shortWarmupPhase(warm: WarmupDbInfo): string {
+  switch (warm.active_phase) {
+    case "copying_files":
+      return "Copying";
+    case "touching_memory":
+      return "RAM warmup";
+    case "verifying_db":
+      return "Verifying";
+    case "waiting":
+      return "Waiting";
+    case "starting":
+      return "Starting";
+    case "failed":
+      return "Failed";
+    case "completed":
+      return "Warm";
+    default:
+      return "Warming";
+  }
+}
+
+function formatPhaseCounts(counts?: Record<string, number>): string {
+  if (!counts) return "";
+  const labels: Record<string, string> = {
+    copying_files: "copying",
+    touching_memory: "RAM",
+    verifying_db: "verifying",
+    waiting: "waiting",
+    starting: "starting",
+    completed: "done",
+    failed: "failed",
+    unknown: "running",
+  };
+  return Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .map(([phase, count]) => `${labels[phase] ?? phase} ${count}`)
+    .join(" · ");
+}
+
+function formatDuration(seconds?: number): string | undefined {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return undefined;
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))} sec`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder > 0 ? `${hours} hr ${remainder} min` : `${hours} hr`;
+}
+
+function WarmupCapacityBanner({
+  capacity,
+  nodeSku,
+  nodeCount,
+}: {
+  capacity: WarmupCapacity;
+  nodeSku?: string | null;
+  nodeCount?: number | null;
+}) {
+  const pressure = capacity.memoryPressure;
+  return (
+    <div
+      style={{
+        marginBottom: 10,
+        padding: "8px 10px",
+        borderRadius: 8,
+        fontSize: 11,
+        background: pressure ? "rgba(240,198,116,0.10)" : "rgba(106,214,163,0.08)",
+        border: `1px solid ${pressure ? "rgba(240,198,116,0.30)" : "rgba(106,214,163,0.22)"}`,
+        color: "var(--text-muted)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 10,
+        flexWrap: "wrap",
+      }}
+    >
+      <span>
+        Warm cache capacity · {nodeCount ?? capacity.nodes} node
+        {(nodeCount ?? capacity.nodes) === 1 ? "" : "s"}
+        {nodeSku ? ` · ${nodeSku}` : ""}
+      </span>
+      <span
+        style={{ color: pressure ? "var(--warning)" : "var(--success)", fontWeight: 600 }}
+      >
+        {capacity.memoryPct == null
+          ? "memory unknown"
+          : `${capacity.memoryPct.toFixed(1)}% memory used`}
+        {capacity.minFreeGiB != null
+          ? ` · min ${capacity.minFreeGiB.toFixed(1)} GiB free`
+          : ""}
+        {capacity.pressureFlags.length > 0
+          ? ` · ${capacity.pressureFlags.join(", ")}`
+          : ""}
+      </span>
+    </div>
+  );
+}
+
+function WarmupDbRow({
+  row,
+  actionsDisabled,
+  starting,
+  releasing,
+  onWarm,
+  onRelease,
+}: {
+  row: WarmupRow;
+  actionsDisabled: boolean;
+  starting: boolean;
+  releasing: boolean;
+  onWarm: () => void;
+  onRelease: () => void;
+}) {
+  const tone = row.cacheTone;
+  const toneColor =
+    tone === "ready"
+      ? "var(--success)"
+      : tone === "loading"
+        ? "var(--accent)"
+        : tone === "blocked"
+          ? "var(--danger)"
+          : tone === "pressure"
+            ? "var(--warning)"
+            : "var(--text-muted)";
+  const showWarm = row.primaryAction === "warm" || row.primaryAction === "rewarm";
+  const warmDisabled = actionsDisabled || !row.canWarm || starting || releasing;
+  const releaseDisabled = actionsDisabled || !row.canRelease || starting || releasing;
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(160px, 1.1fr) minmax(220px, 1.5fr) auto",
+        gap: 10,
+        alignItems: "center",
+        padding: "10px 12px",
+        borderRadius: 8,
+        background: "rgba(255,255,255,0.035)",
+        border: "1px solid var(--border-weak)",
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
+          <Database size={13} color="var(--accent)" />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{row.name}</span>
+        </div>
+        <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+          {row.label} · {row.sizeLabel}
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", fontSize: 10 }}>
+          <StatusPill
+            label={row.storageLabel}
+            tone={row.storageLabel === "Downloaded" ? "ok" : "neutral"}
+          />
+          <StatusPill
+            label={row.shardLabel}
+            tone={row.shardLabel === "Not sharded" ? "neutral" : "accent"}
+          />
+          <StatusPill label={row.cacheLabel} toneColor={toneColor} />
+        </div>
+        <div
+          className="muted"
+          style={{ fontSize: 10, lineHeight: 1.4 }}
+          title={row.blockedReason ?? row.detail}
+        >
+          {row.blockedReason ?? row.detail}
+        </div>
+        {row.warm?.status === "Loading" && <WarmupProgressBar warm={row.warm} />}
+      </div>
+      <div
+        style={{ display: "flex", gap: 6, justifyContent: "flex-end", flexWrap: "wrap" }}
+      >
+        {showWarm && (
+          <button
+            type="button"
+            className="btn btn--primary btn--sm"
+            disabled={warmDisabled}
+            onClick={onWarm}
+            title={row.blockedReason}
+            style={{ fontSize: 11, whiteSpace: "nowrap" }}
+          >
+            {starting ? <Loader2 size={11} className="spin" /> : <Flame size={11} />}
+            {row.primaryAction === "rewarm" ? "Rewarm" : "Warm"}
+          </button>
+        )}
+        {row.canRelease && (
+          <button
+            type="button"
+            className="glass-button"
+            disabled={releaseDisabled}
+            onClick={onRelease}
+            title="Release warm cache resources for this database"
+            style={{ fontSize: 11, whiteSpace: "nowrap", padding: "5px 9px" }}
+          >
+            {releasing ? <Loader2 size={11} className="spin" /> : <Trash2 size={11} />}
+            Release
+          </button>
+        )}
+        {!showWarm && !row.canRelease && (
+          <span
+            className="muted"
+            style={{ fontSize: 10, display: "inline-flex", alignItems: "center", gap: 4 }}
+          >
+            <Snowflake size={11} /> Submit cold
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WarmupProgressBar({ warm }: { warm: WarmupDbInfo }) {
+  const pct = Number.isFinite(warm.progress_pct)
+    ? Math.max(0, Math.min(100, warm.progress_pct ?? 0))
+    : 0;
+  const phase = shortWarmupPhase(warm);
+  const lastLogs = (warm.pod_statuses ?? [])
+    .map((pod) => pod.last_log || pod.message)
+    .filter(Boolean)
+    .slice(0, 3)
+    .join(" · ");
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <div
+        style={{
+          height: 4,
+          background: "rgba(255,255,255,0.08)",
+          borderRadius: 999,
+          overflow: "hidden",
+        }}
+        title={lastLogs || undefined}
+      >
+        <div
+          style={{
+            width: `${pct}%`,
+            minWidth: pct > 0 ? 8 : 0,
+            height: "100%",
+            background: "var(--accent)",
+            transition: "width 0.3s ease",
+          }}
+        />
+      </div>
+      <div
+        style={{
+          fontSize: 9,
+          color: "var(--text-faint)",
+          display: "flex",
+          gap: 6,
+          flexWrap: "wrap",
+        }}
+      >
+        <span>{phase}</span>
+        <span>
+          {warm.nodes_ready}/{warm.total_jobs} ready
+        </span>
+        {warm.elapsed_seconds != null && (
+          <span>{formatDuration(warm.elapsed_seconds)} elapsed</span>
+        )}
+        {warm.estimated_remaining_seconds != null ? (
+          <span>~{formatDuration(warm.estimated_remaining_seconds)} left</span>
+        ) : (
+          <span>ETA after first shard completes</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatusPill({
+  label,
+  tone,
+  toneColor,
+}: {
+  label: string;
+  tone?: "ok" | "accent" | "neutral";
+  toneColor?: string;
+}) {
+  const color =
+    toneColor ??
+    (tone === "ok"
+      ? "var(--success)"
+      : tone === "accent"
+        ? "var(--accent)"
+        : "var(--text-muted)");
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        minHeight: 20,
+        padding: "2px 7px",
+        borderRadius: 999,
+        border: "1px solid rgba(255,255,255,0.12)",
+        color,
+        background: "rgba(255,255,255,0.035)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "—";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[idx]}`;
 }

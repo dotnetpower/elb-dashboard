@@ -18,7 +18,7 @@ export const SAFE_SHARD_FRACTION_OF_NODE_RAM = 0.5;
  * `api/services/aks_skus.py::SKU_CATALOG`. Unknown SKUs fall back to
  * the same 64 GiB default the backend uses, so the preview never throws.
  */
-const SKU_MEMORY_GIB: Record<string, number> = {
+export const SKU_MEMORY_GIB: Record<string, number> = {
   // E v5 (memory-optimised, our default workload pool)
   Standard_E16s_v5: 128,
   Standard_E32s_v5: 256,
@@ -40,8 +40,61 @@ const SKU_MEMORY_GIB: Record<string, number> = {
 };
 
 /** Convert bytes to GiB (binary, matches Python `bytes / 1024**3`). */
-function bytesToGib(bytes: number): number {
+export function bytesToGib(bytes: number): number {
   return bytes / 1024 ** 3;
+}
+
+export interface ShardCapacityPlan {
+  feasible: boolean;
+  pickedN: number;
+  minShards: number;
+  maxPreset: number;
+  numNodes: number;
+  machineType: string;
+  dbGib: number;
+  nodeRamGib: number;
+  safeRamPerShardGib: number;
+  perShardGib: number;
+  reason: string | null;
+}
+
+export function planPartitionsForSubmit(
+  dbTotalBytes: number,
+  numNodes: number,
+  machineType: string,
+  presets: readonly number[] = PRESET_SHARD_SETS,
+): ShardCapacityPlan {
+  const safeNumNodes = Math.max(1, Math.trunc(numNodes || 1));
+  const nodeRamGib = SKU_MEMORY_GIB[machineType] ?? 64;
+  const safeRamPerShardGib = nodeRamGib * SAFE_SHARD_FRACTION_OF_NODE_RAM;
+  const dbGib = bytesToGib(Math.max(0, dbTotalBytes));
+  const minByRam = safeRamPerShardGib > 0 ? Math.ceil(dbGib / safeRamPerShardGib) : safeNumNodes;
+  const minShards = Math.max(safeNumNodes, minByRam, 1);
+  const sortedPresets = [...presets].filter((n) => n > 0).sort((a, b) => a - b);
+  const maxPreset = sortedPresets[sortedPresets.length - 1] ?? 1;
+  const pickedN = sortedPresets.find((n) => n >= minShards) ?? maxPreset;
+  const feasible = pickedN >= minShards && pickedN <= safeNumNodes;
+  const perShardGib = pickedN > 0 ? dbGib / pickedN : dbGib;
+  const preparedShardLabel = maxPreset === 1 ? "prepared shard is" : "prepared shards are";
+  const reason = feasible
+    ? null
+    : pickedN > safeNumNodes
+      ? `This database needs ${pickedN} shards, but the selected cluster has ${safeNumNodes} workload nodes.`
+      : `This database needs at least ${minShards} shards for ${machineType}, but only ${maxPreset} ${preparedShardLabel} available.`;
+
+  return {
+    feasible,
+    pickedN,
+    minShards,
+    maxPreset,
+    numNodes: safeNumNodes,
+    machineType,
+    dbGib,
+    nodeRamGib,
+    safeRamPerShardGib,
+    perShardGib,
+    reason,
+  };
 }
 
 /**
@@ -60,13 +113,5 @@ export function selectPartitionsForSubmit(
   machineType: string,
   presets: readonly number[] = PRESET_SHARD_SETS,
 ): number {
-  const ramGib = SKU_MEMORY_GIB[machineType] ?? 64;
-  const safeRamPerShard = ramGib * SAFE_SHARD_FRACTION_OF_NODE_RAM;
-  const dbGib = bytesToGib(dbTotalBytes);
-  const minByRam = safeRamPerShard > 0 ? Math.ceil(dbGib / safeRamPerShard) : numNodes;
-  const minN = Math.max(numNodes, minByRam, 1);
-  for (const n of presets) {
-    if (n >= minN) return n;
-  }
-  return presets[presets.length - 1] ?? 1;
+  return planPartitionsForSubmit(dbTotalBytes, numNodes, machineType, presets).pickedN;
 }

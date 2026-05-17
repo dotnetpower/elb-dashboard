@@ -26,7 +26,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH=/opt/elb/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/opt/elb/venv/bin:/opt/elb/elastic-blast-azure/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # ---------------------------------------------------------------------------
 # Apt deps + Python 3.12 (native to Ubuntu 24.04, no PPA required)
@@ -105,6 +105,7 @@ COPY patch_elastic_blast.py /tmp/patch_elastic_blast.py
 COPY merge-sharded-results.sh /tmp/merge-sharded-results.sh
 RUN git clone --depth 1 https://github.com/dotnetpower/elastic-blast-azure.git /opt/elb/elastic-blast-azure \
     && python3.12 /tmp/patch_elastic_blast.py /opt/elb/elastic-blast-azure /tmp/merge-sharded-results.sh \
+    && /opt/elb/venv/bin/pip install --no-cache-dir -r /opt/elb/elastic-blast-azure/requirements/base.txt packit glob2 \
     && /opt/elb/venv/bin/pip install --no-build-isolation --no-deps /opt/elb/elastic-blast-azure
 
 # ---------------------------------------------------------------------------
@@ -141,13 +142,15 @@ RUN printf '%s\n' \
 COPY profile.sh    /etc/profile.d/elb-env.sh
 COPY command_guard.sh /etc/profile.d/elb-command-guard.sh
 COPY history.sh    /etc/profile.d/elb-history.sh
+COPY tmux.conf     /etc/tmux.conf
 COPY banner.sh /usr/local/bin/elb-banner
 COPY tool-versions.sh /usr/local/bin/elb-tool-versions
 COPY motd          /etc/motd
 COPY entrypoint.sh /usr/local/bin/elb-entrypoint
 COPY exec_server.py /usr/local/bin/elb-exec-server
 COPY cgroup_reporter.py /usr/local/bin/elb-cgroup-reporter
-RUN chmod +x /usr/local/bin/elb-entrypoint /usr/local/bin/elb-exec-server /usr/local/bin/elb-cgroup-reporter /usr/local/bin/elb-banner /usr/local/bin/elb-tool-versions /etc/profile.d/elb-env.sh /etc/profile.d/elb-command-guard.sh /etc/profile.d/elb-history.sh
+RUN chmod +x /usr/local/bin/elb-entrypoint /usr/local/bin/elb-exec-server /usr/local/bin/elb-cgroup-reporter /usr/local/bin/elb-banner /usr/local/bin/elb-tool-versions /etc/profile.d/elb-env.sh /etc/profile.d/elb-command-guard.sh /etc/profile.d/elb-history.sh \
+    && chmod 0644 /etc/tmux.conf
 
 USER azureuser:azureuser
 WORKDIR /home/azureuser

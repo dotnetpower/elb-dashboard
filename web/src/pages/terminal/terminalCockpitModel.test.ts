@@ -24,6 +24,10 @@ describe("terminal cockpit model", () => {
         "blast-triage",
         "controls",
         "evidence-summary",
+        "cold-review",
+        "maturity-ladder",
+        "input-qc-gates",
+        "db-provenance-gates",
       ]),
     );
   });

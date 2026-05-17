@@ -20,8 +20,11 @@ interface BlastDbRowProps {
   latestVersion: string | null;
   elapsed: number;
   downloadDisabled: boolean;
+  autoWarmupChecked: boolean;
+  autoWarmupDisabled: boolean;
   onDownload: () => void;
   onConfirmLarge: () => void;
+  onToggleAutoWarmup: (checked: boolean) => void;
 }
 
 /**
@@ -43,8 +46,11 @@ export function BlastDbRow({
   latestVersion,
   elapsed,
   downloadDisabled,
+  autoWarmupChecked,
+  autoWarmupDisabled,
   onDownload,
   onConfirmLarge,
+  onToggleAutoWarmup,
 }: BlastDbRowProps) {
   const triggerDownload = () => {
     if (db.category === "Large") {
@@ -249,6 +255,30 @@ export function BlastDbRow({
               )}
             </>
           )}
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              color: autoWarmupChecked ? "var(--success)" : "var(--text-muted)",
+              cursor: autoWarmupDisabled ? "not-allowed" : "pointer",
+              opacity: autoWarmupDisabled ? 0.55 : 1,
+            }}
+            title={
+              autoWarmupDisabled
+                ? "Download this database before enabling automatic warmup"
+                : "Warm this database automatically when an AKS workload cluster is running"
+            }
+          >
+            <input
+              type="checkbox"
+              checked={autoWarmupChecked}
+              disabled={autoWarmupDisabled}
+              onChange={(event) => onToggleAutoWarmup(event.target.checked)}
+              style={{ accentColor: "var(--success)", margin: 0 }}
+            />
+            Auto warm
+          </label>
         </div>
         {isCopying && inProgressInfo && (
           <div

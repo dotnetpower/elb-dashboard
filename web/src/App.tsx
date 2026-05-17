@@ -13,6 +13,10 @@ import { BlastAnalytics } from "@/pages/BlastAnalytics";
 import { DatabaseBuilder } from "@/pages/DatabaseBuilder";
 import { ToolsPage } from "@/pages/ToolsPage";
 import { ApiReference } from "@/pages/ApiReference";
+import { AksCardMockups } from "@/pages/mockups/AksCardMockups";
+import { AksCardMockupsRefined } from "@/pages/mockups/AksCardMockupsRefined";
+import { AksCardMockupsPremium } from "@/pages/mockups/AksCardMockupsPremium";
+import { SidecarInspectorMockups } from "@/pages/mockups/SidecarInspectorMockups";
 
 const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
 const CLIENT_ID_MISSING = !import.meta.env.VITE_AZURE_CLIENT_ID && !DEV_BYPASS;
@@ -31,6 +35,19 @@ function AppRoutes() {
           <Route path="/blast/databases/build" element={<DatabaseBuilder />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/docs" element={<ApiReference />} />
+          <Route path="/mockups/aks-card" element={<AksCardMockups />} />
+          <Route
+            path="/mockups/aks-card-refined"
+            element={<AksCardMockupsRefined />}
+          />
+          <Route
+            path="/mockups/aks-card-premium"
+            element={<AksCardMockupsPremium />}
+          />
+          <Route
+            path="/mockups/sidecar-inspector"
+            element={<SidecarInspectorMockups />}
+          />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>

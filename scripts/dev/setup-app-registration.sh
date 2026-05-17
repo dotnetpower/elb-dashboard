@@ -139,7 +139,7 @@ az rest --method PATCH \
 web_env="$repo_root/web/.env.local"
 echo "==> Writing $web_env"
 cat > "$web_env" <<EOF
-VITE_API_BASE_URL=http://localhost:8080
+VITE_API_BASE_URL=http://localhost:8085
 VITE_AZURE_TENANT_ID=$tenant_id
 VITE_AZURE_CLIENT_ID=$app_id
 VITE_AZURE_REDIRECT_URI=$REDIRECT_URI

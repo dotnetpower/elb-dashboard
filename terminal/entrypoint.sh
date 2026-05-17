@@ -78,7 +78,9 @@ EXEC_PID=$!
 # ---------------------------------------------------------------------------
 # Start ttyd (background). -W = writable shell. -p 7681 -i 127.0.0.1 = loopback.
 # Each browser session attaches (or creates) a tmux session named "elb" so
-# refreshing the browser does not lose work.
+# refreshing the browser does not lose work. Do not pass tmux `-D` here: a
+# reconnect would detach the previous ttyd client, whose close handler would
+# schedule another reconnect and create a self-sustaining reconnect loop.
 # ---------------------------------------------------------------------------
 TTYD_HOST="${TTYD_HOST:-127.0.0.1}"
 /usr/local/bin/ttyd \
@@ -87,7 +89,7 @@ TTYD_HOST="${TTYD_HOST:-127.0.0.1}"
   -W \
   -t enableZmodem=false \
   -t fontSize=14 \
-  /usr/bin/tmux new-session -A -D -s elb /bin/bash --login &
+  /usr/bin/tmux new-session -A -s elb /bin/bash --login &
 TTYD_PID=$!
 
 echo "elb-supervisor: ttyd host=$TTYD_HOST pid=$TTYD_PID exec_server pid=$EXEC_PID reporter pid=$REPORTER_PID" >&2

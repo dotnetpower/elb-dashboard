@@ -61,6 +61,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import PurePosixPath
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -130,6 +131,16 @@ def _validate_request(body: bytes) -> tuple[dict | None, int, str | None]:
     if stdin_value is not None and not isinstance(stdin_value, str):
         return None, 400, "stdin must be a string or omitted"
 
+    stdin_file = payload.get("stdin_file")
+    if stdin_file is not None:
+        if not isinstance(stdin_file, str) or not stdin_file:
+            return None, 400, "stdin_file must be a relative path string or omitted"
+        stdin_path = PurePosixPath(stdin_file)
+        if stdin_path.is_absolute() or any(part in {"", ".", ".."} for part in stdin_path.parts):
+            return None, 400, "stdin_file must be a relative path without '.' or '..'"
+        if stdin_value is None:
+            return None, 400, "stdin_file requires stdin"
+
     cwd = payload.get("cwd")
     if cwd is not None:
         if not isinstance(cwd, str) or not cwd.startswith("/"):
@@ -143,7 +154,13 @@ def _validate_request(body: bytes) -> tuple[dict | None, int, str | None]:
     timeout = max(1, min(timeout, MAX_TIMEOUT))
 
     return (
-        {"argv": argv, "stdin": stdin_value, "cwd": cwd, "timeout": timeout},
+        {
+            "argv": argv,
+            "stdin": stdin_value,
+            "stdin_file": stdin_file,
+            "cwd": cwd,
+            "timeout": timeout,
+        },
         200,
         None,
     )
@@ -156,6 +173,16 @@ def _make_cwd(explicit: str | None) -> tuple[str, bool]:
     os.makedirs(EXEC_TMP_ROOT, exist_ok=True)
     path = tempfile.mkdtemp(prefix=f"req-{uuid.uuid4().hex[:8]}-", dir=EXEC_TMP_ROOT)
     return path, True
+
+
+def _write_stdin_file(req: dict, cwd: str) -> None:
+    stdin_file = req.get("stdin_file")
+    if not stdin_file:
+        return
+    path = os.path.join(cwd, stdin_file)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(req["stdin"])
 
 
 def _spawn(argv: list[str], cwd: str, stdin_text: str | None) -> subprocess.Popen[bytes]:
@@ -190,6 +217,7 @@ def _run_buffered(req: dict) -> dict:
     cwd, owned = _make_cwd(req["cwd"])
     started = time.monotonic()
     try:
+        _write_stdin_file(req, cwd)
         proc = _spawn(req["argv"], cwd, req["stdin"])
         try:
             stdin_bytes = req["stdin"].encode("utf-8") if req["stdin"] is not None else None
@@ -240,6 +268,7 @@ def _stream(req: dict, write_line, client_alive=None) -> dict:
             pass
 
     try:
+        _write_stdin_file(req, cwd)
         proc = _spawn(req["argv"], cwd, req["stdin"])
         if req["stdin"] is not None and proc.stdin is not None:
             try:

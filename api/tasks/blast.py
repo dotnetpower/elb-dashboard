@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Iterator, Mapping
 from datetime import UTC
 from typing import Any
@@ -56,6 +57,7 @@ SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
         "db_total_letters",
         "gap_extend",
         "gap_open",
+        "is_inclusive",
         "machine_type",
         "max_target_seqs",
         "mem_limit",
@@ -67,9 +69,16 @@ SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
         "query_effective_search_spaces",
         "shard_sets",
         "sharding_mode",
+        "taxid",
         "word_size",
     }
 )
+
+
+class WarmupNotReadyError(RuntimeError):
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def _now_iso() -> str:
@@ -160,8 +169,8 @@ def _normalise_database_url(storage_account: str, database: str) -> str:
     )
 
 
-def _results_root_url(storage_account: str) -> str:
-    return _storage_url(storage_account, "results")
+def _results_job_url(storage_account: str, job_id: str) -> str:
+    return _storage_url(storage_account, "results", _relative_blob_path(job_id, "job_id"))
 
 
 def _extract_db_name(database: str) -> str:
@@ -179,9 +188,7 @@ def _extract_db_name(database: str) -> str:
     return db
 
 
-def _resolve_db_metadata(
-    storage_account: str, db_name: str
-) -> dict[str, Any] | None:
+def _resolve_db_metadata(storage_account: str, db_name: str) -> dict[str, Any] | None:
     """Read ``{db}-metadata.json`` from the workload Storage account.
 
     Returns the parsed dict (with ``sharded`` / ``shard_sets`` /
@@ -214,7 +221,8 @@ def _resolve_db_metadata(
     except Exception as exc:
         LOGGER.info(
             "db metadata lookup skipped for %s: %s",
-            db_name, type(exc).__name__,
+            db_name,
+            type(exc).__name__,
         )
         return None
 
@@ -240,18 +248,17 @@ def _build_config_content(
         "program": program,
         "db": _normalise_database_url(storage_account, database) if database else "",
         "query_blob_url": _normalise_query_url(storage_account, query_file) if query_file else "",
-        "results_url": _results_root_url(storage_account),
+        "results_url": _results_job_url(storage_account, job_id),
+        "reuse": True,
     }
     if options:
         params.update(dict(options))
 
-    # Auto-shard wire-up: if the caller did not pass DB metadata in
-    # options (the common case — the SPA only knows db_name + size from
-    # the dashboard, not the on-storage shard state), resolve it from
-    # ``{db}-metadata.json`` so generate_config can decide whether to
-    # inject db-partitions. Skipped silently when the caller already
-    # provided ``db_sharded`` (tests / benchmark runs / power users).
-    if database and storage_account and "db_sharded" not in params:
+    # Auto-shard wire-up: resolve ``{db}-metadata.json`` and use it to fill
+    # missing shard fields. The SPA may already send a coarse ``db_sharded``
+    # flag, but ElasticBLAST also needs the partition prefix/size inputs that
+    # are only authoritative in storage metadata.
+    if database and storage_account:
         db_name = _extract_db_name(database)
         meta = _resolve_db_metadata(storage_account, db_name)
         if meta is not None:
@@ -272,6 +279,82 @@ def _build_config_content(
                     params.setdefault(target_key, int(value))
 
     return generate_config(params)
+
+
+def _option_enabled(options: Mapping[str, Any], key: str) -> bool:
+    value = options.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _submit_requires_node_warmup(options: Mapping[str, Any] | None) -> bool:
+    if not isinstance(options, Mapping):
+        return False
+    if options.get("enable_warmup") is False:
+        return False
+    from api.services.sharding_precision import normalize_sharding_mode
+
+    return normalize_sharding_mode(options) != "off" or _option_enabled(
+        options,
+        "db_auto_partition",
+    )
+
+
+def _ensure_node_warmup_ready_for_submit(
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    database: str,
+    options: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not _submit_requires_node_warmup(options):
+        return None
+    db_name = _extract_db_name(database)
+    if not db_name:
+        raise WarmupNotReadyError(
+            "node warmup readiness cannot be checked without a database name",
+            retryable=False,
+        )
+    try:
+        from api.services import get_credential
+        from api.services.monitoring import k8s_warmup_status
+
+        credential = get_credential()
+        status = k8s_warmup_status(
+            credential,
+            subscription_id or os.environ.get("AZURE_SUBSCRIPTION_ID", ""),
+            resource_group,
+            cluster_name,
+        )
+    except Exception as exc:
+        raise WarmupNotReadyError(
+            f"node warmup readiness check failed: {_snippet(exc)}",
+            retryable=True,
+        ) from exc
+
+    for item in status.get("databases", []):
+        if not isinstance(item, Mapping) or item.get("name") != db_name:
+            continue
+        db_status = str(item.get("status") or "Unknown")
+        if db_status == "Ready":
+            return dict(item)
+        ready = int(item.get("nodes_ready") or 0)
+        total = int(item.get("total_jobs") or 0)
+        active = int(item.get("nodes_active") or 0)
+        retryable = db_status in {"Loading", "Pending", "Starting", "Unknown"} or active > 0
+        raise WarmupNotReadyError(
+            f"node warmup for {db_name} is {db_status} ({ready}/{total} nodes ready)",
+            retryable=retryable,
+        )
+
+    raise WarmupNotReadyError(
+        f"node warmup for {db_name} has not started or is not visible yet",
+        retryable=True,
+    )
 
 
 def _upload_split_query_files(
@@ -454,7 +537,12 @@ def _dispatch_split_child_submits(
             )
 
         repo.update(child_job_id, status="running", phase="submitting")
-        result = terminal_run(argv=argv, stdin=config_content, timeout_seconds=600)
+        result = terminal_run(
+            argv=argv,
+            stdin=config_content,
+            stdin_file=ELASTIC_BLAST_CFG_FILE,
+            timeout_seconds=600,
+        )
         payload_json = _last_json(str(result.get("stdout", "")))
         exit_code = int(result.get("exit_code", 1) or 0)
         if exit_code == 0:
@@ -967,8 +1055,10 @@ def _aggregate_split_merge_reports(
     for item in child_reports:
         report = item["report"]
         outfmt_value = report.get("outfmt")
-        report_format = "blast_xml" if str(outfmt_value).strip() == "5" else str(
-            report.get("format") or "blast_tabular"
+        report_format = (
+            "blast_xml"
+            if str(outfmt_value).strip() == "5"
+            else str(report.get("format") or "blast_tabular")
         )
         formats.add(report_format)
         precision_level = report.get("precision_level")
@@ -1322,20 +1412,23 @@ def _finalize_split_parent_results(
     }
 
 
-def _elastic_blast_argv(command: str, job_id: str, *, force: bool = False) -> list[str]:
+ELASTIC_BLAST_CFG_FILE = "elastic-blast.ini"
+
+
+def _elastic_blast_argv(
+    command: str,
+    job_id: str,
+    *,
+    cfg_file: str = ELASTIC_BLAST_CFG_FILE,
+    force: bool = False,
+) -> list[str]:
+    del job_id, force
     argv = [
         "elastic-blast",
         command,
         "--cfg",
-        "-",
-        "--json",
-        "--idempotency-key",
-        job_id,
-        "--correlation-id",
-        job_id,
+        cfg_file,
     ]
-    if force:
-        argv.append("--force")
     return argv
 
 
@@ -1442,7 +1535,7 @@ def _retry_or_fail(
     countdown = retry_after_seconds or min(300, 15 * (2**retries))
     _update_state(
         job_id,
-        "retrying",
+        phase,
         status="running",
         event="retry_scheduled",
         error_code=error_code,
@@ -1467,7 +1560,7 @@ def _submit_success_status(payload: Mapping[str, Any] | None) -> tuple[str, str]
 @shared_task(
     name="api.tasks.blast.submit",
     bind=True,
-    max_retries=3,
+    max_retries=12,
     retry_backoff=True,
     retry_backoff_max=300,
     retry_jitter=True,
@@ -1489,14 +1582,53 @@ def submit(
 ) -> dict[str, Any]:
     """Submit a BLAST search via the terminal sidecar.
 
-    Side effects: executes ``elastic-blast submit --cfg - --json`` in the
-    terminal sidecar and updates Table-backed job state. The ``job_id`` is
-    passed as the ElasticBLAST idempotency key, making Celery retries safe.
+    Side effects: writes ``elastic-blast.ini`` in the terminal sidecar workdir,
+    executes ``elastic-blast submit --cfg elastic-blast.ini``, and updates
+    Table-backed job state.
     """
 
-    del subscription_id  # kept in the task signature for route/API stability.
     _progress(self, "preparing")
     _update_state(job_id, "preparing")
+
+    try:
+        warmup_ready = _ensure_node_warmup_ready_for_submit(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            database=database,
+            options=options,
+        )
+        if warmup_ready is not None:
+            _progress(
+                self,
+                "warmup_ready",
+                database=_extract_db_name(database),
+                warmup=warmup_ready,
+            )
+            _update_state(
+                job_id,
+                "warmup_ready",
+                status="running",
+                warmup=warmup_ready,
+            )
+    except WarmupNotReadyError as exc:
+        if exc.retryable:
+            return _retry_or_fail(
+                self,
+                job_id=job_id,
+                phase="waiting_for_warmup",
+                exc=exc,
+                error_code="node_warmup_not_ready",
+                retry_after_seconds=60,
+            )
+        error = _snippet(exc)
+        _update_state(job_id, "warmup_not_ready", status="failed", error_code=error)
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "phase": "warmup_not_ready",
+            "error": error,
+        }
 
     if _requires_split_parent_submission(options):
         _progress(self, "splitting_queries")
@@ -1509,9 +1641,7 @@ def submit(
                 program=program,
                 database=database,
                 query_file=query_file,
-                query_effective_search_spaces=(options or {}).get(
-                    "query_effective_search_spaces"
-                ),
+                query_effective_search_spaces=(options or {}).get("query_effective_search_spaces"),
                 options=options,
                 owner_oid=caller_oid,
                 tenant_id=caller_tenant_id,
@@ -1559,6 +1689,7 @@ def submit(
         result = terminal_run(
             argv=_elastic_blast_argv("submit", job_id),
             stdin=config_content,
+            stdin_file=ELASTIC_BLAST_CFG_FILE,
             timeout_seconds=600,
         )
     except TerminalExecError as exc:

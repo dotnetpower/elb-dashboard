@@ -28,6 +28,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from api.auth import CallerIdentity, require_caller
 from api.services import get_credential
 from api.services import monitoring as monitoring_svc
+from api.services.monitor_cache import cached_snapshot
 from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
@@ -37,6 +38,10 @@ router = APIRouter(tags=["monitor"])
 
 def _sub_default() -> str:
     return os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+
+
+def _cache_key(*parts: object) -> str:
+    return ":".join(str(part) for part in parts)
 
 
 def _graceful(op: str, exc: Exception, *, empty: Any) -> Any:
@@ -82,8 +87,10 @@ def list_aks(
         raise HTTPException(400, "subscription_id required")
     cred = get_credential()
     try:
-        clusters = monitoring_svc.list_aks_clusters(cred, sub, resource_group)
-        return {"clusters": clusters}
+        return cached_snapshot(
+            _cache_key("monitor", "aks", sub, resource_group),
+            lambda: {"clusters": monitoring_svc.list_aks_clusters(cred, sub, resource_group)},
+        )
     except Exception as exc:
         return _graceful("aks_list", exc, empty={"clusters": []})
 
@@ -98,7 +105,12 @@ def aks_nodes(
     sub = subscription_id or _sub_default()
     cred = get_credential()
     try:
-        return {"nodes": monitoring_svc.k8s_get_nodes(cred, sub, resource_group, cluster_name)}
+        return cached_snapshot(
+            _cache_key("monitor", "aks", "nodes", sub, resource_group, cluster_name),
+            lambda: {
+                "nodes": monitoring_svc.k8s_get_nodes(cred, sub, resource_group, cluster_name)
+            },
+        )
     except Exception as exc:
         return _graceful("aks_nodes", exc, empty={"nodes": []})
 
@@ -113,7 +125,10 @@ def aks_pods(
     sub = subscription_id or _sub_default()
     cred = get_credential()
     try:
-        return {"pods": monitoring_svc.k8s_get_pods(cred, sub, resource_group, cluster_name)}
+        return cached_snapshot(
+            _cache_key("monitor", "aks", "pods", sub, resource_group, cluster_name),
+            lambda: {"pods": monitoring_svc.k8s_get_pods(cred, sub, resource_group, cluster_name)},
+        )
     except Exception as exc:
         return _graceful("aks_pods", exc, empty={"pods": []})
 
@@ -128,7 +143,12 @@ def aks_top_nodes(
     sub = subscription_id or _sub_default()
     cred = get_credential()
     try:
-        return {"nodes": monitoring_svc.k8s_top_nodes(cred, sub, resource_group, cluster_name)}
+        return cached_snapshot(
+            _cache_key("monitor", "aks", "top-nodes", sub, resource_group, cluster_name),
+            lambda: {
+                "nodes": monitoring_svc.k8s_top_nodes(cred, sub, resource_group, cluster_name)
+            },
+        )
     except Exception as exc:
         return _graceful("aks_top_nodes", exc, empty={"nodes": []})
 
@@ -206,9 +226,150 @@ def aks_warmup_status(
     sub = subscription_id or _sub_default()
     cred = get_credential()
     try:
-        return monitoring_svc.k8s_warmup_status(cred, sub, resource_group, cluster_name)
+        return cached_snapshot(
+            _cache_key("monitor", "aks", "warmup-status", sub, resource_group, cluster_name),
+            lambda: monitoring_svc.k8s_warmup_status(cred, sub, resource_group, cluster_name),
+        )
     except Exception as exc:
         return _graceful("aks_warmup_status", exc, empty={"databases": []})
+
+
+# ---------------------------------------------------------------------------
+# AKS events (lightweight k8s events feed for the cluster bento Live activity)
+# ---------------------------------------------------------------------------
+_EVENTS_NAMESPACE_RE = __import__("re").compile(r"^[a-z0-9-]{1,64}$")
+# Azure resource group name rules (≤90, alphanumeric + . _ - ( ), no
+# trailing dot).  AKS cluster name is even tighter (≤63, alphanumeric +
+# - and _) but we keep them on the same regex for simplicity since the
+# Azure SDK already enforces the strict form server-side.
+_AZ_NAME_RE = __import__("re").compile(r"^[A-Za-z0-9._\-()]{1,90}$")
+
+
+@router.get("/aks/events")
+def aks_events(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(default=""),
+    limit: int = Query(default=30, ge=1, le=200),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Recent k8s events, sorted newest-first.
+
+    `namespace=""` means "all namespaces".  Requests through the kubelet
+    API; if the cluster is stopped or RBAC denies access, returns the
+    standard degraded payload instead of 500.
+
+    Output is sanitised — pod/container ids and node names are kept,
+    but message content runs through `sanitise()` so a misbehaved
+    container that prints a SAS or bearer token cannot leak it via
+    the dashboard.
+    """
+    if namespace and not _EVENTS_NAMESPACE_RE.match(namespace):
+        raise HTTPException(400, "invalid namespace")
+    if not _AZ_NAME_RE.match(resource_group):
+        raise HTTPException(400, "invalid resource_group")
+    if not _AZ_NAME_RE.match(cluster_name):
+        raise HTTPException(400, "invalid cluster_name")
+    sub = subscription_id or _sub_default()
+    if not sub:
+        raise HTTPException(400, "subscription_id required")
+    cred = get_credential()
+    try:
+        from api.services.k8s_monitoring import k8s_list_events
+
+        def load_events() -> dict[str, Any]:
+            events = k8s_list_events(
+                cred,
+                sub,
+                resource_group,
+                cluster_name,
+                namespace=namespace or None,
+                limit=limit,
+            )
+            # Defence in depth: redact every message before it leaves the
+            # api sidecar.  The k8s_list_events helper already drops fields
+            # that have no business in the SPA, but messages are free-form.
+            for ev in events:
+                if isinstance(ev.get("message"), str):
+                    ev["message"] = sanitise(ev["message"])[:512]
+            return {"events": events}
+
+        return cached_snapshot(
+            _cache_key(
+                "monitor", "aks", "events", sub, resource_group, cluster_name, namespace, limit
+            ),
+            load_events,
+        )
+    except Exception as exc:
+        return _graceful("aks_events", exc, empty={"events": []})
+
+
+# ---------------------------------------------------------------------------
+# Request metrics — process-local ring buffer (latency p50/p95/p99 + errors)
+# ---------------------------------------------------------------------------
+@router.get("/metrics")
+def request_metrics(
+    window_seconds: int = Query(default=900, ge=60, le=24 * 60 * 60),
+    path_prefix: str = Query(default=""),
+    rpm_buckets: int = Query(default=60, ge=1, le=720),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Per-process request latency / error / RPM aggregates.
+
+    Defaults to last 15 minutes.  `path_prefix=/api/blast` filters to a
+    subset of the surface so the SPA can ask "how is BLAST doing?"
+    distinctly from "how is the API doing overall?".
+
+    Per-process scope: when the api sidecar is replicated each replica
+    has its own buffer.  The Container App pins replicas to 1 so this
+    is currently equivalent to "global" — see the comment at the top of
+    [api/services/request_metrics.py](../services/request_metrics.py).
+    """
+    from api.services.request_metrics import metrics as _metrics
+
+    # Reject path_prefix that is not under /api/.  Anything else would
+    # be a wildcard search of the buffer (or worse, allow callers to
+    # probe paths they don't normally see) — neither is desirable.
+    if path_prefix and not path_prefix.startswith("/api/"):
+        raise HTTPException(400, "path_prefix must start with /api/")
+    try:
+        return _metrics().summarise(
+            window_seconds=window_seconds,
+            path_prefix=path_prefix or None,
+            rpm_buckets=rpm_buckets,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Per-request HTTP inspector — full headers + (capped) body for the most
+# recent N requests. Backs the "View HTTP requests" panel on the SidecarsCard.
+# ---------------------------------------------------------------------------
+@router.get("/sidecar-requests")
+def sidecar_requests(
+    limit: int = Query(default=200, ge=1, le=1000),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the most recent captured requests (newest first).
+
+    Capture happens in `api.main.RequestIdMiddleware` and is opt-out via
+    the `REQUEST_DETAIL_CAPTURE_ENABLED=false` environment variable. The
+    buffer is per-process (no replication), and sensitive headers
+    (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted at capture
+    time — see
+    [api/services/request_metrics.py](../services/request_metrics.py)
+    `DETAIL_REDACT_HEADERS`.
+    """
+    from api.services.request_metrics import details as _details
+
+    items = _details().list_recent(limit=limit)
+    return {
+        "items": items,
+        "count": len(items),
+        "capacity": _details().capacity,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +385,10 @@ def storage_summary(
     sub = subscription_id or _sub_default()
     cred = get_credential()
     try:
-        return monitoring_svc.get_storage_summary(cred, sub, resource_group, account_name)
+        return cached_snapshot(
+            _cache_key("monitor", "storage", sub, resource_group, account_name),
+            lambda: monitoring_svc.get_storage_summary(cred, sub, resource_group, account_name),
+        )
     except Exception as exc:
         return _graceful("storage_summary", exc, empty={"name": account_name, "containers": []})
 
@@ -248,7 +412,10 @@ def aks_run_command(
     command = body.get("command", "")
 
     if not command or not rg or not cluster_name:
-        return {"exit_code": 1, "output": "Missing required fields: resource_group, cluster_name, command"}
+        return {
+            "exit_code": 1,
+            "output": "Missing required fields: resource_group, cluster_name, command",
+        }
 
     cred = get_credential()
     try:
@@ -257,17 +424,30 @@ def aks_run_command(
             namespace = body.get("namespace")
             pods = monitoring_svc.k8s_get_pods(cred, sub, rg, cluster_name, namespace=namespace)
             import json
+
             return {"exit_code": 0, "output": json.dumps(pods, indent=2, default=str)}
-        elif command.strip().startswith("get nodes") or command.strip().startswith("kubectl get nodes"):
+        elif command.strip().startswith("get nodes") or command.strip().startswith(
+            "kubectl get nodes"
+        ):
             nodes = monitoring_svc.k8s_get_nodes(cred, sub, rg, cluster_name)
             import json
+
             return {"exit_code": 0, "output": json.dumps(nodes, indent=2, default=str)}
-        elif command.strip().startswith("top nodes") or command.strip().startswith("kubectl top nodes"):
+        elif command.strip().startswith("top nodes") or command.strip().startswith(
+            "kubectl top nodes"
+        ):
             metrics = monitoring_svc.k8s_top_nodes(cred, sub, rg, cluster_name)
             import json
+
             return {"exit_code": 0, "output": json.dumps(metrics, indent=2, default=str)}
         else:
-            return {"exit_code": 1, "output": f"Command not supported via API proxy. Supported: get pods, get nodes, top nodes. Use the Browser Terminal for arbitrary kubectl commands."}
+            return {
+                "exit_code": 1,
+                "output": (
+                    "Command not supported via API proxy. Supported: get pods, get nodes, "
+                    "top nodes. Use the Browser Terminal for arbitrary kubectl commands."
+                ),
+            }
     except Exception as exc:
         return {"exit_code": 1, "output": f"Error: {type(exc).__name__}: {str(exc)[:500]}"}
 
@@ -285,9 +465,24 @@ def list_acr(
     sub = subscription_id or _sub_default()
     cred = get_credential()
     try:
-        return monitoring_svc.list_acr_repositories(cred, sub, resource_group, registry_name)
+        return cached_snapshot(
+            _cache_key("monitor", "acr", sub, resource_group, registry_name),
+            lambda: monitoring_svc.list_acr_repositories(cred, sub, resource_group, registry_name),
+        )
     except Exception as exc:
-        return _graceful("list_acr", exc, empty={"name": registry_name, "login_server": "", "sku": None, "expected_image_tags": {}, "actual_tags": {}, "building_images": [], "build_details": []})
+        return _graceful(
+            "list_acr",
+            exc,
+            empty={
+                "name": registry_name,
+                "login_server": "",
+                "sku": None,
+                "expected_image_tags": {},
+                "actual_tags": {},
+                "building_images": [],
+                "build_details": [],
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -586,9 +781,7 @@ class _SidecarBroadcaster:
         async with self._lock:
             self._subscribers.add(queue)
             if self._task is None or self._task.done():
-                self._task = asyncio.create_task(
-                    self._run(), name="sidecar-broadcaster"
-                )
+                self._task = asyncio.create_task(self._run(), name="sidecar-broadcaster")
         # Initial snapshot for the new subscriber. Using drain_events=False
         # keeps the broadcaster the sole drainer.
         try:

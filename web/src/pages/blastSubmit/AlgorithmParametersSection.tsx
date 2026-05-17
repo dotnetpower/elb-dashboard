@@ -5,6 +5,14 @@ import type { FormState } from "@/pages/blastSubmitModel";
 import type { ProgramMeta, SetBlastField } from "@/pages/blastSubmit/types";
 import { Tip } from "@/pages/blastSubmit/ui";
 
+const OUTPUT_FORMAT_OPTIONS = [
+  { value: 0, label: "0 — Pairwise text" },
+  { value: 5, label: "5 — BLAST XML" },
+  { value: 6, label: "6 — Tabular" },
+  { value: 7, label: "7 — Tabular + comments" },
+  { value: 11, label: "11 — ASN.1 (archive)" },
+];
+
 export function AlgorithmParametersSection({
   form,
   set,
@@ -12,6 +20,8 @@ export function AlgorithmParametersSection({
   setShowParams,
   paramsSummary,
   programMeta,
+  webBlastSearchsp,
+  webBlastSearchspScope,
 }: {
   form: FormState;
   set: SetBlastField;
@@ -19,13 +29,15 @@ export function AlgorithmParametersSection({
   setShowParams: (value: (current: boolean) => boolean) => void;
   paramsSummary: string;
   programMeta: ProgramMeta;
+  webBlastSearchsp?: number;
+  webBlastSearchspScope?: string;
 }) {
   return (
     <section className="glass-card blast-section">
       <button onClick={() => setShowParams((value) => !value)} className="blast-params-toggle">
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span className="blast-step-badge" style={{ fontSize: 10, width: 20, height: 20 }}>
-            5
+            6
           </span>
           <Gauge size={16} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
           <span style={{ fontWeight: 600, fontSize: 14 }}>Algorithm Parameters</span>
@@ -106,12 +118,21 @@ export function AlgorithmParametersSection({
                 value={form.outfmt}
                 onChange={(event) => set("outfmt", parseInt(event.target.value, 10))}
               >
-                <option value={7}>7 — Tabular + comments</option>
-                <option value={6}>6 — Tabular</option>
-                <option value={0}>0 — Pairwise text</option>
-                <option value={11}>11 — ASN.1 (archive)</option>
+                {OUTPUT_FORMAT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
             </label>
+            {webBlastSearchsp && (
+              <label>
+                <span className="glass-label">
+                  Search space <Tip text={webBlastSearchspScope ?? "Verified Web BLAST calibration default."} />
+                </span>
+                <input className="glass-input" value={webBlastSearchsp.toString()} readOnly />
+              </label>
+            )}
             {form.program === "blastn" && (
               <>
                 <label>
