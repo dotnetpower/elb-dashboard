@@ -43,6 +43,8 @@ SPLIT_CHILD_MERGED_RESULT_BLOB = "merged_results.out.gz"
 SPLIT_CHILD_MERGE_REPORT_BLOB = "merge-report.json"
 SPLIT_PARENT_MANIFEST_BLOB = "split-results-manifest.json"
 SPLIT_MERGE_REPORT_MAX_BYTES = 1024 * 1024
+TIE_ORDER_ORACLE_BLOB = "metadata/tie-order-oracle.txt"
+TIE_ORDER_ORACLE_MAX_BYTES = 1024 * 1024
 SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
     {
         "additional_options",
@@ -70,6 +72,8 @@ SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
         "shard_sets",
         "sharding_mode",
         "taxid",
+        "tie_order_oracle_accessions",
+        "tie_order_oracle_text",
         "word_size",
     }
 )
@@ -193,6 +197,52 @@ def _normalise_database_url(storage_account: str, database: str) -> str:
         "blast-db",
         f"{db_name}/{db_name}",
     )
+
+
+def _normalise_tie_order_oracle(value: object) -> tuple[str, int] | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        accessions = [line.strip() for line in value.splitlines() if line.strip()]
+    elif isinstance(value, list):
+        accessions = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raise ValueError("tie order oracle must be a string or a list of accessions")
+    if not accessions:
+        return None
+    text = "\n".join(accessions) + "\n"
+    if len(text.encode("utf-8")) > TIE_ORDER_ORACLE_MAX_BYTES:
+        raise ValueError("tie order oracle is too large")
+    return text, len(accessions)
+
+
+def _upload_tie_order_oracle_if_present(
+    *,
+    storage_account: str,
+    job_id: str,
+    options: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(options, Mapping):
+        return None
+    oracle = _normalise_tie_order_oracle(
+        options.get("tie_order_oracle_accessions") or options.get("tie_order_oracle_text")
+    )
+    if oracle is None:
+        return None
+    text, accession_count = oracle
+    from api.services import get_credential
+    from api.services.storage_data import upload_blob_text
+
+    blob_path = f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_BLOB}"
+    upload_blob_text(
+        get_credential(),
+        storage_account,
+        "results",
+        blob_path,
+        text,
+        content_type="text/plain; charset=utf-8",
+    )
+    return {"blob_path": blob_path, "accession_count": accession_count}
 
 
 def _results_job_url(storage_account: str, job_id: str) -> str:
@@ -1691,6 +1741,19 @@ def submit(
             )
 
     try:
+        tie_order_oracle = _upload_tie_order_oracle_if_present(
+            storage_account=storage_account,
+            job_id=job_id,
+            options=options,
+        )
+        if tie_order_oracle is not None:
+            _progress(self, "tie_order_oracle_uploaded", tie_order_oracle=tie_order_oracle)
+            _update_state(
+                job_id,
+                "tie_order_oracle_uploaded",
+                status="running",
+                tie_order_oracle=tie_order_oracle,
+            )
         config_content = _build_config_content(
             job_id=job_id,
             resource_group=resource_group,

@@ -90,7 +90,7 @@ export function deriveShardingAvailability({
 
   return {
     capacityPlan,
-    preferredMode: enabled ? "approximate" : "off",
+    preferredMode: enabled ? "precise" : "off",
     options: {
       off: {
         mode: "off",
@@ -104,14 +104,14 @@ export function deriveShardingAvailability({
         label: "Fast shard",
         enabled,
         reason,
-        description: "Use prepared node-local DB shards and merge top hits. Fastest on warmed large databases, but shard-local statistics can differ from full-DB BLAST.",
+        description: "Use prepared node-local DB shards and merge top hits. This is a throughput probe mode; full Web BLAST equivalence is not claimed.",
       },
       precise: {
         mode: "precise",
-        label: "Precise shard",
+        label: "Web-equivalent shard",
         enabled,
         reason,
-        description: "Use warmed shards with search-space correction and query-aware merge checks. Pre-flight still verifies required metadata before submit.",
+        description: "Use warmed shards with full-DB search-space correction and query-aware merge checks. This is the default path for NCBI Web BLAST-compatible runs.",
       },
     },
   };

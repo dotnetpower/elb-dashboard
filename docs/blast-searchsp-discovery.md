@@ -342,6 +342,159 @@ Recommended execution order:
   the Web XML, local full DB XML, sharded merged XML, comparator JSON, and run
   logs are all saved under `docs/temp/`.
 
+### Runtime Equivalence Contract
+
+The dashboard's default warmed-database submit path is now **precise sharded
+BLAST**, not approximate sharding. A result may be described as NCBI Web
+BLAST-compatible only when all of the following are true:
+
+1. The selected database is warmed on AKS node-local storage and has prepared
+  shard layouts for the selected workload node count.
+2. The submit uses `sharding_mode=precise`; approximate sharding is a throughput
+  probe mode and does not carry the Web-equivalence claim.
+3. The BLAST options include a verified full-database effective search space
+  (`-searchsp`) for the exact database snapshot and option scope, either from
+  `api/services/web_blast_searchsp.py`, storage metadata, or an explicit caller
+  override.
+4. The output format is merge-supported (`outfmt 5` XML or `outfmt 6` /
+  `outfmt '6 std ...'`) and the merge/finalizer report is kept with the run.
+5. Evidence includes a canonical comparator report. Strict equality remains the
+  pass condition for final claims; tie-window equivalence is diagnostic evidence
+  for top-N boundary investigations, not a final replacement for strict order.
+
+The frontend therefore prefers the `Web-equivalent shard` mode whenever a warmed
+prepared database fits the selected cluster. The backend pre-flight and submit
+gates continue to block precise sharding when the search-space or query metadata
+needed for full-DB statistics is missing.
+
+### 2026-05-18 Runtime Checkpoint
+
+Current deployed/local-control-plane observation:
+
+- AKS `elb-cluster` in `rg-elb-01` is `Succeeded` / `Running` with a 1-node
+  `systempool` and a 10-node `blastpool` (`Standard_E16s_v5`).
+- `core_nt` node-local warmup is `Ready` on `10/10` shards (`00` through `09`),
+  with no active or failed warmup pods reported by `/api/monitor/aks/warmup-status`.
+- The worker's scheduled `reconcile_auto_warmup` task returns `already_ready`,
+  so no remedial warmup action is needed at this checkpoint.
+- A current precise sharded submit payload passes `/api/blast/pre-flight` with
+  `ready: true`, `critical_blockers: 0`, and `sharding_precision` =
+  `precise_single_query`. The route injects the verified `core_nt` Web BLAST
+  search space when the caller has not supplied an explicit `-searchsp`.
+
+Comparator status:
+
+- Existing no-hit `core_nt` calibration evidence remains strictly equivalent:
+  `docs/temp/core-nt-searchsp/fresh-2026-05-17/live-finalizer-5be97da5/canonical-compare.json`
+  reports `equivalent: true` and `difference_count: 0`.
+- Current F3L positive-hit Web XML vs sharded `core_nt` evidence is **not**
+  equivalent: `docs/temp/f3l-core-nt-2026-05-17/current-web-xml-vs-webmask-2026-05-18.json`
+  reports `shared_accessions: 1`, `web_only: 499`, `candidate_only: 499`,
+  `top10_overlap: 0`, and `tie_window_equivalent: false`.
+- Older F3L Web CSV exports also remain non-equivalent against the current
+  sharded candidate. The inclusive CSV has `shared_accessions: 0/500`; the
+  exclusive CSV has `shared_accessions: 0/329`. This confirms the blocker is
+  same-snapshot/top-N candidate selection, not only XML serialization or CSV
+  parsing.
+- The Web top-500 accessions are all present in the wider local candidate pool
+  (`500/500` overlap across 11,261 candidates), but only `1/500` survives the
+  current top-500 merge. The immediate optimization target is therefore the
+  tie/order selection at the `max_target_seqs` boundary, ideally by preserving
+  the original BLAST database subject order rather than guessing from accession
+  strings.
+- Running the XML/outfmt6 comparator against that wider pool confirms the same
+  diagnosis: `current-web-xml-vs-widepool-2026-05-18.json` reports
+  `shared_accessions: 500`, `web_only: 0`, `value_mismatch_count: 0`, and
+  `tie_window_equivalent: true`. This is diagnostic only; the strict final
+  top-500 output is still non-equivalent until the merge selects the same 500
+  tied hits in the same order.
+
+Next optimization target: keep precise sharding as the default, then improve the
+positive-hit merge/oracle path until Web XML, Web CSV, local full DB, and
+sharded merged output all agree under the strict comparator. Tie-window reports
+should be used to diagnose boundary behavior, but the final claim still requires
+strict equality.
+
+The sharded finalizer now records `tie_cutoff_overflow_count` and
+`tie_cutoff_queries` in `merge-report.json` whenever `max_target_seqs` cuts
+through a tied score class. This does not change result ordering yet; it makes
+the Web-equivalence blocker observable in every production run so the next
+optimization can target only affected queries.
+
+On the current F3L/core_nt wide-pool evidence, rerunning the merge helper with
+the new diagnostic reports `total_input_hits: 11261`, `total_output_hits: 500`,
+`tie_break_count: 11085`, and `tie_cutoff_overflow_count: 8620`. The cutoff
+score class alone has `9120` tied hits, of which only `500` can be selected for
+`max_target_seqs=500`. This explains why a biologically identical candidate pool
+still fails strict Web top-500 equality without a Web-compatible subject-order
+tie breaker.
+
+### 2026-05-18 Tie-Order Oracle Result
+
+An expanded offline inference pass now records its inputs and candidate scores
+with `scripts/dev/infer-blast-tie-order.py`:
+
+- `tie-order-inference-2026-05-18.json`
+- `tie-order-inference-2026-05-18.md`
+
+The pass evaluated `249` deterministic keys over accession, accession number,
+version, title, year, local OID, GI, sequence length, shard id, volume/OID,
+subject coordinates, prefix distributions, hash values, and two-key metadata
+combinations. The best synthetic key was still weak (`year_desc`,
+`top500_overlap: 33`, `top100_overlap: 3`, `top10_overlap: 0`,
+`same_top: false`). This confirms again that the current evidence does not
+support a safe fabricated Web BLAST tie-breaker.
+
+The productive path is an explicit same-snapshot order oracle. The sharded merge
+helper now accepts `ELB_TIE_ORDER_FILE`, a newline/TSV/outfmt6 accession order
+file. When present, ties are sorted by `(primary BLAST score, oracle rank,
+original ordinal)`. For a top-N membership oracle, `ELB_TIE_ORDER_STRICT=1`
+also excludes non-oracle hits before truncation. The ElasticBLAST finalizer
+patch looks for `${ELB_RESULTS}/${ELB_METADATA_DIR}/tie-order-oracle.txt`; if
+that blob exists, it downloads it, exports `ELB_TIE_ORDER_FILE`, and enables
+strict oracle mode by default.
+The submit API can now carry `tie_order_oracle_text` or
+`tie_order_oracle_accessions`; the worker uploads it to
+`results/<job>/metadata/tie-order-oracle.txt` before invoking ElasticBLAST.
+
+Using the current Web top-500 accession list as that oracle against the wide
+candidate pool produces strict equality:
+
+| Comparator field | Result |
+| --- | ---: |
+| `equivalent` | `true` |
+| `exact_order` | `true` |
+| `shared_accessions` | `500` |
+| `web_only` | `0` |
+| `candidate_only` | `0` |
+| `value_mismatch_count` | `0` |
+| `top10_overlap` | `10` |
+| `top100_overlap` | `100` |
+
+With strict mode enabled on the same evidence, the finalizer excludes all
+non-oracle candidates before top-N selection. The strict F3L run reports
+`total_input_hits: 11261`, `total_output_hits: 500`, `tie_break_count: 499`,
+`tie_cutoff_overflow_count: 0`, and the comparator still reports
+`equivalent: true`, `exact_order: true`, and `value_mismatch_count: 0`.
+
+A second same-snapshot test used the local 16S full-run XML order as the oracle
+for the existing contiguous sharded XML artifacts. Non-strict oracle sorting
+matched the first 110 accessions, then admitted a non-oracle higher-score shard
+hit (`NR_119263`) that the full BLAST run did not report. Strict oracle mode
+fixed membership and order: the strict remerge produced `500` hits with
+`exact_accession_order: true`, `tie_cutoff_overflow_count: 0`, and
+`tie_break_count: 343`. The remaining canonical XML comparator differences are
+surface/provenance fields from the synthetic FASTA shard DB regeneration:
+`500` `Hit_id` values lack the `gi|...|` prefix and `5` `Hit_def` values differ.
+
+This proves the finalizer can produce a Web/full-run-identical top-N membership
+and order when the missing same-snapshot order is supplied. It does not prove
+that a Web order can be synthesized from local shard metadata; the inference
+evidence says the opposite. The next correctness task is therefore oracle
+production: either run a same-snapshot full local BLAST order probe
+before/alongside the sharded run, or obtain the Web/NCBI filtered subject order
+for that exact database snapshot.
+
 ### 2026-05-17 hit-positive Web RID evidence
 
 Evidence directory:

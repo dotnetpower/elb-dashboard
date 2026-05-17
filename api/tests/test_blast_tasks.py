@@ -105,6 +105,49 @@ def test_build_config_content_rejects_relative_path_traversal() -> None:
         )
 
 
+def test_upload_tie_order_oracle_writes_finalizer_metadata(monkeypatch) -> None:
+    uploads: list[dict[str, object]] = []
+
+    def fake_upload_blob_text(*args, **kwargs) -> None:
+        uploads.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr("api.services.get_credential", lambda: "credential")
+    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
+
+    result = blast._upload_tie_order_oracle_if_present(
+        storage_account="stelb",
+        job_id="job-123",
+        options={"tie_order_oracle_accessions": ["PX485240.1", "OX044342.2"]},
+    )
+
+    assert result == {
+        "blob_path": "job-123/metadata/tie-order-oracle.txt",
+        "accession_count": 2,
+    }
+    assert uploads == [
+        {
+            "args": (
+                "credential",
+                "stelb",
+                "results",
+                "job-123/metadata/tie-order-oracle.txt",
+                "PX485240.1\nOX044342.2\n",
+            ),
+            "kwargs": {"content_type": "text/plain; charset=utf-8"},
+        }
+    ]
+
+
+def test_upload_tie_order_oracle_rejects_oversized_payload() -> None:
+    oversized = "A" * (blast.TIE_ORDER_ORACLE_MAX_BYTES + 1)
+    with pytest.raises(ValueError, match="too large"):
+        blast._upload_tie_order_oracle_if_present(
+            storage_account="stelb",
+            job_id="job-123",
+            options={"tie_order_oracle_text": oversized},
+        )
+
+
 def test_elastic_blast_argv_uses_cfg_file() -> None:
     argv = blast._elastic_blast_argv("submit", "abc-123")
 

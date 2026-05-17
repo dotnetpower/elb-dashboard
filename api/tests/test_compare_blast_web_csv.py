@@ -80,3 +80,45 @@ def test_compare_web_csv_to_outfmt6_reports_snapshot_mismatch(tmp_path: Path) ->
         "web": "WEB001.1",
         "candidate": "OLD001.1",
     }
+
+
+def test_compare_web_csv_to_outfmt6_reports_tie_window_equivalence(tmp_path: Path) -> None:
+    web_csv = tmp_path / "web.csv"
+    candidate = tmp_path / "candidate.out"
+    strict_report = tmp_path / "strict-report.json"
+    tie_report = tmp_path / "tie-report.json"
+    web_csv.write_text(
+        "accession,scientific_name,taxid,hit_def,identity_pct,coverage_pct,evalue,bits,align_length,identities,gaps,query_from,query_to,hit_from,hit_to,subject_length\n"
+        "AAA111.1,Example,1,subject,100.0,100.0,0.0,180.5,100,100,0,1,100,1,100,1000\n"
+        "BBB222.1,Example,1,subject,100.0,100.0,0.0,180.5,100,100,0,1,100,1,100,1000\n",
+        encoding="utf-8",
+    )
+    candidate.write_text(
+        "\n".join(
+            [
+                "query\tCCC333.1\t100.000\t100\t0\t0\t1\t100\t1\t100\t0.0\t180.5",
+                "query\tBBB222.1\t100.000\t100\t0\t0\t1\t100\t1\t100\t0.0\t180.5",
+                "query\tAAA111.1\t100.000\t100\t0\t0\t1\t100\t1\t100\t0.0\t180.5",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    strict_result = _run(web_csv, candidate, strict_report, "--query-id", "query")
+    tie_result = _run(
+        web_csv,
+        candidate,
+        tie_report,
+        "--query-id",
+        "query",
+        "--accept-tie-window",
+    )
+
+    assert strict_result.returncode == 1
+    assert tie_result.returncode == 0, tie_result.stdout + tie_result.stderr
+    payload = json.loads(tie_report.read_text())
+    assert payload["equivalent"] is False
+    assert payload["tie_window_equivalent"] is True
+    assert payload["tie_window"]["web_rows_missing_from_candidate_pool"] == 0
+    assert payload["tie_window"]["web_rows_with_value_mismatch"] == 0

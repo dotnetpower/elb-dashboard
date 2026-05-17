@@ -204,6 +204,33 @@ def patch_finalizer_script(root: Path, merge_script_source: Path) -> None:
         ),
         '--include-pattern "*.out.gz"',
     )
+    _replace_once_unless_present(
+        path,
+        (
+            '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n'
+            '        echo "Downloaded $SHARD_COUNT shard files, $TOTAL_ROWS tabular rows"\n\n'
+            '        if ! /scripts/merge-sharded-results.sh \\\n'
+        ),
+        (
+            '        TOTAL_ROWS=$(wc -l < "$MERGE_INPUT" 2>/dev/null || echo 0)\n'
+            '        echo "Downloaded $SHARD_COUNT shard files, $TOTAL_ROWS tabular rows"\n\n'
+            '        ORACLE_BLOB="${ELB_RESULTS}/${ELB_METADATA_DIR}/tie-order-oracle.txt"\n'
+            '        ORACLE_FILE="$MERGE_DIR/tie-order-oracle.txt"\n'
+            '        if blob_exists "$ORACLE_BLOB"; then\n'
+            '            if azcopy cp "$ORACLE_BLOB" "$ORACLE_FILE" '
+            '--log-level=ERROR 2>/dev/null; then\n'
+            '                export ELB_TIE_ORDER_FILE="$ORACLE_FILE"\n'
+            '                export ELB_TIE_ORDER_STRICT="${ELB_TIE_ORDER_STRICT:-1}"\n'
+            '                echo "Using tie-order oracle from ${ORACLE_BLOB}"\n'
+            '            else\n'
+            '                echo "WARNING: tie-order oracle exists but could not be '
+            'downloaded: ${ORACLE_BLOB}"\n'
+            '            fi\n'
+            '        fi\n\n'
+            '        if ! /scripts/merge-sharded-results.sh \\\n'
+        ),
+        "ELB_TIE_ORDER_FILE",
+    )
 
     text = path.read_text()
     if (

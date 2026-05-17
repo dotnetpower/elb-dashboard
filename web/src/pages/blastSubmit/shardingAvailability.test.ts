@@ -46,7 +46,7 @@ describe("deriveShardingAvailability", () => {
     });
 
     expect(availability.options.off.enabled).toBe(false);
-    expect(availability.preferredMode).toBe("approximate");
+    expect(availability.preferredMode).toBe("precise");
     expect(availability.options.precise.enabled).toBe(true);
     expect(availability.options.approximate.enabled).toBe(true);
     expect(availability.capacityPlan?.pickedN).toBe(10);

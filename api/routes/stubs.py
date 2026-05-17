@@ -82,6 +82,8 @@ _BLAST_SUBMIT_OPTION_KEYS = frozenset(
         "shard_sets",
         "sharding_mode",
         "taxid",
+        "tie_order_oracle_accessions",
+        "tie_order_oracle_text",
         "use_local_ssd",
         "word_size",
     }

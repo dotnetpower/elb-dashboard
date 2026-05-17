@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -136,7 +137,128 @@ def test_merge_sharded_results_reports_ties(tmp_path: Path) -> None:
 
     report = json.loads(report_json.read_text())
     assert report["tie_break_count"] == 1
+    assert report["tie_cutoff_overflow_count"] == 0
     assert report["warnings"]
+
+
+def test_merge_sharded_results_reports_tie_cutoff_overflow(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    input_tsv.write_text(
+        "q1\ts1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\n"
+        "q1\ts2\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\n"
+        "q1\ts3\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\n"
+    )
+
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "3",
+            "blastn",
+            "-outfmt 6 -max_target_seqs 2",
+        ],
+        check=True,
+    )
+
+    report = json.loads(report_json.read_text())
+    assert report["tie_break_count"] == 2
+    assert report["tie_cutoff_overflow_count"] == 1
+    assert report["tie_cutoff_queries"] == [
+        {
+            "query_id": "q1",
+            "evalue": 1e-30,
+            "bitscore": 90.0,
+            "tie_input_count": 3,
+            "tie_selected_count": 2,
+            "tie_overflow_count": 1,
+        }
+    ]
+    assert any("max_target_seqs cutoff" in warning for warning in report["warnings"])
+
+
+def test_merge_sharded_results_uses_tie_order_oracle(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    oracle = tmp_path / "oracle.txt"
+    input_tsv.write_text(
+        "q1\ts1.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\n"
+        "q1\ts2.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\n"
+        "q1\ts3.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\n"
+    )
+    oracle.write_text("s3\ns1\n")
+
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "3",
+            "blastn",
+            "-outfmt 6 -max_target_seqs 2",
+        ],
+        check=True,
+        env={**os.environ, "ELB_TIE_ORDER_FILE": str(oracle)},
+    )
+
+    with gzip.open(output_gz, "rt") as handle:
+        rows = [line.strip() for line in handle if line.strip() and not line.startswith("#")]
+    assert rows == [
+        "q1\ts3.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90",
+        "q1\ts1.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90",
+    ]
+
+    report = json.loads(report_json.read_text())
+    assert report["ranking_basis"] == "evalue_bitscore_oracle_ordinal"
+    assert report["tie_order_oracle_accessions"] == 2
+    assert report["tie_order_oracle_strict"] is False
+    assert report["tie_cutoff_overflow_count"] == 1
+
+
+def test_merge_sharded_results_strict_oracle_excludes_non_oracle_hits(tmp_path: Path) -> None:
+    input_tsv = tmp_path / "hits.tsv"
+    output_gz = tmp_path / "merged.out.gz"
+    report_json = tmp_path / "merge-report.json"
+    oracle = tmp_path / "oracle.txt"
+    input_tsv.write_text(
+        "q1\ts1.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90\n"
+        "q1\tnon_oracle.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-40\t120\n"
+        "q1\ts2.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-20\t80\n"
+    )
+    oracle.write_text("s2\ns1\n")
+
+    subprocess.run(  # noqa: S603 -- test executes the checked-in merge helper
+        [
+            "/bin/bash",
+            str(SCRIPT),
+            str(input_tsv),
+            str(output_gz),
+            str(report_json),
+            "3",
+            "blastn",
+            "-outfmt 6 -max_target_seqs 10",
+        ],
+        check=True,
+        env={**os.environ, "ELB_TIE_ORDER_FILE": str(oracle), "ELB_TIE_ORDER_STRICT": "1"},
+    )
+
+    with gzip.open(output_gz, "rt") as handle:
+        rows = [line.strip() for line in handle if line.strip() and not line.startswith("#")]
+    assert rows == [
+        "q1\ts1.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-30\t90",
+        "q1\ts2.1\t100\t20\t0\t0\t1\t20\t1\t20\t1e-20\t80",
+    ]
+
+    report = json.loads(report_json.read_text())
+    assert report["tie_order_oracle_strict"] is True
+    assert any("Strict tie-order oracle" in warning for warning in report["warnings"])
 
 
 def test_merge_sharded_results_writes_valid_xml(tmp_path: Path) -> None:
