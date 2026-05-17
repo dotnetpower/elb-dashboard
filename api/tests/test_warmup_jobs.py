@@ -134,6 +134,8 @@ def test_database_status_from_warmup_jobs_aggregates_shards() -> None:
             "nodes_active": 1,
             "total_jobs": 3,
             "shards": ["00", "01", "02"],
+            "shard_nodes": {},
+            "shard_host_paths": {},
             "progress_pct": 66.7,
             "status": "Failed",
         }
@@ -156,6 +158,33 @@ def test_database_status_from_warmup_jobs_marks_all_ready() -> None:
     assert status[0]["total_jobs"] == 10
     assert status[0]["shards"] == [f"{idx:02d}" for idx in range(10)]
     assert status[0]["progress_pct"] == 100.0
+
+
+def test_database_status_from_warmup_jobs_surfaces_job_node_and_host_path() -> None:
+    jobs = [
+        {
+            "metadata": {"labels": {"db": "core_nt", "shard": "00"}},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "nodeName": "aks-blastpool-000001",
+                        "volumes": [
+                            {
+                                "name": "db",
+                                "hostPath": {"path": "/workspace/blastdb/core_nt/00"},
+                            }
+                        ],
+                    }
+                }
+            },
+            "status": {"succeeded": 1},
+        }
+    ]
+
+    status = database_status_from_warmup_jobs(jobs)
+
+    assert status[0]["shard_nodes"] == {"00": "aks-blastpool-000001"}
+    assert status[0]["shard_host_paths"] == {"00": "/workspace/blastdb/core_nt/00"}
 
 
 def test_database_status_from_warmup_jobs_estimates_remaining_seconds() -> None:

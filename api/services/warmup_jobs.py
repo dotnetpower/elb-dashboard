@@ -179,6 +179,8 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
                 "nodes_active": 0,
                 "total_jobs": 0,
                 "shards": [],
+                "shard_nodes": {},
+                "shard_host_paths": {},
                 "progress_pct": 0,
             },
         )
@@ -189,8 +191,15 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
         info["nodes_ready"] += 1 if succeeded > 0 else 0
         info["nodes_failed"] += 1 if failed > 0 and succeeded == 0 else 0
         info["nodes_active"] += 1 if active > 0 else 0
-        if labels.get("shard"):
-            info["shards"].append(labels["shard"])
+        shard = labels.get("shard")
+        if shard:
+            info["shards"].append(shard)
+            node_name = _job_node_name(job)
+            if node_name:
+                info["shard_nodes"][shard] = node_name
+            host_path = _job_db_host_path(job)
+            if host_path:
+                info["shard_host_paths"][shard] = host_path
 
         start_time = _parse_k8s_time(status.get("startTime"))
         completion_time = _parse_k8s_time(status.get("completionTime"))
@@ -218,6 +227,22 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
         info["shards"] = sorted(set(info["shards"]))
         _attach_timing_estimate(info)
     return list(by_db.values())
+
+
+def _job_db_host_path(job: dict[str, Any]) -> str:
+    pod_spec = job.get("spec", {}).get("template", {}).get("spec", {})
+    for volume in pod_spec.get("volumes", []) or []:
+        if volume.get("name") != "db":
+            continue
+        host_path = (volume.get("hostPath") or {}).get("path")
+        if isinstance(host_path, str):
+            return host_path
+    return ""
+
+
+def _job_node_name(job: dict[str, Any]) -> str:
+    node_name = job.get("spec", {}).get("template", {}).get("spec", {}).get("nodeName")
+    return node_name if isinstance(node_name, str) else ""
 
 
 def attach_pod_progress_to_database_status(

@@ -44,6 +44,8 @@ SPLIT_CHILD_MERGE_REPORT_BLOB = "merge-report.json"
 SPLIT_PARENT_MANIFEST_BLOB = "split-results-manifest.json"
 SPLIT_MERGE_REPORT_MAX_BYTES = 1024 * 1024
 TIE_ORDER_ORACLE_BLOB = "metadata/tie-order-oracle.txt"
+TIE_ORDER_ORACLE_URLS_BLOB = "metadata/tie-order-oracle-urls.txt"
+TIE_ORDER_ORACLE_STRICT_BLOB = "metadata/tie-order-oracle-strict.txt"
 TIE_ORDER_ORACLE_MAX_BYTES = 1024 * 1024
 SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
     {
@@ -73,7 +75,9 @@ SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
         "sharding_mode",
         "taxid",
         "tie_order_oracle_accessions",
+        "tie_order_oracle_strict",
         "tie_order_oracle_text",
+        "use_db_order_oracle",
         "word_size",
     }
 )
@@ -242,7 +246,91 @@ def _upload_tie_order_oracle_if_present(
         text,
         content_type="text/plain; charset=utf-8",
     )
-    return {"blob_path": blob_path, "accession_count": accession_count}
+    strict_requested = _option_enabled(options, "tie_order_oracle_strict")
+    if strict_requested:
+        upload_blob_text(
+            get_credential(),
+            storage_account,
+            "results",
+            f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_STRICT_BLOB}",
+            "1\n",
+            content_type="text/plain; charset=utf-8",
+        )
+    return {"blob_path": blob_path, "accession_count": accession_count, "strict": strict_requested}
+
+
+def _db_order_oracle_part_urls(
+    *,
+    storage_account: str,
+    db_name: str,
+) -> list[str]:
+    from api.services import get_credential
+    from api.services.db_order_oracle import ORACLE_PARTS_DIR, ORACLE_PREFIX_ROOT
+    from api.services.storage_data import _blob_service
+
+    svc = _blob_service(get_credential(), storage_account)
+    cc = svc.get_container_client("blast-db")
+    status_blob = f"{ORACLE_PREFIX_ROOT}/{db_name}/status.json"
+    try:
+        status = json.loads(
+            cc.get_blob_client(status_blob).download_blob().readall().decode("utf-8")
+        )
+    except Exception:
+        return []
+    if not isinstance(status, dict):
+        return []
+    run_id = str(status.get("run_id") or "")
+    expected_parts = int(status.get("expected_parts") or 0)
+    if not run_id or expected_parts <= 0:
+        return []
+    prefix = f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_PARTS_DIR}/{run_id}/"
+    part_names = sorted(
+        blob.name
+        for blob in cc.list_blobs(name_starts_with=prefix)
+        if str(blob.name).endswith(".txt")
+    )
+    if len(part_names) < expected_parts:
+        return []
+    return [
+        f"https://{storage_account}.blob.core.windows.net/blast-db/{name}"
+        for name in part_names
+    ]
+
+
+def _upload_db_order_oracle_pointer_if_available(
+    *,
+    storage_account: str,
+    job_id: str,
+    database: str,
+    options: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(options, Mapping) or options.get("use_db_order_oracle") is False:
+        return None
+    from api.services.sharding_precision import normalize_sharding_mode
+
+    if normalize_sharding_mode(options) != "precise":
+        return None
+    if options.get("tie_order_oracle_accessions") or options.get("tie_order_oracle_text"):
+        return None
+    db_name = _extract_db_name(database)
+    if not db_name:
+        return None
+    part_urls = _db_order_oracle_part_urls(storage_account=storage_account, db_name=db_name)
+    if not part_urls:
+        return None
+    from api.services import get_credential
+    from api.services.storage_data import upload_blob_text
+
+    blob_path = f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_URLS_BLOB}"
+    upload_blob_text(
+        get_credential(),
+        storage_account,
+        "results",
+        blob_path,
+        "\n".join(part_urls) + "\n",
+        content_type="text/plain; charset=utf-8",
+    )
+    return {"blob_path": blob_path, "db_name": db_name, "part_count": len(part_urls)}
 
 
 def _results_job_url(storage_account: str, job_id: str) -> str:
@@ -1753,6 +1841,20 @@ def submit(
                 "tie_order_oracle_uploaded",
                 status="running",
                 tie_order_oracle=tie_order_oracle,
+            )
+        db_order_oracle = _upload_db_order_oracle_pointer_if_available(
+            storage_account=storage_account,
+            job_id=job_id,
+            database=database,
+            options=options,
+        )
+        if db_order_oracle is not None:
+            _progress(self, "db_order_oracle_attached", db_order_oracle=db_order_oracle)
+            _update_state(
+                job_id,
+                "db_order_oracle_attached",
+                status="running",
+                db_order_oracle=db_order_oracle,
             )
         config_content = _build_config_content(
             job_id=job_id,

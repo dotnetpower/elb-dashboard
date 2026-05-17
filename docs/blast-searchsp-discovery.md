@@ -520,6 +520,56 @@ kept in the same evidence directory as a negative control showing why Web DB ids
 must be captured from the Web form rather than inferred from local BLAST DB
 basenames.
 
+### 2026-05-17 Production Oracle Cache Design
+
+The query-specific strict oracle path proves that the finalizer can produce
+same-snapshot Web/full-run top-N membership and ordering, but it is not suitable
+for the normal submit path. BLAST execution must remain fast, so expensive order
+discovery is now moved to database lifecycle time:
+
+- When a database snapshot changes, or when the user clicks the database-manager
+  order button, the backend creates one AKS Job per warmed shard.
+- Each Job runs on the node that already holds the warmed shard and emits
+  `blastdbcmd -db <db>_shard_<nn> -entry all -outfmt '%a'` accession order into
+  `blast-db/metadata/oracles/<db>/parts/<run_id>/<nn>.txt`.
+- `blast-db/metadata/oracles/<db>/status.json` records the active run id,
+  expected part count, ready part count, and source version.
+- A precise sharded BLAST submit only attaches a tiny
+  `metadata/tie-order-oracle-urls.txt` pointer manifest when cached DB-order
+  parts are ready. The finalizer downloads the parts, concatenates them in shard
+  order, and uses the resulting file as a non-strict tie breaker.
+- Strict mode remains reserved for a top-N membership oracle such as a Web or
+  full-run accession list. DB-order oracle parts are not a membership filter.
+
+This keeps normal BLAST submit latency independent of oracle generation. The
+remaining proof step is empirical: after `core_nt` warmup completes on the
+current AKS nodes, build the DB-order oracle parts and compare a positive-hit
+precise sharded run against same-snapshot Web/full-run evidence. If the cached
+DB-order oracle does not reproduce Web ordering, the fallback remains the
+documented strict top-N oracle for evidence-scoped runs while the DB snapshot
+order source is refined.
+
+Live checkpoint while implementing this design:
+
+- AKS `elb-cluster` was restarted successfully (`Succeeded` / `Running`).
+- Existing `core_nt` warmup Jobs were detected as stale after restart: their
+  completed Job specs were pinned to removed nodes, while the current Ready
+  nodes had new names. The monitoring path now marks that state as `Stale`
+  instead of `Ready`.
+- Recreated warmup initially failed because `elbstg01.blob.core.windows.net`
+  resolved to a public IP inside AKS while the storage account had
+  `publicNetworkAccess: Disabled`. A blob private endpoint and private DNS link
+  were added to the live workload environment; AKS now resolves the storage
+  endpoint to private IP `10.224.0.15`.
+- After the private endpoint repair, `core_nt` warmup completed on all 10
+  current AKS nodes. The backend warmup helper reports `status=Ready`,
+  `nodes_ready=10`, and shard host paths available for oracle scheduling.
+- Live DB-order oracle run `20260517164853-89081927` completed all 10 shard Jobs
+  and uploaded parts under
+  `blast-db/metadata/oracles/core_nt/parts/20260517164853-89081927/`. The
+  status blob now reports `status=ready`, `expected_parts=10`, and
+  `ready_parts=10`.
+
 ### 2026-05-17 local 16S baseline evidence
 
 Local BLAST+ 2.17.0 was installed under `~/.local/elb-tools/ncbi-blast-2.17.0+`

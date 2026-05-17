@@ -14,6 +14,8 @@ interface Props {
   subscriptionId: string;
   resourceGroup: string;
   accountName: string;
+  clusterName?: string;
+  acrName?: string;
 }
 
 /**
@@ -25,7 +27,7 @@ interface Props {
  * Lifecycle and per-section state live in their own modules; this file is the
  * coordinator that wires the storage query to its presentational parts.
  */
-export function StorageCard({ subscriptionId, resourceGroup, accountName }: Props) {
+export function StorageCard({ subscriptionId, resourceGroup, accountName, clusterName, acrName }: Props) {
   const enabled = Boolean(subscriptionId && resourceGroup && accountName);
   const refetchInterval = useAutoRefreshInterval();
 
@@ -88,6 +90,8 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName }: Prop
             subscriptionId={subscriptionId}
             resourceGroup={resourceGroup}
             accountName={accountName}
+            clusterName={clusterName ?? "elb-cluster"}
+            acrName={acrName}
             onDownloadingChange={setDbDownloading}
           />
         </>

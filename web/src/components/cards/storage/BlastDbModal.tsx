@@ -69,11 +69,13 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
     downloadedDbs,
     updatesAvailable,
     downloading,
+    oracleBuilding,
     inProgress,
     elapsed,
     downloadResult,
     dismissDownloadResult,
     handleDownload,
+    handleBuildOracle,
   } = state;
 
   const startDownload = (name: string) => {
@@ -346,9 +348,12 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                         latestVersion={latestVersion}
                         elapsed={elapsed}
                         downloadDisabled={downloading !== null}
+                        oracleBuilding={oracleBuilding === db.value}
+                        oracleDisabled={!isDownloaded || oracleBuilding !== null}
                         autoWarmupChecked={autoWarmupDbs.has(db.value)}
                         autoWarmupDisabled={!isDownloaded}
                         onDownload={() => startDownload(db.value)}
+                        onBuildOracle={() => void handleBuildOracle(db.value)}
                         onConfirmLarge={() => setConfirmLargeDb(db.value)}
                         onToggleAutoWarmup={(checked) =>
                           toggleAutoWarmup(db.value, checked)
