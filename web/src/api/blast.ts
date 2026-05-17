@@ -37,6 +37,8 @@ export interface BlastSubmitRequest {
   mem_limit?: string;
   batch_len?: number;
   enable_warmup?: boolean;
+  /** Default true: force ElasticBLAST onto the AKS node-local SSD init path. */
+  use_local_ssd?: boolean;
   reuse?: boolean;
   /** Experimental: partitioned DB search is not full-DB result equivalent yet. */
   db_auto_partition?: boolean;

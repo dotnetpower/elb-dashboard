@@ -49,6 +49,20 @@ T0=$(date +%s)
 LOG_DIR="/tmp/elb-postprov-$TAG"
 mkdir -p "$LOG_DIR"
 
+ACR_RESTORE_NETWORK=0
+restore_acr_network() {
+  if [ "${ACR_RESTORE_NETWORK:-0}" = "1" ]; then
+    ts "==> Restoring ACR public network access to Disabled"
+    az acr update \
+      --name "$ACR_NAME" \
+      --public-network-enabled false \
+      --default-action Deny \
+      --output none \
+      >/dev/null 2>&1 || ts "WARN: failed to restore ACR public network access; rerun azd provision to reconcile"
+  fi
+}
+trap restore_acr_network EXIT
+
 # ---------------------------------------------------------------------------
 # Pretty timestamped logger so the operator can see real-time progress.
 # Format: [HH:MM:SS +Xm Ys] message
@@ -114,6 +128,17 @@ build_image() {
 }
 
 ts "==> Building 3 images in parallel via az acr build (no local Docker needed)"
+ACR_PUBLIC_ACCESS=$(az acr show --name "$ACR_NAME" --query publicNetworkAccess -o tsv 2>/dev/null || echo "")
+if [ "$ACR_PUBLIC_ACCESS" = "Disabled" ]; then
+  ts "==> Temporarily enabling ACR public network access for az acr build"
+  az acr update \
+    --name "$ACR_NAME" \
+    --public-network-enabled true \
+    --default-action Allow \
+    --output none \
+    >/dev/null
+  ACR_RESTORE_NETWORK=1
+fi
 build_image PID_API      "elb-api"      "$REPO_ROOT/api/Dockerfile"      "$REPO_ROOT"
 build_image PID_FRONTEND "elb-frontend" "$REPO_ROOT/web/Dockerfile"      "$REPO_ROOT"
 build_image PID_TERMINAL "elb-terminal" "$REPO_ROOT/terminal/Dockerfile" "$REPO_ROOT/terminal"
@@ -124,15 +149,15 @@ ts "    elb-terminal: pid=$PID_TERMINAL"
 
 # Poll every 15s and report which builds are still running.
 declare -A RUNNING
-RUNNING[elb-api]=$PID_API
-RUNNING[elb-frontend]=$PID_FRONTEND
-RUNNING[elb-terminal]=$PID_TERMINAL
+RUNNING["elb-api"]=$PID_API
+RUNNING["elb-frontend"]=$PID_FRONTEND
+RUNNING["elb-terminal"]=$PID_TERMINAL
 
 while [ ${#RUNNING[@]} -gt 0 ]; do
   sleep 15
   finished=()
   for name in "${!RUNNING[@]}"; do
-    pid=${RUNNING[$name]}
+    pid=${RUNNING["$name"]}
     if ! kill -0 "$pid" 2>/dev/null; then
       wait "$pid" 2>/dev/null
       rc=$?
@@ -148,7 +173,7 @@ while [ ${#RUNNING[@]} -gt 0 ]; do
     fi
   done
   for name in "${finished[@]}"; do
-    unset 'RUNNING[$name]'
+    unset "RUNNING[$name]"
   done
   if [ ${#RUNNING[@]} -gt 0 ]; then
     ts "    waiting for: ${!RUNNING[*]}"

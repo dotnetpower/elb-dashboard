@@ -80,6 +80,9 @@ class WarmupNotReadyError(RuntimeError):
         super().__init__(message)
         self.retryable = retryable
 
+class TerminalAzureLoginError(RuntimeError):
+    """Raised when the terminal sidecar cannot acquire an Azure CLI identity."""
+
 
 def _now_iso() -> str:
     from datetime import datetime
@@ -89,6 +92,29 @@ def _now_iso() -> str:
 
 def _snippet(value: object, limit: int = ERROR_SNIPPET_CHARS) -> str:
     return str(value or "")[:limit]
+
+def _ensure_terminal_azure_cli_login(terminal_run) -> None:
+    """Ensure shell-only ElasticBLAST calls have an Azure CLI account.
+
+    The browser terminal remains interactive and user-owned. The programmatic
+    exec server runs with its own ``AZURE_CONFIG_DIR`` and can safely acquire a
+    short-lived managed-identity CLI session for API/Celery submissions.
+    """
+    account = terminal_run(
+        argv=["az", "account", "show", "--query", "user.name", "--output", "tsv"],
+        timeout_seconds=30,
+    )
+    if int(account.get("exit_code", 1) or 0) == 0:
+        return
+
+    client_id = os.environ.get("AZURE_CLIENT_ID", "").strip()
+    argv = ["az", "login", "--identity"]
+    if client_id:
+        argv.extend(["--username", client_id])
+    login = terminal_run(argv=argv, timeout_seconds=120)
+    if int(login.get("exit_code", 1) or 0) != 0:
+        error = _result_error(login, None)
+        raise TerminalAzureLoginError(error)
 
 
 def _storage_url(storage_account: str, container: str, path: str = "") -> str:
@@ -1686,6 +1712,8 @@ def submit(
     try:
         from api.services.terminal_exec import run as terminal_run
 
+        _ensure_terminal_azure_cli_login(terminal_run)
+
         result = terminal_run(
             argv=_elastic_blast_argv("submit", job_id),
             stdin=config_content,
@@ -1699,6 +1727,14 @@ def submit(
             phase="terminal_unavailable",
             exc=exc,
             error_code="terminal_exec_unavailable",
+        )
+    except TerminalAzureLoginError as exc:
+        return _retry_or_fail(
+            self,
+            job_id=job_id,
+            phase="terminal_az_login_failed",
+            exc=exc,
+            error_code="terminal_az_login_failed",
         )
 
     payload = _last_json(str(result.get("stdout", "")))

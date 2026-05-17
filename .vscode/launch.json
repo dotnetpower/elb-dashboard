@@ -19,10 +19,18 @@
         "PYTHONPATH": "${workspaceFolder}",
         "AUTH_DEV_BYPASS": "true",
         "LOG_LEVEL": "DEBUG",
-        "ENABLE_DOCS": "true"
+        "ENABLE_DOCS": "true",
+        "LOCAL_DEBUG_AUTO_OPEN_STORAGE": "true",
+        "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
+        "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
+        "OPS_REDIS_URL": "redis://127.0.0.1:6379/2",
+        "FRONTEND_UPSTREAM": "http://127.0.0.1:8090",
+        "TERMINAL_EXEC_UPSTREAM": "http://127.0.0.1:7682",
+        "EXEC_TOKEN": "dev-exec-token-not-secret-but-long-enough-for-startup-check"
       },
       "justMyCode": false,
-      "console": "integratedTerminal"
+      "console": "integratedTerminal",
+      "preLaunchTask": "redis: ensure"
     },
     {
       "name": "Worker: Celery",
@@ -36,7 +44,7 @@
         "-l",
         "info",
         "-Q",
-        "default,azure,blast,storage",
+        "default,acr,azure,blast,storage",
         "--concurrency=2",
         "--pool=solo"
       ],
@@ -46,6 +54,8 @@
         "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
         "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",
         "OPS_REDIS_URL": "redis://127.0.0.1:6379/2",
+        "TERMINAL_EXEC_UPSTREAM": "http://127.0.0.1:7682",
+        "EXEC_TOKEN": "dev-exec-token-not-secret-but-long-enough-for-startup-check",
         "LOG_LEVEL": "DEBUG"
       },
       "justMyCode": false,
@@ -77,6 +87,20 @@
       "justMyCode": false,
       "console": "integratedTerminal",
       "preLaunchTask": "redis: ensure"
+    },
+    {
+      "name": "Terminal Exec: Loopback",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/terminal/exec_server.py",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "EXEC_TOKEN": "dev-exec-token-not-secret-but-long-enough-for-startup-check",
+        "EXEC_MAX_CONCURRENCY": "4",
+        "AZCOPY_AUTO_LOGIN_TYPE": "AZCLI"
+      },
+      "justMyCode": false,
+      "console": "integratedTerminal"
     },
     {
       "name": "Pytest: Current File",
@@ -115,14 +139,32 @@
         "webpack:///src/*": "${workspaceFolder}/web/src/*"
       },
       "preLaunchTask": "web: dev"
+    },
+    {
+      "name": "Full Stack: Compose (6 sidecars)",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://127.0.0.1:18080/",
+      "webRoot": "${workspaceFolder}/web",
+      "sourceMapPathOverrides": {
+        "/src/*": "${workspaceFolder}/web/src/*",
+        "webpack:///src/*": "${workspaceFolder}/web/src/*"
+      },
+      "preLaunchTask": "fullstack: compose start"
     }
   ],
   "compounds": [
     {
+      "name": "Full Stack (compose 6 sidecars)",
+      "configurations": ["Full Stack: Compose (6 sidecars)"],
+      "stopAll": true,
+      "presentation": { "order": 1 }
+    },
+    {
       "name": "Full Stack (api + web)",
       "configurations": ["API: FastAPI (uvicorn)", "Web: Vite Dev"],
       "stopAll": true,
-      "presentation": { "order": 1 }
+      "presentation": { "order": 2 }
     },
     {
       "name": "Backend (api + worker + beat)",
@@ -132,7 +174,7 @@
         "Beat: Celery Beat"
       ],
       "stopAll": true,
-      "presentation": { "order": 2 }
+      "presentation": { "order": 3 }
     },
     {
       "name": "Full Stack + Worker + Beat",
@@ -140,10 +182,11 @@
         "API: FastAPI (uvicorn)",
         "Worker: Celery",
         "Beat: Celery Beat",
+        "Terminal Exec: Loopback",
         "Web: Vite Dev"
       ],
       "stopAll": true,
-      "presentation": { "order": 3 }
+      "presentation": { "order": 4 }
     }
   ]
 }

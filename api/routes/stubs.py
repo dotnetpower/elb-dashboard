@@ -82,6 +82,7 @@ _BLAST_SUBMIT_OPTION_KEYS = frozenset(
         "shard_sets",
         "sharding_mode",
         "taxid",
+        "use_local_ssd",
         "word_size",
     }
 )

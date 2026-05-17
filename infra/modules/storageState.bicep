@@ -7,6 +7,9 @@
 //   * `dead-letter`      container  — one blob per Celery task that exhausted retries
 //   * `job-payloads`     container  — sanitised request/result payloads, append blobs
 //   * `schedules`        container  — single JSON blob, ETag-versioned
+//   * `blast-db`         container  — ElasticBLAST database files
+//   * `queries`          container  — user query FASTA uploads
+//   * `results`          container  — ElasticBLAST outputs streamed through the API
 //   * `redis-data`       file share — AOF persistence for the redis sidecar
 //   * `terminal-home`    file share — /home/azureuser persistence for the terminal sidecar
 //
@@ -56,6 +59,9 @@ var stateContainers = [
   'dead-letter'
   'job-payloads'
   'schedules'
+  'blast-db'
+  'queries'
+  'results'
 ]
 
 resource containers 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = [for name in stateContainers: {

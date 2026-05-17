@@ -46,6 +46,9 @@ param lockdownPrivateNetworking bool = false
 @description('If true, grants the shared UAMI subscription-scope Reader so the SPA discovery wizard can list RGs / storage accounts / ACRs / VMs across the subscription. Requires the deployer to have User Access Administrator (or Owner). Set to false in restricted tenants and run the equivalent `az role assignment create` from docs/auth.md by hand.')
 param assignSubscriptionReader bool = true
 
+@description('If true, grants the shared UAMI resource-group-scope Contributor and User Access Administrator for runtime resource orchestration. Set to false when equivalent roles already exist outside this template.')
+param assignControlPlaneRoles bool = true
+
 // ---------------------------------------------------------------------------
 // Resource tagging (CAF-aligned)
 // ---------------------------------------------------------------------------
@@ -153,6 +156,14 @@ module identity 'modules/identity.bicep' = {
 module subscriptionRoles 'modules/subscriptionRoles.bicep' = if (assignSubscriptionReader) {
   name: 'sub-roles-${resourceToken}'
   // Sub-scope (no `scope:` clause) — main.bicep already targets subscription.
+  params: {
+    uamiPrincipalId: identity.outputs.identityPrincipalId
+  }
+}
+
+module controlPlaneRoles 'modules/controlPlaneRoles.bicep' = if (assignControlPlaneRoles) {
+  name: 'control-plane-roles-${resourceToken}'
+  scope: platformRg
   params: {
     uamiPrincipalId: identity.outputs.identityPrincipalId
   }

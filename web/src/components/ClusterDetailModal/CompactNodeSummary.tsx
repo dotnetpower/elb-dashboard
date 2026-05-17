@@ -24,8 +24,8 @@ export function CompactNodeSummary({
     <button
       type="button"
       onClick={onOpenModal}
-      aria-label="Open per-node breakdown"
-      title="Open per-node breakdown"
+      aria-label="Open node details"
+      title="Open node details"
       style={{
         display: "flex",
         alignItems: "center",
@@ -233,7 +233,7 @@ export function CompactNodeSummary({
               fontSize: 9,
             }}
           >
-            Details
+            Node details
           </span>
         </span>
       </span>
