@@ -117,14 +117,18 @@ def test_upload_tie_order_oracle_writes_finalizer_metadata(monkeypatch) -> None:
     result = blast._upload_tie_order_oracle_if_present(
         storage_account="stelb",
         job_id="job-123",
-        options={"tie_order_oracle_accessions": ["PX485240.1", "OX044342.2"]},
+        options={
+            "tie_order_oracle_accessions": ["PX485240.1", "OX044342.2"],
+            "tie_order_oracle_strict": True,
+        },
     )
 
     assert result == {
         "blob_path": "job-123/metadata/tie-order-oracle.txt",
         "accession_count": 2,
+        "strict": True,
     }
-    assert uploads == [
+    assert uploads[:1] == [
         {
             "args": (
                 "credential",
@@ -136,6 +140,7 @@ def test_upload_tie_order_oracle_writes_finalizer_metadata(monkeypatch) -> None:
             "kwargs": {"content_type": "text/plain; charset=utf-8"},
         }
     ]
+    assert uploads[1]["args"][3] == "job-123/metadata/tie-order-oracle-strict.txt"
 
 
 def test_upload_tie_order_oracle_rejects_oversized_payload() -> None:
@@ -146,6 +151,40 @@ def test_upload_tie_order_oracle_rejects_oversized_payload() -> None:
             job_id="job-123",
             options={"tie_order_oracle_text": oversized},
         )
+
+
+def test_upload_db_order_oracle_pointer_writes_url_manifest(monkeypatch) -> None:
+    uploads: list[dict[str, object]] = []
+
+    def fake_upload_blob_text(*args, **kwargs) -> None:
+        uploads.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr("api.services.get_credential", lambda: "credential")
+    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
+    monkeypatch.setattr(
+        blast,
+        "_db_order_oracle_part_urls",
+        lambda **_kwargs: [
+            "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run/00.txt",
+            "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run/01.txt",
+        ],
+    )
+
+    result = blast._upload_db_order_oracle_pointer_if_available(
+        storage_account="stelb",
+        job_id="job-123",
+        database="core_nt",
+        options={"sharding_mode": "precise"},
+    )
+
+    assert result == {
+        "blob_path": "job-123/metadata/tie-order-oracle-urls.txt",
+        "db_name": "core_nt",
+        "part_count": 2,
+    }
+    assert uploads[0]["args"][3] == "job-123/metadata/tie-order-oracle-urls.txt"
+    assert "00.txt" in uploads[0]["args"][4]
+    assert uploads[0]["kwargs"] == {"content_type": "text/plain; charset=utf-8"}
 
 
 def test_elastic_blast_argv_uses_cfg_file() -> None:

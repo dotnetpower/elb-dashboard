@@ -43,6 +43,8 @@ export function DashboardGrid({ config }: DashboardGridProps) {
           subscriptionId={config.subscriptionId}
           resourceGroup={config.workloadResourceGroup}
           accountName={config.storageAccountName}
+          clusterName="elb-cluster"
+          acrName={config.acrName}
         />
         <TerminalCard />
       </div>

@@ -42,12 +42,23 @@ export interface DownloadedDbMeta {
   sharded?: boolean;
   /** Sorted preset shard counts already built (e.g. [1,2,3,4,5,6,8,10]). */
   shard_sets?: number[];
+  db_order_oracle?: {
+    status: string;
+    run_id?: string | null;
+    started_at?: string | null;
+    source_version?: string | null;
+    expected_parts?: number;
+    ready_parts?: number;
+    part_prefix?: string | null;
+  };
 }
 
 interface UseBlastDbArgs {
   subscriptionId: string;
   resourceGroup: string;
   accountName: string;
+  clusterName: string;
+  acrName?: string;
   enabled: boolean;
 }
 
@@ -55,6 +66,8 @@ export function useBlastDb({
   subscriptionId,
   resourceGroup,
   accountName,
+  clusterName,
+  acrName,
   enabled,
 }: UseBlastDbArgs) {
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -66,6 +79,7 @@ export function useBlastDb({
     Map<string, { source_version?: string }>
   >(() => new Map());
   const [elapsed, setElapsed] = useState(0);
+  const [oracleBuilding, setOracleBuilding] = useState<string | null>(null);
 
   const dbQuery = useQuery({
     queryKey: ["blast-databases", subscriptionId, accountName, resourceGroup],
@@ -221,6 +235,36 @@ export function useBlastDb({
     }
   };
 
+  const handleBuildOracle = async (dbName: string) => {
+    if (!enabled || !clusterName) return;
+    setOracleBuilding(dbName);
+    setDownloadResult(null);
+    try {
+      const meta = downloadedDbs.get(dbName);
+      const resp = await blastApi.buildDbOrderOracle(
+        {
+          subscription_id: subscriptionId,
+          resource_group: resourceGroup,
+          account_name: accountName,
+          cluster_name: clusterName,
+          acr_name: acrName,
+          source_version: meta?.source_version,
+        },
+        dbName,
+      );
+      setDownloadResult({
+        db: dbName,
+        msg: `Started order oracle build across ${resp.expected_parts} warmed shards.`,
+        type: "ok",
+      });
+      void dbQuery.refetch();
+    } catch (e) {
+      setDownloadResult({ db: dbName, msg: formatApiError(e, "blast"), type: "err" });
+    } finally {
+      setOracleBuilding(null);
+    }
+  };
+
   // Aggregate "is anything happening" — used by parent for shimmer
   const activeDownload =
     downloading ?? (inProgress.size > 0 ? [...inProgress.keys()][0] : null);
@@ -278,6 +322,7 @@ export function useBlastDb({
     enableLocalAccess,
     // In-flight state
     downloading,
+    oracleBuilding,
     elapsed,
     inProgress,
     activeDownload,
@@ -286,6 +331,7 @@ export function useBlastDb({
     dismissDownloadResult: () => setDownloadResult(null),
     // Actions
     handleDownload,
+    handleBuildOracle,
   };
 }
 

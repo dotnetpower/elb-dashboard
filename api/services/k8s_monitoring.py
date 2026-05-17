@@ -744,6 +744,7 @@ def k8s_warmup_status(
         )
         if response.status_code == 200:
             warmup_databases = database_status_from_warmup_jobs(response.json().get("items", []))
+            _mark_stale_warmup_nodes(session, server, warmup_databases)
             pods, logs_by_pod = _warmup_pods_and_logs(session, server)
             attach_pod_progress_to_database_status(warmup_databases, pods, logs_by_pod)
             _merge_database_statuses(result, warmup_databases)
@@ -854,6 +855,8 @@ def _merge_database_statuses(result: dict[str, Any], incoming: list[dict[str, An
                 "active_phase_label",
                 "phase_counts",
                 "pod_statuses",
+                "shard_nodes",
+                "shard_host_paths",
             ):
                 if key in database:
                     current[key] = database[key]
@@ -862,6 +865,36 @@ def _merge_database_statuses(result: dict[str, Any], incoming: list[dict[str, An
             existing[name] = database
         if database.get("status") == "Ready":
             result["warm"] = True
+
+
+def _mark_stale_warmup_nodes(
+    session: Any,
+    server: str,
+    databases: list[dict[str, Any]],
+) -> None:
+    response = session.get(f"{server}/api/v1/nodes", timeout=10)
+    if response.status_code != 200:
+        return
+    ready_nodes = set(_candidate_warmup_node_names(response.json().get("items", [])))
+    if not ready_nodes:
+        return
+    for database in databases:
+        shard_nodes = database.get("shard_nodes") or {}
+        if not isinstance(shard_nodes, dict):
+            continue
+        stale_shards = sorted(
+            shard for shard, node_name in shard_nodes.items() if str(node_name) not in ready_nodes
+        )
+        if not stale_shards:
+            continue
+        database["status"] = "Stale"
+        database["nodes_active"] = 0
+        database["nodes_ready"] = 0
+        database["nodes_failed"] = int(database.get("total_jobs") or len(stale_shards))
+        database["stale_shards"] = stale_shards
+        database["active_phase"] = "failed"
+        database["active_phase_label"] = "Warmup stale"
+        database["active_message"] = "Warmup jobs are pinned to nodes that are no longer Ready."
 
 
 def _warmup_pods_and_logs(session: Any, server: str) -> tuple[list[dict[str, Any]], dict[str, str]]:

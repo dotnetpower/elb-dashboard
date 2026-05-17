@@ -352,6 +352,8 @@ def list_databases(
     cc = svc.get_container_client(container)
     db_info: dict[str, dict[str, Any]] = {}
     metadata_blobs: dict[str, str] = {}  # db_name -> metadata json content
+    oracle_status_blobs: dict[str, str] = {}  # db_name -> oracle status json content
+    oracle_part_counts: dict[str, int] = {}
     blastdb_json_blobs: dict[str, str] = {}  # db_name -> BLAST v5 .njs content
     for blob in cc.list_blobs():
         parts = blob.name.split("/")
@@ -366,6 +368,26 @@ def list_databases(
                 metadata_blobs[meta_db_name] = bc.download_blob().readall().decode("utf-8")
             except Exception as exc:
                 LOGGER.debug("metadata blob read skipped for %s: %s", blob.name, exc)
+            continue
+        if (
+            len(parts) == 4
+            and parts[0] == "metadata"
+            and parts[1] == "oracles"
+            and parts[3] == "status.json"
+        ):
+            try:
+                bc = cc.get_blob_client(blob.name)
+                oracle_status_blobs[parts[2]] = bc.download_blob().readall().decode("utf-8")
+            except Exception as exc:
+                LOGGER.debug("oracle status blob read skipped for %s: %s", blob.name, exc)
+            continue
+        if (
+            len(parts) == 6
+            and parts[0] == "metadata"
+            and parts[1] == "oracles"
+            and parts[3] == "parts"
+        ):
+            oracle_part_counts[parts[2]] = oracle_part_counts.get(parts[2], 0) + 1
             continue
         if name.endswith(".njs"):
             base = re.sub(r"\.\d+$", "", name[:-4])
@@ -490,6 +512,25 @@ def list_databases(
                         break
             except Exception as exc:
                 LOGGER.debug("metadata blob parse skipped for %s: %s", db_name, exc)
+        if db_name in oracle_status_blobs:
+            try:
+                oracle = _json.loads(oracle_status_blobs[db_name])
+                if isinstance(oracle, dict):
+                    expected_parts = int(oracle.get("expected_parts") or 0)
+                    ready_parts = int(oracle_part_counts.get(db_name, 0))
+                    info["db_order_oracle"] = {
+                        "status": "ready"
+                        if expected_parts > 0 and ready_parts >= expected_parts
+                        else str(oracle.get("status") or "building"),
+                        "run_id": oracle.get("run_id"),
+                        "started_at": oracle.get("started_at"),
+                        "source_version": oracle.get("source_version"),
+                        "expected_parts": expected_parts,
+                        "ready_parts": ready_parts,
+                        "part_prefix": oracle.get("part_prefix"),
+                    }
+            except Exception as exc:
+                LOGGER.debug("oracle status blob parse skipped for %s: %s", db_name, exc)
         default_searchsp = WEB_BLAST_SEARCHSP_DEFAULTS.get(db_name)
         if default_searchsp is not None:
             info.setdefault("web_blast_searchsp", default_searchsp.value)

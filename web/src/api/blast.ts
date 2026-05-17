@@ -61,6 +61,10 @@ export interface BlastSubmitRequest {
   aks_cluster_name?: string;
   terminal_resource_group?: string;
   terminal_vm_name?: string;
+  tie_order_oracle_accessions?: string[];
+  tie_order_oracle_text?: string;
+  tie_order_oracle_strict?: boolean;
+  use_db_order_oracle?: boolean;
 }
 
 export interface BlastSubmitResponse {
@@ -161,6 +165,15 @@ export interface BlastDatabase {
   sharding_started_at?: string | null;
   /** Sanitised error string from the last failed sharding attempt; cleared on next start. */
   sharding_error?: string | null;
+  db_order_oracle?: {
+    status: "ready" | "building" | "failed" | string;
+    run_id?: string | null;
+    started_at?: string | null;
+    source_version?: string | null;
+    expected_parts?: number;
+    ready_parts?: number;
+    part_prefix?: string | null;
+  };
   /**
    * Server-computed warmup feasibility. Only present when listDatabases was
    * called with cluster topology (num_nodes + machine_type). See Phase 1 of
@@ -554,6 +567,26 @@ export const blastApi = {
       resource_group: resourceGroup,
       account_name: storageAccount,
     }),
+
+  buildDbOrderOracle: (body: {
+    subscription_id: string;
+    resource_group: string;
+    account_name: string;
+    cluster_name: string;
+    acr_name?: string;
+    image?: string;
+    source_version?: string;
+  }, dbName: string) =>
+    api.post<{
+      accepted: boolean;
+      db_name: string;
+      run_id: string;
+      expected_parts: number;
+      created: string[];
+      existing: string[];
+      status_blob: string;
+      part_urls: string[];
+    }>(`/blast/databases/${encodeURIComponent(dbName)}/oracle`, body),
 
   buildCustomDb: (req: {
     subscription_id: string;

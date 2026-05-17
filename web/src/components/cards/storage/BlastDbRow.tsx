@@ -1,4 +1,4 @@
-import { CheckCircle2, Circle, Download, Loader2 } from "lucide-react";
+import { CheckCircle2, Circle, Download, ListOrdered, Loader2 } from "lucide-react";
 
 import {
   type BlastDbCatalogItem,
@@ -20,9 +20,12 @@ interface BlastDbRowProps {
   latestVersion: string | null;
   elapsed: number;
   downloadDisabled: boolean;
+  oracleBuilding: boolean;
+  oracleDisabled: boolean;
   autoWarmupChecked: boolean;
   autoWarmupDisabled: boolean;
   onDownload: () => void;
+  onBuildOracle: () => void;
   onConfirmLarge: () => void;
   onToggleAutoWarmup: (checked: boolean) => void;
 }
@@ -46,9 +49,12 @@ export function BlastDbRow({
   latestVersion,
   elapsed,
   downloadDisabled,
+  oracleBuilding,
+  oracleDisabled,
   autoWarmupChecked,
   autoWarmupDisabled,
   onDownload,
+  onBuildOracle,
   onConfirmLarge,
   onToggleAutoWarmup,
 }: BlastDbRowProps) {
@@ -253,6 +259,28 @@ export function BlastDbRow({
                   Sharded · {meta.shard_sets!.length} layouts
                 </span>
               )}
+              {meta.db_order_oracle && (
+                <span
+                  className="db-shard-chip"
+                  title={`DB order oracle: ${meta.db_order_oracle.ready_parts ?? 0}/${meta.db_order_oracle.expected_parts ?? 0} parts`}
+                  style={{
+                    fontSize: 10,
+                    padding: "1px 6px",
+                    borderRadius: 3,
+                    color:
+                      meta.db_order_oracle.status === "ready"
+                        ? "var(--success)"
+                        : "var(--accent)",
+                    background: "rgba(106,214,163,0.08)",
+                    border: "1px solid rgba(106,214,163,0.22)",
+                    fontWeight: 500,
+                    whiteSpace: "nowrap",
+                    letterSpacing: 0,
+                  }}
+                >
+                  Order · {meta.db_order_oracle.status}
+                </span>
+              )}
             </>
           )}
           <label
@@ -332,9 +360,33 @@ export function BlastDbRow({
             <Download size={11} /> Update
           </button>
         ) : isDownloaded ? (
-          <span className="gt gt-g" style={{ fontSize: 10 }}>
-            Ready
-          </span>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <button
+              className="glass-button"
+              style={{
+                fontSize: 11,
+                padding: "3px 6px",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onBuildOracle();
+              }}
+              disabled={oracleDisabled}
+              title="Build DB order oracle from warmed AKS shards"
+            >
+              {oracleBuilding ? (
+                <Loader2 size={11} className="spin" />
+              ) : (
+                <ListOrdered size={11} />
+              )}
+            </button>
+            <span className="gt gt-g" style={{ fontSize: 10 }}>
+              Ready
+            </span>
+          </div>
         ) : isDownloading ? (
           <span
             className="gt gt-b"

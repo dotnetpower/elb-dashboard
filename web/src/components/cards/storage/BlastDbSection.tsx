@@ -10,6 +10,8 @@ interface BlastDbSectionProps {
   subscriptionId: string;
   resourceGroup: string;
   accountName: string;
+  clusterName: string;
+  acrName?: string;
   /** Bubbles "anything in flight?" up to the parent card so it can shimmer. */
   onDownloadingChange?: (db: string | null) => void;
 }
@@ -25,10 +27,19 @@ export function BlastDbSection({
   subscriptionId,
   resourceGroup,
   accountName,
+  clusterName,
+  acrName,
   onDownloadingChange,
 }: BlastDbSectionProps) {
   const enabled = Boolean(subscriptionId && resourceGroup && accountName);
-  const state = useBlastDb({ subscriptionId, resourceGroup, accountName, enabled });
+  const state = useBlastDb({
+    subscriptionId,
+    resourceGroup,
+    accountName,
+    clusterName,
+    acrName,
+    enabled,
+  });
   const [showPopup, setShowPopup] = useState(false);
   const { toast } = useToast();
 
