@@ -36,6 +36,14 @@ function isMergeCompatibleOutfmt(outfmt: number): boolean {
   return outfmt === 5 || outfmt === 6;
 }
 
+export function hasPreparedShardLayout(database?: BlastDatabase): boolean {
+  return Boolean(
+    database?.name === "core_nt" &&
+      database.sharded === true &&
+      database.shard_sets?.some((shardCount) => shardCount > 1),
+  );
+}
+
 function unavailableReason({
   cluster,
   database,
@@ -50,7 +58,7 @@ function unavailableReason({
   if (!isDbAlreadyWarm) return "Warm this database on the selected cluster before using sharded performance modes.";
   if (database.sharding_in_progress) return "Shard preparation is still running for this database.";
   if (database.sharding_error) return `Shard preparation failed: ${database.sharding_error}`;
-  if (database.sharded !== true || !database.shard_sets?.length) {
+  if (!hasPreparedShardLayout(database)) {
     return "Prepared shard layouts are not available for this database yet.";
   }
   if (!database.total_bytes || database.total_bytes <= 0) {
@@ -72,7 +80,7 @@ export function deriveShardingAvailability({
   const nodeCount = cluster ? getWorkloadNodeCount(cluster) : null;
   const nodeSku = cluster ? getWorkloadNodeSku(cluster) : null;
   const capacityPlan =
-    database?.total_bytes && nodeCount && nodeSku && database.shard_sets?.length
+    database?.total_bytes && nodeCount && nodeSku && hasPreparedShardLayout(database)
       ? planPartitionsForSubmit(database.total_bytes, nodeCount, nodeSku, database.shard_sets)
       : null;
   const reason = unavailableReason({

@@ -59,32 +59,6 @@ export function ResultsBody({
   onDownload,
   onUnlocked,
 }: ResultsBodyProps) {
-  if (isRunning) {
-    return (
-      <div
-        style={{
-          marginTop: "var(--space-3)",
-          padding: "16px",
-          borderRadius: 10,
-          background: "var(--bg-tertiary)",
-          fontSize: 13,
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-        }}
-      >
-        <Loader2
-          size={16}
-          className="spin"
-          style={{ color: "var(--accent)", flexShrink: 0 }}
-        />
-        <span style={{ color: "var(--text-muted)" }}>
-          Results will appear here once the job completes. Current phase:{" "}
-          <strong style={{ color: "var(--accent)" }}>{effectivePhase}</strong>
-        </span>
-      </div>
-    );
-  }
   if (effectiveIsFailed) {
     return (
       <div
@@ -139,6 +113,44 @@ export function ResultsBody({
       />
     );
   }
+  if (files.length > 0) {
+    return (
+      <BlastResultsTable
+        files={files}
+        resultFiles={resultFiles}
+        debugFiles={debugFiles}
+        hasOnlyDebugFiles={hasOnlyDebugFiles}
+        downloadingFile={downloadingFile}
+        onDownload={onDownload}
+      />
+    );
+  }
+  if (isRunning) {
+    return (
+      <div
+        style={{
+          marginTop: "var(--space-3)",
+          padding: "16px",
+          borderRadius: 10,
+          background: "var(--bg-tertiary)",
+          fontSize: 13,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
+        <Loader2
+          size={16}
+          className="spin"
+          style={{ color: "var(--accent)", flexShrink: 0 }}
+        />
+        <span style={{ color: "var(--text-muted)" }}>
+          Results will appear here once the job completes. Current phase:{" "}
+          <strong style={{ color: "var(--accent)" }}>{effectivePhase}</strong>
+        </span>
+      </div>
+    );
+  }
   if (files.length === 0) {
     if (phase === "completed") {
       return (
@@ -160,14 +172,4 @@ export function ResultsBody({
       </p>
     );
   }
-  return (
-    <BlastResultsTable
-      files={files}
-      resultFiles={resultFiles}
-      debugFiles={debugFiles}
-      hasOnlyDebugFiles={hasOnlyDebugFiles}
-      downloadingFile={downloadingFile}
-      onDownload={onDownload}
-    />
-  );
 }

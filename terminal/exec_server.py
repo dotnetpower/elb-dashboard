@@ -76,6 +76,7 @@ DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 1800  # hard 30-min cap; longer tasks must be split
 SIGTERM_GRACE_SECONDS = 5
 EXEC_TMP_ROOT = "/tmp/exec"  # noqa: S108 - intentional; cleaned per-request
+EXEC_AZURE_CONFIG_DIR = os.environ.get("EXEC_AZURE_CONFIG_DIR", "")
 
 LOGGER = logging.getLogger("exec_server")
 _semaphore = threading.BoundedSemaphore(MAX_CONCURRENCY)
@@ -185,6 +186,14 @@ def _write_stdin_file(req: dict, cwd: str) -> None:
         handle.write(req["stdin"])
 
 
+def _child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if EXEC_AZURE_CONFIG_DIR and not env.get("AZURE_CONFIG_DIR"):
+        env["AZURE_CONFIG_DIR"] = EXEC_AZURE_CONFIG_DIR
+    env.setdefault("AZCOPY_AUTO_LOGIN_TYPE", "AZCLI")
+    return env
+
+
 def _spawn(argv: list[str], cwd: str, stdin_text: str | None) -> subprocess.Popen[bytes]:
     return subprocess.Popen(  # noqa: S603 - argv allowlisted, shell=False
         argv,
@@ -192,6 +201,7 @@ def _spawn(argv: list[str], cwd: str, stdin_text: str | None) -> subprocess.Pope
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
+        env=_child_env(),
         # New session so we can SIGKILL the entire process group on timeout.
         start_new_session=True,
         bufsize=0,

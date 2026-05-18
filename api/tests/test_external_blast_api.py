@@ -190,6 +190,19 @@ def test_external_blast_base_url_uses_runtime_cache(monkeypatch) -> None:
     assert external_blast._base_url() == "http://10.0.0.4"
 
 
+def test_external_blast_headers_include_api_and_internal_tokens(monkeypatch) -> None:
+    from api.services import external_blast
+
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "api-token")
+    monkeypatch.setenv("ELB_OPENAPI_INTERNAL_TOKEN", "internal-token")
+
+    assert external_blast._headers() == {
+        "Accept": "application/json",
+        "X-ELB-API-Token": "api-token",
+        "X-ELB-Internal-Token": "internal-token",
+    }
+
+
 def test_openapi_runtime_round_trip() -> None:
     from api.services import openapi_runtime
 
@@ -272,6 +285,12 @@ def test_canonical_jobs_list_merges_external_when_table_unconfigured(monkeypatch
 
 
 def test_canonical_jobs_list_reports_external_detail_code(monkeypatch):
+    """Runtime failures from the external plane (5xx, network, timeout) MUST
+    still surface as ``external_degraded`` so operators can see real outages
+    in the request inspector. Configuration-absence reasons
+    (``openapi_not_configured``) are exercised by
+    :func:`test_canonical_jobs_list_silent_when_external_not_configured`.
+    """
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
     from api.services import external_blast, state_repo
@@ -282,8 +301,8 @@ def test_canonical_jobs_list_reports_external_detail_code(monkeypatch):
 
     def list_jobs_unavailable():
         raise HTTPException(
-            503,
-            detail={"code": "openapi_not_configured", "message": "ELB_OPENAPI_BASE_URL is not set"},
+            502,
+            detail={"code": "openapi_upstream_error", "message": "bad gateway"},
         )
 
     monkeypatch.setattr(state_repo, "JobStateRepository", EmptyRepo)
@@ -296,7 +315,86 @@ def test_canonical_jobs_list_reports_external_detail_code(monkeypatch):
     body = response.json()
     assert body["jobs"] == []
     assert body["external_degraded"] is True
-    assert body["external_degraded_reason"] == "openapi_not_configured"
+    assert body["external_degraded_reason"] == "openapi_upstream_error"
+    assert "degraded" not in body
+
+
+def test_canonical_jobs_list_silent_when_external_not_configured(monkeypatch):
+    """``openapi_not_configured`` / ``openapi_not_enabled`` mean the optional
+    external execution plane simply isn't wired up — that's a normal state,
+    not a degradation. The Jobs payload MUST NOT carry ``external_degraded``
+    in that case, otherwise the request inspector renders every 30 s poll as
+    a red Degraded badge and operators tune out the real warnings.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast, state_repo
+
+    class EmptyRepo:
+        def list_for_owner(self, *_args, **_kwargs):
+            return []
+
+    def list_jobs_not_configured():
+        raise HTTPException(
+            503,
+            detail={
+                "code": "openapi_not_configured",
+                "message": "ELB_OPENAPI_BASE_URL is not set",
+            },
+        )
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", EmptyRepo)
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs_not_configured)
+    client = TestClient(app)
+
+    response = client.get("/api/blast/jobs")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["jobs"] == []
+    assert "external_degraded" not in body
+    assert "external_degraded_reason" not in body
+    assert "degraded" not in body
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    ["openapi_not_configured", "openapi_not_enabled"],
+)
+def test_canonical_jobs_list_silent_for_every_not_enabled_reason(
+    monkeypatch, reason_code
+):
+    """Lock the entire ``_EXTERNAL_NOT_ENABLED_REASONS`` allow-list. Adding a
+    new code to that set without an accompanying test would let a regression
+    slip through.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.routes import stubs as stubs_module
+    from api.services import external_blast, state_repo
+
+    assert reason_code in stubs_module._EXTERNAL_NOT_ENABLED_REASONS
+
+    class EmptyRepo:
+        def list_for_owner(self, *_args, **_kwargs):
+            return []
+
+    def list_jobs_not_enabled():
+        raise HTTPException(
+            503,
+            detail={"code": reason_code, "message": f"{reason_code} active"},
+        )
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", EmptyRepo)
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs_not_enabled)
+    client = TestClient(app)
+
+    response = client.get("/api/blast/jobs")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "external_degraded" not in body
+    assert "external_degraded_reason" not in body
     assert "degraded" not in body
 
 

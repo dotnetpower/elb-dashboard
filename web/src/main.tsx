@@ -11,13 +11,16 @@ import { ToastProvider } from "@/components/Toast";
 import { AutoRefreshProvider } from "@/hooks/useAutoRefresh";
 import { isDevBypassEnabled } from "@/config/runtime";
 import "@/theme/glass.css";
-// JetBrains Mono — used by the browser terminal (xterm.js fontFamily).
-// Loading the four common variants here makes them available everywhere
-// in the SPA (xterm has its own font cache; importing once is enough).
+// Inter — the default UI typeface used across the SPA.
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/inter/700.css";
+import "@fontsource/inter/400-italic.css";
+import "@fontsource/inter/700-italic.css";
+// JetBrains Mono — used only by the browser terminal (xterm.js fontFamily).
 import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/700.css";
-import "@fontsource/jetbrains-mono/400-italic.css";
-import "@fontsource/jetbrains-mono/700-italic.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

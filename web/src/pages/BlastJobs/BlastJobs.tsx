@@ -2,6 +2,7 @@ import { AlertTriangle } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { RowSkeleton } from "@/components/RowSkeleton";
 
 import { DateGroupSection } from "./DateGroupSection";
 import { JobsFilterBar } from "./JobsFilterBar";
@@ -39,15 +40,7 @@ export function BlastJobs() {
       />
 
       {jobsQuery.isLoading && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {[1, 2, 3].map((i) => (
-            <div
-              key={i}
-              className="skeleton skeleton-line"
-              style={{ height: 40, width: "100%" }}
-            />
-          ))}
-        </div>
+        <RowSkeleton count={3} height={40} label="Loading BLAST jobs…" />
       )}
 
       {allJobs.length > 0 && (

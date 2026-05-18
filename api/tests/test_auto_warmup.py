@@ -19,6 +19,10 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
     monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
     monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
         "api.services.monitoring.list_aks_clusters",
         lambda credential, subscription_id, resource_group: [
             {
@@ -108,6 +112,128 @@ def test_reconcile_auto_warmup_skips_until_cluster_ready(monkeypatch, tmp_path) 
     result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
 
     assert result["clusters"][0]["status"] == "not_ready"
+    assert calls == []
+
+
+def test_reconcile_auto_warmup_reenqueues_when_db_not_warm(monkeypatch, tmp_path) -> None:
+    """Regression: even when ``last_ready`` is already True from a prior tick,
+    a downloaded DB that is not warm on the cluster must still get a warmup
+    task enqueued. Previously a ``last_ready`` short-circuit returned
+    ``already_ready`` and left newly downloaded DBs cold forever.
+    """
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 4,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
+    )
+    monkeypatch.setattr(
+        "api.services.storage_data.list_databases",
+        lambda credential, storage_account: [{"name": "core_nt"}],
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeTask:
+        id = "warmup-task-reenqueue"
+
+    def fake_send_task(task_name: str, *, kwargs: dict[str, Any], queue: str) -> FakeTask:
+        calls.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
+        return FakeTask()
+
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    # Persist a preference with last_ready=True to simulate "cluster was ready
+    # on a previous reconcile tick and core_nt was claimed warm at the time".
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+        last_ready=True,
+    )
+    save_auto_warmup_preference(pref)
+
+    # Note: no ``force`` flag — the beat schedule calls reconcile without it.
+    result = reconcile_auto_warmup.run()
+
+    assert result["clusters"][0]["status"] == "triggered"
+    assert calls[0]["kwargs"]["database_name"] == "core_nt"
+
+
+def test_reconcile_auto_warmup_inflight_lock_prevents_duplicate(
+    monkeypatch, tmp_path
+) -> None:
+    """A DB whose previous warmup task is still in its pre-Kubernetes phases
+    (download / shard / plan) must not be re-enqueued by the next reconcile
+    tick, because k8s_warmup_status cannot yet observe the pod.
+    """
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 4,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
+    )
+    monkeypatch.setattr(
+        "api.services.storage_data.list_databases",
+        lambda credential, storage_account: [{"name": "core_nt"}],
+    )
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.celery_app.celery_app.send_task",
+        lambda *args, **kwargs: calls.append({"args": args, "kwargs": kwargs}),
+    )
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict())
+
+    assert result["clusters"][0]["status"] == "ready_noop"
+    assert result["clusters"][0]["skipped"] == [{"db": "core_nt", "reason": "inflight"}]
     assert calls == []
 
 

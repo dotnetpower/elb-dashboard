@@ -57,7 +57,7 @@ describe("deriveShardingAvailability", () => {
   it("keeps precise mode from claiming Web equivalence without evidence", () => {
     const availability = deriveShardingAvailability({
       cluster,
-      database: { ...database, name: "ITS_RefSeq_Fungi", web_blast_searchsp: undefined },
+      database: { ...database, web_blast_searchsp: undefined },
       isDbAlreadyWarm: true,
       outfmt: 5,
     });
@@ -81,6 +81,36 @@ describe("deriveShardingAvailability", () => {
     expect(availability.preferredMode).toBe("off");
     expect(availability.options.precise.enabled).toBe(false);
     expect(availability.options.precise.reason).toContain("Warm this database");
+  });
+
+  it("keeps baseline mode available for warm DBs without prepared shard layouts", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database: { ...database, name: "18S_fungal_sequences", sharded: false, shard_sets: [] },
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+
+    expect(availability.preferredMode).toBe("off");
+    expect(availability.options.off.enabled).toBe(true);
+    expect(availability.options.approximate.enabled).toBe(false);
+    expect(availability.options.precise.enabled).toBe(false);
+    expect(availability.options.precise.reason).toContain("Prepared shard layouts");
+  });
+
+  it("does not treat single-part non-core-nt shard metadata as prepared sharding", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database: { ...database, name: "18S_fungal_sequences", sharded: true, shard_sets: [1] },
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+
+    expect(availability.preferredMode).toBe("off");
+    expect(availability.options.off.enabled).toBe(true);
+    expect(availability.options.approximate.enabled).toBe(false);
+    expect(availability.options.precise.enabled).toBe(false);
+    expect(availability.capacityPlan).toBeNull();
   });
 
   it("disables sharded modes when capacity requires more shards than nodes", () => {

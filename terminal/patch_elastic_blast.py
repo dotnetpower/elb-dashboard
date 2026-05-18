@@ -29,6 +29,16 @@ def _replace_once_unless_present(
     path.write_text(text.replace(old, new, 1))
 
 
+def _replace_all_unless_present(path: Path, old: str, new: str, marker: str) -> None:
+    text = path.read_text()
+    if marker in text:
+        return
+    count = text.count(old)
+    if count < 1:
+        raise RuntimeError(f"expected at least one match in {path}, found {count}")
+    path.write_text(text.replace(old, new))
+
+
 def patch_azure_py(root: Path) -> None:
     path = root / "src/elastic_blast/azure.py"
     _replace_once_unless_present(
@@ -351,6 +361,7 @@ def patch_init_shard_script(root: Path) -> None:
 def patch_aks_workload_tolerations(root: Path) -> None:
     templates = {
         "blast-batch-job-aks.yaml.template": "OnFailure",
+        "blast-batch-job-local-ssd-aks.yaml.template": "OnFailure",
         "blast-batch-job-shard-ssd-aks.yaml.template": "OnFailure",
         "job-init-pv-aks.yaml.template": "Never",
         "job-init-pv-partitioned-aks.yaml.template": "Never",
@@ -382,6 +393,59 @@ def patch_aks_workload_tolerations(root: Path) -> None:
             path.write_text(text)
 
 
+def patch_unique_init_ssd_job_names(root: Path) -> None:
+    templates = [
+        "job-init-local-ssd-aks.yaml.template",
+        "job-init-ssd-shard-aks.yaml.template",
+    ]
+    for name in templates:
+        path = root / "src/elastic_blast/templates" / name
+        _replace_once_unless_present(
+            path,
+            "  name: init-ssd-${NODE_ORDINAL}\n",
+            "  name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}\n",
+            "name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}",
+        )
+
+
+def patch_init_job_wait_filters(root: Path) -> None:
+    path = root / "src/elastic_blast/kubernetes.py"
+    _replace_once_unless_present(
+        path,
+        (
+            "            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "get jobs -o jsonpath=' \\\n"
+        ),
+        (
+            "            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "get jobs -l elb-job-id={cfg.azure.elb_job_id} -o jsonpath=' \\\n"
+        ),
+        "get jobs -l elb-job-id={cfg.azure.elb_job_id} -o jsonpath=",
+    )
+    _replace_once_unless_present(
+        path,
+        (
+            "            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "get jobs -l app=setup -o jsonpath=' \\\n"
+        ),
+        (
+            "            cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "get jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id} "
+            "-o jsonpath=' \\\n"
+        ),
+        "get jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id} -o jsonpath=",
+    )
+    _replace_all_unless_present(
+        path,
+        "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} delete jobs -l app=setup'",
+        (
+            "cmd = f'kubectl --context={cfg.appstate.k8s_ctx} "
+            "delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}'"
+        ),
+        "delete jobs -l app=setup,elb-job-id={cfg.azure.elb_job_id}",
+    )
+
+
 def main() -> int:
     if len(sys.argv) not in {2, 3}:
         print(
@@ -407,6 +471,8 @@ def main() -> int:
     patch_finalizer_script(root, merge_script_source)
     patch_init_shard_script(root)
     patch_aks_workload_tolerations(root)
+    patch_unique_init_ssd_job_names(root)
+    patch_init_job_wait_filters(root)
     print("patched elastic-blast-azure finalizer for sharded result merge")
     return 0
 

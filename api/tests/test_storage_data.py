@@ -210,6 +210,42 @@ def test_list_databases_surfaces_db_order_oracle_status(
     }
 
 
+def test_list_databases_marks_db_order_oracle_stale_on_source_version_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blobs = [
+        _blob("core_nt.nsq"),
+        _blob("core_nt-metadata.json"),
+        _blob("metadata/oracles/core_nt/status.json"),
+        _blob("metadata/oracles/core_nt/parts/run-1/00.txt"),
+    ]
+    payloads = {
+        "core_nt-metadata.json": json.dumps({"source_version": "new-snapshot"}),
+        "metadata/oracles/core_nt/status.json": json.dumps(
+            {
+                "status": "building",
+                "run_id": "run-1",
+                "expected_parts": 1,
+                "source_version": "old-snapshot",
+                "part_prefix": "metadata/oracles/core_nt/parts/run-1/",
+            }
+        ),
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    databases = {
+        item["name"]: item for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+    }
+
+    assert databases["core_nt"]["source_version"] == "new-snapshot"
+    assert databases["core_nt"]["db_order_oracle"]["status"] == "stale"
+
+
 @pytest.mark.parametrize(
     "bad_name",
     [

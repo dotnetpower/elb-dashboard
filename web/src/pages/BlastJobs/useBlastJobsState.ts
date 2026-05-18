@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 
 import { blastApi, type BlastJobSummary } from "@/api/endpoints";
 import { useClusterReadiness } from "@/hooks/usePrerequisites";
@@ -14,11 +15,55 @@ import {
 
 export type FilterKind = "all" | "running" | "completed" | "failed";
 
+const FILTER_KINDS: ReadonlySet<FilterKind> = new Set([
+  "all",
+  "running",
+  "completed",
+  "failed",
+]);
+
+function parseFilter(raw: string | null): FilterKind {
+  return raw && FILTER_KINDS.has(raw as FilterKind) ? (raw as FilterKind) : "all";
+}
+
 export function useBlastJobsState() {
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
-  const [filter, setFilter] = useState<FilterKind>("all");
-  const [search, setSearch] = useState("");
+  // J1: persist filter/search in URL query string so refresh + deep-links keep state.
+  const filter = useMemo<FilterKind>(
+    () => parseFilter(searchParams.get("status")),
+    [searchParams],
+  );
+  const search = searchParams.get("q") ?? "";
+  const setFilter = useCallback(
+    (next: FilterKind) => {
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          if (next === "all") params.delete("status");
+          else params.set("status", next);
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+  const setSearch = useCallback(
+    (next: string) => {
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          if (next.trim() === "") params.delete("q");
+          else params.set("q", next);
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
   const cluster = useClusterReadiness();
 
   const jobsQuery = useQuery({

@@ -10,6 +10,7 @@ ElasticBLAST submit/finalizer cycle.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sys
@@ -124,6 +125,43 @@ def _read_web_xml(path: Path) -> list[Row]:
             )
         )
     return rows
+
+
+def _write_accession_oracle(rows: list[Row], path: Path) -> None:
+    path.write_text(
+        "".join(f"{row.values['accession']}\n" for row in rows if row.values.get("accession")),
+        encoding="utf-8",
+    )
+
+
+def _write_normalized_csv(rows: list[Row], path: Path) -> None:
+    fieldnames = [
+        "rank",
+        "accession",
+        "identity_pct",
+        "align_length",
+        "mismatches",
+        "gaps",
+        "query_from",
+        "query_to",
+        "hit_from",
+        "hit_to",
+        "evalue",
+        "bits",
+        "score",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            values = {
+                column: row.values.get(column, "")
+                for column in fieldnames
+                if column != "rank"
+            }
+            writer.writerow(
+                {"rank": row.rank, **values}
+            )
 
 
 def _read_outfmt6(path: Path, query_id: str | None) -> list[Row]:
@@ -255,6 +293,9 @@ def compare(web_rows: list[Row], candidate_rows: list[Row]) -> dict[str, Any]:
     missing_from_pool = [
         accession for accession in web_accessions if accession not in candidate_by_accession
     ]
+    candidate_only_accessions = [
+        accession for accession in candidate_accessions if accession not in web_by_accession
+    ]
     tie_window_equivalent = bool(
         web_rows
         and candidate_rows
@@ -282,8 +323,10 @@ def compare(web_rows: list[Row], candidate_rows: list[Row]) -> dict[str, Any]:
         "web_rows": len(web_rows),
         "candidate_rows": len(candidate_rows),
         "shared_accessions": len(shared),
-        "web_only": len(set(web_accessions) - set(candidate_accessions)),
-        "candidate_only": len(set(candidate_accessions) - set(web_accessions)),
+        "web_only": len(missing_from_pool),
+        "candidate_only": len(candidate_only_accessions),
+        "first_20_web_only_accessions": missing_from_pool[:20],
+        "first_20_candidate_only_accessions": candidate_only_accessions[:20],
         "same_top_accession": bool(
             web_accessions and candidate_accessions and web_accessions[0] == candidate_accessions[0]
         ),
@@ -313,13 +356,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--query-id", help="only compare candidate rows for this qseqid")
     parser.add_argument("--json", type=Path, help="optional JSON report output path")
     parser.add_argument(
+        "--write-accessions",
+        type=Path,
+        help="write Web XML hit accessions, in Web rank order, for strict tie-order oracle use",
+    )
+    parser.add_argument(
+        "--write-normalized-csv",
+        type=Path,
+        help="write Web XML primary HSP rows as normalized CSV evidence",
+    )
+    parser.add_argument(
         "--accept-tie-window",
         action="store_true",
         help="exit successfully when strict order fails but the top-N tie-window is equivalent",
     )
     args = parser.parse_args(argv)
 
-    report = build_report(args.web_xml, args.candidate, query_id=args.query_id)
+    web_rows = _read_web_xml(args.web_xml)
+    if args.write_accessions:
+        _write_accession_oracle(web_rows, args.write_accessions)
+    if args.write_normalized_csv:
+        _write_normalized_csv(web_rows, args.write_normalized_csv)
+    candidate_rows = _read_outfmt6(args.candidate, args.query_id)
+    report = compare(web_rows, candidate_rows)
+    report.update(
+        {"web_xml": str(args.web_xml), "candidate": str(args.candidate), "query_id": args.query_id}
+    )
     payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.json:
         args.json.write_text(payload, encoding="utf-8")

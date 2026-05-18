@@ -74,6 +74,60 @@ def test_compare_web_xml_to_outfmt6_accepts_equivalent_rows(tmp_path: Path) -> N
     assert payload["value_mismatch_count"] == 0
 
 
+def test_compare_web_xml_to_outfmt6_writes_oracle_and_normalized_csv(tmp_path: Path) -> None:
+    web_xml = tmp_path / "web.xml"
+    candidate = tmp_path / "candidate.out"
+    report = tmp_path / "report.json"
+    accessions = tmp_path / "web-accessions.txt"
+    normalized_csv = tmp_path / "web.csv"
+    web_xml.write_text(
+        """<?xml version="1.0"?>
+<BlastOutput>
+  <BlastOutput_iterations>
+    <Iteration>
+      <Iteration_query-ID>query</Iteration_query-ID>
+      <Iteration_hits>
+        <Hit>
+          <Hit_id>gi|1|gb|ABC123.1|</Hit_id>
+          <Hit_accession>ABC123</Hit_accession>
+          <Hit_hsps><Hsp>
+            <Hsp_identity>462</Hsp_identity><Hsp_align-len>462</Hsp_align-len>
+            <Hsp_gaps>0</Hsp_gaps><Hsp_query-from>1</Hsp_query-from>
+            <Hsp_query-to>462</Hsp_query-to><Hsp_hit-from>10</Hsp_hit-from>
+            <Hsp_hit-to>471</Hsp_hit-to><Hsp_evalue>0.0</Hsp_evalue>
+            <Hsp_bit-score>828.419</Hsp_bit-score><Hsp_score>448</Hsp_score>
+          </Hsp></Hit_hsps>
+        </Hit>
+      </Iteration_hits>
+    </Iteration>
+  </BlastOutput_iterations>
+</BlastOutput>
+""",
+        encoding="utf-8",
+    )
+    candidate.write_text(
+        "query\tABC123.1\t100.000\t462\t0\t0\t1\t462\t10\t471\t0.0\t828.419\n",
+        encoding="utf-8",
+    )
+
+    result = _run(
+        web_xml,
+        candidate,
+        report,
+        "--write-accessions",
+        str(accessions),
+        "--write-normalized-csv",
+        str(normalized_csv),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert accessions.read_text(encoding="utf-8") == "ABC123.1\n"
+    assert normalized_csv.read_text(encoding="utf-8").splitlines() == [
+        "rank,accession,identity_pct,align_length,mismatches,gaps,query_from,query_to,hit_from,hit_to,evalue,bits,score",
+        "1,ABC123.1,100.000,462,0,0,1,462,10,471,0.0,828.419,448",
+    ]
+
+
 def test_compare_web_xml_to_outfmt6_reports_value_mismatch(tmp_path: Path) -> None:
     web_xml = tmp_path / "web.xml"
     candidate = tmp_path / "candidate.out"
@@ -119,6 +173,65 @@ def test_compare_web_xml_to_outfmt6_reports_value_mismatch(tmp_path: Path) -> No
         "web": "828.419",
         "candidate": "854",
     }
+
+
+def test_compare_web_xml_to_outfmt6_reports_missing_accession_samples(tmp_path: Path) -> None:
+    web_xml = tmp_path / "web.xml"
+    candidate = tmp_path / "candidate.out"
+    report = tmp_path / "report.json"
+    web_xml.write_text(
+        """<?xml version="1.0"?>
+<BlastOutput>
+  <BlastOutput_iterations>
+    <Iteration>
+      <Iteration_query-ID>query</Iteration_query-ID>
+      <Iteration_hits>
+        <Hit>
+          <Hit_id>gb|AAA111.1|</Hit_id><Hit_accession>AAA111</Hit_accession>
+          <Hit_hsps><Hsp>
+            <Hsp_identity>100</Hsp_identity><Hsp_align-len>100</Hsp_align-len>
+            <Hsp_gaps>0</Hsp_gaps><Hsp_query-from>1</Hsp_query-from>
+            <Hsp_query-to>100</Hsp_query-to><Hsp_hit-from>1</Hsp_hit-from>
+            <Hsp_hit-to>100</Hsp_hit-to><Hsp_evalue>0.0</Hsp_evalue>
+            <Hsp_bit-score>180.5</Hsp_bit-score><Hsp_score>100</Hsp_score>
+          </Hsp></Hit_hsps>
+        </Hit>
+        <Hit>
+          <Hit_id>gb|BBB222.1|</Hit_id><Hit_accession>BBB222</Hit_accession>
+          <Hit_hsps><Hsp>
+            <Hsp_identity>100</Hsp_identity><Hsp_align-len>100</Hsp_align-len>
+            <Hsp_gaps>0</Hsp_gaps><Hsp_query-from>1</Hsp_query-from>
+            <Hsp_query-to>100</Hsp_query-to><Hsp_hit-from>1</Hsp_hit-from>
+            <Hsp_hit-to>100</Hsp_hit-to><Hsp_evalue>0.0</Hsp_evalue>
+            <Hsp_bit-score>180.5</Hsp_bit-score><Hsp_score>100</Hsp_score>
+          </Hsp></Hit_hsps>
+        </Hit>
+      </Iteration_hits>
+    </Iteration>
+  </BlastOutput_iterations>
+</BlastOutput>
+""",
+        encoding="utf-8",
+    )
+    candidate.write_text(
+        "\n".join(
+            [
+                "query\tAAA111.1\t100.000\t100\t0\t0\t1\t100\t1\t100\t0.0\t180\t100",
+                "query\tCCC333.1\t100.000\t100\t0\t0\t1\t100\t1\t100\t0.0\t180\t100",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run(web_xml, candidate, report)
+
+    assert result.returncode == 1
+    payload = json.loads(report.read_text())
+    assert payload["web_only"] == 1
+    assert payload["candidate_only"] == 1
+    assert payload["first_20_web_only_accessions"] == ["BBB222.1"]
+    assert payload["first_20_candidate_only_accessions"] == ["CCC333.1"]
 
 
 def test_compare_web_xml_to_outfmt6_uses_optional_raw_score_for_rounded_bits(

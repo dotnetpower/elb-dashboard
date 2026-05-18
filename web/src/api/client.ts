@@ -176,10 +176,17 @@ const RBAC_HINTS: Record<string, string> = {
  * For 403 errors, adds guidance about the required RBAC role.
  */
 export function formatApiError(err: unknown, context?: string): string {
-  if (!(err instanceof Error)) return String(err);
+  if (!(err instanceof Error)) return sanitiseUserFacingMessage(String(err));
   const apiErr = err as Partial<ApiError>;
   const base = err.message || "Unknown error";
   const structuredMessage = apiErrorMessage(apiErr.body);
+
+  // C2 — proactively strip query strings, SAS signatures, bearer tokens, and
+  // long base64 blobs from anything we are about to render. The server-side
+  // `sanitise` helper covers structured payloads, but error.message strings
+  // (especially from network/timeout paths) frequently bypass it.
+  const sanitiseAndFormat = (s: string | null | undefined) =>
+    s ? sanitiseUserFacingMessage(s) : s;
 
   if (apiErr.status === 403) {
     const hint = (context && RBAC_HINTS[context]) || RBAC_HINTS["default"];
@@ -192,7 +199,7 @@ export function formatApiError(err: unknown, context?: string): string {
     return "Resource not found. It may have been deleted or not yet created.";
   }
   if (apiErr.status === 400 || apiErr.status === 409 || apiErr.status === 422) {
-    return structuredMessage ?? base;
+    return sanitiseAndFormat(structuredMessage ?? base) ?? base;
   }
   if (apiErr.status === 500) {
     // Hide internal details; show a clean message with the original reason if short enough
@@ -202,7 +209,7 @@ export function formatApiError(err: unknown, context?: string): string {
       .trim();
     return clean.length > 200
       ? "An internal error occurred. Please try again or check Azure Portal for details."
-      : clean;
+      : (sanitiseUserFacingMessage(clean) ?? clean);
   }
   if (apiErr.status === 503) {
     // Surface the structured "lab_tool_backend_pending" code cleanly so the UI
@@ -215,14 +222,59 @@ export function formatApiError(err: unknown, context?: string): string {
         "This Lab Tool route has no backend implementation in this build yet."
       );
     }
-    if (structuredMessage) return structuredMessage;
+    if (structuredMessage) return sanitiseUserFacingMessage(structuredMessage) ?? structuredMessage;
     return "Service temporarily unavailable. The Function App may be starting up — try again in a moment.";
   }
-  // Network errors
+  // Network errors — distinguish abort/timeout from offline so the user sees
+  // an actionable hint rather than a generic "Failed to fetch".
+  if (
+    err.name === "AbortError" ||
+    base.toLowerCase().includes("aborted") ||
+    base.toLowerCase().includes("timeout")
+  ) {
+    return "Request timed out. The backend is taking longer than expected — check the AKS cluster and try again.";
+  }
   if (base.includes("Failed to fetch") || base.includes("NetworkError")) {
     return "Network error — check your internet connection or try again.";
   }
-  return base;
+  return sanitiseUserFacingMessage(base) ?? base;
+}
+
+/**
+ * C2 — last-line scrub for any string we are about to render as an error.
+ *
+ * Defence-in-depth against the server-side sanitiser missing something: strip
+ * Azure SAS query strings, bearer tokens, subscription/tenant GUIDs, and
+ * obvious base64 blobs. Also collapses Azure SDK-style error prefixes like
+ * "(ResourceNotFound) The resource …" into a cleaner sentence.
+ */
+function sanitiseUserFacingMessage(message: string): string {
+  let out = message;
+
+  // Strip "?sig=..." style SAS query suffixes regardless of leading URL shape.
+  out = out.replace(/\?[A-Za-z0-9%=&_\-+.]*\bsig=[^&\s"']+[^"'\s]*/gi, "?<sas-redacted>");
+  out = out.replace(/\bsig=[A-Za-z0-9%+/=]{20,}/gi, "sig=<redacted>");
+
+  // Strip bearer / shared-key style headers if they ever leak into error text.
+  out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer <redacted>");
+  out = out.replace(/\bSharedKey\s+[A-Za-z0-9+/=:]+/gi, "SharedKey <redacted>");
+
+  // Subscription / tenant / object id GUIDs — never useful in the UI.
+  out = out.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<id-redacted>");
+
+  // Azure SDK "(ResourceNotFound) The resource '/subscriptions/…' was not found." →
+  // "Resource not found." This is purely cosmetic but covers a common case
+  // where the SDK pastes the full ARM path back at the user.
+  out = out.replace(/^\(([A-Za-z]+)\)\s*/, (_, code: string) => `${humaniseAzureCode(code)} — `);
+
+  // Collapse runs of whitespace introduced by the substitutions above.
+  out = out.replace(/\s{2,}/g, " ").trim();
+  return out;
+}
+
+function humaniseAzureCode(code: string): string {
+  // Insert spaces before capitals: "ResourceNotFound" → "Resource Not Found".
+  return code.replace(/([a-z])([A-Z])/g, "$1 $2");
 }
 
 function apiErrorMessage(body: unknown): string | null {

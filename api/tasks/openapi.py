@@ -53,6 +53,19 @@ _ROLE_STORAGE_BLOB_DATA_CONTRIBUTOR = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
 _ROLE_AKS_CLUSTER_USER = "4abbcc35-e782-43d8-92c5-2d3f1bd2253f"
 
 
+def _blast_node_count(cluster: Any) -> int:
+    """Return the desired blastpool node count, bounded for core_nt partitions."""
+
+    pools = getattr(cluster, "agent_pool_profiles", None) or []
+    for pool in pools:
+        labels = getattr(pool, "node_labels", None) or {}
+        if labels.get("workload") == "blast" or getattr(pool, "name", "") == "blastpool":
+            count = getattr(pool, "count", None) or getattr(pool, "node_count", None) or 0
+            if count:
+                return max(1, min(int(count), 10))
+    return 10
+
+
 def _now_iso() -> str:
     from datetime import datetime
 
@@ -223,6 +236,7 @@ def _build_manifests(
     tenant_id: str,
     acr_name: str,
     acr_resource_group: str,
+    num_nodes: int = 10,
 ) -> str:
     """Return the multi-document JSON payload to feed ``kubectl apply -f -``.
 
@@ -272,6 +286,8 @@ def _build_manifests(
                                 {"name": "ELB_AZURE_REGION", "value": region},
                                 {"name": "ELB_ACR_NAME", "value": acr_name},
                                 {"name": "ELB_ACR_RESOURCE_GROUP", "value": acr_resource_group},
+                                {"name": "ELB_NUM_NODES", "value": str(max(1, num_nodes))},
+                                {"name": "ELB_CORE_NT_SHARDS", "value": str(max(1, num_nodes))},
                                 {
                                     "name": "PATH",
                                     "value": (
@@ -280,7 +296,14 @@ def _build_manifests(
                                         "/sbin:/bin"
                                     ),
                                 },
-                                {"name": "AZURE_CLIENT_ID", "value": mi_client_id},
+                                # Do not set AZURE_CLIENT_ID manually here. If the
+                                # AKS Workload Identity webhook is present it
+                                # injects AZURE_CLIENT_ID / AZURE_TENANT_ID /
+                                # AZURE_FEDERATED_TOKEN_FILE from the annotated
+                                # ServiceAccount. If the webhook is absent, a
+                                # manual AZURE_CLIENT_ID makes `az login --identity`
+                                # fail with "Identity not found" instead of
+                                # falling back to the node managed identity.
                                 # Leave azcopy mode to the image/runtime.
                                 # The sibling OpenAPI service now downgrades
                                 # from WORKLOAD to MSI if the AKS webhook has
@@ -481,6 +504,7 @@ def deploy_openapi_service(
     aks = aks_client(cred, subscription_id)
     cluster = aks.managed_clusters.get(resource_group, cluster_name)
     region = cluster.location
+    num_nodes = _blast_node_count(cluster)
 
     image_tag = IMAGE_TAGS.get("elb-openapi", "4.9")
     effective_acr_resource_group = acr_resource_group or "rg-elbacr-01"
@@ -539,6 +563,7 @@ def deploy_openapi_service(
         tenant_id=tenant_id,
         acr_name=acr_name,
         acr_resource_group=effective_acr_resource_group,
+        num_nodes=num_nodes,
     )
     try:
         apply_output = _kubectl_apply(

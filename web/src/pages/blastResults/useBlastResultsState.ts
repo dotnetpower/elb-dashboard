@@ -45,12 +45,6 @@ export function useBlastResultsState({
   const cluster = useClusterReadiness();
   const terminalSidecar = useTerminalSidecarHealth();
 
-  const subscriptionId =
-    searchParams.get("subscription_id") || config?.subscriptionId || "";
-  const storageAccount =
-    searchParams.get("storage_account") || config?.storageAccountName || "";
-  const resourceGroup = config?.workloadResourceGroup || "";
-
   const jobQuery = useQuery({
     queryKey: ["blast-job", jobId],
     queryFn: () => blastApi.getJob(jobId!),
@@ -68,6 +62,28 @@ export function useBlastResultsState({
       return 5_000;
     },
   });
+
+  const job = jobQuery.data;
+  const payload = job?.payload;
+  const payloadSubscriptionId = stringFromPayload(payload, "subscription_id");
+  const payloadStorageAccount = stringFromPayload(payload, "storage_account");
+  const payloadResourceGroup = stringFromPayload(payload, "resource_group");
+
+  const subscriptionId =
+    searchParams.get("subscription_id") ||
+    payloadSubscriptionId ||
+    config?.subscriptionId ||
+    "";
+  const storageAccount =
+    searchParams.get("storage_account") ||
+    payloadStorageAccount ||
+    config?.storageAccountName ||
+    "";
+  const resourceGroup =
+    searchParams.get("resource_group") ||
+    payloadResourceGroup ||
+    config?.workloadResourceGroup ||
+    "";
 
   const resultsQuery = useQuery({
     queryKey: [
@@ -92,7 +108,6 @@ export function useBlastResultsState({
     },
   });
 
-  const job = jobQuery.data;
   const allFiles = resultsQuery.data?.files ?? [];
   const split = splitBlastResultFiles(allFiles);
   const publicAccessDisabled =
@@ -176,3 +191,11 @@ export function useBlastResultsState({
 }
 
 export type BlastResultsState = ReturnType<typeof useBlastResultsState>;
+
+function stringFromPayload(
+  payload: Record<string, unknown> | undefined,
+  key: string,
+) {
+  const value = payload?.[key];
+  return typeof value === "string" ? value : "";
+}

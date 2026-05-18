@@ -8,7 +8,9 @@ import {
   Dna,
   FileSearch,
   Gauge,
+  KeyRound,
   LifeBuoy,
+  RefreshCw,
   SendToBack,
   ShieldCheck,
   Sparkles,
@@ -54,10 +56,32 @@ interface TerminalHealthResponse {
   error?: string;
 }
 
+// T2: result of GET /api/terminal/azure-cli.
+interface AzureCliStatus {
+  status: "signed_in" | "signed_out" | "unknown";
+  user?: string | null;
+  tenant_id?: string | null;
+  subscription_id?: string | null;
+  hint?: string | null;
+  error?: string | null;
+  checked_at?: number;
+  cached?: boolean;
+  cache_age_s?: number;
+}
+
 async function fetchTerminalHealth(): Promise<TerminalHealthResponse> {
   const response = await fetchApiRaw("/terminal/health", { method: "GET" });
   if (!response.ok) return { status: "down", error: `HTTP ${response.status}` };
   return (await response.json()) as TerminalHealthResponse;
+}
+
+async function fetchAzureCliStatus(force = false): Promise<AzureCliStatus> {
+  const path = force ? "/terminal/azure-cli?force=true" : "/terminal/azure-cli";
+  const response = await fetchApiRaw(path, { method: "GET" });
+  if (!response.ok) {
+    return { status: "unknown", error: `HTTP ${response.status}` };
+  }
+  return (await response.json()) as AzureCliStatus;
 }
 
 function impactLabel(impact: CommandImpact): string {
@@ -139,6 +163,16 @@ export function TerminalCockpit({
     staleTime: 15_000,
     retry: false,
   });
+  // T2: poll the Azure CLI sign-in status separately from sidecar health.
+  // Backend caches the underlying `az account show` call for 60 s so this is
+  // safe at a 2-minute UI refresh.
+  const azureCli = useQuery({
+    queryKey: ["terminal-azure-cli"],
+    queryFn: () => fetchAzureCliStatus(false),
+    refetchInterval: 120_000,
+    staleTime: 60_000,
+    retry: false,
+  });
 
   const healthStatus = health.data?.status ?? (health.isLoading ? "checking" : "unknown");
   const liveCount = INNOVATION_CAPABILITIES.filter((item) => item.status === "live").length;
@@ -187,6 +221,49 @@ export function TerminalCockpit({
           <Gauge size={13} strokeWidth={1.5} />
           <span>Shell</span>
           <strong>{shellUser ?? "pending"}</strong>
+        </div>
+        {/* T2: Azure CLI sign-in indicator. Shows last-known status and lets
+            the user trigger a fresh probe (bypasses the 60 s cache). */}
+        <div
+          className="terminal-cockpit__health-item"
+          title={
+            azureCli.data?.status === "signed_in" && azureCli.data?.user
+              ? `Signed in as ${azureCli.data.user}`
+              : azureCli.data?.hint ??
+                azureCli.data?.error ??
+                "Run `az login --use-device-code` inside the terminal to sign in."
+          }
+        >
+          <KeyRound size={13} strokeWidth={1.5} />
+          <span>az login</span>
+          <strong data-state={azureCli.data?.status ?? (azureCli.isLoading ? "checking" : "unknown")}>
+            {azureCli.isLoading
+              ? "checking"
+              : azureCli.data?.status === "signed_in"
+                ? "signed in"
+                : azureCli.data?.status === "signed_out"
+                  ? "signed out"
+                  : "unknown"}
+          </strong>
+          <button
+            type="button"
+            onClick={() => azureCli.refetch()}
+            disabled={azureCli.isFetching}
+            aria-label="Re-check az login status"
+            title="Re-check az login status (bypasses 60s cache)"
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              marginLeft: 6,
+              cursor: azureCli.isFetching ? "wait" : "pointer",
+              color: "var(--text-faint)",
+              display: "inline-flex",
+              alignItems: "center",
+            }}
+          >
+            <RefreshCw size={11} strokeWidth={1.5} className={azureCli.isFetching ? "spin" : undefined} />
+          </button>
         </div>
       </section>
 

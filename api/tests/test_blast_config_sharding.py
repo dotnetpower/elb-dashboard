@@ -42,11 +42,11 @@ def test_auto_sharding_is_off_but_local_ssd_is_on_by_default() -> None:
     assert cfg.get("cluster", "exp-use-local-ssd") == "true"
 
 
-def test_local_ssd_can_be_explicitly_disabled_for_baseline_debugging() -> None:
+def test_local_ssd_cannot_be_disabled_while_pv_path_is_paused() -> None:
     params = _base_params()
     params["use_local_ssd"] = False
     cfg = _parse(generate_config(params))
-    assert not cfg.has_option("cluster", "exp-use-local-ssd")
+    assert cfg.get("cluster", "exp-use-local-ssd") == "true"
 
 
 def test_approximate_sharding_opt_in_injects_partitions_and_prefix() -> None:

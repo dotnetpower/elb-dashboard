@@ -30,7 +30,7 @@ import { parsePositiveTaxid, PROGRAMS } from "@/pages/blastSubmitModel";
 
 export function BlastSubmit() {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { form, setForm, set, reset, clearDraft } = useDraftForm();
+  const { form, setForm, set, reset, clearDraft, lastSavedAt } = useDraftForm();
   const [showParams, setShowParams] = useState(false);
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -136,6 +136,10 @@ export function BlastSubmit() {
     !shardingAvailability.options[form.sharding_mode].enabled
       ? shardingAvailability.options[form.sharding_mode].reason
       : null;
+  const effectiveShardingMode = shardingAvailability.options[form.sharding_mode].enabled
+    ? form.sharding_mode
+    : shardingAvailability.preferredMode;
+  const effectiveShardingEnabled = effectiveShardingMode !== "off";
 
   useEffect(() => {
     setForm((current) => {
@@ -184,19 +188,19 @@ export function BlastSubmit() {
       taxid: selectedTaxid ?? undefined,
       is_inclusive: selectedTaxid ? form.is_inclusive : undefined,
       allow_approximate_sharding:
-        form.sharding_mode === "approximate" || undefined,
-      db_auto_partition: form.sharding_mode !== "off",
+        effectiveShardingMode === "approximate" || undefined,
+      db_auto_partition: effectiveShardingEnabled,
       db_total_bytes: selectedDbInfo?.total_bytes,
       db_total_letters: selectedDbInfo?.total_letters,
       db_effective_search_space: selectedDbInfo?.web_blast_searchsp,
-      disable_sharding: form.disable_sharding,
+      disable_sharding: !effectiveShardingEnabled,
       enable_warmup: form.enable_warmup,
       evalue: form.evalue,
       max_target_seqs: form.max_target_seqs,
       outfmt: form.outfmt,
       low_complexity_filter: form.low_complexity_filter,
-      shard_sets: dbShardSets.length > 0 ? dbShardSets : undefined,
-      sharding_mode: form.sharding_mode,
+      shard_sets: effectiveShardingEnabled && dbShardSets.length > 0 ? dbShardSets : undefined,
+      sharding_mode: effectiveShardingMode,
       word_size: form.word_size ? parseInt(form.word_size, 10) : undefined,
     }),
   });
@@ -345,6 +349,7 @@ export function BlastSubmit() {
         submitError={submitMutation.isError ? submitMutation.error : null}
         preFlightResult={preFlightResult}
         preFlightPending={preFlightMutation.isPending}
+        lastSavedAt={lastSavedAt}
         onPreFlight={() => preFlightMutation.mutate()}
         onSubmit={handleSubmit}
       />

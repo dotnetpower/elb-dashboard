@@ -1,8 +1,34 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from api.tasks import openapi
+
+
+def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
+    manifest = openapi._build_manifests(
+        image="elbacr.azurecr.io/elb-openapi:4.9",
+        mi_client_id="mi-client-id",
+        cluster_name="elb-cluster",
+        resource_group="rg-elb",
+        storage_account="elbstg",
+        region="koreacentral",
+        tenant_id="tenant-id",
+        acr_name="elbacr",
+        acr_resource_group="rg-acr",
+        num_nodes=10,
+    )
+    docs = [json.loads(chunk) for chunk in manifest.split("\n---\n")]
+    deployment = next(doc for doc in docs if doc["kind"] == "Deployment")
+    env = {
+        item["name"]: item["value"]
+        for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+
+    assert env["ELB_NUM_NODES"] == "10"
+    assert env["ELB_CORE_NT_SHARDS"] == "10"
+    assert "PYTHONPATH" not in env
 
 
 def test_kubectl_apply_logs_in_with_managed_identity_when_needed(monkeypatch) -> None:

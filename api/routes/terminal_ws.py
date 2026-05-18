@@ -119,6 +119,96 @@ async def terminal_health() -> dict[str, object]:
         return {"status": "down", "error": str(exc)[:120]}
 
 
+# T2 — Azure CLI sign-in probe.
+#
+# The Browser Terminal needs the user to run `az login --use-device-code` once
+# per terminal-home Files share. There was previously no way for the UI to
+# tell the user whether that has been done; the cockpit just showed a generic
+# "Sidecar: ok" badge. This endpoint runs `az account show -o json` inside the
+# terminal sidecar via the existing terminal_exec server (allowlist already
+# permits `az`). Results are cached for 60 s to keep the cockpit refresh cheap.
+_AZURE_CLI_CACHE_TTL = 60.0
+_azure_cli_cache: dict[str, object] | None = None
+_azure_cli_cache_at: float = 0.0
+_azure_cli_lock = asyncio.Lock()
+
+
+async def _probe_azure_cli() -> dict[str, object]:
+    """Best-effort probe — never raises. Returns a stable shape for the SPA."""
+    # Import lazily so terminal_exec import errors (e.g. EXEC_TOKEN unset in a
+    # bare test environment) cannot break the health endpoint itself.
+    try:
+        from api.services import terminal_exec
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"status": "unknown", "error": f"exec helper unavailable: {exc}"}
+
+    def _run() -> dict[str, object]:
+        try:
+            return terminal_exec.run(
+                ["az", "account", "show", "-o", "json"],
+                timeout_seconds=8,
+            )
+        except Exception as exc:  # pragma: no cover - network-dependent
+            return {"exit_code": -1, "stdout": "", "stderr": str(exc)[:200]}
+
+    result = await asyncio.to_thread(_run)
+    exit_code = int(result.get("exit_code", -1) or -1)
+    stdout = str(result.get("stdout") or "").strip()
+    if exit_code == 0 and stdout:
+        import json as _json
+
+        try:
+            parsed = _json.loads(stdout)
+            return {
+                "status": "signed_in",
+                "user": parsed.get("user", {}).get("name"),
+                "tenant_id": parsed.get("tenantId"),
+                "subscription_id": parsed.get("id"),
+                "checked_at": time.time(),
+            }
+        except Exception:
+            return {"status": "signed_in", "checked_at": time.time()}
+    stderr = str(result.get("stderr") or "")[:200]
+    if "Please run 'az login'" in stderr or "AADSTS" in stderr or exit_code in (1, -1):
+        return {
+            "status": "signed_out",
+            "hint": "Run `az login --use-device-code` in the terminal.",
+            "checked_at": time.time(),
+        }
+    return {"status": "unknown", "error": stderr or "no output", "checked_at": time.time()}
+
+
+@router.get("/azure-cli")
+async def terminal_azure_cli(
+    force: bool = Query(default=False, description="Bypass the 60-second result cache."),
+    caller: CallerIdentity = REQUIRE_CALLER,
+) -> dict[str, object]:
+    """Report whether the terminal sidecar has a working `az` sign-in.
+
+    Cached for 60 s. The probe is cheap (~200 ms when signed in) but it does
+    fan-out to terminal_exec, so we do not want the cockpit polling on a
+    sub-minute interval.
+    """
+    global _azure_cli_cache, _azure_cli_cache_at
+    now = time.time()
+    async with _azure_cli_lock:
+        cached = _azure_cli_cache
+        cache_age = now - _azure_cli_cache_at
+        if not force and cached is not None and cache_age < _AZURE_CLI_CACHE_TTL:
+            return {**cached, "cached": True, "cache_age_s": int(cache_age)}
+        probed = await _probe_azure_cli()
+        _azure_cli_cache = probed
+        _azure_cli_cache_at = now
+    # Identity hash for log correlation only; do not echo caller back.
+    LOGGER.info(
+        "azure-cli probe caller=%s status=%s",
+        _log_identity_hash(caller.object_id),
+        probed.get("status"),
+    )
+    return {**probed, "cached": False}
+
+
+
 @router.websocket("/ws")
 async def ws_terminal(
     websocket: WebSocket,

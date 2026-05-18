@@ -105,88 +105,6 @@ def test_build_config_content_rejects_relative_path_traversal() -> None:
         )
 
 
-def test_upload_tie_order_oracle_writes_finalizer_metadata(monkeypatch) -> None:
-    uploads: list[dict[str, object]] = []
-
-    def fake_upload_blob_text(*args, **kwargs) -> None:
-        uploads.append({"args": args, "kwargs": kwargs})
-
-    monkeypatch.setattr("api.services.get_credential", lambda: "credential")
-    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
-
-    result = blast._upload_tie_order_oracle_if_present(
-        storage_account="stelb",
-        job_id="job-123",
-        options={
-            "tie_order_oracle_accessions": ["PX485240.1", "OX044342.2"],
-            "tie_order_oracle_strict": True,
-        },
-    )
-
-    assert result == {
-        "blob_path": "job-123/metadata/tie-order-oracle.txt",
-        "accession_count": 2,
-        "strict": True,
-    }
-    assert uploads[:1] == [
-        {
-            "args": (
-                "credential",
-                "stelb",
-                "results",
-                "job-123/metadata/tie-order-oracle.txt",
-                "PX485240.1\nOX044342.2\n",
-            ),
-            "kwargs": {"content_type": "text/plain; charset=utf-8"},
-        }
-    ]
-    assert uploads[1]["args"][3] == "job-123/metadata/tie-order-oracle-strict.txt"
-
-
-def test_upload_tie_order_oracle_rejects_oversized_payload() -> None:
-    oversized = "A" * (blast.TIE_ORDER_ORACLE_MAX_BYTES + 1)
-    with pytest.raises(ValueError, match="too large"):
-        blast._upload_tie_order_oracle_if_present(
-            storage_account="stelb",
-            job_id="job-123",
-            options={"tie_order_oracle_text": oversized},
-        )
-
-
-def test_upload_db_order_oracle_pointer_writes_url_manifest(monkeypatch) -> None:
-    uploads: list[dict[str, object]] = []
-
-    def fake_upload_blob_text(*args, **kwargs) -> None:
-        uploads.append({"args": args, "kwargs": kwargs})
-
-    monkeypatch.setattr("api.services.get_credential", lambda: "credential")
-    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
-    monkeypatch.setattr(
-        blast,
-        "_db_order_oracle_part_urls",
-        lambda **_kwargs: [
-            "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run/00.txt",
-            "https://stelb.blob.core.windows.net/blast-db/metadata/oracles/core_nt/parts/run/01.txt",
-        ],
-    )
-
-    result = blast._upload_db_order_oracle_pointer_if_available(
-        storage_account="stelb",
-        job_id="job-123",
-        database="core_nt",
-        options={"sharding_mode": "precise"},
-    )
-
-    assert result == {
-        "blob_path": "job-123/metadata/tie-order-oracle-urls.txt",
-        "db_name": "core_nt",
-        "part_count": 2,
-    }
-    assert uploads[0]["args"][3] == "job-123/metadata/tie-order-oracle-urls.txt"
-    assert "00.txt" in uploads[0]["args"][4]
-    assert uploads[0]["kwargs"] == {"content_type": "text/plain; charset=utf-8"}
-
-
 def test_elastic_blast_argv_uses_cfg_file() -> None:
     argv = blast._elastic_blast_argv("submit", "abc-123")
 
@@ -278,20 +196,6 @@ def test_k8s_cancel_blast_job_rejects_invalid_label_value() -> None:
         k8s_cancel_blast_job(object(), "sub", "rg", "aks", "default", "bad/job")
 
 
-# ---------------------------------------------------------------------------
-# Auto-shard wire-up: _build_config_content resolves DB metadata
-# ---------------------------------------------------------------------------
-def test_extract_db_name_handles_every_input_shape() -> None:
-    assert blast._extract_db_name("core_nt") == "core_nt"
-    assert blast._extract_db_name("blast-db/core_nt") == "core_nt"
-    assert blast._extract_db_name("blast-db/core_nt/core_nt") == "core_nt"
-    assert (
-        blast._extract_db_name("https://elbstg01.blob.core.windows.net/blast-db/core_nt/core_nt")
-        == "core_nt"
-    )
-    assert blast._extract_db_name("") == ""
-
-
 def test_build_config_auto_resolves_metadata_without_sharding_but_uses_local_ssd(
     monkeypatch,
 ) -> None:
@@ -302,7 +206,7 @@ def test_build_config_auto_resolves_metadata_without_sharding_but_uses_local_ssd
         "shard_sets": [1, 2, 3, 4, 5, 6, 8, 10],
         "total_bytes": 269 * 1024**3,
     }
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -328,7 +232,7 @@ def test_build_config_approximate_sharding_opt_in_injects_partitions(monkeypatch
         "total_bytes": 269 * 1024**3,
         "total_letters": 123_456_789,
     }
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -362,7 +266,7 @@ def test_build_config_metadata_effective_search_space_injects_searchsp(monkeypat
         "total_letters": 123_456_789,
         "effective_search_space": 2_254_169_736,
     }
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -393,7 +297,7 @@ def test_build_config_core_nt_calibrated_search_space_injects_searchsp(monkeypat
         "total_letters": 1_041_443_571_674,
         "effective_search_space": calibrated_search_space,
     }
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -488,8 +392,36 @@ def test_node_warmup_ready_check_skips_unsharded_submit() -> None:
     )
 
 
+def test_node_warmup_ready_check_skips_stale_sharded_options_for_unsharded_db(
+    monkeypatch,
+) -> None:
+    fake_meta = {
+        "db_name": "18S_fungal_sequences",
+        "sharded": False,
+        "shard_sets": [],
+    }
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
+
+    def fail_warmup_status(*_args, **_kwargs):
+        raise AssertionError("warmup status should not be called for unsharded DB")
+
+    monkeypatch.setattr("api.services.monitoring.k8s_warmup_status", fail_warmup_status)
+
+    assert (
+        blast._ensure_node_warmup_ready_for_submit(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            database="18S_fungal_sequences",
+            storage_account="elbstg01",
+            options={"sharding_mode": "precise", "enable_warmup": True},
+        )
+        is None
+    )
+
+
 def test_build_config_skips_auto_shard_when_metadata_missing(monkeypatch) -> None:
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: None)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -504,13 +436,92 @@ def test_build_config_skips_auto_shard_when_metadata_missing(monkeypatch) -> Non
     assert not cfg.has_option("blast", "db-partitions")
 
 
+def test_build_config_forces_sharding_off_when_metadata_is_unsharded(monkeypatch) -> None:
+    fake_meta = {
+        "db_name": "18S_fungal_sequences",
+        "sharded": False,
+        "shard_sets": [],
+        "total_bytes": 2 * 1024**3,
+    }
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
+    content = blast._build_config_content(
+        job_id="job-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        program="blastn",
+        database="18S_fungal_sequences",
+        query_file="queries/q.fa",
+        options={
+            "machine_type": "Standard_E16s_v5",
+            "num_nodes": 10,
+            "db_auto_partition": True,
+            "db_sharded": True,
+            "db_partitions": 10,
+            "db_partition_prefix": "https://elbstg01.blob.core.windows.net/blast-db/10shards/18S_fungal_sequences_shard_",
+            "sharding_mode": "precise",
+            "outfmt": 6,
+        },
+    )
+    cfg = _parse_ini(content)
+    assert not cfg.has_option("blast", "db-partitions")
+    assert not cfg.has_option("blast", "db-partition-prefix")
+
+
+def test_unsharded_metadata_suppresses_stale_split_sharding_options(monkeypatch) -> None:
+    fake_meta = {
+        "db_name": "18S_fungal_sequences",
+        "sharded": False,
+        "shard_sets": [],
+    }
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
+    options = blast._suppress_sharding_for_unsharded_database(
+        storage_account="elbstg01",
+        database="18S_fungal_sequences",
+        options={
+            "sharding_mode": "precise",
+            "query_count": 2,
+            "query_effective_search_spaces": [100, 200],
+            "outfmt": 6,
+        },
+    )
+    assert options is not None
+    assert options["sharding_mode"] == "off"
+    assert options["db_auto_partition"] is False
+    assert blast._requires_split_parent_submission(options) is False
+
+
+def test_single_part_non_core_nt_metadata_suppresses_sharding_options(monkeypatch) -> None:
+    fake_meta = {
+        "db_name": "18S_fungal_sequences",
+        "sharded": True,
+        "shard_sets": [1],
+    }
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
+    options = blast._suppress_sharding_for_unsharded_database(
+        storage_account="elbstg01",
+        database="18S_fungal_sequences",
+        options={
+            "sharding_mode": "precise",
+            "db_auto_partition": True,
+            "db_sharded": True,
+            "shard_sets": [1],
+            "outfmt": 6,
+        },
+    )
+    assert options is not None
+    assert options["sharding_mode"] == "off"
+    assert options["db_auto_partition"] is False
+    assert options["db_sharded"] is False
+
+
 def test_build_config_caller_provided_metadata_wins(monkeypatch) -> None:
     # Storage metadata is still resolved when the caller passes a coarse
     # db_sharded flag, but explicit caller values must not be overwritten.
     called = []
     monkeypatch.setattr(
         blast,
-        "_resolve_db_metadata",
+        "resolve_db_metadata",
         lambda *a, **k: (
             called.append(1),
             {
@@ -548,7 +559,7 @@ def test_build_config_db_sharded_flag_still_resolves_missing_metadata(monkeypatc
         "total_letters": 1_041_443_571_674,
         "effective_search_space": 32_156_241_807_668,
     }
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -580,7 +591,7 @@ def test_build_config_disable_sharding_blocks_auto_inject(monkeypatch) -> None:
         "shard_sets": [1, 2, 3, 4, 5],
         "total_bytes": 269 * 1024**3,
     }
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: fake_meta)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
     content = blast._build_config_content(
         job_id="job-1",
         resource_group="rg-elb",
@@ -660,7 +671,7 @@ def test_upload_split_query_files_verifies_uploaded_blob(monkeypatch) -> None:
 
 
 def test_build_split_child_submit_plan_generates_group_configs(monkeypatch) -> None:
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: None)
     uploaded_groups = [
         {
             "group_id": "qg1",
@@ -903,7 +914,7 @@ def test_ensure_terminal_azure_cli_login_falls_back_to_managed_identity(
 
     assert calls == [
         ["az", "account", "show", "--query", "user.name", "--output", "tsv"],
-        ["az", "login", "--identity", "--username", "client-id-123"],
+        ["az", "login", "--identity", "--client-id", "client-id-123"],
     ]
 
 
@@ -2103,7 +2114,7 @@ def test_split_parent_storage_submit_to_finalize_e2e(
 
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: FakeRepo())
-    monkeypatch.setattr(blast, "_resolve_db_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *_args, **_kwargs: None)
 
     def fake_upload_group_fasta(
         _credential: object,

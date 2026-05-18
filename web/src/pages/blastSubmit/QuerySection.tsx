@@ -444,7 +444,7 @@ function PrimerDiagnosticsPanel({
                 flexWrap: "wrap",
               }}
             >
-              <span style={{ minWidth: 120, fontFamily: "monospace", color: "var(--text-muted)" }}>
+              <span style={{ minWidth: 120, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
                 {f.id} ({f.length} nt)
               </span>
               <span

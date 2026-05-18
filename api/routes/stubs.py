@@ -84,7 +84,9 @@ _BLAST_SUBMIT_OPTION_KEYS = frozenset(
         "sharding_mode",
         "taxid",
         "tie_order_oracle_accessions",
+        "tie_order_oracle_strict",
         "tie_order_oracle_text",
+        "use_db_order_oracle",
         "use_local_ssd",
         "word_size",
     }
@@ -130,6 +132,7 @@ def _submit_options_from_body(body: dict[str, Any]) -> dict[str, Any]:
             options.setdefault(key, body[key])
     if "searchsp" in body and body["searchsp"] not in (None, ""):
         options.setdefault("db_effective_search_space", body["searchsp"])
+    options["use_local_ssd"] = True
     return options
 
 
@@ -198,6 +201,7 @@ def _normalise_blast_submit_body(body: dict[str, Any], *, job_id: str) -> dict[s
         str(normalised.get("database") or normalised.get("db") or ""),
         options,
     )
+    normalised["use_local_ssd"] = True
     query_data = normalised.get("query_data")
     if isinstance(query_data, str) and query_data.strip():
         try:
@@ -285,6 +289,19 @@ def _exception_reason(exc: Exception) -> str:
             return str(detail)[:120]
         return f"http_{exc.status_code}"
     return type(exc).__name__
+
+
+# Reasons that mean "the external OpenAPI execution plane is intentionally not
+# wired up yet" rather than "it failed at runtime". Surfacing these as
+# `external_degraded` makes every `/api/blast/jobs` poll look like an error in
+# the request inspector (constant red Degraded badge), which is misleading —
+# the dashboard works fine on the local state repo alone. Skip them.
+_EXTERNAL_NOT_ENABLED_REASONS = frozenset(
+    {
+        "openapi_not_configured",
+        "openapi_not_enabled",
+    }
+)
 
 
 def _external_to_blast_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -1043,10 +1060,16 @@ def blast_jobs_list(
                 seen.add(job_id)
     except Exception as exc:
         LOGGER.info("external blast job list unavailable: %s", _exception_reason(exc))
-        external_degraded = {
-            "external_degraded": True,
-            "external_degraded_reason": _exception_reason(exc),
-        }
+        reason = _exception_reason(exc)
+        # `openapi_not_configured` / `openapi_not_enabled` mean the optional
+        # external OpenAPI plane simply isn't deployed yet — that's a normal
+        # state, not a degradation. Skip surfacing it as `external_degraded`
+        # so the request inspector doesn't show a perpetual red badge.
+        if reason not in _EXTERNAL_NOT_ENABLED_REASONS:
+            external_degraded = {
+                "external_degraded": True,
+                "external_degraded_reason": reason,
+            }
 
     jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
     response: dict[str, Any] = {"jobs": jobs[:limit]}

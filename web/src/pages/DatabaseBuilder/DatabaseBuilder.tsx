@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowRight, Database } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, Database } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { NotImplementedBanner } from "@/pages/tools/ToolLayout";
@@ -9,9 +9,135 @@ import { ExistingDbsSection } from "./ExistingDbsSection";
 import { FastaInputSection } from "./FastaInputSection";
 import { useDatabaseBuilderState } from "./useDatabaseBuilderState";
 
+// C1: 3-step wizard model. "done" = inputs satisfied, "active" = next missing
+// step, "pending" = downstream. Renders as a compact horizontal stepper just
+// below the page header so the user always knows where they are.
+type StepState = "done" | "active" | "pending";
+
+interface WizardStep {
+  key: string;
+  label: string;
+  desc: string;
+  state: StepState;
+}
+
+function WizardStepper({ steps }: { steps: WizardStep[] }) {
+  return (
+    <ol
+      className="db-wizard-stepper"
+      aria-label="Custom DB build progress"
+      style={{
+        display: "flex",
+        gap: 8,
+        listStyle: "none",
+        padding: 0,
+        margin: 0,
+        flexWrap: "wrap",
+      }}
+    >
+      {steps.map((step, idx) => {
+        const color =
+          step.state === "done"
+            ? "var(--success)"
+            : step.state === "active"
+              ? "var(--accent)"
+              : "var(--text-faint)";
+        const background =
+          step.state === "done"
+            ? "rgba(106,214,163,0.10)"
+            : step.state === "active"
+              ? "rgba(122,167,255,0.10)"
+              : "var(--bg-secondary)";
+        return (
+          <li
+            key={step.key}
+            aria-current={step.state === "active" ? "step" : undefined}
+            style={{
+              flex: "1 1 200px",
+              minWidth: 180,
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: `1px solid ${
+                step.state === "pending" ? "var(--border-weak)" : color
+              }`,
+              background,
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: 999,
+                background: color,
+                color: "#0b132b",
+                fontSize: 11,
+                fontWeight: 700,
+                display: "grid",
+                placeItems: "center",
+                flexShrink: 0,
+              }}
+            >
+              {step.state === "done" ? <Check size={12} strokeWidth={2.5} /> : idx + 1}
+            </span>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
+                {step.label}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {step.desc}
+              </span>
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 export function DatabaseBuilder() {
   const state = useDatabaseBuilderState();
   const { cfg, readiness, readyCount } = state;
+
+  // C1: derive stepper state from the existing builder state so we don't
+  // duplicate validation rules. Build is "done" only once the mutation has
+  // actually produced output (state.successPath).
+  const configDone =
+    state.isValidDbName && !state.nameClash && !!state.dbType;
+  const fastaDone = state.fastaStats.isValid;
+  const buildDone = !!state.successPath;
+  const buildActive = !buildDone && configDone && fastaDone;
+  const fastaActive = !fastaDone && configDone;
+  const configActive = !configDone;
+  const stepperSteps: WizardStep[] = [
+    {
+      key: "configure",
+      label: "Configure",
+      desc: "Name + molecule type",
+      state: configDone ? "done" : configActive ? "active" : "pending",
+    },
+    {
+      key: "input",
+      label: "Provide FASTA",
+      desc: state.fastaStats.seqCount
+        ? `${state.fastaStats.seqCount} sequences staged`
+        : "Paste or upload sequences",
+      state: fastaDone ? "done" : fastaActive ? "active" : "pending",
+    },
+    {
+      key: "build",
+      label: "Build & publish",
+      desc: buildDone
+        ? "Published to Blob Storage"
+        : state.buildMutation.isPending
+          ? "makeblastdb running…"
+          : "Run makeblastdb in the sidecar",
+      state: buildDone ? "done" : buildActive ? "active" : "pending",
+    },
+  ];
 
   return (
     <div className="page-stack mono-page custom-db-page">
@@ -57,6 +183,8 @@ export function DatabaseBuilder() {
           </span>
         </div>
       </header>
+
+      <WizardStepper steps={stepperSteps} />
 
       <NotImplementedBanner feature="Custom Database Builder" />
 

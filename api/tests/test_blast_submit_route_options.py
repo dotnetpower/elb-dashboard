@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from api.routes.stubs import _apply_web_blast_searchsp_default, _submit_options_from_body
+from api.routes.stubs import (
+    _apply_web_blast_searchsp_default,
+    _normalise_blast_submit_body,
+    _submit_options_from_body,
+)
 
 
 def test_submit_options_forward_acr_fields() -> None:
@@ -34,6 +38,52 @@ def test_submit_options_accept_searchsp_alias() -> None:
 
     assert options["db_effective_search_space"] == "32156241807668"
     assert "searchsp" not in options
+
+
+def test_submit_options_forward_tie_order_oracle_controls() -> None:
+    options = _submit_options_from_body(
+        {
+            "tie_order_oracle_accessions": ["PX485240.1", "OX044342.2"],
+            "tie_order_oracle_strict": True,
+        }
+    )
+
+    assert options["tie_order_oracle_accessions"] == ["PX485240.1", "OX044342.2"]
+    assert options["tie_order_oracle_strict"] is True
+
+
+def test_submit_options_forward_db_order_oracle_opt_out() -> None:
+    options = _submit_options_from_body({"use_db_order_oracle": False})
+
+    assert options["use_db_order_oracle"] is False
+
+
+def test_submit_options_force_local_ssd_even_when_caller_disables_it() -> None:
+    options = _submit_options_from_body(
+        {
+            "options": {"use_local_ssd": False},
+            "use_local_ssd": False,
+        }
+    )
+
+    assert options["use_local_ssd"] is True
+
+
+def test_normalise_submit_body_records_forced_local_ssd() -> None:
+    body = {
+        "resource_group": "rg-elb",
+        "cluster_name": "elb-cluster",
+        "storage_account": "elbstg01",
+        "program": "blastn",
+        "database": "blast-db/18S_fungal_sequences/18S_fungal_sequences",
+        "query_file": "queries/q.fa",
+        "use_local_ssd": False,
+    }
+
+    normalised = _normalise_blast_submit_body(body, job_id="job-1")
+
+    assert normalised["use_local_ssd"] is True
+    assert normalised["options"]["use_local_ssd"] is True
 
 
 def test_web_blast_searchsp_default_applies_for_core_nt() -> None:

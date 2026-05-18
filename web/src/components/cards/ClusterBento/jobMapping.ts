@@ -37,13 +37,22 @@ const ACTIVE_REDUCING = new Set([
 const COMPLETED = new Set(["Completed", "completed", "Succeeded", "succeeded", "success"]);
 const FAILED = new Set(["Failed", "failed", "Error", "error", "cancelled", "Cancelled"]);
 
-export function classifyJobState(input: { phase?: string; status?: string }): DisplayJobState {
+export function classifyJobState(input: {
+  phase?: string;
+  status?: string;
+  /** Optional non-empty error string on the job row. When the
+   *  phase/status fields are missing or unrecognised but the job has
+   *  recorded an error, treat the row as Failed so headers, failed-rate
+   *  counters and per-row chrome reflect reality instead of "Unknown". */
+  error?: string | null;
+}): DisplayJobState {
   const v = input.phase || input.status || "";
   if (FAILED.has(v)) return "Failed";
   if (COMPLETED.has(v)) return "Completed";
   if (ACTIVE_REDUCING.has(v)) return "Reducing";
   if (ACTIVE_RUNNING.has(v)) return "Running";
   if (ACTIVE_PENDING.has(v)) return "Pending";
+  if (input.error && input.error.trim().length > 0) return "Failed";
   return v ? "Unknown" : "Pending";
 }
 
@@ -61,7 +70,11 @@ export function jobClusterName(j: BlastJobSummary): string | null {
 }
 
 export function toJobRowView(j: BlastJobSummary): JobRowView {
-  const state = classifyJobState({ phase: j.phase, status: j.status });
+  const state = classifyJobState({
+    phase: j.phase,
+    status: j.status,
+    error: j.error,
+  });
   const splitsTotal = j.splits_total ?? j.split_children?.child_count ?? 0;
   const splitsDone = j.splits_done ?? 0;
   const query = j.query_label ?? j.job_title ?? j.job_id;

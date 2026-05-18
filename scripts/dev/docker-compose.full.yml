@@ -98,10 +98,16 @@ services:
       # prod the api/worker default is 127.0.0.1, but in compose each
       # service is its own net namespace — must point at the redis svc.
       OPS_REDIS_URL: redis://redis:6379/2
+      # Local browser-submit smoke tests use the host az login cache for
+      # exec_server commands. Production does not mount this path and uses
+      # managed identity instead.
+      EXEC_AZURE_CONFIG_DIR: /tmp/elb-exec-azure
       # Skip MSI bootstrap — the toolchain in this sidecar does not need
       # to authenticate against Azure for local debug.
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
+    volumes:
+      - ${HOME}/.azure:/tmp/elb-exec-azure
     networks: [elb]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request,sys; ok=True\nfor url in ('http://127.0.0.1:7681/','http://127.0.0.1:7682/healthz'):\n    try:\n        ok = ok and urllib.request.urlopen(url, timeout=2).status < 500\n    except Exception:\n        ok = False\nsys.exit(0 if ok else 1)"]
@@ -197,6 +203,8 @@ services:
       API_CLIENT_ID: ${API_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
       AZURE_SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID:-00000000-0000-0000-0000-000000000000}
+      AZURE_TABLE_ENDPOINT: https://${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}.table.core.windows.net
+      AZURE_BLOB_ENDPOINT: https://${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}.blob.core.windows.net
       # Cross-sidecar wiring (overrides the prod defaults that point at
       # 127.0.0.1, since each compose service is its own net namespace).
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -267,6 +275,8 @@ services:
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-00000000-0000-0000-0000-000000000000}
       AZURE_SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID:-00000000-0000-0000-0000-000000000000}
+      AZURE_TABLE_ENDPOINT: https://${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}.table.core.windows.net
+      AZURE_BLOB_ENDPOINT: https://${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}.blob.core.windows.net
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -323,6 +333,8 @@ services:
       - --pidfile=/tmp/celerybeat.pid
     environment:
       LOG_LEVEL: DEBUG
+      AZURE_TABLE_ENDPOINT: https://${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}.table.core.windows.net
+      AZURE_BLOB_ENDPOINT: https://${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}.blob.core.windows.net
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       CELERY_BROKER_URL: redis://redis:6379/0

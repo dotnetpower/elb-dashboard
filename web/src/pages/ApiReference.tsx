@@ -8,6 +8,7 @@ import { aksApi, monitoringApi } from "@/api/endpoints";
 import { OpenApiDeployPanel } from "@/components/OpenApiDeployPanel";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { ApiHero } from "@/pages/apiReference/ApiHero";
+import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { parseSpec } from "@/pages/apiReference/spec";
 import { TagSection } from "@/pages/apiReference/TagSection";
@@ -126,39 +127,72 @@ export function ApiReference() {
         />
       )}
 
-      {baseUrl && hasOpenApiImage && (
-        <OpenApiDeployPanel
-          variant="update"
-          subscriptionId={sub}
-          resourceGroup={rg}
-          clusterName={clusterName}
-          acrName={acrName}
-          storageAccount={savedConfig?.storageAccountName ?? ""}
-          imageBuilt={hasOpenApiImage}
-          onRetry={() => {
-            svcQuery.refetch();
-            specQuery.refetch();
-          }}
-          retrying={svcQuery.isFetching || specQuery.isFetching}
-          pinnedTag={acrQuery.data?.expected_image_tags?.["elb-openapi"]}
-          currentTag={acrQuery.data?.actual_tags?.["elb-openapi"]?.[0]}
-        />
-      )}
+      {baseUrl && hasOpenApiImage && (() => {
+        // Only render the "Update OpenAPI" panel when the dashboard's
+        // pinned tag (from api/services/image_tags.py) is actually
+        // *newer* than what the cluster is currently serving. We treat
+        // the deployed OpenAPI document's `info.version` as the source
+        // of truth for what the pod is running (the tag in ACR is just
+        // the latest available build, not necessarily what is rolled
+        // out). When the two match, the cluster is already up to date
+        // and the panel would be a misleading "Update to v4.9" button.
+        const pinnedTag = acrQuery.data?.expected_image_tags?.["elb-openapi"];
+        const runningVersion = spec?.version;
+        if (pinnedTag && runningVersion && pinnedTag === runningVersion) {
+          return null;
+        }
+        return (
+          <OpenApiDeployPanel
+            variant="update"
+            subscriptionId={sub}
+            resourceGroup={rg}
+            clusterName={clusterName}
+            acrName={acrName}
+            storageAccount={savedConfig?.storageAccountName ?? ""}
+            imageBuilt={hasOpenApiImage}
+            onRetry={() => {
+              svcQuery.refetch();
+              specQuery.refetch();
+            }}
+            retrying={svcQuery.isFetching || specQuery.isFetching}
+            pinnedTag={pinnedTag}
+            currentTag={acrQuery.data?.actual_tags?.["elb-openapi"]?.[0]}
+          />
+        );
+      })()}
 
       {baseUrl && specQuery.isLoading && <SpecLoadingState />}
 
       {specQuery.isError && <SpecErrorState message={(specQuery.error as Error).message} />}
 
-      {spec &&
-        grouped.map(({ tag, endpoints }) => (
-          <TagSection
-            key={tag.name}
-            tag={tag}
-            endpoints={endpoints}
-            baseUrl={spec.baseUrl}
-            proxyInfo={{ sub, rg, clusterName }}
-          />
-        ))}
+      {spec && grouped.length > 0 && (
+        // A1: two-column layout — sticky sidebar (tag list + endpoint search +
+        // method chips) on the left, tag sections on the right. The sidebar is
+        // sticky to `top: 16px` so scrolling through long specs still keeps
+        // navigation in reach without taking over the viewport.
+        <div
+          className="api-reference-layout"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(240px, 280px) 1fr",
+            gap: 16,
+            alignItems: "start",
+          }}
+        >
+          <ApiReferenceSidebar groups={grouped} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+            {grouped.map(({ tag, endpoints }) => (
+              <TagSection
+                key={tag.name}
+                tag={tag}
+                endpoints={endpoints}
+                baseUrl={spec.baseUrl}
+                proxyInfo={{ sub, rg, clusterName }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Database, Wrench } from "lucide-react";
 
 import { loadSavedConfig } from "@/components/SetupWizard";
@@ -17,8 +18,33 @@ import {
   type TabKey,
 } from "@/pages/tools/toolsPageModel";
 
+const DEFAULT_TAB: TabKey = "cost";
+
+function isTabKey(value: string | null): value is TabKey {
+  return value !== null && value in TAB_INDEX;
+}
+
 export function ToolsPage() {
-  const [activeTab, setActiveTab] = useState<TabKey>("cost");
+  const [searchParams, setSearchParams] = useSearchParams();
+  // L1: keep `?tab=` in the URL so deep-links and refreshes preserve the active tab.
+  const activeTab = useMemo<TabKey>(() => {
+    const raw = searchParams.get("tab");
+    return isTabKey(raw) ? raw : DEFAULT_TAB;
+  }, [searchParams]);
+  const setActiveTab = useCallback(
+    (next: TabKey) => {
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          if (next === DEFAULT_TAB) params.delete("tab");
+          else params.set("tab", next);
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
   const cfg = loadSavedConfig();
   const hasConfig = !!cfg?.subscriptionId;
   const activeMeta = TAB_INDEX[activeTab];

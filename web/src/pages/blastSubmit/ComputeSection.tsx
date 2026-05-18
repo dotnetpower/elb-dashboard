@@ -54,6 +54,9 @@ export function ComputeSection({
     shardingAvailability.options.precise,
   ];
   const selectedShardingOption = shardingAvailability.options[form.sharding_mode];
+  const hasShardedMode =
+    shardingAvailability.options.approximate.enabled ||
+    shardingAvailability.options.precise.enabled;
   const shardedUnavailableReason =
     shardingAvailability.options.precise.reason ?? shardingAvailability.options.approximate.reason;
   const offUnavailableReason = shardingAvailability.options.off.reason;
@@ -148,7 +151,11 @@ export function ComputeSection({
               )}
             </span>
             <span className="muted" style={{ textAlign: "right" }}>
-              {isDbAlreadyWarm ? "Sharded modes available when capacity fits" : "Run baseline mode or warm the DB first"}
+              {isDbAlreadyWarm
+                ? hasShardedMode
+                  ? "Prepared shards available when capacity fits"
+                  : "Full DB cache ready; sharded modes unavailable"
+                : "Run baseline mode or warm the DB first"}
             </span>
           </div>
           <div style={{ marginTop: 8, marginBottom: 6 }}>

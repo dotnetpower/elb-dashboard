@@ -19,6 +19,11 @@ import {
 } from "./computeEnvironment";
 import type { ToastFn } from "./types";
 
+function hasPreparedShardLayoutForSubmit(db: string, shardSets?: number[]): boolean {
+  const dbName = db.split("/").filter(Boolean).pop() || db;
+  return dbName === "core_nt" && Boolean(shardSets?.some((shardCount) => shardCount > 1));
+}
+
 export interface UseSubmitMutationArgs {
   navigate: NavigateFunction;
   toast: ToastFn;
@@ -107,6 +112,11 @@ export function buildSubmitRequest({
     );
   }
 
+  const hasPreparedShardLayout = hasPreparedShardLayoutForSubmit(form.db, dbShardSets);
+  const effectiveShardingMode =
+    hasPreparedShardLayout && !form.disable_sharding ? form.sharding_mode : "off";
+  const useSharding = effectiveShardingMode !== "off";
+
   return {
     subscription_id: subId,
     resource_group: workloadRg,
@@ -132,15 +142,15 @@ export function buildSubmitRequest({
     mem_limit: "24Gi",
     enable_warmup: form.enable_warmup,
     use_local_ssd: true,
-    db_auto_partition: form.sharding_mode !== "off",
-    sharding_mode: form.sharding_mode,
+    db_auto_partition: useSharding,
+    sharding_mode: effectiveShardingMode,
     db_effective_search_space: dbEffectiveSearchSpace,
     db_total_letters: dbTotalLetters,
     db_total_bytes: dbTotalBytes,
-    shard_sets: dbShardSets && dbShardSets.length > 0 ? dbShardSets : undefined,
+    shard_sets: useSharding ? dbShardSets : undefined,
     allow_approximate_sharding:
-      form.sharding_mode === "approximate" || undefined,
-    disable_sharding: form.disable_sharding,
+      effectiveShardingMode === "approximate" || undefined,
+    disable_sharding: !useSharding,
     acr_resource_group: acrRg || undefined,
     acr_name: acrName || undefined,
     storage_account: storageAccount,

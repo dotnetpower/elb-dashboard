@@ -83,6 +83,57 @@ def _cluster_is_workload_ready(cluster: dict[str, Any]) -> bool:
     )
 
 
+# Auto-warm inflight lock: prevent duplicate `warmup_database` enqueues while
+# the previous task is still in its pre-Kubernetes phases (downloading /
+# sharding / planning), during which `k8s_warmup_status` cannot yet observe
+# the warmup pod. Keyed in ops Redis db 2 with a short TTL so a crashed task
+# can be retried on the next beat tick.
+_AUTOWARMUP_INFLIGHT_TTL_SECONDS = 15 * 60
+_AUTOWARMUP_INFLIGHT_PREFIX = "autowarmup:inflight:"
+
+
+def _autowarmup_inflight_key(
+    subscription_id: str, resource_group: str, cluster_name: str, db_name: str
+) -> str:
+    return (
+        f"{_AUTOWARMUP_INFLIGHT_PREFIX}"
+        f"{subscription_id}:{resource_group}:{cluster_name}:{db_name}"
+    )
+
+
+def _autowarmup_inflight_redis() -> Any | None:
+    try:
+        import os
+
+        import redis
+
+        url = os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
+        return redis.Redis.from_url(url, socket_timeout=1.5)
+    except Exception as exc:  # pragma: no cover — defensive
+        LOGGER.debug("auto warm inflight redis unavailable: %s", type(exc).__name__)
+        return None
+
+
+def _autowarmup_inflight_acquire(
+    subscription_id: str, resource_group: str, cluster_name: str, db_name: str
+) -> bool:
+    """Atomically claim an enqueue slot. Returns False if a previous reconcile
+    already enqueued this DB within the TTL window and the resulting warmup
+    has not yet become visible to k8s_warmup_status.
+    """
+    client = _autowarmup_inflight_redis()
+    if client is None:
+        # Fail-open: better to occasionally double-enqueue than to never warm.
+        return True
+    key = _autowarmup_inflight_key(subscription_id, resource_group, cluster_name, db_name)
+    try:
+        # SET key value NX EX ttl — returns True only if the key was created.
+        return bool(client.set(key, "1", nx=True, ex=_AUTOWARMUP_INFLIGHT_TTL_SECONDS))
+    except Exception as exc:
+        LOGGER.debug("auto warm inflight set failed: %s", type(exc).__name__)
+        return True
+
+
 def _warmup_status_by_db(databases: list[dict[str, Any]]) -> dict[str, str]:
     out: dict[str, str] = {}
     for item in databases:
@@ -403,6 +454,7 @@ def warmup_database(
                     k8s_ensure_job_manifests,
                     k8s_ensure_warmup_scripts_configmap,
                     k8s_ready_warmup_node_names,
+                    k8s_release_stale_warmup_jobs,
                 )
                 from api.services.warmup_jobs import build_warmup_job_plan
 
@@ -472,6 +524,22 @@ def warmup_database(
                 if configmap_summary.get("status") == "error":
                     raise RuntimeError(f"warmup scripts ConfigMap failed: {configmap_summary}")
 
+                # AKS stop/start replaces VMSS instance names. Any existing
+                # `warm-<db>-<shard>` Job pinned to a now-gone node would
+                # sit at `succeeded=1` forever (the dashboard correctly
+                # marks the DB as `Stale`), and `k8s_ensure_job_manifests`
+                # would then skip recreating it because the name still
+                # exists. Drop those stale Jobs first so ensure creates
+                # fresh ones on the current ready nodes.
+                stale_summary = k8s_release_stale_warmup_jobs(
+                    cred,
+                    subscription_id,
+                    resource_group,
+                    cluster_name,
+                    database_name,
+                    nodes,
+                )
+
                 _record_task_progress(
                     self,
                     "applying_warmup_jobs",
@@ -480,6 +548,7 @@ def warmup_database(
                     nodes=plan.nodes,
                     rbac=role_summary,
                     scripts_configmap=configmap_summary,
+                    stale_jobs=stale_summary,
                 )
                 _update_state(
                     job_id,
@@ -489,6 +558,7 @@ def warmup_database(
                     nodes=list(plan.nodes),
                     rbac=role_summary,
                     scripts_configmap=configmap_summary,
+                    stale_jobs=stale_summary,
                 )
                 apply_summary = k8s_ensure_job_manifests(
                     cred,
@@ -653,10 +723,12 @@ def reconcile_auto_warmup(
                 reconciled.append(result)
                 continue
 
-            if pref.last_ready and not force:
-                result["status"] = "already_ready"
-                reconciled.append(result)
-                continue
+            # NOTE: We intentionally do NOT short-circuit on `pref.last_ready`.
+            # The per-DB `warm_status` check below already skips any DB that is
+            # already Ready/Loading on the cluster, so re-running this loop on
+            # every beat tick is cheap. The previous early-return left newly
+            # downloaded DBs (or DBs whose warmup pod was deleted/failed) stuck
+            # in a not-warm state forever after the cluster's first ready edge.
 
             warm_status = _warmup_status_by_db(
                 k8s_warmup_status(
@@ -685,6 +757,19 @@ def reconcile_auto_warmup(
                     continue
                 if warm_status.get(db_name) in {"Ready", "Loading"}:
                     result["skipped"].append({"db": db_name, "reason": warm_status[db_name]})
+                    continue
+                # The first few minutes of warmup_database run inside the
+                # worker (download / shard / plan) *before* a k8s warmup pod
+                # exists, so warm_status above cannot deduplicate. Use a
+                # short-lived Redis lock to make sure we only enqueue once
+                # per DB until the resulting pod becomes observable.
+                if not _autowarmup_inflight_acquire(
+                    pref.subscription_id,
+                    pref.resource_group,
+                    pref.cluster_name,
+                    db_name,
+                ):
+                    result["skipped"].append({"db": db_name, "reason": "inflight"})
                     continue
                 task = celery_app.send_task(
                     "api.tasks.storage.warmup_database",

@@ -16,6 +16,7 @@ from api.services.sanitise import sanitise
 
 _BASE_URL_ENV = "ELB_OPENAPI_BASE_URL"
 _INTERNAL_AUTH_ENV = "ELB_OPENAPI_INTERNAL_TOKEN"
+_API_AUTH_ENV = "ELB_OPENAPI_API_TOKEN"
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 
@@ -53,6 +54,9 @@ def _base_url() -> str:
 
 def _headers() -> dict[str, str]:
     headers = {"Accept": "application/json"}
+    api_token = os.environ.get(_API_AUTH_ENV, "").strip()
+    if api_token:
+        headers["X-ELB-API-Token"] = api_token
     token = os.environ.get(_INTERNAL_AUTH_ENV, "").strip()
     if token:
         headers["X-ELB-Internal-Token"] = token

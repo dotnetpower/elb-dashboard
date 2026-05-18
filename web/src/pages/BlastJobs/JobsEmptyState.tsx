@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
-import { AlertTriangle } from "lucide-react";
+
+import { DegradedNotice } from "@/components/DegradedNotice";
 
 import type { BlastJobsState } from "./useBlastJobsState";
 
@@ -20,37 +21,16 @@ export function NoJobsEmpty({ cluster, degradedNotice }: NoJobsEmptyProps) {
           style={{
             margin: "var(--space-3) auto var(--space-4)",
             maxWidth: 520,
-            padding: "10px 14px",
-            background: "rgba(240,198,116,0.08)",
-            border: "1px solid rgba(240,198,116,0.25)",
-            borderRadius: 8,
-            fontSize: 12,
             textAlign: "left",
-            color: "var(--text-primary)",
           }}
         >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              marginBottom: 4,
-            }}
-          >
-            <AlertTriangle size={12} style={{ color: "var(--warning)" }} />
-            <strong
-              style={{
-                fontSize: 11,
-                letterSpacing: "0.04em",
-                textTransform: "uppercase",
-              }}
-            >
-              Job listing degraded · {degradedNotice.reason}
-            </strong>
-          </div>
-          <div className="muted" style={{ fontSize: 11, lineHeight: 1.4 }}>
-            {degradedNotice.message}
-          </div>
+          {/* D2: shared degraded notice keeps copy + recovery hints consistent
+              across cards (Jobs / Storage / Sidecars / Analytics). */}
+          <DegradedNotice
+            reason={degradedNotice.reason}
+            message={degradedNotice.message}
+            scope="Job listing"
+          />
         </div>
       )}
       {cluster.hasRunningCluster || cluster.isLoading || cluster.isError ? (

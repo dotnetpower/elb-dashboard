@@ -33,6 +33,9 @@ export function ClusterDetails({
   terminalResourceGroup,
   terminalVmName,
   kubeletObjectId,
+  hideTrigger,
+  open,
+  onOpenChange,
 }: {
   clusterName: string;
   powerState: string | null;
@@ -54,9 +57,24 @@ export function ClusterDetails({
   terminalResourceGroup?: string;
   terminalVmName?: string;
   kubeletObjectId?: string | null;
+  /** When true, suppress the inline CompactNodeSummary trigger strip.
+   *  Used by ClusterPulse, which surfaces its own "Open cluster detail"
+   *  affordance. */
+  hideTrigger?: boolean;
+  /** Optional controlled-mode open state. When provided together with
+   *  `onOpenChange`, the parent owns visibility (e.g. a button outside
+   *  this subtree opens the modal). Falls back to internal state when
+   *  both are undefined to preserve the original click-strip behaviour. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const isRunning = powerState === "Running" && !isTransitioning;
-  const [showModal, setShowModal] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const showModal = open ?? internalOpen;
+  const setShowModal = (next: boolean) => {
+    if (onOpenChange) onOpenChange(next);
+    if (open === undefined) setInternalOpen(next);
+  };
 
   const { topQuery, summary } = useNodeSummary({
     subscriptionId,
@@ -66,9 +84,11 @@ export function ClusterDetails({
   });
 
   return (
-    <div style={{ marginTop: "var(--space-2)" }}>
-      {/* One-line aggregate summary strip — opens the full modal on click. */}
-      {isRunning && summary.total > 0 && (
+    <div style={hideTrigger ? undefined : { marginTop: "var(--space-2)" }}>
+      {/* One-line aggregate summary strip — opens the full modal on click.
+       *  Suppressed when `hideTrigger` is set; the parent surfaces its own
+       *  "open detail" entry point. */}
+      {!hideTrigger && isRunning && summary.total > 0 && (
         <CompactNodeSummary
           summary={summary}
           isFetching={topQuery.isFetching}
@@ -76,7 +96,7 @@ export function ClusterDetails({
         />
       )}
 
-      {isRunning && topQuery.isLoading && summary.total === 0 && (
+      {!hideTrigger && isRunning && topQuery.isLoading && summary.total === 0 && (
         <div
           className="muted"
           style={{
@@ -91,7 +111,7 @@ export function ClusterDetails({
         </div>
       )}
 
-      {!isRunning && (
+      {!hideTrigger && !isRunning && (
         <div className="muted" style={{ fontSize: 10, marginTop: 4 }}>
           Start the cluster to view node metrics.
         </div>

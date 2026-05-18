@@ -18,6 +18,7 @@ import re
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -644,6 +645,104 @@ def k8s_release_warmup_cache(
             "db_label": db_label,
             "namespace": target_ns,
             "deleted": deleted,
+            "errors": errors,
+        }
+    finally:
+        session.close()
+
+
+def k8s_release_stale_warmup_jobs(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    db_name: str,
+    current_node_names: Iterable[str],
+    namespace: str = "default",
+) -> dict[str, Any]:
+    """Delete warmup Jobs (and their pods) pinned to nodes no longer present.
+
+    ``Job.spec.template.spec.nodeName`` is immutable, so when AKS stop/start
+    rotates VMSS instances the dashboard's previously-succeeded warmup Jobs
+    cannot run again on the replacement nodes — they sit at ``succeeded=1``
+    forever while ``_mark_stale_warmup_nodes`` correctly flags the DB as
+    ``Stale``. Re-running ``k8s_ensure_job_manifests`` won't help either,
+    because the existing Job names collide and ensure skips them.
+
+    This helper finds Jobs labelled ``app=db-warmup, db=<name>`` whose pinned
+    ``nodeName`` is not in ``current_node_names`` and deletes them with
+    ``propagationPolicy=Background`` so the pods clean up too. The next
+    ``k8s_ensure_job_manifests`` call will then recreate fresh Jobs on the
+    current ready nodes.
+    """
+
+    db_label = _warmup_db_label_value(db_name)
+    if not _K8S_LABEL_VALUE_RE.match(db_label):
+        raise ValueError("db_name is not a valid Kubernetes label value")
+
+    live_nodes = {str(name) for name in current_node_names if name}
+
+    session, server = _get_k8s_session(
+        credential, subscription_id, resource_group, cluster_name, admin=True
+    )
+    try:
+        target_ns = _namespace_or_default(session, server, namespace)
+        list_url = f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs"
+        response = session.get(
+            list_url,
+            params={"labelSelector": f"app={DEFAULT_WARMUP_APP_LABEL},db={db_label}"},
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return {
+                "status": "error",
+                "database": db_name,
+                "namespace": target_ns,
+                "status_code": response.status_code,
+                "detail": response.text[:200],
+            }
+
+        deleted: list[dict[str, Any]] = []
+        kept: list[str] = []
+        errors: list[dict[str, Any]] = []
+        for job in response.json().get("items", []):
+            metadata = job.get("metadata", {}) or {}
+            name = str(metadata.get("name") or "")
+            if not name:
+                continue
+            pinned = (
+                job.get("spec", {})
+                .get("template", {})
+                .get("spec", {})
+                .get("nodeName")
+                or ""
+            )
+            if not pinned or str(pinned) in live_nodes:
+                kept.append(name)
+                continue
+            del_response = session.delete(
+                f"{list_url}/{name}",
+                params={"propagationPolicy": "Background"},
+                timeout=10,
+            )
+            if del_response.status_code in (200, 201, 202, 404):
+                deleted.append({"name": name, "stale_node": str(pinned)})
+            else:
+                errors.append(
+                    {
+                        "name": name,
+                        "stale_node": str(pinned),
+                        "status_code": del_response.status_code,
+                        "detail": del_response.text[:200],
+                    }
+                )
+
+        return {
+            "status": "released" if not errors else "partial",
+            "database": db_name,
+            "namespace": target_ns,
+            "deleted": deleted,
+            "kept": kept,
             "errors": errors,
         }
     finally:

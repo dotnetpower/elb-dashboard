@@ -116,6 +116,67 @@ describe("blast submit taxonomy filter", () => {
     expect(request.db_effective_search_space).toBe(32156241807668);
   });
 
+  it("forces stale sharding form state off when no prepared shard layout is available", () => {
+    const request = buildSubmitRequest({
+      form: makeForm({ sharding_mode: "precise", db_auto_partition: true }),
+      selectedCluster: cluster,
+      subId: "sub-1",
+      workloadRg: "rg-elb",
+      storageAccount: "stelb",
+      acrRg: "rg-elbacr",
+      acrName: "acrelb",
+      region: "koreacentral",
+      dbShardSets: [],
+    });
+
+    expect(request.sharding_mode).toBe("off");
+    expect(request.db_auto_partition).toBe(false);
+    expect(request.shard_sets).toBeUndefined();
+    expect(request.disable_sharding).toBe(true);
+  });
+
+  it("treats single-part non-core-nt shard metadata as unsharded", () => {
+    const request = buildSubmitRequest({
+      form: makeForm({
+        db: "blast-db/18S_fungal_sequences/18S_fungal_sequences",
+        sharding_mode: "precise",
+        db_auto_partition: true,
+      }),
+      selectedCluster: cluster,
+      subId: "sub-1",
+      workloadRg: "rg-elb",
+      storageAccount: "stelb",
+      acrRg: "rg-elbacr",
+      acrName: "acrelb",
+      region: "koreacentral",
+      dbShardSets: [1],
+    });
+
+    expect(request.sharding_mode).toBe("off");
+    expect(request.db_auto_partition).toBe(false);
+    expect(request.shard_sets).toBeUndefined();
+    expect(request.disable_sharding).toBe(true);
+  });
+
+  it("keeps sharding enabled when a prepared shard layout is available", () => {
+    const request = buildSubmitRequest({
+      form: makeForm({ sharding_mode: "precise", db_auto_partition: true }),
+      selectedCluster: cluster,
+      subId: "sub-1",
+      workloadRg: "rg-elb",
+      storageAccount: "stelb",
+      acrRg: "rg-elbacr",
+      acrName: "acrelb",
+      region: "koreacentral",
+      dbShardSets: [1, 2, 4, 10],
+    });
+
+    expect(request.sharding_mode).toBe("precise");
+    expect(request.db_auto_partition).toBe(true);
+    expect(request.shard_sets).toEqual([1, 2, 4, 10]);
+    expect(request.disable_sharding).toBe(false);
+  });
+
   it("renders inclusive taxonomy filters in the command preview", () => {
     const command = buildCommandString(
       makeForm({ taxid: "9606", is_inclusive: true }),

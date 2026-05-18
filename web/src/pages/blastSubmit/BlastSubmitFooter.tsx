@@ -1,7 +1,10 @@
+import { useEffect, useState } from "react";
 import {
   CheckCircle2,
   Loader2,
   Play,
+  Save,
+  ShieldAlert,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -27,8 +30,21 @@ export interface BlastSubmitFooterProps {
   submitError: unknown;
   preFlightResult: PreFlightResult | null;
   preFlightPending: boolean;
+  /** Wall-clock time of the last successful draft auto-save (N1). */
+  lastSavedAt?: Date | null;
   onPreFlight: () => void;
   onSubmit: () => void;
+}
+
+function formatSavedAgo(when: Date | null | undefined, now: number): string {
+  if (!when) return "Draft not saved yet";
+  const seconds = Math.max(0, Math.round((now - when.getTime()) / 1000));
+  if (seconds < 5) return "Saved just now";
+  if (seconds < 60) return `Saved ${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `Saved ${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return `Saved ${hours}h ago`;
 }
 
 export function BlastSubmitFooter({
@@ -43,9 +59,30 @@ export function BlastSubmitFooter({
   submitError,
   preFlightResult,
   preFlightPending,
+  lastSavedAt,
   onPreFlight,
   onSubmit,
 }: BlastSubmitFooterProps) {
+  // N1: re-render the "Saved Ns ago" label every 15s so it doesn't go stale
+  // while the user idles on the form.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 15_000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  // N2: block the actual Run BLAST button if pre-flight was run and failed.
+  // Validation already gates canSubmit on required fields; this adds a second
+  // gate that surfaces "fix the readiness checks first" to the user.
+  const preFlightBlocked =
+    preFlightResult != null && preFlightResult.ready === false;
+  const runDisabled = !canSubmit || preFlightBlocked || submitPending;
+  const runTitle = preFlightBlocked
+    ? `Resolve ${preFlightResult?.critical_blockers ?? 0} pre-flight blocker(s) before submitting`
+    : !canSubmit
+      ? "Fill in the required fields above"
+      : undefined;
+
   return (
     <div className="blast-submit-footer">
       {missing.length > 0 && !submitPending && (
@@ -98,6 +135,26 @@ export function BlastSubmitFooter({
               )}
             </span>
           )}
+          {/* N1: draft auto-save indicator */}
+          <span
+            className="blast-submit-summary__saved"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: 11,
+              color: "var(--text-faint)",
+              marginLeft: searchSummary ? 12 : 0,
+            }}
+            title={
+              lastSavedAt
+                ? `Draft stored in this browser tab (sessionStorage). Last write: ${lastSavedAt.toLocaleTimeString()}`
+                : "Draft will auto-save as you type"
+            }
+          >
+            <Save size={11} strokeWidth={1.5} />
+            {formatSavedAgo(lastSavedAt, now)}
+          </span>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {canSubmit && (
@@ -121,14 +178,24 @@ export function BlastSubmitFooter({
           <button
             className="blast-submit-btn"
             onClick={onSubmit}
-            disabled={!canSubmit}
+            disabled={runDisabled}
+            title={runTitle}
+            aria-disabled={runDisabled}
           >
             {submitPending ? (
               <Loader2 size={16} strokeWidth={1.5} className="spin" />
+            ) : preFlightBlocked ? (
+              <ShieldAlert size={15} strokeWidth={1.5} />
             ) : (
               <Play size={15} strokeWidth={1.5} />
             )}
-            <span>{submitPending ? "Submitting" : "Run BLAST"}</span>
+            <span>
+              {submitPending
+                ? "Submitting"
+                : preFlightBlocked
+                  ? "Resolve blockers"
+                  : "Run BLAST"}
+            </span>
           </button>
         </div>
       </div>

@@ -24,6 +24,11 @@ from urllib.parse import urlparse
 
 from celery import shared_task
 
+from api.services.blast_db_metadata import extract_db_name, resolve_db_metadata
+from api.services.blast_oracles import (
+    upload_db_order_oracle_pointer_if_available,
+    upload_tie_order_oracle_if_present,
+)
 from api.services.query_grouping import QuerySplitExecutionPlan
 from api.services.terminal_exec import TerminalExecError
 
@@ -43,10 +48,6 @@ SPLIT_CHILD_MERGED_RESULT_BLOB = "merged_results.out.gz"
 SPLIT_CHILD_MERGE_REPORT_BLOB = "merge-report.json"
 SPLIT_PARENT_MANIFEST_BLOB = "split-results-manifest.json"
 SPLIT_MERGE_REPORT_MAX_BYTES = 1024 * 1024
-TIE_ORDER_ORACLE_BLOB = "metadata/tie-order-oracle.txt"
-TIE_ORDER_ORACLE_URLS_BLOB = "metadata/tie-order-oracle-urls.txt"
-TIE_ORDER_ORACLE_STRICT_BLOB = "metadata/tie-order-oracle-strict.txt"
-TIE_ORDER_ORACLE_MAX_BYTES = 1024 * 1024
 SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
     {
         "additional_options",
@@ -118,7 +119,7 @@ def _ensure_terminal_azure_cli_login(terminal_run) -> None:
     client_id = os.environ.get("AZURE_CLIENT_ID", "").strip()
     argv = ["az", "login", "--identity"]
     if client_id:
-        argv.extend(["--username", client_id])
+        argv.extend(["--client-id", client_id])
     login = terminal_run(argv=argv, timeout_seconds=120)
     if int(login.get("exit_code", 1) or 0) != 0:
         error = _result_error(login, None)
@@ -203,192 +204,8 @@ def _normalise_database_url(storage_account: str, database: str) -> str:
     )
 
 
-def _normalise_tie_order_oracle(value: object) -> tuple[str, int] | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, str):
-        accessions = [line.strip() for line in value.splitlines() if line.strip()]
-    elif isinstance(value, list):
-        accessions = [str(item).strip() for item in value if str(item).strip()]
-    else:
-        raise ValueError("tie order oracle must be a string or a list of accessions")
-    if not accessions:
-        return None
-    text = "\n".join(accessions) + "\n"
-    if len(text.encode("utf-8")) > TIE_ORDER_ORACLE_MAX_BYTES:
-        raise ValueError("tie order oracle is too large")
-    return text, len(accessions)
-
-
-def _upload_tie_order_oracle_if_present(
-    *,
-    storage_account: str,
-    job_id: str,
-    options: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    if not isinstance(options, Mapping):
-        return None
-    oracle = _normalise_tie_order_oracle(
-        options.get("tie_order_oracle_accessions") or options.get("tie_order_oracle_text")
-    )
-    if oracle is None:
-        return None
-    text, accession_count = oracle
-    from api.services import get_credential
-    from api.services.storage_data import upload_blob_text
-
-    blob_path = f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_BLOB}"
-    upload_blob_text(
-        get_credential(),
-        storage_account,
-        "results",
-        blob_path,
-        text,
-        content_type="text/plain; charset=utf-8",
-    )
-    strict_requested = _option_enabled(options, "tie_order_oracle_strict")
-    if strict_requested:
-        upload_blob_text(
-            get_credential(),
-            storage_account,
-            "results",
-            f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_STRICT_BLOB}",
-            "1\n",
-            content_type="text/plain; charset=utf-8",
-        )
-    return {"blob_path": blob_path, "accession_count": accession_count, "strict": strict_requested}
-
-
-def _db_order_oracle_part_urls(
-    *,
-    storage_account: str,
-    db_name: str,
-) -> list[str]:
-    from api.services import get_credential
-    from api.services.db_order_oracle import ORACLE_PARTS_DIR, ORACLE_PREFIX_ROOT
-    from api.services.storage_data import _blob_service
-
-    svc = _blob_service(get_credential(), storage_account)
-    cc = svc.get_container_client("blast-db")
-    status_blob = f"{ORACLE_PREFIX_ROOT}/{db_name}/status.json"
-    try:
-        status = json.loads(
-            cc.get_blob_client(status_blob).download_blob().readall().decode("utf-8")
-        )
-    except Exception:
-        return []
-    if not isinstance(status, dict):
-        return []
-    run_id = str(status.get("run_id") or "")
-    expected_parts = int(status.get("expected_parts") or 0)
-    if not run_id or expected_parts <= 0:
-        return []
-    prefix = f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_PARTS_DIR}/{run_id}/"
-    part_names = sorted(
-        blob.name
-        for blob in cc.list_blobs(name_starts_with=prefix)
-        if str(blob.name).endswith(".txt")
-    )
-    if len(part_names) < expected_parts:
-        return []
-    return [
-        f"https://{storage_account}.blob.core.windows.net/blast-db/{name}"
-        for name in part_names
-    ]
-
-
-def _upload_db_order_oracle_pointer_if_available(
-    *,
-    storage_account: str,
-    job_id: str,
-    database: str,
-    options: Mapping[str, Any] | None,
-) -> dict[str, Any] | None:
-    if not isinstance(options, Mapping) or options.get("use_db_order_oracle") is False:
-        return None
-    from api.services.sharding_precision import normalize_sharding_mode
-
-    if normalize_sharding_mode(options) != "precise":
-        return None
-    if options.get("tie_order_oracle_accessions") or options.get("tie_order_oracle_text"):
-        return None
-    db_name = _extract_db_name(database)
-    if not db_name:
-        return None
-    part_urls = _db_order_oracle_part_urls(storage_account=storage_account, db_name=db_name)
-    if not part_urls:
-        return None
-    from api.services import get_credential
-    from api.services.storage_data import upload_blob_text
-
-    blob_path = f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_URLS_BLOB}"
-    upload_blob_text(
-        get_credential(),
-        storage_account,
-        "results",
-        blob_path,
-        "\n".join(part_urls) + "\n",
-        content_type="text/plain; charset=utf-8",
-    )
-    return {"blob_path": blob_path, "db_name": db_name, "part_count": len(part_urls)}
-
-
 def _results_job_url(storage_account: str, job_id: str) -> str:
     return _storage_url(storage_account, "results", _relative_blob_path(job_id, "job_id"))
-
-
-def _extract_db_name(database: str) -> str:
-    """Extract the bare DB name from a ``database`` field of any shape."""
-    db = database.strip()
-    if db.startswith("https://"):
-        # https://acct.blob.core.windows.net/blast-db/<db>[/...]
-        parts = db.split("/", 5)
-        if len(parts) >= 5:
-            db = parts[4]
-        else:
-            return ""
-    db = db.removeprefix("blast-db/")
-    db = db.split("/", 1)[0]
-    return db
-
-
-def _resolve_db_metadata(storage_account: str, db_name: str) -> dict[str, Any] | None:
-    """Read ``{db}-metadata.json`` from the workload Storage account.
-
-    Returns the parsed dict (with ``sharded`` / ``shard_sets`` /
-    ``total_bytes`` fields if the prepare-db pipeline wrote them) or
-    ``None`` if the metadata blob does not exist or cannot be read.
-
-    Best-effort: any error returns ``None`` so submit can proceed without
-    auto-sharding instead of failing outright.
-    """
-    if not storage_account or not db_name:
-        return None
-    try:
-        from azure.core.exceptions import ResourceNotFoundError
-
-        from api.services import get_credential
-        from api.services.storage_data import _blob_service
-
-        cred = get_credential()
-        svc = _blob_service(cred, storage_account)
-        cc = svc.get_container_client("blast-db")
-        bc = cc.get_blob_client(f"{db_name}-metadata.json")
-        try:
-            data = bc.download_blob().readall()
-        except ResourceNotFoundError:
-            return None
-        meta = json.loads(data.decode("utf-8"))
-        if isinstance(meta, dict):
-            return meta
-        return None
-    except Exception as exc:
-        LOGGER.info(
-            "db metadata lookup skipped for %s: %s",
-            db_name,
-            type(exc).__name__,
-        )
-        return None
 
 
 def _build_config_content(
@@ -423,11 +240,20 @@ def _build_config_content(
     # flag, but ElasticBLAST also needs the partition prefix/size inputs that
     # are only authoritative in storage metadata.
     if database and storage_account:
-        db_name = _extract_db_name(database)
-        meta = _resolve_db_metadata(storage_account, db_name)
+        db_name = extract_db_name(database)
+        meta = resolve_db_metadata(storage_account, db_name)
         if meta is not None:
             params.setdefault("db_name", db_name)
-            params.setdefault("db_sharded", bool(meta.get("sharded")))
+            metadata_has_shards = _metadata_has_prepared_shard_layout(db_name, meta)
+            if metadata_has_shards:
+                params.setdefault("db_sharded", True)
+            else:
+                params["db_sharded"] = False
+                params["db_auto_partition"] = False
+                params["sharding_mode"] = "off"
+                params["disable_sharding"] = True
+                params.pop("db_partitions", None)
+                params.pop("db_partition_prefix", None)
             tb = meta.get("total_bytes")
             if isinstance(tb, (int, float)) and tb > 0:
                 params.setdefault("db_total_bytes", int(tb))
@@ -454,6 +280,46 @@ def _option_enabled(options: Mapping[str, Any], key: str) -> bool:
     return bool(value)
 
 
+def _metadata_has_prepared_shard_layout(db_name: str, meta: Mapping[str, Any]) -> bool:
+    shard_sets = meta.get("shard_sets")
+    return (
+        db_name == "core_nt"
+        and bool(meta.get("sharded"))
+        and isinstance(shard_sets, list)
+        and any(isinstance(value, int) and value > 1 for value in shard_sets)
+    )
+
+
+def _disable_sharding_options(options: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(options, Mapping):
+        return None
+    adjusted = dict(options)
+    adjusted["db_auto_partition"] = False
+    adjusted["db_sharded"] = False
+    adjusted["disable_sharding"] = True
+    adjusted["sharding_mode"] = "off"
+    adjusted.pop("db_partitions", None)
+    adjusted.pop("db_partition_prefix", None)
+    return adjusted
+
+
+def _suppress_sharding_for_unsharded_database(
+    *,
+    storage_account: str,
+    database: str,
+    options: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(options, Mapping) or not storage_account or not database:
+        return dict(options) if isinstance(options, Mapping) else None
+    db_name = extract_db_name(database)
+    meta = resolve_db_metadata(storage_account, db_name)
+    if meta is None:
+        return dict(options)
+    if _metadata_has_prepared_shard_layout(db_name, meta):
+        return dict(options)
+    return _disable_sharding_options(options)
+
+
 def _submit_requires_node_warmup(options: Mapping[str, Any] | None) -> bool:
     if not isinstance(options, Mapping):
         return False
@@ -473,11 +339,17 @@ def _ensure_node_warmup_ready_for_submit(
     resource_group: str,
     cluster_name: str,
     database: str,
+    storage_account: str = "",
     options: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
+    options = _suppress_sharding_for_unsharded_database(
+        storage_account=storage_account,
+        database=database,
+        options=options,
+    )
     if not _submit_requires_node_warmup(options):
         return None
-    db_name = _extract_db_name(database)
+    db_name = extract_db_name(database)
     if not db_name:
         raise WarmupNotReadyError(
             "node warmup readiness cannot be checked without a database name",
@@ -1753,6 +1625,11 @@ def submit(
 
     _progress(self, "preparing")
     _update_state(job_id, "preparing")
+    effective_options = _suppress_sharding_for_unsharded_database(
+        storage_account=storage_account,
+        database=database,
+        options=options,
+    )
 
     try:
         warmup_ready = _ensure_node_warmup_ready_for_submit(
@@ -1760,13 +1637,14 @@ def submit(
             resource_group=resource_group,
             cluster_name=cluster_name,
             database=database,
-            options=options,
+            storage_account=storage_account,
+            options=effective_options,
         )
         if warmup_ready is not None:
             _progress(
                 self,
                 "warmup_ready",
-                database=_extract_db_name(database),
+                database=extract_db_name(database),
                 warmup=warmup_ready,
             )
             _update_state(
@@ -1794,7 +1672,7 @@ def submit(
             "error": error,
         }
 
-    if _requires_split_parent_submission(options):
+    if _requires_split_parent_submission(effective_options):
         _progress(self, "splitting_queries")
         try:
             return _run_storage_query_split_parent_submission(
@@ -1805,8 +1683,10 @@ def submit(
                 program=program,
                 database=database,
                 query_file=query_file,
-                query_effective_search_spaces=(options or {}).get("query_effective_search_spaces"),
-                options=options,
+                query_effective_search_spaces=(effective_options or {}).get(
+                    "query_effective_search_spaces"
+                ),
+                options=effective_options,
                 owner_oid=caller_oid,
                 tenant_id=caller_tenant_id,
             )
@@ -1829,10 +1709,10 @@ def submit(
             )
 
     try:
-        tie_order_oracle = _upload_tie_order_oracle_if_present(
+        tie_order_oracle = upload_tie_order_oracle_if_present(
             storage_account=storage_account,
             job_id=job_id,
-            options=options,
+            options=effective_options,
         )
         if tie_order_oracle is not None:
             _progress(self, "tie_order_oracle_uploaded", tie_order_oracle=tie_order_oracle)
@@ -1842,11 +1722,11 @@ def submit(
                 status="running",
                 tie_order_oracle=tie_order_oracle,
             )
-        db_order_oracle = _upload_db_order_oracle_pointer_if_available(
+        db_order_oracle = upload_db_order_oracle_pointer_if_available(
             storage_account=storage_account,
             job_id=job_id,
             database=database,
-            options=options,
+            options=effective_options,
         )
         if db_order_oracle is not None:
             _progress(self, "db_order_oracle_attached", db_order_oracle=db_order_oracle)
@@ -1864,7 +1744,7 @@ def submit(
             program=program,
             database=database,
             query_file=query_file,
-            options=options,
+            options=effective_options,
         )
     except Exception as exc:  # configuration errors are caller/actionable, not retryable
         error = _snippet(exc)

@@ -1,5 +1,5 @@
-import { useCallback, useState } from "react";
-import { ChevronDown, Loader2, Play, Zap } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, Link2, Loader2, Play, Zap } from "lucide-react";
 
 import { METHOD_META } from "@/pages/apiReference/constants";
 import { MethodBadge } from "@/pages/apiReference/MethodBadge";
@@ -24,6 +24,8 @@ export function EndpointCard({
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [bodyText, setBodyText] = useState("");
   const [selectedExample, setSelectedExample] = useState("");
+  const [copiedAnchor, setCopiedAnchor] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const { execute, response, loading, copyResponse } = useOpenApiExecutor({
     endpoint: ep,
     baseUrl,
@@ -59,8 +61,51 @@ export function EndpointCard({
     if (simple) execute();
   };
 
+  // A2: when the URL hash points at this endpoint card, auto-expand and scroll
+  // into view. Triggers on initial mount and whenever the hash changes (back/forward,
+  // index sidebar click, copy-link paste).
+  useEffect(() => {
+    const sync = () => {
+      if (typeof window === "undefined") return;
+      const hash = window.location.hash.replace(/^#/, "");
+      if (hash === id) {
+        setExpanded(true);
+        initBody();
+        // Defer scroll so the expanded body has measurable size.
+        requestAnimationFrame(() => {
+          rootRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      }
+    };
+    sync();
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, [id, initBody]);
+
+  const handleCopyLink = useCallback(
+    (event: React.MouseEvent) => {
+      event.stopPropagation();
+      if (typeof window === "undefined") return;
+      const url = `${window.location.origin}${window.location.pathname}#${id}`;
+      // history.replaceState avoids a navigation, just updates the bar so the
+      // user can re-copy or share without scrolling jump.
+      window.history.replaceState(null, "", `${window.location.pathname}#${id}`);
+      navigator.clipboard?.writeText(url).then(
+        () => {
+          setCopiedAnchor(true);
+          setTimeout(() => setCopiedAnchor(false), 1500);
+        },
+        () => {
+          /* clipboard denied — URL still updated */
+        },
+      );
+    },
+    [id],
+  );
+
   return (
     <div
+      ref={rootRef}
       id={id}
       style={{
         background: "var(--bg-primary)",
@@ -113,6 +158,24 @@ export function EndpointCard({
         >
           {ep.summary}
         </span>
+        {/* A2: copy a shareable deep-link to this endpoint */}
+        <button
+          type="button"
+          onClick={handleCopyLink}
+          title={copiedAnchor ? "Link copied" : "Copy link to this endpoint"}
+          aria-label="Copy link to this endpoint"
+          style={{
+            background: "none",
+            border: "none",
+            padding: 4,
+            cursor: "pointer",
+            color: copiedAnchor ? "var(--success)" : "var(--text-faint)",
+            display: "inline-flex",
+            alignItems: "center",
+          }}
+        >
+          <Link2 size={12} strokeWidth={1.5} />
+        </button>
 
         {simple && !expanded && (
           <button

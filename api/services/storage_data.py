@@ -560,10 +560,20 @@ def list_databases(
                 if isinstance(oracle, dict):
                     expected_parts = int(oracle.get("expected_parts") or 0)
                     ready_parts = int(oracle_part_counts.get(db_name, 0))
+                    db_source_version = str(info.get("source_version") or "")
+                    oracle_source_version = str(oracle.get("source_version") or "")
+                    source_version_stale = bool(
+                        db_source_version
+                        and oracle_source_version != db_source_version
+                    )
                     info["db_order_oracle"] = {
-                        "status": "ready"
-                        if expected_parts > 0 and ready_parts >= expected_parts
-                        else str(oracle.get("status") or "building"),
+                        "status": (
+                            "stale"
+                            if source_version_stale
+                            else "ready"
+                            if expected_parts > 0 and ready_parts >= expected_parts
+                            else str(oracle.get("status") or "building")
+                        ),
                         "run_id": oracle.get("run_id"),
                         "started_at": oracle.get("started_at"),
                         "source_version": oracle.get("source_version"),

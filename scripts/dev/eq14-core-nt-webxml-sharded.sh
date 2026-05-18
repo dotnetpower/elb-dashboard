@@ -3,10 +3,15 @@ set -euo pipefail
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 stamp_slug=$(date -u +%Y%m%dt%H%M%Sz)
-run_id="eq14-core-nt-webxml-sharded-${stamp_slug}"
+query_key=${1:-${EQ14_QUERY_KEY:-MPXV_F3L.fa}}
+query_slug=$(printf '%s' "$query_key" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-48)
+if [[ -z "$query_slug" ]]; then
+  query_slug=query
+fi
+run_id="eq14-core-nt-webxml-sharded-${query_slug}-${stamp_slug}"
+child_run_label="eq14-${query_slug:0:26}-${stamp_slug}"
 out_dir="/workspace/evidence/${run_id}"
 work_dir="/workspace/${run_id}-work"
-mkdir -p "$out_dir" "$work_dir"
 
 namespace=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo elb-equivalence)
 tools_cm=${EQ14_TOOLS_CONFIGMAP:-eq14-core-nt-webxml-tools}
@@ -14,11 +19,12 @@ storage_account=${EQ14_STORAGE_ACCOUNT:-elbstg01}
 results_url=${EQ14_RESULTS_URL:-"https://${storage_account}.blob.core.windows.net/results/${run_id}"}
 partition_prefix=${EQ14_PARTITION_PREFIX:-"https://${storage_account}.blob.core.windows.net/blast-db/10shards/core_nt_shard_"}
 db_name=${EQ14_DB_NAME:-core_nt}
+web_database=${EQ14_WEB_DATABASE:-$db_name}
 num_shards=${EQ14_NUM_SHARDS:-10}
 searchsp=${EQ14_SEARCHSP:-32156241807668}
-taxids=${EQ14_TAXIDS:-10244}
-entrez_query=${EQ14_ENTREZ_QUERY:-"txid10244[Organism:exp]"}
-max_target_seqs=${EQ14_MAX_TARGET_SEQS:-5000}
+taxids=${2:-${EQ14_TAXIDS:-10244}}
+entrez_query=${3:-${EQ14_ENTREZ_QUERY:-"txid10244[Organism:exp]"}}
+max_target_seqs=${4:-${EQ14_MAX_TARGET_SEQS:-5000}}
 web_hitlist_size=${EQ14_WEB_HITLIST_SIZE:-500}
 web_expect=${EQ14_WEB_EXPECT:-0.05}
 web_word_size=${EQ14_WEB_WORD_SIZE:-28}
@@ -28,9 +34,24 @@ web_poll_seconds=${EQ14_WEB_POLL_SECONDS:-60}
 image=${EQ14_ELB_IMAGE:-elbacr01.azurecr.io/ncbi/elb:1.4.0}
 export AZCOPY_AUTO_LOGIN_TYPE=${AZCOPY_AUTO_LOGIN_TYPE:-MSI}
 
+if [[ "$db_name" != "core_nt" || "$web_database" != "core_nt" ]]; then
+  echo "ERROR: eq14-core-nt-webxml-sharded.sh is core_nt-only; do not run sharded validation for unsharded DBs." >&2
+  echo "       db_name=${db_name} web_database=${web_database}" >&2
+  exit 2
+fi
+if [[ "$partition_prefix" != *"/core_nt_shard_" ]]; then
+  echo "ERROR: partition prefix must target the prepared core_nt shard layout: ${partition_prefix}" >&2
+  exit 2
+fi
+
+mkdir -p "$out_dir" "$work_dir"
+
 printf 'EQ14_CORE_NT_WEBXML_STARTED=%s\n' "$stamp" | tee "$out_dir/summary.env"
 printf 'NODE_NAME=%s\n' "${NODE_NAME:-unknown}" | tee -a "$out_dir/summary.env"
 printf 'RESULTS_URL=%s\n' "$results_url" | tee -a "$out_dir/summary.env"
+printf 'QUERY_KEY=%s\n' "$query_key" | tee -a "$out_dir/summary.env"
+printf 'CHILD_RUN_LABEL=%s\n' "$child_run_label" | tee -a "$out_dir/summary.env"
+printf 'WEB_DATABASE=%s\n' "$web_database" | tee -a "$out_dir/summary.env"
 printf 'PARTITION_PREFIX=%s\n' "$partition_prefix" | tee -a "$out_dir/summary.env"
 printf 'NUM_SHARDS=%s\n' "$num_shards" | tee -a "$out_dir/summary.env"
 printf 'SEARCHSP=%s\n' "$searchsp" | tee -a "$out_dir/summary.env"
@@ -40,11 +61,12 @@ printf 'WEB_EXPECT=%s\n' "$web_expect" | tee -a "$out_dir/summary.env"
 printf 'WEB_HITLIST_SIZE=%s\n' "$web_hitlist_size" | tee -a "$out_dir/summary.env"
 printf 'MAX_TARGET_SEQS=%s\n' "$max_target_seqs" | tee -a "$out_dir/summary.env"
 
-for key in MPXV_F3L.fa compare-blast-web-xml-outfmt6.py merge-sharded-results.sh; do
+for key in "$query_key" compare-blast-web-xml-outfmt6.py merge-sharded-results.sh; do
   kubectl -n "$namespace" get configmap "$tools_cm" \
     -o "go-template={{ index .data \"${key}\" }}" > "$work_dir/$key"
 done
 chmod +x "$work_dir/compare-blast-web-xml-outfmt6.py" "$work_dir/merge-sharded-results.sh"
+query_path="$work_dir/$query_key"
 
 web_xml="$out_dir/web-blast.xml"
 web_csv="$out_dir/web-blast-from-xml.csv"
@@ -53,7 +75,7 @@ widepool="$out_dir/sharded-widepool.outfmt6"
 strict_outfmt6="$out_dir/strict-web-oracle-merged.outfmt6"
 
 submit_web_blast() {
-  python3 - <<'PY' "$work_dir/MPXV_F3L.fa" "$out_dir/web-put-response.txt" "$out_dir/web-rid.env" "$entrez_query" "$web_expect" "$web_word_size" "$web_hitlist_size" "$web_filter"
+  python3 - <<'PY' "$query_path" "$out_dir/web-put-response.txt" "$out_dir/web-rid.env" "$entrez_query" "$web_expect" "$web_word_size" "$web_hitlist_size" "$web_filter" "$web_database"
 from __future__ import annotations
 
 import sys
@@ -61,12 +83,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-query_path, response_path, rid_env_path, entrez_query, expect, word_size, hitlist_size, filter_value = sys.argv[1:]
+query_path, response_path, rid_env_path, entrez_query, expect, word_size, hitlist_size, filter_value, database = sys.argv[1:]
 query = Path(query_path).read_text(encoding="utf-8")
 params = {
     "CMD": "Put",
     "PROGRAM": "blastn",
-    "DATABASE": "core_nt",
+  "DATABASE": database,
     "QUERY": query,
     "MEGABLAST": "on",
     "EXPECT": expect,
@@ -168,11 +190,11 @@ submit_web_blast | tee -a "$out_dir/summary.env"
 
 query_cm="${run_id}-query"
 kubectl -n default create configmap "$query_cm" \
-  --from-file=MPXV_F3L.fa="$work_dir/MPXV_F3L.fa" \
+  --from-file=query.fa="$query_path" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 azcopy login --identity >/dev/null
-azcopy cp "$work_dir/MPXV_F3L.fa" "${results_url}/query_batches/batch_000.fa" --log-level=ERROR
+azcopy cp "$query_path" "${results_url}/query_batches/batch_000.fa" --log-level=ERROR
 
 mapfile -t nodes < <(kubectl get nodes -l workload=blast -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)
 if (( ${#nodes[@]} < num_shards )); then
@@ -182,7 +204,7 @@ fi
 printf '%s\n' "${nodes[@]}" > "$out_dir/blast-nodes.txt"
 
 cleanup_child_jobs() {
-  kubectl -n default delete jobs -l "app=eq14-core-nt-webxml,run=${run_id}" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n default delete jobs -l "app=eq14-core-nt-webxml,run=${child_run_label}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl -n default delete configmap "$query_cm" --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup_child_jobs EXIT
@@ -200,7 +222,7 @@ metadata:
   name: ${job_name}
   labels:
     app: eq14-core-nt-webxml
-    run: ${run_id}
+    run: ${child_run_label}
     shard: "${idx}"
 spec:
   backoffLimit: 1
@@ -208,7 +230,7 @@ spec:
     metadata:
       labels:
         app: eq14-core-nt-webxml
-        run: ${run_id}
+        run: ${child_run_label}
         shard: "${idx}"
     spec:
       restartPolicy: Never
@@ -255,7 +277,7 @@ spec:
                 /scripts/blast-vmtouch-aks.sh > /tmp/vmtouch.log 2>&1 || true
                 blastdbcmd -db "${db_shard}" -dbtype nucl -info > /tmp/db-info.txt
               fi
-              blastn -query /query/MPXV_F3L.fa -db "${db_shard}" \
+              blastn -query /query/query.fa -db "${db_shard}" \
                 -num_threads 8 \
                 -evalue ${web_expect} \
                 -max_target_seqs ${max_target_seqs} \
@@ -298,11 +320,11 @@ done
 
 deadline=$((SECONDS + 3600))
 while (( SECONDS < deadline )); do
-  succeeded=$(kubectl -n default get jobs -l "app=eq14-core-nt-webxml,run=${run_id}" -o jsonpath='{range .items[*]}{.status.succeeded}{"\n"}{end}' | awk '$1==1 {count++} END {print count+0}')
-  failed=$(kubectl -n default get jobs -l "app=eq14-core-nt-webxml,run=${run_id}" -o jsonpath='{range .items[*]}{.status.failed}{"\n"}{end}' | awk '$1>0 {count++} END {print count+0}')
+  succeeded=$(kubectl -n default get jobs -l "app=eq14-core-nt-webxml,run=${child_run_label}" -o jsonpath='{range .items[*]}{.status.succeeded}{"\n"}{end}' | awk '$1==1 {count++} END {print count+0}')
+  failed=$(kubectl -n default get jobs -l "app=eq14-core-nt-webxml,run=${child_run_label}" -o jsonpath='{range .items[*]}{.status.failed}{"\n"}{end}' | awk '$1>0 {count++} END {print count+0}')
   echo "SHARD_PROGRESS succeeded=${succeeded}/${num_shards} failed=${failed}" | tee -a "$out_dir/summary.env"
   if (( failed > 0 )); then
-    kubectl -n default get pods -l "app=eq14-core-nt-webxml,run=${run_id}" -o wide > "$out_dir/failed-pods.txt" || true
+    kubectl -n default get pods -l "app=eq14-core-nt-webxml,run=${child_run_label}" -o wide > "$out_dir/failed-pods.txt" || true
     exit 1
   fi
   if (( succeeded == num_shards )); then
@@ -312,56 +334,13 @@ while (( SECONDS < deadline )); do
 done
 if (( succeeded != num_shards )); then
   echo "ERROR: timed out waiting for sharded Jobs" >&2
-  kubectl -n default get jobs,pods -l "app=eq14-core-nt-webxml,run=${run_id}" -o wide > "$out_dir/timeout-jobs-pods.txt" || true
+  kubectl -n default get jobs,pods -l "app=eq14-core-nt-webxml,run=${child_run_label}" -o wide > "$out_dir/timeout-jobs-pods.txt" || true
   exit 1
 fi
 
 poll_web_blast
 
-python3 - <<'PY' "$web_xml" "$web_csv" "$web_accessions"
-from __future__ import annotations
-
-import csv
-import sys
-import xml.etree.ElementTree as ET
-from decimal import Decimal
-from pathlib import Path
-
-xml_path, csv_path, accessions_path = map(Path, sys.argv[1:])
-root = ET.parse(xml_path).getroot()
-rows = []
-for hit in root.findall(".//Iteration_hits/Hit"):
-    hsp = hit.find("Hit_hsps/Hsp")
-    if hsp is None:
-        continue
-    identity = int(hsp.findtext("Hsp_identity") or "0")
-    align_len = int(hsp.findtext("Hsp_align-len") or "0")
-    gaps = int(hsp.findtext("Hsp_gaps") or "0")
-    accession = (hit.findtext("Hit_accession") or "").strip()
-    rows.append({
-        "rank": len(rows) + 1,
-        "accession": accession,
-        "identity_pct": format((Decimal(identity) * Decimal(100) / Decimal(align_len)).quantize(Decimal("0.001")), "f") if align_len else "0",
-        "align_length": align_len,
-        "mismatches": max(0, align_len - identity - gaps),
-        "gaps": gaps,
-        "query_from": hsp.findtext("Hsp_query-from") or "",
-        "query_to": hsp.findtext("Hsp_query-to") or "",
-        "hit_from": hsp.findtext("Hsp_hit-from") or "",
-        "hit_to": hsp.findtext("Hsp_hit-to") or "",
-        "evalue": hsp.findtext("Hsp_evalue") or "",
-        "bits": hsp.findtext("Hsp_bit-score") or "",
-        "score": hsp.findtext("Hsp_score") or "",
-    })
-with csv_path.open("w", newline="", encoding="utf-8") as handle:
-    writer = csv.DictWriter(handle, fieldnames=list(rows[0]) if rows else ["rank", "accession"])
-    writer.writeheader()
-    writer.writerows(rows)
-accessions_path.write_text("\n".join(str(row["accession"]) for row in rows if row["accession"]) + "\n", encoding="utf-8")
-print(f"WEB_XML_ROWS={len(rows)}")
-PY
-
-kubectl -n default get jobs,pods -l "app=eq14-core-nt-webxml,run=${run_id}" -o wide > "$out_dir/jobs-pods.txt"
+kubectl -n default get jobs,pods -l "app=eq14-core-nt-webxml,run=${child_run_label}" -o wide > "$out_dir/jobs-pods.txt"
 azcopy list "$results_url" --machine-readable > "$out_dir/blob-list.txt"
 azcopy cp "$results_url" "$work_dir/download/" --recursive=true --log-level=ERROR
 
@@ -380,6 +359,8 @@ python3 "$work_dir/compare-blast-web-xml-outfmt6.py" \
   --web-xml "$web_xml" \
   --candidate "$widepool" \
   --accept-tie-window \
+  --write-accessions "$web_accessions" \
+  --write-normalized-csv "$web_csv" \
   --json "$out_dir/web-xml-vs-widepool.json" \
   > "$out_dir/web-xml-vs-widepool.stdout" || true
 

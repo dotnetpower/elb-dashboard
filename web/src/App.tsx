@@ -16,6 +16,7 @@ import { ApiReference } from "@/pages/ApiReference";
 import { AksCardMockups } from "@/pages/mockups/AksCardMockups";
 import { AksCardMockupsRefined } from "@/pages/mockups/AksCardMockupsRefined";
 import { AksCardMockupsPremium } from "@/pages/mockups/AksCardMockupsPremium";
+import { AksCardMockupsSimple } from "@/pages/mockups/AksCardMockupsSimple";
 import { SidecarInspectorMockups } from "@/pages/mockups/SidecarInspectorMockups";
 import { configValue, isDevBypassEnabled } from "@/config/runtime";
 
@@ -44,6 +45,10 @@ function AppRoutes() {
           <Route
             path="/mockups/aks-card-premium"
             element={<AksCardMockupsPremium />}
+          />
+          <Route
+            path="/mockups/aks-card-simple"
+            element={<AksCardMockupsSimple />}
           />
           <Route
             path="/mockups/sidecar-inspector"

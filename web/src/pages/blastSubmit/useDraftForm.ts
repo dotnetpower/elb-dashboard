@@ -99,12 +99,22 @@ export function restoreDraftForm(
  */
 export function useDraftForm() {
   const [form, setForm] = useState<FormState>(() => restoreDraftForm());
+  // N1: surface the last successful auto-save time so the footer can show
+  // "Saved Ns ago" feedback. Initialised null until the first effect run.
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
 
   useEffect(() => {
-    safeSessionStorage()?.setItem(
-      DRAFT_KEY,
-      JSON.stringify({ ...form, draft_version: DRAFT_SCHEMA_VERSION }),
-    );
+    const storage = safeSessionStorage();
+    if (!storage) return;
+    try {
+      storage.setItem(
+        DRAFT_KEY,
+        JSON.stringify({ ...form, draft_version: DRAFT_SCHEMA_VERSION }),
+      );
+      setLastSavedAt(new Date());
+    } catch {
+      /* quota or private-mode \u2014 leave lastSavedAt untouched so UI can show stale */
+    }
   }, [form]);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => {
@@ -117,10 +127,11 @@ export function useDraftForm() {
   const clearDraft = () => {
     try {
       (safeSessionStorage() as RemovableStorage | null)?.removeItem(DRAFT_KEY);
+      setLastSavedAt(null);
     } catch {
       /* ignore */
     }
   };
 
-  return { form, setForm, set, reset, clearDraft } as const;
+  return { form, setForm, set, reset, clearDraft, lastSavedAt } as const;
 }

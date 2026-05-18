@@ -536,6 +536,7 @@ delete_detached_job() {
   job_name=$(resolve_job_name "${1:-}")
   kubectl -n "$RUNNER_NAMESPACE" delete job "$job_name" --ignore-not-found=true
   kubectl -n "$RUNNER_NAMESPACE" delete configmap "$job_name-script" --ignore-not-found=true
+  kubectl -n "$RUNNER_NAMESPACE" delete configmap "$job_name-user-script" --ignore-not-found=true
 }
 
 run_readiness() {

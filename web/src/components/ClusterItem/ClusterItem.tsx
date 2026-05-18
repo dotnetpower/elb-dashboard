@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { monitoringApi, type AksClusterSummary } from "@/api/endpoints";
 import { ClusterDetails } from "@/components/ClusterDetailModal";
-import { ClusterBento } from "@/components/cards/ClusterBento";
+import { ClusterPulse } from "@/components/cards/ClusterPulse";
 import { DB_CATALOG } from "@/components/cards/storageDbCatalog";
 import {
   AUTO_WARMUP_PREFS_EVENT,
@@ -10,19 +10,20 @@ import {
 } from "@/components/cards/storage/autoWarmupPrefs";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
 
-import { ClusterHeaderBand } from "./ClusterHeaderBand";
-import { ClusterStateRow } from "./ClusterStateRow";
 import { DatabaseChipStrip } from "./DatabaseChipStrip";
-import { PoolCardsGrid } from "./PoolCardsGrid";
-import { ShardingCapacityRow } from "./ShardingCapacityRow";
 import { StartEstimatePanel } from "./StartEstimatePanel";
-import { useClusterActiveSubmissions } from "./useClusterActiveSubmissions";
 import { useClusterDbChips } from "./useClusterDbChips";
 import { useClusterShardMutation } from "./useClusterShardMutation";
 
-const CLUSTER_COLLAPSED_KEY = "elb-cluster-collapsed-";
-
-// ClusterItem — collapsible per-cluster card (stopped clusters collapsed by default)
+// ClusterItem — per-cluster row, driven by <ClusterPulse>.
+//
+// The card itself is now intentionally light: it owns the data hooks
+// (DB chips, sharding mutation, auto-warmup sync) and the modal state,
+// and hands a single-line pulse component the signals it needs to
+// render the row. Old surfaces (`ClusterHeaderBand`, `ClusterBento`,
+// `PoolCardsGrid`, `ShardingCapacityRow`, `ClusterStateRow`) were
+// retired — their information moved into the pulse expansion (meta +
+// jobs) and the existing detail modal.
 // ---------------------------------------------------------------------------
 
 export function ClusterItem({
@@ -56,7 +57,6 @@ export function ClusterItem({
   terminalResourceGroup?: string;
   terminalVmName?: string;
 }) {
-  const isStopped = c.power_state === "Stopped";
   const isRunning = isAksWorkloadReady(c);
   const trans = transitioning.get(c.name);
   const isTransitioning = transitioning.has(c.name);
@@ -64,27 +64,7 @@ export function ClusterItem({
   const [transitionStartedAt, setTransitionStartedAt] = useState<number | null>(
     null,
   );
-
-  const [collapsed, setCollapsed] = useState(() => {
-    try {
-      const v = localStorage.getItem(CLUSTER_COLLAPSED_KEY + c.name);
-      return v != null ? v === "1" : isStopped;
-    } catch {
-      return isStopped;
-    }
-  });
-
-  const toggleCollapse = () => {
-    setCollapsed((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(CLUSTER_COLLAPSED_KEY + c.name, next ? "1" : "0");
-      } catch {
-        /* noop */
-      }
-      return next;
-    });
-  };
+  const [detailOpen, setDetailOpen] = useState(false);
 
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
     readAutoWarmupDbs(),
@@ -111,7 +91,7 @@ export function ClusterItem({
   const clusterNumNodes = c.node_count ?? 0;
   const clusterMachineType = c.node_sku ?? "";
 
-  const { warmupQuery, warmupDbs, isWarm, dbChips, infeasibleDbs, dbListDegraded } =
+  const { warmupQuery, warmupDbs, dbChips, infeasibleDbs, dbListDegraded } =
     useClusterDbChips({
       subscriptionId,
       resourceGroup,
@@ -181,128 +161,86 @@ export function ClusterItem({
     storageResourceGroup,
   });
 
-  const { tracking, submissions } = useClusterActiveSubmissions({
-    clusterName: c.name,
-    isRunning,
-    isTransitioning,
-  });
+  const expansionExtras =
+    showOperationalDetails &&
+    ((dbChips.length > 0 || dbListDegraded) || trans === "starting") ? (
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+          padding: "10px 0 2px 0",
+        }}
+      >
+        {trans === "starting" && (
+          <StartEstimatePanel
+            clusterName={c.name}
+            autoWarmupDbCount={autoWarmupDbs.size}
+            startedAt={transitionStartedAt}
+          />
+        )}
+        {showOperationalDetails && (dbChips.length > 0 || dbListDegraded) && (
+          <DatabaseChipStrip
+            dbChips={dbChips}
+            infeasibleDbs={infeasibleDbs}
+            dbListDegraded={dbListDegraded}
+            shardMutation={shardMutation}
+            shardingDb={shardingDb}
+            shardError={shardError}
+            clusterNumNodes={clusterNumNodes}
+            clusterMachineType={clusterMachineType}
+          />
+        )}
+      </div>
+    ) : null;
 
   return (
-    // #1 — Header promotion: drop the nested glass-card surface and use a
-    // flat panel with a clear header band so the cluster name reads as the
-    // dominant heading rather than "another card inside a card".
-    <li
-      style={{
-        padding: 0,
-        background: "rgba(255, 255, 255, 0.025)",
-        border: "1px solid var(--border-weak)",
-        borderRadius: 10,
-        overflow: "hidden",
-      }}
-    >
-      <ClusterHeaderBand
+    <li style={{ listStyle: "none" }}>
+      <ClusterPulse
         cluster={c}
-        collapsed={collapsed}
-        onToggleCollapse={toggleCollapse}
+        subscriptionId={subscriptionId}
+        resourceGroup={resourceGroup}
         trans={trans}
-        isRunning={isRunning}
-        isWarm={isWarm}
-        warmupDbsCount={warmupDbs.length}
         actionLoading={actionLoading}
         onStartStop={onStartStop}
         onDelete={onDelete}
+        dbCounts={{
+          ready: dbChips.length,
+          unavailable: infeasibleDbs.length,
+        }}
+        expansionExtras={expansionExtras}
+        onOpenDetail={() => setDetailOpen(true)}
       />
 
-      {!collapsed && (
-        <div
-          style={{
-            padding: "12px 14px",
-            display: "flex",
-            flexDirection: "column",
-            gap: 10,
-          }}
-        >
-          {/*
-            Bento — primary live view. Drives Submit pipeline / API
-            health / CPU / Memory / Active jobs / Live activity from
-            the api sidecar. Cells degrade independently when an
-            upstream is unavailable so the bento itself never breaks
-            the cluster card.
-          */}
-          <ClusterBento
-            cluster={c}
-            subscriptionId={subscriptionId}
-            resourceGroup={resourceGroup}
-            isRunning={showOperationalDetails}
-            transition={trans}
-          />
-
-          {trans === "starting" && (
-            <StartEstimatePanel
-              clusterName={c.name}
-              autoWarmupDbCount={autoWarmupDbs.size}
-              startedAt={transitionStartedAt}
-            />
-          )}
-
-          {/* Sharding chips remain a primary action surface — keep visible. */}
-          {showOperationalDetails && (dbChips.length > 0 || dbListDegraded) && (
-            <DatabaseChipStrip
-              dbChips={dbChips}
-              infeasibleDbs={infeasibleDbs}
-              dbListDegraded={dbListDegraded}
-              shardMutation={shardMutation}
-              shardingDb={shardingDb}
-              shardError={shardError}
-              clusterNumNodes={clusterNumNodes}
-              clusterMachineType={clusterMachineType}
-            />
-          )}
-
-          {/* Operational detail stays visible so node breakdown and sharding
-              controls are discoverable without a secondary show/hide toggle. */}
-          {showOperationalDetails && (
-            <>
-              {c.agent_pools && c.agent_pools.length > 0 && (
-                <PoolCardsGrid agentPools={c.agent_pools} />
-              )}
-
-              {isRunning && c.agent_pools && c.agent_pools.length > 0 && (
-                <ShardingCapacityRow
-                  agentPools={c.agent_pools}
-                  tracking={tracking}
-                  submissions={submissions}
-                />
-              )}
-
-              <ClusterStateRow provisioningState={c.provisioning_state} />
-
-              <ClusterDetails
-                clusterName={c.name}
-                powerState={c.power_state}
-                isTransitioning={!!trans}
-                agentPools={c.agent_pools}
-                fqdn={c.fqdn}
-                networkPlugin={c.network_plugin}
-                subscriptionId={subscriptionId}
-                resourceGroup={resourceGroup}
-                warmupDbs={warmupDbs}
-                warmupQuery={warmupQuery}
-                storageAccount={storageAccount}
-                storageResourceGroup={storageResourceGroup}
-                acrResourceGroup={acrResourceGroup}
-                acrName={acrName}
-                region={region}
-                nodeSku={c.node_sku}
-                nodeCount={c.node_count}
-                terminalResourceGroup={terminalResourceGroup}
-                terminalVmName={terminalVmName}
-                kubeletObjectId={c.kubelet_object_id}
-              />
-            </>
-          )}
-        </div>
-      )}
+      {/* Controlled-mode details modal. The trigger UI lives inside
+          <ClusterPulse>; we keep the modal mounted here so a single
+          source of truth (subscriptionId/resourceGroup/cluster) feeds
+          it without prop drilling. */}
+      <ClusterDetails
+        clusterName={c.name}
+        powerState={c.power_state}
+        isTransitioning={!!trans}
+        agentPools={c.agent_pools}
+        fqdn={c.fqdn}
+        networkPlugin={c.network_plugin}
+        subscriptionId={subscriptionId}
+        resourceGroup={resourceGroup}
+        warmupDbs={warmupDbs}
+        warmupQuery={warmupQuery}
+        storageAccount={storageAccount}
+        storageResourceGroup={storageResourceGroup}
+        acrResourceGroup={acrResourceGroup}
+        acrName={acrName}
+        region={region}
+        nodeSku={c.node_sku}
+        nodeCount={c.node_count}
+        terminalResourceGroup={terminalResourceGroup}
+        terminalVmName={terminalVmName}
+        kubeletObjectId={c.kubelet_object_id}
+        hideTrigger
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+      />
     </li>
   );
 }
