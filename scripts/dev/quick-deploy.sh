@@ -9,12 +9,15 @@
 #   1. Build ONE image via `az acr build` (cached layers, ~30-90 s).
 #   2. Patch ONLY that container's image via `az containerapp update`
 #      (one ARM transaction, ~20-30 s — does NOT touch sidecar layout,
-#      env vars, secrets, probes, or scale rules).
+#      secrets, probes, or scale rules).
 #   3. (Optional) tail the new revision's logs.
 #
-# It refuses to touch sidecar structure (env, secrets, probes) — for
+# It refuses to touch sidecar structure (secrets, probes, volumes) — for
 # those changes you still need a Bicep redeploy via postprovision.sh
 # or `az deployment group create --template-file containerAppControl.bicep`.
+# The frontend sidecar is the only exception for env vars: its runtime
+# config is generated from server environment variables at startup, so
+# this script keeps those values in sync during fast frontend deploys.
 #
 # Usage:
 #   scripts/dev/quick-deploy.sh <sidecar> [tag]
@@ -43,6 +46,47 @@ cd "$REPO_ROOT"
 ts() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+strip_quotes() {
+  local value="${1:-}"
+  value="${value%\"}"
+  value="${value#\"}"
+  printf '%s' "$value"
+}
+
+load_simple_env_file() {
+  local file="${1:-}"
+  [[ -f "$file" ]] || return 0
+  while IFS='=' read -r key value; do
+    [[ -n "${key:-}" ]] || continue
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    value="$(strip_quotes "${value:-}")"
+    if [[ -z "${!key:-}" ]]; then
+      export "$key=$value"
+    fi
+  done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" || true)
+}
+
+load_azd_env() {
+  command -v azd >/dev/null 2>&1 || return 0
+  command -v timeout >/dev/null 2>&1 || return 0
+  local values
+  values="$(timeout 8s azd env get-values 2>/dev/null || true)"
+  while IFS='=' read -r key value; do
+    [[ -n "${key:-}" ]] || continue
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    value="$(strip_quotes "${value:-}")"
+    if [[ -z "${!key:-}" ]]; then
+      export "$key=$value"
+    fi
+  done <<< "$values"
+}
+
+load_simple_env_file "$REPO_ROOT/.env"
+load_simple_env_file "$REPO_ROOT/.env.local"
+load_simple_env_file "$REPO_ROOT/web/.env.production"
+load_simple_env_file "$REPO_ROOT/web/.env.local"
+load_azd_env
+
 [[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal> [tag] [--logs]"
 
 SIDECAR="$1"; shift || true
@@ -70,16 +114,62 @@ for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME; do
 done
 
 NEW_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${TAG}"
+API_CLIENT_ID_VAL="${VITE_AZURE_CLIENT_ID:-${API_CLIENT_ID:-}}"
+AZURE_TENANT_ID_VAL="${VITE_AZURE_TENANT_ID:-${AZURE_TENANT_ID:-common}}"
+if [[ "$AZURE_TENANT_ID_VAL" == "common" && -n "${AZURE_TENANT_ID:-}" ]]; then
+  AZURE_TENANT_ID_VAL="$AZURE_TENANT_ID"
+fi
+VITE_AUTH_DEV_BYPASS_VAL="${VITE_AUTH_DEV_BYPASS:-false}"
+VITE_API_BASE_URL_VAL="${VITE_API_BASE_URL:-}"
+VITE_AZURE_REDIRECT_URI_VAL="${VITE_AZURE_REDIRECT_URI:-__RUNTIME__}"
+ACR_RESTORE_NETWORK=0
+
+restore_acr_network() {
+  if [[ "${ACR_RESTORE_NETWORK:-0}" == "1" ]]; then
+    ts "==> Restoring ACR public network access to Disabled"
+    az acr update \
+      --name "$ACR_NAME" \
+      --public-network-enabled false \
+      --default-action Deny \
+      -o none >/dev/null 2>&1 || ts "WARN: failed to restore ACR public network access"
+  fi
+}
+trap restore_acr_network EXIT
+
+declare -a BUILD_ARGS=()
+if [[ "$SIDECAR" == "frontend" ]]; then
+  [[ -n "$API_CLIENT_ID_VAL" ]] || die "API_CLIENT_ID/VITE_AZURE_CLIENT_ID is unset; set .env, web/.env.local, or azd env before deploying frontend"
+  BUILD_ARGS=(
+    --build-arg "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL"
+    --build-arg "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL"
+    --build-arg "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL"
+    --build-arg "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL"
+    --build-arg "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL"
+  )
+fi
 
 ts "==> Building $IMAGE_NAME:$TAG via ACR (no local Docker)"
 ts "    dockerfile=$DOCKERFILE  context=$BUILD_CTX"
+ACR_PUBLIC_ACCESS=$(az acr show --name "$ACR_NAME" --query publicNetworkAccess -o tsv 2>/dev/null || echo "")
+if [[ "$ACR_PUBLIC_ACCESS" == "Disabled" ]]; then
+  ts "==> Temporarily enabling ACR public network access for az acr build"
+  az acr update \
+    --name "$ACR_NAME" \
+    --public-network-enabled true \
+    --default-action Allow \
+    -o none >/dev/null
+  ACR_RESTORE_NETWORK=1
+fi
 az acr build \
   --registry "$ACR_NAME" \
   --image "${IMAGE_NAME}:${TAG}" \
   --file "$DOCKERFILE" \
+  "${BUILD_ARGS[@]}" \
   "$BUILD_CTX" \
-  --no-logs \
   -o none
+
+restore_acr_network
+ACR_RESTORE_NETWORK=0
 
 ts "==> Build complete: $NEW_IMAGE"
 
@@ -101,12 +191,29 @@ esac
 
 for tgt in "${TARGETS[@]}"; do
   ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $NEW_IMAGE"
-  az containerapp update \
-    --name "$CONTAINER_APP_NAME" \
-    --resource-group "$AZURE_RESOURCE_GROUP" \
-    --container-name "$tgt" \
-    --image "$NEW_IMAGE" \
-    -o none
+  if [[ "$tgt" == "frontend" ]]; then
+    az containerapp update \
+      --name "$CONTAINER_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --container-name "$tgt" \
+      --image "$NEW_IMAGE" \
+      --set-env-vars \
+        "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL" \
+        "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL" \
+        "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL" \
+        "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
+        "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL" \
+        "API_CLIENT_ID=$API_CLIENT_ID_VAL" \
+        "AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
+      -o none
+  else
+    az containerapp update \
+      --name "$CONTAINER_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --container-name "$tgt" \
+      --image "$NEW_IMAGE" \
+      -o none
+  fi
 done
 
 ts "==> Latest revision:"

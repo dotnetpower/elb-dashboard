@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import UTC
@@ -396,6 +397,18 @@ def _kubectl_apply(
     # exec server (configurable via EXEC_TMP_DIR). Random uuid prevents
     # collisions across concurrent deploys.
     kubeconfig_path = f"/tmp/exec/kubeconfig-{uuid.uuid4().hex}"  # noqa: S108
+    account_result = exec_run(["az", "account", "show", "--only-show-errors"], timeout_seconds=30)
+    if account_result.get("exit_code", 1) != 0:
+        login_argv = ["az", "login", "--identity", "--allow-no-subscriptions", "--only-show-errors"]
+        client_id = os.getenv("AZURE_CLIENT_ID", "").strip()
+        if client_id:
+            login_argv.extend(["--client-id", client_id])
+        login_result = exec_run(login_argv, timeout_seconds=120)
+        if login_result.get("exit_code", 1) != 0:
+            raise RuntimeError(
+                "az login --identity failed in the terminal sidecar: "
+                f"{(login_result.get('stderr') or login_result.get('stdout') or '').strip()[:500]}"
+            )
     az_argv = [
         "az",
         "aks",
@@ -564,6 +577,19 @@ def deploy_openapi_service(
         time.sleep(10)
 
     elapsed = int(time.time() - started)
+    if external_ip:
+        from api.services.openapi_runtime import save_openapi_base_url
+
+        save_openapi_base_url(
+            f"http://{external_ip}",
+            metadata={
+                "subscription_id": subscription_id,
+                "resource_group": resource_group,
+                "cluster_name": cluster_name,
+                "service_name": "elb-openapi",
+                "image": image,
+            },
+        )
     LOGGER.info(
         "openapi deploy done image=%s external_ip=%s elapsed=%ss",
         image,

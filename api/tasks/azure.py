@@ -448,12 +448,15 @@ def start_aks(
     resource_group: str,
     cluster_name: str,
     auto_warmup: dict[str, Any] | None = None,
+    auto_openapi: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start a stopped AKS cluster.
 
     Side effects: starts the AKS control plane/node pools. When an Auto warm
     preference is supplied, persists it and queues storage warmup reconciliation
-    after AKS start completes so the browser can be refreshed safely.
+    after AKS start completes so the browser can be refreshed safely. When an
+    OpenAPI deployment preference is supplied, queues the idempotent OpenAPI
+    service deployment after the cluster is reachable.
     """
     cred = get_credential()
     aks = aks_client(cred, subscription_id)
@@ -484,11 +487,31 @@ def start_aks(
             auto_warmup_task_id = task.id
         except Exception as exc:
             LOGGER.warning("auto warm reconcile enqueue failed after AKS start: %s", exc)
+    openapi_task_id = ""
+    if auto_openapi:
+        try:
+            from api.celery_app import celery_app
+
+            openapi_payload = {
+                **auto_openapi,
+                "subscription_id": subscription_id,
+                "resource_group": resource_group,
+                "cluster_name": cluster_name,
+            }
+            task = celery_app.send_task(
+                "api.tasks.openapi.deploy_openapi_service",
+                kwargs=openapi_payload,
+                queue="azure",
+            )
+            openapi_task_id = task.id
+        except Exception as exc:
+            LOGGER.warning("openapi deploy enqueue failed after AKS start: %s", exc)
     return {
         "cluster_name": cluster_name,
         "action": "start",
         "status": "completed",
         "auto_warmup_task_id": auto_warmup_task_id,
+        "openapi_task_id": openapi_task_id,
     }
 
 

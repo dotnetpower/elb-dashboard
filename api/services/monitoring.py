@@ -33,6 +33,7 @@ from api.services.k8s_monitoring import (
     k8s_top_nodes,
     k8s_warmup_status,
 )
+from api.services.storage_network import ensure_workload_storage_private_endpoints
 
 LOGGER = logging.getLogger(__name__)
 BLAST_POOL_NAME = "blastpool"
@@ -405,6 +406,8 @@ def ensure_storage_account(
     account_name: str,
     region: str,
     caller_oid: str = "",
+    private_endpoint_subnet_id: str = "",
+    private_dns_zone_resource_group: str = "",
 ) -> None:
     """Create a Standard_LRS HNS-enabled storage account and default containers."""
 
@@ -443,6 +446,16 @@ def ensure_storage_account(
             f"/providers/Microsoft.Storage/storageAccounts/{account_name}",
             "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
         )
+
+    ensure_workload_storage_private_endpoints(
+        credential,
+        subscription_id,
+        resource_group,
+        account_name,
+        region,
+        private_endpoint_subnet_id,
+        private_dns_zone_resource_group,
+    )
 
 
 def ensure_acr(

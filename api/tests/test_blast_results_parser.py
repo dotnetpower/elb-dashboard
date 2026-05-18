@@ -10,7 +10,9 @@ from __future__ import annotations
 from api.services.blast_results_parser import (
     EXPORT_DEFAULT_COLUMNS,
     aggregate_blast_hits,
+    parse_blast_result_content,
     parse_blast_tabular,
+    parse_blast_xml,
 )
 
 _OUTFMT_6_SAMPLE = "\n".join(
@@ -35,6 +37,35 @@ query_alpha\tMN908947\t99.10\t200\t1\t0\t1\t200\t10\t209\t1e-100\t450\t100\t220\
 query_alpha\tMT121215\t98.50\t200\t3\t0\t1\t200\t1\t200\t1e-90\t420\t99\t220\t29903
 query_beta\tFJ441177\t87.20\t250\t30\t2\t1\t250\t10\t258\t1e-30\t180\t90\t260\t30000
 """  # noqa: E501  -- BLAST -outfmt 7 fixture; line length is intrinsic to the format
+
+
+_OUTFMT_5_XML = """<?xml version="1.0"?>
+<BlastOutput>
+    <BlastOutput_iterations>
+        <Iteration>
+            <Iteration_query-ID>query_alpha</Iteration_query-ID>
+            <Iteration_query-len>462</Iteration_query-len>
+            <Iteration_hits>
+                <Hit>
+                    <Hit_id>gi|1|gb|ABC123.1|</Hit_id>
+                    <Hit_accession>ABC123</Hit_accession>
+                    <Hit_def>Example subject sequence</Hit_def>
+                    <Hit_len>1200</Hit_len>
+                    <Hit_hsps><Hsp>
+                        <Hsp_identity>460</Hsp_identity><Hsp_positive>461</Hsp_positive>
+                        <Hsp_align-len>462</Hsp_align-len><Hsp_gaps>1</Hsp_gaps>
+                        <Hsp_query-from>1</Hsp_query-from><Hsp_query-to>462</Hsp_query-to>
+                        <Hsp_hit-from>10</Hsp_hit-from><Hsp_hit-to>471</Hsp_hit-to>
+                        <Hsp_evalue>1e-100</Hsp_evalue><Hsp_bit-score>828.419</Hsp_bit-score>
+                        <Hsp_score>448</Hsp_score><Hsp_qseq>ACGT</Hsp_qseq>
+                        <Hsp_hseq>ACGA</Hsp_hseq><Hsp_midline>||| </Hsp_midline>
+                    </Hsp></Hit_hsps>
+                </Hit>
+            </Iteration_hits>
+        </Iteration>
+    </BlastOutput_iterations>
+</BlastOutput>
+"""
 
 
 def test_parse_outfmt6_default_columns() -> None:
@@ -69,6 +100,52 @@ def test_parse_outfmt7_uses_field_header() -> None:
     assert isinstance(first["pident"], float)
     assert isinstance(first["length"], int)
     assert isinstance(first["evalue"], float)
+
+
+def test_parse_outfmt5_xml_to_canonical_hit_rows() -> None:
+    hits = parse_blast_xml(_OUTFMT_5_XML)
+    assert len(hits) == 1
+    hit = hits[0]
+    assert hit["qseqid"] == "query_alpha"
+    assert hit["sseqid"] == "ABC123.1"
+    assert hit["stitle"] == "Example subject sequence"
+    assert hit["qlen"] == 462
+    assert hit["slen"] == 1200
+    assert hit["pident"] == 99.567
+    assert hit["ppos"] == 99.784
+    assert hit["length"] == 462
+    assert hit["mismatch"] == 1
+    assert hit["gapopen"] == 1
+    assert hit["gaps"] == 1
+    assert hit["qstart"] == 1
+    assert hit["qend"] == 462
+    assert hit["sstart"] == 10
+    assert hit["send"] == 471
+    assert hit["evalue"] == 1e-100
+    assert hit["bitscore"] == 828.419
+    assert hit["score"] == 448
+    assert hit["qseq"] == "ACGT"
+    assert hit["sseq"] == "ACGA"
+    assert hit["midline"] == "|||"
+
+
+def test_parse_result_content_detects_xml() -> None:
+    hits = parse_blast_result_content(_OUTFMT_5_XML)
+    assert len(hits) == 1
+    assert hits[0]["sseqid"] == "ABC123.1"
+
+
+def test_parse_result_content_detects_bom_prefixed_xml() -> None:
+    hits = parse_blast_result_content("\ufeff\n" + _OUTFMT_5_XML)
+    assert len(hits) == 1
+    assert hits[0]["qseqid"] == "query_alpha"
+
+
+def test_parse_outfmt5_xml_tolerates_namespaces() -> None:
+    namespaced = _OUTFMT_5_XML.replace("<BlastOutput>", '<BlastOutput xmlns="urn:test">')
+    hits = parse_blast_xml(namespaced)
+    assert len(hits) == 1
+    assert hits[0]["sseqid"] == "ABC123.1"
 
 
 def test_parse_skips_blank_and_comment_lines() -> None:

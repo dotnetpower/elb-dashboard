@@ -11,10 +11,11 @@ import {
   saveConfig,
   type ResourceConfig,
 } from "@/components/SetupWizard";
+import { isDevBypassEnabled } from "@/config/runtime";
 
 import { configFromTags } from "./configFromTags";
 
-const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
+const DEV_BYPASS = isDevBypassEnabled();
 
 const EMPTY_CONFIG: ResourceConfig = {
   subscriptionId: "",

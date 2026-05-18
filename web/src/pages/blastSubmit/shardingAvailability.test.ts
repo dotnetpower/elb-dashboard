@@ -32,6 +32,7 @@ const database: BlastDatabase = {
   name: "core_nt",
   container: "blast-db",
   total_bytes: 250 * 1024 ** 3,
+  web_blast_searchsp: 32_156_241_807_668,
   sharded: true,
   shard_sets: [1, 2, 3, 4, 5, 6, 8, 10],
 };
@@ -48,8 +49,24 @@ describe("deriveShardingAvailability", () => {
     expect(availability.options.off.enabled).toBe(false);
     expect(availability.preferredMode).toBe("precise");
     expect(availability.options.precise.enabled).toBe(true);
+    expect(availability.options.precise.label).toBe("Web-equivalent shard");
     expect(availability.options.approximate.enabled).toBe(true);
     expect(availability.capacityPlan?.pickedN).toBe(10);
+  });
+
+  it("keeps precise mode from claiming Web equivalence without evidence", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database: { ...database, name: "ITS_RefSeq_Fungi", web_blast_searchsp: undefined },
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+
+    expect(availability.preferredMode).toBe("approximate");
+    expect(availability.options.approximate.enabled).toBe(true);
+    expect(availability.options.precise.enabled).toBe(false);
+    expect(availability.options.precise.label).toBe("Precise shard");
+    expect(availability.options.precise.reason).toContain("Verified Web BLAST search-space evidence");
   });
 
   it("disables sharded modes when the DB is not warm on the selected cluster", () => {

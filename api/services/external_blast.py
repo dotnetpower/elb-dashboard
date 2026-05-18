@@ -37,9 +37,16 @@ class StreamedFile:
 def _base_url() -> str:
     value = os.environ.get(_BASE_URL_ENV, "").strip().rstrip("/")
     if not value:
+        from api.services.openapi_runtime import get_openapi_base_url
+
+        value = get_openapi_base_url()
+    if not value:
         raise HTTPException(
             503,
-            detail={"code": "openapi_not_configured", "message": f"{_BASE_URL_ENV} is not set"},
+            detail={
+                "code": "openapi_not_configured",
+                "message": f"{_BASE_URL_ENV} is not set and no OpenAPI runtime endpoint is cached",
+            },
         )
     return value
 

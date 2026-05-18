@@ -17,7 +17,7 @@ import uuid
 from datetime import UTC
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from api.auth import CallerIdentity, require_caller
@@ -47,6 +47,7 @@ _TAXONOMY_DETAIL_PATH = Path(..., ge=1, le=10_000_000_000)
 _TAXONOMY_IMAGE_NAME = Query(..., min_length=1, max_length=120)
 _TAXONOMY_TREE_PATH = Path(..., ge=1, le=10_000_000_000)
 _TAXONOMY_TREE_SIBLING_LIMIT = Query(default=3, ge=1, le=8)
+_OPENAPI_PROXY_ALLOWED_HEADERS = frozenset({"accept", "content-type", "x-client-request-id"})
 
 _BLAST_SUBMIT_OPTION_KEYS = frozenset(
     {
@@ -756,6 +757,93 @@ def aks_openapi_spec(
     }
 
 
+@aks_router.api_route(
+    "/openapi/proxy",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+async def aks_openapi_proxy(
+    request: Request,
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    target_path: str = Query(..., alias="path"),
+    caller: CallerIdentity = Depends(require_caller),
+) -> Response:
+    """Proxy API Reference "Try it" calls to the deployed ``elb-openapi`` pod."""
+
+    import httpx
+
+    from api.services import get_credential
+    from api.services.k8s_monitoring import k8s_get_service_ip
+
+    if not target_path.startswith("/") or target_path.startswith("//"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_openapi_path",
+                "message": "path must be an absolute OpenAPI service path",
+            },
+        )
+    if "\r" in target_path or "\n" in target_path:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_openapi_path", "message": "path contains invalid characters"},
+        )
+
+    sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
+    cred = get_credential()
+    try:
+        ip = k8s_get_service_ip(cred, sub, resource_group, cluster_name, "elb-openapi")
+    except Exception as exc:
+        ip = None
+        LOGGER.warning("openapi/proxy: k8s_get_service_ip failed: %s", exc)
+
+    if not ip:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "openapi_service_not_reachable",
+                "message": "The elb-openapi service is not reachable yet.",
+                "retryable": True,
+            },
+        )
+
+    headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() in _OPENAPI_PROXY_ALLOWED_HEADERS
+    }
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            upstream = await client.request(
+                request.method,
+                f"http://{ip}{target_path}",
+                headers=headers,
+                content=body if body else None,
+            )
+    except httpx.RequestError as exc:
+        LOGGER.warning("openapi/proxy: upstream request failed for %s: %s", ip, exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "openapi_upstream_unreachable",
+                "message": "The elb-openapi endpoint did not respond.",
+                "retryable": True,
+            },
+        ) from exc
+
+    response_headers: dict[str, str] = {}
+    content_type = upstream.headers.get("content-type")
+    if content_type:
+        response_headers["content-type"] = content_type
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=response_headers,
+    )
+
+
 @aks_router.post("/start")
 def aks_start(
     body: dict[str, Any] = Body(...),
@@ -764,12 +852,34 @@ def aks_start(
     from api.tasks.azure import start_aks
 
     auto_warmup = body.get("auto_warmup") if isinstance(body.get("auto_warmup"), dict) else None
+    auto_openapi = body.get("auto_openapi") if isinstance(body.get("auto_openapi"), dict) else None
+    if auto_openapi is None:
+        source = auto_warmup if isinstance(auto_warmup, dict) else body
+        if source.get("acr_name"):
+            auto_openapi = {
+                "acr_name": source.get("acr_name", ""),
+                "acr_resource_group": source.get("acr_resource_group", ""),
+                "storage_account": source.get("storage_account", ""),
+                "storage_resource_group": source.get("storage_resource_group", ""),
+            }
+    if isinstance(auto_openapi, dict):
+        auto_openapi = {
+            "acr_name": auto_openapi.get("acr_name", ""),
+            "acr_resource_group": auto_openapi.get("acr_resource_group", ""),
+            "storage_account": auto_openapi.get("storage_account", ""),
+            "storage_resource_group": auto_openapi.get("storage_resource_group", ""),
+            "tenant_id": auto_openapi.get("tenant_id") or caller.tenant_id,
+            "caller_oid": auto_openapi.get("caller_oid") or caller.object_id,
+        }
+        if not auto_openapi["acr_name"]:
+            auto_openapi = None
     result = _safe_delay(
         start_aks,
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
         cluster_name=body.get("cluster_name", ""),
         auto_warmup=auto_warmup,
+        auto_openapi=auto_openapi,
     )
     return {"task_id": result.id, "status": "queued"}
 
@@ -2301,16 +2411,23 @@ _RESULTS_MAX_FILES = 20
 _RESULTS_AGGREGATE_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB / file
 _RESULTS_ALIGNMENTS_MAX_BYTES = 20 * 1024 * 1024  # 20 MiB / file (single file)
 _RESULTS_EXPORT_MAX_BYTES = 10 * 1024 * 1024
+_RESULTS_DEFAULT_PAGE_SIZE = 100
+_RESULTS_ALIGNMENTS_MAX_HITS = 50_000
 
 
-def _list_result_out_blobs(storage_account: str, job_id: str) -> list[dict[str, Any]]:
-    """Return the `.out` (BLAST tabular) blobs that belong to a job."""
+def _list_parseable_result_blobs(storage_account: str, job_id: str) -> list[dict[str, Any]]:
+    """Return BLAST result blobs the analytics parser can understand."""
     from api.services import get_credential
     from api.services.storage_data import list_result_blobs
 
     cred = get_credential()
     blobs = list_result_blobs(cred, storage_account, container="results", prefix=f"{job_id}/")
-    return [b for b in blobs if isinstance(b.get("name"), str) and b["name"].endswith(".out")]
+    parseable_suffixes = (".out", ".out.gz", ".xml", ".xml.gz")
+    return [
+        b
+        for b in blobs
+        if isinstance(b.get("name"), str) and b["name"].lower().endswith(parseable_suffixes)
+    ]
 
 
 def _validate_result_blob_name(blob_name: str, job_id: str) -> None:
@@ -2334,6 +2451,120 @@ def _validate_result_blob_name(blob_name: str, job_id: str) -> None:
         raise HTTPException(400, detail={"code": "invalid_blob_name"})
 
 
+def _numeric_result_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _coverage_percent(
+    start: Any,
+    end: Any,
+    total: Any,
+    fallback_span: float | None = None,
+) -> float | None:
+    total_value = _numeric_result_value(total)
+    if total_value is None or total_value <= 0:
+        return None
+    start_value = _numeric_result_value(start)
+    end_value = _numeric_result_value(end)
+    if start_value is not None and end_value is not None:
+        covered = abs(end_value - start_value) + 1
+    elif fallback_span is not None:
+        covered = fallback_span
+    else:
+        return None
+    return round(max(0.0, min(100.0, (covered / total_value) * 100.0)), 1)
+
+
+def _annotate_result_hit(hit: dict[str, Any], source_blob: str | None = None) -> dict[str, Any]:
+    annotated = dict(hit)
+    if source_blob:
+        annotated["source_blob"] = source_blob
+
+    align_len = _numeric_result_value(annotated.get("length"))
+    query_cover = _coverage_percent(
+        annotated.get("qstart"), annotated.get("qend"), annotated.get("qlen"), align_len
+    )
+    subject_cover = _coverage_percent(
+        annotated.get("sstart"), annotated.get("send"), annotated.get("slen"), align_len
+    )
+    if query_cover is not None:
+        annotated["qcovs"] = query_cover
+    if subject_cover is not None:
+        annotated["scovs"] = subject_cover
+
+    identity = _numeric_result_value(annotated.get("pident"))
+    evalue = _numeric_result_value(annotated.get("evalue"))
+    query_cover = _numeric_result_value(annotated.get("qcovs"))
+    if identity is None or evalue is None or query_cover is None:
+        annotated["review_status"] = "unclassified"
+        annotated["review_reason"] = "Missing identity, e-value, or HSP query coverage."
+    elif identity >= 99.5 and query_cover >= 95 and evalue <= 1e-20:
+        annotated["review_status"] = "strong_match"
+        annotated["review_reason"] = "Near-exact, high-coverage HSP."
+    elif identity >= 95 and query_cover >= 80 and evalue <= 1e-5:
+        annotated["review_status"] = "review_priority"
+        annotated["review_reason"] = "High-similarity HSP worth diagnostic review."
+    elif identity >= 90 and query_cover >= 50:
+        annotated["review_status"] = "low_confidence"
+        annotated["review_reason"] = "Moderate similarity or partial coverage."
+    else:
+        annotated["review_status"] = "weak_hit"
+        annotated["review_reason"] = "Low similarity or short coverage."
+    return annotated
+
+
+def _result_hit_matches_filters(
+    hit: dict[str, Any],
+    *,
+    query_id: str,
+    subject_id: str,
+    organism: str,
+    min_identity: float,
+    min_bitscore: float,
+    max_evalue: float,
+    min_query_cover: float,
+) -> bool:
+    if query_id and hit.get("qseqid") != query_id:
+        return False
+    if subject_id and subject_id.lower() not in str(hit.get("sseqid", "")).lower():
+        return False
+    if organism:
+        haystack = " ".join(
+            str(hit.get(key, "")) for key in ("sscinames", "stitle", "sseqid", "staxids")
+        ).lower()
+        if organism.lower() not in haystack:
+            return False
+    identity = _numeric_result_value(hit.get("pident"))
+    if identity is not None and identity < min_identity:
+        return False
+    bitscore = _numeric_result_value(hit.get("bitscore"))
+    if bitscore is not None and bitscore < min_bitscore:
+        return False
+    evalue = _numeric_result_value(hit.get("evalue"))
+    if evalue is not None and evalue > max_evalue:
+        return False
+    query_cover = _numeric_result_value(hit.get("qcovs"))
+    if min_query_cover > 0 and (query_cover is None or query_cover < min_query_cover):
+        return False
+    return True
+
+
+def _result_hit_sort_key(hit: dict[str, Any], sort_by: str, sort_dir: str) -> tuple[int, float]:
+    value = _numeric_result_value(hit.get(sort_by))
+    if value is None:
+        return (1, 0.0)
+    return (0, -value if sort_dir == "desc" else value)
+
+
 @blast_router.get("/jobs/{job_id}/results/aggregate")
 def blast_job_results_aggregate(
     job_id: str = Path(...),
@@ -2341,14 +2572,14 @@ def blast_job_results_aggregate(
     storage_account: str = Query(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    """Parse `.out` result blobs and return aggregate statistics for analytics."""
+    """Parse result blobs and return aggregate statistics for analytics."""
     _ensure_job_read_allowed(job_id, caller)
     from api.services import get_credential
-    from api.services.blast_results_parser import aggregate_blast_hits, parse_blast_tabular
-    from api.services.storage_data import read_blob_text
+    from api.services.blast_results_parser import aggregate_blast_hits, parse_blast_result_content
+    from api.services.storage_data import read_result_blob_text
 
     try:
-        out_blobs = _list_result_out_blobs(storage_account, job_id)
+        result_blobs = _list_parseable_result_blobs(storage_account, job_id)
     except Exception as exc:
         LOGGER.warning("results aggregate: list_result_blobs failed: %s", type(exc).__name__)
         return {
@@ -2359,11 +2590,11 @@ def blast_job_results_aggregate(
             "stats": None,
         }
 
-    if not out_blobs:
+    if not result_blobs:
         return {
             "job_id": job_id,
             "status": "no_results",
-            "message": "No .out result files found for this job.",
+            "message": "No parseable BLAST result files found for this job.",
             "stats": None,
             "files_parsed": 0,
             "total_files": 0,
@@ -2373,16 +2604,16 @@ def blast_job_results_aggregate(
     all_hits: list[dict[str, Any]] = []
     parsed_files = 0
     read_failures = 0
-    for blob_info in out_blobs[:_RESULTS_MAX_FILES]:
+    for blob_info in result_blobs[:_RESULTS_MAX_FILES]:
         try:
-            content = read_blob_text(
+            content = read_result_blob_text(
                 cred,
                 storage_account,
                 "results",
                 blob_info["name"],
                 max_bytes=_RESULTS_AGGREGATE_MAX_BYTES,
             )
-            all_hits.extend(parse_blast_tabular(content))
+            all_hits.extend(parse_blast_result_content(content))
             parsed_files += 1
         except Exception as exc:
             read_failures += 1
@@ -2405,7 +2636,7 @@ def blast_job_results_aggregate(
             ),
             "stats": None,
             "files_parsed": 0,
-            "total_files": len(out_blobs),
+            "total_files": len(result_blobs),
             "read_failures": read_failures,
         }
 
@@ -2414,11 +2645,11 @@ def blast_job_results_aggregate(
             "job_id": job_id,
             "status": "no_hits",
             "message": "No BLAST hits found in result files.",
-            "stats": {"total_hits": 0},
+            "stats": aggregate_blast_hits([]),
             "files_parsed": parsed_files,
-            "total_files": len(out_blobs),
+            "total_files": len(result_blobs),
             "read_failures": read_failures,
-            "truncated": len(out_blobs) > _RESULTS_MAX_FILES,
+            "truncated": len(result_blobs) > _RESULTS_MAX_FILES,
         }
 
     try:
@@ -2435,7 +2666,7 @@ def blast_job_results_aggregate(
             "degraded_reason": "aggregation_failed",
             "stats": None,
             "files_parsed": parsed_files,
-            "total_files": len(out_blobs),
+            "total_files": len(result_blobs),
             "read_failures": read_failures,
         }
     return {
@@ -2443,9 +2674,9 @@ def blast_job_results_aggregate(
         "status": "ok",
         "stats": stats,
         "files_parsed": parsed_files,
-        "total_files": len(out_blobs),
+        "total_files": len(result_blobs),
         "read_failures": read_failures,
-        "truncated": len(out_blobs) > _RESULTS_MAX_FILES,
+        "truncated": len(result_blobs) > _RESULTS_MAX_FILES,
     }
 
 
@@ -2456,107 +2687,194 @@ def blast_job_results_alignments(
     storage_account: str = Query(...),
     blob_name: str = Query(default=""),
     max_alignments: int = Query(default=50, ge=1, le=500),
+    page: int = Query(default=1, ge=1, le=10000),
+    page_size: int | None = Query(default=None, ge=1, le=500),
     query_id: str = Query(default=""),
+    subject_id: str = Query(default=""),
+    organism: str = Query(default=""),
     min_identity: float = Query(default=0.0, ge=0.0, le=100.0),
     min_bitscore: float = Query(default=0.0, ge=0.0),
     max_evalue: float = Query(default=10.0, ge=0.0),
+    min_query_cover: float = Query(default=0.0, ge=0.0, le=100.0),
+    sort_by: str = Query(default="evalue", pattern=r"^(evalue|bitscore|pident|qcovs|length)$"),
+    sort_dir: str = Query(default="asc", pattern=r"^(asc|desc)$"),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    """Return parsed alignments from a `.out` file, optionally filtered.
+    """Return parsed alignments from result files, optionally filtered.
 
-    `min_identity` / `min_bitscore` / `max_evalue` let the SPA narrow down a
-    large hit table without re-downloading the file. `query_id` returns hits
-    for a single query — useful when reviewing a primer pair or amplicon
-    individually.
+    With no `blob_name`, all parseable result blobs under the job prefix are
+    read up to the safety file cap. That keeps the Hits tab honest for split
+    jobs: it reports the page being viewed rather than showing the first blob
+    as if it represented the whole run.
     """
     _ensure_job_read_allowed(job_id, caller)
     from api.services import get_credential
-    from api.services.blast_results_parser import parse_blast_tabular
-    from api.services.storage_data import read_blob_text
+    from api.services.blast_results_parser import parse_blast_result_content
+    from api.services.storage_data import read_result_blob_text
 
     target_blob = blob_name.strip()
+    result_blobs: list[dict[str, Any]] = []
     try:
         if not target_blob:
-            out_blobs = _list_result_out_blobs(storage_account, job_id)
-            if not out_blobs:
+            result_blobs = _list_parseable_result_blobs(storage_account, job_id)
+            if not result_blobs:
                 return {
                     "job_id": job_id,
+                    "blob_name": "",
+                    "blob_names": [],
                     "alignments": [],
                     "message": "No result files",
                     "total_hits": 0,
+                    "filtered_hits": 0,
                     "returned": 0,
                     "query_ids": [],
+                    "page": page,
+                    "page_size": page_size or max_alignments,
+                    "pages": 0,
+                    "files_parsed": 0,
+                    "total_files": 0,
+                    "read_failures": 0,
                 }
-            target_blob = out_blobs[0]["name"]
         else:
             _validate_result_blob_name(target_blob, job_id)
+            result_blobs = [{"name": target_blob}]
     except HTTPException:
         raise
     except Exception as exc:
         LOGGER.warning("results alignments: list failed: %s", type(exc).__name__)
         return {
             "job_id": job_id,
+            "blob_name": target_blob,
+            "blob_names": [],
             "alignments": [],
             "degraded": True,
             "degraded_reason": "storage_unreachable",
             "total_hits": 0,
+            "filtered_hits": 0,
             "returned": 0,
             "query_ids": [],
+            "page": page,
+            "page_size": page_size or max_alignments,
+            "pages": 0,
+            "files_parsed": 0,
+            "total_files": 0,
+            "read_failures": 0,
         }
 
     cred = get_credential()
-    try:
-        content = read_blob_text(
-            cred,
-            storage_account,
-            "results",
-            target_blob,
-            max_bytes=_RESULTS_ALIGNMENTS_MAX_BYTES,
-        )
-    except Exception as exc:
-        LOGGER.warning("results alignments: read failed: %s", type(exc).__name__)
+    all_hits: list[dict[str, Any]] = []
+    parsed_files = 0
+    read_failures = 0
+    hit_limit_reached = False
+    blob_names: list[str] = []
+    for blob_info in result_blobs[:_RESULTS_MAX_FILES]:
+        if len(all_hits) >= _RESULTS_ALIGNMENTS_MAX_HITS:
+            hit_limit_reached = True
+            break
+        blob_path = str(blob_info.get("name") or "")
+        if not blob_path:
+            continue
+        try:
+            content = read_result_blob_text(
+                cred,
+                storage_account,
+                "results",
+                blob_path,
+                max_bytes=_RESULTS_ALIGNMENTS_MAX_BYTES,
+            )
+            parsed_hits = parse_blast_result_content(content)
+            remaining_hit_slots = _RESULTS_ALIGNMENTS_MAX_HITS - len(all_hits)
+            all_hits.extend(
+                _annotate_result_hit(hit, blob_path) for hit in parsed_hits[:remaining_hit_slots]
+            )
+            if len(parsed_hits) > remaining_hit_slots:
+                hit_limit_reached = True
+            parsed_files += 1
+            blob_names.append(blob_path)
+            if hit_limit_reached:
+                break
+        except Exception as exc:
+            read_failures += 1
+            LOGGER.warning(
+                "results alignments: failed to parse %s: %s", blob_path, type(exc).__name__
+            )
+
+    if parsed_files == 0 and read_failures > 0:
         return {
             "job_id": job_id,
+            "blob_name": target_blob,
+            "blob_names": blob_names,
             "alignments": [],
             "degraded": True,
-            "degraded_reason": "storage_unreachable",
+            "degraded_reason": "all_reads_failed",
+            "message": f"Failed to read any of {read_failures} result file(s).",
             "total_hits": 0,
+            "filtered_hits": 0,
             "returned": 0,
             "query_ids": [],
+            "page": page,
+            "page_size": page_size or max_alignments,
+            "pages": 0,
+            "files_parsed": 0,
+            "total_files": len(result_blobs),
+            "read_failures": read_failures,
+            "truncated": len(result_blobs) > _RESULTS_MAX_FILES,
+            "hit_limit_reached": False,
         }
 
-    all_hits = parse_blast_tabular(content)
     query_ids = sorted({str(h.get("qseqid", "")) for h in all_hits if h.get("qseqid")})
 
     filtered: list[dict[str, Any]] = []
     qid_filter = query_id.strip()
+    subject_filter = subject_id.strip()
+    organism_filter = organism.strip()
     for hit in all_hits:
-        if qid_filter and hit.get("qseqid") != qid_filter:
-            continue
-        pident = hit.get("pident")
-        if isinstance(pident, (int, float)) and pident < min_identity:
-            continue
-        bitscore = hit.get("bitscore")
-        if isinstance(bitscore, (int, float)) and bitscore < min_bitscore:
-            continue
-        evalue = hit.get("evalue")
-        if isinstance(evalue, (int, float)) and evalue > max_evalue:
-            continue
-        filtered.append(hit)
+        if _result_hit_matches_filters(
+            hit,
+            query_id=qid_filter,
+            subject_id=subject_filter,
+            organism=organism_filter,
+            min_identity=min_identity,
+            min_bitscore=min_bitscore,
+            max_evalue=max_evalue,
+            min_query_cover=min_query_cover,
+        ):
+            filtered.append(hit)
+
+    filtered.sort(key=lambda hit: _result_hit_sort_key(hit, sort_by, sort_dir))
+    effective_page_size = page_size or max_alignments or _RESULTS_DEFAULT_PAGE_SIZE
+    start = (page - 1) * effective_page_size
+    end = start + effective_page_size
+    page_hits = filtered[start:end]
+    page_count = (len(filtered) + effective_page_size - 1) // effective_page_size
 
     return {
         "job_id": job_id,
-        "blob_name": target_blob,
-        "alignments": filtered[:max_alignments],
+        "blob_name": blob_names[0] if len(blob_names) == 1 else target_blob,
+        "blob_names": blob_names,
+        "alignments": page_hits,
         "total_hits": len(all_hits),
         "filtered_hits": len(filtered),
-        "returned": min(len(filtered), max_alignments),
+        "returned": len(page_hits),
         "query_ids": query_ids[:200],
+        "page": page,
+        "page_size": effective_page_size,
+        "pages": page_count,
+        "files_parsed": parsed_files,
+        "total_files": len(result_blobs),
+        "read_failures": read_failures,
+        "truncated": len(result_blobs) > _RESULTS_MAX_FILES or hit_limit_reached,
+        "hit_limit_reached": hit_limit_reached,
         "filters": {
             "query_id": qid_filter or None,
+            "subject_id": subject_filter or None,
+            "organism": organism_filter or None,
             "min_identity": min_identity,
             "min_bitscore": min_bitscore,
             "max_evalue": max_evalue,
+            "min_query_cover": min_query_cover,
+            "sort_by": sort_by,
+            "sort_dir": sort_dir,
         },
     }
 
@@ -2610,12 +2928,12 @@ def blast_job_results_export(
     from api.services.blast_results_parser import (
         EXPORT_DEFAULT_COLUMNS,
         EXPORT_EXTRA_COLUMNS,
-        parse_blast_tabular,
+        parse_blast_result_content,
     )
-    from api.services.storage_data import read_blob_text
+    from api.services.storage_data import read_result_blob_text
 
     try:
-        out_blobs = _list_result_out_blobs(storage_account, job_id)
+        result_blobs = _list_parseable_result_blobs(storage_account, job_id)
     except Exception as exc:
         LOGGER.warning("results export: list_result_blobs failed: %s", type(exc).__name__)
         raise HTTPException(
@@ -2626,23 +2944,26 @@ def blast_job_results_export(
     cred = get_credential()
     all_hits: list[dict[str, Any]] = []
     read_failures = 0
-    for blob_info in out_blobs[:_RESULTS_MAX_FILES]:
+    for blob_info in result_blobs[:_RESULTS_MAX_FILES]:
         try:
-            content = read_blob_text(
+            content = read_result_blob_text(
                 cred,
                 storage_account,
                 "results",
                 blob_info["name"],
                 max_bytes=_RESULTS_EXPORT_MAX_BYTES,
             )
-            all_hits.extend(parse_blast_tabular(content))
+            all_hits.extend(
+                _annotate_result_hit(hit, str(blob_info["name"]))
+                for hit in parse_blast_result_content(content)
+            )
         except Exception:
             read_failures += 1
             LOGGER.debug("results export: failed to parse blob", exc_info=True)
 
     # If we had blobs to read but every read failed, the export would otherwise
     # be a misleading header-only CSV. Fail loudly instead.
-    if out_blobs and read_failures == len(out_blobs[:_RESULTS_MAX_FILES]):
+    if result_blobs and read_failures == len(result_blobs[:_RESULTS_MAX_FILES]):
         raise HTTPException(
             503,
             detail={

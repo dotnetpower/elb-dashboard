@@ -182,8 +182,8 @@ a fabricated value.
 | --- | ---: | --- | --- |
 | `core_nt` | `32156241807668` | `blastn`, `core_nt` 2026-05-09 snapshot, 64 nt calibration query, `-word_size 28 -dust yes -evalue 10 -max_target_seqs 500 -outfmt 5` | `docs/temp/core-nt-searchsp/core_nt-searchsp-calibration-results.tgz` |
 | `16S_ribosomal_RNA` | not set | Web RID captured; local full DB and sharded equivalence not completed | `docs/temp/web-blast-equivalence/2026-05-17-16s-carnobacterium/` |
-| `18S_fungal_sequences` | not set | Not calibrated against NCBI Web BLAST yet | n/a |
-| `ITS_RefSeq_Fungi` | not set | Not calibrated against NCBI Web BLAST yet | n/a |
+| `18S_fungal_sequences` | not set | Web RID captured; local full DB and sharded equivalence not completed | `docs/temp/web-blast-equivalence/2026-05-18-18s-fungal-short/` |
+| `ITS_RefSeq_Fungi` | not set | Web RID captured; local full DB and sharded equivalence not completed | `docs/temp/web-blast-equivalence/aks-runner-20260518T060631Z/` |
 | `elb_compare_tiny` | not set | Synthetic local equivalence probe only; not an NCBI Web BLAST database | n/a |
 
 Implementation details:
@@ -320,24 +320,26 @@ fields such as local database paths and XML serialization.
 | `EQ-03` | Done for `core_nt` no-hit calibration | Force every shard to use the full DB search space. | Kubernetes shard manifests include `-searchsp 32156241807668`; shard XML reports the same `Statistics_eff-space`. |
 | `EQ-04` | Done for `core_nt` no-hit calibration | Merge shard XML statistics back to full DB statistics. | `merged_vs_baseline_stats.json` reports `all_result_statistics_match: true` for `db_len`, `db_num`, `eff_space`, `hsp_len`, hit count, HSP count, lambda, kappa, and entropy. |
 | `EQ-05` | Done for `core_nt` no-hit calibration | Add a canonical BLAST XML comparator script for Web/full/sharded outputs. | `scripts/dev/compare-blast-xml.py` ignores provenance-only fields but compares query IDs, subject IDs/accessions, HSP coordinates, aligned sequences, identity, gaps, e-value, bit score, and output ordering. Existing evidence `canonical-compare.json` reports `equivalent: true` and `difference_count: 0`. |
-| `EQ-06` | Partial | Capture at least one NCBI Web BLAST RID with positive hits for each supported database default. | `scripts/dev/test_queries/16S_carnobacterium.fa` was submitted to Web DB `rRNA_typestrains/16S_ribosomal_RNA`; RID `0JXX09HH016` produced 500 hits / 500 HSPs. Evidence is under `docs/temp/web-blast-equivalence/2026-05-17-16s-carnobacterium/`. Web RIDs for `18S_fungal_sequences` and `ITS_RefSeq_Fungi` remain open. |
-| `EQ-07` | Partial for 16S | Reproduce each Web RID locally against the same database snapshot. | Local BLAST+ 2.17.0 and the May 14 2026 `16S_ribosomal_RNA` database reproduced the Web DB size and top hit in `2.54s`. Strict canonical comparison still fails: first hit-order mismatch is rank 111, 438/500 hit IDs overlap, and Web XML reports `Statistics_eff-space=0` while local BLAST+ reports `57425628120`. |
-| `EQ-08` | Partial for local 16S probe | Run the same hit-positive query through precise local-SSD sharding. | A local 4-shard 16S probe matched full-run DB statistics exactly (`db_len`, `db_num`, `eff_space`, `hsp_len`, `lambda`, `kappa`, `entropy`) but strict hit ordering diverged in tied high-score regions. Round-robin and contiguous shard splits both kept the same top accession and top-10 order, but first full-vs-sharded accession mismatch was rank 15. |
-| `EQ-09` | Open | Stress top-N merge behavior near `max_target_seqs` boundaries. | Golden cases cover ties, duplicate subject IDs across shards, multiple HSPs per hit, and more candidate hits than `max_target_seqs`; ordering is deterministic and matches the full DB baseline. |
-| `EQ-10` | Open | Validate multi-query and query-group behavior. | Each query group carries the correct full-run search space; merged output preserves per-query statistics and hit ordering. |
-| `EQ-11` | Open | Expand verified defaults database by database. | `16S_ribosomal_RNA`, `18S_fungal_sequences`, and `ITS_RefSeq_Fungi` remain unset until `EQ-06` through `EQ-10` pass for their own Web/default evidence. |
-| `EQ-12` | Open | Make the dashboard claim evidence-aware. | The UI may show `Web-compatible` only for databases/options with passing evidence; unknown combinations must stay explicit override/manual calibration paths. |
-| `EQ-13` | Partial / blocked by snapshot mismatch and top-N ties | Compare NCBI Web BLAST CSV exports against same-snapshot sharded tabular results. | `scripts/dev/compare-blast-web-csv.py` compares Web CSV exports with BLAST outfmt 6 rows by accession, ordering, and value fields. Current MPXV F3L CSV exports do not match either the older sibling v3 benchmark or the fresh `core_nt` AKS run because shared accession overlap is `0`. Recheck showed the Web top accession `OZ461628.1` exists in current shard 05, but it aligns as `98.701%` / bit `821` at rank `1013` when shard 05 is run with `max_target_seqs=5000`; the Web CSV reports `100.0%` / bit `828.419` at rank `1`. The blocker is therefore obtaining a same-snapshot Web CSV/full-DB oracle and resolving top-N tie behavior, not changing `searchsp`. |
+| `EQ-06` | Done | Capture at least one NCBI Web BLAST RID with positive hits for each supported database default. | `16S_ribosomal_RNA` RID `0JXX09HH016` produced 500 hits / 500 HSPs. `18S_fungal_sequences` uses NCBI's current form value `TL/18S_fungal_sequences`; RID `0NBHHRPG014` produced 500 hits / 500 HSPs from a 300 bp `NR_132222.1` fragment with top accession `NG_065576`, evidence under `docs/temp/web-blast-equivalence/2026-05-18-18s-fungal-short/`. `ITS_RefSeq_Fungi` RID `0NATHX89014` produced 500 hits / 500 HSPs with top accession `NR_111007`, evidence under `docs/temp/web-blast-equivalence/aks-runner-20260518T060631Z/`. |
+| `EQ-07` | Partial: 16S same-snapshot pass; 18S/ITS DB-length mismatch | Reproduce each Web RID locally against the same database snapshot. | System-pool Job `elb-eq07-local-full-20260518063208` downloaded the three small DBs from `elbstg01` with AzCopy MSI and ran BLASTN 2.17.0 locally. `16S_ribosomal_RNA` matched the Web DB length (`40051470`), DB count (`27648`), 500 hits / 500 HSPs, and top accession `NR_025211`. Storage-backed `18S_fungal_sequences` and `ITS_RefSeq_Fungi` both reproduced 500 hits / 500 HSPs and the Web top accession (`NG_065576`, `NR_111007`) but did not match Web DB statistics. A non-mutating NCBI-current probe (`elb-eq07-ncbi-current-20260518063630`) brought the sequence counts into alignment (`3907`, `20219`) and kept the same top accessions, but DB length still differed by 49 bp for 18S and 176 bp for ITS, so these two remain blocked on Web/downloadable DB scope or masked-length differences. Evidence: `docs/temp/web-blast-equivalence/aks-runner-20260518T063230Z/` and `docs/temp/web-blast-equivalence/aks-runner-20260518T063726Z/`. |
+| `EQ-08` | Diagnostic only: small DB system-pool 16S statistics/top-10 pass; strict order blocked | Run the same hit-positive query through precise local-SSD sharding. | System-pool Job `elb-equivalence-job-20260518064515` reproduced the 4-shard 16S probe on node `aks-systempool-41800479-vmss000004`. Full and merged XML matched `db_len=40051470`, `db_num=27648`, `eff_space=57425628120`, `hsp_len=26`, hit count `500`, HSP count `500`, top accession `NR_025211`, and top-10 order. Strict full-vs-merged order still diverges at rank 15; default merge chooses `NR_041841`, same-snapshot accession oracle chooses `NR_042061`, while full BLAST chooses `NR_036793`. Because 16S/18S/ITS are small marker databases, this is snapshot/form-value evidence only, not production sharding proof. Evidence: `docs/temp/web-blast-equivalence/aks-runner-20260518T064631Z/`. |
+| `EQ-09` | Done for golden merge coverage | Stress top-N merge behavior near `max_target_seqs` boundaries. | Focused regression tests passed on 2026-05-18: `uv run pytest -q api/tests/test_sharded_merge.py api/tests/test_query_grouping.py api/tests/test_sharding_precision.py api/tests/test_compare_blast_web_xml_outfmt6.py api/tests/test_compare_blast_web_csv.py` reported `46 passed in 0.72s`. Golden cases cover ties, duplicate subject IDs across shards, multiple HSPs per hit, and more candidate hits than `max_target_seqs`; ordering is deterministic and matches the full DB baseline. |
+| `EQ-10` | Done for query-group/precision coverage | Validate multi-query and query-group behavior. | The same focused test run (`46 passed in 0.72s`) verifies that each query group carries the correct full-run search space, multi-query precision gating blocks ambiguous unsupported inputs, merged XML/outfmt6 output preserves per-query statistics, and comparator coverage remains stable. |
+| `EQ-11` | Open | Expand verified defaults database by database. | `16S_ribosomal_RNA`, `18S_fungal_sequences`, and `ITS_RefSeq_Fungi` remain unset until `EQ-06` through `EQ-10` pass for their own Web/default evidence. `16S_ribosomal_RNA` now has same-snapshot local full-run evidence; 18S and ITS need refreshed Web RID evidence or aligned local DB snapshots before they can advance. |
+| `EQ-12` | Done | Make the dashboard claim evidence-aware. | `web/src/pages/blastSubmit/shardingAvailability.ts` now enables and labels `Web-equivalent shard` only when the selected database carries a verified `web_blast_searchsp` value. Unknown DB/options scopes fall back to a disabled `Precise shard` option with an explicit verified-evidence blocker, while `Fast shard` remains available as a non-equivalence throughput probe. Vitest evidence: `npm run test -- src/pages/blastSubmit/shardingAvailability.test.ts` reported `5 passed`. |
+| `EQ-13` | Partial / blocked by Web CSV snapshot-HSP mismatch and top-N ties | Compare NCBI Web BLAST CSV exports against same-snapshot sharded tabular results. | `scripts/dev/compare-blast-web-csv.py` compares Web CSV exports with BLAST outfmt 6 rows by accession, ordering, and value fields. The latest `core_nt` system-node run `elb-equivalence-job-20260518070958` used 10 warmed blastpool shards for MPXV F3L and wrote evidence under `docs/temp/web-blast-equivalence/aks-runner-20260518T071101Z/`. The Web CSV top-500 accessions are all present in the 12,220-row widepool (`shared_accessions: 500`, `web_only: 0`), and a strict Web top-500 accession oracle can reproduce exact CSV order (`exact_order: true`, `top10_overlap: 10`). However, HSP values mismatch for all 500 rows (`98.701%` / raw score `430` / bit `795` locally for the Web top accessions versus `100.0%` / bit `828.419` in the CSV), so this CSV is not a same-snapshot/current-HSP oracle. The blocker is obtaining a current Web XML/CSV oracle whose HSP values match the warmed `core_nt` snapshot, then resolving top-N tie membership/order inside the large tied hit window. |
+| `EQ-14` | Done for fresh Web XML strict-oracle equivalence | Submit fresh NCBI Web BLAST XML (`outfmt 5`) and compare XML-derived CSV fields with sharded `core_nt`. | System-node Job `elb-equivalence-job-20260518072757` submitted Web RID `0NFW8888016`, generated `web-blast-from-xml.csv`, ran 10 warmed `core_nt` shard Jobs, and compared Web XML HSP fields against the sharded widepool. The widepool contained every Web top-500 accession (`shared_accessions: 500`, `web_only: 0`) with no HSP value mismatches, but default deterministic order still differed (`top10_overlap: 0`, `top100_overlap: 1`). Applying the same-run Web top-500 accession oracle produced exact equivalence: `equivalent: true`, `exact_order: true`, `top10_overlap: 10`, `top100_overlap: 100`, and `value_mismatch_count: 0`. Evidence: `docs/temp/web-blast-equivalence/aks-runner-20260518T072909Z/elb-equivalence-job-20260518072757/`. |
 
 Recommended execution order:
 
-1. Decide how strict Web-vs-local ordering should be for hits tied near the
-  `max_target_seqs=500` boundary. The first 16S mismatch is rank 111, while the
-  top hit and database statistics match.
+1. Decide how strict Web-vs-local and full-vs-sharded ordering should be for hits
+  tied near the `max_target_seqs=500` boundary. The Web-vs-local 16S mismatch is
+  rank 111, while the system-pool full-vs-sharded 16S mismatch is rank 15 even
+  with a same-snapshot accession-order oracle.
 2. Add a comparator mode or separate report for set-overlap / top-N tie windows
   before using Web XML as the sharded merge oracle.
-3. Run the same comparator against `core_nt` hit-positive evidence after the
-  small-database path is proven.
+3. Treat small marker databases as snapshot/form-value diagnostics only; use
+  `core_nt` for sharded hit-positive equivalence proof.
 4. Only promote a database default in `api/services/web_blast_searchsp.py` after
   the Web XML, local full DB XML, sharded merged XML, comparator JSON, and run
   logs are all saved under `docs/temp/`.
@@ -362,10 +364,14 @@ BLAST-compatible only when all of the following are true:
   pass condition for final claims; tie-window equivalence is diagnostic evidence
   for top-N boundary investigations, not a final replacement for strict order.
 
-The frontend therefore prefers the `Web-equivalent shard` mode whenever a warmed
-prepared database fits the selected cluster. The backend pre-flight and submit
-gates continue to block precise sharding when the search-space or query metadata
-needed for full-DB statistics is missing.
+The frontend therefore prefers the `Web-equivalent shard` mode only when a
+warmed prepared database fits the selected cluster **and** the selected database
+row carries verified search-space evidence. Unknown DB/options scopes show a
+disabled `Precise shard` path with an explicit verified-evidence blocker; the
+enabled `Fast shard` path remains a throughput probe and does not carry the Web
+equivalence claim. The backend pre-flight and submit gates continue to block
+precise sharding when the search-space or query metadata needed for full-DB
+statistics is missing.
 
 ### 2026-05-18 Runtime Checkpoint
 
@@ -381,6 +387,65 @@ Current deployed/local-control-plane observation:
   `ready: true`, `critical_blockers: 0`, and `sharding_precision` =
   `precise_single_query`. The route injects the verified `core_nt` Web BLAST
   search space when the caller has not supplied an explicit `-searchsp`.
+- Long-running equivalence orchestration is now routed through a temporary AKS
+  system-pool runner instead of a local terminal session. The detached Job path
+  in `scripts/dev/aks-equivalence-runner.sh` starts a Kubernetes Job on
+  `kubernetes.azure.com/mode=system`, keeps the pod alive after command
+  completion for evidence collection, and copies `/workspace/evidence` back to
+  `docs/temp/web-blast-equivalence/` with `job-collect`.
+- System-pool audit Job `elb-eq-action-audit-20260518054339` ran on
+  `aks-systempool-41800479-vmss000004` and completed its command with
+  `COMMAND_EXIT_CODE=0`. Evidence under
+  `docs/temp/web-blast-equivalence/aks-runner-20260518T054405Z/` records
+  `system_nodes=1`, `blast_nodes=10`, `relevant_job_count=78`, `oracle_jobs=10`,
+  `blast_batch_jobs=60`, and `finalizer_jobs=6`. This confirms the remaining
+  `EQ-06` through `EQ-13` checks can be orchestrated from the system pool while
+  heavy BLAST work stays on the blast node pool.
+- The first detached `EQ-06` Web RID probe (`elb-eq06-web-rid-20260518055638`)
+  completed on the system node and was collected under
+  `docs/temp/web-blast-equivalence/aks-runner-20260518T060017Z/`. It returned
+  RIDs for 18S and ITS but `Statistics_db-len=0` / no hits because the probe used
+  local database basenames as Web database values.
+- The corrected ITS Web DB probe (`elb-eq06-web-rid-webdb-20260518060043`) was
+  collected under `docs/temp/web-blast-equivalence/aks-runner-20260518T060631Z/`.
+  It produced RID `0NATHX89014` for `rRNA_typestrains/ITS_RefSeq_Fungi` with
+  `500` hits, `500` HSPs, `Statistics_db-len=12019908`,
+  `Statistics_db-num=20219`, and top accession `NR_111007`.
+- NCBI's current form uses `TL/18S_fungal_sequences` for 18S. A 300 bp RefSeq
+  fragment from `NR_132222.1` produced RID `0NBHHRPG014` with `500` hits,
+  `500` HSPs, `Statistics_db-len=5185702`, `Statistics_db-num=3907`, and top
+  accession `NG_065576`. Evidence was saved under
+  `docs/temp/web-blast-equivalence/2026-05-18-18s-fungal-short/`. Previous 18S
+  attempts with `rRNA_typestrains/18S_fungal_sequences` returned no-hit XML and
+  were cleaned up after evidence collection.
+- `EQ-07` storage and local-run evidence was collected from system-pool Jobs.
+  `elb-eq07-db-availability-20260518062519` showed that the currently running
+  blastpool nodes have empty node-local `/workspace/blast` caches for
+  `16S_ribosomal_RNA`, `18S_fungal_sequences`, `ITS_RefSeq_Fungi`, and the old
+  `core_nt_shard_00` warmup path, so the quick proof path used Storage-backed
+  downloads instead of assuming warm cache state. Evidence is under
+  `docs/temp/web-blast-equivalence/aks-runner-20260518T062604Z/`.
+- `elb-eq07-local-full-20260518063208` then downloaded the small BLAST DBs from
+  `elbstg01` via AzCopy MSI and ran local full BLASTN 2.17.0 on the system node.
+  `16S_ribosomal_RNA` matched the Web RID DB length, DB count, hit/HSP count,
+  and top accession. `18S_fungal_sequences` and `ITS_RefSeq_Fungi` matched the
+  Web top accession and hit/HSP count but not DB length/count, proving their
+  local Storage snapshots are not the same as the captured Web RID snapshots.
+  Evidence is under
+  `docs/temp/web-blast-equivalence/aks-runner-20260518T063230Z/`.
+- `elb-eq07-ncbi-current-20260518063630` downloaded current NCBI
+  `18S_fungal_sequences` and `ITS_RefSeq_Fungi` DB archives directly with
+  `update_blastdb.pl --decompress` and reran the same queries without mutating
+  workload Storage. Current downloadable sequence counts now match the Web RIDs
+  (`18S=3907`, `ITS=20219`) and top accessions still match, but DB length is
+  still slightly different (`18S` current `5185751` vs Web `5185702`; `ITS`
+  current `12019732` vs Web `12019908`). This narrows the remaining 18S/ITS
+  blocker to Web form DB scope or masked-length accounting rather than a simple
+  stale-Storage-only issue. Evidence is under
+  `docs/temp/web-blast-equivalence/aks-runner-20260518T063726Z/`.
+- Fast close-outs for `EQ-09`, `EQ-10`, and `EQ-12` are now validated: focused
+  backend equivalence tests reported `46 passed in 0.72s`, and the frontend
+  evidence-aware sharding availability test reported `5 passed`.
 
 Comparator status:
 
@@ -644,6 +709,42 @@ accession, identity/gaps, and original FASTA global ordinal did not reproduce th
 full BLAST internal ordering. This confirms that the next productive work is not
 more infrastructure setup; it is defining or implementing a BLAST-compatible
 tie-break strategy for hit-positive sharded merge results.
+
+### 2026-05-18 system-pool 16S sharded positive probe
+
+The local 16S sharding result was reproduced from the AKS system nodepool, using
+detached Job `elb-equivalence-job-20260518064515` on
+`aks-systempool-41800479-vmss000004`. This keeps the long-running BLAST work off
+the local workstation and makes the evidence resilient to a local network drop.
+
+Evidence directory:
+
+- `docs/temp/web-blast-equivalence/aks-runner-20260518T064631Z/elb-equivalence-job-20260518064515/eq08-system-16s-sharding-20260518T064524Z/`
+
+The Job downloaded `16S_ribosomal_RNA` from `elbstg01` with AzCopy MSI, extracted
+query accession `NR_025211.1` from the same DB snapshot, split all `27648`
+records into four contiguous shards, and ran BLASTN 2.17.0 with
+`-searchsp 57425628120`.
+
+| Field | Full local DB | Default merge | Oracle merge |
+| --- | ---: | ---: | ---: |
+| Hit count | `500` | `500` | `500` |
+| HSP count | `500` | `500` | `500` |
+| `Statistics_db-len` | `40051470` | `40051470` | `40051470` |
+| `Statistics_db-num` | `27648` | `27648` | `27648` |
+| `Statistics_eff-space` | `57425628120` | `57425628120` | `57425628120` |
+| `Statistics_hsp-len` | `26` | `26` | `26` |
+| Top accession | `NR_025211` | `NR_025211` | `NR_025211` |
+| Top-10 order | baseline | matched | matched |
+| First accession mismatch | n/a | rank `15` (`NR_041841`) | rank `15` (`NR_042061`) |
+| Top-500 overlap | n/a | `442 / 500` | `441 / 500` |
+
+Both merge modes report `tie_break_count=18931` and
+`tie_cutoff_overflow_count=5`, confirming that the remaining blocker is BLAST's
+internal ordering in large tied score classes near the `max_target_seqs=500`
+cutoff. The same-snapshot accession-order oracle covers `28009` accession forms
+but still does not reproduce the full BLAST ordering at rank 15, so `EQ-08`
+remains partial rather than a Web-equivalent pass.
 
 The critical database-version check is positive for this 16S probe. The NCBI Web
 XML does not expose a database release date, but it reports the same database
@@ -954,6 +1055,97 @@ inputs:
 Without one of those, a deterministic sharded merge can be stable and
 biologically equivalent, but it cannot honestly claim byte-for-byte or
 rank-for-rank Web top-500 identity for this query.
+
+### 2026-05-18 Core NT System-Node EQ-13 Rerun
+
+After confirming that 16S/18S/ITS are too small to serve as production sharding
+proof, EQ-13 was rerun against `core_nt` from the AKS system node using 10
+blastpool child Jobs. The reusable runner is
+[scripts/dev/eq13-core-nt-f3l-widepool.sh](../scripts/dev/eq13-core-nt-f3l-widepool.sh).
+It dispatches one child Job per warmed `core_nt_shard_00..09`, gathers a
+widepool with `-max_target_seqs 5000`, and then compares the result with the
+MPXV F3L inclusive Web CSV.
+
+Latest run evidence:
+
+| Field | Value |
+| --- | --- |
+| Orchestrator Job | `elb-equivalence-job-20260518070958` |
+| Run ID | `eq13-core-nt-f3l-widepool-20260518t071007z` |
+| Node placement | orchestrator on `aks-systempool-41800479-vmss000004`; 10 child Jobs on `workload=blast` nodes |
+| Query | `scripts/dev/test_queries/MPXV_F3L.fa` (`462` nt) |
+| Database | `core_nt_shard_00..09` from `https://elbstg01.blob.core.windows.net/blast-db/10shards/core_nt_shard_` |
+| Search space | `32156241807668` |
+| Web CSV oracle | `docs/temp/blast_inclusive_F3L_928998.csv` |
+| Evidence | `docs/temp/web-blast-equivalence/aks-runner-20260518T071101Z/elb-equivalence-job-20260518070958/` |
+
+Result summary from `summary.json`:
+
+| Check | Result |
+| --- | ---: |
+| Widepool candidate rows | `12,220` |
+| Web top-500 accessions present in widepool | `500 / 500` |
+| Web-only accessions | `0` |
+| Widepool top-10 overlap with CSV | `0 / 10` |
+| Strict Web accession oracle exact order | `true` |
+| Strict oracle rows | `500` |
+| Strict oracle value mismatches | `500 / 500` |
+| Merge tie cutoff overflow | `0` |
+
+The strict accession oracle proves that the merge layer can preserve a supplied
+Web top-500 order from a larger sharded candidate pool. It does **not** prove
+Web BLAST equivalence for this CSV because the HSP values are different. For the
+CSV top accession `OZ461628.1`, the local row is `98.701%`, `6` mismatches, raw
+score `430`, displayed bit score `795`, and subject coordinates `46970..46509`;
+the CSV reports `100.0%`, `0` mismatches, bit score `828.419`, and coordinates
+`46509..46970`. The current blocker is therefore not sharding mechanics or
+`searchsp`; it is acquiring a same-snapshot/current-HSP Web oracle, then deciding
+how strict top-N order should be when thousands of hits share an indistinguishable
+score class.
+
+### 2026-05-18 Fresh Web XML Strict-Oracle Pass
+
+To remove the stale CSV/HSP mismatch, a new Web BLAST RID was submitted from the
+AKS system node and retrieved as BLAST XML (`outfmt 5`). The helper script is
+[scripts/dev/eq14-core-nt-webxml-sharded.sh](../scripts/dev/eq14-core-nt-webxml-sharded.sh).
+It submits Web BLAST, writes a normalized CSV from the XML HSPs, runs the same
+MPXV F3L query across 10 warmed `core_nt` shards, and compares Web XML fields
+against both the full widepool and a strict Web top-500 accession oracle merge.
+
+Latest run evidence:
+
+| Field | Value |
+| --- | --- |
+| Orchestrator Job | `elb-equivalence-job-20260518072757` |
+| Run ID | `eq14-core-nt-webxml-sharded-20260518t072806z` |
+| Web RID | `0NFW8888016` |
+| Web output | `web-blast.xml` plus normalized `web-blast-from-xml.csv` |
+| Node placement | orchestrator on `aks-systempool-41800479-vmss000004`; 10 child Jobs on `workload=blast` nodes |
+| Query | `scripts/dev/test_queries/MPXV_F3L.fa` (`462` nt) |
+| Web options | `PROGRAM=blastn`, `DATABASE=core_nt`, `MEGABLAST=on`, `EXPECT=0.05`, `WORD_SIZE=28`, `HITLIST_SIZE=500`, `FILTER=L`, `ENTREZ_QUERY=txid10244[Organism:exp]` |
+| Local options | `-evalue 0.05 -max_target_seqs 5000 -taxids 10244 -outfmt '6 std score' -word_size 28 -searchsp 32156241807668 -dust yes -soft_masking false` |
+| Evidence | `docs/temp/web-blast-equivalence/aks-runner-20260518T072909Z/elb-equivalence-job-20260518072757/` |
+
+Result summary from `summary.json`:
+
+| Check | Result |
+| --- | ---: |
+| Web XML rows | `500` |
+| Widepool candidate rows | `12,220` |
+| Web top-500 accessions present in widepool | `500 / 500` |
+| Widepool HSP value mismatches | `0` |
+| Widepool default top-10 overlap | `0 / 10` |
+| Widepool default top-100 overlap | `1 / 100` |
+| Strict Web accession oracle exact order | `true` |
+| Strict oracle HSP value mismatches | `0` |
+| Strict oracle equivalence | `true` |
+
+This closes the same-snapshot/HSP-value question for the fresh Web XML oracle:
+the sharded `core_nt` widepool contains all Web top-500 hits with identical
+primary HSP fields. The remaining distinction is order selection inside a very
+large tied score class. A deterministic local merge without the Web accession
+oracle does not reproduce Web's top-N membership/order, but a strict same-run
+Web top-500 oracle produces exact XML-derived CSV equivalence.
 
 Performance note: the latest warmed `core_nt` shard jobs completed in `17s` to
 `19s`, so the remaining equivalence work should focus on hit-positive golden

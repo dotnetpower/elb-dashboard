@@ -2313,10 +2313,14 @@ textarea.form-input {
   background: rgba(2, 4, 10, 0.62);
   backdrop-filter: blur(2px);
   -webkit-backdrop-filter: blur(2px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .taxonomy-modal {
   width: min(1400px, calc(100vw - 32px));
   max-height: min(calc(100vh - 32px), 860px);
+  max-height: min(calc(100dvh - 32px), 860px);
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2374,8 +2378,17 @@ textarea.form-input {
 .taxonomy-modal__body {
   flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   padding: 14px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.taxonomy-modal__body::-webkit-scrollbar {
+  width: 6px;
+}
+.taxonomy-modal__body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
 }
 .taxonomy-modal__split {
   display: grid;
@@ -2394,6 +2407,19 @@ textarea.form-input {
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.taxonomy-modal__left::-webkit-scrollbar,
+.taxonomy-modal__image-col::-webkit-scrollbar,
+.taxonomy-modal__right::-webkit-scrollbar {
+  width: 6px;
+}
+.taxonomy-modal__left::-webkit-scrollbar-thumb,
+.taxonomy-modal__image-col::-webkit-scrollbar-thumb,
+.taxonomy-modal__right::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
 }
 .taxonomy-modal__search {
   position: relative;
@@ -2921,8 +2947,18 @@ textarea.form-input {
 }
 
 @media (max-width: 860px) {
+  .taxonomy-modal__body {
+    overflow-y: auto;
+  }
   .taxonomy-modal__split {
     grid-template-columns: 1fr;
+    height: auto;
+  }
+  .taxonomy-modal__left,
+  .taxonomy-modal__image-col,
+  .taxonomy-modal__right {
+    overflow: visible;
+    padding-right: 0;
   }
   .taxonomy-modal__image {
     min-height: 180px;
@@ -2932,6 +2968,21 @@ textarea.form-input {
   }
   .taxonomy-modal {
     max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+  }
+}
+
+@media (max-height: 720px) {
+  .taxonomy-modal__split {
+    height: auto;
+  }
+  .taxonomy-modal__left,
+  .taxonomy-modal__image-col,
+  .taxonomy-modal__right {
+    overflow: visible;
+  }
+  .taxonomy-modal__results {
+    max-height: min(220px, 34dvh);
   }
 }
 

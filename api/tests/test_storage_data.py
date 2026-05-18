@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from types import SimpleNamespace
 
@@ -52,6 +53,49 @@ def test_upload_group_fasta_writes_queries_blob(monkeypatch: pytest.MonkeyPatch)
 def test_upload_group_fasta_rejects_unsafe_paths(blob_path: str) -> None:
     with pytest.raises(ValueError, match="invalid blob_path"):
         storage_data.upload_group_fasta(object(), "elbstg01", blob_path, ">q1\nAAAA\n")
+
+
+class FakeChunkDownload:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def chunks(self):
+        midpoint = max(1, len(self.payload) // 2)
+        yield self.payload[:midpoint]
+        yield self.payload[midpoint:]
+
+
+class FakeChunkBlobClient:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def download_blob(self) -> FakeChunkDownload:
+        return FakeChunkDownload(self.payload)
+
+
+class FakeChunkBlobService:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def get_blob_client(self, _container: str, _blob_path: str) -> FakeChunkBlobClient:
+        return FakeChunkBlobClient(self.payload)
+
+
+def test_read_result_blob_text_inflates_gzip_with_decompressed_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = gzip.compress(b"query\tresult\nsecond\trow\n")
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeChunkBlobService(payload),
+    )
+
+    text = storage_data.read_result_blob_text(
+        object(), "elbstg01", "results", "job123/merged_results.out.gz", max_bytes=12
+    )
+
+    assert text == "query\tresult"
 
 
 class FakeDownload:

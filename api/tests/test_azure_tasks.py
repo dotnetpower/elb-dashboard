@@ -176,3 +176,61 @@ def test_ensure_aks_runtime_rbac_reports_nonfatal_failures(monkeypatch) -> None:
 
     assert summary["roles_assigned"] == ["Storage Blob Data Contributor"]
     assert "AcrPull" in summary["roles_failed"]
+
+
+def test_start_aks_enqueues_openapi_after_cluster_start(monkeypatch) -> None:
+    sent_tasks: list[dict[str, Any]] = []
+
+    class FakePoller:
+        def result(self) -> None:
+            return None
+
+    class FakeManagedClusters:
+        def begin_start(self, resource_group: str, cluster_name: str) -> FakePoller:
+            sent_tasks.append({"started": f"{resource_group}/{cluster_name}"})
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    class FakeAsyncResult:
+        id = "task-openapi-123"
+
+    def fake_send_task(
+        task_name: str,
+        *,
+        kwargs: dict[str, Any],
+        queue: str | None = None,
+    ) -> FakeAsyncResult:
+        sent_tasks.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
+        return FakeAsyncResult()
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    result = azure.start_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        auto_openapi={
+            "acr_name": "elbacr01",
+            "acr_resource_group": "rg-elbacr",
+            "storage_account": "elbstg01",
+            "storage_resource_group": "rg-storage",
+        },
+    )
+
+    assert result["openapi_task_id"] == "task-openapi-123"
+    assert sent_tasks[0] == {"started": "rg-elb/elb-cluster"}
+    assert sent_tasks[1]["task_name"] == "api.tasks.openapi.deploy_openapi_service"
+    assert sent_tasks[1]["queue"] == "azure"
+    assert sent_tasks[1]["kwargs"] == {
+        "subscription_id": "sub-1",
+        "resource_group": "rg-elb",
+        "cluster_name": "elb-cluster",
+        "acr_name": "elbacr01",
+        "acr_resource_group": "rg-elbacr",
+        "storage_account": "elbstg01",
+        "storage_resource_group": "rg-storage",
+    }

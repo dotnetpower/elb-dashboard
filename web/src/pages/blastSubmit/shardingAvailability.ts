@@ -83,6 +83,8 @@ export function deriveShardingAvailability({
     capacityPlan,
   });
   const enabled = reason == null;
+  const hasVerifiedWebSearchSpace = typeof database?.web_blast_searchsp === "number" && database.web_blast_searchsp > 0;
+  const preciseReason = reason ?? (hasVerifiedWebSearchSpace ? null : "Verified Web BLAST search-space evidence is not available for this database/options scope.");
   const offDisabled = enabled && isDbAlreadyWarm;
   const offReason = offDisabled
     ? "This database is already warmed as prepared shards on the selected cluster. Use a sharded mode to consume the node-local cache."
@@ -90,7 +92,7 @@ export function deriveShardingAvailability({
 
   return {
     capacityPlan,
-    preferredMode: enabled ? "precise" : "off",
+    preferredMode: preciseReason == null ? "precise" : enabled ? "approximate" : "off",
     options: {
       off: {
         mode: "off",
@@ -108,10 +110,12 @@ export function deriveShardingAvailability({
       },
       precise: {
         mode: "precise",
-        label: "Web-equivalent shard",
-        enabled,
-        reason,
-        description: "Use warmed shards with full-DB search-space correction and query-aware merge checks. This is the default path for NCBI Web BLAST-compatible runs.",
+        label: hasVerifiedWebSearchSpace ? "Web-equivalent shard" : "Precise shard",
+        enabled: preciseReason == null,
+        reason: preciseReason,
+        description: hasVerifiedWebSearchSpace
+          ? "Use warmed shards with verified full-DB search-space correction and query-aware merge checks. This is the default path for evidence-backed NCBI Web BLAST-compatible runs."
+          : "Use warmed shards only after a verified full-DB search-space default or explicit calibration evidence is available for this database/options scope.",
       },
     },
   };

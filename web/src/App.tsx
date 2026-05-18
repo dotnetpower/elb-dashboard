@@ -17,9 +17,10 @@ import { AksCardMockups } from "@/pages/mockups/AksCardMockups";
 import { AksCardMockupsRefined } from "@/pages/mockups/AksCardMockupsRefined";
 import { AksCardMockupsPremium } from "@/pages/mockups/AksCardMockupsPremium";
 import { SidecarInspectorMockups } from "@/pages/mockups/SidecarInspectorMockups";
+import { configValue, isDevBypassEnabled } from "@/config/runtime";
 
-const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
-const CLIENT_ID_MISSING = !import.meta.env.VITE_AZURE_CLIENT_ID && !DEV_BYPASS;
+const DEV_BYPASS = isDevBypassEnabled();
+const CLIENT_ID_MISSING = !configValue("VITE_AZURE_CLIENT_ID") && !DEV_BYPASS;
 
 function AppRoutes() {
   return (

@@ -88,6 +88,8 @@ def test_aks_start_forwards_auto_warmup_payload(
                 "databases": ["core_nt"],
                 "programs": {"core_nt": "blastn"},
                 "enabled": True,
+                "acr_resource_group": "rg-elbacr",
+                "acr_name": "elbacr01",
             },
         },
     )
@@ -96,6 +98,55 @@ def test_aks_start_forwards_auto_warmup_payload(
     assert response.json()["task_id"] == "task-start-aks"
     assert calls[0]["auto_warmup"]["databases"] == ["core_nt"]
     assert calls[0]["auto_warmup"]["storage_account"] == "elbstg01"
+    assert calls[0]["auto_openapi"] == {
+        "acr_name": "elbacr01",
+        "acr_resource_group": "rg-elbacr",
+        "storage_account": "elbstg01",
+        "storage_resource_group": "rg-elb",
+        "tenant_id": "common",
+        "caller_oid": "00000000-0000-0000-0000-000000000000",
+    }
+
+
+def test_aks_start_forwards_auto_openapi_payload(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class FakeAsyncResult:
+        id = "task-start-aks"
+
+    def fake_delay(**kwargs: Any) -> FakeAsyncResult:
+        calls.append(kwargs)
+        return FakeAsyncResult()
+
+    monkeypatch.setattr("api.tasks.azure.start_aks.delay", fake_delay)
+
+    response = client.post(
+        "/api/aks/start",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "auto_openapi": {
+                "acr_name": "elbacr01",
+                "acr_resource_group": "rg-elbacr",
+                "storage_account": "elbstg01",
+                "storage_resource_group": "rg-storage",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["task_id"] == "task-start-aks"
+    assert calls[0]["auto_openapi"] == {
+        "acr_name": "elbacr01",
+        "acr_resource_group": "rg-elbacr",
+        "storage_account": "elbstg01",
+        "storage_resource_group": "rg-storage",
+        "tenant_id": "common",
+        "caller_oid": "00000000-0000-0000-0000-000000000000",
+    }
 
 
 def test_aks_assign_roles_forwards_storage_rbac_fields(

@@ -24,6 +24,11 @@ import redis  # provided by /opt/elb/venv
 CGROUP_ROOT = "/sys/fs/cgroup"
 KEY_PREFIX = "sidecar:metrics:"
 
+try:
+    _CLK_TCK = os.sysconf("SC_CLK_TCK")
+except (ValueError, OSError):
+    _CLK_TCK = 100
+
 
 def _read_cpu_usec() -> int:
     with open(f"{CGROUP_ROOT}/cpu.stat", encoding="utf-8") as f:
@@ -47,6 +52,41 @@ def _read_mem_max() -> int | None:
         return None
 
 
+def _read_proc_self_cpu_usec() -> int:
+    with open("/proc/self/stat", encoding="utf-8") as f:
+        raw = f.read()
+    rhs = raw.rsplit(")", 1)[1].split()
+    utime_jiffies = int(rhs[11])
+    stime_jiffies = int(rhs[12])
+    return (utime_jiffies + stime_jiffies) * 1_000_000 // _CLK_TCK
+
+
+def _read_proc_self_rss_bytes() -> int:
+    with open("/proc/self/status", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    raise RuntimeError("VmRSS missing from /proc/self/status")
+
+
+def _select_reader(log: logging.Logger):
+    try:
+        prev_cpu = _read_cpu_usec()
+        return "cgroup", _read_cpu_usec, _read_mem_bytes, _read_mem_max(), prev_cpu
+    except Exception as cgroup_exc:
+        try:
+            prev_cpu = _read_proc_self_cpu_usec()
+        except Exception as procfs_exc:
+            log.warning(
+                "initial read failed (cgroup=%s, procfs=%s)",
+                cgroup_exc,
+                procfs_exc,
+            )
+            raise
+        log.info("cgroup unavailable (%s); using procfs fallback", cgroup_exc)
+        return "procfs", _read_proc_self_cpu_usec, _read_proc_self_rss_bytes, None, prev_cpu
+
+
 def main() -> int:
     name = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("SIDECAR_NAME", "terminal")
     interval = float(os.environ.get("REPORT_INTERVAL", "5"))
@@ -65,27 +105,34 @@ def main() -> int:
 
     try:
         client = redis.Redis.from_url(url, socket_timeout=1.5)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("could not init redis client: %s", exc)
         return 1
 
-    host = socket.gethostname()
-    mem_max = _read_mem_max()
-    log.info("started name=%s host=%s interval=%.1fs ttl=%ds mem_max=%s", name, host, interval, ttl, mem_max)
-
     try:
-        prev_cpu = _read_cpu_usec()
-        prev_ts = time.time()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("initial cgroup read failed (cgroup v1?): %s", exc)
+        mode, read_cpu, read_mem, mem_max, prev_cpu = _select_reader(log)
+    except Exception as exc:
+        log.warning("initial metrics read failed: %s", exc)
         return 1
+
+    host = socket.gethostname()
+    prev_ts = time.time()
+    log.info(
+        "started name=%s host=%s mode=%s interval=%.1fs ttl=%ds mem_max=%s",
+        name,
+        host,
+        mode,
+        interval,
+        ttl,
+        mem_max if mem_max is not None else "unbounded",
+    )
 
     while True:
         time.sleep(interval)
         try:
-            cur_cpu = _read_cpu_usec()
+            cur_cpu = read_cpu()
             cur_ts = time.time()
-            cur_mem = _read_mem_bytes()
+            cur_mem = read_mem()
             dt = max(1e-6, cur_ts - prev_ts)
             cpu_pct = round(max(0, cur_cpu - prev_cpu) / dt / 10_000, 1)
             mem_pct = round(cur_mem / mem_max * 100, 1) if mem_max else None
@@ -97,12 +144,13 @@ def main() -> int:
                 "mem_bytes": cur_mem,
                 "mem_max_bytes": mem_max,
                 "mem_pct": mem_pct,
+                "source": mode,
             }
             client.setex(f"{KEY_PREFIX}{name}", ttl, json.dumps(payload))
             prev_cpu, prev_ts = cur_cpu, cur_ts
         except redis.RedisError as exc:
             log.warning("redis error: %s", exc)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("tick failed: %s", exc)
 
 

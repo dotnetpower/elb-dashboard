@@ -1,5 +1,7 @@
+import { isDevBypassEnabled } from "@/config/runtime";
+
 export const STORAGE_KEY = "elb-resource-config";
-export const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
+export const DEV_BYPASS = isDevBypassEnabled();
 
 export interface ResourceConfig {
   subscriptionId: string;

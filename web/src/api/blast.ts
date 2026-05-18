@@ -280,24 +280,42 @@ export interface BlastWarmupPlan {
   recommendations: string[];
 }
 
+export type BlastHitNumeric = number | string;
+
 export interface BlastHit {
   qseqid: string;
   sseqid: string;
-  pident: number;
-  length: number;
-  mismatch: number;
-  gapopen: number;
-  qstart: number;
-  qend: number;
-  sstart: number;
-  send: number;
-  evalue: number;
-  bitscore: number;
+  pident: BlastHitNumeric;
+  length: BlastHitNumeric;
+  mismatch: BlastHitNumeric;
+  gapopen: BlastHitNumeric;
+  qstart: BlastHitNumeric;
+  qend: BlastHitNumeric;
+  sstart: BlastHitNumeric;
+  send: BlastHitNumeric;
+  evalue: BlastHitNumeric;
+  bitscore: BlastHitNumeric;
+  score?: BlastHitNumeric;
+  gaps?: BlastHitNumeric;
   qseq?: string;
   sseq?: string;
-  qlen?: number;
-  slen?: number;
-  ppos?: number;
+  midline?: string;
+  qlen?: BlastHitNumeric;
+  slen?: BlastHitNumeric;
+  qcovs?: BlastHitNumeric;
+  scovs?: BlastHitNumeric;
+  ppos?: BlastHitNumeric;
+  stitle?: string;
+  sscinames?: string;
+  staxids?: string;
+  source_blob?: string;
+  review_status?:
+    | "strong_match"
+    | "review_priority"
+    | "low_confidence"
+    | "weak_hit"
+    | "unclassified";
+  review_reason?: string;
 }
 
 export interface BlastAggregateStats {
@@ -397,8 +415,7 @@ export const blastApi = {
       summary: string;
     }>("/blast/pre-flight", req),
 
-  submit: (req: BlastSubmitRequest) =>
-    api.post<BlastSubmitResponse>("/blast/jobs", req),
+  submit: (req: BlastSubmitRequest) => api.post<BlastSubmitResponse>("/blast/jobs", req),
 
   searchTaxonomy: (query: string, limit = 10) =>
     api.get<TaxonomySearchResponse>(
@@ -406,7 +423,9 @@ export const blastApi = {
     ),
 
   getTaxonomyDetail: (taxid: number) =>
-    api.get<TaxonomyDetail>(`/blast/taxonomy/detail/${encodeURIComponent(String(taxid))}`),
+    api.get<TaxonomyDetail>(
+      `/blast/taxonomy/detail/${encodeURIComponent(String(taxid))}`,
+    ),
 
   getTaxonomyImage: (scientificName: string) =>
     api.get<TaxonomyImageResponse>(
@@ -568,15 +587,18 @@ export const blastApi = {
       account_name: storageAccount,
     }),
 
-  buildDbOrderOracle: (body: {
-    subscription_id: string;
-    resource_group: string;
-    account_name: string;
-    cluster_name: string;
-    acr_name?: string;
-    image?: string;
-    source_version?: string;
-  }, dbName: string) =>
+  buildDbOrderOracle: (
+    body: {
+      subscription_id: string;
+      resource_group: string;
+      account_name: string;
+      cluster_name: string;
+      acr_name?: string;
+      image?: string;
+      source_version?: string;
+    },
+    dbName: string,
+  ) =>
     api.post<{
       accepted: boolean;
       db_name: string;
@@ -630,16 +652,65 @@ export const blastApi = {
     jobId: string,
     subscriptionId: string,
     storageAccount: string,
-    opts?: { blob_name?: string; max_alignments?: number; query_id?: string },
-  ) =>
-    api.get<{
+    opts?: {
+      blob_name?: string;
+      max_alignments?: number;
+      page?: number;
+      page_size?: number;
+      query_id?: string;
+      subject_id?: string;
+      organism?: string;
+      min_identity?: number;
+      min_bitscore?: number;
+      max_evalue?: number;
+      min_query_cover?: number;
+      sort_by?: "evalue" | "bitscore" | "pident" | "qcovs" | "length";
+      sort_dir?: "asc" | "desc";
+    },
+  ) => {
+    const params = new URLSearchParams({
+      subscription_id: subscriptionId,
+      storage_account: storageAccount,
+    });
+    if (opts?.blob_name) params.set("blob_name", opts.blob_name);
+    if (opts?.max_alignments) params.set("max_alignments", String(opts.max_alignments));
+    if (opts?.page) params.set("page", String(opts.page));
+    if (opts?.page_size) params.set("page_size", String(opts.page_size));
+    if (opts?.query_id) params.set("query_id", opts.query_id);
+    if (opts?.subject_id) params.set("subject_id", opts.subject_id);
+    if (opts?.organism) params.set("organism", opts.organism);
+    if (opts?.min_identity !== undefined)
+      params.set("min_identity", String(opts.min_identity));
+    if (opts?.min_bitscore !== undefined)
+      params.set("min_bitscore", String(opts.min_bitscore));
+    if (opts?.max_evalue !== undefined) params.set("max_evalue", String(opts.max_evalue));
+    if (opts?.min_query_cover !== undefined)
+      params.set("min_query_cover", String(opts.min_query_cover));
+    if (opts?.sort_by) params.set("sort_by", opts.sort_by);
+    if (opts?.sort_dir) params.set("sort_dir", opts.sort_dir);
+    return api.get<{
       job_id: string;
       blob_name: string;
+      blob_names?: string[];
       alignments: BlastHit[];
       total_hits: number;
       returned: number;
       query_ids: string[];
+      page?: number;
+      page_size?: number;
+      pages?: number;
+      files_parsed?: number;
+      total_files?: number;
+      read_failures?: number;
+      truncated?: boolean;
+      hit_limit_reached?: boolean;
+      degraded?: boolean;
+      degraded_reason?: string;
+      message?: string;
+      filtered_hits?: number;
+      filters?: Record<string, unknown>;
     }>(
-      `/blast/jobs/${encodeURIComponent(jobId)}/results/alignments?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}${opts?.blob_name ? `&blob_name=${encodeURIComponent(opts.blob_name)}` : ""}${opts?.max_alignments ? `&max_alignments=${opts.max_alignments}` : ""}${opts?.query_id ? `&query_id=${encodeURIComponent(opts.query_id)}` : ""}`,
-    ),
+      `/blast/jobs/${encodeURIComponent(jobId)}/results/alignments?${params.toString()}`,
+    );
+  },
 };

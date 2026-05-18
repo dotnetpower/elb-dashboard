@@ -59,6 +59,7 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
         ("POST", "/api/resources/ensure-rg"),
         ("POST", "/api/storage/prepare-db"),
         ("POST", "/api/blast/submit"),
+        ("GET", "/api/aks/openapi/proxy?resource_group=rg-x&cluster_name=cx&path=%2Fhealthz"),
         ("POST", "/api/v1/elastic-blast/submit"),
         ("GET", "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa"),
         ("GET", "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/files/result-xml-001"),

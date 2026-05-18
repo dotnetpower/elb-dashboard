@@ -1,32 +1,33 @@
-"""Parser + aggregator for BLAST tabular output (`-outfmt 6` / `-outfmt 7`).
+"""Parser + aggregator for BLAST result output.
 
 Ported from `legacy/functionapp/routes/blast_jobs.py` so that
 `/api/blast/jobs/{id}/results/aggregate`, `.../alignments`, and `.../export`
 can return real data to the `BlastAnalytics` page instead of degraded stubs.
 
-The parser is deliberately **stateless and side-effect-free** so it can run
+The parsers are deliberately **stateless and side-effect-free** so they can run
 inside the api sidecar's HTTP handler without enqueuing a Celery task: the
 blobs we parse are kilobytes-to-low-megabytes, capped by `max_bytes` in
-`storage_data.read_blob_text`, so the cost is bounded.
+`storage_data.read_result_blob_text`, so the cost is bounded.
 
 Format support:
+    * `-outfmt 5` (BLAST XML) — converted to the same canonical hit row shape
+        used by tabular output so the UI can render Web BLAST-like tables and
+        alignment previews.
   * `-outfmt 6` (tabular, no header) — assumed to use the BLAST default
     12-column layout (`qseqid sseqid pident length mismatch gapopen qstart
     qend sstart send evalue bitscore`).
   * `-outfmt 7` (tabular with `# Fields:` comment lines) — parsed by mapping
     the field labels back to canonical column names so custom `-outfmt 7
     'qseqid sseqid pident qlen slen ...'` invocations still work.
-
-Anything else (`-outfmt 0` pairwise text, `-outfmt 5` XML) is ignored
-silently — callers should default the submit form to outfmt 6 or 7 if they
-want results to surface here. The UI already does this (see
-`web/src/pages/blastSubmit/AlgorithmParametersSection.tsx`).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
+
+from defusedxml import ElementTree as ET
 
 LOGGER = logging.getLogger(__name__)
 
@@ -80,8 +81,106 @@ _FIELD_LABEL_TO_COLUMN: dict[str, str] = {
 # Columns that should be coerced to float, int, or left as string.
 _FLOAT_COLUMNS = frozenset({"pident", "evalue", "bitscore", "ppos"})
 _INT_COLUMNS = frozenset(
-    {"length", "mismatch", "gapopen", "qstart", "qend", "sstart", "send", "qlen", "slen"}
+    {
+        "length",
+        "mismatch",
+        "gapopen",
+        "gaps",
+        "qstart",
+        "qend",
+        "sstart",
+        "send",
+        "qlen",
+        "slen",
+        "score",
+    }
 )
+
+
+def parse_blast_result_content(content: str) -> list[dict[str, Any]]:
+    """Parse BLAST XML (`outfmt 5`) or tabular (`outfmt 6` / `outfmt 7`) content."""
+    stripped = content.lstrip("\ufeff \t\r\n")
+    if stripped.startswith("<?xml") or stripped.startswith("<BlastOutput"):
+        return parse_blast_xml(stripped)
+    return parse_blast_tabular(content)
+
+
+def parse_blast_xml(content: str) -> list[dict[str, Any]]:
+    """Parse BLAST XML (`-outfmt 5`) into canonical hit dictionaries.
+
+    Each HSP becomes one row, matching the tabular parser's shape closely
+    enough for aggregate stats, CSV export, and the alignment preview. BLAST
+    XML reports total gap characters as `Hsp_gaps`; the historical UI field is
+    named `gapopen`, so both `gapopen` and `gaps` carry that same value.
+    """
+    root = ET.fromstring(content)
+    if _local_name(root.tag) != "BlastOutput":
+        return []
+
+    hits: list[dict[str, Any]] = []
+    iterations_parent = _child(root, "BlastOutput_iterations")
+    for iteration in _children(iterations_parent, "Iteration"):
+        query_id = (
+            _text(iteration, "Iteration_query-ID")
+            or _text(iteration, "Iteration_query-def")
+            or "Query_1"
+        )
+        query_len = _int_or_none(_text(iteration, "Iteration_query-len"))
+        hits_parent = _child(iteration, "Iteration_hits")
+        for hit in _children(hits_parent, "Hit"):
+            subject_id = (
+                _versioned_accession(hit) or _text(hit, "Hit_accession") or _text(hit, "Hit_id")
+            )
+            subject_title = _text(hit, "Hit_def")
+            subject_len = _int_or_none(_text(hit, "Hit_len"))
+            if not subject_id:
+                continue
+            hsps_parent = _child(hit, "Hit_hsps")
+            for hsp in _children(hsps_parent, "Hsp"):
+                align_len = _int_or_none(_text(hsp, "Hsp_align-len"))
+                identity = _int_or_none(_text(hsp, "Hsp_identity"))
+                gaps = _int_or_none(_text(hsp, "Hsp_gaps")) or 0
+                positive = _int_or_none(_text(hsp, "Hsp_positive"))
+                pident = (
+                    round((identity * 100.0) / align_len, 3)
+                    if identity is not None and align_len and align_len > 0
+                    else None
+                )
+                ppos = (
+                    round((positive * 100.0) / align_len, 3)
+                    if positive is not None and align_len and align_len > 0
+                    else None
+                )
+                row: dict[str, Any] = {
+                    "qseqid": query_id,
+                    "sseqid": subject_id,
+                    "pident": pident,
+                    "length": align_len,
+                    "mismatch": (
+                        max(0, align_len - identity - gaps)
+                        if align_len is not None and identity is not None
+                        else None
+                    ),
+                    "gapopen": gaps,
+                    "gaps": gaps,
+                    "qstart": _int_or_none(_text(hsp, "Hsp_query-from")),
+                    "qend": _int_or_none(_text(hsp, "Hsp_query-to")),
+                    "sstart": _int_or_none(_text(hsp, "Hsp_hit-from")),
+                    "send": _int_or_none(_text(hsp, "Hsp_hit-to")),
+                    "evalue": _float_or_none(_text(hsp, "Hsp_evalue")),
+                    "bitscore": _float_or_none(_text(hsp, "Hsp_bit-score")),
+                    "score": _int_or_none(_text(hsp, "Hsp_score")),
+                    "qlen": query_len,
+                    "slen": subject_len,
+                    "stitle": subject_title or None,
+                    "qseq": _text(hsp, "Hsp_qseq") or None,
+                    "sseq": _text(hsp, "Hsp_hseq") or None,
+                    "midline": _text(hsp, "Hsp_midline") or None,
+                }
+                if ppos is not None:
+                    row["ppos"] = ppos
+                hits.append({key: value for key, value in row.items() if value is not None})
+    return hits
 
 
 def parse_blast_tabular(content: str) -> list[dict[str, Any]]:
@@ -91,8 +190,9 @@ def parse_blast_tabular(content: str) -> list[dict[str, Any]]:
     string columns (qseqid, sseqid, stitle, sscinames, staxids, …) are
     kept verbatim so the UI can render them.
 
-    Malformed lines (wrong column count, unparseable numbers) are skipped
-    silently — the parser is best-effort, not a syntax checker.
+    Malformed lines with too few columns are skipped silently. Unparseable
+    numeric values are preserved as text so the caller can still render the
+    row and aggregation can ignore only the invalid metric.
     """
     hits: list[dict[str, Any]] = []
     columns: tuple[str, ...] = _DEFAULT_COLUMNS
@@ -296,8 +396,71 @@ EXPORT_DEFAULT_COLUMNS: tuple[str, ...] = _DEFAULT_COLUMNS
 EXPORT_EXTRA_COLUMNS: tuple[str, ...] = (
     "qlen",
     "slen",
+    "score",
+    "gaps",
     "ppos",
+    "qcovs",
+    "scovs",
+    "review_status",
+    "review_reason",
+    "source_blob",
     "stitle",
     "sscinames",
     "staxids",
+    "qseq",
+    "sseq",
+    "midline",
 )
+
+
+def _text(element: ET.Element, name: str) -> str:
+    child = _child(element, name)
+    value = child.text if child is not None else None
+    return value.strip() if value else ""
+
+
+def _child(element: ET.Element | None, name: str) -> ET.Element | None:
+    if element is None:
+        return None
+    for child in element:
+        if _local_name(child.tag) == name:
+            return child
+    return None
+
+
+def _children(element: ET.Element | None, name: str) -> list[ET.Element]:
+    if element is None:
+        return []
+    return [child for child in element if _local_name(child.tag) == name]
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _int_or_none(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _float_or_none(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _versioned_accession(hit: ET.Element) -> str:
+    hit_id = _text(hit, "Hit_id")
+    for pattern in (r"\|([A-Z]{1,4}_?\d+(?:\.\d+)?)\|?$", r"\|([A-Z]{1,4}_?\d+\.\d+)\|"):
+        match = re.search(pattern, hit_id)
+        if match:
+            return match.group(1)
+    accession = _text(hit, "Hit_accession")
+    return accession

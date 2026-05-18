@@ -17,6 +17,7 @@ helpers handle the actual idempotent ARM PUT.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -108,6 +109,11 @@ def ensure_storage(
             body["account_name"],
             body["region"],
             caller_oid=caller.object_id,
+            private_endpoint_subnet_id=os.environ.get("PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID", ""),
+            private_dns_zone_resource_group=os.environ.get(
+                "PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP",
+                os.environ.get("AZURE_RESOURCE_GROUP", ""),
+            ),
         )
     except Exception as exc:
         LOGGER.warning("ensure_storage failed: %s", type(exc).__name__)

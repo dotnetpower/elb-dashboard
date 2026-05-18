@@ -9,6 +9,7 @@ import { msalInstance } from "@/auth/msal";
 import { App } from "@/App";
 import { ToastProvider } from "@/components/Toast";
 import { AutoRefreshProvider } from "@/hooks/useAutoRefresh";
+import { isDevBypassEnabled } from "@/config/runtime";
 import "@/theme/glass.css";
 // JetBrains Mono — used by the browser terminal (xterm.js fontFamily).
 // Loading the four common variants here makes them available everywhere
@@ -30,7 +31,7 @@ const queryClient = new QueryClient({
 });
 
 async function bootstrap() {
-  const devBypass = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
+  const devBypass = isDevBypassEnabled();
 
   try {
     // Must be awaited before any other MSAL call (msal-browser v3 requirement).

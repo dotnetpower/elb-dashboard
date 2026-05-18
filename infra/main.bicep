@@ -266,6 +266,7 @@ module controlApp 'modules/containerAppControl.bicep' = {
     apiClientId: apiClientId
     applicationInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     platformStorageAccountName: storage.outputs.storageAccountName
+    platformPrivateEndpointSubnetId: network.outputs.privateEndpointsSubnetId
     subscriptionId: subscription().subscriptionId
     allowedOrigins: allowedOriginsArray
     // First deploy uses the bootstrap image so the Container App provisions

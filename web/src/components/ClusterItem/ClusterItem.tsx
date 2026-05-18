@@ -15,6 +15,7 @@ import { ClusterStateRow } from "./ClusterStateRow";
 import { DatabaseChipStrip } from "./DatabaseChipStrip";
 import { PoolCardsGrid } from "./PoolCardsGrid";
 import { ShardingCapacityRow } from "./ShardingCapacityRow";
+import { StartEstimatePanel } from "./StartEstimatePanel";
 import { useClusterActiveSubmissions } from "./useClusterActiveSubmissions";
 import { useClusterDbChips } from "./useClusterDbChips";
 import { useClusterShardMutation } from "./useClusterShardMutation";
@@ -60,6 +61,9 @@ export function ClusterItem({
   const trans = transitioning.get(c.name);
   const isTransitioning = transitioning.has(c.name);
   const showOperationalDetails = isRunning && !isTransitioning;
+  const [transitionStartedAt, setTransitionStartedAt] = useState<number | null>(
+    null,
+  );
 
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -86,6 +90,14 @@ export function ClusterItem({
     readAutoWarmupDbs(),
   );
   const autoWarmupSyncKeyRef = useRef("");
+
+  useEffect(() => {
+    if (trans === "starting") {
+      setTransitionStartedAt((prev) => prev ?? Date.now());
+      return;
+    }
+    setTransitionStartedAt(null);
+  }, [trans]);
 
   useEffect(() => {
     const refresh = () => setAutoWarmupDbs(readAutoWarmupDbs());
@@ -224,6 +236,14 @@ export function ClusterItem({
             isRunning={showOperationalDetails}
             transition={trans}
           />
+
+          {trans === "starting" && (
+            <StartEstimatePanel
+              clusterName={c.name}
+              autoWarmupDbCount={autoWarmupDbs.size}
+              startedAt={transitionStartedAt}
+            />
+          )}
 
           {/* Sharding chips remain a primary action surface — keep visible. */}
           {showOperationalDetails && (dbChips.length > 0 || dbListDegraded) && (

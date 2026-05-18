@@ -181,6 +181,37 @@ def test_path_segment_is_percent_encoded() -> None:
     assert external_blast._path_segment("bad/id") == "bad%2Fid"
 
 
+def test_external_blast_base_url_uses_runtime_cache(monkeypatch) -> None:
+    monkeypatch.delenv("ELB_OPENAPI_BASE_URL", raising=False)
+    from api.services import external_blast, openapi_runtime
+
+    monkeypatch.setattr(openapi_runtime, "get_openapi_base_url", lambda: "http://10.0.0.4")
+
+    assert external_blast._base_url() == "http://10.0.0.4"
+
+
+def test_openapi_runtime_round_trip() -> None:
+    from api.services import openapi_runtime
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.value: str | None = None
+
+        def set(self, _key: str, value: str) -> None:
+            self.value = value
+
+        def get(self, _key: str) -> str | None:
+            return self.value
+
+    fake = FakeRedis()
+    assert openapi_runtime.save_openapi_base_url(
+        "http://10.0.0.4/",
+        metadata={"cluster_name": "elb-cluster"},
+        client=fake,
+    )
+    assert openapi_runtime.get_openapi_base_url(client=fake) == "http://10.0.0.4"
+
+
 def test_external_blast_file_download_forwards(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app

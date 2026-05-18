@@ -1,5 +1,6 @@
 import { api } from "@/api/client";
 import { blastApi, type BlastExportFormat } from "@/api/blast";
+import { apiBaseUrl } from "@/config/runtime";
 
 export const reportApi = {
   exportResults: (
@@ -15,7 +16,7 @@ export const reportApi = {
     storageAccount: string,
     format: BlastExportFormat,
   ) =>
-    `${import.meta.env.VITE_API_BASE_URL ?? ""}/api/blast/jobs/${encodeURIComponent(jobId)}/results/export?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&format=${format}`,
+    `${apiBaseUrl()}/api/blast/jobs/${encodeURIComponent(jobId)}/results/export?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&format=${format}`,
 };
 
 export interface AuditEvent {

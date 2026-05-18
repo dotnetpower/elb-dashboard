@@ -1,9 +1,10 @@
 import { msalInstance, apiLoginRequest } from "@/auth/msal";
 import { notifyAuthSessionIssue } from "@/auth/sessionEvents";
 import { fetchWithRetry, makeRequestId } from "@/api/resilience";
+import { apiBaseUrl, isDevBypassEnabled } from "@/config/runtime";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
-const DEV_BYPASS = import.meta.env.VITE_AUTH_DEV_BYPASS === "true";
+const API_BASE = apiBaseUrl();
+const DEV_BYPASS = isDevBypassEnabled();
 
 async function getAccessToken(): Promise<string | null> {
   if (DEV_BYPASS) return null;

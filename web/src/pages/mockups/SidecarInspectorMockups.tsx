@@ -1663,7 +1663,16 @@ function TableA({
   const visible = data.slice(0, limit);
   const remaining = Math.max(0, data.length - limit);
   return (
-    <div style={{ maxHeight: 320, overflowY: "auto", border: "1px solid var(--border-weak)", borderRadius: 6 }}>
+    <div
+      style={{
+        maxHeight: 320,
+        overflowY: "auto",
+        border: "1px solid var(--border-weak)",
+        borderRadius: 6,
+        position: "relative",
+        zIndex: 0,
+      }}
+    >
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
         <thead style={{ position: "sticky", top: 0, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", zIndex: 1 }}>
           <tr style={{ color: "var(--text-muted)", textAlign: "left" }}>
@@ -1885,6 +1894,7 @@ function Drawer({ req, onClose }: { req: MockReq; onClose: () => void }) {
         borderLeft: "1px solid var(--border-weak)",
         padding: 14,
         overflowY: "auto",
+        zIndex: 20,
         boxShadow: "-12px 0 32px rgba(0,0,0,0.45)",
         animation: "slideIn 180ms ease-out",
       }}

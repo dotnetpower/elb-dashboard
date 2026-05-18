@@ -51,6 +51,8 @@ RUN chmod +x /usr/local/bin/elb-cgroup-reporter
 
 # Process supervisor — runs nginx (primary) + cgroup reporter (advisory).
 COPY web/supervisord.conf /etc/supervisord.conf
+COPY web/entrypoint.sh /usr/local/bin/elb-frontend-entrypoint
+RUN chmod +x /usr/local/bin/elb-frontend-entrypoint
 
 # Nginx and the reporter both run as root inside the container — the
 # loopback ingress means nothing from outside ever talks to either of them
@@ -60,4 +62,5 @@ EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://127.0.0.1:8081/ || exit 1
 
+ENTRYPOINT ["/usr/local/bin/elb-frontend-entrypoint"]
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]

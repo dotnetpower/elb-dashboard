@@ -6,6 +6,7 @@ import base64
 import binascii
 import logging
 import re
+import zlib
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -161,6 +162,47 @@ def read_blob_text(
     blob = svc.get_blob_client(container, blob_path)
     data = blob.download_blob(offset=0, length=max_bytes).readall()
     return data.decode("utf-8", errors="replace")
+
+
+def read_result_blob_text(
+    credential: TokenCredential,
+    account_name: str,
+    container: str,
+    blob_path: str,
+    max_bytes: int = 4096,
+) -> str:
+    """Read result text, transparently inflating gzip result blobs.
+
+    BLAST results are often uploaded as `.out.gz`; reading those through
+    `read_blob_text` returns compressed bytes, which makes XML/content sniffing
+    impossible. This helper caps the decompressed payload so analytics routes
+    remain bounded in the request thread.
+    """
+    if max_bytes <= 0:
+        return ""
+    if not blob_path.lower().endswith(".gz"):
+        return read_blob_text(credential, account_name, container, blob_path, max_bytes=max_bytes)
+
+    _validate_blob_path(blob_path)
+    svc = _blob_service(credential, account_name)
+    blob = svc.get_blob_client(container, blob_path)
+    downloader = blob.download_blob()
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    chunks: list[bytes] = []
+    total = 0
+    for compressed in downloader.chunks():
+        remaining = max_bytes - total
+        if remaining <= 0:
+            break
+        data = inflater.decompress(compressed, remaining)
+        if data:
+            chunks.append(data)
+            total += len(data)
+    if total < max_bytes:
+        flushed = inflater.flush(max_bytes - total)
+        if flushed:
+            chunks.append(flushed)
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def stream_blob_bytes(

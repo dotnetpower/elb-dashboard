@@ -50,6 +50,9 @@ param applicationInsightsConnectionString string
 @description('Platform Storage account name (used to derive the table endpoint for jobstate / jobhistory access).')
 param platformStorageAccountName string = ''
 
+@description('Resource id of the platform subnet where workload Storage private endpoints are created for api/worker/terminal access.')
+param platformPrivateEndpointSubnetId string = ''
+
 @description('Subscription id (passed into the api/worker env vars so monitor routes can default subscription_id when not provided in the query string).')
 param subscriptionId string = subscription().subscriptionId
 
@@ -76,6 +79,7 @@ var terminalImage = useBootstrapImage ? bootstrapImage : '${acrLoginServer}/elb-
 var storageDnsSuffix = environment().suffixes.storage
 var tableEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.table.${storageDnsSuffix}'
 var blobEndpoint = empty(platformStorageAccountName) ? '' : 'https://${platformStorageAccountName}.blob.${storageDnsSuffix}'
+var platformResourceGroupName = resourceGroup().name
 
 resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
@@ -153,8 +157,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'API_CLIENT_ID', value: apiClientId }
             { name: 'AZURE_CLIENT_ID', value: sharedIdentityClientId }
             { name: 'AZURE_SUBSCRIPTION_ID', value: subscriptionId }
+            { name: 'AZURE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'AZURE_TABLE_ENDPOINT', value: tableEndpoint }
             { name: 'AZURE_BLOB_ENDPOINT', value: blobEndpoint }
+            { name: 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', value: platformPrivateEndpointSubnetId }
+            { name: 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
@@ -199,6 +206,13 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           env: [
             { name: 'SIDECAR_NAME', value: 'frontend' }
             { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
+            { name: 'VITE_API_BASE_URL', value: '' }
+            { name: 'VITE_AUTH_DEV_BYPASS', value: 'false' }
+            { name: 'VITE_AZURE_REDIRECT_URI', value: '__RUNTIME__' }
+            { name: 'VITE_AZURE_TENANT_ID', value: tenantId }
+            { name: 'VITE_AZURE_CLIENT_ID', value: apiClientId }
+            { name: 'API_CLIENT_ID', value: apiClientId }
+            { name: 'AZURE_TENANT_ID', value: tenantId }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
@@ -230,8 +244,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'API_CLIENT_ID', value: apiClientId }
             { name: 'AZURE_CLIENT_ID', value: sharedIdentityClientId }
             { name: 'AZURE_SUBSCRIPTION_ID', value: subscriptionId }
+            { name: 'AZURE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'AZURE_TABLE_ENDPOINT', value: tableEndpoint }
             { name: 'AZURE_BLOB_ENDPOINT', value: blobEndpoint }
+            { name: 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', value: platformPrivateEndpointSubnetId }
+            { name: 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
             // Worker calls api.services.terminal_exec which needs the same
