@@ -11,6 +11,7 @@ import { apiLoginRequest } from "@/auth/msal";
 import { subscribeAuthSessionIssues, type AuthSessionIssue } from "@/auth/sessionEvents";
 import { useClusterReadiness, useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
+import { isFeatureEnabled } from "@/config/runtime";
 
 import "./Layout.css";
 
@@ -178,9 +179,13 @@ export function Layout({ children }: PropsWithChildren) {
   const autoRefreshLabel = autoRefreshMs >= 1000 ? `${Math.round(autoRefreshMs / 1000)}s` : `${autoRefreshMs}ms`;
   const { theme, toggle: toggleTheme } = useTheme();
   const cluster = useClusterReadiness();
-  const terminalSidecar = useTerminalSidecarHealth();
+  const customDbEnabled = isFeatureEnabled("customDb");
+  const labToolsEnabled = isFeatureEnabled("labTools");
+  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
   const newSearchBlocked = !cluster.hasRunningCluster;
   const terminalBlocked = !terminalSidecar.isHealthy;
+  const showToolsGroup = labToolsEnabled || terminalEnabled;
 
   useEffect(() => subscribeAuthSessionIssues(setSessionIssue), []);
 
@@ -245,23 +250,29 @@ export function Layout({ children }: PropsWithChildren) {
           <NavLink to="/blast/jobs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <List size={14} strokeWidth={1.5} /> Jobs
           </NavLink>
-          <NavLink to="/blast/databases/build" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
-            <Database size={14} strokeWidth={1.5} /> Custom DB
-          </NavLink>
-          <span className="layout__nav-sep" />
-          <span className="layout__nav-group-label">Tools</span>
-          <NavLink to="/tools" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
-            <ArrowRightLeft size={14} strokeWidth={1.5} /> Lab Tools
-          </NavLink>
-          <NavLink
-            to="/terminal"
-            className="layout__nav-item"
-            onClick={() => setMobileNavOpen(false)}
-            title={terminalBlocked ? "Terminal sidecar is not available in this environment" : undefined}
-          >
-            <TerminalIcon size={14} strokeWidth={1.5} /> Terminal
-            {terminalBlocked && <NavWarnDot />}
-          </NavLink>
+          {customDbEnabled && (
+            <NavLink to="/blast/databases/build" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+              <Database size={14} strokeWidth={1.5} /> Custom DB
+            </NavLink>
+          )}
+          {showToolsGroup && <span className="layout__nav-sep" />}
+          {showToolsGroup && <span className="layout__nav-group-label">Tools</span>}
+          {labToolsEnabled && (
+            <NavLink to="/tools" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+              <ArrowRightLeft size={14} strokeWidth={1.5} /> Lab Tools
+            </NavLink>
+          )}
+          {terminalEnabled && (
+            <NavLink
+              to="/terminal"
+              className="layout__nav-item"
+              onClick={() => setMobileNavOpen(false)}
+              title={terminalBlocked ? "Terminal sidecar is not available in this environment" : undefined}
+            >
+              <TerminalIcon size={14} strokeWidth={1.5} /> Terminal
+              {terminalBlocked && <NavWarnDot />}
+            </NavLink>
+          )}
           <NavLink to="/docs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <Code2 size={14} strokeWidth={1.5} /> API
           </NavLink>

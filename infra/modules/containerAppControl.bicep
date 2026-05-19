@@ -44,6 +44,15 @@ param tenantId string
 @description('App Registration client id (audience) for the api.')
 param apiClientId string
 
+@description('Frontend feature flag for the custom database builder. Set to false to hide menu entries and route access.')
+param featureCustomDb string = 'true'
+
+@description('Frontend feature flag for lab tools. Set to false to hide menu entries and route access.')
+param featureLabTools string = 'true'
+
+@description('Frontend feature flag for the browser terminal. Set to false to hide menu entries, dashboard card, shortcuts, and route access.')
+param featureTerminal string = 'true'
+
 @description('App Insights connection string for telemetry from inside the containers.')
 param applicationInsightsConnectionString string
 
@@ -211,6 +220,9 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'VITE_AZURE_REDIRECT_URI', value: '__RUNTIME__' }
             { name: 'VITE_AZURE_TENANT_ID', value: tenantId }
             { name: 'VITE_AZURE_CLIENT_ID', value: apiClientId }
+            { name: 'VITE_FEATURE_CUSTOM_DB', value: featureCustomDb }
+            { name: 'VITE_FEATURE_LAB_TOOLS', value: featureLabTools }
+            { name: 'VITE_FEATURE_TERMINAL', value: featureTerminal }
             { name: 'API_CLIENT_ID', value: apiClientId }
             { name: 'AZURE_TENANT_ID', value: tenantId }
             { name: 'LOG_LEVEL', value: 'INFO' }

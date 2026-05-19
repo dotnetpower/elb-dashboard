@@ -125,18 +125,20 @@ export function HighlightedFASTA({ text }: { text: string }) {
 export function FilePreview({
   jobId,
   filename,
+  blobName,
   subscriptionId,
   storageAccount,
   maxBytes,
 }: {
   jobId: string;
   filename: string;
+  blobName?: string;
   subscriptionId: string;
   storageAccount: string;
   maxBytes?: number;
 }) {
   const q = useQuery({
-    queryKey: ["blast-file", jobId, filename],
+    queryKey: ["blast-file", jobId, filename, blobName, subscriptionId, storageAccount, maxBytes],
     queryFn: () =>
       blastApi.readJobFile(
         jobId,
@@ -144,6 +146,7 @@ export function FilePreview({
         subscriptionId,
         storageAccount,
         maxBytes ?? 4096,
+        blobName,
       ),
     staleTime: Infinity,
   });

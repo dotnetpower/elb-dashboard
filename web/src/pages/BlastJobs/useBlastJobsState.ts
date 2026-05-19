@@ -2,7 +2,8 @@ import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 
-import { blastApi, type BlastJobSummary } from "@/api/endpoints";
+import { blastApi, monitoringApi, type BlastJobSummary } from "@/api/endpoints";
+import { loadSavedConfig } from "@/components/SetupWizard";
 import { useClusterReadiness } from "@/hooks/usePrerequisites";
 
 import {
@@ -65,10 +66,25 @@ export function useBlastJobsState() {
     [setSearchParams],
   );
   const cluster = useClusterReadiness();
+  const savedConfig = loadSavedConfig();
+  const subscriptionId = savedConfig?.subscriptionId ?? "";
+  const resourceGroup = savedConfig?.workloadResourceGroup ?? "";
+  const clustersQuery = useQuery({
+    queryKey: ["aks", subscriptionId, resourceGroup],
+    queryFn: () => monitoringApi.aks(subscriptionId, resourceGroup),
+    enabled: Boolean(subscriptionId && resourceGroup),
+    staleTime: 30_000,
+  });
+  const clusterName = clustersQuery.data?.clusters?.[0]?.name ?? "";
 
   const jobsQuery = useQuery({
-    queryKey: ["blast-jobs"],
-    queryFn: () => blastApi.listJobs(),
+    queryKey: ["blast-jobs", subscriptionId, resourceGroup, clusterName],
+    queryFn: () =>
+      blastApi.listJobs({
+        subscriptionId,
+        resourceGroup,
+        clusterName,
+      }),
     refetchInterval: 20_000,
   });
 

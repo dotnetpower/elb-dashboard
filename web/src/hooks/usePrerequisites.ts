@@ -75,14 +75,23 @@ async function fetchTerminalHealth(): Promise<TerminalHealthResponse> {
   return (await r.json()) as TerminalHealthResponse;
 }
 
-export function useTerminalSidecarHealth(): TerminalSidecarHealth {
+export function useTerminalSidecarHealth(enabled = true): TerminalSidecarHealth {
   const query = useQuery({
     queryKey: ["terminal-sidecar-health"],
     queryFn: fetchTerminalHealth,
+    enabled,
     refetchInterval: 30_000,
     staleTime: 15_000,
     retry: false,
   });
+
+  if (!enabled) {
+    return {
+      isHealthy: false,
+      status: "unknown",
+      isLoading: false,
+    };
+  }
 
   const status = query.data?.status ?? (query.isLoading ? "checking" : "unknown");
   return {

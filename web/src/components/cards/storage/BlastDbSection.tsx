@@ -73,10 +73,10 @@ export function BlastDbSection({
           {publicAccessDisabled && (
             <span
               className="dv3-pill dv3-pill-warning"
-              title="Storage publicNetworkAccess is Disabled. Database list cannot be read from this network."
+              title="Storage is Private only. Database list cannot be read from this local network."
             >
               <Lock size={10} strokeWidth={2} style={{ marginRight: 3 }} />
-              blocked
+              private only
             </span>
           )}
           {!publicAccessDisabled && downloadedDbs.size > 0 && (
@@ -125,12 +125,12 @@ export function BlastDbSection({
           <Lock size={14} style={{ color: "var(--warning)", flexShrink: 0 }} />
           <div style={{ flex: 1 }}>
             <div style={{ color: "var(--text-primary)", fontWeight: 500 }}>
-              Storage public access is disabled
+              Storage is Private only
             </div>
             <div style={{ marginTop: 2 }}>
-              Database list cannot be read from your laptop. Open an
-              IP-allowlisted window so this view works locally; production
-              still uses the private endpoint.
+              This local browser session cannot read the database list through the
+              private endpoint. Open an IP-allowlisted debug window for local
+              testing; production continues to use the private endpoint.
             </div>
           </div>
           <button

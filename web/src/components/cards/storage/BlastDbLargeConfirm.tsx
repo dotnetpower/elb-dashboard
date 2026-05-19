@@ -47,8 +47,8 @@ export function BlastDbLargeConfirm({
       </div>
       <div className="muted" style={{ fontSize: 11, marginBottom: 8 }}>
         This database is <strong>{db?.size}</strong> and may take hours to copy from
-        NCBI. Ensure your storage account has sufficient space and that public access
-        is enabled.
+        NCBI. Ensure your storage account has sufficient space and that the control
+        plane can reach it through the private endpoint.
       </div>
       <div style={{ display: "flex", gap: "var(--space-2)" }}>
         <button

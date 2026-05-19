@@ -451,17 +451,41 @@ export const blastApi = {
     filename?: string;
   }) => api.post<{ blob_url: string; blob_path: string }>("/blast/upload-query", data),
 
-  listJobs: () => api.get<{ jobs: BlastJobSummary[] }>("/blast/jobs"),
+  listJobs: (context?: {
+    subscriptionId?: string;
+    resourceGroup?: string;
+    clusterName?: string;
+  }) => {
+    const params = new URLSearchParams();
+    if (context?.subscriptionId) params.set("subscription_id", context.subscriptionId);
+    if (context?.resourceGroup) params.set("resource_group", context.resourceGroup);
+    if (context?.clusterName) params.set("cluster_name", context.clusterName);
+    const qs = params.toString();
+    return api.get<{ jobs: BlastJobSummary[] }>(`/blast/jobs${qs ? `?${qs}` : ""}`);
+  },
 
   getJob: (jobId: string, history = false) =>
     api.get<BlastJobSummary>(
       `/blast/jobs/${encodeURIComponent(jobId)}${history ? "?history=1" : ""}`,
     ),
 
-  cancelJob: (jobId: string) =>
+  cancelJob: (
+    jobId: string,
+    context?: {
+      subscriptionId?: string;
+      resourceGroup?: string;
+      clusterName?: string;
+      storageAccount?: string;
+    },
+  ) =>
     api.post<{ job_id: string; status: string }>(
       `/blast/jobs/${encodeURIComponent(jobId)}/cancel`,
-      {},
+      {
+        subscription_id: context?.subscriptionId,
+        resource_group: context?.resourceGroup,
+        cluster_name: context?.clusterName,
+        storage_account: context?.storageAccount,
+      },
     ),
 
   deleteJob: (jobId: string) =>
@@ -475,9 +499,10 @@ export const blastApi = {
     subscriptionId: string,
     storageAccount: string,
     maxBytes = 4096,
+    blobName?: string,
   ) =>
     api.get<{ name: string; content: string; truncated: boolean }>(
-      `/blast/jobs/${encodeURIComponent(jobId)}/file?name=${encodeURIComponent(filename)}&subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&max_bytes=${maxBytes}`,
+      `/blast/jobs/${encodeURIComponent(jobId)}/file?name=${encodeURIComponent(blobName || filename)}&subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&max_bytes=${maxBytes}`,
     ),
 
   listResults: (

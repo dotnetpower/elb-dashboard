@@ -32,9 +32,9 @@ interface ReasonMeta {
 
 const REASON_META: Record<string, ReasonMeta> = {
   network_blocked: {
-    label: "Network blocked",
+    label: "Private only",
     hint:
-      "Storage public network access is Disabled and the browser cannot reach the data plane. Use scripts/dev/storage-public-access.sh on for local debugging, or rely on the api sidecar streaming proxy.",
+      "Storage is Private only and this local browser session cannot reach the data plane. Use scripts/dev/storage-public-access.sh on for local debugging, or rely on the api sidecar streaming proxy.",
     icon: <WifiOff size={12} />,
   },
   unauthorized: {

@@ -4,6 +4,17 @@ type RuntimeConfig = {
   VITE_AZURE_CLIENT_ID?: string;
   VITE_AZURE_REDIRECT_URI?: string;
   VITE_AUTH_DEV_BYPASS?: string;
+  VITE_FEATURE_CUSTOM_DB?: string;
+  VITE_FEATURE_LAB_TOOLS?: string;
+  VITE_FEATURE_TERMINAL?: string;
+};
+
+export type FeatureFlag = "customDb" | "labTools" | "terminal";
+
+const FEATURE_FLAG_KEYS: Record<FeatureFlag, keyof RuntimeConfig> = {
+  customDb: "VITE_FEATURE_CUSTOM_DB",
+  labTools: "VITE_FEATURE_LAB_TOOLS",
+  terminal: "VITE_FEATURE_TERMINAL",
 };
 
 const buildConfig: RuntimeConfig = {
@@ -12,6 +23,9 @@ const buildConfig: RuntimeConfig = {
   VITE_AZURE_CLIENT_ID: import.meta.env.VITE_AZURE_CLIENT_ID,
   VITE_AZURE_REDIRECT_URI: import.meta.env.VITE_AZURE_REDIRECT_URI,
   VITE_AUTH_DEV_BYPASS: import.meta.env.VITE_AUTH_DEV_BYPASS,
+  VITE_FEATURE_CUSTOM_DB: import.meta.env.VITE_FEATURE_CUSTOM_DB,
+  VITE_FEATURE_LAB_TOOLS: import.meta.env.VITE_FEATURE_LAB_TOOLS,
+  VITE_FEATURE_TERMINAL: import.meta.env.VITE_FEATURE_TERMINAL,
 };
 
 function runtimeConfig(): RuntimeConfig {
@@ -33,4 +47,16 @@ export function isDevBypassEnabled(): boolean {
 
 export function apiBaseUrl(): string {
   return configValue("VITE_API_BASE_URL");
+}
+
+export function parseFeatureFlag(value: string | undefined, fallback = true): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (["0", "false", "no", "off", "disabled"].includes(normalized)) return false;
+  if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
+  return fallback;
+}
+
+export function isFeatureEnabled(flag: FeatureFlag): boolean {
+  return parseFeatureFlag(configValue(FEATURE_FLAG_KEYS[flag]), true);
 }

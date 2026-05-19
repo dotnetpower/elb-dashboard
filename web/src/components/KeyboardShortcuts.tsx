@@ -13,15 +13,27 @@ import {
   X,
 } from "lucide-react";
 
-const SHORTCUTS: { key: string; label: string; action: string }[] = [
+import { isFeatureEnabled } from "@/config/runtime";
+
+type Shortcut = { key: string; label: string; action: string };
+
+const BASE_SHORTCUTS: Shortcut[] = [
   { key: "g d", label: "Go to Dashboard", action: "/" },
-  { key: "g t", label: "Go to Terminal", action: "/terminal" },
   { key: "g s", label: "Go to BLAST Submit", action: "/blast/submit" },
   { key: "g j", label: "Go to BLAST Jobs", action: "/blast/jobs" },
   { key: "g a", label: "Go to API Reference", action: "/docs" },
   { key: "?", label: "Show this panel", action: "help" },
   { key: "Esc", label: "Close panel / dialog", action: "close" },
 ];
+
+function shortcuts(): Shortcut[] {
+  if (!isFeatureEnabled("terminal")) return BASE_SHORTCUTS;
+  return [
+    BASE_SHORTCUTS[0],
+    { key: "g t", label: "Go to Terminal", action: "/terminal" },
+    ...BASE_SHORTCUTS.slice(1),
+  ];
+}
 
 export function useKeyboardShortcuts() {
   const [showHelp, setShowHelp] = useState(false);
@@ -56,7 +68,7 @@ export function useKeyboardShortcuts() {
 
       if (pendingRef.current === "g") {
         const combo = `g ${e.key}`;
-        const match = SHORTCUTS.find((s) => s.key === combo);
+        const match = shortcuts().find((s) => s.key === combo);
         if (match && match.action !== "help") {
           e.preventDefault();
           navigate(match.action);
@@ -189,10 +201,11 @@ export function ShortcutOverlay({ onClose }: { onClose: () => void }) {
 }
 
 function ShortcutsTab() {
-  const navShortcuts = SHORTCUTS.filter(
+  const visibleShortcuts = shortcuts();
+  const navShortcuts = visibleShortcuts.filter(
     (s) => s.action.startsWith("/") || s.action.startsWith("g"),
   );
-  const otherShortcuts = SHORTCUTS.filter(
+  const otherShortcuts = visibleShortcuts.filter(
     (s) => !s.action.startsWith("/") && !s.action.startsWith("g"),
   );
 
@@ -224,7 +237,7 @@ function ShortcutGroup({
   shortcuts,
 }: {
   title: string;
-  shortcuts: typeof SHORTCUTS;
+  shortcuts: Shortcut[];
 }) {
   return (
     <div>

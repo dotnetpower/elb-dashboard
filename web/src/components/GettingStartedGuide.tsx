@@ -9,6 +9,7 @@ interface Props {
   hasCluster: boolean;
   hasImages: boolean;
   hasTerminal: boolean;
+  terminalEnabled: boolean;
   clusterRunning: boolean;
   acrName: string;
   onDismiss: () => void;
@@ -25,7 +26,7 @@ interface Step {
 }
 
 export function GettingStartedGuide({
-  hasCluster, hasImages, hasTerminal, clusterRunning, acrName, onDismiss,
+  hasCluster, hasImages, hasTerminal, terminalEnabled, clusterRunning, acrName, onDismiss,
 }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
@@ -52,17 +53,21 @@ export function GettingStartedGuide({
         ? clusterRunning ? "Cluster is ready" : "Cluster exists but is not ready yet. Wait for provisioning to finish, or start it from the Dashboard if it is stopped."
         : 'Click "+ Add Cluster" on the AKS card. Default: Standard_E16s_v5, 10 nodes for standard workloads. For large databases (nt, nr), use Standard_E32s_v5 or higher.',
     },
-    {
-      id: "terminal",
-      title: "Open the Terminal",
-      description: "The browser terminal sidecar (with elastic-blast CLI pre-installed) ships with the deployment and is reached over an authenticated WebSocket.",
-      icon: <Terminal size={18} />,
-      done: hasTerminal,
-      action: hasTerminal ? null : { label: "Open Terminal page", to: "/terminal" },
-      detail: hasTerminal
-        ? "Terminal sidecar is healthy"
-        : "The `terminal` sidecar is not available in this environment. It ships with the deployed Container App (or a local `docker compose -f scripts/dev/docker-compose.local.yml up` stack). Running the api alone is enough for the rest of the dashboard.",
-    },
+    ...(terminalEnabled
+      ? [
+          {
+            id: "terminal",
+            title: "Open the Terminal",
+            description: "The browser terminal sidecar (with elastic-blast CLI pre-installed) ships with the deployment and is reached over an authenticated WebSocket.",
+            icon: <Terminal size={18} />,
+            done: hasTerminal,
+            action: hasTerminal ? null : { label: "Open Terminal page", to: "/terminal" },
+            detail: hasTerminal
+              ? "Terminal sidecar is healthy"
+              : "The `terminal` sidecar is not available in this environment. It ships with the deployed Container App (or a local `docker compose -f scripts/dev/docker-compose.local.yml up` stack). Running the api alone is enough for the rest of the dashboard.",
+          },
+        ]
+      : []),
     {
       id: "database",
       title: "Download a BLAST database",

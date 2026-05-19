@@ -6,7 +6,7 @@ interface StorageMetaGridProps {
 }
 
 /**
- * Compact 4-cell grid: Region · SKU · HNS · Public network access.
+ * Compact 4-cell grid: Region · SKU · HNS · network reachability.
  * Uses the v3 dashboard token system (`dv3-cell-grid`) so the chrome is
  * consistent with the cluster + jobs cards.
  */
@@ -37,12 +37,12 @@ export function StorageMetaGrid({
         className={`cell${isPublic ? " warn" : " success"}`}
         title={
           isPublic
-            ? "publicNetworkAccess=Enabled. Production posture is Disabled (project policy §9)."
-            : "publicNetworkAccess=Disabled. Production posture; data plane reached via private endpoint."
+            ? "Public endpoint is enabled. Production posture is Private only (project policy §9)."
+            : "Private only. Public endpoint is disabled; data plane is reached via private endpoint."
         }
       >
-        <span className="label">Public</span>
-        <div className="value">{isPublic ? "Enabled" : "Disabled"}</div>
+        <span className="label">Network</span>
+        <div className="value">{isPublic ? "Public allowed" : "Private only"}</div>
       </div>
     </div>
   );

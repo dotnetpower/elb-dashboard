@@ -16,6 +16,7 @@ import threading as _threading
 import uuid
 from datetime import UTC
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -270,8 +271,106 @@ def _payload_value(payload: dict[str, Any] | None, *keys: str) -> Any:
     return None
 
 
+def _queries_blob_path(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("az://"):
+        raw = "https://" + raw.removeprefix("az://")
+    if raw.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        parts = parsed.path.lstrip("/").split("/", 1)
+        if len(parts) == 2 and parts[0] == "queries":
+            return parts[1]
+        return ""
+    raw = raw.lstrip("/")
+    if raw.startswith("queries/"):
+        raw = raw.removeprefix("queries/")
+    return raw
+
+
+def _job_query_blob_path(job_id: str, caller: CallerIdentity) -> str:
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        state = JobStateRepository().get(job_id)
+    except Exception as exc:
+        LOGGER.info("query preview state lookup failed job_id=%s: %s", job_id, type(exc).__name__)
+        return ""
+    if state is None:
+        return ""
+    if getattr(state, "owner_oid", None) and state.owner_oid != caller.object_id:
+        raise HTTPException(403, "not owner")
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    return _queries_blob_path(_payload_value(payload, "query_file", "query_blob_url"))
+
+
+def _blob_not_found(exc: BaseException) -> bool:
+    from azure.core.exceptions import ResourceNotFoundError
+
+    if isinstance(exc, ResourceNotFoundError):
+        return True
+    text = str(exc)
+    return any(
+        marker in text
+        for marker in (
+            "BlobNotFound",
+            "ResourceNotFound",
+            "The specified blob does not exist",
+        )
+    )
+
+
+def _job_payload_for_file_preview(job_id: str, caller: CallerIdentity) -> dict[str, Any]:
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        state = JobStateRepository().get(job_id)
+    except Exception as exc:
+        if os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true":
+            LOGGER.info(
+                "file preview state lookup skipped job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
+            return {}
+        LOGGER.warning("file preview state lookup failed job_id=%s: %s", job_id, type(exc).__name__)
+        raise HTTPException(503, {"code": "state_lookup_unavailable"}) from exc
+    if state is None:
+        return {}
+    if getattr(state, "owner_oid", None) and state.owner_oid != caller.object_id:
+        raise HTTPException(403, "not owner")
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    return payload
+
+
+def _config_preview_from_payload(
+    *,
+    job_id: str,
+    storage_account: str,
+    payload: dict[str, Any],
+) -> str:
+    from api.tasks.blast import _build_config_content
+
+    options = dict(payload.get("options") if isinstance(payload.get("options"), dict) else {})
+    for key in ("acr_resource_group", "acr_name"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            options.setdefault(key, value)
+    return _build_config_content(
+        job_id=job_id,
+        resource_group=str(_payload_value(payload, "resource_group") or ""),
+        cluster_name=str(_payload_value(payload, "cluster_name", "aks_cluster_name") or ""),
+        storage_account=str(_payload_value(payload, "storage_account") or storage_account),
+        program=str(_payload_value(payload, "program") or "blastn"),
+        database=str(_payload_value(payload, "database", "db") or ""),
+        query_file=str(_payload_value(payload, "query_file", "query_blob_url") or ""),
+        options=options,
+    )
+
+
 def _external_status_to_dashboard(status: str) -> str:
-    if status == "success":
+    if status in {"success", "completed"}:
         return "completed"
     if status in {"queued", "running", "failed", "cancelled"}:
         return status
@@ -348,6 +447,67 @@ def _external_to_blast_job(job: dict[str, Any]) -> dict[str, Any]:
         error = job.get("error")
         out["error"] = error.get("message") if isinstance(error, dict) else str(error)
     return out
+
+
+def _openapi_client_kwargs_from_cluster(
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, str]:
+    if not (subscription_id and resource_group and cluster_name):
+        return {}
+    try:
+        from api.services import get_credential
+        from api.services.k8s_monitoring import (
+            k8s_get_deployment_env_value,
+            k8s_get_service_ip,
+        )
+
+        credential = get_credential()
+        ip = k8s_get_service_ip(
+            credential,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            "elb-openapi",
+        )
+        if not ip:
+            return {}
+        try:
+            from api.services.openapi_runtime import save_openapi_base_url
+
+            save_openapi_base_url(
+                f"http://{ip}",
+                metadata={
+                    "subscription_id": subscription_id,
+                    "resource_group": resource_group,
+                    "cluster_name": cluster_name,
+                    "service_name": "elb-openapi",
+                },
+            )
+        except Exception as exc:
+            LOGGER.debug("openapi runtime cache write skipped: %s", type(exc).__name__)
+        api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
+        if not api_token:
+            api_token = (
+                k8s_get_deployment_env_value(
+                    credential,
+                    subscription_id,
+                    resource_group,
+                    cluster_name,
+                    "elb-openapi",
+                    "ELB_OPENAPI_API_TOKEN",
+                    container_name="openapi",
+                )
+                or ""
+            ).strip()
+        kwargs = {"base_url": f"http://{ip}"}
+        if api_token:
+            kwargs["api_token"] = api_token
+        return kwargs
+    except Exception as exc:
+        LOGGER.info("openapi cluster context unavailable: %s", type(exc).__name__)
+        return {}
 
 
 def _split_child_summary_from_repo(repo: Any, parent_job_id: str) -> dict[str, Any] | None:
@@ -429,6 +589,7 @@ def _split_child_summaries_from_repo(
 
 def _local_to_blast_job(state: Any, split_children: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = state.payload if isinstance(state.payload, dict) else {}
+    progress = payload.get("_progress") if isinstance(payload.get("_progress"), dict) else None
     program = str(_payload_value(payload, "program") or "blast")
     db = str(_payload_value(payload, "db", "database") or "")
     infrastructure = {
@@ -459,6 +620,13 @@ def _local_to_blast_job(state: Any, split_children: dict[str, Any] | None = None
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
         "source": "dashboard",
     }
+    if progress is not None:
+        out["custom_status"] = progress
+        out["output"] = {
+            "status": state.status,
+            "phase": state.phase or state.status,
+            "steps": progress.get("steps", {}),
+        }
     # Optional dashboard-friendly query name (used by the cluster bento
     # Active jobs cell to show "BRCA1 - chr17.fa" rather than the raw uuid).
     query_label = _payload_value(payload, "query_file", "query_name", "queries")
@@ -482,6 +650,46 @@ def _local_to_blast_job(state: Any, split_children: dict[str, Any] | None = None
             out["splits_failed"] = failed
             out["splits_total"] = total
     return out
+
+
+def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
+    if getattr(state, "type", "") != "blast" or getattr(state, "status", "") != "running":
+        return state
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    subscription_id = str(_payload_value(payload, "subscription_id") or "")
+    resource_group = str(_payload_value(payload, "resource_group") or "")
+    cluster_name = str(_payload_value(payload, "cluster_name", "aks_cluster_name") or "")
+    if not (subscription_id and resource_group and cluster_name):
+        return state
+    try:
+        from api.services import get_credential
+        from api.services.monitoring import k8s_check_blast_status
+
+        k8s = k8s_check_blast_status(
+            get_credential(),
+            subscription_id,
+            resource_group,
+            cluster_name,
+            namespace="default",
+            job_id=state.job_id,
+        )
+    except Exception as exc:
+        LOGGER.debug("blast k8s refresh skipped job_id=%s: %s", state.job_id, type(exc).__name__)
+        return state
+    k8s_status = str(k8s.get("status") or "")
+    if k8s_status not in {"completed", "failed"}:
+        return state
+    try:
+        updated = repo.update(state.job_id, status=k8s_status, phase=k8s_status)
+        repo.append_history(
+            state.job_id,
+            "k8s_status_refreshed",
+            {"status": k8s_status, "phase": k8s_status, "k8s": k8s},
+        )
+        return updated
+    except Exception as exc:
+        LOGGER.debug("blast k8s refresh update skipped job_id=%s: %s", state.job_id, exc)
+        return state
 
 
 def _external_result_files(job: dict[str, Any]) -> list[dict[str, Any]]:
@@ -994,6 +1202,9 @@ blast_router = APIRouter(prefix="/api/blast", tags=["blast"])
 @blast_router.get("/jobs")
 def blast_jobs_list(
     limit: int = Query(default=50, ge=1, le=500),
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(default=""),
+    cluster_name: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """List BLAST jobs from the platform table plus external OpenAPI jobs.
@@ -1047,7 +1258,12 @@ def blast_jobs_list(
     try:
         from api.services import external_blast
 
-        external_rows = external_blast.list_jobs().get("jobs", [])
+        external_kwargs = _openapi_client_kwargs_from_cluster(
+            subscription_id,
+            resource_group,
+            cluster_name,
+        )
+        external_rows = external_blast.list_jobs(**external_kwargs).get("jobs", [])
         if isinstance(external_rows, list):
             seen = {str(job.get("job_id")) for job in jobs}
             for row in external_rows:
@@ -1095,6 +1311,7 @@ def blast_job_get(
         if state is not None:
             if state.owner_oid and state.owner_oid != caller.object_id:
                 raise HTTPException(403, "not owner")
+            state = _refresh_running_blast_state(repo, state)
             out = _local_to_blast_job(
                 state,
                 split_children=_split_child_summary_from_repo(repo, state.job_id),
@@ -1133,18 +1350,46 @@ def blast_job_get(
 @blast_router.post("/jobs/{job_id}/cancel")
 def blast_job_cancel(
     job_id: str = Path(...),
-    body: dict[str, Any] = Body(default={}),
+    body: dict[str, Any] | None = Body(default=None),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     from api.tasks.blast import cancel
 
+    request_body = dict(body or {})
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        state = JobStateRepository().get(job_id)
+        if state is not None:
+            if state.owner_oid and state.owner_oid != caller.object_id:
+                raise HTTPException(403, "not owner")
+            payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+            for body_key, payload_keys in {
+                "subscription_id": ("subscription_id",),
+                "resource_group": ("resource_group",),
+                "cluster_name": ("cluster_name", "aks_cluster_name"),
+                "storage_account": ("storage_account",),
+            }.items():
+                if request_body.get(body_key) in (None, ""):
+                    value = _payload_value(payload, *payload_keys)
+                    if value not in (None, ""):
+                        request_body[body_key] = value
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.info(
+            "blast cancel state context unavailable job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+
     result = _safe_delay(
         cancel,
         job_id=job_id,
-        subscription_id=body.get("subscription_id", ""),
-        resource_group=body.get("resource_group", ""),
-        cluster_name=body.get("cluster_name", ""),
-        storage_account=body.get("storage_account", ""),
+        subscription_id=request_body.get("subscription_id", ""),
+        resource_group=request_body.get("resource_group", ""),
+        cluster_name=request_body.get("cluster_name", ""),
+        storage_account=request_body.get("storage_account", ""),
     )
     return {"job_id": job_id, "task_id": result.id, "status": "cancelling"}
 
@@ -2352,26 +2597,100 @@ def blast_job_file(
     max_bytes: int = Query(default=10 * 1024 * 1024, ge=1, le=100 * 1024 * 1024),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    """Read a result file from storage (streamed through the api sidecar)."""
+    """Read a job file from storage (streamed through the api sidecar)."""
     try:
         from api.services import get_credential
         from api.services.storage_data import read_blob_text
 
         cred = get_credential()
-        blob_path = f"{job_id}/{name}" if not name.startswith(job_id) else name
-        content = read_blob_text(
-            cred,
-            storage_account,
-            container="results",
-            blob_path=blob_path,
-            max_bytes=max_bytes,
+        name_raw = str(name).strip()
+        basename = name_raw.rsplit("/", 1)[-1]
+        requested_query_blob = _queries_blob_path(name)
+        payload_query_blob = ""
+        query_candidates: list[str] = []
+        if name_raw in {"input.fa", "query.fa"}:
+            payload_query_blob = _job_query_blob_path(job_id, caller)
+            requested_query_blob = payload_query_blob or f"{job_id}/{name}"
+            query_candidates = [
+                requested_query_blob,
+                f"uploads/{job_id}/query.fa",
+                f"{job_id}/query.fa",
+            ]
+        explicit_query_ref = name_raw.startswith("queries/") or (
+            name_raw.startswith(("az://", "http://", "https://")) and bool(requested_query_blob)
         )
+        if requested_query_blob and (explicit_query_ref or name_raw in {"input.fa", "query.fa"}):
+            if explicit_query_ref:
+                payload_query_blob = _job_query_blob_path(job_id, caller)
+                if (
+                    requested_query_blob != payload_query_blob
+                    and not requested_query_blob.startswith((f"{job_id}/", f"uploads/{job_id}/"))
+                ):
+                    raise HTTPException(403, "query blob is outside this job")
+            container = "queries"
+            blob_candidates = query_candidates or [requested_query_blob]
+        elif basename == "elastic-blast.ini":
+            container = "queries"
+            requested_config_blob = _queries_blob_path(name_raw)
+            explicit_config_ref = name_raw.startswith("queries/") or (
+                name_raw.startswith(("az://", "http://", "https://"))
+                and bool(requested_config_blob)
+            )
+            if explicit_config_ref and not requested_config_blob.startswith(
+                (f"{job_id}/", f"uploads/{job_id}/")
+            ):
+                raise HTTPException(403, "config blob is outside this job")
+            blob_candidates = [
+                requested_config_blob if explicit_config_ref else "",
+                f"{job_id}/elastic-blast.ini",
+                f"uploads/{job_id}/elastic-blast.ini",
+            ]
+        else:
+            container = "results"
+            blob_candidates = [f"{job_id}/{name}" if not name.startswith(job_id) else name]
+        content = ""
+        selected_blob = ""
+        last_not_found: BaseException | None = None
+        seen: set[str] = set()
+        for candidate in blob_candidates:
+            blob_path = str(candidate or "").strip()
+            if not blob_path or blob_path in seen:
+                continue
+            seen.add(blob_path)
+            try:
+                content = read_blob_text(
+                    cred,
+                    storage_account,
+                    container=container,
+                    blob_path=blob_path,
+                    max_bytes=max_bytes,
+                )
+                selected_blob = blob_path
+                break
+            except Exception as exc:
+                if not _blob_not_found(exc):
+                    raise
+                last_not_found = exc
+        if not selected_blob:
+            if basename == "elastic-blast.ini":
+                payload = _job_payload_for_file_preview(job_id, caller)
+                if payload:
+                    content = _config_preview_from_payload(
+                        job_id=job_id,
+                        storage_account=storage_account,
+                        payload=payload,
+                    )
+                    selected_blob = f"{job_id}/elastic-blast.ini"
+            if not selected_blob:
+                raise last_not_found or FileNotFoundError(name_raw)
         return {
             "job_id": job_id,
             "name": name,
             "content": content,
             "truncated": len(content) >= max_bytes,
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         LOGGER.warning("blast_job_file failed: %s", type(exc).__name__)
         from api.services import get_credential as _get_cred

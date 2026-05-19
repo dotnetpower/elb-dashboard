@@ -17,7 +17,11 @@ const ACTIVE_PENDING = new Set([
   "Provisioning",
   "DownloadingDB",
   "Submitted",
+  "submitted",
+  "submitting",
+  "preparing",
   "queued",
+  "waiting_for_warmup",
 ]);
 
 const ACTIVE_RUNNING = new Set([
@@ -35,7 +39,28 @@ const ACTIVE_REDUCING = new Set([
 ]);
 
 const COMPLETED = new Set(["Completed", "completed", "Succeeded", "succeeded", "success"]);
-const FAILED = new Set(["Failed", "failed", "Error", "error", "cancelled", "Cancelled"]);
+const FAILED = new Set([
+  "Failed",
+  "failed",
+  "Error",
+  "error",
+  "submit_failed",
+  "config_invalid",
+  "warmup_not_ready",
+  "split_submit_invalid",
+  "cancelled",
+  "Cancelled",
+]);
+
+function classifyValue(value: string | undefined): DisplayJobState | null {
+  if (!value) return null;
+  if (FAILED.has(value)) return "Failed";
+  if (COMPLETED.has(value)) return "Completed";
+  if (ACTIVE_REDUCING.has(value)) return "Reducing";
+  if (ACTIVE_RUNNING.has(value)) return "Running";
+  if (ACTIVE_PENDING.has(value)) return "Pending";
+  return null;
+}
 
 export function classifyJobState(input: {
   phase?: string;
@@ -46,13 +71,14 @@ export function classifyJobState(input: {
    *  counters and per-row chrome reflect reality instead of "Unknown". */
   error?: string | null;
 }): DisplayJobState {
-  const v = input.phase || input.status || "";
-  if (FAILED.has(v)) return "Failed";
-  if (COMPLETED.has(v)) return "Completed";
-  if (ACTIVE_REDUCING.has(v)) return "Reducing";
-  if (ACTIVE_RUNNING.has(v)) return "Running";
-  if (ACTIVE_PENDING.has(v)) return "Pending";
+  const phaseState = classifyValue(input.phase);
+  const statusState = classifyValue(input.status);
+  if (phaseState === "Failed" || statusState === "Failed") return "Failed";
+  if (phaseState === "Completed" || statusState === "Completed") return "Completed";
+  if (statusState) return statusState;
+  if (phaseState) return phaseState;
   if (input.error && input.error.trim().length > 0) return "Failed";
+  const v = input.phase || input.status || "";
   return v ? "Unknown" : "Pending";
 }
 

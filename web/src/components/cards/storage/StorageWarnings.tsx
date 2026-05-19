@@ -10,7 +10,7 @@ interface StorageWarningsProps {
 
 /**
  * Two stacked warning banners shown above the storage meta grid:
- *   1. Public network access enabled — non-dismissible (incident-grade).
+ *   1. Public endpoint enabled — non-dismissible (incident-grade).
  *   2. HNS disabled — dismissible, persisted in localStorage.
  */
 export function StorageWarnings({ isPublic, isHnsEnabled }: StorageWarningsProps) {
@@ -40,8 +40,8 @@ export function StorageWarnings({ isPublic, isHnsEnabled }: StorageWarningsProps
           }}
         >
           <ShieldAlert size={13} strokeWidth={1.5} />
-          Public network access is enabled — expected state is{" "}
-          <strong>Disabled</strong>. Investigate and remediate.
+          Public endpoint is enabled — expected state is{" "}
+          <strong>Private only</strong>. Investigate and remediate.
         </div>
       )}
 

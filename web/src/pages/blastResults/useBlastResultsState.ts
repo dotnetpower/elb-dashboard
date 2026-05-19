@@ -6,15 +6,13 @@ import { FAILURE_PHASES } from "@/components/BlastStepTimeline";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { useToast } from "@/components/Toast";
 import { useBlastResultActions } from "@/hooks/useBlastResultActions";
-import {
-  useClusterReadiness,
-  useTerminalSidecarHealth,
-} from "@/hooks/usePrerequisites";
+import { useClusterReadiness, useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import {
   resolveBlastJobPhase,
   resolveBlastResultState,
   splitBlastResultFiles,
 } from "@/pages/blastResultsModel";
+import { isFeatureEnabled } from "@/config/runtime";
 
 const TERMINAL_PHASES = new Set([
   "completed",
@@ -35,15 +33,13 @@ export interface UseBlastResultsStateArgs {
  * Results page needs. The page component just reads state out and renders
  * sections.
  */
-export function useBlastResultsState({
-  jobId,
-  searchParams,
-}: UseBlastResultsStateArgs) {
+export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsStateArgs) {
   const config = loadSavedConfig();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const cluster = useClusterReadiness();
-  const terminalSidecar = useTerminalSidecarHealth();
+  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
 
   const jobQuery = useQuery({
     queryKey: ["blast-job", jobId],
@@ -68,6 +64,9 @@ export function useBlastResultsState({
   const payloadSubscriptionId = stringFromPayload(payload, "subscription_id");
   const payloadStorageAccount = stringFromPayload(payload, "storage_account");
   const payloadResourceGroup = stringFromPayload(payload, "resource_group");
+  const payloadClusterName =
+    stringFromPayload(payload, "cluster_name") ||
+    stringFromPayload(payload, "aks_cluster_name");
 
   const subscriptionId =
     searchParams.get("subscription_id") ||
@@ -84,22 +83,13 @@ export function useBlastResultsState({
     payloadResourceGroup ||
     config?.workloadResourceGroup ||
     "";
+  const clusterName =
+    searchParams.get("cluster_name") || payloadClusterName || "elb-cluster";
 
   const resultsQuery = useQuery({
-    queryKey: [
-      "blast-results",
-      jobId,
-      subscriptionId,
-      storageAccount,
-      resourceGroup,
-    ],
+    queryKey: ["blast-results", jobId, subscriptionId, storageAccount, resourceGroup],
     queryFn: () =>
-      blastApi.listResults(
-        jobId!,
-        subscriptionId,
-        storageAccount,
-        resourceGroup,
-      ),
+      blastApi.listResults(jobId!, subscriptionId, storageAccount, resourceGroup),
     enabled: Boolean(jobId && subscriptionId && storageAccount),
     refetchInterval: (q) => {
       if (q.state.data?.files && q.state.data.files.length > 0) return false;
@@ -110,8 +100,7 @@ export function useBlastResultsState({
 
   const allFiles = resultsQuery.data?.files ?? [];
   const split = splitBlastResultFiles(allFiles);
-  const publicAccessDisabled =
-    resultsQuery.data?.public_access_disabled === true;
+  const publicAccessDisabled = resultsQuery.data?.public_access_disabled === true;
 
   const phaseInfo = resolveBlastJobPhase(job);
   const resultState = resolveBlastResultState({
@@ -126,6 +115,8 @@ export function useBlastResultsState({
   const actions = useBlastResultActions({
     jobId,
     subscriptionId,
+    resourceGroup,
+    clusterName,
     storageAccount,
   });
 
@@ -143,16 +134,12 @@ export function useBlastResultsState({
       initialPhaseRef.current = phase;
       return;
     }
-    if (
-      initialPhaseRef.current &&
-      TERMINAL_PHASES.has(initialPhaseRef.current)
-    ) {
+    if (initialPhaseRef.current && TERMINAL_PHASES.has(initialPhaseRef.current)) {
       prevPhaseRef.current = phase;
       return;
     }
     if (phase && phase !== prevPhaseRef.current) {
-      if (phase === "completed")
-        toast("BLAST job completed successfully!", "success");
+      if (phase === "completed") toast("BLAST job completed successfully!", "success");
       else if (FAILURE_PHASES.has(phase)) toast("BLAST job failed.", "error");
     }
     prevPhaseRef.current = phase;
@@ -192,10 +179,7 @@ export function useBlastResultsState({
 
 export type BlastResultsState = ReturnType<typeof useBlastResultsState>;
 
-function stringFromPayload(
-  payload: Record<string, unknown> | undefined,
-  key: string,
-) {
+function stringFromPayload(payload: Record<string, unknown> | undefined, key: string) {
   const value = payload?.[key];
   return typeof value === "string" ? value : "";
 }

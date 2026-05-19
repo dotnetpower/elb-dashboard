@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 
 import { dbVersionApi } from "@/api/endpoints";
 import { loadSavedConfig } from "@/components/SetupWizard";
+import { isFeatureEnabled } from "@/config/runtime";
 import { SectionHeader, SetupRequired } from "@/pages/tools/ToolLayout";
 import type { TabMeta } from "@/pages/tools/toolsPageModel";
 
@@ -15,6 +16,7 @@ export function DbVersionsTab({
   hasConfig: boolean;
 }) {
   const cfg = loadSavedConfig();
+  const customDbEnabled = isFeatureEnabled("customDb");
   const listQuery = useQuery({
     queryKey: ["db-versions", cfg?.storageAccountName],
     queryFn: () =>
@@ -77,13 +79,15 @@ export function DbVersionsTab({
             Build a custom database or download a public NCBI database to populate the
             registry.
           </div>
-          <Link
-            to="/blast/databases/build"
-            className="btn btn--primary btn--sm"
-            style={{ marginTop: 12 }}
-          >
-            Build custom database <ArrowRight size={12} />
-          </Link>
+          {customDbEnabled && (
+            <Link
+              to="/blast/databases/build"
+              className="btn btn--primary btn--sm"
+              style={{ marginTop: 12 }}
+            >
+              Build custom database <ArrowRight size={12} />
+            </Link>
+          )}
         </div>
       ) : (
         <div style={{ overflowX: "auto" }}>

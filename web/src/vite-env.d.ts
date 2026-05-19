@@ -6,6 +6,9 @@ interface ImportMetaEnv {
   readonly VITE_AZURE_CLIENT_ID?: string;
   readonly VITE_AZURE_REDIRECT_URI?: string;
   readonly VITE_AUTH_DEV_BYPASS?: string;
+  readonly VITE_FEATURE_CUSTOM_DB?: string;
+  readonly VITE_FEATURE_LAB_TOOLS?: string;
+  readonly VITE_FEATURE_TERMINAL?: string;
 }
 
 interface ImportMeta {
@@ -19,5 +22,8 @@ interface Window {
     VITE_AZURE_CLIENT_ID?: string;
     VITE_AZURE_REDIRECT_URI?: string;
     VITE_AUTH_DEV_BYPASS?: string;
+    VITE_FEATURE_CUSTOM_DB?: string;
+    VITE_FEATURE_LAB_TOOLS?: string;
+    VITE_FEATURE_TERMINAL?: string;
   };
 }

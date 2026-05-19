@@ -1,10 +1,7 @@
 import { Link } from "react-router-dom";
 import { Loader2, XCircle } from "lucide-react";
 
-import {
-  BlastResultsTable,
-  NoResultFilesPanel,
-} from "./BlastResultsTable";
+import { BlastResultsTable, NoResultFilesPanel } from "./BlastResultsTable";
 import { StorageLockedPanel } from "./StorageLockedPanel";
 import type { splitBlastResultFiles } from "@/pages/blastResultsModel";
 
@@ -24,6 +21,7 @@ export interface ResultsBodyProps {
   phase: string;
   files: ReturnType<typeof splitBlastResultFiles>["files"];
   resultFiles: ReturnType<typeof splitBlastResultFiles>["resultFiles"];
+  supportFiles: ReturnType<typeof splitBlastResultFiles>["supportFiles"];
   debugFiles: ReturnType<typeof splitBlastResultFiles>["debugFiles"];
   hasOnlyDebugFiles: boolean;
   downloadingFile: string | null;
@@ -49,6 +47,7 @@ export function ResultsBody({
   phase,
   files,
   resultFiles,
+  supportFiles,
   debugFiles,
   hasOnlyDebugFiles,
   downloadingFile,
@@ -77,8 +76,7 @@ export function ResultsBody({
         <XCircle size={16} style={{ color: "var(--danger)", flexShrink: 0 }} />
         <span style={{ color: "var(--text-muted)" }}>
           No results available — the job failed at the{" "}
-          <strong style={{ color: "var(--danger)" }}>{failedStepLabel}</strong>{" "}
-          step.
+          <strong style={{ color: "var(--danger)" }}>{failedStepLabel}</strong> step.
         </span>
       </div>
     );
@@ -118,6 +116,7 @@ export function ResultsBody({
       <BlastResultsTable
         files={files}
         resultFiles={resultFiles}
+        supportFiles={supportFiles}
         debugFiles={debugFiles}
         hasOnlyDebugFiles={hasOnlyDebugFiles}
         downloadingFile={downloadingFile}

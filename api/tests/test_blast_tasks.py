@@ -2055,6 +2055,22 @@ def test_check_status_finalizes_split_parent_when_children_merge_ready(
     assert state_updates[-1][1] == "split_children_merge_ready"
 
 
+def test_merge_progress_payload_keeps_submit_context_and_live_output() -> None:
+    payload = blast._merge_progress_payload(
+        {"program": "blastn", "db": "core_nt"},
+        phase="submitting",
+        status="running",
+        error_code="",
+        details={"last_output": "kubectl logs line", "ignored": "large-detail"},
+    )
+
+    assert payload["program"] == "blastn"
+    assert payload["db"] == "core_nt"
+    assert payload["_progress"]["phase"] == "submitting"
+    assert payload["_progress"]["steps"]["submitting"]["last_output"] == "kubectl logs line"
+    assert "ignored" not in payload["_progress"]["steps"]["submitting"]
+
+
 def test_split_parent_storage_submit_to_finalize_e2e(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

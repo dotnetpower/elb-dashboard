@@ -12,6 +12,9 @@ keys = [
     "VITE_AZURE_REDIRECT_URI",
     "VITE_AZURE_TENANT_ID",
     "VITE_AZURE_CLIENT_ID",
+    "VITE_FEATURE_CUSTOM_DB",
+    "VITE_FEATURE_LAB_TOOLS",
+    "VITE_FEATURE_TERMINAL",
 ]
 config = {key: os.environ.get(key, "") for key in keys}
 if not config["VITE_AZURE_CLIENT_ID"]:
@@ -22,6 +25,9 @@ if not config["VITE_AZURE_REDIRECT_URI"]:
     config["VITE_AZURE_REDIRECT_URI"] = "__RUNTIME__"
 if not config["VITE_AUTH_DEV_BYPASS"]:
     config["VITE_AUTH_DEV_BYPASS"] = "false"
+for key in ("VITE_FEATURE_CUSTOM_DB", "VITE_FEATURE_LAB_TOOLS", "VITE_FEATURE_TERMINAL"):
+    if not config[key]:
+        config[key] = "true"
 
 payload = json.dumps(config, separators=(",", ":"))
 Path("/usr/share/nginx/html/runtime-config.js").write_text(

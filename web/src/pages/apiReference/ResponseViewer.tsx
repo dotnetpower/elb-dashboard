@@ -65,6 +65,7 @@ export function ResponseViewer({
           </span>
         </div>
         <button
+          type="button"
           className="glass-button"
           onClick={doCopy}
           style={{ padding: "3px 8px", fontSize: 10 }}

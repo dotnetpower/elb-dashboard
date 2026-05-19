@@ -22,6 +22,7 @@ export function TagSection({
   return (
     <section id={`tag-${tag.name}`}>
       <button
+        type="button"
         onClick={() => setOpen((isOpen) => !isOpen)}
         style={{
           display: "flex",

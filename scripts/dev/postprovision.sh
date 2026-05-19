@@ -41,6 +41,9 @@ done
 
 API_CLIENT_ID_VAL="${API_CLIENT_ID:-}"
 APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="${APPLICATIONINSIGHTS_CONNECTION_STRING:-}"
+VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
+VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
+VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TAG="$(date -u +%Y%m%d%H%M%S)"
@@ -108,6 +111,9 @@ build_image() {
       --build-arg "VITE_AZURE_REDIRECT_URI=__RUNTIME__"
       --build-arg "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID"
       --build-arg "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL"
+      --build-arg "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL"
+      --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
+      --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
     )
   fi
   {
@@ -232,6 +238,9 @@ az deployment group create \
       sharedIdentityClientId="$SHARED_IDENTITY_CLIENT_ID" \
       tenantId="$AZURE_TENANT_ID" \
       apiClientId="$API_CLIENT_ID_VAL" \
+      featureCustomDb="$VITE_FEATURE_CUSTOM_DB_VAL" \
+      featureLabTools="$VITE_FEATURE_LAB_TOOLS_VAL" \
+      featureTerminal="$VITE_FEATURE_TERMINAL_VAL" \
       applicationInsightsConnectionString="$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" \
       platformStorageAccountName="${STORAGE_ACCOUNT_NAME:-}" \
       subscriptionId="$(az account show --query id -o tsv)" \

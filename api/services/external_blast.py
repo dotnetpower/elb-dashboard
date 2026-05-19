@@ -35,8 +35,8 @@ class StreamedFile:
     filename: str
 
 
-def _base_url() -> str:
-    value = os.environ.get(_BASE_URL_ENV, "").strip().rstrip("/")
+def _base_url(value: str | None = None) -> str:
+    value = (value or os.environ.get(_BASE_URL_ENV, "")).strip().rstrip("/")
     if not value:
         from api.services.openapi_runtime import get_openapi_base_url
 
@@ -52,12 +52,12 @@ def _base_url() -> str:
     return value
 
 
-def _headers() -> dict[str, str]:
+def _headers(*, api_token: str | None = None, internal_token: str | None = None) -> dict[str, str]:
     headers = {"Accept": "application/json"}
-    api_token = os.environ.get(_API_AUTH_ENV, "").strip()
+    api_token = (api_token or os.environ.get(_API_AUTH_ENV, "")).strip()
     if api_token:
         headers["X-ELB-API-Token"] = api_token
-    token = os.environ.get(_INTERNAL_AUTH_ENV, "").strip()
+    token = (internal_token or os.environ.get(_INTERNAL_AUTH_ENV, "")).strip()
     if token:
         headers["X-ELB-Internal-Token"] = token
     return headers
@@ -96,9 +96,16 @@ def _raise_upstream_error(exc: httpx.HTTPStatusError) -> None:
     raise HTTPException(exc.response.status_code, detail=detail) from exc
 
 
-def submit_job(payload: dict[str, Any]) -> dict[str, Any]:
+def submit_job(
+    payload: dict[str, Any],
+    *,
+    base_url: str | None = None,
+    api_token: str | None = None,
+) -> dict[str, Any]:
     with httpx.Client(
-        base_url=_base_url(), timeout=_DEFAULT_TIMEOUT_SECONDS, headers=_headers()
+        base_url=_base_url(base_url),
+        timeout=_DEFAULT_TIMEOUT_SECONDS,
+        headers=_headers(api_token=api_token),
     ) as client:
         try:
             resp = client.post("/api/v1/elastic-blast/submit", json=payload)
@@ -113,9 +120,16 @@ def submit_job(payload: dict[str, Any]) -> dict[str, Any]:
         return resp.json()
 
 
-def get_job(job_id: str) -> dict[str, Any]:
+def get_job(
+    job_id: str,
+    *,
+    base_url: str | None = None,
+    api_token: str | None = None,
+) -> dict[str, Any]:
     with httpx.Client(
-        base_url=_base_url(), timeout=_DEFAULT_TIMEOUT_SECONDS, headers=_headers()
+        base_url=_base_url(base_url),
+        timeout=_DEFAULT_TIMEOUT_SECONDS,
+        headers=_headers(api_token=api_token),
     ) as client:
         try:
             resp = client.get(f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}")
@@ -130,7 +144,7 @@ def get_job(job_id: str) -> dict[str, Any]:
         return resp.json()
 
 
-def list_jobs() -> dict[str, Any]:
+def list_jobs(*, base_url: str | None = None, api_token: str | None = None) -> dict[str, Any]:
     """List all jobs tracked by the external ElasticBLAST OpenAPI service.
 
     The legacy `/v1/jobs` endpoint is the only listing surface exposed by the
@@ -139,7 +153,9 @@ def list_jobs() -> dict[str, Any]:
     """
 
     with httpx.Client(
-        base_url=_base_url(), timeout=_DEFAULT_TIMEOUT_SECONDS, headers=_headers()
+        base_url=_base_url(base_url),
+        timeout=_DEFAULT_TIMEOUT_SECONDS,
+        headers=_headers(api_token=api_token),
     ) as client:
         try:
             resp = client.get("/v1/jobs")
@@ -154,8 +170,16 @@ def list_jobs() -> dict[str, Any]:
         return resp.json()
 
 
-def download_file(job_id: str, file_id: str) -> DownloadedFile:
-    with httpx.Client(base_url=_base_url(), timeout=_STREAM_TIMEOUT, headers=_headers()) as client:
+def download_file(
+    job_id: str,
+    file_id: str,
+    *,
+    base_url: str | None = None,
+    api_token: str | None = None,
+) -> DownloadedFile:
+    with httpx.Client(
+        base_url=_base_url(base_url), timeout=_STREAM_TIMEOUT, headers=_headers(api_token=api_token)
+    ) as client:
         try:
             resp = client.get(
                 f"/api/v1/elastic-blast/jobs/{_path_segment(job_id)}/files/{_path_segment(file_id)}"
@@ -179,8 +203,16 @@ def download_file(job_id: str, file_id: str) -> DownloadedFile:
     )
 
 
-def stream_file(job_id: str, file_id: str) -> StreamedFile:
-    client = httpx.Client(base_url=_base_url(), timeout=_STREAM_TIMEOUT, headers=_headers())
+def stream_file(
+    job_id: str,
+    file_id: str,
+    *,
+    base_url: str | None = None,
+    api_token: str | None = None,
+) -> StreamedFile:
+    client = httpx.Client(
+        base_url=_base_url(base_url), timeout=_STREAM_TIMEOUT, headers=_headers(api_token=api_token)
+    )
     try:
         request = client.build_request(
             "GET",

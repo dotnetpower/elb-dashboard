@@ -59,7 +59,11 @@ export function buildStepLog({
         ? "✓ Storage access configured for data transfer."
         : "Configuring storage network access...";
     case "uploading": {
-      const bp = sd.blob_path as string;
+      const payload = isRecord(job.payload) ? job.payload : null;
+      const bp =
+        stringValue(sd.blob_path) ||
+        stringValue(payload?.query_file) ||
+        stringValue(payload?.query_blob_url);
       const uploadLog = (
         (sd.output as string) ||
         (sd.last_output as string) ||
@@ -69,7 +73,7 @@ export function buildStepLog({
       if (uploadLog)
         return `${state === "done" ? "✓ Query uploaded." : "Uploading query..."}\n\n--- Upload Log ---\n${uploadLog}`;
       if (sd.skipped) return "✓ Query already uploaded (no inline data).";
-      if (state === "done" && bp) return `✓ Query uploaded → ${bp}`;
+      if (state === "done" && bp) return `✓ Query uploaded → ${queryDisplayPath(bp)}`;
       return state === "done"
         ? `✓ Query uploaded to queries/${jobId}/input.fa`
         : "Uploading FASTA query sequence...";
@@ -96,9 +100,7 @@ export function buildStepLog({
           wo ? `\n--- Console Output ---\n${wo}` : ""
         }`;
       if (state === "done")
-        return `✓ Warmup step completed.\n${
-          wo ? `\n--- Console Output ---\n${wo}` : ""
-        }`;
+        return `✓ Warmup step completed.\n${wo ? `\n--- Console Output ---\n${wo}` : ""}`;
       return "Running elastic-blast prepare — downloading DB shards to node SSDs...";
     }
     case "submitting": {
@@ -164,9 +166,7 @@ export function buildStepLog({
             ? "✓ .out result files found in blob."
             : "⚠ No .out result files detected yet."
           : "";
-      const verifyInfo = verifyAttempts
-        ? ` (${verifyAttempts} verification polls)`
-        : "";
+      const verifyInfo = verifyAttempts ? ` (${verifyAttempts} verification polls)` : "";
       if (state === "error") return `✗ Export failed:\n${eo || failureText}`;
       if (state === "done" && ed.success)
         return `✓ Results exported.${verifyInfo}\n${outInfo}\n\n--- Export Log ---\n${eo || "(no output)"}`;
@@ -178,9 +178,7 @@ export function buildStepLog({
         }`;
       if (verifyAttempts)
         return `Verifying result blobs... (attempt ${verifyAttempts})${
-          liveExport
-            ? `\n\n--- Export Verification Log ---\n${liveExport}`
-            : ""
+          liveExport ? `\n\n--- Export Verification Log ---\n${liveExport}` : ""
         }`;
       if (state === "active" && liveExport)
         return `Waiting for results-export K8s job + capturing pod logs...\n\n--- Export Verification Log ---\n${liveExport}`;
@@ -194,4 +192,27 @@ export function buildStepLog({
     default:
       return null;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function queryDisplayPath(value: string): string {
+  const raw = value.trim();
+  if (raw.startsWith("queries/")) return raw;
+  try {
+    const parsed = new URL(raw.startsWith("az://") ? `https://${raw.slice(5)}` : raw);
+    const parts = parsed.pathname.replace(/^\//, "").split("/");
+    if (parts[0] === "queries" && parts.length > 1) {
+      return `queries/${parts.slice(1).join("/")}`;
+    }
+  } catch {
+    // Not a URL; treat it as a queries-container relative path.
+  }
+  return `queries/${raw.replace(/^\/+/, "")}`;
 }

@@ -22,6 +22,7 @@ export function ResultsCard({ jobId, state }: ResultsCardProps) {
     phase,
     files,
     resultFiles,
+    supportFiles,
     debugFiles,
     hasOnlyDebugFiles,
     actions,
@@ -80,6 +81,7 @@ export function ResultsCard({ jobId, state }: ResultsCardProps) {
         phase={phase}
         files={files}
         resultFiles={resultFiles}
+        supportFiles={supportFiles}
         debugFiles={debugFiles}
         hasOnlyDebugFiles={hasOnlyDebugFiles}
         downloadingFile={actions.downloadingFile}

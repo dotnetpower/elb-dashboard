@@ -37,6 +37,15 @@ param tenantId string = subscription().tenantId
 @description('Application (client) id of the App Registration used by the SPA + api. Set after the App Registration is created (or re-used from the legacy deployment).')
 param apiClientId string = ''
 
+@description('Frontend feature flag for the custom database builder. Set to false for production deployments that should hide this surface.')
+param featureCustomDb string = 'true'
+
+@description('Frontend feature flag for lab tools. Set to false for production deployments that should hide this surface.')
+param featureLabTools string = 'true'
+
+@description('Frontend feature flag for the browser terminal. Set to false for production deployments that should hide this surface.')
+param featureTerminal string = 'true'
+
 @description('Comma-separated CORS allowed origins for the api ingress. Leave empty to allow same-origin only (recommended once the SPA is served by the frontend sidecar).')
 param allowedOrigins string = ''
 
@@ -264,6 +273,9 @@ module controlApp 'modules/containerAppControl.bicep' = {
     sharedIdentityClientId: identity.outputs.identityClientId
     tenantId: tenantId
     apiClientId: apiClientId
+    featureCustomDb: featureCustomDb
+    featureLabTools: featureLabTools
+    featureTerminal: featureTerminal
     applicationInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     platformStorageAccountName: storage.outputs.storageAccountName
     platformPrivateEndpointSubnetId: network.outputs.privateEndpointsSubnetId

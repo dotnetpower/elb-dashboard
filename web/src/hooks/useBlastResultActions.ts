@@ -8,10 +8,14 @@ import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
 export function useBlastResultActions({
   jobId,
   subscriptionId,
+  resourceGroup,
+  clusterName,
   storageAccount,
 }: {
   jobId: string | undefined;
   subscriptionId: string;
+  resourceGroup: string;
+  clusterName: string;
   storageAccount: string;
 }) {
   const { toast } = useToast();
@@ -85,7 +89,13 @@ export function useBlastResultActions({
   };
 
   const cancelMutation = useMutation({
-    mutationFn: () => blastApi.cancelJob(jobId!),
+    mutationFn: () =>
+      blastApi.cancelJob(jobId!, {
+        subscriptionId,
+        resourceGroup,
+        clusterName,
+        storageAccount,
+      }),
     onSuccess: () => {
       toast("Job cancelled.", "success");
       queryClient.invalidateQueries({ queryKey: ["blast-job", jobId] });

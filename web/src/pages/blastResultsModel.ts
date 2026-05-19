@@ -8,22 +8,75 @@ import {
 import { statusColor } from "@/constants";
 
 const DEBUG_FILES = new Set(["blast-status.txt", "jobs.txt", "pods.txt"]);
+const RESULT_SUFFIXES = [".out", ".out.gz", ".xml", ".xml.gz", ".asn", ".asn.gz"];
+const REPORT_SUFFIXES = [".json", ".jsonl"];
+const REPORT_NAME_RE = /(manifest|report|summary|metrics|stats|metadata)/i;
+
+export type BlastResultFileKind = "result" | "support" | "diagnostic";
+
+export function classifyBlastResultFile(file: BlastResultFile): BlastResultFileKind {
+  const basename = file.name.split("/").pop() || "";
+  const lowerName = file.name.toLowerCase();
+  const lowerBase = basename.toLowerCase();
+  if (
+    DEBUG_FILES.has(basename) ||
+    lowerBase.endsWith(".log") ||
+    lowerBase.includes("stderr") ||
+    lowerBase.includes("stdout") ||
+    lowerBase === "status.txt"
+  ) {
+    return "diagnostic";
+  }
+  if (RESULT_SUFFIXES.some((suffix) => lowerBase.endsWith(suffix))) {
+    return "result";
+  }
+  if (
+    REPORT_SUFFIXES.some((suffix) => lowerBase.endsWith(suffix)) ||
+    REPORT_NAME_RE.test(lowerName)
+  ) {
+    return "support";
+  }
+  return "support";
+}
+
+function sortResultFiles(files: BlastResultFile[]): BlastResultFile[] {
+  return [...files].sort((a, b) => {
+    const aName = a.name.toLowerCase();
+    const bName = b.name.toLowerCase();
+    const aMerged = aName.includes("merged_results") ? 0 : 1;
+    const bMerged = bName.includes("merged_results") ? 0 : 1;
+    if (aMerged !== bMerged) return aMerged - bMerged;
+    const aTime = a.last_modified ? Date.parse(a.last_modified) : 0;
+    const bTime = b.last_modified ? Date.parse(b.last_modified) : 0;
+    if (aTime !== bTime) return bTime - aTime;
+    return aName.localeCompare(bName);
+  });
+}
 
 export function splitBlastResultFiles(allFiles: BlastResultFile[]) {
-  const resultFiles = allFiles.filter((file) => {
-    const basename = file.name.split("/").pop() || "";
-    return !DEBUG_FILES.has(basename) && !basename.endsWith(".log");
-  });
-  const debugFiles = allFiles.filter((file) => {
-    const basename = file.name.split("/").pop() || "";
-    return DEBUG_FILES.has(basename) || basename.endsWith(".log");
-  });
+  const resultFiles = sortResultFiles(
+    allFiles.filter((file) => classifyBlastResultFile(file) === "result"),
+  );
+  const supportFiles = sortResultFiles(
+    allFiles.filter((file) => classifyBlastResultFile(file) === "support"),
+  );
+  const debugFiles = sortResultFiles(
+    allFiles.filter((file) => classifyBlastResultFile(file) === "diagnostic"),
+  );
+  const visibleFiles =
+    resultFiles.length > 0
+      ? resultFiles
+      : supportFiles.length > 0
+        ? supportFiles
+        : debugFiles;
 
   return {
     resultFiles,
+    supportFiles,
     debugFiles,
-    files: resultFiles.length > 0 ? resultFiles : debugFiles,
-    hasOnlyDebugFiles: resultFiles.length === 0 && debugFiles.length > 0,
+    files: visibleFiles,
+    hasOnlyDebugFiles:
+      resultFiles.length === 0 && supportFiles.length === 0 && debugFiles.length > 0,
   };
 }
 

@@ -41,11 +41,12 @@ export function StepLogSection({
     (output as Record<string, unknown>)?.steps ??
     {}) as Record<string, Record<string, unknown>>;
   const jobId = job?.job_id as string;
+  const uploadBlobName = resolveUploadQueryBlobName(stepsData.uploading, job);
+  const configBlobName = resolveConfigBlobName(stepsData.configuring, jobId);
 
   const { getStepDuration } = useStepDurations({ phase, stepsData });
 
-  const toggle = (key: string) =>
-    setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
+  const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
   const effectivePhaseKey = PHASE_TO_STEP[phase] ?? phase;
   const currentPhaseIdx = PHASE_STEPS.findIndex((s) => s.key === effectivePhaseKey);
@@ -80,12 +81,14 @@ export function StepLogSection({
       (state === "done" || state === "active") &&
       jobId &&
       subscriptionId &&
-      storageAccount
+      storageAccount &&
+      uploadBlobName
     ) {
       return (
         <FilePreview
           jobId={jobId}
           filename="input.fa"
+          blobName={uploadBlobName}
           subscriptionId={subscriptionId}
           storageAccount={storageAccount}
           maxBytes={1000}
@@ -104,6 +107,7 @@ export function StepLogSection({
         <FilePreview
           jobId={jobId}
           filename="elastic-blast.ini"
+          blobName={configBlobName}
           subscriptionId={subscriptionId}
           storageAccount={storageAccount}
           maxBytes={10000}
@@ -119,8 +123,7 @@ export function StepLogSection({
       <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
         {PHASE_STEPS.map((step, i) => {
           const state = getStepState(i, step.key);
-          const isOpen =
-            expanded[step.key] ?? (state === "active" || state === "error");
+          const isOpen = expanded[step.key] ?? (state === "active" || state === "error");
           const log = buildStepLog({
             key: step.key,
             state,
@@ -149,4 +152,31 @@ export function StepLogSection({
       </div>
     </>
   );
+}
+
+function resolveUploadQueryBlobName(
+  uploadStep: Record<string, unknown> | undefined,
+  job: Record<string, unknown>,
+): string | undefined {
+  const payload = isRecord(job.payload) ? job.payload : null;
+  const jobId = stringValue(job.job_id);
+  const candidate =
+    stringValue(uploadStep?.blob_path) ||
+    stringValue(payload?.query_file) ||
+    stringValue(payload?.query_blob_url);
+  return candidate || (jobId ? `queries/${jobId}/input.fa` : undefined);
+}
+
+function resolveConfigBlobName(
+  configureStep: Record<string, unknown> | undefined,
+  jobId: string,
+): string | undefined {
+  const candidate =
+    stringValue(configureStep?.config_blob_path) ||
+    stringValue(configureStep?.config_url);
+  return candidate || (jobId ? `queries/${jobId}/elastic-blast.ini` : undefined);
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
 }

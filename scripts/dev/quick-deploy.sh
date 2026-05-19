@@ -85,7 +85,9 @@ load_simple_env_file "$REPO_ROOT/.env"
 load_simple_env_file "$REPO_ROOT/.env.local"
 load_simple_env_file "$REPO_ROOT/web/.env.production"
 load_simple_env_file "$REPO_ROOT/web/.env.local"
-load_azd_env
+if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${ACR_NAME:-}" || -z "${ACR_LOGIN_SERVER:-}" || -z "${CONTAINER_APP_NAME:-}" ]]; then
+  load_azd_env
+fi
 
 [[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal> [tag] [--logs]"
 
@@ -122,6 +124,9 @@ fi
 VITE_AUTH_DEV_BYPASS_VAL="${VITE_AUTH_DEV_BYPASS:-false}"
 VITE_API_BASE_URL_VAL="${VITE_API_BASE_URL:-}"
 VITE_AZURE_REDIRECT_URI_VAL="${VITE_AZURE_REDIRECT_URI:-__RUNTIME__}"
+VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
+VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
+VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
 ACR_RESTORE_NETWORK=0
 
 restore_acr_network() {
@@ -145,6 +150,9 @@ if [[ "$SIDECAR" == "frontend" ]]; then
     --build-arg "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL"
     --build-arg "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL"
     --build-arg "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL"
+    --build-arg "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL"
+    --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
+    --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
   )
 fi
 
@@ -203,6 +211,9 @@ for tgt in "${TARGETS[@]}"; do
         "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL" \
         "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
         "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL" \
+        "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL" \
+        "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL" \
+        "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL" \
         "API_CLIENT_ID=$API_CLIENT_ID_VAL" \
         "AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
       -o none

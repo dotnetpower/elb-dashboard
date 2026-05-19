@@ -7,6 +7,7 @@ that require the cloud are skipped automatically.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -479,6 +480,210 @@ def test_canonical_dashboard_submit_uploads_inline_query(
     assert calls[0]["database"] == "core_nt"
     assert str(calls[0]["query_file"]).startswith("queries/uploads/")
     assert calls[0]["options"]["query_count"] == 1
+
+
+def test_blast_job_file_reads_uploaded_query_from_queries_container(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    class FakeRepo:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(
+                job_id=job_id,
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                payload={"query_file": f"queries/uploads/{job_id}/query.fa"},
+            )
+
+    reads: list[tuple[str, str]] = []
+
+    def fake_read_blob_text(
+        _credential: object,
+        _account_name: str,
+        container: str,
+        blob_path: str,
+        *,
+        max_bytes: int,
+    ) -> str:
+        reads.append((container, blob_path))
+        assert max_bytes == 1000
+        return ">q1\nACGT\n"
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+
+    r = client.get(
+        "/api/blast/jobs/job-123/file"
+        "?name=input.fa&subscription_id=sub-1&storage_account=elbstg01&max_bytes=1000"
+    )
+
+    assert r.status_code == 200
+    assert r.json()["content"] == ">q1\nACGT\n"
+    assert reads == [("queries", "uploads/job-123/query.fa")]
+
+
+def test_blast_job_file_rejects_query_blob_outside_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    class FakeRepo:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(
+                job_id=job_id,
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                payload={"query_file": f"queries/uploads/{job_id}/query.fa"},
+            )
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+
+    r = client.get(
+        "/api/blast/jobs/job-123/file"
+        "?name=queries/uploads/other-job/query.fa&subscription_id=sub-1&storage_account=elbstg01"
+    )
+
+    assert r.status_code == 403
+
+
+def test_blast_job_file_accepts_job_query_blob_url(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    class FakeRepo:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(
+                job_id=job_id,
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                payload={"query_file": f"queries/uploads/{job_id}/query.fa"},
+            )
+
+    reads: list[tuple[str, str]] = []
+
+    def fake_read_blob_text(
+        _credential: object,
+        _account_name: str,
+        container: str,
+        blob_path: str,
+        *,
+        max_bytes: int,
+    ) -> str:
+        reads.append((container, blob_path))
+        return ">q1\nACGT\n"
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+
+    query_url = "https://elbstg01.blob.core.windows.net/queries/uploads/job-123/query.fa"
+    r = client.get(
+        "/api/blast/jobs/job-123/file"
+        f"?name={query_url}&subscription_id=sub-1&storage_account=elbstg01"
+    )
+
+    assert r.status_code == 200
+    assert reads == [("queries", "uploads/job-123/query.fa")]
+
+
+def test_blast_job_file_falls_back_to_uploads_query_path(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    class FakeRepo:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(
+                job_id=job_id,
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                payload={},
+            )
+
+    reads: list[tuple[str, str]] = []
+
+    def fake_read_blob_text(
+        _credential: object,
+        _account_name: str,
+        container: str,
+        blob_path: str,
+        *,
+        max_bytes: int,
+    ) -> str:
+        reads.append((container, blob_path))
+        if blob_path == "uploads/job-123/query.fa":
+            return ">q1\nACGT\n"
+        raise RuntimeError("BlobNotFound")
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+
+    r = client.get(
+        "/api/blast/jobs/job-123/file"
+        "?name=input.fa&subscription_id=sub-1&storage_account=elbstg01&max_bytes=1000"
+    )
+
+    assert r.status_code == 200
+    assert r.json()["content"] == ">q1\nACGT\n"
+    assert reads == [
+        ("queries", "job-123/input.fa"),
+        ("queries", "uploads/job-123/query.fa"),
+    ]
+
+
+def test_blast_job_file_generates_config_preview_when_blob_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    class FakeRepo:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(
+                job_id=job_id,
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                payload={
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "storage_account": "elbstg01",
+                    "program": "blastn",
+                    "database": "core_nt",
+                    "query_file": f"queries/uploads/{job_id}/query.fa",
+                },
+            )
+
+    reads: list[tuple[str, str]] = []
+
+    def fake_read_blob_text(
+        _credential: object,
+        _account_name: str,
+        container: str,
+        blob_path: str,
+        *,
+        max_bytes: int,
+    ) -> str:
+        reads.append((container, blob_path))
+        raise RuntimeError("BlobNotFound")
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr(
+        "api.routes.stubs._config_preview_from_payload",
+        lambda **_kwargs: "[blast]\nprogram=blastn\n",
+    )
+
+    r = client.get(
+        "/api/blast/jobs/job-123/file"
+        "?name=elastic-blast.ini&subscription_id=sub-1&storage_account=elbstg01"
+    )
+
+    assert r.status_code == 200
+    assert r.json()["content"] == "[blast]\nprogram=blastn\n"
+    assert reads == [
+        ("queries", "job-123/elastic-blast.ini"),
+        ("queries", "uploads/job-123/elastic-blast.ini"),
+    ]
 
 
 def test_blast_submit_blocks_precise_mapping_search_spaces(

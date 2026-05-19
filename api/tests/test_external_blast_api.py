@@ -284,6 +284,63 @@ def test_canonical_jobs_list_merges_external_when_table_unconfigured(monkeypatch
     assert "degraded" not in body
 
 
+def test_canonical_jobs_list_uses_cluster_openapi_context(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    from api.main import app
+    from api.routes import stubs
+    from api.services import external_blast
+
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(
+        stubs,
+        "_openapi_client_kwargs_from_cluster",
+        lambda subscription_id, resource_group, cluster_name: {
+            "base_url": f"http://{cluster_name}.{resource_group}.{subscription_id}",
+            "api_token": "cluster-token",
+        },
+    )
+
+    def list_jobs(**kwargs):
+        captured.update(kwargs)
+        return {
+            "jobs": [
+                {
+                    "job_id": "bbbbbbbbbbbb",
+                    "status": "success",
+                    "created_at": "2026-05-12T10:00:00Z",
+                    "program": "blastn",
+                    "db": "core_nt",
+                }
+            ],
+            "count": 1,
+        }
+
+    monkeypatch.setattr(external_blast, "list_jobs", list_jobs)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/blast/jobs?subscription_id=sub-1&resource_group=rg-elb-01&cluster_name=elb-cluster"
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "base_url": "http://elb-cluster.rg-elb-01.sub-1",
+        "api_token": "cluster-token",
+    }
+    body = response.json()
+    assert body["jobs"][0]["job_id"] == "bbbbbbbbbbbb"
+    assert body["jobs"][0]["status"] == "completed"
+
+
+@pytest.mark.parametrize("external_status", ["success", "completed"])
+def test_external_completed_status_maps_to_dashboard_completed(external_status):
+    from api.routes import stubs
+
+    assert stubs._external_status_to_dashboard(external_status) == "completed"
+
+
 def test_canonical_jobs_list_reports_external_detail_code(monkeypatch):
     """Runtime failures from the external plane (5xx, network, timeout) MUST
     still surface as ``external_degraded`` so operators can see real outages
@@ -361,9 +418,7 @@ def test_canonical_jobs_list_silent_when_external_not_configured(monkeypatch):
     "reason_code",
     ["openapi_not_configured", "openapi_not_enabled"],
 )
-def test_canonical_jobs_list_silent_for_every_not_enabled_reason(
-    monkeypatch, reason_code
-):
+def test_canonical_jobs_list_silent_for_every_not_enabled_reason(monkeypatch, reason_code):
     """Lock the entire ``_EXTERNAL_NOT_ENABLED_REASONS`` allow-list. Adding a
     new code to that set without an accompanying test would let a regression
     slip through.

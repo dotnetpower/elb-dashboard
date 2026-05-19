@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Link2, Loader2, Play, Zap } from "lucide-react";
 
 import { METHOD_META } from "@/pages/apiReference/constants";
@@ -35,8 +35,11 @@ export function EndpointCard({
   });
 
   const methodMeta = METHOD_META[ep.method] || METHOD_META.get;
-  const examples = ep.requestBody?.content?.["application/json"]?.examples || {};
-  const exampleKeys = Object.keys(examples);
+  const examples = useMemo(
+    () => ep.requestBody?.content?.["application/json"]?.examples || {},
+    [ep.requestBody],
+  );
+  const exampleKeys = useMemo(() => Object.keys(examples), [examples]);
   const simple = isSimpleEndpoint(ep);
 
   const initBody = useCallback(() => {
@@ -179,6 +182,7 @@ export function EndpointCard({
 
         {simple && !expanded && (
           <button
+            type="button"
             className="glass-button glass-button--primary"
             onClick={(event) => {
               event.stopPropagation();
@@ -338,6 +342,7 @@ export function EndpointCard({
             >
               <SectionLabel style={{ margin: 0 }}>Try it</SectionLabel>
               <button
+                type="button"
                 className="glass-button glass-button--primary"
                 onClick={execute}
                 disabled={loading}

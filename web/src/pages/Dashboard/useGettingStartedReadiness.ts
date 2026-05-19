@@ -5,6 +5,7 @@ import { monitoringApi } from "@/api/endpoints";
 import type { ResourceConfig } from "@/components/SetupWizard";
 import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import { usePrefetchApiReference } from "@/hooks/usePrefetchApiReference";
+import { isFeatureEnabled } from "@/config/runtime";
 
 export interface UseGettingStartedReadinessArgs {
   config: ResourceConfig;
@@ -59,7 +60,8 @@ export function useGettingStartedReadiness({
     retry: 1,
   });
 
-  const terminalSidecar = useTerminalSidecarHealth();
+  const terminalEnabled = isFeatureEnabled("terminal");
+  const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
 
   // Pre-warm the React Query cache for the API Reference page so the
   // user does not have to sit through the "Discovering OpenAPI service
@@ -75,13 +77,15 @@ export function useGettingStartedReadiness({
   const hasImages = acrQuery.data?.actual_tags
     ? Object.keys(acrQuery.data.actual_tags).length >= 4
     : false;
-  const hasTerminal = terminalSidecar.isHealthy;
+  const hasTerminal = terminalEnabled ? terminalSidecar.isHealthy : true;
   const needsSetup =
     hasConfig &&
     !gettingStartedDismissed &&
     (!hasCluster || !hasImages || !hasTerminal);
   const queriesLoaded =
-    aksQuery.isFetched && acrQuery.isFetched && !terminalSidecar.isLoading;
+    aksQuery.isFetched &&
+    acrQuery.isFetched &&
+    (!terminalEnabled || !terminalSidecar.isLoading);
 
   useEffect(() => {
     if (queriesLoaded && needsSetup && !showGettingStarted && !showWizard) {
@@ -109,6 +113,7 @@ export function useGettingStartedReadiness({
     hasCluster,
     hasImages,
     hasTerminal,
+    terminalEnabled,
     aksQuery,
   } as const;
 }

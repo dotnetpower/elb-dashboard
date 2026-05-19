@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { fetchApiRaw } from "@/api/client";
+import { fetchApiRawNoRedirect } from "@/api/client";
 import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
 
 interface OpenApiEndpoint {
@@ -115,7 +115,7 @@ async function executeViaProxy(
   });
   const opts: RequestInit = { method: endpoint.method.toUpperCase(), signal };
   if (endpoint.requestBody && bodyText) opts.body = bodyText;
-  return fetchApiRaw(`/aks/openapi/proxy?${params.toString()}`, opts);
+  return fetchApiRawNoRedirect(`/aks/openapi/proxy?${params.toString()}`, opts);
 }
 
 async function executeDirect(

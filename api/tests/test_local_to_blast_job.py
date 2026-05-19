@@ -43,6 +43,29 @@ def test_local_to_blast_job_exposes_error_for_frontend():
     assert out["error"] == "boom"
 
 
+def test_local_to_blast_job_exposes_progress_steps():
+    out = _local_to_blast_job(
+        _state(
+            status="running",
+            phase="submitting",
+            payload={
+                "_progress": {
+                    "phase": "submitting",
+                    "status": "running",
+                    "steps": {
+                        "submitting": {
+                            "phase": "submitting",
+                            "last_output": "kubectl logs...",
+                        }
+                    },
+                }
+            },
+        )
+    )
+    assert out["custom_status"]["steps"]["submitting"]["last_output"] == "kubectl logs..."
+    assert out["output"]["steps"]["submitting"]["phase"] == "submitting"
+
+
 def test_local_to_blast_job_derives_splits_done_total():
     children = {
         "child_count": 6,

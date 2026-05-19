@@ -5,12 +5,15 @@ import { SidecarsCard } from "@/components/cards/SidecarsCard";
 import { StorageCard } from "@/components/cards/StorageCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
 import type { ResourceConfig } from "@/components/SetupWizard";
+import { isFeatureEnabled } from "@/config/runtime";
 
 export interface DashboardGridProps {
   config: ResourceConfig;
 }
 
 export function DashboardGrid({ config }: DashboardGridProps) {
+  const terminalEnabled = isFeatureEnabled("terminal");
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {/*
@@ -46,7 +49,7 @@ export function DashboardGrid({ config }: DashboardGridProps) {
           clusterName="elb-cluster"
           acrName={config.acrName}
         />
-        <TerminalCard />
+        {terminalEnabled && <TerminalCard />}
       </div>
 
       <SidecarsCard />

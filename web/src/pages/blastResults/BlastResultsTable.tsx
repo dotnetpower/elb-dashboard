@@ -2,16 +2,21 @@ import { Link } from "react-router-dom";
 import {
   AlertTriangle,
   Download,
+  FileJson,
+  FileSearch,
   Loader2,
   RefreshCw,
 } from "lucide-react";
 
 import { formatBytes } from "@/components/BlastFilePreview";
 import type { BlastResultFile } from "@/api/endpoints";
+import { isFeatureEnabled } from "@/config/runtime";
+import { classifyBlastResultFile } from "@/pages/blastResultsModel";
 
 interface BlastResultsTableProps {
   files: BlastResultFile[];
   resultFiles: BlastResultFile[];
+  supportFiles: BlastResultFile[];
   debugFiles: BlastResultFile[];
   hasOnlyDebugFiles: boolean;
   downloadingFile: string | null;
@@ -27,33 +32,37 @@ interface BlastResultsTableProps {
 export function BlastResultsTable({
   files,
   resultFiles,
+  supportFiles,
   debugFiles,
   hasOnlyDebugFiles,
   downloadingFile,
   onDownload,
 }: BlastResultsTableProps) {
+  const primaryFiles = resultFiles.length > 0 ? resultFiles : files;
+  const showPrimaryAsDiagnostics = resultFiles.length === 0 && hasOnlyDebugFiles;
+  const primaryTitle = showPrimaryAsDiagnostics
+    ? "Diagnostic files"
+    : resultFiles.length > 0
+      ? "Primary outputs"
+      : "Supporting artifacts";
+  const primaryDescription = showPrimaryAsDiagnostics
+    ? "Logs and cluster status captured for this job."
+    : resultFiles.length > 0
+      ? "BLAST output files ready for download."
+      : "No primary BLAST output was found; these artifacts may help explain the run.";
+
   return (
     <div style={{ marginTop: "var(--space-3)" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ borderBottom: "1px solid var(--glass-border)" }}>
-            <ResultsHeaderCell label="File" align="left" />
-            <ResultsHeaderCell label="Size" align="right" />
-            <ResultsHeaderCell label="Modified" align="right" />
-            <th style={{ width: 60 }} />
-          </tr>
-        </thead>
-        <tbody>
-          {files.map((f) => (
-            <BlastResultRow
-              key={f.name}
-              file={f}
-              isDownloading={downloadingFile === f.name}
-              onDownload={() => onDownload(f)}
-            />
-          ))}
-        </tbody>
-      </table>
+      <ResultSectionHeader
+        title={primaryTitle}
+        description={primaryDescription}
+        count={primaryFiles.length}
+      />
+      <ResultsFileTable
+        files={primaryFiles}
+        downloadingFile={downloadingFile}
+        onDownload={onDownload}
+      />
       {hasOnlyDebugFiles && (
         <div
           style={{
@@ -73,45 +82,140 @@ export function BlastResultsTable({
               color: "var(--warning)",
             }}
           />
-          No BLAST result files (.out) were produced. The files above are diagnostic
-          logs from the cluster. This typically means the search returned no hits for
-          the query/database combination.
+          No BLAST result files (.out) were produced. The files above are diagnostic logs
+          from the cluster. This typically means the search returned no hits for the
+          query/database combination.
         </div>
       )}
-      {debugFiles.length > 0 && resultFiles.length > 0 && (
-        <details style={{ marginTop: 14, fontSize: 12 }}>
-          <summary style={{ cursor: "pointer", color: "var(--text-muted)" }}>
-            {debugFiles.length} diagnostic file{debugFiles.length > 1 ? "s" : ""} (logs,
-            status)
-          </summary>
-          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {debugFiles.map((f) => {
-              const fname = f.name.split("/").pop() || f.name;
-              return (
-                <button
-                  key={f.name}
-                  className="glass-button"
-                  style={{ fontSize: 11, padding: "4px 10px" }}
-                  onClick={() => onDownload(f)}
-                >
-                  <Download size={11} /> {fname}
-                </button>
-              );
-            })}
-          </div>
-        </details>
+      {supportFiles.length > 0 && resultFiles.length > 0 && (
+        <ArtifactDetails
+          icon="support"
+          title="Reports and manifests"
+          files={supportFiles}
+          downloadingFile={downloadingFile}
+          onDownload={onDownload}
+        />
+      )}
+      {debugFiles.length > 0 && !hasOnlyDebugFiles && (
+        <ArtifactDetails
+          icon="diagnostic"
+          title="Diagnostic logs"
+          files={debugFiles}
+          downloadingFile={downloadingFile}
+          onDownload={onDownload}
+        />
       )}
     </div>
   );
 }
 
-function ResultsHeaderCell({
-  label,
-  align,
+function ResultSectionHeader({
+  title,
+  description,
+  count,
 }: {
-  label: string;
-  align: "left" | "right";
+  title: string;
+  description: string;
+  count: number;
 }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "baseline",
+        justifyContent: "space-between",
+        gap: 12,
+        marginBottom: 8,
+      }}
+    >
+      <div>
+        <div style={{ color: "var(--text-primary)", fontSize: 13, fontWeight: 600 }}>
+          {title}
+        </div>
+        <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 2 }}>
+          {description}
+        </div>
+      </div>
+      <span className="muted" style={{ fontSize: 11, whiteSpace: "nowrap" }}>
+        {count} file{count === 1 ? "" : "s"}
+      </span>
+    </div>
+  );
+}
+
+function ResultsFileTable({
+  files,
+  downloadingFile,
+  onDownload,
+}: {
+  files: BlastResultFile[];
+  downloadingFile: string | null;
+  onDownload: (file: BlastResultFile) => void;
+}) {
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+      <thead>
+        <tr style={{ borderBottom: "1px solid var(--glass-border)" }}>
+          <ResultsHeaderCell label="File" align="left" />
+          <ResultsHeaderCell label="Size" align="right" />
+          <ResultsHeaderCell label="Modified" align="right" />
+          <th style={{ width: 60 }} />
+        </tr>
+      </thead>
+      <tbody>
+        {files.map((file) => (
+          <BlastResultRow
+            key={file.name}
+            file={file}
+            isDownloading={downloadingFile === file.name}
+            onDownload={() => onDownload(file)}
+          />
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function ArtifactDetails({
+  icon,
+  title,
+  files,
+  downloadingFile,
+  onDownload,
+}: {
+  icon: "support" | "diagnostic";
+  title: string;
+  files: BlastResultFile[];
+  downloadingFile: string | null;
+  onDownload: (file: BlastResultFile) => void;
+}) {
+  const Icon = icon === "support" ? FileJson : FileSearch;
+  return (
+    <details style={{ marginTop: 14, fontSize: 12 }}>
+      <summary
+        style={{
+          cursor: "pointer",
+          color: "var(--text-muted)",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+        }}
+      >
+        <Icon size={13} strokeWidth={1.5} />
+        {title} ({files.length})
+      </summary>
+      <div style={{ marginTop: 8 }}>
+        <ResultsFileTable
+          files={files}
+          downloadingFile={downloadingFile}
+          onDownload={onDownload}
+        />
+      </div>
+    </details>
+  );
+}
+
+function ResultsHeaderCell({ label, align }: { label: string; align: "left" | "right" }) {
   return (
     <th
       style={{
@@ -139,15 +243,17 @@ function BlastResultRow({
   onDownload: () => void;
 }) {
   const fname = file.name.split("/").pop() || file.name;
-  const ext = fname.split(".").pop()?.toLowerCase() || "";
-  const isResult = ext === "out" || ext === "gz" || ext === "asn";
-  const isLog = ext === "log";
-  const typeColor = isResult
-    ? "var(--success)"
-    : isLog
-      ? "var(--warning)"
-      : "var(--text-faint)";
-  const typeLabel = isResult ? "RESULT" : isLog ? "LOG" : "INFO";
+  const directory = file.name.includes("/")
+    ? file.name.split("/").slice(0, -1).join("/")
+    : "";
+  const kind = classifyBlastResultFile(file);
+  const typeColor =
+    kind === "result"
+      ? "var(--success)"
+      : kind === "support"
+        ? "var(--accent)"
+        : "var(--warning)";
+  const typeLabel = kind === "result" ? "RESULT" : kind === "support" ? "REPORT" : "LOG";
 
   return (
     <tr style={{ borderBottom: "1px solid var(--glass-border)" }}>
@@ -173,7 +279,17 @@ function BlastResultRow({
         >
           {typeLabel}
         </span>
-        <code style={{ fontSize: 12 }}>{fname}</code>
+        <span style={{ minWidth: 0 }}>
+          <code style={{ fontSize: 12 }}>{fname}</code>
+          {directory && (
+            <span
+              className="muted"
+              style={{ display: "block", fontSize: 10, marginTop: 2 }}
+            >
+              {directory}/
+            </span>
+          )}
+        </span>
       </td>
       <td style={{ padding: "8px 12px", textAlign: "right" }} className="muted">
         {file.size != null ? formatBytes(file.size) : "—"}
@@ -221,6 +337,8 @@ export function NoResultFilesPanel({
   hasAnyCluster,
   onRetry,
 }: NoResultFilesPanelProps) {
+  const terminalEnabled = isFeatureEnabled("terminal");
+
   return (
     <div
       style={{
@@ -234,38 +352,33 @@ export function NoResultFilesPanel({
         <code style={{ fontSize: 12 }}>results/{jobId}/</code>.
       </div>
       <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
-        This typically means the BLAST search returned no hits for the given query
-        and database combination.
+        This typically means the BLAST search returned no hits for the given query and
+        database combination.
       </div>
-      <div
-        style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}
-      >
-        <button
-          className="glass-button"
-          onClick={onRetry}
-          style={{ fontSize: 12 }}
-        >
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+        <button className="glass-button" onClick={onRetry} style={{ fontSize: 12 }}>
           <RefreshCw size={13} /> Try Again
         </button>
-        {terminalSidecarHealthy ? (
-          <Link
-            to="/terminal"
-            className="glass-button"
-            style={{ textDecoration: "none", fontSize: 12 }}
-          >
-            <Download size={13} /> Check Terminal
-          </Link>
-        ) : (
-          <button
-            type="button"
-            className="glass-button"
-            disabled
-            title="Terminal sidecar is not available in this environment"
-            style={{ fontSize: 12, cursor: "not-allowed" }}
-          >
-            <Download size={13} /> Check Terminal
-          </button>
-        )}
+        {terminalEnabled &&
+          (terminalSidecarHealthy ? (
+            <Link
+              to="/terminal"
+              className="glass-button"
+              style={{ textDecoration: "none", fontSize: 12 }}
+            >
+              <Download size={13} /> Check Terminal
+            </Link>
+          ) : (
+            <button
+              type="button"
+              className="glass-button"
+              disabled
+              title="Terminal sidecar is not available in this environment"
+              style={{ fontSize: 12, cursor: "not-allowed" }}
+            >
+              <Download size={13} /> Check Terminal
+            </button>
+          ))}
         {hasRunningCluster ? (
           <Link
             to={`/blast/submit?resubmit=${encodeURIComponent(jobId)}`}

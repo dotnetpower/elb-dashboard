@@ -110,7 +110,13 @@ export function ApiHero({
               >
                 <ExternalLink size={11} /> Swagger UI
               </a>
-              <button className="glass-button" onClick={onRefresh} disabled={refreshing} style={{ fontSize: 11 }}>
+              <button
+                type="button"
+                className="glass-button"
+                onClick={onRefresh}
+                disabled={refreshing}
+                style={{ fontSize: 11 }}
+              >
                 <RefreshCw size={11} className={refreshing ? "spin" : ""} />
               </button>
             </>

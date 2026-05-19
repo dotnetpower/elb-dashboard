@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from collections.abc import Iterator, Mapping
 from datetime import UTC
 from typing import Any
@@ -36,6 +37,7 @@ LOGGER = logging.getLogger(__name__)
 
 STDOUT_SNIPPET_CHARS = 1000
 ERROR_SNIPPET_CHARS = 500
+LIVE_OUTPUT_SNIPPET_CHARS = 8000
 RETRYABLE_ERROR_CATEGORIES = {"transient", "capacity", "conflict"}
 RETRYABLE_EXIT_CODES = {8, 10}
 QUERY_FASTA_READ_MAX_BYTES = 100 * 1024 * 1024
@@ -89,6 +91,7 @@ class WarmupNotReadyError(RuntimeError):
         super().__init__(message)
         self.retryable = retryable
 
+
 class TerminalAzureLoginError(RuntimeError):
     """Raised when the terminal sidecar cannot acquire an Azure CLI identity."""
 
@@ -101,6 +104,7 @@ def _now_iso() -> str:
 
 def _snippet(value: object, limit: int = ERROR_SNIPPET_CHARS) -> str:
     return str(value or "")[:limit]
+
 
 def _ensure_terminal_azure_cli_login(terminal_run) -> None:
     """Ensure shell-only ElasticBLAST calls have an Azure CLI account.
@@ -1507,6 +1511,84 @@ def _retry_after(payload: Mapping[str, Any] | None, default: int) -> int:
     return max(1, min(parsed, 300))
 
 
+def _step_key_for_phase(phase: str) -> str:
+    return {
+        "configuring": "configuring",
+        "warmup_ready": "warming_up",
+        "submitting": "submitting",
+        "submitted": "submitting",
+        "submit_retryable_failure": "submitting",
+        "submit_failed": "submitting",
+        "completed": "completed",
+        "failed": "submitting",
+    }.get(phase, phase)
+
+
+def _tail_text(lines: list[str], limit: int = LIVE_OUTPUT_SNIPPET_CHARS) -> str:
+    text = "\n".join(line for line in lines if line)
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _compact_progress_details(details: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "config_blob_path",
+        "config_url",
+        "config_upload_error",
+        "decision",
+        "duration_ms",
+        "exit_code",
+        "k8s",
+        "last_output",
+        "log_line_count",
+        "output",
+        "timed_out",
+    }
+    compact: dict[str, Any] = {}
+    for key, value in details.items():
+        if key not in allowed:
+            continue
+        if key in {"last_output", "output"}:
+            compact[key] = _snippet(value, LIVE_OUTPUT_SNIPPET_CHARS)
+        else:
+            compact[key] = value
+    return compact
+
+
+def _merge_progress_payload(
+    existing_payload: Mapping[str, Any] | None,
+    *,
+    phase: str,
+    status: str,
+    error_code: str,
+    details: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = dict(existing_payload or {})
+    progress = dict(payload.get("_progress") if isinstance(payload.get("_progress"), dict) else {})
+    steps = dict(progress.get("steps") if isinstance(progress.get("steps"), dict) else {})
+    step_key = _step_key_for_phase(phase)
+    step = dict(steps.get(step_key) if isinstance(steps.get(step_key), dict) else {})
+    step.update(
+        {
+            "phase": phase,
+            "status": status,
+            "updated_at": _now_iso(),
+            **_compact_progress_details(details),
+        }
+    )
+    if error_code:
+        step["error"] = error_code
+    if status == "completed":
+        step["success"] = True
+    if status == "failed":
+        step["success"] = False
+    steps[step_key] = step
+    progress.update({"phase": phase, "status": status, "steps": steps})
+    payload["_progress"] = progress
+    return payload
+
+
 def _update_state(
     job_id: str,
     phase: str,
@@ -1528,7 +1610,27 @@ def _update_state(
 
         repo = JobStateRepository()
         stored_error_code = error_code or ""
-        repo.update(job_id, status=status, phase=phase, error_code=stored_error_code)
+        merged_payload: dict[str, Any] | None = None
+        try:
+            state = repo.get(job_id)
+            existing_payload = state.payload if state is not None else None
+            merged_payload = _merge_progress_payload(
+                existing_payload if isinstance(existing_payload, Mapping) else None,
+                phase=phase,
+                status=status,
+                error_code=stored_error_code,
+                details=details,
+            )
+        except Exception as exc:
+            LOGGER.debug("blast progress payload merge skipped job_id=%s: %s", job_id, exc)
+        update_kwargs: dict[str, Any] = {
+            "status": status,
+            "phase": phase,
+            "error_code": stored_error_code,
+        }
+        if merged_payload is not None:
+            update_kwargs["payload"] = merged_payload
+        repo.update(job_id, **update_kwargs)
         repo.append_history(
             job_id,
             event or phase,
@@ -1542,6 +1644,101 @@ def _update_state(
         )
     except Exception as exc:
         LOGGER.warning("blast state update failed job_id=%s phase=%s: %s", job_id, phase, exc)
+
+
+def _stream_submit_command(
+    *,
+    job_id: str,
+    task: Any,
+    config_content: str,
+) -> dict[str, Any]:
+    from api.services.sanitise import sanitise
+    from api.services.terminal_exec import stream as terminal_stream
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    summary: dict[str, Any] = {"exit_code": 1, "duration_ms": 0, "timed_out": False}
+    last_update = 0.0
+    log_line_count = 0
+
+    for item in terminal_stream(
+        argv=_elastic_blast_argv("submit", job_id),
+        stdin=config_content,
+        stdin_file=ELASTIC_BLAST_CFG_FILE,
+        timeout_seconds=600,
+    ):
+        if "line" in item:
+            stream_name = str(item.get("stream") or "stdout")
+            line = sanitise(str(item.get("line") or ""))
+            if stream_name == "stderr":
+                stderr_lines.append(line)
+            else:
+                stdout_lines.append(line)
+            log_line_count += 1
+            now = time.monotonic()
+            if now - last_update >= 2.0:
+                live_output = _tail_text(stdout_lines + stderr_lines)
+                _progress(
+                    task,
+                    "submitting",
+                    last_output=live_output,
+                    log_line_count=log_line_count,
+                )
+                _update_state(
+                    job_id,
+                    "submitting",
+                    status="running",
+                    event="submit_log",
+                    last_output=live_output,
+                    log_line_count=log_line_count,
+                )
+                last_update = now
+            continue
+        summary = dict(item)
+
+    stdout = "\n".join(stdout_lines)
+    stderr = "\n".join(stderr_lines)
+    if stdout or stderr:
+        _update_state(
+            job_id,
+            "submitting",
+            status="running",
+            event="submit_log",
+            last_output=_tail_text(stdout_lines + stderr_lines),
+            log_line_count=log_line_count,
+        )
+    return {**summary, "stdout": stdout, "stderr": stderr}
+
+
+def _refresh_submit_terminal_status(
+    *,
+    job_id: str,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> tuple[str, str, dict[str, Any] | None]:
+    try:
+        from api.services import get_credential
+        from api.services.monitoring import k8s_check_blast_status
+
+        k8s = k8s_check_blast_status(
+            get_credential(),
+            subscription_id,
+            resource_group,
+            cluster_name,
+            namespace="default",
+            job_id=job_id,
+        )
+    except Exception as exc:
+        LOGGER.info("submit terminal status refresh skipped job_id=%s: %s", job_id, exc)
+        return "submitted", "running", None
+
+    k8s_status = str(k8s.get("status") or "")
+    if k8s_status == "completed":
+        return "completed", "completed", k8s
+    if k8s_status == "failed":
+        return "failed", "failed", k8s
+    return "submitted", "running", k8s
 
 
 def _progress(task: Any, phase: str, **details: Any) -> None:
@@ -1746,6 +1943,40 @@ def submit(
             query_file=query_file,
             options=effective_options,
         )
+        config_blob_path = f"{job_id}/{ELASTIC_BLAST_CFG_FILE}"
+        try:
+            from api.services import get_credential
+            from api.services.storage_data import upload_blob_text
+
+            config_url = upload_blob_text(
+                get_credential(),
+                storage_account,
+                "queries",
+                config_blob_path,
+                config_content,
+            )
+            _progress(
+                self,
+                "configuring",
+                config_blob_path=f"queries/{config_blob_path}",
+                config_url=config_url,
+            )
+            _update_state(
+                job_id,
+                "configuring",
+                status="running",
+                config_blob_path=f"queries/{config_blob_path}",
+                config_url=config_url,
+            )
+        except Exception as exc:
+            LOGGER.warning("config preview upload failed job_id=%s: %s", job_id, type(exc).__name__)
+            _update_state(
+                job_id,
+                "configuring",
+                status="running",
+                config_blob_path=f"queries/{config_blob_path}",
+                config_upload_error=type(exc).__name__,
+            )
     except Exception as exc:  # configuration errors are caller/actionable, not retryable
         error = _snippet(exc)
         _update_state(job_id, "config_invalid", status="failed", error_code=error)
@@ -1758,12 +1989,10 @@ def submit(
         from api.services.terminal_exec import run as terminal_run
 
         _ensure_terminal_azure_cli_login(terminal_run)
-
-        result = terminal_run(
-            argv=_elastic_blast_argv("submit", job_id),
-            stdin=config_content,
-            stdin_file=ELASTIC_BLAST_CFG_FILE,
-            timeout_seconds=600,
+        result = _stream_submit_command(
+            job_id=job_id,
+            task=self,
+            config_content=config_content,
         )
     except TerminalExecError as exc:
         return _retry_or_fail(
@@ -1786,19 +2015,33 @@ def submit(
     exit_code = int(result.get("exit_code", 1) or 0)
     if exit_code == 0:
         phase, status = _submit_success_status(payload)
+        if status == "running":
+            phase, status, k8s_status = _refresh_submit_terminal_status(
+                job_id=job_id,
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+            )
+        else:
+            k8s_status = None
         _update_state(
             job_id,
             phase,
             status=status,
             decision=(payload or {}).get("decision"),
             cluster_name=(payload or {}).get("cluster_name"),
+            k8s=k8s_status,
             output=_snippet(result.get("stdout"), STDOUT_SNIPPET_CHARS),
+            exit_code=exit_code,
+            duration_ms=result.get("duration_ms"),
+            timed_out=result.get("timed_out"),
         )
         return {
             "job_id": job_id,
             "status": status,
             "phase": phase,
             "decision": (payload or {}).get("decision", "accepted"),
+            "k8s": k8s_status,
             "output": _snippet(result.get("stdout"), STDOUT_SNIPPET_CHARS),
         }
 

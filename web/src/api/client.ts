@@ -6,7 +6,12 @@ import { apiBaseUrl, isDevBypassEnabled } from "@/config/runtime";
 const API_BASE = apiBaseUrl();
 const DEV_BYPASS = isDevBypassEnabled();
 
-async function getAccessToken(): Promise<string | null> {
+interface FetchApiOptions {
+  redirectOnUnauthorized?: boolean;
+}
+
+async function getAccessToken(options: FetchApiOptions = {}): Promise<string | null> {
+  const redirectOnUnauthorized = options.redirectOnUnauthorized !== false;
   if (DEV_BYPASS) return null;
   const account = msalInstance.getActiveAccount();
   if (!account) {
@@ -26,6 +31,9 @@ async function getAccessToken(): Promise<string | null> {
       lastError = err;
       if (err instanceof Error && err.name === "InteractionRequiredAuthError") {
         notifyAuthSessionIssue("interaction_required");
+        if (!redirectOnUnauthorized) {
+          throw err;
+        }
         // Redirect to login — cannot be retried silently
         await msalInstance.acquireTokenRedirect({ ...apiLoginRequest, account });
         throw err;
@@ -51,8 +59,13 @@ export interface ApiTextResponse {
   filename: string | null;
 }
 
-async function fetchApi(path: string, init: RequestInit = {}): Promise<Response> {
-  const token = await getAccessToken();
+async function fetchApi(
+  path: string,
+  init: RequestInit = {},
+  options: FetchApiOptions = {},
+): Promise<Response> {
+  const redirectOnUnauthorized = options.redirectOnUnauthorized !== false;
+  const token = await getAccessToken(options);
   const headers = new Headers(init.headers);
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
@@ -68,7 +81,7 @@ async function fetchApi(path: string, init: RequestInit = {}): Promise<Response>
     headers,
   });
   // #44: Auto-handle 401 — trigger re-authentication
-  if (response.status === 401 && !DEV_BYPASS) {
+  if (response.status === 401 && !DEV_BYPASS && redirectOnUnauthorized) {
     notifyAuthSessionIssue("api_unauthorized");
     const account = msalInstance.getActiveAccount();
     if (account) {
@@ -158,6 +171,18 @@ export const api = {
  * Use for cases where the caller needs direct access to status/headers/body.
  */
 export const fetchApiRaw = fetchApi;
+
+/**
+ * Low-level authenticated fetch that does not trigger an MSAL redirect on 401.
+ * Use inside in-page consoles where the HTTP response should be rendered rather
+ * than replacing the current SPA route with an auth round-trip.
+ */
+export function fetchApiRawNoRedirect(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  return fetchApi(path, init, { redirectOnUnauthorized: false });
+}
 
 // ---------------------------------------------------------------------------
 // RBAC-friendly error formatting

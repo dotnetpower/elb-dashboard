@@ -239,9 +239,10 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
           >
             <Lock size={14} style={{ flexShrink: 0, marginTop: 1 }} />
             <div style={{ flex: 1 }}>
-              <strong>Storage public access is disabled.</strong> Database scan is
-              unavailable from the browser; downloaded state cannot be detected. The
-              catalog below still shows all available databases.
+              <strong>Storage is Private only.</strong> This local browser session
+              cannot scan the database container through the private endpoint;
+              downloaded state cannot be detected. The catalog below still shows all
+              available databases.
             </div>
             {canEnableLocalAccess && (
               <button

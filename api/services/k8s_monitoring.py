@@ -1072,6 +1072,44 @@ def k8s_get_service_ip(
         session.close()
 
 
+def k8s_get_deployment_env_value(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    deployment_name: str,
+    env_name: str,
+    namespace: str = "default",
+    container_name: str | None = None,
+) -> str | None:
+    """Return a literal env value from a Kubernetes Deployment container."""
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        response = session.get(
+            f"{server}/apis/apps/v1/namespaces/{namespace}/deployments/{deployment_name}",
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return None
+        containers = (
+            response.json()
+            .get("spec", {})
+            .get("template", {})
+            .get("spec", {})
+            .get("containers", [])
+        )
+        for container in containers:
+            if container_name and container.get("name") != container_name:
+                continue
+            for env in container.get("env", []) or []:
+                if env.get("name") == env_name and env.get("value"):
+                    return str(env["value"])
+        return None
+    finally:
+        session.close()
+
+
 def k8s_get_pods(
     credential: TokenCredential,
     subscription_id: str,

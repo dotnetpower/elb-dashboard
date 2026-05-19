@@ -41,6 +41,7 @@ export function Dashboard() {
     hasCluster,
     hasImages,
     hasTerminal,
+    terminalEnabled,
     aksQuery,
   } = useGettingStartedReadiness({ config, showWizard });
 
@@ -107,6 +108,7 @@ export function Dashboard() {
           hasCluster={hasCluster}
           hasImages={hasImages}
           hasTerminal={hasTerminal}
+          terminalEnabled={terminalEnabled}
           clusterRunning={
             aksQuery.data?.clusters?.some(isAksWorkloadReady) ?? false
           }

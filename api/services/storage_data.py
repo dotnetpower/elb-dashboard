@@ -320,10 +320,11 @@ def classify_storage_failure(
             "degraded_reason": "network_blocked",
             "public_access_disabled": True,
             "message": (
-                f"Storage account '{account_name}' has publicNetworkAccess: Disabled "
-                "(production posture — see project policy §9). Data-plane access only "
-                "works from inside the platform VNet via the private endpoint, so this "
-                "view is unavailable from local development. To debug locally, open an "
+                f"Storage account '{account_name}' is Private only "
+                "(publicNetworkAccess: Disabled; production posture — see project policy §9). "
+                "Data-plane access only works from inside the platform VNet via the "
+                "private endpoint, so this view is unavailable from local development. "
+                "To debug locally, open an "
                 "IP-allowlisted window with "
                 f"`scripts/dev/storage-public-access.sh on --account {account_name} "
                 f"--rg {resource_group or '<resource-group>'}` and close it again with "
