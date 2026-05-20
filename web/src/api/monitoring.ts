@@ -38,7 +38,8 @@ export interface WarmupDbInfo {
     | "Partial"
     | "Released"
     | "Blocked"
-    | "Pressure";
+    | "Pressure"
+    | "Stale";
   nodes_ready: number;
   nodes_failed: number;
   nodes_active: number;
@@ -62,6 +63,8 @@ export interface WarmupDbInfo {
   active_last_log?: string;
   phase_counts?: Record<string, number>;
   pod_statuses?: WarmupPodStatus[];
+  source_version?: string;
+  source_versions?: string[];
 }
 
 export interface WarmupPodStatus {

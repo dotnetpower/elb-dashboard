@@ -10,6 +10,7 @@ import {
   numberValue,
 } from "./helpers";
 import { DegradedBanner } from "./DegradedBanner";
+import { ResultsPendingPanel } from "./ResultsPendingPanel";
 import type { BlastAnalyticsState } from "./useBlastAnalyticsState";
 
 export interface TaxonomyPanelProps {
@@ -19,6 +20,7 @@ export interface TaxonomyPanelProps {
   subscriptionId: string;
   storageAccount: string;
   resourceGroup: string;
+  resultsPending?: boolean;
 }
 
 type TaxonomyView = "organism" | "lineage";
@@ -53,6 +55,7 @@ export function TaxonomyPanel({
   subscriptionId,
   storageAccount,
   resourceGroup,
+  resultsPending = false,
 }: TaxonomyPanelProps) {
   const { alignQuery, alignments, applied } = analytics;
   const [view, setView] = useState<TaxonomyView>("organism");
@@ -78,9 +81,13 @@ export function TaxonomyPanel({
         max_evalue: applied.maxEvalue,
         include_lineage: view === "lineage",
       }),
-    enabled: Boolean(jobId && subscriptionId && storageAccount),
+    enabled: Boolean(jobId && subscriptionId && storageAccount && !resultsPending),
     staleTime: 60_000,
   });
+
+  if (resultsPending) {
+    return <ResultsPendingPanel />;
+  }
 
   const serverDegraded = Boolean(taxonomyQuery.data?.degraded);
   const serverRows: TaxonomyRow[] = useMemo(() => {

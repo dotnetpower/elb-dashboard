@@ -257,6 +257,37 @@ def test_build_config_approximate_sharding_opt_in_injects_partitions(monkeypatch
     assert "-dbsize 123456789" in cfg.get("blast", "options")
 
 
+def test_build_config_non_core_prepared_metadata_can_inject_partitions(monkeypatch) -> None:
+    fake_meta = {
+        "db_name": "16S_ribosomal_RNA",
+        "source_version": "2026-05-20-00-00-00",
+        "sharded": True,
+        "shard_sets": [1, 5],
+        "shard_source_version": "2026-05-20-00-00-00",
+        "total_bytes": 269 * 1024**3,
+    }
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
+    content = blast._build_config_content(
+        job_id="job-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        program="blastn",
+        database="16S_ribosomal_RNA",
+        query_file="queries/q.fa",
+        options={
+            "machine_type": "Standard_E16s_v5",
+            "num_nodes": 5,
+            "allow_approximate_sharding": True,
+        },
+    )
+    cfg = _parse_ini(content)
+    assert cfg.get("blast", "db-partitions") == "5"
+    assert cfg.get("blast", "db-partition-prefix") == (
+        "https://elbstg01.blob.core.windows.net/blast-db/5shards/16S_ribosomal_RNA_shard_"
+    )
+
+
 def test_build_config_metadata_effective_search_space_injects_searchsp(monkeypatch) -> None:
     fake_meta = {
         "db_name": "core_nt",
@@ -347,6 +378,48 @@ def test_node_warmup_ready_check_allows_ready_sharded_submit(monkeypatch) -> Non
 
     assert ready is not None
     assert ready["status"] == "Ready"
+
+
+def test_node_warmup_ready_check_rejects_stale_warm_generation(monkeypatch) -> None:
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        blast,
+        "resolve_db_metadata",
+        lambda *_args, **_kwargs: {
+            "db_name": "core_nt",
+            "source_version": "2026-05-20-00-00-00",
+            "sharded": True,
+            "shard_sets": [10],
+            "shard_source_version": "2026-05-20-00-00-00",
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda *_args, **_kwargs: {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Ready",
+                    "source_version": "2026-05-19-00-00-00",
+                    "nodes_ready": 10,
+                    "total_jobs": 10,
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(blast.WarmupNotReadyError) as err:
+        blast._ensure_node_warmup_ready_for_submit(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            database="core_nt",
+            storage_account="elbstg01",
+            options={"sharding_mode": "precise", "enable_warmup": True},
+        )
+
+    assert err.value.retryable is True
+    assert "stale DB generation" in str(err.value)
 
 
 def test_node_warmup_ready_check_retries_loading_sharded_submit(monkeypatch) -> None:
@@ -528,6 +601,32 @@ def test_single_part_non_core_nt_metadata_suppresses_sharding_options(monkeypatc
             "db_auto_partition": True,
             "db_sharded": True,
             "shard_sets": [1],
+            "outfmt": 6,
+        },
+    )
+    assert options is not None
+    assert options["sharding_mode"] == "off"
+    assert options["db_auto_partition"] is False
+    assert options["db_sharded"] is False
+
+
+def test_stale_shard_generation_suppresses_sharding_options(monkeypatch) -> None:
+    fake_meta = {
+        "db_name": "16S_ribosomal_RNA",
+        "source_version": "2026-05-20-00-00-00",
+        "sharded": True,
+        "shard_sets": [5],
+        "shard_source_version": "2026-05-19-00-00-00",
+    }
+    monkeypatch.setattr(blast, "resolve_db_metadata", lambda *a, **k: fake_meta)
+    options = blast._suppress_sharding_for_unsharded_database(
+        storage_account="elbstg01",
+        database="16S_ribosomal_RNA",
+        options={
+            "sharding_mode": "precise",
+            "db_auto_partition": True,
+            "db_sharded": True,
+            "shard_sets": [5],
             "outfmt": 6,
         },
     )
@@ -2091,6 +2190,109 @@ def test_merge_progress_payload_keeps_submit_context_and_live_output() -> None:
     assert payload["_progress"]["phase"] == "submitting"
     assert payload["_progress"]["steps"]["submitting"]["last_output"] == "kubectl logs line"
     assert "ignored" not in payload["_progress"]["steps"]["submitting"]
+
+
+def test_merge_progress_payload_keeps_completed_submit_output() -> None:
+    payload = blast._merge_progress_payload(
+        {"program": "blastn", "db": "core_nt"},
+        phase="submitting",
+        status="completed",
+        error_code="",
+        details={"output": "final elastic-blast log", "log_line_count": 12},
+    )
+
+    step = payload["_progress"]["steps"]["submitting"]
+    assert step["status"] == "completed"
+    assert step["success"] is True
+    assert step["output"] == "final elastic-blast log"
+    assert step["log_line_count"] == 12
+
+
+def test_merge_progress_payload_completes_previous_running_steps() -> None:
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "submitting",
+                "status": "running",
+                "steps": {
+                    "preparing": {"phase": "preparing", "status": "running"},
+                    "warming_up": {"phase": "warmup_ready", "status": "running"},
+                    "configuring": {"phase": "configuring", "status": "running"},
+                    "submitting": {
+                        "phase": "submitting",
+                        "status": "running",
+                        "last_output": "submit log",
+                    },
+                    "failed_step": {"phase": "failed_step", "status": "failed"},
+                },
+            }
+        },
+        phase="completed",
+        status="completed",
+        error_code="",
+        details={"k8s": {"succeeded": 10}},
+    )
+
+    steps = payload["_progress"]["steps"]
+    assert payload["_progress"]["status"] == "completed"
+    for key in ("preparing", "warming_up", "configuring", "submitting"):
+        assert steps[key]["status"] == "completed"
+        assert steps[key]["success"] is True
+    assert steps["submitting"]["last_output"] == "submit log"
+    assert steps["failed_step"]["status"] == "failed"
+    assert steps["completed"]["k8s"] == {"succeeded": 10}
+
+
+def test_merge_progress_payload_completes_steps_when_phase_advances() -> None:
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "warmup_ready",
+                "status": "running",
+                "steps": {
+                    "preparing": {"phase": "preparing", "status": "running"},
+                    "warming_up": {"phase": "warmup_ready", "status": "running"},
+                },
+            }
+        },
+        phase="configuring",
+        status="running",
+        error_code="",
+        details={"config_blob_path": "queries/job-123/elastic-blast.ini"},
+    )
+
+    steps = payload["_progress"]["steps"]
+    assert payload["_progress"]["phase"] == "configuring"
+    assert steps["preparing"]["status"] == "completed"
+    assert steps["warming_up"]["status"] == "completed"
+    assert steps["preparing"]["success"] is True
+    assert steps["warming_up"]["success"] is True
+    assert steps["configuring"]["status"] == "running"
+    assert steps["configuring"]["config_blob_path"] == "queries/job-123/elastic-blast.ini"
+
+
+def test_merge_progress_payload_tracks_staging_db_before_submit() -> None:
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "configuring",
+                "status": "running",
+                "steps": {
+                    "configuring": {"phase": "configuring", "status": "running"},
+                },
+            }
+        },
+        phase="staging_db",
+        status="running",
+        error_code="",
+        details={"last_output": "init-ssd progress"},
+    )
+
+    steps = payload["_progress"]["steps"]
+    assert payload["_progress"]["phase"] == "staging_db"
+    assert steps["configuring"]["status"] == "completed"
+    assert steps["staging_db"]["status"] == "running"
+    assert steps["staging_db"]["last_output"] == "init-ssd progress"
 
 
 def test_split_parent_storage_submit_to_finalize_e2e(

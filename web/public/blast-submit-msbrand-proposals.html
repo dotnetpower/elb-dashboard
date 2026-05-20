@@ -1,0 +1,1426 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>BLAST Submit — Microsoft brand redesign proposals (v2)</title>
+<style>
+  /* ─── Microsoft brand tokens ─────────────────────────────────────── */
+  :root {
+    --ms-white: #ffffff;
+    --ms-off-white: #f4f3f5;
+    --ms-warm-light-gray: #e8e6df;
+    --ms-light-gray: #d9d6d6;
+    --ms-mid-gray: #d7d2cb;
+    --ms-cool-gray: #b1b3b3;
+    --ms-warm-gray: #8c8279;
+    --ms-dark-gray: #454142;
+
+    --ms-blue: #0078d4;
+    --ms-blue-dark: #2a446f;
+    --ms-blue-light: #bdc8e8;
+    --ms-blue-tint: rgba(0, 120, 212, 0.10);
+    --ms-blue-tint-strong: rgba(0, 120, 212, 0.18);
+
+    --ms-green: #07641d;
+    --ms-green-tint: rgba(7, 100, 29, 0.10);
+
+    --ms-orange: #ff5c39;
+    --ms-orange-dark: #73391d;
+    --ms-orange-tint: rgba(115, 57, 29, 0.10);
+
+    --ms-red-dark: #73262f;
+    --ms-red-tint: rgba(115, 38, 47, 0.10);
+
+    --ms-purple: #8661c5;
+    --ms-purple-dark: #463668;
+    --ms-purple-tint: rgba(134, 97, 197, 0.12);
+
+    --ms-teal-dark: #225b62;
+    --ms-yellow: #ffb900;
+    --ms-yellow-tint: rgba(255, 185, 0, 0.18);
+
+    --text: #1b1b1b;
+    --text-muted: #454142;
+    --text-faint: #69655f;
+
+    --radius: 6px;
+    --shadow-card: 0 1px 0 rgba(255,255,255,0.85) inset,
+                   0 4px 14px rgba(20,20,20,0.08),
+                   0 1px 3px rgba(20,20,20,0.06);
+    --shadow-card-strong: 0 1px 0 rgba(255,255,255,0.85) inset,
+                          0 10px 28px rgba(20,20,20,0.14);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--font);
+    color: var(--text);
+    background: linear-gradient(180deg, #fafafb 0%, #ececef 100%);
+    min-height: 100vh;
+    font-size: 14px;
+    line-height: 1.5;
+    padding-bottom: 80px;
+  }
+
+  /* ─── Page chrome ────────────────────────────────────────────────── */
+  .doc-header {
+    background: var(--ms-white);
+    border-bottom: 1px solid rgba(69, 65, 66, 0.18);
+    padding: 28px 48px 22px;
+  }
+  .doc-header h1 {
+    margin: 0 0 6px;
+    font-size: 22px; font-weight: 600;
+    color: var(--text); letter-spacing: -0.01em;
+  }
+  .doc-header p { margin: 0; color: var(--text-muted); font-size: 13.5px; }
+  .doc-header .brand-strip { display: flex; gap: 6px; margin-top: 14px; }
+  .doc-header .brand-strip span { width: 28px; height: 6px; border-radius: 2px; }
+  .doc-header .note {
+    margin-top: 10px; padding: 8px 12px;
+    background: var(--ms-blue-tint);
+    border-left: 3px solid var(--ms-blue);
+    border-radius: 4px;
+    font-size: 12.5px; color: var(--ms-blue-dark);
+  }
+
+  /* ─── Tabs ───────────────────────────────────────────────────────── */
+  .tabs {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--ms-white);
+    border-bottom: 1px solid rgba(69, 65, 66, 0.18);
+    padding: 0 48px;
+    display: flex; gap: 4px;
+    box-shadow: 0 2px 6px rgba(20,20,20,0.04);
+  }
+  .tabs button {
+    appearance: none; background: transparent; border: none;
+    border-bottom: 2px solid transparent;
+    padding: 14px 18px 12px;
+    font: inherit; font-weight: 600;
+    color: var(--text-muted); cursor: pointer;
+    transition: color .15s ease, border-color .15s ease;
+  }
+  .tabs button:hover { color: var(--ms-blue); }
+  .tabs button.active { color: var(--ms-blue); border-bottom-color: var(--ms-blue); }
+  .tabs button .badge {
+    display: inline-block; margin-left: 8px;
+    padding: 1px 7px; border-radius: 10px;
+    background: var(--ms-blue-tint); color: var(--ms-blue);
+    font-size: 11px; font-weight: 700;
+  }
+  .tabs button .badge.new { background: var(--ms-green-tint); color: var(--ms-green); }
+
+  .panel { display: none; padding: 28px 48px; }
+  .panel.active { display: block; }
+
+  .panel-intro {
+    background: var(--ms-white);
+    border: 1px solid rgba(69, 65, 66, 0.18);
+    border-left: 4px solid var(--ms-blue);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    margin-bottom: 24px;
+    box-shadow: var(--shadow-card);
+  }
+  .panel-intro h2 { margin: 0 0 4px; font-size: 16px; color: var(--text); font-weight: 700; }
+  .panel-intro p { margin: 0; color: var(--text-muted); font-size: 13px; }
+  .panel-intro .pros { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .panel-intro .pros span {
+    font-size: 11.5px;
+    background: var(--ms-blue-tint); color: var(--ms-blue-dark);
+    border-radius: 10px; padding: 2px 9px; font-weight: 600;
+  }
+
+  /* ─── Mockup browser frame ───────────────────────────────────────── */
+  .mock {
+    background: var(--ms-white);
+    border: 1px solid rgba(69, 65, 66, 0.18);
+    border-radius: 10px; overflow: hidden;
+    box-shadow: var(--shadow-card-strong);
+  }
+  .mock-topbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+    background: #fcfcfd;
+    border-bottom: 1px solid rgba(69, 65, 66, 0.14);
+    font-size: 12px; color: var(--text-faint);
+  }
+  .mock-topbar .dots { display: flex; gap: 5px; }
+  .mock-topbar .dots i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+  .mock-topbar .dots i:nth-child(1) { background: #ff5f57; }
+  .mock-topbar .dots i:nth-child(2) { background: #febc2e; }
+  .mock-topbar .dots i:nth-child(3) { background: #28c840; }
+  .mock-topbar .url {
+    flex: 1; background: var(--ms-off-white);
+    border-radius: 4px; padding: 4px 10px;
+    color: var(--text-muted); font-family: var(--font-mono);
+  }
+
+  /* ─── Reusable mock primitives ───────────────────────────────────── */
+  .step-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 6px;
+    font-weight: 700; font-size: 13px;
+    background: var(--ms-blue-tint); color: var(--ms-blue);
+    flex-shrink: 0;
+  }
+  .step-num.done { background: var(--ms-green); color: var(--ms-white); }
+  .step-num.purple { background: var(--ms-purple-tint); color: var(--ms-purple); }
+  .step-num.purple.done { background: var(--ms-purple); color: var(--ms-white); }
+
+  .section-card {
+    background: var(--ms-white);
+    border: 1px solid rgba(69, 65, 66, 0.18);
+    border-radius: var(--radius);
+    padding: 18px 22px;
+    margin-bottom: 14px;
+  }
+  .section-card .hd { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .section-card .hd .ttl { font-weight: 700; font-size: 15px; color: var(--text); }
+  .section-card .hd .sub { font-size: 12.5px; color: var(--text-faint); margin-top: 2px; }
+  .section-card .hd .right { margin-left: auto; display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--text-faint); }
+
+  .program-tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  .program-tabs .t {
+    background: var(--ms-off-white);
+    border: 1px solid rgba(69, 65, 66, 0.14);
+    border-radius: var(--radius);
+    padding: 12px 8px; text-align: center;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .program-tabs .t:hover { border-color: var(--ms-blue); }
+  .program-tabs .t.selected {
+    background: var(--ms-blue-tint); border-color: var(--ms-blue);
+    box-shadow: 0 0 0 2px var(--ms-blue-tint-strong);
+  }
+  .program-tabs .t .name {
+    font-weight: 700; color: var(--ms-blue);
+    font-family: var(--font-mono); font-size: 13px;
+  }
+  .program-tabs .t .desc { font-size: 10.5px; color: var(--text-faint); margin-top: 4px; }
+
+  .field-label {
+    font-size: 11px; font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 6px;
+  }
+  .field-input {
+    width: 100%; background: var(--ms-white);
+    border: 1px solid rgba(69, 65, 66, 0.28); border-radius: 4px;
+    padding: 8px 12px; font: inherit; font-size: 13px; color: var(--text);
+  }
+  .field-input:focus {
+    outline: none; border-color: var(--ms-blue);
+    box-shadow: 0 0 0 3px var(--ms-blue-tint-strong);
+  }
+  .field-textarea {
+    min-height: 140px;
+    font-family: var(--font-mono); font-size: 12px;
+    resize: vertical;
+  }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 9px; border-radius: 10px;
+    font-size: 11.5px; font-weight: 600; white-space: nowrap;
+  }
+  .pill.blue { background: var(--ms-blue-tint); color: var(--ms-blue); }
+  .pill.green { background: var(--ms-green-tint); color: var(--ms-green); }
+  .pill.amber { background: var(--ms-yellow-tint); color: #6b4f00; }
+  .pill.red { background: var(--ms-red-tint); color: var(--ms-red-dark); }
+  .pill.gray { background: rgba(69,65,66,.08); color: var(--text-muted); }
+  .pill.purple { background: var(--ms-purple-tint); color: var(--ms-purple); }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 16px; border-radius: 4px;
+    font: inherit; font-weight: 600; font-size: 13px;
+    cursor: pointer; border: 1px solid transparent;
+    transition: all .15s ease;
+  }
+  .btn-primary {
+    background: linear-gradient(180deg, #2196e8 0%, var(--ms-blue) 100%);
+    color: var(--ms-white); border-color: #006aba;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 4px 14px rgba(0,120,212,.30);
+  }
+  .btn-primary:hover { background: linear-gradient(180deg, #34a3eb 0%, #1483d7 100%); }
+  .btn-primary:disabled {
+    background: var(--ms-cool-gray); border-color: var(--ms-cool-gray);
+    cursor: not-allowed; box-shadow: none;
+  }
+  .btn-secondary {
+    background: var(--ms-white); color: var(--text);
+    border-color: rgba(69,65,66,.28);
+  }
+  .btn-secondary:hover { border-color: var(--ms-blue); color: var(--ms-blue); }
+  .btn-secondary:disabled { color: var(--text-faint); cursor: not-allowed; }
+
+  /* Readiness dots (matches blast-readiness in real app) */
+  .readiness {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 10px;
+    background: var(--ms-off-white);
+    border: 1px solid rgba(69,65,66,.18);
+    border-radius: 12px;
+    font-size: 11px; color: var(--text-faint);
+  }
+  .readiness .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: rgba(69,65,66,.22);
+  }
+  .readiness .dot.ok { background: var(--ms-green); }
+
+  /* Required-checklist box */
+  .checklist {
+    background: var(--ms-yellow-tint);
+    border: 1px solid rgba(255,185,0,.40);
+    border-left: 3px solid var(--ms-yellow);
+    padding: 10px 12px;
+    border-radius: 4px;
+    font-size: 12px; color: #6b4f00;
+  }
+  .checklist strong { display: block; margin-bottom: 4px; font-size: 11.5px; }
+  .checklist ul { margin: 0; padding-left: 18px; }
+  .checklist a { color: var(--ms-blue); text-decoration: none; margin-left: 6px; font-weight: 600; }
+
+  /* Command preview */
+  .cmd-preview {
+    background: #1b1b1b; color: #e8e6df;
+    padding: 10px 14px; border-radius: 4px;
+    font-family: var(--font-mono); font-size: 11.5px;
+    line-height: 1.6; overflow-x: auto;
+    border-left: 3px solid var(--ms-blue);
+    white-space: pre;
+  }
+  .cmd-preview .arg { color: var(--ms-blue-light); }
+  .cmd-preview .val { color: #ffd485; }
+  .cmd-preview .comment { color: var(--ms-cool-gray); font-style: italic; }
+
+  /* Task profile option rows */
+  .task-opt {
+    display: flex; gap: 12px; padding: 10px 12px;
+    border: 1px solid rgba(69,65,66,.18); border-radius: 4px;
+    margin-bottom: 6px; cursor: pointer; background: var(--ms-white);
+  }
+  .task-opt:hover { border-color: var(--ms-blue); }
+  .task-opt.selected {
+    background: var(--ms-blue-tint); border-color: var(--ms-blue);
+  }
+  .task-opt.selected.purple-variant {
+    background: var(--ms-purple-tint); border-color: var(--ms-purple);
+  }
+  .task-opt .body { flex: 1; }
+  .task-opt .body strong { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); }
+  .task-opt .body .desc { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
+  .task-opt .body .meta { display: flex; gap: 4px; margin-top: 6px; }
+
+  /* DB table */
+  .db-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .db-table th, .db-table td {
+    padding: 7px 10px; text-align: left;
+    border-bottom: 1px solid rgba(69,65,66,.10);
+  }
+  .db-table th {
+    background: var(--ms-off-white);
+    font-weight: 700; font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-muted);
+  }
+  .db-table tr.selected td { background: var(--ms-blue-tint); }
+  .db-table tr:hover:not(.selected) td { background: rgba(0,120,212,.04); }
+  .db-table .db-name { font-weight: 600; color: var(--text); }
+  .db-table .db-size { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+  /* Presets row */
+  .preset-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .preset {
+    background: var(--ms-off-white);
+    border: 1px solid rgba(69,65,66,.18);
+    border-radius: 4px; padding: 8px 10px;
+    cursor: pointer; transition: all .15s ease;
+  }
+  .preset:hover { border-color: var(--ms-blue); }
+  .preset.selected { background: var(--ms-blue-tint); border-color: var(--ms-blue); }
+  .preset .name { font-weight: 700; font-size: 12px; color: var(--text); }
+  .preset .desc { font-size: 10.5px; color: var(--text-faint); }
+  .preset .vals { font-size: 10px; color: var(--text-faint); margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  /* Compute cluster card */
+  .cluster-card {
+    background: var(--ms-off-white);
+    border: 1px solid rgba(69,65,66,.18);
+    border-radius: 4px; padding: 10px 12px;
+  }
+  .cluster-card .row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .cluster-card .row + .row { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(69,65,66,.08); }
+  .cluster-card .row .k { color: var(--text-faint); }
+  .cluster-card .row .v { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* Param grid */
+  .param-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .param-grid .field .field-label { margin-bottom: 4px; }
+  .param-grid .field .field-input { padding: 6px 10px; font-size: 12px; }
+
+  /* ─── Proposal A: Vertical stepper + sticky summary rail ─────────── */
+  .a-grid {
+    display: grid;
+    grid-template-columns: 230px minmax(0, 1fr) 300px;
+    gap: 18px;
+    padding: 22px 28px;
+  }
+  .a-stepper, .a-summary {
+    background: var(--ms-white);
+    border: 1px solid rgba(69, 65, 66, 0.18);
+    border-radius: var(--radius);
+    padding: 14px 14px 18px;
+    position: sticky; top: 16px;
+    height: fit-content;
+  }
+  .a-stepper h4, .a-summary h4 {
+    margin: 0 0 12px;
+    font-size: 11px; font-weight: 700;
+    color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .a-stepper .step {
+    display: flex; gap: 10px; align-items: center;
+    padding: 8px 8px 8px 6px;
+    border-radius: 4px;
+    border-left: 3px solid transparent;
+    cursor: pointer; color: var(--text-muted);
+    font-size: 13px;
+  }
+  .a-stepper .step:hover { background: var(--ms-off-white); }
+  .a-stepper .step.active {
+    background: var(--ms-blue-tint); color: var(--ms-blue);
+    font-weight: 600; border-left-color: var(--ms-blue);
+  }
+  .a-stepper .step.done .step-num { background: var(--ms-green); color: var(--ms-white); }
+  .a-stepper .step .check { margin-left: auto; color: var(--ms-green); font-size: 14px; }
+  .a-stepper .step .optional { margin-left: auto; font-size: 10px; color: var(--text-faint); font-style: italic; }
+
+  .a-summary .kv {
+    display: flex; justify-content: space-between; gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(69,65,66,.10);
+    font-size: 12.5px;
+  }
+  .a-summary .kv:last-of-type { border: none; }
+  .a-summary .kv .k { color: var(--text-faint); }
+  .a-summary .kv .v {
+    font-weight: 600; color: var(--text);
+    font-variant-numeric: tabular-nums; text-align: right;
+  }
+  .a-summary .runbar { margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(69,65,66,.14); }
+  .a-summary .runbar .btn { width: 100%; justify-content: center; margin-bottom: 6px; }
+  .a-content .section-card { border-left: 4px solid var(--ms-blue); }
+  .a-content .section-card.done {
+    border-left-color: var(--ms-green);
+    background: linear-gradient(90deg, rgba(7,100,29,.025) 0%, var(--ms-white) 30%);
+  }
+  .a-content .section-card.done .step-num { background: var(--ms-green); color: var(--ms-white); }
+  .a-content .section-card.optional { border-left-color: var(--ms-yellow); }
+
+  /* ─── Proposal B (NEW): grouped stepper + 2-color cards + rail ──── */
+  .b-grid {
+    display: grid;
+    grid-template-columns: 250px minmax(0, 1fr) 320px;
+    gap: 18px;
+    padding: 22px 28px;
+  }
+  .b-stepper {
+    background: var(--ms-white);
+    border: 1px solid rgba(69,65,66,.18);
+    border-radius: var(--radius);
+    padding: 0 0 14px;
+    position: sticky; top: 16px; height: fit-content;
+    overflow: hidden;
+  }
+  .b-group-hd {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 14px 10px;
+    font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .b-group-hd.input {
+    background: var(--ms-blue-tint); color: var(--ms-blue);
+    border-bottom: 1px solid var(--ms-blue-tint-strong);
+  }
+  .b-group-hd.runtime {
+    background: var(--ms-purple-tint); color: var(--ms-purple);
+    border-top: 1px solid rgba(134,97,197,.20);
+    border-bottom: 1px solid rgba(134,97,197,.20);
+    margin-top: 8px;
+  }
+  .b-group-hd .count { margin-left: auto; font-size: 11px; font-weight: 700; font-family: var(--font-mono); }
+  .b-group-hd .swatch { width: 8px; height: 8px; border-radius: 2px; }
+  .b-step {
+    display: flex; gap: 10px; align-items: center;
+    padding: 8px 14px 8px 11px;
+    border-left: 3px solid transparent;
+    cursor: pointer; color: var(--text-muted);
+    font-size: 13px;
+  }
+  .b-step:hover { background: var(--ms-off-white); }
+  .b-step.active.input {
+    background: var(--ms-blue-tint); color: var(--ms-blue);
+    font-weight: 600; border-left-color: var(--ms-blue);
+  }
+  .b-step.active.runtime {
+    background: var(--ms-purple-tint); color: var(--ms-purple);
+    font-weight: 600; border-left-color: var(--ms-purple);
+  }
+  .b-step.done .step-num { background: var(--ms-green); color: var(--ms-white); }
+  .b-step .check { margin-left: auto; color: var(--ms-green); }
+  .b-step .opt { margin-left: auto; font-size: 10px; color: var(--text-faint); font-style: italic; }
+
+  .b-content .section-card.input { border-top: 3px solid var(--ms-blue); }
+  .b-content .section-card.runtime { border-top: 3px solid var(--ms-purple); }
+  .b-content .section-card.input .step-num { background: var(--ms-blue-tint); color: var(--ms-blue); }
+  .b-content .section-card.runtime .step-num { background: var(--ms-purple-tint); color: var(--ms-purple); }
+  .b-content .section-card.done .step-num { background: var(--ms-green); color: var(--ms-white); }
+  .b-content .group-divider {
+    display: flex; align-items: center; gap: 12px;
+    margin: 18px 0 12px;
+    font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .b-content .group-divider .label.input { color: var(--ms-blue); }
+  .b-content .group-divider .label.runtime { color: var(--ms-purple); }
+  .b-content .group-divider hr {
+    flex: 1; border: none; height: 1px;
+    background: rgba(69,65,66,.18);
+  }
+
+  .b-summary {
+    background: var(--ms-white);
+    border: 1px solid rgba(69,65,66,.18);
+    border-radius: var(--radius);
+    padding: 0;
+    position: sticky; top: 16px; height: fit-content;
+    overflow: hidden;
+  }
+  .b-summary .group { padding: 12px 14px; }
+  .b-summary .group + .group { border-top: 1px solid rgba(69,65,66,.14); }
+  .b-summary .group h5 {
+    margin: 0 0 8px;
+    font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .b-summary .group.input h5 { color: var(--ms-blue); }
+  .b-summary .group.runtime h5 { color: var(--ms-purple); }
+  .b-summary .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+  .b-summary .group.input .swatch { background: var(--ms-blue); }
+  .b-summary .group.runtime .swatch { background: var(--ms-purple); }
+  .b-summary .kv {
+    display: flex; justify-content: space-between; gap: 8px;
+    padding: 4px 0; font-size: 12.5px;
+  }
+  .b-summary .kv .k { color: var(--text-faint); }
+  .b-summary .kv .v {
+    font-weight: 600; color: var(--text);
+    font-variant-numeric: tabular-nums; text-align: right;
+  }
+  .b-summary .runbar {
+    background: var(--ms-off-white);
+    padding: 12px 14px;
+    border-top: 1px solid rgba(69,65,66,.14);
+  }
+  .b-summary .runbar .btn { width: 100%; justify-content: center; margin-bottom: 6px; }
+  .b-summary .runbar .saved {
+    margin-top: 8px; text-align: center;
+    font-size: 11px; color: var(--text-faint);
+  }
+
+  /* ─── Proposal C: Two-column workspace ───────────────────────────── */
+  .c-header {
+    padding: 22px 32px 14px;
+    background: linear-gradient(180deg, var(--ms-white) 0%, var(--ms-off-white) 100%);
+    border-bottom: 1px solid rgba(69,65,66,.18);
+  }
+  .c-header h1 {
+    margin: 0 0 4px; font-size: 22px; font-weight: 600;
+    color: var(--text);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .c-header h1 .accent {
+    background: linear-gradient(135deg, var(--ms-blue) 0%, var(--ms-blue-dark) 100%);
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+  }
+  .c-header .sub {
+    margin: 0; color: var(--text-muted);
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  }
+  .c-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    padding: 20px 32px 110px;
+  }
+  .c-col-head {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 10px; padding: 10px 14px;
+    border-radius: 4px;
+  }
+  .c-col-head.input { background: var(--ms-blue-tint); color: var(--ms-blue); }
+  .c-col-head.runtime { background: var(--ms-purple-tint); color: var(--ms-purple); }
+  .c-col-head .icon {
+    width: 22px; height: 22px; border-radius: 4px;
+    background: currentColor; opacity: .18;
+  }
+  .c-col-head .label {
+    font-weight: 700; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .c-col-head .desc {
+    margin-left: auto; font-size: 12px;
+    color: inherit; opacity: .8; font-variant-numeric: tabular-nums;
+  }
+
+  .c-grid .section-card { margin-bottom: 12px; }
+  .c-grid .col.input .section-card { border-top: 3px solid var(--ms-blue); }
+  .c-grid .col.runtime .section-card { border-top: 3px solid var(--ms-purple); }
+  .c-grid .col.input .section-card .step-num { background: var(--ms-blue-tint); color: var(--ms-blue); }
+  .c-grid .col.runtime .section-card .step-num { background: var(--ms-purple-tint); color: var(--ms-purple); }
+  .c-grid .col.input .section-card.done,
+  .c-grid .col.runtime .section-card.done { border-top-color: var(--ms-green); }
+  .c-grid .col.input .section-card.done .step-num,
+  .c-grid .col.runtime .section-card.done .step-num { background: var(--ms-green); color: var(--ms-white); }
+
+  .c-runbar {
+    position: fixed; bottom: 20px; left: 50%;
+    transform: translateX(-50%);
+    background: var(--ms-white);
+    border: 1px solid rgba(69,65,66,.18);
+    border-radius: 999px;
+    padding: 8px 8px 8px 22px;
+    display: flex; align-items: center; gap: 14px;
+    box-shadow: 0 12px 32px rgba(20,20,20,.18), 0 2px 6px rgba(20,20,20,.10);
+    max-width: 92vw;
+  }
+  .c-runbar .meta { font-size: 12.5px; color: var(--text-muted); }
+  .c-runbar .meta strong { color: var(--text); }
+  .c-runbar .req {
+    color: var(--ms-orange-dark); font-weight: 600; font-size: 12px;
+    padding-left: 12px; border-left: 1px solid rgba(69,65,66,.18);
+  }
+  .c-runbar .btn-primary { border-radius: 999px; padding: 8px 22px; }
+  .c-runbar .btn-secondary { border-radius: 999px; padding: 8px 14px; }
+
+  /* Misc helpers */
+  .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .small-muted { font-size: 12px; color: var(--text-faint); }
+  .seqstats {
+    display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap;
+    font-size: 11.5px; color: var(--text-muted);
+  }
+  .seqstats span { display: inline-flex; align-items: center; gap: 4px; }
+  .legend {
+    margin-top: 18px; padding: 14px 16px;
+    background: var(--ms-white);
+    border: 1px dashed rgba(69,65,66,.30);
+    border-radius: var(--radius);
+    font-size: 12.5px;
+  }
+  .legend strong { color: var(--text); }
+  .legend ul { margin: 8px 0 0; padding-left: 18px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<header class="doc-header">
+  <h1>BLAST Submit — Microsoft brand redesign proposals (v2 · real data)</h1>
+  <p>세 가지 레이아웃에 실제 <code>BlastSubmit.tsx</code>의 필드 · 디폴트값 · 검증 로직을 그대로 입혔습니다.</p>
+  <div class="brand-strip">
+    <span style="background:#0078d4" title="Blue"></span>
+    <span style="background:#07641d" title="Green"></span>
+    <span style="background:#8661c5" title="Purple"></span>
+    <span style="background:#225b62" title="Teal"></span>
+    <span style="background:#73391d" title="Orange"></span>
+    <span style="background:#454142" title="Dark Gray"></span>
+    <span style="background:#d9d6d6" title="Light Gray"></span>
+  </div>
+  <div class="note">
+    <strong>실제 앱에서 가져온 데이터:</strong>
+    7개 섹션 제목/부제 · 5개 program tab · 3개 blastn task variant (megablast / dc-megablast / blastn) +
+    각 word-size · 4개 algorithm-parameter preset · BLAST command preview · 4-dot readiness
+    (Config / Sequence / Database / Cluster) · 실제 defaults
+    (db = <code>blast-db/core_nt/core_nt</code>, E-value <code>0.05</code>, max-targets <code>100</code>,
+    outfmt <code>5</code>, low-complexity ON) · <code>submitValidation.ts</code>의 checklist 항목.
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="active" data-tab="a">Proposal A — Vertical Stepper + Summary Rail <span class="badge">linear</span></button>
+  <button data-tab="b">Proposal B — A+C hybrid: 그룹 stepper + 2색 카드 + 양분 summary <span class="badge new">NEW</span></button>
+  <button data-tab="c">Proposal C — Input / Runtime Split Workspace <span class="badge">grouped</span></button>
+</nav>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<!-- Proposal A                                                           -->
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<section class="panel active" data-panel="a">
+  <div class="panel-intro">
+    <h2>Proposal A — Vertical Stepper + Sticky Summary Rail</h2>
+    <p>
+      Left: 7-step stepper that mirrors the real section order (1 Program → 7 Algorithm Parameters).
+      Center: form sections with a Microsoft Blue left accent that flips to Dark Green when complete.
+      Right: live <em>Search summary</em> + 4-dot readiness + <em>Required-before-submitting</em>
+      checklist + Run button — sticky so the CTA is always reachable.
+    </p>
+    <div class="pros">
+      <span>Linear guidance</span>
+      <span>Always-visible Run button</span>
+      <span>4-dot readiness in summary</span>
+      <span>Best for first-time users</span>
+    </div>
+  </div>
+
+  <div class="mock">
+    <div class="mock-topbar">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <div class="url">localhost:8090/blast/submit</div>
+    </div>
+    <div class="a-grid">
+      <aside class="a-stepper">
+        <h4>New Search · 7 steps</h4>
+        <div class="step done"><span class="step-num">1</span> Program <span class="check">✓</span></div>
+        <div class="step active"><span class="step-num">2</span> Query sequence</div>
+        <div class="step done"><span class="step-num">3</span> Search set <span class="check">✓</span></div>
+        <div class="step"><span class="step-num">4</span> Taxonomy filter <span class="optional">optional</span></div>
+        <div class="step"><span class="step-num">5</span> Task profile</div>
+        <div class="step"><span class="step-num">6</span> Execution profile</div>
+        <div class="step"><span class="step-num">7</span> Algorithm params <span class="optional">advanced</span></div>
+      </aside>
+
+      <main class="a-content">
+        <!-- 1 Program -->
+        <div class="section-card done">
+          <div class="hd">
+            <span class="step-num">1</span>
+            <div><div class="ttl">Program Selection</div><div class="sub">Choose a BLAST algorithm</div></div>
+            <span class="right"><span class="pill green">✓ blastn</span></span>
+          </div>
+          <div class="program-tabs">
+            <div class="t selected"><div class="name">blastn</div><div class="desc">Nucleotide → Nucleotide</div></div>
+            <div class="t"><div class="name">blastp</div><div class="desc">Protein → Protein</div></div>
+            <div class="t"><div class="name">blastx</div><div class="desc">tNucl → Protein</div></div>
+            <div class="t"><div class="name">tblastn</div><div class="desc">Protein → tNucl</div></div>
+            <div class="t"><div class="name">tblastx</div><div class="desc">tNucl → tNucl</div></div>
+          </div>
+          <div style="margin-top:10px; font-size:12px; color:var(--text-muted)">
+            📖 Search nucleotide databases using a nucleotide query.
+          </div>
+        </div>
+
+        <!-- 2 Query -->
+        <div class="section-card">
+          <div class="hd">
+            <span class="step-num">2</span>
+            <div><div class="ttl">Enter Query Sequence</div><div class="sub">Paste FASTA sequence(s) or upload a file</div></div>
+            <span class="right">
+              <span class="pill blue" style="cursor:pointer">Load example</span>
+              <span class="pill gray" style="cursor:pointer">📎 Upload</span>
+            </span>
+          </div>
+          <textarea class="field-input field-textarea" placeholder=">sequence_id description
+ATGCATGC..."></textarea>
+          <div class="seqstats">
+            <span>0 sequences</span><span>·</span><span>0 bp</span><span>·</span>
+            <span class="pill amber">Required</span>
+          </div>
+        </div>
+
+        <!-- 3 Search Set -->
+        <div class="section-card done">
+          <div class="hd">
+            <span class="step-num">3</span>
+            <div><div class="ttl">Choose Search Set</div><div class="sub">Select a BLAST database from your storage</div></div>
+            <span class="right"><span class="pill green">5 of 25 catalog · ready</span></span>
+          </div>
+          <table class="db-table">
+            <thead><tr><th>Database</th><th>Type</th><th>Size</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr class="selected">
+                <td><span class="db-name">core_nt</span><div class="small-muted">Core Nucleotide</div></td>
+                <td><span class="pill blue">nucl</span></td>
+                <td class="db-size">~250 GB</td>
+                <td><span class="pill green">selected · warmed</span></td>
+              </tr>
+              <tr>
+                <td><span class="db-name">16S_ribosomal_RNA</span><div class="small-muted">16S ribosomal RNA</div></td>
+                <td><span class="pill blue">nucl</span></td>
+                <td class="db-size">~18 MB</td>
+                <td><span class="pill gray">downloaded</span></td>
+              </tr>
+              <tr>
+                <td><span class="db-name">ITS_RefSeq_Fungi</span><div class="small-muted">ITS RefSeq Fungi</div></td>
+                <td><span class="pill blue">nucl</span></td>
+                <td class="db-size">~8 MB</td>
+                <td><span class="pill gray">downloaded</span></td>
+              </tr>
+              <tr>
+                <td><span class="db-name">18S_fungal_sequences</span><div class="small-muted">18S fungal sequences</div></td>
+                <td><span class="pill blue">nucl</span></td>
+                <td class="db-size">~12 MB</td>
+                <td><span class="pill gray">downloaded</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="small-muted" style="margin-top:8px; font-family:var(--font-mono)">blast-db/core_nt/core_nt</div>
+        </div>
+
+        <!-- 4 Taxonomy (optional) -->
+        <div class="section-card optional">
+          <div class="hd">
+            <span class="step-num">4</span>
+            <div><div class="ttl">Taxonomy Filter</div><div class="sub">Limit the search to one NCBI taxon</div></div>
+            <span class="right"><span class="pill amber">Optional · skipped</span></span>
+          </div>
+          <input class="field-input" placeholder="Search for an organism (e.g. Homo sapiens, taxid 9606)">
+          <div class="field-label" style="margin-top:10px">Popular</div>
+          <div class="chip-row">
+            <span class="pill blue" style="cursor:pointer">Homo sapiens · 9606</span>
+            <span class="pill blue" style="cursor:pointer">Mus musculus · 10090</span>
+            <span class="pill blue" style="cursor:pointer">Escherichia coli · 562</span>
+            <span class="pill blue" style="cursor:pointer">SARS-CoV-2 · 2697049</span>
+            <span class="pill blue" style="cursor:pointer">Rattus norvegicus · 10116</span>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:10px">
+            <span class="field-label" style="margin:0">Filter mode</span>
+            <span class="pill green">Include only</span>
+            <span class="pill gray">Exclude</span>
+          </div>
+        </div>
+
+        <!-- 5 Task profile -->
+        <div class="section-card">
+          <div class="hd">
+            <span class="step-num">5</span>
+            <div><div class="ttl">Program Selection (task profile)</div><div class="sub">Choose the blastn task profile</div></div>
+            <span class="right"><span class="pill blue">megablast</span></span>
+          </div>
+          <label class="task-opt selected">
+            <input type="radio" checked>
+            <div class="body">
+              <strong>megablast</strong>
+              <div class="desc">Highly similar sequences · Best for intra-species comparisons</div>
+              <div class="meta"><span class="pill blue">word 28</span><span class="pill gray">E 0.05</span></div>
+            </div>
+          </label>
+          <label class="task-opt">
+            <input type="radio">
+            <div class="body">
+              <strong>dc-megablast</strong>
+              <div class="desc">More dissimilar sequences (discontiguous) · Best for cross-species searches</div>
+              <div class="meta"><span class="pill blue">word 11</span><span class="pill gray">E 0.05</span></div>
+            </div>
+          </label>
+          <label class="task-opt">
+            <input type="radio">
+            <div class="body">
+              <strong>blastn</strong>
+              <div class="desc">Somewhat similar sequences · Best for inter-species comparisons</div>
+              <div class="meta"><span class="pill blue">word 7</span><span class="pill gray">E 0.05</span></div>
+            </div>
+          </label>
+        </div>
+
+        <!-- 6 Execution -->
+        <div class="section-card">
+          <div class="hd">
+            <span class="step-num">6</span>
+            <div><div class="ttl">Execution Profile</div><div class="sub">Choose how this search should run on Azure</div></div>
+            <span class="right"><span class="pill green">●  Live</span></span>
+          </div>
+          <div class="field-label">AKS Cluster</div>
+          <select class="field-input">
+            <option>elb-cluster · 11 nodes · koreacentral</option>
+            <option>elb-smoke-aks · 3 nodes</option>
+          </select>
+          <div class="cluster-card" style="margin-top:10px">
+            <div class="row"><span class="k">Region</span><span class="v">koreacentral</span><span style="margin-left:auto" class="pill green">Ready</span></div>
+            <div class="row"><span class="k">Nodes</span><span class="v">11 (user pool: 9)</span></div>
+            <div class="row"><span class="k">CPU peak</span><span class="v">23%</span><span class="k" style="margin-left:auto">Mem peak</span><span class="v">21%</span></div>
+            <div class="row"><span class="k">API p95</span><span class="v">4.7 s</span><span class="k" style="margin-left:auto">Errors 15m</span><span class="v">0</span></div>
+          </div>
+          <label style="display:flex; gap:6px; align-items:center; font-size:12px; margin-top:10px"><input type="checkbox" checked> Enable warmup <span class="pill green" style="margin-left:6px">DB already warm</span></label>
+          <div class="field-label" style="margin-top:10px">Sharding mode</div>
+          <div class="chip-row">
+            <span class="pill blue">Off (default)</span>
+            <span class="pill gray">Approximate</span>
+            <span class="pill gray">Precise</span>
+          </div>
+        </div>
+
+        <!-- 7 Algorithm Params -->
+        <div class="section-card optional">
+          <div class="hd">
+            <span class="step-num">7</span>
+            <div><div class="ttl">Algorithm Parameters</div><div class="sub">E-value 0.05 · Max 100 · Fmt 5 · Word size auto</div></div>
+            <span class="right small-muted">▾ Customize</span>
+          </div>
+          <div class="field-label">Presets</div>
+          <div class="preset-row">
+            <div class="preset"><div class="name">Quick scan</div><div class="desc">Fast, fewer results</div><div class="vals">E 10 · 50</div></div>
+            <div class="preset selected"><div class="name">Standard</div><div class="desc">Balanced (default)</div><div class="vals">E 0.05 · 100</div></div>
+            <div class="preset"><div class="name">Thorough</div><div class="desc">Low E, more targets</div><div class="vals">E 1e-5 · 500</div></div>
+            <div class="preset"><div class="name">Publication</div><div class="desc">Stringent params</div><div class="vals">E 1e-10 · 1000</div></div>
+          </div>
+          <div class="param-grid" style="margin-top:12px">
+            <div class="field"><div class="field-label">E-value</div><input class="field-input" value="0.05"></div>
+            <div class="field"><div class="field-label">Max target seqs</div><input class="field-input" value="100"></div>
+            <div class="field"><div class="field-label">Output format</div><input class="field-input" value="5 (XML)"></div>
+            <div class="field"><div class="field-label">Word size</div><input class="field-input" placeholder="auto · 28"></div>
+            <div class="field"><div class="field-label">Gap open</div><input class="field-input" placeholder="auto"></div>
+            <div class="field"><div class="field-label">Gap extend</div><input class="field-input" placeholder="auto"></div>
+          </div>
+          <div style="margin-top:10px; display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--text-muted)">
+            <label><input type="checkbox" checked> DUST low-complexity</label>
+            <label><input type="checkbox" checked> Short-query adjust</label>
+            <label><input type="checkbox"> Mask lookup only</label>
+            <label><input type="checkbox"> Mask lowercase</label>
+          </div>
+        </div>
+      </main>
+
+      <aside class="a-summary">
+        <h4>Search Summary</h4>
+        <div class="kv"><span class="k">Job title</span><span class="v">— (auto)</span></div>
+        <div class="kv"><span class="k">Program</span><span class="v">blastn</span></div>
+        <div class="kv"><span class="k">Task</span><span class="v">megablast</span></div>
+        <div class="kv"><span class="k">Database</span><span class="v">core_nt</span></div>
+        <div class="kv"><span class="k">Sequences</span><span class="v">0 · 0 bp</span></div>
+        <div class="kv"><span class="k">Taxon filter</span><span class="v">—</span></div>
+        <div class="kv"><span class="k">Cluster</span><span class="v">elb-cluster</span></div>
+        <div class="kv"><span class="k">Warmup</span><span class="v">enabled</span></div>
+        <div class="kv"><span class="k">Sharding</span><span class="v">off</span></div>
+        <div class="kv"><span class="k">E-value</span><span class="v">0.05</span></div>
+        <div class="kv"><span class="k">Max targets</span><span class="v">100</span></div>
+        <div class="kv"><span class="k">Outfmt</span><span class="v">5 (XML)</span></div>
+
+        <h4 style="margin-top:14px">Readiness</h4>
+        <div class="readiness" style="width:100%">
+          <span class="dot ok"></span><span class="dot"></span><span class="dot ok"></span><span class="dot"></span>
+          <span style="margin-left:auto"><strong>2/4</strong></span>
+        </div>
+
+        <div class="runbar">
+          <div class="checklist">
+            <strong>Required before submitting</strong>
+            <ul>
+              <li>Query sequence</li>
+              <li>AKS cluster must be fully provisioned</li>
+            </ul>
+          </div>
+          <button class="btn btn-secondary" style="margin-top:10px; width:100%; justify-content:center" disabled>✓ Check Readiness</button>
+          <button class="btn btn-primary" disabled>▶ Run BLAST</button>
+          <div class="small-muted" style="text-align:center; margin-top:4px">💾 Saved 30s ago · ⌘+Enter to submit</div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="legend">
+    <strong>Why this works</strong>
+    <ul>
+      <li>The 7-step stepper on the left mirrors the real section order — no mental remapping.</li>
+      <li>Color tells progress at a glance: <span class="pill blue">in-progress</span> · <span class="pill green">done</span> · <span class="pill amber">optional</span>.</li>
+      <li>The Search summary, 4-dot readiness, checklist, and Run button are <em>all</em> on the sticky right rail — the user never scrolls to find their CTA.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<!-- Proposal B (NEW) — A + C hybrid                                     -->
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<section class="panel" data-panel="b">
+  <div class="panel-intro">
+    <h2>Proposal B — A + C hybrid · 그룹화된 stepper + 2색 카드 + 양분 summary rail</h2>
+    <p>
+      A의 <strong>좌측 stepper + 우측 sticky summary rail</strong>에 C의 <strong>Input vs Runtime</strong>
+      컬러 그룹화를 합쳤습니다. 좌측 stepper는 "①–④ Input" (Blue) 와 "⑤–⑦ Runtime" (Purple) 두 그룹으로
+      나뉘고, 중앙 카드는 각각 Blue/Purple 상단 stripe를 띠며, 우측 rail은 Input/Runtime 두 블록으로
+      나뉘어 두 영역을 한눈에 sanity-check할 수 있습니다. 아래에는 실제 BLAST command preview를 보여줍니다.
+    </p>
+    <div class="pros">
+      <span>Stepper + summary rail (from A)</span>
+      <span>Input/Runtime color split (from C)</span>
+      <span>4 + 3 grouped completion counts</span>
+      <span>BLAST command preview built in</span>
+    </div>
+  </div>
+
+  <div class="mock">
+    <div class="mock-topbar">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <div class="url">localhost:8090/blast/submit</div>
+    </div>
+    <div class="b-grid">
+      <!-- LEFT: grouped stepper -->
+      <aside class="b-stepper">
+        <div class="b-group-hd input">
+          <span class="swatch" style="background:var(--ms-blue)"></span>
+          ① Input
+          <span class="count">3/4</span>
+        </div>
+        <div class="b-step done input"><span class="step-num">1</span> Program <span class="check">✓</span></div>
+        <div class="b-step active input"><span class="step-num">2</span> Query sequence</div>
+        <div class="b-step done input"><span class="step-num">3</span> Search set <span class="check">✓</span></div>
+        <div class="b-step input"><span class="step-num">4</span> Taxonomy filter <span class="opt">optional</span></div>
+
+        <div class="b-group-hd runtime">
+          <span class="swatch" style="background:var(--ms-purple)"></span>
+          ② Runtime
+          <span class="count">2/3</span>
+        </div>
+        <div class="b-step done runtime"><span class="step-num purple">5</span> Task profile <span class="check">✓</span></div>
+        <div class="b-step done runtime"><span class="step-num purple">6</span> Execution profile <span class="check">✓</span></div>
+        <div class="b-step runtime"><span class="step-num purple">7</span> Algorithm params <span class="opt">advanced</span></div>
+      </aside>
+
+      <main class="b-content">
+        <div class="group-divider">
+          <span class="label input">①  Input · What are you searching?</span>
+          <hr>
+        </div>
+
+        <div class="section-card input done">
+          <div class="hd">
+            <span class="step-num">1</span>
+            <div><div class="ttl">Program Selection</div><div class="sub">Choose a BLAST algorithm</div></div>
+            <span class="right"><span class="pill green">✓ blastn</span></span>
+          </div>
+          <div class="program-tabs">
+            <div class="t selected"><div class="name">blastn</div><div class="desc">Nucl → Nucl</div></div>
+            <div class="t"><div class="name">blastp</div><div class="desc">Prot → Prot</div></div>
+            <div class="t"><div class="name">blastx</div><div class="desc">tNucl → Prot</div></div>
+            <div class="t"><div class="name">tblastn</div><div class="desc">Prot → tNucl</div></div>
+            <div class="t"><div class="name">tblastx</div><div class="desc">tNucl → tNucl</div></div>
+          </div>
+        </div>
+
+        <div class="section-card input">
+          <div class="hd">
+            <span class="step-num">2</span>
+            <div><div class="ttl">Enter Query Sequence</div><div class="sub">Paste FASTA sequence(s) or upload a file</div></div>
+            <span class="right">
+              <span class="pill blue" style="cursor:pointer">Load example</span>
+              <span class="pill gray" style="cursor:pointer">📎 Upload</span>
+            </span>
+          </div>
+          <textarea class="field-input field-textarea" placeholder=">sequence_id description
+ATGCATGC..."></textarea>
+          <div class="seqstats">
+            <span>0 sequences</span><span>·</span><span>0 bp</span><span>·</span>
+            <span class="pill amber">Required</span>
+          </div>
+        </div>
+
+        <div class="section-card input done">
+          <div class="hd">
+            <span class="step-num">3</span>
+            <div><div class="ttl">Choose Search Set</div><div class="sub">Select a BLAST database from your storage</div></div>
+            <span class="right"><span class="pill green">core_nt · ready · warmed</span></span>
+          </div>
+          <table class="db-table">
+            <thead><tr><th>Database</th><th>Type</th><th>Size</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr class="selected"><td><span class="db-name">core_nt</span><div class="small-muted">Core Nucleotide</div></td><td><span class="pill blue">nucl</span></td><td class="db-size">~250 GB</td><td><span class="pill green">selected · warmed</span></td></tr>
+              <tr><td><span class="db-name">16S_ribosomal_RNA</span></td><td><span class="pill blue">nucl</span></td><td class="db-size">~18 MB</td><td><span class="pill gray">downloaded</span></td></tr>
+              <tr><td><span class="db-name">ITS_RefSeq_Fungi</span></td><td><span class="pill blue">nucl</span></td><td class="db-size">~8 MB</td><td><span class="pill gray">downloaded</span></td></tr>
+              <tr><td><span class="db-name">18S_fungal_sequences</span></td><td><span class="pill blue">nucl</span></td><td class="db-size">~12 MB</td><td><span class="pill gray">downloaded</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="section-card input">
+          <div class="hd">
+            <span class="step-num">4</span>
+            <div><div class="ttl">Taxonomy Filter</div><div class="sub">Limit the search to one NCBI taxon</div></div>
+            <span class="right"><span class="pill amber">Optional · skipped</span></span>
+          </div>
+          <input class="field-input" placeholder="Search for an organism (e.g. Homo sapiens, taxid 9606)">
+          <div class="chip-row" style="margin-top:8px">
+            <span class="pill blue">Homo sapiens · 9606</span>
+            <span class="pill blue">Mus musculus · 10090</span>
+            <span class="pill blue">Escherichia coli · 562</span>
+            <span class="pill blue">SARS-CoV-2 · 2697049</span>
+          </div>
+        </div>
+
+        <div class="group-divider">
+          <span class="label runtime">②  Runtime · How should it run?</span>
+          <hr>
+        </div>
+
+        <div class="section-card runtime done">
+          <div class="hd">
+            <span class="step-num purple">5</span>
+            <div><div class="ttl">Program Selection (task profile)</div><div class="sub">Choose the blastn task profile</div></div>
+            <span class="right"><span class="pill purple">megablast</span></span>
+          </div>
+          <label class="task-opt selected purple-variant">
+            <input type="radio" checked>
+            <div class="body">
+              <strong>megablast</strong>
+              <div class="desc">Highly similar sequences · Best for intra-species comparisons</div>
+              <div class="meta"><span class="pill purple">word 28</span><span class="pill gray">E 0.05</span></div>
+            </div>
+          </label>
+          <label class="task-opt">
+            <input type="radio">
+            <div class="body">
+              <strong>dc-megablast</strong>
+              <div class="desc">More dissimilar (discontiguous) · Best for cross-species</div>
+              <div class="meta"><span class="pill purple">word 11</span><span class="pill gray">E 0.05</span></div>
+            </div>
+          </label>
+          <label class="task-opt">
+            <input type="radio">
+            <div class="body">
+              <strong>blastn</strong>
+              <div class="desc">Somewhat similar · Best for inter-species</div>
+              <div class="meta"><span class="pill purple">word 7</span><span class="pill gray">E 0.05</span></div>
+            </div>
+          </label>
+        </div>
+
+        <div class="section-card runtime done">
+          <div class="hd">
+            <span class="step-num purple">6</span>
+            <div><div class="ttl">Execution Profile</div><div class="sub">Choose how this search should run on Azure</div></div>
+            <span class="right"><span class="pill green">●  Live</span></span>
+          </div>
+          <select class="field-input">
+            <option>elb-cluster · 11 nodes · koreacentral</option>
+          </select>
+          <div class="cluster-card" style="margin-top:10px">
+            <div class="row"><span class="k">Region</span><span class="v">koreacentral</span><span style="margin-left:auto" class="pill green">Ready</span></div>
+            <div class="row"><span class="k">Nodes</span><span class="v">11 (user pool: 9)</span></div>
+            <div class="row"><span class="k">CPU peak</span><span class="v">23%</span><span class="k" style="margin-left:auto">Mem peak</span><span class="v">21%</span></div>
+            <div class="row"><span class="k">API p95</span><span class="v">4.7 s</span><span class="k" style="margin-left:auto">Sharding</span><span class="v">off</span></div>
+          </div>
+          <label style="display:flex; gap:6px; align-items:center; font-size:12px; margin-top:10px"><input type="checkbox" checked> Enable warmup <span class="pill green" style="margin-left:6px">DB already warm</span></label>
+        </div>
+
+        <div class="section-card runtime">
+          <div class="hd">
+            <span class="step-num purple">7</span>
+            <div><div class="ttl">Algorithm Parameters</div><div class="sub">E-value 0.05 · Max 100 · Fmt 5</div></div>
+            <span class="right small-muted">▾ Customize</span>
+          </div>
+          <div class="preset-row">
+            <div class="preset"><div class="name">Quick scan</div><div class="vals">E 10 · 50</div></div>
+            <div class="preset selected" style="background:var(--ms-purple-tint); border-color:var(--ms-purple)"><div class="name">Standard</div><div class="vals">E 0.05 · 100</div></div>
+            <div class="preset"><div class="name">Thorough</div><div class="vals">E 1e-5 · 500</div></div>
+            <div class="preset"><div class="name">Publication</div><div class="vals">E 1e-10 · 1000</div></div>
+          </div>
+          <div class="param-grid" style="margin-top:10px">
+            <div class="field"><div class="field-label">E-value</div><input class="field-input" value="0.05"></div>
+            <div class="field"><div class="field-label">Max target seqs</div><input class="field-input" value="100"></div>
+            <div class="field"><div class="field-label">Output format</div><input class="field-input" value="5 (XML)"></div>
+          </div>
+        </div>
+      </main>
+
+      <!-- RIGHT: 2-block summary rail -->
+      <aside class="b-summary">
+        <div class="group input">
+          <h5><span class="swatch"></span> Input summary · 3/4</h5>
+          <div class="kv"><span class="k">Program</span><span class="v">blastn</span></div>
+          <div class="kv"><span class="k">Database</span><span class="v">core_nt</span></div>
+          <div class="kv"><span class="k">DB size</span><span class="v">~250 GB</span></div>
+          <div class="kv"><span class="k">Sequences</span><span class="v">0 · 0 bp</span></div>
+          <div class="kv"><span class="k">Taxon filter</span><span class="v">—</span></div>
+          <div class="kv"><span class="k">Job title</span><span class="v">— (auto)</span></div>
+        </div>
+
+        <div class="group runtime">
+          <h5><span class="swatch"></span> Runtime summary · 2/3</h5>
+          <div class="kv"><span class="k">Task</span><span class="v">megablast</span></div>
+          <div class="kv"><span class="k">Word size</span><span class="v">28</span></div>
+          <div class="kv"><span class="k">Cluster</span><span class="v">elb-cluster</span></div>
+          <div class="kv"><span class="k">Region</span><span class="v">koreacentral</span></div>
+          <div class="kv"><span class="k">Warmup</span><span class="v">enabled</span></div>
+          <div class="kv"><span class="k">Sharding</span><span class="v">off</span></div>
+          <div class="kv"><span class="k">E-value</span><span class="v">0.05</span></div>
+          <div class="kv"><span class="k">Max targets</span><span class="v">100</span></div>
+          <div class="kv"><span class="k">Output fmt</span><span class="v">5 (XML)</span></div>
+        </div>
+
+        <div class="group">
+          <h5 style="color:var(--text-muted)">Readiness · 2/4</h5>
+          <div class="readiness" style="width:100%">
+            <span class="dot ok" title="Config"></span>
+            <span class="dot" title="Sequence"></span>
+            <span class="dot ok" title="Database"></span>
+            <span class="dot" title="Cluster"></span>
+            <span style="margin-left:auto"><strong>Seq</strong> · <strong>Cluster</strong> 필요</span>
+          </div>
+          <div class="checklist" style="margin-top:10px">
+            <strong>Required before submitting</strong>
+            <ul>
+              <li>Query sequence</li>
+              <li>AKS cluster must be fully provisioned</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="runbar">
+          <div class="field-label" style="margin-bottom:4px">Command preview</div>
+          <div class="cmd-preview"><span class="comment"># elastic-blast submit (preview)</span>
+elastic-blast submit \
+  <span class="arg">--cfg</span> <span class="val">elb.ini</span> \
+  <span class="arg">--program</span> <span class="val">blastn</span> \
+  <span class="arg">--db</span> <span class="val">core_nt</span> \
+  <span class="arg">--query</span> <span class="val">query.fa</span></div>
+          <button class="btn btn-secondary" style="margin-top:10px" disabled>✓ Check Readiness</button>
+          <button class="btn btn-primary" disabled>▶ Run BLAST</button>
+          <div class="saved">💾 Saved 30s ago · ⌘+Enter to submit</div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="legend">
+    <strong>왜 이 하이브리드가 좋은가</strong>
+    <ul>
+      <li><strong>A에서:</strong> 좌측 linear stepper + 우측 sticky summary rail (Run 버튼이 항상 보임).</li>
+      <li><strong>C에서:</strong> Input/Runtime 컬러 분리를 stepper 그룹 · 카드 상단 stripe · 우측 rail 두 블록에 모두 적용 → 어느 영역을 편집 중인지 한 눈에 인지.</li>
+      <li>그룹별 "3/4 · 2/3" 완료 카운트로 진척 시각화.</li>
+      <li>실제 <code>BlastCommandPreview</code> 컴포넌트를 Run 버튼 바로 위에 보여서 "정확히 무엇이 실행될지" 확인 가능.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<!-- Proposal C                                                           -->
+<!-- ════════════════════════════════════════════════════════════════════ -->
+<section class="panel" data-panel="c">
+  <div class="panel-intro">
+    <h2>Proposal C — Input / Runtime Split Workspace</h2>
+    <p>
+      The 7 sections fall into two natural groups: <strong>Input</strong> (program, query, database, taxon)
+      and <strong>Runtime</strong> (task profile, execution profile, algorithm parameters). This proposal
+      mirrors that mental model with a 50/50 two-column workspace — left in Microsoft Blue, right in
+      Microsoft Purple — and a floating pill-shaped Run bar at the bottom.
+    </p>
+    <div class="pros">
+      <span>Strong information grouping</span>
+      <span>Distinct accent per concern</span>
+      <span>Floating CTA = premium feel</span>
+      <span>Best for repeat search workflows</span>
+    </div>
+  </div>
+
+  <div class="mock">
+    <div class="mock-topbar">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <div class="url">localhost:8090/blast/submit</div>
+    </div>
+
+    <div class="c-header">
+      <h1>🧬 <span class="accent">ElasticBLAST</span> New Search · Standard Nucleotide BLAST</h1>
+      <div class="sub">
+        <span>Submit a sequence search using ElasticBLAST on AKS</span>
+        <span class="pill gray">💾 Saved 30s ago</span>
+        <div class="readiness"><span class="dot ok"></span><span class="dot"></span><span class="dot ok"></span><span class="dot"></span> <strong>2/4</strong></div>
+      </div>
+    </div>
+
+    <div class="c-grid">
+      <div class="col input">
+        <div class="c-col-head input">
+          <span class="icon"></span>
+          <span class="label">① Input · What are you searching?</span>
+          <span class="desc">3 of 4 specified</span>
+        </div>
+
+        <div class="section-card done">
+          <div class="hd">
+            <span class="step-num">1</span>
+            <div><div class="ttl">Program Selection</div><div class="sub">Choose a BLAST algorithm</div></div>
+            <span class="right"><span class="pill green">✓ blastn</span></span>
+          </div>
+          <div class="program-tabs" style="grid-template-columns:repeat(5,1fr); gap:4px">
+            <div class="t selected"><div class="name">blastn</div></div>
+            <div class="t"><div class="name">blastp</div></div>
+            <div class="t"><div class="name">blastx</div></div>
+            <div class="t"><div class="name">tblastn</div></div>
+            <div class="t"><div class="name">tblastx</div></div>
+          </div>
+        </div>
+
+        <div class="section-card">
+          <div class="hd">
+            <span class="step-num">2</span>
+            <div><div class="ttl">Enter Query Sequence</div><div class="sub">Paste FASTA or upload</div></div>
+            <span class="right"><span class="pill blue">Load example</span></span>
+          </div>
+          <textarea class="field-input field-textarea" placeholder=">sequence_id description
+ATGCATGC..."></textarea>
+          <div class="seqstats"><span>0 sequences · 0 bp</span><span class="pill amber">Required</span></div>
+        </div>
+
+        <div class="section-card done">
+          <div class="hd">
+            <span class="step-num">3</span>
+            <div><div class="ttl">Choose Search Set</div><div class="sub">BLAST database from storage</div></div>
+            <span class="right"><span class="pill green">core_nt · warmed</span></span>
+          </div>
+          <table class="db-table">
+            <thead><tr><th>Database</th><th>Type</th><th>Size</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr class="selected"><td><span class="db-name">core_nt</span><div class="small-muted">Core Nucleotide</div></td><td><span class="pill blue">nucl</span></td><td class="db-size">~250 GB</td><td><span class="pill green">warmed</span></td></tr>
+              <tr><td><span class="db-name">16S_ribosomal_RNA</span></td><td><span class="pill blue">nucl</span></td><td class="db-size">~18 MB</td><td><span class="pill gray">downloaded</span></td></tr>
+              <tr><td><span class="db-name">ITS_RefSeq_Fungi</span></td><td><span class="pill blue">nucl</span></td><td class="db-size">~8 MB</td><td><span class="pill gray">downloaded</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="section-card">
+          <div class="hd">
+            <span class="step-num">4</span>
+            <div><div class="ttl">Taxonomy Filter</div><div class="sub">Limit to one NCBI taxon</div></div>
+            <span class="right"><span class="pill amber">Optional</span></span>
+          </div>
+          <input class="field-input" placeholder="Search organism (e.g. Homo sapiens 9606)">
+          <div class="chip-row" style="margin-top:8px">
+            <span class="pill blue">Homo sapiens · 9606</span>
+            <span class="pill blue">Mus musculus · 10090</span>
+            <span class="pill blue">E. coli · 562</span>
+            <span class="pill blue">SARS-CoV-2 · 2697049</span>
+          </div>
+          <div style="display:flex; gap:6px; align-items:center; margin-top:8px">
+            <span class="field-label" style="margin:0">Mode</span>
+            <span class="pill green">Include</span>
+            <span class="pill gray">Exclude</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="col runtime">
+        <div class="c-col-head runtime">
+          <span class="icon"></span>
+          <span class="label">② Runtime · How should it run?</span>
+          <span class="desc">3 of 3 configured</span>
+        </div>
+
+        <div class="section-card done">
+          <div class="hd">
+            <span class="step-num">5</span>
+            <div><div class="ttl">Program Selection (task profile)</div><div class="sub">blastn task variant</div></div>
+            <span class="right"><span class="pill purple">megablast</span></span>
+          </div>
+          <label class="task-opt selected purple-variant">
+            <input type="radio" checked>
+            <div class="body">
+              <strong>megablast</strong>
+              <div class="desc">Highly similar · intra-species</div>
+              <div class="meta"><span class="pill purple">word 28</span><span class="pill gray">E 0.05</span></div>
+            </div>
+          </label>
+          <label class="task-opt">
+            <input type="radio">
+            <div class="body">
+              <strong>dc-megablast</strong>
+              <div class="desc">Discontiguous · cross-species</div>
+              <div class="meta"><span class="pill purple">word 11</span></div>
+            </div>
+          </label>
+          <label class="task-opt">
+            <input type="radio">
+            <div class="body">
+              <strong>blastn</strong>
+              <div class="desc">Somewhat similar · inter-species</div>
+              <div class="meta"><span class="pill purple">word 7</span></div>
+            </div>
+          </label>
+        </div>
+
+        <div class="section-card done">
+          <div class="hd">
+            <span class="step-num">6</span>
+            <div><div class="ttl">Execution Profile</div><div class="sub">AKS cluster</div></div>
+            <span class="right"><span class="pill green">●  Live</span></span>
+          </div>
+          <select class="field-input">
+            <option>elb-cluster · 11 nodes · koreacentral</option>
+          </select>
+          <div class="cluster-card" style="margin-top:10px">
+            <div class="row"><span class="k">Region</span><span class="v">koreacentral</span><span class="k" style="margin-left:auto">Nodes</span><span class="v">11</span></div>
+            <div class="row"><span class="k">CPU peak</span><span class="v">23%</span><span class="k" style="margin-left:auto">Mem peak</span><span class="v">21%</span></div>
+            <div class="row"><span class="k">API p95</span><span class="v">4.7 s</span><span class="k" style="margin-left:auto">Sharding</span><span class="v">off</span></div>
+          </div>
+          <label style="display:flex; gap:6px; align-items:center; font-size:12px; margin-top:8px"><input type="checkbox" checked> Enable warmup <span class="pill green" style="margin-left:6px">DB already warm</span></label>
+        </div>
+
+        <div class="section-card">
+          <div class="hd">
+            <span class="step-num">7</span>
+            <div><div class="ttl">Algorithm Parameters</div><div class="sub">E 0.05 · Max 100 · Fmt 5</div></div>
+            <span class="right"><span class="pill purple">Standard preset</span></span>
+          </div>
+          <div class="preset-row">
+            <div class="preset"><div class="name">Quick scan</div><div class="vals">E 10</div></div>
+            <div class="preset selected" style="background:var(--ms-purple-tint); border-color:var(--ms-purple)"><div class="name">Standard</div><div class="vals">E 0.05</div></div>
+            <div class="preset"><div class="name">Thorough</div><div class="vals">E 1e-5</div></div>
+            <div class="preset"><div class="name">Publication</div><div class="vals">E 1e-10</div></div>
+          </div>
+          <div class="param-grid" style="margin-top:10px">
+            <div class="field"><div class="field-label">E-value</div><input class="field-input" value="0.05"></div>
+            <div class="field"><div class="field-label">Max target seqs</div><input class="field-input" value="100"></div>
+            <div class="field"><div class="field-label">Outfmt</div><input class="field-input" value="5 (XML)"></div>
+          </div>
+          <div style="margin-top:8px; display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--text-muted)">
+            <label><input type="checkbox" checked> DUST</label>
+            <label><input type="checkbox" checked> Short-query adjust</label>
+            <label><input type="checkbox"> Mask lowercase</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="c-runbar">
+      <div class="meta">Search <strong>core_nt</strong> using <strong>blastn · megablast</strong> on <strong>elb-cluster</strong></div>
+      <div class="readiness"><span class="dot ok"></span><span class="dot"></span><span class="dot ok"></span><span class="dot"></span> 2/4</div>
+      <div class="req">⚠ Query sequence required</div>
+      <button class="btn btn-secondary" disabled>✓ Check Readiness</button>
+      <button class="btn btn-primary" disabled>▶ Run BLAST</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <strong>Why this works</strong>
+    <ul>
+      <li>Two columns map to the two questions a researcher actually asks: <em>what am I searching</em> vs <em>how should it run</em>.</li>
+      <li>Distinct accent colors (Blue vs Purple) make the split obvious — top stripes, header tints, and task-option highlight all agree.</li>
+      <li>The floating pill-shaped Run bar carries the 4-dot readiness so the user sees what's missing without scrolling up.</li>
+    </ul>
+  </div>
+</section>
+
+<script>
+  const tabs = document.querySelectorAll('.tabs button');
+  const panels = document.querySelectorAll('.panel');
+  tabs.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.tab;
+      tabs.forEach(b => b.classList.toggle('active', b === btn));
+      panels.forEach(p => p.classList.toggle('active', p.dataset.panel === id));
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  });
+</script>
+
+</body>
+</html>

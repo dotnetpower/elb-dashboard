@@ -95,6 +95,7 @@ _INSPECTOR_EXCLUDE_PREFIXES: tuple[str, ...] = (
     "/api/monitor/sidecars",  # SSE topology + high-volume snapshot
     "/api/monitor/metrics",  # would self-amplify
     "/api/monitor/sidecar-requests",  # would self-amplify
+    "/api/blast/logs",  # SSE job log stream
     "/api/terminal/ws",  # WebSocket upgrade
 )
 _INSPECTOR_EXCLUDE_EXACT: frozenset[str] = frozenset({"/api/health"})

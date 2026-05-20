@@ -35,48 +35,24 @@ export function buildStepLog({
   const stepLabel = PHASE_STEPS.find((step) => step.key === key)?.label ?? "Step";
 
   switch (key) {
-    case "checking_vm": {
-      const ps = sd.power_state as string;
-      const started = sd.started as boolean;
-      const vmLog = ((sd.output as string) || (sd.last_output as string) || "").trim();
-      if (state === "error") return `✗ ${stepLabel} failed:\n${failureText}`;
-      if (vmLog)
-        return `${state === "done" ? "✓ VM ready." : "Checking VM..."}\n\n--- VM Check Log ---\n${vmLog}`;
-      if (state === "done")
-        return started
-          ? `✓ VM was deallocated → started (power: ${ps || "running"}). Waited 30s for boot.`
-          : `✓ VM already running (power: ${ps || "running"}).`;
-      return "Checking Terminal sidecar reachability...";
-    }
-    case "enabling_storage":
-      if (state === "error") return `✗ ${stepLabel} failed:\n${failureText}`;
-      if (sd.output || sd.last_output) {
-        return `${state === "done" ? "✓ Storage access configured." : "Configuring storage access..."}\n\n--- Storage Log ---\n${(
-          (sd.output as string) || (sd.last_output as string)
-        ).trim()}`;
-      }
-      return state === "done"
-        ? "✓ Storage access configured for data transfer."
-        : "Configuring storage network access...";
-    case "uploading": {
+    case "preparing": {
       const payload = isRecord(job.payload) ? job.payload : null;
       const bp =
         stringValue(sd.blob_path) ||
         stringValue(payload?.query_file) ||
         stringValue(payload?.query_blob_url);
-      const uploadLog = (
+      const prepareLog = (
         (sd.output as string) ||
         (sd.last_output as string) ||
         ""
       ).trim();
       if (state === "error") return `✗ ${stepLabel} failed:\n${failureText}`;
-      if (uploadLog)
-        return `${state === "done" ? "✓ Query uploaded." : "Uploading query..."}\n\n--- Upload Log ---\n${uploadLog}`;
-      if (sd.skipped) return "✓ Query already uploaded (no inline data).";
-      if (state === "done" && bp) return `✓ Query uploaded → ${queryDisplayPath(bp)}`;
+      if (prepareLog)
+        return `${state === "done" ? "✓ Run prepared." : "Preparing run..."}\n\n--- Prepare Log ---\n${prepareLog}`;
+      if (state === "done" && bp) return `✓ Run prepared. Query: ${queryDisplayPath(bp)}`;
       return state === "done"
-        ? `✓ Query uploaded to queries/${jobId}/input.fa`
-        : "Uploading FASTA query sequence...";
+        ? "✓ Run prepared."
+        : "Validating submit inputs and resolving query/database metadata...";
     }
     case "configuring": {
       const cu = sd.config_url as string;
@@ -96,12 +72,25 @@ export function buildStepLog({
       const wo = ((sd.output as string) || (sd.last_output as string) || "").trim();
       if (state === "error") return `✗ Warmup failed:\n${wo || failureText}`;
       if (state === "done" && sd.success)
-        return `✓ Cluster warmed up — DB shards loaded on local SSD.\n${
+        return `✓ Node-local DB warmup is ready.\n${
           wo ? `\n--- Console Output ---\n${wo}` : ""
         }`;
       if (state === "done")
-        return `✓ Warmup step completed.\n${wo ? `\n--- Console Output ---\n${wo}` : ""}`;
-      return "Running elastic-blast prepare — downloading DB shards to node SSDs...";
+        return `✓ Warmup check completed.\n${wo ? `\n--- Console Output ---\n${wo}` : ""}`;
+      return "Checking whether DB shards are already warm on node-local SSD...";
+    }
+    case "staging_db": {
+      const stageOutput = (
+        (sd.output as string) ||
+        (sd.last_output as string) ||
+        ""
+      ).trim();
+      if (state === "error") return `✗ DB staging failed:\n${stageOutput || failureText}`;
+      if (stageOutput)
+        return `${state === "done" ? "✓ DB staging finished." : "Staging DB on node-local SSD..."}\n\n--- Live Console Output ---\n${stageOutput}`;
+      return state === "done"
+        ? "✓ DB shards are ready on node-local SSD."
+        : "ElasticBLAST is reusing warm shards or staging any missing DB files on node-local SSD...";
     }
     case "submitting": {
       const so =
@@ -116,8 +105,8 @@ export function buildStepLog({
       const submitJobName = sd.submit_job_name as string | undefined;
       const pollAttempt = sd.poll_attempt as number | undefined;
       if (state === "error") return `✗ Submit failed:\n${so || failureText}`;
-      if (state === "done" && sd.output)
-        return `✓ Submitted successfully.\n\n--- Console Output ---\n${sd.output as string}`;
+      if (state === "done" && liveOutput)
+        return `✓ Submitted successfully.\n\n--- Console Output ---\n${liveOutput}`;
       if (state === "active" && liveOutput) {
         const meta = [
           submitJobName ? `helper job : ${submitJobName}` : null,
@@ -187,7 +176,10 @@ export function buildStepLog({
     case "completed": {
       if (state === "error") return `✗ Completion failed:\n${failureText}`;
       const totalPolls = (stepsData.running?.polls as number) || 0;
-      return `✓ All steps completed.\n\n  Total polling time: ~${totalPolls * 30}s\n  Results container: results/${jobId}/`;
+      const completionOutput = ((sd.output as string) || (sd.last_output as string) || "").trim();
+      return `✓ All steps completed.\n\n  Total polling time: ~${totalPolls * 30}s\n  Results container: results/${jobId}/${
+        completionOutput ? `\n\n--- Completion Log ---\n${completionOutput}` : ""
+      }`;
     }
     default:
       return null;

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -13,6 +13,7 @@ import { ResultsCard } from "@/pages/blastResults/ResultsCard";
 import { AlignmentsTabBody } from "@/pages/blastResults/analytics/AlignmentsTabBody";
 import { DescriptionsTabBody } from "@/pages/blastResults/analytics/DescriptionsTabBody";
 import { GraphicSummaryPanel } from "@/pages/blastResults/analytics/GraphicSummaryPanel";
+import { ResultsPendingPanel } from "@/pages/blastResults/analytics/ResultsPendingPanel";
 import { TaxonomyPanel } from "@/pages/blastResults/analytics/TaxonomyPanel";
 import { useBlastAnalyticsState } from "@/pages/blastResults/analytics/useBlastAnalyticsState";
 import { useBlastResultsState } from "@/pages/blastResults/useBlastResultsState";
@@ -32,24 +33,37 @@ import { useBlastResultsState } from "@/pages/blastResults/useBlastResultsState"
  */
 export function BlastResults() {
   const { jobId } = useParams<{ jobId: string }>();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
 
   const tab = resolveBlastResultsTab(searchParams.get("tab"));
   const state = useBlastResultsState({ jobId, searchParams });
   const { job, isRunning, actions, subscriptionId, storageAccount, resourceGroup } =
     state;
+  const hasExplicitTab = searchParams.has("tab");
+
+  useEffect(() => {
+    if (!isRunning || hasExplicitTab) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", "run");
+    setSearchParams(next, { replace: true });
+  }, [hasExplicitTab, isRunning, searchParams, setSearchParams]);
+
+  const isResultAnalyticsTab =
+    tab === "descriptions" ||
+    tab === "graphic" ||
+    tab === "alignments" ||
+    tab === "taxonomy";
+  const analyticsEnabled =
+    isResultAnalyticsTab && !isRunning && Boolean(job);
+  const resultTabWaitingForJob = isResultAnalyticsTab && !job;
 
   const analytics = useBlastAnalyticsState({
     jobId: jobId ?? "",
     subscriptionId,
     storageAccount,
     resourceGroup,
-    enabled:
-      tab === "descriptions" ||
-      tab === "graphic" ||
-      tab === "alignments" ||
-      tab === "taxonomy",
+    enabled: analyticsEnabled,
   });
 
   return (
@@ -64,6 +78,7 @@ export function BlastResults() {
         jobPayload={job?.payload}
         program={job?.program ?? null}
         database={job?.db ?? null}
+        databaseMetadata={job?.database_metadata ?? null}
         configSnapshot={job?.config_snapshot as Record<string, unknown> | undefined}
         infrastructure={job?.infrastructure as Record<string, unknown> | undefined}
         exportingFormat={actions.exportingFormat}
@@ -71,22 +86,31 @@ export function BlastResults() {
         hasExportTargets={Boolean(subscriptionId && storageAccount)}
       />
 
-      <BlastResultsTabs active={tab} />
+      <BlastResultsTabs active={tab} resultsPending={isRunning} />
 
-      {tab === "descriptions" && (
+      {resultTabWaitingForJob && (
+        <ResultsPendingPanel
+          title="Loading BLAST job"
+          message="Checking the run status before loading result data."
+        />
+      )}
+      {tab === "descriptions" && !resultTabWaitingForJob && (
         <DescriptionsTabBody analytics={analytics} resultsPending={isRunning} />
       )}
-      {tab === "graphic" && <GraphicSummaryPanel analytics={analytics} />}
-      {tab === "alignments" && (
+      {tab === "graphic" && !resultTabWaitingForJob && (
+        <GraphicSummaryPanel analytics={analytics} resultsPending={isRunning} />
+      )}
+      {tab === "alignments" && !resultTabWaitingForJob && (
         <AlignmentsTabBody analytics={analytics} resultsPending={isRunning} />
       )}
-      {tab === "taxonomy" && (
+      {tab === "taxonomy" && !resultTabWaitingForJob && (
         <TaxonomyPanel
           analytics={analytics}
           jobId={jobId!}
           subscriptionId={subscriptionId}
           storageAccount={storageAccount}
           resourceGroup={resourceGroup}
+          resultsPending={isRunning}
         />
       )}
       {tab === "files" && <ResultsCard jobId={jobId!} state={state} />}

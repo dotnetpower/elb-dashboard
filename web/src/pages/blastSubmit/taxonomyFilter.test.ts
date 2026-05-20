@@ -196,6 +196,25 @@ describe("blast submit taxonomy filter", () => {
     expect(command).toContain("-negative_taxids 562");
   });
 
+  it("renders the verified DB search space in the command preview", () => {
+    const command = buildCommandString(makeForm(), PROGRAMS[0], {
+      effectiveSearchSpace: 32156241807668,
+    });
+
+    expect(command).toContain("-searchsp 32156241807668");
+  });
+
+  it("does not duplicate an explicit search space override in the command preview", () => {
+    const command = buildCommandString(
+      makeForm({ additional_options: "-searchsp 42" }),
+      PROGRAMS[0],
+      { effectiveSearchSpace: 32156241807668 },
+    );
+
+    expect(command.match(/-searchsp/g)).toHaveLength(1);
+    expect(command).toContain("-searchsp 42");
+  });
+
   it("maps NCBI-style masking and culling controls into the submit options", () => {
     const request = makeRequest(
       makeForm({

@@ -10,7 +10,7 @@
 
 import type { BlastJobSummary } from "@/api/endpoints";
 
-import type { DisplayJobState, JobRowView } from "./atoms";
+import type { DisplayJobState, JobRowView } from "./jobTypes";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -102,6 +102,13 @@ export function isDashboardJobFailed(j: BlastJobSummary): boolean {
   return jobDisplayState(j) === "Failed";
 }
 
+export function compareJobsNewestFirst(
+  left: { created_at?: string | null; updated_at?: string | null },
+  right: { created_at?: string | null; updated_at?: string | null },
+): number {
+  return jobTimestamp(right) - jobTimestamp(left);
+}
+
 /** Return the cluster name a BLAST job is bound to (or null if unbound). */
 export function jobClusterName(j: BlastJobSummary): string | null {
   // `infrastructure.cluster_name` is the canonical field; `payload` is
@@ -132,8 +139,10 @@ export function toJobRowView(j: BlastJobSummary): JobRowView {
     jobId: j.job_id,
     displayId: j.job_id.slice(0, 8),
     title,
+    program: j.program || "blast",
     db: shortDbLabel(j.db || externalDbLabel(j) || "—"),
     query,
+    clusterName: jobClusterName(j),
     state: effectiveState,
     createdAt: j.created_at ?? null,
     elapsedSec: terminalElapsedSec(j, effectiveState),
@@ -147,6 +156,13 @@ function fallbackJobTitle(j: BlastJobSummary, query: string): string {
   const db = shortDbLabel(j.db || externalDbLabel(j) || "");
   const parts = [j.program || "blast", db, query].filter(Boolean);
   return parts.length > 0 ? parts.join(" - ") : j.job_id;
+}
+
+function jobTimestamp(job: { created_at?: string | null; updated_at?: string | null }) {
+  const created = Date.parse(job.created_at || "");
+  if (Number.isFinite(created)) return created;
+  const updated = Date.parse(job.updated_at || "");
+  return Number.isFinite(updated) ? updated : 0;
 }
 
 function asRecord(value: unknown): UnknownRecord | null {

@@ -142,14 +142,23 @@ def autowarmup_inflight_acquire(
         return True
 
 
-def warmup_status_by_db(databases: list[dict[str, Any]]) -> dict[str, str]:
-    out: dict[str, str] = {}
+def warmup_status_by_db(databases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
     for item in databases:
         name = str(item.get("name") or "")
-        status = str(item.get("status") or "")
         if name:
-            out[name] = status
+            out[name] = item
     return out
+
+
+def _latest_ncbi_source_version() -> str:
+    try:
+        from api.routes.storage.common import _resolve_latest_dir
+
+        return _resolve_latest_dir()
+    except Exception as exc:
+        LOGGER.warning("auto warm NCBI latest-dir lookup failed: %s", type(exc).__name__)
+        return ""
 
 
 InflightAcquire = Callable[[str, str, str, str], bool]
@@ -236,24 +245,52 @@ def reconcile_auto_warmup_preferences(
                 ).get("databases", [])
             )
             try:
-                downloaded = {
-                    str(item.get("name"))
-                    for item in storage_data.list_databases(
-                        credential,
-                        pref.storage_account,
-                    )
+                downloaded_by_name = {
+                    str(item.get("name")): item
+                    for item in storage_data.list_databases(credential, pref.storage_account)
                     if item.get("name")
                 }
             except Exception as exc:
                 LOGGER.warning("auto warm database listing failed: %s", type(exc).__name__)
-                downloaded = set(pref.databases)
+                downloaded_by_name = {db_name: {"name": db_name} for db_name in pref.databases}
+            latest_source_version = (
+                _latest_ncbi_source_version()
+                if any(item.get("source_version") for item in downloaded_by_name.values())
+                else ""
+            )
 
             for db_name in pref.databases:
-                if db_name not in downloaded:
+                db_meta = downloaded_by_name.get(db_name)
+                if db_meta is None:
                     result["skipped"].append({"db": db_name, "reason": "not_downloaded"})
                     continue
-                if warm_status.get(db_name) in {"Ready", "Loading"}:
-                    result["skipped"].append({"db": db_name, "reason": warm_status[db_name]})
+                db_source_version = str(db_meta.get("source_version") or "")
+                if (
+                    latest_source_version
+                    and db_source_version
+                    and db_source_version != latest_source_version
+                ):
+                    result["skipped"].append(
+                        {
+                            "db": db_name,
+                            "reason": "update_required",
+                            "source_version": db_source_version,
+                            "latest_version": latest_source_version,
+                        }
+                    )
+                    continue
+                warm_meta = warm_status.get(db_name) or {}
+                warm_generation = str(warm_meta.get("source_version") or "")
+                warm_generations = {
+                    str(item) for item in warm_meta.get("source_versions", []) or [] if str(item)
+                }
+                if db_source_version and warm_generation != db_source_version:
+                    warm_meta = {}
+                elif len(warm_generations) > 1 or str(warm_meta.get("status") or "") == "Stale":
+                    warm_meta = {}
+                warm_state = str(warm_meta.get("status") or "")
+                if warm_state in {"Ready", "Loading"}:
+                    result["skipped"].append({"db": db_name, "reason": warm_state})
                     continue
                 if not inflight_acquire(
                     pref.subscription_id,

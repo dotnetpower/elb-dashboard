@@ -11,7 +11,7 @@ from api.services.db_sharding import DEFAULT_CONTAINER, MAX_SHARDS, partition_pr
 
 DEFAULT_WARMUP_APP_LABEL = "elb-db-warmup"
 DEFAULT_NAMESPACE = "default"
-DEFAULT_SCRIPTS_CONFIGMAP = "elb-scripts"
+DEFAULT_SCRIPTS_CONFIGMAP = "elb-warmup-scripts"
 DEFAULT_NODE_DB_PATH = "/workspace/blast"
 DEFAULT_CONTAINER_DB_PATH = "/blast/blastdb"
 DEFAULT_AZCOPY_CONCURRENCY = 16
@@ -32,6 +32,8 @@ _SAFE_DB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_NODE_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 _SAFE_IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$")
 _SAFE_LABEL_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
+_SHARD_SUFFIX_RE = re.compile(r"^(?P<db>.+)_shard_(?P<shard>\d{2,})$")
+SOURCE_VERSION_ANNOTATION = "elb.dashboard/source-version"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +103,7 @@ def build_warmup_job_plan(
     app_label: str = DEFAULT_WARMUP_APP_LABEL,
     azcopy_concurrency: int = DEFAULT_AZCOPY_CONCURRENCY,
     azcopy_buffer_gb: int = DEFAULT_AZCOPY_BUFFER_GB,
+    source_version: str = "",
 ) -> WarmupJobPlan:
     """Build one Kubernetes Job per shard, pinned one-to-one onto nodes.
 
@@ -143,6 +146,7 @@ def build_warmup_job_plan(
             partition_prefix=prefix,
             azcopy_concurrency=azcopy_concurrency,
             azcopy_buffer_gb=azcopy_buffer_gb,
+            source_version=source_version,
         )
         for idx in range(num_shards)
     )
@@ -165,7 +169,9 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
     for job in jobs:
         metadata = job.get("metadata", {}) or {}
         labels = metadata.get("labels", {}) or {}
-        db_name = labels.get("db") or ""
+        raw_db_name = str(labels.get("db") or "")
+        label_shard = str(labels.get("shard") or "")
+        db_name, derived_shard = _logical_db_name_and_shard(raw_db_name, label_shard)
         if not db_name:
             continue
         status = job.get("status", {}) or {}
@@ -191,7 +197,7 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
         info["nodes_ready"] += 1 if succeeded > 0 else 0
         info["nodes_failed"] += 1 if failed > 0 and succeeded == 0 else 0
         info["nodes_active"] += 1 if active > 0 else 0
-        shard = labels.get("shard")
+        shard = label_shard or derived_shard
         if shard:
             info["shards"].append(shard)
             node_name = _job_node_name(job)
@@ -211,6 +217,9 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
             previous = info.get("completed_at")
             if previous is None or completion_time > previous:
                 info["completed_at"] = completion_time
+        source_version = _job_source_version(job)
+        if source_version:
+            info.setdefault("source_versions", set()).add(source_version)
 
     for info in by_db.values():
         total = info["total_jobs"]
@@ -225,8 +234,38 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
         else:
             info["status"] = "Unknown"
         info["shards"] = sorted(set(info["shards"]))
+        source_versions = info.pop("source_versions", set())
+        if source_versions:
+            sorted_versions = sorted(source_versions)
+            info["source_versions"] = sorted_versions
+            if len(sorted_versions) == 1:
+                info["source_version"] = sorted_versions[0]
+            else:
+                info["status"] = "Stale"
+                info["active_phase"] = "failed"
+                info["active_phase_label"] = "Mixed DB generations"
+                info["active_message"] = "Warmup jobs belong to multiple DB source versions."
         _attach_timing_estimate(info)
     return list(by_db.values())
+
+
+def _logical_db_name_and_shard(raw_db_name: str, label_shard: str = "") -> tuple[str, str]:
+    match = _SHARD_SUFFIX_RE.match(raw_db_name)
+    if not match:
+        return raw_db_name, label_shard
+    return match.group("db"), label_shard or match.group("shard")
+
+
+def _job_source_version(job: dict[str, Any]) -> str:
+    metadata = job.get("metadata", {}) or {}
+    annotations = metadata.get("annotations", {}) or {}
+    value = annotations.get(SOURCE_VERSION_ANNOTATION)
+    if isinstance(value, str) and value:
+        return value
+    template_metadata = job.get("spec", {}).get("template", {}).get("metadata", {}) or {}
+    template_annotations = template_metadata.get("annotations", {}) or {}
+    value = template_annotations.get(SOURCE_VERSION_ANNOTATION)
+    return value if isinstance(value, str) else ""
 
 
 def _job_db_host_path(job: dict[str, Any]) -> str:
@@ -515,12 +554,14 @@ def _build_job(
     partition_prefix: str,
     azcopy_concurrency: int,
     azcopy_buffer_gb: int,
+    source_version: str,
 ) -> dict[str, Any]:
     shard = f"{shard_idx:02d}"
     shard_db = f"{db_name}_shard_{shard}"
     job_name = f"warm-{_job_name_fragment(db_name)}-{shard}"
     host_path = node_db_path.rstrip("/")
     command = _warmup_shell_command()
+    annotations = {SOURCE_VERSION_ANNOTATION: source_version} if source_version else {}
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -532,6 +573,7 @@ def _build_job(
                 "db": _label_value(db_name),
                 "shard": shard,
             },
+            "annotations": annotations,
         },
         "spec": {
             "backoffLimit": 1,
@@ -542,6 +584,7 @@ def _build_job(
                         "db": _label_value(db_name),
                         "shard": shard,
                     },
+                    "annotations": annotations,
                 },
                 "spec": {
                     "restartPolicy": "Never",
@@ -564,6 +607,7 @@ def _build_job(
                                 {"name": "ELB_SHARD_IDX", "value": shard},
                                 {"name": "ELB_PARTITION_PREFIX", "value": partition_prefix},
                                 {"name": "ELB_DB", "value": shard_db},
+                                {"name": "ELB_DB_SOURCE_VERSION", "value": source_version},
                                 {"name": "ELB_DB_MOL_TYPE", "value": mol_type},
                                 {
                                     "name": "AZCOPY_CONCURRENCY_VALUE",
@@ -605,27 +649,49 @@ set -euo pipefail
 cd /blast/blastdb
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 log "START shard=${ELB_SHARD_IDX} db=${ELB_DB} node=$(hostname)"
+EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
 if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
-  log "CLEANUP partial downloads"
+    log "CLEANUP partial downloads"
     find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
 fi
-if [ -s .download-complete ] && [ ! -s taxonomy4blast.sqlite3 ]; then
-    log "CACHE_INCOMPLETE missing taxonomy4blast.sqlite3"
+if [ -f .download-complete ] && { [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; }; then
+    log "CACHE_INCOMPLETE missing taxdb files"
     rm -f .download-complete
 fi
-if [ ! -s .download-complete ]; then
+valid_nsq_count=$(find . -maxdepth 1 -name '*.nsq' ! -name '.azDownload-*' | wc -l)
+if [ -f .download-complete ] && [ "$valid_nsq_count" = "0" ]; then
+    log "CACHE_INCOMPLETE missing nucleotide volume files"
+    rm -f .download-complete
+fi
+if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+    if [ ! -f .download-source-version ]; then
+        log "CACHE_STALE missing source-version marker"
+        rm -f .download-complete
+    elif [ "$(cat .download-source-version)" != "$EXPECTED_SOURCE_VERSION" ]; then
+        log "CACHE_STALE source-version mismatch"
+        rm -f .download-complete
+    fi
+fi
+if [ ! -f .download-complete ]; then
   /scripts/init-db-shard-aks.sh
   partials=$(find . -maxdepth 1 -name '.azDownload-*' | wc -l)
   if [ "$partials" != "0" ]; then
     log "ERROR partial downloads remain: $partials"
     exit 1
   fi
-  nsq_count=$(find . -maxdepth 1 -name '*.nsq' | wc -l)
+    nsq_count=$(find . -maxdepth 1 -name '*.nsq' ! -name '.azDownload-*' | wc -l)
   if [ "$nsq_count" = "0" ]; then
     log "ERROR no nucleotide volume files downloaded"
     exit 1
   fi
-  touch .download-complete
+    if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
+        log "ERROR taxdb files missing after download"
+        exit 1
+    fi
+    printf '%s' ok > .download-complete
+    if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+        printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version
+    fi
 else
   log "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
 fi
@@ -641,6 +707,36 @@ set -euo pipefail
 
 echo "BASH version ${BASH_VERSION}"
 echo "Shard download: idx=${ELB_SHARD_IDX} prefix=${ELB_PARTITION_PREFIX} db=${ELB_DB}"
+
+cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"
+
+EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
+if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
+    echo "CLEANUP partial downloads"
+    find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
+fi
+if [ -f .download-complete ] && { [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; }; then
+    echo "CACHE_INCOMPLETE missing taxdb files"
+    rm -f .download-complete
+fi
+valid_nsq_count=$(find . -maxdepth 1 -name '*.nsq' ! -name '.azDownload-*' | wc -l)
+if [ -f .download-complete ] && [ "$valid_nsq_count" = "0" ]; then
+    echo "CACHE_INCOMPLETE missing nucleotide volume files"
+    rm -f .download-complete
+fi
+if [ -f .download-complete ] && [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+    if [ ! -f .download-source-version ]; then
+        echo "CACHE_STALE missing source-version marker"
+        rm -f .download-complete
+    elif [ "$(cat .download-source-version)" != "$EXPECTED_SOURCE_VERSION" ]; then
+        echo "CACHE_STALE source-version mismatch"
+        rm -f .download-complete
+    fi
+fi
+if [ -f .download-complete ]; then
+    echo "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}"
+    exit 0
+fi
 
 start=$(date +%s)
 log_runtime() {
@@ -701,11 +797,15 @@ find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
 end=$(date +%s)
 log_runtime "download-shard-${ELB_SHARD_IDX}" $((end - start))
 
-nsq_count=$(find . -maxdepth 1 -name '*.nsq' | wc -l)
+nsq_count=$(find . -maxdepth 1 -name '*.nsq' ! -name '.azDownload-*' | wc -l)
 echo "DB files downloaded: ${nsq_count} .nsq files"
 echo "Total size: $(du -sh . 2>/dev/null | cut -f1)"
 if [ "$nsq_count" = "0" ]; then
     echo "ERROR: no nucleotide volume files downloaded"
+    exit 1
+fi
+if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
+    echo "ERROR: taxdb files missing after download"
     exit 1
 fi
 
@@ -716,6 +816,10 @@ for VOL in $VOLUMES; do
 done
 echo "VOLPATHS=${VOLPATHS}" > /tmp/shard_volpaths.txt
 echo "Volume paths: ${VOLPATHS}"
+printf '%s' ok > .download-complete
+if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
+    printf '%s' "$EXPECTED_SOURCE_VERSION" > .download-source-version
+fi
 pkill -f azcopy 2>/dev/null || true
 rm -rf /root/.azcopy 2>/dev/null || true
 """.strip()

@@ -255,7 +255,11 @@ export function hasCliFlag(options: string, flag: string): boolean {
   return new RegExp(`(?:^|\\s)${flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|=|$)`).test(options);
 }
 
-export function buildCommandString(form: FormState, programMeta: (typeof PROGRAMS)[0]): string {
+export function buildCommandString(
+  form: FormState,
+  programMeta: (typeof PROGRAMS)[0],
+  options: { effectiveSearchSpace?: number } = {},
+): string {
   const dbName = form.db.split("/").pop() || form.db;
   const parts = [form.program, "-db", dbName, "-evalue", String(form.evalue)];
   const useShortTask = shouldUseBlastnShortTask(form);
@@ -292,6 +296,14 @@ export function buildCommandString(form: FormState, programMeta: (typeof PROGRAM
   const taxid = parsePositiveTaxid(form.taxid);
   if (taxid) {
     parts.push(form.is_inclusive ? "-taxids" : "-negative_taxids", String(taxid));
+  }
+  if (
+    options.effectiveSearchSpace &&
+    Number.isFinite(options.effectiveSearchSpace) &&
+    options.effectiveSearchSpace > 0 &&
+    !hasCliFlag(form.additional_options || "", "-searchsp")
+  ) {
+    parts.push("-searchsp", String(Math.floor(options.effectiveSearchSpace)));
   }
   if (form.additional_options?.trim()) parts.push(form.additional_options.trim());
   parts.push("-query", "query.fasta", "-out", "results.out");

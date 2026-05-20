@@ -39,6 +39,29 @@ def test_local_to_blast_job_query_label_extracted():
     assert out["db"] == "16S_ribosomal_RNA"
 
 
+def test_local_to_blast_job_can_include_database_metadata(monkeypatch):
+    def fake_database_metadata(database: str, storage_account: str):
+        assert database == "core_nt"
+        assert storage_account == "elbstg01"
+        return {"name": "core_nt", "title": "Core nucleotide BLAST database"}
+
+    monkeypatch.setattr(blast_job_state, "_database_metadata_for_response", fake_database_metadata)
+
+    out = _local_to_blast_job(
+        _state(
+            db="core_nt",
+            storage_account="elbstg01",
+            payload={"db": "core_nt", "storage_account": "elbstg01"},
+        ),
+        include_database_metadata=True,
+    )
+
+    assert out["database_metadata"] == {
+        "name": "core_nt",
+        "title": "Core nucleotide BLAST database",
+    }
+
+
 def test_local_to_blast_job_exposes_error_for_frontend():
     out = _local_to_blast_job(_state(status="failed", phase="submit_failed", error_code="boom"))
     assert out["error_code"] == "boom"
@@ -178,6 +201,62 @@ def test_refresh_running_blast_state_waits_for_result_artifacts(monkeypatch):
     assert progress["phase"] == "results_pending"
     assert progress["steps"]["exporting_results"]["phase"] == "results_pending"
     assert repo.history[0][1] == "k8s_completed_results_pending"
+
+
+def test_refresh_running_blast_state_completes_prior_running_steps(monkeypatch):
+    state = _state(
+        status="running",
+        phase="submitting",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+            "_progress": {
+                "phase": "submitting",
+                "status": "running",
+                "steps": {
+                    "submitting": {
+                        "phase": "submitting",
+                        "status": "running",
+                        "last_output": "elastic-blast submit log",
+                    }
+                },
+            },
+        },
+    )
+
+    class Repo:
+        def __init__(self) -> None:
+            self.updated = None
+            self.history = []
+
+        def update(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return _state(**{**state.__dict__, **kwargs})
+
+        def append_history(self, job_id, event, payload):
+            self.history.append((job_id, event, payload))
+
+    repo = Repo()
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {"status": "completed", "job_id": "job-elastic"},
+    )
+    monkeypatch.setattr(blast_job_state, "_state_has_parseable_result_artifact", lambda *_: True)
+
+    refreshed = blast_job_state._refresh_running_blast_state(repo, state)
+
+    assert refreshed.status == "completed"
+    assert refreshed.phase == "completed"
+    progress = repo.updated[1]["payload"]["_progress"]
+    assert progress["phase"] == "completed"
+    assert progress["steps"]["submitting"]["status"] == "completed"
+    assert progress["steps"]["submitting"]["success"] is True
+    assert progress["steps"]["submitting"]["last_output"] == "elastic-blast submit log"
+    assert progress["steps"]["completed"]["status"] == "completed"
+    assert progress["steps"]["completed"]["success"] is True
 
 
 def test_refresh_running_blast_state_uses_discovered_elastic_blast_job_id(monkeypatch):

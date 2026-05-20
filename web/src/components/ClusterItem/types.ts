@@ -8,6 +8,10 @@ export type DbChip = {
   shardLayouts: number;
   shardingInProgress: boolean;
   shardingError: string | null;
+  sourceVersion: string | null;
+  warmSourceVersion: string | null;
+  warmSourceVersions: string[];
+  warmStale: boolean;
   /** Server-computed warmup feasibility — only set when cluster topology was supplied. */
   warmupPlan?: BlastDatabase["warmup_plan"];
 };

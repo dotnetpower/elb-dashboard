@@ -126,8 +126,14 @@ export function resolveBlastResultState({
   >;
   const exportStep = stepsObj?.exporting_results as Record<string, unknown> | undefined;
   const submitStep = stepsObj?.submitting as Record<string, unknown> | undefined;
+  const stagingStep = stepsObj?.staging_db as Record<string, unknown> | undefined;
   const hasOutputFiles = exportStep?.has_output_files as boolean | undefined;
-  const submitOutput = (submitStep?.output as string) ?? "";
+  const submitOutput =
+    ((submitStep?.output as string | undefined) ||
+      (submitStep?.last_output as string | undefined) ||
+      (stagingStep?.output as string | undefined) ||
+      (stagingStep?.last_output as string | undefined) ||
+      "");
   const submitHasFatalErrors = hasSubmitFatalErrors(submitOutput);
   const orchestratorSaysCompleted = outputStatus === "completed";
   const completedButFailed =

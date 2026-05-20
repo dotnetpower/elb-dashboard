@@ -16,10 +16,9 @@ export {
 } from "./atoms";
 export type {
   ClusterHealth,
-  DisplayJobState,
   EventKind,
-  JobRowView,
 } from "./atoms";
+export type { DisplayJobState, JobRowView } from "./jobTypes";
 export { classifyJobState, isActiveJobState, jobClusterName, toJobRowView } from "./jobMapping";
 export { toEventLineView } from "./eventMapping";
 export type { EventLineView } from "./eventMapping";

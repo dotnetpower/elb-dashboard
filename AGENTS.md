@@ -156,6 +156,9 @@ where the failure was found, but knowing them up front saves a lot of time.
 - **Conventional Commits** (`feat:`, `fix:`, `chore:`, `docs:`, …).
 - **Per-feature change notes** in `docs/features_change/YYYY-MM/YYYY-MM-DD-<name>.md`
   before each behaviour-changing commit.
+- **GitHub issue hygiene**: if a change implements a registered issue, comment with
+   the completed work and validation; close it only after acceptance criteria are met,
+   otherwise leave it open with the remaining gap.
 - **No new dependency without justification** in the PR description.
 - **Tests live next to their code** (`api/tests/`); cross-cutting only at root `tests/`.
 

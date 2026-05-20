@@ -6,7 +6,7 @@
  * React state lives in `usePulseSignals` / `useClusterHealth`.
  */
 
-import type { DisplayJobState } from "@/components/cards/ClusterBento/atoms";
+import type { DisplayJobState } from "@/components/cards/ClusterBento/jobTypes";
 
 export type HealthTone =
   | "healthy"

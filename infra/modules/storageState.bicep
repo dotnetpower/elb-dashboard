@@ -3,10 +3,12 @@
 // On the existing platform Storage account this module adds:
 //   * `job-state`        table      — single-row-per-job state (PartitionKey=job_id, RowKey="current")
 //   * `job-history`      table      — per-step transitions (PartitionKey=job_id, RowKey=ulid)
+//   * `jobartifactstate` table      — one tiny row per large job artifact
 //   * `autowarmup`       table      — Auto warm preferences, kept out of jobstate
 //   * `audit`            container  — append blobs, daily-rolled JSON Lines
 //   * `dead-letter`      container  — one blob per Celery task that exhausted retries
 //   * `job-payloads`     container  — sanitised request/result payloads, append blobs
+//   * `job-artifacts`    container  — large immutable UI artifacts for completed jobs
 //   * `schedules`        container  — single JSON blob, ETag-versioned
 //   * `blast-db`         container  — ElasticBLAST database files
 //   * `queries`          container  — user query FASTA uploads
@@ -43,6 +45,11 @@ resource jobHistoryTable 'Microsoft.Storage/storageAccounts/tableServices/tables
   name: 'jobhistory'
 }
 
+resource jobArtifactStateTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+  parent: tableService
+  name: 'jobartifactstate'
+}
+
 resource autoWarmupTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
   parent: tableService
   name: 'autowarmup'
@@ -63,6 +70,7 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01'
 var stateContainers = [
   'audit'
   'dead-letter'
+  'job-artifacts'
   'job-payloads'
   'schedules'
   'blast-db'
@@ -114,7 +122,7 @@ resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05
           definition: {
             filters: {
               blobTypes: [ 'blockBlob' ]
-              prefixMatch: [ 'dead-letter/', 'job-payloads/' ]
+              prefixMatch: [ 'dead-letter/', 'job-artifacts/', 'job-payloads/' ]
             }
             actions: {
               baseBlob: {
@@ -131,4 +139,5 @@ resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05
 
 output jobStateTableName string = jobStateTable.name
 output jobHistoryTableName string = jobHistoryTable.name
+output jobArtifactStateTableName string = jobArtifactStateTable.name
 output autoWarmupTableName string = autoWarmupTable.name

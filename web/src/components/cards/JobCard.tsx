@@ -3,8 +3,10 @@ import { Link } from "react-router-dom";
 import { ArrowRight } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
+import { BlastJobIdentity } from "@/components/cards/BlastJobIdentity";
 import { MonitorCard } from "@/components/MonitorCard";
 import {
+  compareJobsNewestFirst,
   isDashboardJobActive,
   isDashboardJobCompleted,
   isDashboardJobFailed,
@@ -26,11 +28,11 @@ export function JobCard() {
   const completed = jobs.filter(isDashboardJobCompleted).length;
   const failed = jobs.filter(isDashboardJobFailed).length;
 
-  // Show running jobs first, then most recent, capped at MAX_DASHBOARD_JOBS
+  // Show running jobs first, then most recent, capped at MAX_DASHBOARD_JOBS.
   const displayed = useMemo(() => {
-    const reversed = [...jobs].reverse();
-    const active = reversed.filter(isDashboardJobActive);
-    const done = reversed.filter((j) => !isDashboardJobActive(j));
+    const newestFirst = [...jobs].sort(compareJobsNewestFirst);
+    const active = newestFirst.filter(isDashboardJobActive);
+    const done = newestFirst.filter((j) => !isDashboardJobActive(j));
     return [...active, ...done].slice(0, MAX_DASHBOARD_JOBS);
   }, [jobs]);
 
@@ -142,8 +144,15 @@ export function JobCard() {
                 className="dv3-job-row"
               >
                 <span className={`phase ${cls}`}>{view.state}</span>
-                <span className="name">{view.title}</span>
-                <span className="meta">{view.db}</span>
+                <BlastJobIdentity
+                  className="name"
+                  title={view.title}
+                  fallbackTitle={job.job_id}
+                  program={view.program}
+                  db={view.db}
+                  query={view.query}
+                  clusterName={view.clusterName}
+                />
                 <span className="right">
                   <ArrowRight size={12} strokeWidth={1.75} />
                 </span>

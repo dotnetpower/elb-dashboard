@@ -1,7 +1,6 @@
 import {
   Server,
   HardDrive,
-  Upload,
   Settings,
   Dna,
   Send,
@@ -17,28 +16,22 @@ export interface PhaseStep {
   icon: LucideIcon;
 }
 
-// Phase steps matching orchestrator order exactly.
+// Phase steps matching the Container Apps + AKS orchestrator order.
 export const PHASE_STEPS: PhaseStep[] = [
   {
-    key: "checking_vm",
-    label: "Prepare VM",
-    desc: "Start remote terminal",
+    key: "preparing",
+    label: "Prepare Run",
+    desc: "Validate submit inputs",
     icon: Server,
   },
   {
-    key: "enabling_storage",
-    label: "Open Storage",
-    desc: "Enable public access",
-    icon: HardDrive,
-  },
-  {
-    key: "uploading",
-    label: "Upload Query",
-    desc: "Send sequence to blob",
-    icon: Upload,
+    key: "warming_up",
+    label: "Warmup Check",
+    desc: "Confirm DB shards are warm",
+    icon: Dna,
   },
   { key: "configuring", label: "Configure", desc: "Generate INI config", icon: Settings },
-  { key: "warming_up", label: "Warmup", desc: "Prepare DB shards on SSD", icon: Dna },
+  { key: "staging_db", label: "Stage DB", desc: "Reuse or stage node SSD", icon: HardDrive },
   { key: "submitting", label: "Submit Job", desc: "Send to AKS cluster", icon: Send },
   { key: "running", label: "BLAST Run", desc: "Sequence alignment", icon: Dna },
   {
@@ -62,8 +55,14 @@ export const FAILURE_PHASES = new Set([
 export type StepState = "done" | "active" | "pending" | "error" | "skipped";
 
 export const PHASE_TO_STEP: Record<string, string> = {
+  checking_vm: "preparing",
+  enabling_storage: "preparing",
+  uploading: "preparing",
+  warmup_ready: "warming_up",
+  waiting_for_warmup: "warming_up",
   submit_failed: "submitting",
-  reading_split_query: "uploading",
+  staging_db: "staging_db",
+  reading_split_query: "preparing",
   splitting_queries: "configuring",
   split_children_submitted: "submitting",
   split_children_aggregating: "running",
@@ -77,12 +76,16 @@ export const PHASE_TO_STEP: Record<string, string> = {
 };
 
 export const PHASE_MESSAGES: Record<string, string> = {
-  checking_vm: "Verifying Terminal sidecar is reachable...",
-  enabling_storage: "Enabling storage public access for data transfer...",
-  uploading: "Uploading query sequence to Azure Blob Storage...",
+  preparing: "Preparing the BLAST run...",
+  checking_vm: "Preparing the BLAST run...",
+  enabling_storage: "Preparing the BLAST run...",
+  uploading: "Preparing the BLAST run...",
   configuring: "Generating ElasticBLAST configuration...",
-  warming_up: "Preparing cluster with DB shards on local SSD (warmup)...",
+  warming_up: "Checking node-local DB warmup readiness...",
   warmup_failed: "Cluster warmup failed.",
+  warmup_ready: "Node-local DB warmup is ready.",
+  waiting_for_warmup: "Waiting for node-local DB warmup...",
+  staging_db: "Reusing or staging DB shards on node-local SSD...",
   submitting: "Submitting job to AKS cluster...",
   reading_split_query: "Reading the original query from Storage...",
   splitting_queries: "Splitting queries by effective search space...",

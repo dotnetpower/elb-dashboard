@@ -64,51 +64,57 @@
   --card-accent-jobs: var(--warning);
 }
 
-/* #50 Light theme — Aurora White (premium glass) */
+/* #50 Light theme — Aurora White (premium glass)
+   Vividness pass (2026-05-20): higher card opacity, visible borders,
+   darker text, calmer aurora wash so content stands out. */
 [data-theme="light"] {
-  --bg-canvas: #f6f7fb;
+  --bg-canvas: #eef1f8;
   --bg-primary: #ffffff;
-  --bg-secondary: #f0f2f8;
-  --bg-tertiary: #e7eaf3;
-  --bg-hover: #dfe3ee;
-  --border-weak: rgba(80, 70, 160, 0.18);
-  --border-medium: rgba(80, 70, 160, 0.30);
-  --border-focus: rgba(91, 108, 255, 0.50);
-  --text-primary: #161a36;
-  --text-muted: #444b76;
-  --text-faint: #6c759a;
-  --accent: #5b6cff;
+  --bg-secondary: #eaedf6;
+  --bg-tertiary: #dfe3ef;
+  --bg-hover: #d4d9e7;
+  --border-weak: rgba(60, 52, 130, 0.22);
+  --border-medium: rgba(60, 52, 130, 0.38);
+  --border-focus: rgba(75, 92, 245, 0.60);
+  --text-primary: #0e1230;
+  --text-muted: #353c66;
+  --text-faint: #555d85;
+  --accent: #4b5cf5;
   --success: #047857;
   --warning: #b45309;
   --danger: #b91c1c;
-  --purple: #7c6df5;
+  --purple: #6c5be0;
   --teal: #0f766e;
 
   /* Glass aliases — used by .panel / .glass-card override below.
-     0.68 is the sweet spot: still translucent enough for aurora to
-     show through, but solid enough that body text reads cleanly. */
-  --glass-bg: rgba(255, 255, 255, 0.68);
-  --glass-bg-strong: rgba(255, 255, 255, 0.85);
-  --glass-border: rgba(255, 255, 255, 0.95);
-  --glass-blur: 22px;
+     Bumped to 0.88/0.96 so card bodies read as solid surfaces
+     against the aurora canvas rather than blending into it. */
+  --glass-bg: rgba(255, 255, 255, 0.88);
+  --glass-bg-strong: rgba(255, 255, 255, 0.96);
+  --glass-border: rgba(60, 52, 130, 0.22);
+  --glass-blur: 16px;
 
   --shadow-panel:
-    0 1px 0 rgba(255, 255, 255, 0.95) inset,
-    0 12px 32px rgba(80, 70, 160, 0.18);
+    0 1px 0 rgba(255, 255, 255, 0.85) inset,
+    0 8px 22px rgba(60, 52, 130, 0.14),
+    0 1px 3px rgba(60, 52, 130, 0.08);
   --shadow-panel-hover:
-    0 1px 0 rgba(255, 255, 255, 1) inset,
-    0 18px 44px rgba(80, 70, 160, 0.24);
+    0 1px 0 rgba(255, 255, 255, 0.95) inset,
+    0 14px 32px rgba(60, 52, 130, 0.20),
+    0 2px 6px rgba(60, 52, 130, 0.10);
 }
 
-/* Aurora canvas — lavender + cobalt wash on white (light mode only) */
+/* Aurora canvas — lavender + cobalt wash on white (light mode only).
+   Toned down from 0.28/0.25/0.22 → 0.16/0.14/0.12 so the gradient
+   reads as a subtle ambient tint, not a haze that swallows cards. */
 [data-theme="light"],
 [data-theme="light"] body,
 [data-theme="light"] #root {
   background-image:
-    radial-gradient(900px 480px at 12% -8%, rgba(167, 139, 250, 0.28), transparent 65%),
-    radial-gradient(700px 520px at 105% 12%, rgba(96, 165, 250, 0.25), transparent 60%),
-    radial-gradient(600px 600px at 50% 110%, rgba(196, 181, 253, 0.22), transparent 65%),
-    linear-gradient(180deg, #fbfcff 0%, #f0f3fb 100%) !important;
+    radial-gradient(900px 480px at 12% -8%, rgba(167, 139, 250, 0.16), transparent 65%),
+    radial-gradient(700px 520px at 105% 12%, rgba(96, 165, 250, 0.14), transparent 60%),
+    radial-gradient(600px 600px at 50% 110%, rgba(196, 181, 253, 0.12), transparent 65%),
+    linear-gradient(180deg, #f5f7fc 0%, #e8ecf6 100%) !important;
 }
 
 /* Glass surface for panels — light mode only.
@@ -127,8 +133,8 @@
 /* Panel header — subtle frosted band so the header reads as a 'hat'
    over the body, not a continuation of the glass surface. */
 [data-theme="light"] .panel-hd {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0.30) 100%);
-  border-bottom: 1px solid rgba(80, 70, 160, 0.14);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.78) 0%, rgba(255, 255, 255, 0.55) 100%);
+  border-bottom: 1px solid rgba(60, 52, 130, 0.22);
 }
 
 /* Light-mode overrides for elements using dark-theme rgba(255,255,255,...) */
@@ -656,38 +662,38 @@
    AKS cards doesn't get a permanent identity bar.
    ────────────────────────────────────────────────────────────────── */
 
-/* Tinted frost band per accent — color-mix() gives a faint accent
-   wash on top of the white glass. Falls back gracefully on older
-   browsers (frost stays white-only). */
+/* Tinted frost band per accent — color-mix() gives a stronger accent
+   wash on top of the white glass (vividness pass: 12/4 → 22/10).
+   Falls back gracefully on older browsers (frost stays white-only). */
 [data-theme="light"] .panel--accent-cluster > .panel-hd {
   background: linear-gradient(180deg,
-    color-mix(in srgb, var(--card-accent-cluster) 12%, rgba(255,255,255,0.65)) 0%,
-    color-mix(in srgb, var(--card-accent-cluster) 4%,  rgba(255,255,255,0.35)) 100%);
-  border-bottom-color: color-mix(in srgb, var(--card-accent-cluster) 22%, transparent);
+    color-mix(in srgb, var(--card-accent-cluster) 22%, rgba(255,255,255,0.85)) 0%,
+    color-mix(in srgb, var(--card-accent-cluster) 10%, rgba(255,255,255,0.65)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-cluster) 38%, transparent);
 }
 [data-theme="light"] .panel--accent-storage > .panel-hd {
   background: linear-gradient(180deg,
-    color-mix(in srgb, var(--card-accent-storage) 12%, rgba(255,255,255,0.65)) 0%,
-    color-mix(in srgb, var(--card-accent-storage) 4%,  rgba(255,255,255,0.35)) 100%);
-  border-bottom-color: color-mix(in srgb, var(--card-accent-storage) 22%, transparent);
+    color-mix(in srgb, var(--card-accent-storage) 22%, rgba(255,255,255,0.85)) 0%,
+    color-mix(in srgb, var(--card-accent-storage) 10%, rgba(255,255,255,0.65)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-storage) 38%, transparent);
 }
 [data-theme="light"] .panel--accent-acr > .panel-hd {
   background: linear-gradient(180deg,
-    color-mix(in srgb, var(--card-accent-acr) 12%, rgba(255,255,255,0.65)) 0%,
-    color-mix(in srgb, var(--card-accent-acr) 4%,  rgba(255,255,255,0.35)) 100%);
-  border-bottom-color: color-mix(in srgb, var(--card-accent-acr) 22%, transparent);
+    color-mix(in srgb, var(--card-accent-acr) 22%, rgba(255,255,255,0.85)) 0%,
+    color-mix(in srgb, var(--card-accent-acr) 10%, rgba(255,255,255,0.65)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-acr) 38%, transparent);
 }
 [data-theme="light"] .panel--accent-terminal > .panel-hd {
   background: linear-gradient(180deg,
-    color-mix(in srgb, var(--card-accent-terminal) 12%, rgba(255,255,255,0.65)) 0%,
-    color-mix(in srgb, var(--card-accent-terminal) 4%,  rgba(255,255,255,0.35)) 100%);
-  border-bottom-color: color-mix(in srgb, var(--card-accent-terminal) 22%, transparent);
+    color-mix(in srgb, var(--card-accent-terminal) 22%, rgba(255,255,255,0.85)) 0%,
+    color-mix(in srgb, var(--card-accent-terminal) 10%, rgba(255,255,255,0.65)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-terminal) 38%, transparent);
 }
 [data-theme="light"] .panel--accent-jobs > .panel-hd {
   background: linear-gradient(180deg,
-    color-mix(in srgb, var(--card-accent-jobs) 12%, rgba(255,255,255,0.65)) 0%,
-    color-mix(in srgb, var(--card-accent-jobs) 4%,  rgba(255,255,255,0.35)) 100%);
-  border-bottom-color: color-mix(in srgb, var(--card-accent-jobs) 22%, transparent);
+    color-mix(in srgb, var(--card-accent-jobs) 22%, rgba(255,255,255,0.85)) 0%,
+    color-mix(in srgb, var(--card-accent-jobs) 10%, rgba(255,255,255,0.65)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-jobs) 38%, transparent);
 }
 
 /* Title coloured to match accent — keeps weight 700 from Pass 3.
@@ -697,6 +703,278 @@
 [data-theme="light"] .panel--accent-acr      > .panel-hd .title { color: var(--card-accent-acr); }
 [data-theme="light"] .panel--accent-terminal > .panel-hd .title { color: var(--card-accent-terminal); }
 [data-theme="light"] .panel--accent-jobs     > .panel-hd .title { color: var(--card-accent-jobs); }
+
+/* ──────────────────────────────────────────────────────────────────
+   Microsoft brand palette (light mode only, opt-in)
+   Toggle via the Palette icon in the topbar (light-mode only); the
+   choice persists in localStorage under "elb-palette". Dark mode
+   ignores data-palette entirely.
+
+   Source: Microsoft brand-colour sheet (Whites/Cold-grays/Blues/...
+   tri-tier). We use the Mid tier for primary accents and the Dark
+   tier where AA contrast on white is mandatory (success/danger/etc.).
+   ────────────────────────────────────────────────────────────────── */
+[data-theme="light"][data-palette="msbrand"] {
+  /* Neutrals — paper-white canvas with cool-gray scaffolding */
+  --bg-canvas: #f4f3f5;          /* Off White */
+  --bg-primary: #ffffff;          /* Pure White */
+  --bg-secondary: #e8e6df;        /* Warm Light Gray */
+  --bg-tertiary: #d9d6d6;         /* Light Gray */
+  --bg-hover: #d7d2cb;            /* Mid Gray */
+  --border-weak: rgba(69, 65, 66, 0.20);
+  --border-medium: rgba(69, 65, 66, 0.36);
+  --border-focus: rgba(0, 120, 212, 0.55);
+
+  /* Text — Dark Gray ramp, AA against white */
+  --text-primary: #1b1b1b;
+  --text-muted: #454142;          /* Dark Gray */
+  --text-faint: #69655f;          /* between Dark Gray and Warm Gray */
+
+  /* Accents — Microsoft brand */
+  --accent: #0078d4;              /* Blue (signature) */
+  --success: #07641d;             /* Dark Green */
+  --warning: #73391d;             /* Dark Orange */
+  --danger: #73262f;              /* Dark Red */
+  --purple: #8661c5;              /* Purple */
+  --teal: #225b62;                /* Dark Teal */
+
+  /* Card accents — keep colour identity per card type */
+  --card-accent-cluster: #0078d4;   /* Blue */
+  --card-accent-storage: #07641d;   /* Dark Green */
+  --card-accent-acr: #8661c5;       /* Purple */
+  --card-accent-terminal: #225b62;  /* Dark Teal */
+  --card-accent-jobs: #73391d;      /* Dark Orange */
+
+  /* Glass — solid white, minimal blur, neutral shadows */
+  --glass-bg: rgba(255, 255, 255, 0.94);
+  --glass-bg-strong: rgba(255, 255, 255, 1);
+  --glass-border: rgba(69, 65, 66, 0.20);
+  --glass-blur: 8px;
+
+  --shadow-panel:
+    0 1px 0 rgba(255, 255, 255, 0.85) inset,
+    0 6px 18px rgba(20, 20, 20, 0.10),
+    0 1px 3px rgba(20, 20, 20, 0.08);
+  --shadow-panel-hover:
+    0 1px 0 rgba(255, 255, 255, 0.95) inset,
+    0 10px 26px rgba(20, 20, 20, 0.14),
+    0 2px 6px rgba(20, 20, 20, 0.10);
+}
+
+/* Canvas — neutral paper, no aurora wash (MS brand stays sober) */
+[data-theme="light"][data-palette="msbrand"],
+[data-theme="light"][data-palette="msbrand"] body,
+[data-theme="light"][data-palette="msbrand"] #root {
+  background-image: linear-gradient(180deg, #fafafb 0%, #ececef 100%) !important;
+}
+
+/* Topbar — flat white with neutral underline (replaces the lavender
+   glass band that ships with the aurora palette). */
+[data-theme="light"][data-palette="msbrand"] .layout__topbar {
+  background: rgba(255, 255, 255, 0.96);
+  border-bottom: 1px solid rgba(69, 65, 66, 0.20);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset,
+              0 4px 14px rgba(20, 20, 20, 0.06);
+}
+
+/* Logo gradient — Microsoft blue ramp */
+[data-theme="light"][data-palette="msbrand"] .layout__logo-icon {
+  background: linear-gradient(135deg, #50e6ff 0%, #0078d4 55%, #2a446f 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.40),
+    0 4px 12px rgba(0, 120, 212, 0.30);
+}
+
+/* Nav active pill — blue tint, blue left bar */
+[data-theme="light"][data-palette="msbrand"] .layout__nav-item.active {
+  background: rgba(0, 120, 212, 0.10);
+  border-left-color: var(--accent);
+}
+
+/* Live indicator — emerald against neutral background */
+[data-theme="light"][data-palette="msbrand"] .layout__live {
+  background: rgba(7, 100, 29, 0.08);
+  border-color: rgba(7, 100, 29, 0.28);
+}
+
+/* Selector chips — flat white with grey border (no lavender frost) */
+[data-theme="light"][data-palette="msbrand"] .cfg-chip,
+[data-theme="light"][data-palette="msbrand"] .glass-button,
+[data-theme="light"][data-palette="msbrand"] .gb {
+  background: #ffffff;
+  border-color: rgba(69, 65, 66, 0.28);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset,
+              0 1px 3px rgba(20, 20, 20, 0.06);
+}
+[data-theme="light"][data-palette="msbrand"] .cfg-chip:hover,
+[data-theme="light"][data-palette="msbrand"] .glass-button:hover,
+[data-theme="light"][data-palette="msbrand"] .gb:hover {
+  border-color: rgba(0, 120, 212, 0.45);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.95) inset,
+              0 3px 10px rgba(0, 120, 212, 0.12);
+}
+[data-theme="light"][data-palette="msbrand"] .cfg-chip:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.18);
+}
+
+/* Select chevron — repaint Microsoft blue */
+[data-theme="light"][data-palette="msbrand"] .cfg-chip select,
+[data-theme="light"][data-palette="msbrand"] select.glass-input {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%230078d4' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
+/* Primary button — solid Microsoft blue */
+[data-theme="light"][data-palette="msbrand"] .glass-button--primary,
+[data-theme="light"][data-palette="msbrand"] .gb-p {
+  background: linear-gradient(180deg, #2196e8 0%, #0078d4 100%);
+  border-color: #006aba;
+  color: #ffffff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 4px 14px rgba(0, 120, 212, 0.30);
+}
+[data-theme="light"][data-palette="msbrand"] .glass-button--primary:hover,
+[data-theme="light"][data-palette="msbrand"] .gb-p:hover {
+  background: linear-gradient(180deg, #34a3eb 0%, #1483d7 100%);
+  border-color: #006aba;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    0 6px 18px rgba(0, 120, 212, 0.36);
+}
+
+/* Status / pill backgrounds — re-tint with MS palette */
+[data-theme="light"][data-palette="msbrand"] .gt-g,
+[data-theme="light"][data-palette="msbrand"] .dv3-pill-success { background: rgba(7, 100, 29, 0.10); }
+[data-theme="light"][data-palette="msbrand"] .gt-o,
+[data-theme="light"][data-palette="msbrand"] .dv3-pill-warning { background: rgba(115, 57, 29, 0.10); }
+[data-theme="light"][data-palette="msbrand"] .gt-r,
+[data-theme="light"][data-palette="msbrand"] .dv3-pill-danger  { background: rgba(115, 38, 47, 0.10); }
+[data-theme="light"][data-palette="msbrand"] .gt-b,
+[data-theme="light"][data-palette="msbrand"] .dv3-pill-accent  { background: rgba(0, 120, 212, 0.10); }
+[data-theme="light"][data-palette="msbrand"] .gt-p,
+[data-theme="light"][data-palette="msbrand"] .dv3-pill-purple  { background: rgba(134, 97, 197, 0.12); }
+[data-theme="light"][data-palette="msbrand"] .dv3-pill-teal    { background: rgba(34, 91, 98, 0.10); }
+[data-theme="light"][data-palette="msbrand"] .gt-m {
+  background: rgba(69, 65, 66, 0.08);
+  color: var(--text-muted);
+}
+[data-theme="light"][data-palette="msbrand"] .dv3-pill-faint {
+  background: rgba(69, 65, 66, 0.06);
+  border-color: rgba(69, 65, 66, 0.20);
+  color: var(--text-muted);
+}
+
+/* Panel header — neutral white frost (no lavender), keep accent bands
+   from the accent-specific rules below. */
+[data-theme="light"][data-palette="msbrand"] .panel-hd {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(252, 252, 253, 0.85) 100%);
+  border-bottom-color: rgba(69, 65, 66, 0.18);
+}
+
+/* Per-accent header tints — same structure as aurora, recoloured */
+[data-theme="light"][data-palette="msbrand"] .panel--accent-cluster > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-cluster) 14%, rgba(255,255,255,0.92)) 0%,
+    color-mix(in srgb, var(--card-accent-cluster) 6%,  rgba(255,255,255,0.78)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-cluster) 36%, transparent);
+}
+[data-theme="light"][data-palette="msbrand"] .panel--accent-storage > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-storage) 14%, rgba(255,255,255,0.92)) 0%,
+    color-mix(in srgb, var(--card-accent-storage) 6%,  rgba(255,255,255,0.78)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-storage) 36%, transparent);
+}
+[data-theme="light"][data-palette="msbrand"] .panel--accent-acr > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-acr) 14%, rgba(255,255,255,0.92)) 0%,
+    color-mix(in srgb, var(--card-accent-acr) 6%,  rgba(255,255,255,0.78)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-acr) 36%, transparent);
+}
+[data-theme="light"][data-palette="msbrand"] .panel--accent-terminal > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-terminal) 14%, rgba(255,255,255,0.92)) 0%,
+    color-mix(in srgb, var(--card-accent-terminal) 6%,  rgba(255,255,255,0.78)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-terminal) 36%, transparent);
+}
+[data-theme="light"][data-palette="msbrand"] .panel--accent-jobs > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-jobs) 14%, rgba(255,255,255,0.92)) 0%,
+    color-mix(in srgb, var(--card-accent-jobs) 6%,  rgba(255,255,255,0.78)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-jobs) 36%, transparent);
+}
+
+/* Pulse / modal / kpi tokens overridden to neutral grey on MS palette */
+[data-theme="light"][data-palette="msbrand"] {
+  --kpi-bar-bg: rgba(69, 65, 66, 0.12);
+  --pulse-body-bg: rgba(255, 255, 255, 0.6);
+  --pulse-row-bg: rgba(255, 255, 255, 0.9);
+  --modal-header-bg: linear-gradient(135deg,
+    rgba(0, 120, 212, 0.14) 0%,
+    rgba(134, 97, 197, 0.10) 100%);
+  --modal-surface-strong: rgba(255, 255, 255, 0.85);
+  --modal-surface-soft: rgba(255, 255, 255, 0.7);
+  --modal-zebra: rgba(69, 65, 66, 0.05);
+  --modal-thead-bg: rgba(69, 65, 66, 0.08);
+}
+
+/* ClusterPulse inner card — repaint with the new cluster blue */
+[data-theme="light"][data-palette="msbrand"] .cluster-pulse-card {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--card-accent-cluster) 14%, rgba(255, 255, 255, 0.90)) 0%,
+      color-mix(in srgb, var(--card-accent-cluster) 5%, rgba(255, 255, 255, 0.78)) 58px,
+      transparent 58px
+    ),
+    var(--glass-bg);
+  border-color: color-mix(in srgb, var(--card-accent-cluster) 30%, var(--border-weak));
+}
+
+/* Table row hover — Microsoft blue wash */
+[data-theme="light"][data-palette="msbrand"] .gt-tbl tr:hover td,
+[data-theme="light"][data-palette="msbrand"] .db-row:hover {
+  background: rgba(0, 120, 212, 0.06) !important;
+}
+[data-theme="light"][data-palette="msbrand"] .gt-tbl tbody tr:hover td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Live indicator pulse halo — emerald */
+[data-theme="light"][data-palette="msbrand"] .layout__live-dot {
+  animation: pulse-soft-msbrand 2.2s ease-in-out infinite;
+}
+@keyframes pulse-soft-msbrand {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(7, 100, 29, 0.0);
+  }
+  50% {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 4px rgba(7, 100, 29, 0.14);
+  }
+}
+
+/* Refresh button hover — neutral blue wash */
+[data-theme="light"][data-palette="msbrand"] .panel-whisper__btn:hover {
+  background: rgba(0, 120, 212, 0.10);
+  color: var(--accent);
+}
+
+/* KV row underline — neutral grey hairline (no lavender) */
+[data-theme="light"][data-palette="msbrand"] .kv {
+  border-bottom-color: rgba(69, 65, 66, 0.10);
+}
+
+/* Stat panel — solid white card */
+[data-theme="light"][data-palette="msbrand"] .stat-panel {
+  background: #ffffff;
+  border-color: rgba(69, 65, 66, 0.18);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 
 * {
   box-sizing: border-box;
@@ -5590,7 +5868,7 @@ textarea.form-input {
   background: var(--bg-secondary);
   padding: 9px 12px;
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   font-size: 13px;
@@ -5612,13 +5890,38 @@ textarea.form-input {
 .dv3-job-row .phase.failed    { background: rgba(242, 114, 111, 0.14); color: var(--danger); }
 .dv3-job-row .phase.deleted   { background: var(--bg-tertiary);        color: var(--text-faint); }
 .dv3-job-row .phase.idle      { background: var(--bg-tertiary);        color: var(--text-muted); }
-.dv3-job-row .name {
-  font-family: var(--font-mono);
+.blast-job-identity {
   color: var(--text-primary);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
 }
-.dv3-job-row .meta { color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; }
+.blast-job-identity--compact { color: var(--text-muted); font-size: 10px; }
+.blast-job-identity__title {
+  color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 600;
+}
+.blast-job-identity--compact .blast-job-identity__title { font-size: 11.5px; }
+.blast-job-identity__meta {
+  color: var(--text-muted);
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.blast-job-identity__note { color: var(--danger); }
+.blast-job-identity__cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--glass-bg-strong);
+  white-space: nowrap;
+}
 .dv3-job-row .right { color: var(--text-faint); font-size: 12px; }
 .dv3-jobs-cta {
   margin-top: 12px;

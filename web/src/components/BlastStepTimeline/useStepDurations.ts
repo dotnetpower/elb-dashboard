@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { PHASE_STEPS, type StepState } from "./constants";
+import { PHASE_STEPS, PHASE_TO_STEP, type StepState } from "./constants";
 
 function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -32,9 +32,10 @@ export function useStepDurations(args: {
     const now = Date.now();
     const ts = phaseTimestamps.current;
 
-    const stepIdx = PHASE_STEPS.findIndex((s) => s.key === phase);
-    if (stepIdx >= 0 && !ts[phase]) {
-      ts[phase] = now;
+    const phaseKey = PHASE_TO_STEP[phase] ?? phase;
+    const stepIdx = PHASE_STEPS.findIndex((s) => s.key === phaseKey);
+    if (stepIdx >= 0 && !ts[phaseKey]) {
+      ts[phaseKey] = now;
       // Mark previous step as completed with duration.
       if (stepIdx > 0) {
         const prevKey = PHASE_STEPS[stepIdx - 1].key;

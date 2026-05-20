@@ -60,6 +60,7 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
         ("POST", "/api/resources/ensure-rg"),
         ("POST", "/api/storage/prepare-db"),
         ("POST", "/api/blast/submit"),
+        ("POST", "/api/blast/logs/aaaaaaaaaaaa/ticket"),
         ("GET", "/api/aks/openapi/proxy?resource_group=rg-x&cluster_name=cx&path=%2Fhealthz"),
         ("POST", "/api/v1/elastic-blast/submit"),
         ("GET", "/api/v1/elastic-blast/jobs/aaaaaaaaaaaa"),
@@ -262,6 +263,93 @@ def test_blast_preflight_allows_precise_multi_query_uniform_search_space(
     )
     assert precision_check["status"] == "pass"
     assert precision_check["precision"]["precision_level"] == "precise_tabular"
+
+
+def test_blast_preflight_reports_web_blast_compatibility(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    r = client.post(
+        "/api/blast/pre-flight",
+        json={
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "db": "core_nt",
+            "query_data": ">q1\nAAAA\n",
+            "sharding_mode": "precise",
+            "outfmt": 5,
+            "db_effective_search_space": 32_156_241_807_668,
+            "db_total_letters": 1_041_443_571_674,
+        },
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["compatibility"]["mode"] == "precise"
+    compatibility_check = next(
+        item for item in body["checks"] if item["id"] == "web_blast_compatibility"
+    )
+    assert compatibility_check["status"] == "pass"
+    assert compatibility_check["compatibility"]["evidence"]["db_name"] == "core_nt"
+
+
+def test_blast_submit_blocks_false_precise_with_unverified_database(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    r = client.post(
+        "/api/blast/submit",
+        json={
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "database": "unknown_nt",
+            "query_file": "queries/q.fa",
+            "options": {
+                "sharding_mode": "precise",
+                "outfmt": 5,
+                "query_count": 1,
+                "db_effective_search_space": 12345,
+                "db_total_letters": 99999,
+            },
+        },
+    )
+
+    assert r.status_code == 422
+    body = r.json()
+    assert body["code"] == "web_blast_compatibility_blocked"
+    assert body["compatibility"]["mode"] == "calibration_required"
+
+
+def test_blast_jobs_submit_blocks_false_precise_with_unverified_database(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    r = client.post(
+        "/api/blast/jobs",
+        json={
+            "resource_group": "rg-elb",
+            "aks_cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "db": "unknown_nt",
+            "query_data": ">q1\nAAAA\n",
+            "sharding_mode": "precise",
+            "outfmt": 5,
+            "db_effective_search_space": 12345,
+            "db_total_letters": 99999,
+        },
+    )
+
+    assert r.status_code == 422
+    body = r.json()
+    assert body["code"] == "web_blast_compatibility_blocked"
+    assert body["compatibility"]["mode"] == "calibration_required"
 
 
 def test_blast_preflight_allows_precise_multi_query_split_search_spaces(
@@ -480,6 +568,102 @@ def test_canonical_dashboard_submit_uploads_inline_query(
     assert calls[0]["database"] == "core_nt"
     assert str(calls[0]["query_file"]).startswith("queries/uploads/")
     assert calls[0]["options"]["query_count"] == 1
+    assert uploads[0]["blob_path"] in calls[0]["query_file"]
+
+
+def test_blast_submit_idempotency_key_reuses_existing_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
+    )
+    delay_calls: list[dict[str, object]] = []
+
+    def fake_delay(**kwargs: object) -> object:
+        delay_calls.append(kwargs)
+        return SimpleNamespace(id="new-task")
+
+    class FakeRepository:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(job_id=job_id, task_id="task-existing", status="queued")
+
+        def create(self, state: object) -> object:
+            raise AssertionError("idempotent retry must not create a new row")
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
+    monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
+
+    r = client.post(
+        "/api/blast/submit",
+        json={
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "database": "core_nt",
+            "query_file": "queries/q.fa",
+            "idempotency_key": "req-1",
+            "options": {"sharding_mode": "off"},
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["task_id"] == "task-existing"
+    assert delay_calls == []
+
+
+def test_blast_job_events_returns_canonical_history(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    class FakeRepository:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(job_id=job_id, owner_oid=None)
+
+        def get_history(self, job_id: str, limit: int = 200) -> list[dict[str, object]]:
+            return [
+                {
+                    "PartitionKey": job_id,
+                    "RowKey": "001",
+                    "event": "created",
+                    "ts": "2026-05-20T00:00:01+00:00",
+                    "payload_json": '{"status":"queued"}',
+                }
+            ]
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
+
+    r = client.get("/api/blast/jobs/job-1/events")
+
+    assert r.status_code == 200
+    assert r.json()["events"][0]["event"] == "created"
+
+
+def test_blast_job_queue_returns_position(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    class FakeRepository:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(job_id=job_id, owner_oid=None, status="queued")
+
+        def list_active(self, job_type: str = "blast", limit: int = 500) -> list[object]:
+            return [
+                SimpleNamespace(job_id="job-1", status="queued", created_at="1"),
+                SimpleNamespace(job_id="job-2", status="queued", created_at="2"),
+            ]
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
+
+    r = client.get("/api/blast/jobs/job-2/queue")
+
+    assert r.status_code == 200
+    assert r.json()["queue_position"] == 2
 
 
 def test_blast_job_file_reads_uploaded_query_from_queries_container(

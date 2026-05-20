@@ -77,6 +77,101 @@ with_terminal_exec_env() {
   export TERMINAL_EXEC_UPSTREAM=${TERMINAL_EXEC_UPSTREAM:-http://127.0.0.1:7682}
 }
 
+api_probe_host() {
+  local host=$1
+  case "$host" in
+    0.0.0.0|::)
+      printf '127.0.0.1'
+      ;;
+    *)
+      printf '%s' "$host"
+      ;;
+  esac
+}
+
+api_port_is_listening() {
+  local port=$1
+  ss -H -ltn "sport = :$port" 2>/dev/null | grep -q .
+}
+
+api_health_ready() {
+  local base_url=$1
+  command -v curl >/dev/null 2>&1 \
+    && curl -fsS --max-time 1 "$base_url/api/health" >/dev/null 2>&1
+}
+
+wait_for_api_health() {
+  local base_url=$1
+  for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+    api_health_ready "$base_url" && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+describe_api_port_owner() {
+  local port=$1
+  echo "ERROR: 127.0.0.1:$port is already in use, but it is not the local API health endpoint." >&2
+  echo "Stop the process below, or choose a matching API_PORT/VITE_API_BASE_URL pair." >&2
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :$port" >&2 || true
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >&2 || true
+  else
+    echo "Install 'ss' or 'lsof' to inspect the listener." >&2
+  fi
+}
+
+run_api() {
+  with_common_env
+  with_celery_env
+  with_terminal_exec_env
+  with_local_storage_env
+  export AUTH_DEV_BYPASS=${AUTH_DEV_BYPASS:-true}
+  export ENABLE_DOCS=${ENABLE_DOCS:-true}
+  export CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost:8090,http://127.0.0.1:8090}
+
+  local api_host=${API_HOST:-127.0.0.1}
+  local api_port=${API_PORT:-8085}
+  local probe_host
+  probe_host=$(api_probe_host "$api_host")
+  local api_base_url="http://$probe_host:$api_port"
+  local api_lock_file="$project_root/.logs/local/api-$api_port.lock"
+
+  mkdir -p "$(dirname -- "$api_lock_file")"
+  if command -v flock >/dev/null 2>&1; then
+    exec {api_lock_fd}>"$api_lock_file"
+    if ! flock -n "$api_lock_fd"; then
+      if api_health_ready "$api_base_url"; then
+        echo "api already running at $api_base_url (health OK)." >&2
+        exit 0
+      fi
+      echo "api start is already in progress for $api_base_url; waiting for health..." >&2
+      if wait_for_api_health "$api_base_url"; then
+        echo "api already running at $api_base_url (health OK)." >&2
+        exit 0
+      fi
+      echo "ERROR: another api start holds $api_lock_file, but health did not become ready." >&2
+      exit 1
+    fi
+  else
+    echo "WARNING: flock not found; concurrent api starts may still race on port $api_port." >&2
+  fi
+
+  if api_port_is_listening "$api_port"; then
+    if api_health_ready "$api_base_url"; then
+      echo "api already running at $api_base_url (health OK)." >&2
+      echo "Stop the existing api task/process first if you need a fresh uvicorn reloader." >&2
+      exit 0
+    fi
+    describe_api_port_owner "$api_port"
+    exit 1
+  fi
+
+  cd "$project_root/api"
+  exec "$run_with_log" api -- uv run uvicorn api.main:app --reload --reload-dir . --reload-exclude 'tests/*' --host "$api_host" --port "$api_port" "$@"
+}
+
 run_redis() {
   "$run_with_log" redis -- bash -lc '
 set -euo pipefail
@@ -113,15 +208,7 @@ exit 1
 
 case "$service" in
   api)
-    with_common_env
-    with_celery_env
-    with_terminal_exec_env
-    with_local_storage_env
-    export AUTH_DEV_BYPASS=${AUTH_DEV_BYPASS:-true}
-    export ENABLE_DOCS=${ENABLE_DOCS:-true}
-    export CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost:8090,http://127.0.0.1:8090}
-    cd "$project_root/api"
-    exec "$run_with_log" api -- uv run uvicorn api.main:app --reload --reload-dir . --reload-exclude 'tests/*' --host 127.0.0.1 --port 8085 "$@"
+    run_api "$@"
     ;;
   worker)
     with_common_env
@@ -129,7 +216,7 @@ case "$service" in
     with_terminal_exec_env
     with_local_storage_env
     cd "$project_root"
-    exec "$run_with_log" worker -- uv run celery -A api.celery_app worker -l info -Q default,acr,azure,blast,storage --concurrency=2 "$@"
+    exec "$run_with_log" worker -- uv run python api/run_celery_workers.py "$@"
     ;;
   beat)
     with_common_env

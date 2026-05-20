@@ -128,6 +128,7 @@ function DbChipNode({
   const isReady = w?.status === "Ready";
   const isLoading = w?.status === "Loading";
   const isFailed = w?.status === "Failed";
+  const isStale = db.warmStale || w?.status === "Stale";
   const isPartial = Boolean(
     w && !isReady && !isLoading && !isFailed && w.nodes_ready > 0,
   );
@@ -147,6 +148,11 @@ function DbChipNode({
     stageLabel = "sharding…";
     stageVariant = "loading";
     StageIcon = Loader2;
+  } else if (isStale) {
+    const count = db.warmSourceVersions.length;
+    stageLabel = count > 1 ? `warm stale · ${count} versions` : "warm stale";
+    stageVariant = "warn";
+    StageIcon = Flame;
   } else if (isReady) {
     stageLabel = `ready · ${w!.nodes_ready}/${w!.total_jobs}`;
     stageVariant = "";
@@ -198,6 +204,11 @@ function DbChipNode({
 
   const titleParts: string[] = [db.name];
   titleParts.push(stageLabel);
+  if (db.sourceVersion) titleParts.push(`storage ${db.sourceVersion}`);
+  if (db.warmSourceVersion) titleParts.push(`warm ${db.warmSourceVersion}`);
+  if (db.warmSourceVersions.length > 1) {
+    titleParts.push(`warm versions ${db.warmSourceVersions.join(", ")}`);
+  }
   if (db.shardingError) {
     titleParts.push(db.shardingError);
     titleParts.push("click to retry sharding");

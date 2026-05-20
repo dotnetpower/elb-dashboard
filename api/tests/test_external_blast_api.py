@@ -46,18 +46,105 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
             },
             "batch_len": 462,
             "idempotency_key": "req-1",
+            "submission_source": "dashboard",
+            "external_correlation_id": "caller-supplied",
         },
     )
 
     assert response.status_code == 202
     assert response.json()["job_id"] == "aaaaaaaaaaaa"
     assert captured["submission_source"] == "external_api"
-    assert "external_correlation_id" not in captured
+    assert captured["external_correlation_id"] != "caller-supplied"
+    assert captured["idempotency_key"] == "req-1"
+    assert captured["canonical_request"]["metadata"]["submission_source"] == "external_api"
+    assert captured["compatibility_contract"]["mode"] == "precise"
+    assert captured["provenance"]["compatibility"]["mode"] == "precise"
     assert captured["taxid"] == 3431483
     assert captured["is_inclusive"] is False
     assert captured["options"]["outfmt"] == 5
     assert captured["batch_len"] == 462
     assert "caller_oid" not in captured
+
+
+def test_canonical_jobs_external_submit_uses_trusted_metadata(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    captured = {}
+
+    def fake_submit(payload):
+        captured.update(payload)
+        return {"job_id": "aaaaaaaaaaaa", "status": "queued"}
+
+    monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/blast/jobs",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+            "idempotency_key": "req-2",
+            "submission_source": "dashboard",
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["submission_source"] == "external_api"
+    assert captured["idempotency_key"] == "req-2"
+    assert captured["external_correlation_id"]
+    assert captured["canonical_request"]["query"]["kind"] == "inline_fasta"
+    assert captured["compatibility_contract"]["mode"] == "precise"
+    assert captured["provenance"]["query"]["sha256"]
+
+
+def test_external_blast_events_falls_back_to_current_status(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda job_id: {"job_id": job_id, "status": "running", "updated_at": "now"},
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/events")
+
+    assert response.status_code == 200
+    assert response.json()["events"][0]["phase"] == "running"
+
+
+def test_external_blast_manifest_maps_result_files(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda _job_id: {
+            "result": {
+                "files": [
+                    {
+                        "file_id": "result-xml",
+                        "filename": "blast_result.xml",
+                        "format": "blast_xml",
+                        "size_bytes": 42,
+                    }
+                ]
+            }
+        },
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/v1/elastic-blast/jobs/aaaaaaaaaaaa/manifest")
+
+    assert response.status_code == 200
+    assert response.json()["parseable_count"] == 1
 
 
 def test_external_blast_rejects_non_xml_outfmt(monkeypatch):

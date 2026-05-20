@@ -19,7 +19,6 @@ from api.routes._blast_shared import (
     _queries_blob_path,
 )
 from api.services.blast_result_analytics import (
-    RESULTS_AGGREGATE_MAX_BYTES,
     RESULTS_ALIGNMENTS_MAX_BYTES,
     RESULTS_ALIGNMENTS_MAX_HITS,
     RESULTS_DEFAULT_PAGE_SIZE,
@@ -40,6 +39,112 @@ from api.services.blast_result_analytics import (
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _read_ready_result_artifact(job_id: str, artifact_type: str) -> dict[str, Any] | None:
+    try:
+        from api.services.job_artifacts import read_result_analytics_artifact
+
+        payload = read_result_analytics_artifact(job_id, artifact_type)
+        if payload is not None:
+            return {**payload, "artifact_state": "ready", "source": "artifact"}
+    except Exception as exc:
+        LOGGER.info(
+            "result artifact unavailable job_id=%s type=%s: %s",
+            job_id,
+            artifact_type,
+            type(exc).__name__,
+        )
+    return None
+
+
+def _result_artifact_state(job_id: str, artifact_type: str) -> dict[str, Any]:
+    try:
+        from api.services.job_artifacts import artifact_state_payload
+
+        return artifact_state_payload(job_id, artifact_type) or {"artifact_state": "missing"}
+    except Exception as exc:
+        LOGGER.info(
+            "result artifact state unavailable job_id=%s type=%s: %s",
+            job_id,
+            artifact_type,
+            type(exc).__name__,
+        )
+        return {"artifact_state": "unavailable"}
+
+
+def _enqueue_result_artifact_backfill(job_id: str, artifact_type: str) -> None:
+    try:
+        from api.services.job_artifacts import artifact_build_should_enqueue
+        from api.tasks.blast_artifacts import finalize_job_artifacts
+
+        if not artifact_build_should_enqueue(job_id, [artifact_type]):
+            return
+        finalize_job_artifacts.apply_async(kwargs={"job_id": job_id})
+    except Exception as exc:
+        LOGGER.info(
+            "result artifact backfill enqueue skipped job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+
+
+def _default_alignments_request(
+    *,
+    blob_name: str,
+    max_alignments: int,
+    page: int,
+    page_size: int | None,
+    query_id: str,
+    subject_id: str,
+    organism: str,
+    min_identity: float,
+    min_bitscore: float,
+    max_evalue: float,
+    min_query_cover: float,
+    sort_by: str,
+    sort_dir: str,
+) -> bool:
+    return (
+        not blob_name.strip()
+        and max_alignments == 50
+        and page == 1
+        and page_size is None
+        and not query_id.strip()
+        and not subject_id.strip()
+        and not organism.strip()
+        and min_identity == 0.0
+        and min_bitscore == 0.0
+        and max_evalue == 10.0
+        and min_query_cover == 0.0
+        and sort_by == "relevance"
+        and sort_dir == "asc"
+    )
+
+
+def _default_taxonomy_request(
+    *,
+    blob_name: str,
+    query_id: str,
+    subject_id: str,
+    organism: str,
+    min_identity: float,
+    min_bitscore: float,
+    max_evalue: float,
+    min_query_cover: float,
+    include_lineage: bool,
+) -> bool:
+    return (
+        not blob_name.strip()
+        and not query_id.strip()
+        and not subject_id.strip()
+        and not organism.strip()
+        and min_identity == 0.0
+        and min_bitscore == 0.0
+        and max_evalue == 10.0
+        and min_query_cover == 0.0
+        and not include_lineage
+    )
 
 
 def _validate_result_blob_name(blob_name: str, job_id: str) -> None:
@@ -189,6 +294,9 @@ def blast_job_results(
 ) -> dict[str, Any]:
     """List result blobs for a BLAST job from storage."""
     _ensure_job_read_allowed(job_id, caller)
+    artifact = _read_ready_result_artifact(job_id, "result_manifest")
+    if artifact is not None:
+        return artifact
     local_failure: dict[str, Any] | None = None
     try:
         if storage_account:
@@ -204,7 +312,14 @@ def blast_job_results(
                 context="blast_job_results",
             )
             files = list_result_blobs(cred, storage_account, container="results", prefix=job_id)
-            return {"job_id": job_id, "files": files, "results": files}
+            from api.services.blast_result_manifest import build_result_manifest
+
+            return {
+                "job_id": job_id,
+                "files": files,
+                "results": files,
+                "manifest": build_result_manifest(job_id=job_id, files=files),
+            }
     except Exception as exc:
         LOGGER.warning("blast_job_results failed: %s", type(exc).__name__)
         from api.services import get_credential as _get_cred
@@ -219,13 +334,44 @@ def blast_job_results(
 
         files = _external_result_files(external_blast.get_job(job_id))
         if files:
-            return {"job_id": job_id, "files": files, "results": files, "source": "external"}
+            from api.services.blast_result_manifest import build_result_manifest
+
+            return {
+                "job_id": job_id,
+                "files": files,
+                "results": files,
+                "source": "external",
+                "manifest": build_result_manifest(
+                    job_id=job_id,
+                    files=files,
+                    source="external",
+                ),
+            }
     except Exception as exc:
         LOGGER.info("external blast result list unavailable: %s", type(exc).__name__)
 
     if local_failure:
-        return {"job_id": job_id, "files": [], "results": [], **local_failure}
-    return {"job_id": job_id, "files": [], "results": []}
+        from api.services.blast_result_manifest import build_result_manifest
+
+        return {
+            "job_id": job_id,
+            "files": [],
+            "results": [],
+            "manifest": build_result_manifest(
+                job_id=job_id,
+                files=[],
+                degraded_reason=str(local_failure.get("degraded_reason") or "degraded"),
+            ),
+            **local_failure,
+        }
+    from api.services.blast_result_manifest import build_result_manifest
+
+    return {
+        "job_id": job_id,
+        "files": [],
+        "results": [],
+        "manifest": build_result_manifest(job_id=job_id, files=[]),
+    }
 
 
 @router.get("/jobs/{job_id}/results/aggregate")
@@ -238,9 +384,11 @@ def blast_job_results_aggregate(
 ) -> dict[str, Any]:
     """Parse result blobs and return aggregate statistics for analytics."""
     _ensure_job_read_allowed(job_id, caller)
+    artifact = _read_ready_result_artifact(job_id, "result_aggregate")
+    if artifact is not None:
+        return artifact
+    _enqueue_result_artifact_backfill(job_id, "result_aggregate")
     from api.services import get_credential
-    from api.services.blast_results_parser import aggregate_blast_hits, parse_blast_result_content
-    from api.services.storage_data import read_result_blob_text
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -263,6 +411,7 @@ def blast_job_results_aggregate(
             "stats": None,
         }
 
+    artifact_state = _result_artifact_state(job_id, "result_aggregate")
     if not result_blobs:
         return {
             "job_id": job_id,
@@ -271,65 +420,15 @@ def blast_job_results_aggregate(
             "stats": None,
             "files_parsed": 0,
             "total_files": 0,
-        }
-
-    all_hits: list[dict[str, Any]] = []
-    parsed_files = 0
-    read_failures = 0
-    for blob_info in result_blobs[:RESULTS_MAX_FILES]:
-        try:
-            content = read_result_blob_text(
-                cred,
-                storage_account,
-                "results",
-                blob_info["name"],
-                max_bytes=RESULTS_AGGREGATE_MAX_BYTES,
-            )
-            all_hits.extend(parse_blast_result_content(content))
-            parsed_files += 1
-        except Exception as exc:
-            read_failures += 1
-            LOGGER.warning(
-                "results aggregate: failed to parse %s: %s", blob_info["name"], type(exc).__name__
-            )
-
-    # If every blob read failed, surface that as a storage degradation rather
-    # than "no hits" — a researcher staring at an empty analytics card needs
-    # to know it's an infra issue, not a biology one.
-    if parsed_files == 0 and read_failures > 0:
-        return {
-            "job_id": job_id,
-            "status": "degraded",
-            "degraded": True,
-            "degraded_reason": "all_reads_failed",
-            "message": (
-                f"Failed to read any of {read_failures} result file(s). "
-                "Storage may be unreachable or RBAC missing."
-            ),
-            "stats": None,
-            "files_parsed": 0,
-            "total_files": len(result_blobs),
-            "read_failures": read_failures,
-        }
-
-    if not all_hits:
-        return {
-            "job_id": job_id,
-            "status": "no_hits",
-            "message": "No BLAST hits found in result files.",
-            "stats": aggregate_blast_hits([]),
-            "files_parsed": parsed_files,
-            "total_files": len(result_blobs),
-            "read_failures": read_failures,
-            "truncated": len(result_blobs) > RESULTS_MAX_FILES,
+            **artifact_state,
+            "source": "live_parse",
         }
 
     try:
-        stats = aggregate_blast_hits(all_hits)
+        from api.services.blast_result_artifacts import build_result_aggregate_payload
+
+        payload = build_result_aggregate_payload(job_id, storage_account)
     except Exception as exc:
-        # Defensive: aggregate_blast_hits is pure-Python and well-tested,
-        # but if an unexpected hit shape sneaks through (e.g. NaN in evalue),
-        # report it as degraded rather than 500.
         LOGGER.warning("results aggregate: stats failed: %s", type(exc).__name__)
         return {
             "job_id": job_id,
@@ -337,19 +436,13 @@ def blast_job_results_aggregate(
             "degraded": True,
             "degraded_reason": "aggregation_failed",
             "stats": None,
-            "files_parsed": parsed_files,
+            "files_parsed": 0,
             "total_files": len(result_blobs),
-            "read_failures": read_failures,
+            "read_failures": 0,
+            **artifact_state,
+            "source": "live_parse",
         }
-    return {
-        "job_id": job_id,
-        "status": "ok",
-        "stats": stats,
-        "files_parsed": parsed_files,
-        "total_files": len(result_blobs),
-        "read_failures": read_failures,
-        "truncated": len(result_blobs) > RESULTS_MAX_FILES,
-    }
+    return {**payload, **artifact_state, "source": "live_parse"}
 
 
 @router.get("/jobs/{job_id}/results/alignments")
@@ -383,6 +476,25 @@ def blast_job_results_alignments(
     as if it represented the whole run.
     """
     _ensure_job_read_allowed(job_id, caller)
+    if _default_alignments_request(
+        blob_name=blob_name,
+        max_alignments=max_alignments,
+        page=page,
+        page_size=page_size,
+        query_id=query_id,
+        subject_id=subject_id,
+        organism=organism,
+        min_identity=min_identity,
+        min_bitscore=min_bitscore,
+        max_evalue=max_evalue,
+        min_query_cover=min_query_cover,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    ):
+        artifact = _read_ready_result_artifact(job_id, "result_alignments")
+        if artifact is not None:
+            return artifact
+        _enqueue_result_artifact_backfill(job_id, "result_alignments")
     from api.services import get_credential
     from api.services.blast_results_parser import parse_blast_result_content
     from api.services.storage_data import read_result_blob_text
@@ -608,6 +720,21 @@ def blast_job_results_taxonomy(
     *filtered* (not paginated) hit set.
     """
     _ensure_job_read_allowed(job_id, caller)
+    if _default_taxonomy_request(
+        blob_name=blob_name,
+        query_id=query_id,
+        subject_id=subject_id,
+        organism=organism,
+        min_identity=min_identity,
+        min_bitscore=min_bitscore,
+        max_evalue=max_evalue,
+        min_query_cover=min_query_cover,
+        include_lineage=include_lineage,
+    ):
+        artifact = _read_ready_result_artifact(job_id, "result_taxonomy")
+        if artifact is not None:
+            return artifact
+        _enqueue_result_artifact_backfill(job_id, "result_taxonomy")
     from api.services import get_credential
     from api.services.blast_results_parser import parse_blast_result_content
     from api.services.storage_data import read_result_blob_text

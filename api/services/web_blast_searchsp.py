@@ -18,6 +18,10 @@ class WebBlastSearchSpaceDefault:
     value: int
     scope: str
     evidence: str
+    blast_version: str
+    database_snapshot: str
+    option_scope: str
+    revalidate_when: str
 
     def as_dict(self) -> dict[str, str | int]:
         return {
@@ -25,6 +29,10 @@ class WebBlastSearchSpaceDefault:
             "value": self.value,
             "scope": self.scope,
             "evidence": self.evidence,
+            "blast_version": self.blast_version,
+            "database_snapshot": self.database_snapshot,
+            "option_scope": self.option_scope,
+            "revalidate_when": self.revalidate_when,
         }
 
 
@@ -37,6 +45,16 @@ WEB_BLAST_SEARCHSP_DEFAULTS: dict[str, WebBlastSearchSpaceDefault] = {
             "word_size=28, dust=yes, evalue=10, max_target_seqs=500, outfmt=5"
         ),
         evidence="docs/temp/core-nt-searchsp/core_nt-searchsp-calibration-results.tgz",
+        blast_version="BLASTN 2.17.0+",
+        database_snapshot=(
+            "core_nt 2026-05-09; BLASTDB v5; 125,619,662 sequences; "
+            "1,041,443,571,674 bases"
+        ),
+        option_scope="word_size=28, dust=yes, evalue=10, max_target_seqs=500, outfmt=5",
+        revalidate_when=(
+            "Recalibrate when BLAST+ version, database snapshot, query class, "
+            "or option profile changes."
+        ),
     ),
 }
 

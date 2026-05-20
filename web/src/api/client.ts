@@ -2,12 +2,77 @@ import { msalInstance, apiLoginRequest } from "@/auth/msal";
 import { notifyAuthSessionIssue } from "@/auth/sessionEvents";
 import { fetchWithRetry, makeRequestId } from "@/api/resilience";
 import { apiBaseUrl, isDevBypassEnabled } from "@/config/runtime";
+import type { AccountInfo } from "@azure/msal-browser";
 
 const API_BASE = apiBaseUrl();
 const DEV_BYPASS = isDevBypassEnabled();
 
 interface FetchApiOptions {
   redirectOnUnauthorized?: boolean;
+}
+
+interface ApiTokenCacheEntry {
+  accountKey: string;
+  accessToken: string;
+  expiresAtMs: number;
+}
+
+const ACCESS_TOKEN_REFRESH_SKEW_MS = 60_000;
+
+let cachedApiToken: ApiTokenCacheEntry | null = null;
+let apiTokenInFlight:
+  | { accountKey: string; promise: Promise<ApiTokenCacheEntry> }
+  | null = null;
+
+function accountCacheKey(account: AccountInfo): string {
+  return account.homeAccountId || account.localAccountId || account.username;
+}
+
+function usableCachedToken(accountKey: string): string | null {
+  if (!cachedApiToken || cachedApiToken.accountKey !== accountKey) return null;
+  if (cachedApiToken.expiresAtMs - ACCESS_TOKEN_REFRESH_SKEW_MS <= Date.now()) {
+    cachedApiToken = null;
+    return null;
+  }
+  return cachedApiToken.accessToken;
+}
+
+function clearApiAccessTokenCache(): void {
+  cachedApiToken = null;
+  apiTokenInFlight = null;
+}
+
+async function acquireFreshApiToken(account: AccountInfo): Promise<string> {
+  const accountKey = accountCacheKey(account);
+  if (apiTokenInFlight?.accountKey === accountKey) {
+    return (await apiTokenInFlight.promise).accessToken;
+  }
+
+  let promise: Promise<ApiTokenCacheEntry>;
+  promise = msalInstance
+    .acquireTokenSilent({
+      ...apiLoginRequest,
+      account,
+    })
+    .then((result) => {
+      const expiresAtMs = result.expiresOn?.getTime() ?? 0;
+      const entry: ApiTokenCacheEntry = {
+        accountKey,
+        accessToken: result.accessToken,
+        expiresAtMs,
+      };
+      if (expiresAtMs - ACCESS_TOKEN_REFRESH_SKEW_MS > Date.now()) {
+        cachedApiToken = entry;
+      }
+      return entry;
+    })
+    .finally(() => {
+      if (apiTokenInFlight?.promise === promise) {
+        apiTokenInFlight = null;
+      }
+    });
+  apiTokenInFlight = { accountKey, promise };
+  return (await promise).accessToken;
 }
 
 async function getAccessToken(options: FetchApiOptions = {}): Promise<string | null> {
@@ -18,15 +83,14 @@ async function getAccessToken(options: FetchApiOptions = {}): Promise<string | n
     notifyAuthSessionIssue("not_signed_in");
     throw new Error("Session expired. Please sign in again.");
   }
+  const accountKey = accountCacheKey(account);
+  const cached = usableCachedToken(accountKey);
+  if (cached) return cached;
   // #20: Exponential backoff retry (up to 3 attempts)
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const result = await msalInstance.acquireTokenSilent({
-        ...apiLoginRequest,
-        account,
-      });
-      return result.accessToken;
+      return await acquireFreshApiToken(account);
     } catch (err) {
       lastError = err;
       if (err instanceof Error && err.name === "InteractionRequiredAuthError") {
@@ -81,6 +145,9 @@ async function fetchApi(
     headers,
   });
   // #44: Auto-handle 401 — trigger re-authentication
+  if (response.status === 401 && !DEV_BYPASS) {
+    clearApiAccessTokenCache();
+  }
   if (response.status === 401 && !DEV_BYPASS && redirectOnUnauthorized) {
     notifyAuthSessionIssue("api_unauthorized");
     const account = msalInstance.getActiveAccount();

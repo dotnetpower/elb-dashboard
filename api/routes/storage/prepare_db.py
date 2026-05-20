@@ -29,6 +29,26 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
+    metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
+    try:
+        payload = metadata_blob.download_blob().readall().decode("utf-8")
+        parsed = json.loads(payload)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception as exc:
+        LOGGER.debug("DB metadata read skipped for %s: %s", db_name, type(exc).__name__)
+    return {"db_name": db_name}
+
+
+def _write_db_metadata(container: Any, db_name: str, payload: dict[str, Any]) -> None:
+    metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
+    metadata_blob.upload_blob(
+        json.dumps(payload, sort_keys=True).encode("utf-8"),
+        overwrite=True,
+    )
+
+
 @router.post("/prepare-db")
 def prepare_db(
     body: dict[str, Any] = Body(...),
@@ -104,6 +124,26 @@ def prepare_db(
     )
     container = blob_svc.get_container_client("blast-db")
 
+    previous_metadata = _read_db_metadata(container, db_name)
+    previous_source_version = str(previous_metadata.get("source_version") or "")
+    try:
+        start_metadata = dict(previous_metadata)
+        start_metadata["db_name"] = db_name
+        start_metadata["update_in_progress"] = True
+        start_metadata["update_started_at"] = datetime.now(UTC).isoformat()
+        start_metadata["updating_to_source_version"] = latest_dir
+        start_metadata.pop("update_error", None)
+        start_metadata.pop("update_failed_at", None)
+        if previous_source_version and previous_source_version != latest_dir:
+            start_metadata["previous_source_version"] = previous_source_version
+        _write_db_metadata(container, db_name, start_metadata)
+    except Exception as exc:
+        LOGGER.warning(
+            "prepare_db update-start metadata write failed for %s: %s",
+            db_name,
+            sanitise(str(exc))[:200],
+        )
+
     def _do_copies() -> None:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -147,6 +187,26 @@ def prepare_db(
             skipped,
             errors,
         )
+
+        successful_files = started + skipped
+        if errors > 0 or successful_files <= 0:
+            try:
+                failed_metadata = _read_db_metadata(container, db_name)
+                failed_metadata["db_name"] = db_name
+                failed_metadata["update_in_progress"] = False
+                failed_metadata["updating_to_source_version"] = latest_dir
+                failed_metadata["update_error"] = (
+                    f"copy initiation failed for {errors} of {len(all_keys)} files"
+                )
+                failed_metadata["update_failed_at"] = datetime.now(UTC).isoformat()
+                _write_db_metadata(container, db_name, failed_metadata)
+            except Exception as exc:
+                LOGGER.warning(
+                    "prepare_db update-failure metadata write failed for %s: %s",
+                    db_name,
+                    sanitise(str(exc))[:200],
+                )
+            return
 
         # Auto-shard step: as soon as the NCBI key enumeration is in hand,
         # we know every volume name and can publish the manifest+.nal alias
@@ -196,20 +256,36 @@ def prepare_db(
         # source_version / downloaded_at / sharding state without
         # contacting NCBI again.
         try:
-            metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
-            metadata_blob.upload_blob(
-                json.dumps(
-                    {
-                        "db_name": db_name,
-                        "source_version": latest_dir,
-                        "downloaded_at": datetime.now(UTC).isoformat(),
-                        "file_count": started + skipped,
-                        "sharded": bool(shard_sets_created),
-                        "shard_sets": shard_sets_created,
-                    }
-                ).encode("utf-8"),
-                overwrite=True,
-            )
+            final_metadata = _read_db_metadata(container, db_name)
+            final_metadata["db_name"] = db_name
+            final_metadata["source_version"] = latest_dir
+            final_metadata["downloaded_at"] = datetime.now(UTC).isoformat()
+            final_metadata["file_count"] = successful_files
+            final_metadata["update_in_progress"] = False
+            final_metadata["update_completed_at"] = datetime.now(UTC).isoformat()
+            final_metadata.pop("updating_to_source_version", None)
+            final_metadata.pop("update_error", None)
+            final_metadata.pop("update_failed_at", None)
+            if previous_source_version and previous_source_version != latest_dir:
+                final_metadata["updated_from_source_version"] = previous_source_version
+            if shard_sets_created:
+                final_metadata["sharded"] = True
+                final_metadata["shard_sets"] = shard_sets_created
+                final_metadata["shard_source_version"] = latest_dir
+                final_metadata["sharded_at"] = datetime.now(UTC).isoformat()
+                final_metadata.pop("sharding_error", None)
+            else:
+                final_metadata["sharded"] = False
+                final_metadata["shard_sets"] = []
+                final_metadata["shard_source_version"] = None
+                final_metadata["sharding_error"] = "preset shard layout generation failed"
+            final_metadata["sharding_in_progress"] = False
+            if isinstance(final_metadata.get("db_order_oracle"), dict):
+                oracle = dict(final_metadata["db_order_oracle"])
+                if oracle.get("source_version") and oracle.get("source_version") != latest_dir:
+                    oracle["status"] = "stale"
+                final_metadata["db_order_oracle"] = oracle
+            _write_db_metadata(container, db_name, final_metadata)
         except Exception as e:
             LOGGER.warning("metadata write failed for %s: %s", db_name, sanitise(str(e))[:200])
 

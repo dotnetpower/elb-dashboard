@@ -2,7 +2,10 @@ import { Link } from "react-router-dom";
 import { Server, Trash2 } from "lucide-react";
 
 import type { BlastJobSummary } from "@/api/endpoints";
-import { toJobRowView } from "@/components/cards/ClusterBento/jobMapping";
+import {
+  isActiveJobState,
+  toJobRowView,
+} from "@/components/cards/ClusterBento/jobMapping";
 import { statusColor } from "@/constants";
 
 import { timeAgo } from "./dateGroup";
@@ -11,12 +14,39 @@ export interface JobRowProps {
   job: BlastJobSummary;
   onDelete: (id: string) => void;
   deleting: boolean;
+  now?: number;
 }
 
-export function JobRow({ job, onDelete, deleting }: JobRowProps) {
+function formatDuration(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(safeSeconds / 86_400);
+  const hours = Math.floor((safeSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((safeSeconds % 3_600) / 60);
+  const secs = safeSeconds % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+}
+
+function runtimeLabel(job: BlastJobSummary, active: boolean, now: number) {
+  const created = Date.parse(job.created_at || "");
+  if (!Number.isFinite(created)) return null;
+  const finished = Date.parse(job.updated_at || "");
+  const end = active ? now : finished;
+  if (!Number.isFinite(end) || end < created) return null;
+  const seconds = Math.floor((end - created) / 1000);
+  return {
+    label: active ? "Elapsed" : "Duration",
+    value: formatDuration(seconds),
+  };
+}
+
+export function JobRow({ job, onDelete, deleting, now = Date.now() }: JobRowProps) {
   const view = toJobRowView(job);
   const phase = view.state;
   const color = statusColor(phase.toLowerCase());
+  const runtime = runtimeLabel(job, isActiveJobState(phase), now);
   const cluster = job.infrastructure?.cluster_name;
   const upn = job.owner_upn;
   const shortUser = upn ? upn.split("@")[0] : null;
@@ -138,7 +168,19 @@ export function JobRow({ job, onDelete, deleting }: JobRowProps) {
         className="muted"
         title={job.created_at ? new Date(job.created_at).toLocaleString() : ""}
       >
-        {job.created_at ? timeAgo(job.created_at) : "—"}
+        <div>{job.created_at ? timeAgo(job.created_at) : "—"}</div>
+        {runtime && (
+          <div
+            style={{
+              fontSize: 10,
+              marginTop: 1,
+              color: "var(--text-faint)",
+            }}
+            title={`${runtime.label} ${runtime.value}`}
+          >
+            {runtime.label} {runtime.value}
+          </div>
+        )}
       </td>
       <td style={{ padding: "8px 0", textAlign: "right", width: 36 }}>
         <button

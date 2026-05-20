@@ -133,6 +133,8 @@ def test_results_list_opens_storage_for_local_debug_when_scope_present(
         },
     )
     assert response.status_code == 200
+    assert response.json()["manifest"]["status"] == "available"
+    assert response.json()["manifest"]["parseable_count"] == 1
     assert calls == [("00000000-0000-0000-0000-000000000001", "rg-elb-01", "stelb")]
 
 

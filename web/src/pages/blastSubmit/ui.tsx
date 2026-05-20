@@ -46,14 +46,16 @@ export function SectionHeader({
 export function BlastCommandPreview({
   form,
   programMeta,
+  effectiveSearchSpace,
   toast,
 }: {
   form: FormState;
   programMeta: (typeof PROGRAMS)[0];
+  effectiveSearchSpace?: number;
   toast: ToastFn;
 }) {
   const [copied, setCopied] = useState(false);
-  const cmd = buildCommandString(form, programMeta);
+  const cmd = buildCommandString(form, programMeta, { effectiveSearchSpace });
 
   const handleCopy = () => {
     navigator.clipboard.writeText(cmd).then(() => {

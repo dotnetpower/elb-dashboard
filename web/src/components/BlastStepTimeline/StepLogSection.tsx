@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { FilePreview } from "@/components/BlastFilePreview";
+import { useBlastJobLogStream } from "@/hooks/useBlastJobLogStream";
 
 import { buildStepLog } from "./buildStepLog";
 import {
@@ -25,12 +26,14 @@ export function StepLogSection({
   subscriptionId,
   storageAccount,
   resourceGroup,
+  clusterName,
 }: {
   phase: string;
   job: Record<string, unknown>;
   subscriptionId: string;
   storageAccount: string;
   resourceGroup?: string;
+  clusterName?: string;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -43,7 +46,28 @@ export function StepLogSection({
     (output as Record<string, unknown>)?.steps ??
     {}) as Record<string, Record<string, unknown>>;
   const jobId = job?.job_id as string;
-  const uploadBlobName = resolveUploadQueryBlobName(stepsData.uploading, job);
+  const streamEnabled = Boolean(jobId && phase !== "completed" && !FAILURE_PHASES.has(phase));
+  const liveStream = useBlastJobLogStream({
+    jobId,
+    enabled: streamEnabled,
+    subscriptionId,
+    resourceGroup,
+    clusterName,
+  });
+  const liveLogsByPhase = useMemo(() => {
+    const grouped: Record<string, string[]> = {};
+    for (const event of liveStream.events) {
+      const key = event.phase || "running";
+      const prefix = event.source === "k8s" && event.pod
+        ? `[${event.pod}${event.container ? `/${event.container}` : ""}] `
+        : event.stream === "stderr"
+          ? "[stderr] "
+          : "";
+      grouped[key] = [...(grouped[key] ?? []), `${prefix}${event.line}`].slice(-80);
+    }
+    return grouped;
+  }, [liveStream.events]);
+  const uploadBlobName = resolveUploadQueryBlobName(stepsData.preparing, job);
   const configBlobName = resolveConfigBlobName(stepsData.configuring, jobId);
 
   const { getStepDuration } = useStepDurations({ phase, stepsData });
@@ -77,9 +101,9 @@ export function StepLogSection({
 
   const renderStepExtra = (key: string, state: StepState, isOpen: boolean) => {
     if (!isOpen || state === "pending") return null;
-    // Upload: show input.fa with 1000 char limit (FASTA can be very large).
+    // Prepare: show input.fa with 1000 char limit (FASTA can be very large).
     if (
-      key === "uploading" &&
+      key === "preparing" &&
       (state === "done" || state === "active") &&
       jobId &&
       subscriptionId &&
@@ -138,6 +162,10 @@ export function StepLogSection({
             stepsData,
             jobId,
           });
+          const liveLog = (liveLogsByPhase[step.key] ?? []).join("\n").trim();
+          const combinedLog = liveLog
+            ? `${log ? `${log}\n\n` : ""}--- Live Stream ---\n${liveLog}`
+            : log;
           const duration = getStepDuration(step.key, state);
           const extra = renderStepExtra(step.key, state, isOpen);
           return (
@@ -146,7 +174,7 @@ export function StepLogSection({
               step={step}
               state={state}
               isOpen={isOpen}
-              log={log}
+              log={combinedLog}
               duration={duration}
               extra={extra}
               onToggle={() => toggle(step.key)}

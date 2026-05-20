@@ -4,25 +4,22 @@
  * tick so we render at most one timer for the whole jobs list (instead
  * of one per row).
  *
- * The row is keyboard-activatable (role="link"): pressing Enter or
- * clicking navigates to the per-job results page so users can drill in
- * without hunting for a separate "Open" button.
+ * Layout mirrors the Recent searches table row (JOB · USER · STATUS ·
+ * TIME) so the AKS card's preview and the dedicated Jobs page read the
+ * same way.
  */
 
-import { User } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
+import { BlastJobIdentity } from "@/components/cards/BlastJobIdentity";
 import { isActiveJobState } from "@/components/cards/ClusterBento/jobMapping";
-import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/atoms";
+import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/jobTypes";
+import { statusColor } from "@/constants";
+import { timeAgo } from "@/pages/BlastJobs/dateGroup";
 
-import { DbChip, JobStatePill } from "./atoms";
 import {
-  estimateEtaSec,
   jobStateTone,
-  jobTimeText,
-  noteToneFor,
   ownerLabel,
-  prettifyQueryLabel,
   summariseNote,
 } from "./helpers";
 
@@ -36,21 +33,16 @@ interface Props {
 export function JobLine({ job, ownerUpn, nowMs }: Props) {
   const navigate = useNavigate();
   const tone = jobStateTone(job.state);
-  const splitsTotal = job.splitsTotal ?? 0;
-  const splitsDone = job.splitsDone ?? 0;
-  const pct = splitsTotal === 0 ? 0 : Math.min(1, splitsDone / splitsTotal);
-  const progressWidth = splitsTotal === 0 ? 0 : Math.max(2, pct * 100);
+  const phaseColor = statusColor(job.state.toLowerCase());
   const elapsedSec = computeElapsedSec(job, nowMs);
-  const etaSec =
-    job.etaSec ??
-    (job.state === "Running"
-      ? estimateEtaSec({ elapsedSec, splitsDone, splitsTotal })
-      : null);
   const submitter = describeSubmitter(ownerUpn);
   const noteText = summariseNote(job.note);
-  const noteTone = noteToneFor(job.note);
-  const queryLabel = prettifyQueryLabel(job.query);
-  const borderLeftColor = stateBorderColor(job.state);
+  const active = isActiveJobState(job.state);
+
+  const createdAt = job.createdAt;
+  const timeAgoLabel = createdAt ? timeAgo(createdAt) : "—";
+  const durationLabel = formatDuration(elapsedSec);
+  const durationCaption = active ? "Elapsed" : "Duration";
 
   const goToJob = () => navigate(`/blast/jobs/${encodeURIComponent(job.jobId)}`);
   const fullHoverText = job.note
@@ -70,149 +62,95 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
       }}
       style={{
         display: "grid",
-        gridTemplateColumns: "84px minmax(0, 1fr) 110px 96px 120px",
+        gridTemplateColumns: "minmax(0, 1fr) 90px 88px 110px",
         alignItems: "center",
-        gap: 10,
-        padding: "6px 8px",
+        gap: 12,
+        padding: "8px 10px",
         borderRadius: 6,
         background: "var(--pulse-row-bg)",
         border: "1px solid var(--border-weak)",
-        borderLeft: `3px solid ${borderLeftColor}`,
         cursor: "pointer",
       }}
       title={fullHoverText}
-      aria-label={`Open job ${job.displayId} (${job.state}). ${queryLabel}.`}
+      aria-label={`Open job ${job.title || job.jobId} (${job.state}).`}
     >
-      <JobStatePill state={job.state} />
       <div
         style={{
           display: "flex",
-          flexDirection: "column",
-          gap: 2,
+          alignItems: "center",
+          gap: 8,
           minWidth: 0,
         }}
       >
         <span
+          aria-hidden="true"
           style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            minWidth: 0,
+            width: 7,
+            height: 7,
+            borderRadius: 999,
+            background: phaseColor,
+            flexShrink: 0,
           }}
-        >
-          <span
-            style={{
-              fontSize: 9,
-              fontFamily: "var(--font-mono)",
-              color: "var(--text-faint)",
-              border: "1px solid var(--border-weak)",
-              borderRadius: 3,
-              padding: "0 4px",
-              flexShrink: 0,
-            }}
-            title={`Job id: ${job.jobId}`}
-          >
-            #{job.displayId}
-          </span>
-          <span
-            style={{
-              fontSize: 12,
-              color: "var(--text-primary)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              fontFamily: "var(--font-mono)",
-              minWidth: 0,
-            }}
-          >
-            {queryLabel}
-          </span>
-        </span>
-        {noteText && (
-          <span
-            style={{
-              fontSize: 10,
-              color: noteTone,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {noteText}
-          </span>
-        )}
+        />
+        <BlastJobIdentity
+          title={job.title}
+          fallbackTitle={job.jobId}
+          program={job.program}
+          db={job.db}
+          query={job.query}
+          note={noteText}
+          noteTone={tone}
+          compact
+        />
       </div>
-      <DbChip name={job.db} />
-      <div
-        style={{ display: "flex", flexDirection: "column", gap: 3 }}
-        title={`${splitsDone}/${splitsTotal} splits`}
+      <span
+        title={submitter.title}
+        style={{
+          fontSize: 11,
+          color: "var(--text-muted)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
       >
-        <div
+        {submitter.label}
+      </span>
+      <span style={{ textAlign: "center" }}>
+        <span
           style={{
-            display: "flex",
-            justifyContent: "space-between",
+            display: "inline-block",
             fontSize: 10,
-            color: "var(--text-faint)",
-            fontVariantNumeric: "tabular-nums",
+            textTransform: "uppercase",
+            letterSpacing: "0.04em",
+            padding: "2px 6px",
+            borderRadius: 4,
+            background: `${phaseColor}18`,
+            color: phaseColor,
+            fontWeight: 600,
+            whiteSpace: "nowrap",
           }}
         >
-          <span>
-            {splitsDone}/{splitsTotal || "?"}
-          </span>
-          <span>{splitsTotal === 0 ? "—" : `${Math.round(pct * 100)}%`}</span>
-        </div>
-        <div
-          role="progressbar"
-          aria-valuemin={0}
-          aria-valuemax={splitsTotal || 100}
-          aria-valuenow={splitsTotal === 0 ? 0 : splitsDone}
-          aria-label={`Splits ${splitsDone} of ${splitsTotal || "unknown"}`}
-          style={{
-            height: 4,
-            borderRadius: 2,
-            background: "var(--bg-canvas)",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              width: `${progressWidth}%`,
-              height: "100%",
-              background: tone,
-              transition: "width 200ms ease-out",
-            }}
-          />
-        </div>
-      </div>
+          {job.state}
+        </span>
+      </span>
       <div
         style={{
           display: "flex",
           flexDirection: "column",
           alignItems: "flex-end",
-          gap: 2,
+          gap: 1,
           fontVariantNumeric: "tabular-nums",
         }}
+        title={createdAt ? new Date(createdAt).toLocaleString() : ""}
       >
-        <span style={{ fontSize: 11, color: "var(--text-primary)" }}>
-          {jobTimeText(job.state, elapsedSec, etaSec)}
+        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+          {timeAgoLabel}
         </span>
-        <span
-          style={{
-            fontSize: 10,
-            color: "var(--text-faint)",
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 3,
-            maxWidth: "100%",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-          title={submitter.title}
-        >
-          <User size={9} aria-hidden="true" />
-          {submitter.label}
-        </span>
+        {createdAt && (
+          <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
+            {durationCaption} {durationLabel}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -230,6 +168,18 @@ function computeElapsedSec(j: JobRowView, nowMs: number): number {
   return Math.max(0, Math.floor((nowMs - start) / 1000));
 }
 
+function formatDuration(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(safe / 86_400);
+  const hours = Math.floor((safe % 86_400) / 3_600);
+  const minutes = Math.floor((safe % 3_600) / 60);
+  const secs = safe % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+}
+
 function describeSubmitter(upn: string | null | undefined): {
   label: string;
   title: string;
@@ -238,26 +188,7 @@ function describeSubmitter(upn: string | null | undefined): {
   if (local) {
     return { label: local, title: upn ?? local };
   }
-  // No UPN on the row — don't fabricate "user" since the previous
-  // string made every job look like it had the same submitter.
   return { label: "—", title: "Submitter not recorded" };
-}
-
-function stateBorderColor(state: DisplayJobState): string {
-  switch (state) {
-    case "Failed":
-      return "var(--danger)";
-    case "Completed":
-      return "var(--success)";
-    case "Running":
-      return "var(--accent)";
-    case "Reducing":
-      return "var(--teal)";
-    case "Pending":
-      return "var(--border-weak)";
-    case "Unknown":
-      return "var(--warning)";
-  }
 }
 
 export { JobLine as default };

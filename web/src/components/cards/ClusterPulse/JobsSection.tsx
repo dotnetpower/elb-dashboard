@@ -10,7 +10,7 @@ import { Activity, ChevronRight } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import type { BlastJobSummary } from "@/api/endpoints";
-import type { JobRowView } from "@/components/cards/ClusterBento/atoms";
+import type { JobRowView } from "@/components/cards/ClusterBento/jobTypes";
 
 import { JobLine, jobHasLiveTick } from "./JobLine";
 
@@ -151,6 +151,7 @@ export function JobsSection({
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <JobsTableHeader />
           {jobs.map((j) => (
             <JobLine
               key={j.jobId}
@@ -204,9 +205,8 @@ function useTickWhenActive(enabled: boolean): number {
 
 /** Skeleton roster shown during the first /api/blast/jobs fetch so the
  *  row doesn't briefly flash the "No jobs yet" empty state. Mirrors
- *  the JobLine row geometry (84px state pill · flexible body · 110px
- *  splits · 96px progress · 120px time) so the layout doesn't jump
- *  once real rows arrive. */
+ *  the JobLine row geometry (flex identity · 90px user · 88px status ·
+ *  110px time) so the layout doesn't jump once real rows arrive. */
 function JobsSkeleton() {
   return (
     <div
@@ -221,20 +221,18 @@ function JobsSkeleton() {
           className="pulse-soft"
           style={{
             display: "grid",
-            gridTemplateColumns: "84px minmax(0, 1fr) 110px 96px 120px",
+            gridTemplateColumns: "minmax(0, 1fr) 90px 88px 110px",
             alignItems: "center",
-            gap: 10,
-            padding: "6px 8px",
+            gap: 12,
+            padding: "8px 10px",
             borderRadius: 6,
             background: "var(--pulse-row-bg)",
             border: "1px solid var(--border-weak)",
-            borderLeft: "3px solid var(--border-medium)",
           }}
         >
-          <SkeletonBar width="60%" height={12} />
-          <SkeletonBar width="82%" height={10} />
-          <SkeletonBar width="70%" height={10} />
-          <SkeletonBar width="100%" height={4} />
+          <SkeletonBar width="82%" height={12} />
+          <SkeletonBar width="60%" height={10} />
+          <SkeletonBar width="70%" height={12} />
           <SkeletonBar width="75%" height={10} />
         </div>
       ))}
@@ -260,5 +258,32 @@ function SkeletonBar({
         background: "var(--kpi-bar-bg)",
       }}
     />
+  );
+}
+
+/** Column headers for the jobs roster — mirrors the Recent searches
+ *  table header so the AKS card's preview reads the same way. */
+function JobsTableHeader() {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) 90px 88px 110px",
+        alignItems: "center",
+        gap: 12,
+        padding: "2px 10px",
+        fontSize: 10,
+        fontWeight: 500,
+        textTransform: "uppercase",
+        letterSpacing: "0.08em",
+        color: "var(--text-faint)",
+        borderBottom: "1px solid var(--border-weak)",
+      }}
+    >
+      <span>Job</span>
+      <span>User</span>
+      <span style={{ textAlign: "center" }}>Status</span>
+      <span style={{ textAlign: "right" }}>Time</span>
+    </div>
   );
 }

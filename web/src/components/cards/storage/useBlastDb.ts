@@ -42,6 +42,14 @@ export interface DownloadedDbMeta {
   sharded?: boolean;
   /** Sorted preset shard counts already built (e.g. [1,2,3,4,5,6,8,10]). */
   shard_sets?: number[];
+  shard_source_version?: string | null;
+  shards_stale?: boolean;
+  update_in_progress?: boolean;
+  updating_to_source_version?: string | null;
+  update_started_at?: string | null;
+  update_completed_at?: string | null;
+  update_error?: string | null;
+  update_failed_at?: string | null;
   db_order_oracle?: {
     status: string;
     run_id?: string | null;
@@ -141,7 +149,10 @@ export function useBlastDb({
   const updatesAvailable = useMemo(() => {
     if (!latestVersion) return 0;
     return [...downloadedDbs.values()].filter(
-      (d) => d.source_version && d.source_version !== latestVersion,
+      (d) =>
+        d.source_version &&
+        d.source_version !== latestVersion &&
+        !d.update_in_progress,
     ).length;
   }, [downloadedDbs, latestVersion]);
 
@@ -192,7 +203,7 @@ export function useBlastDb({
     });
   }, [downloadedDbs, inProgress]);
 
-  const handleDownload = async (dbName: string) => {
+  const handleDownload = async (dbName: string, mode: "download" | "update" = "download") => {
     if (!enabled) return;
     setDownloading(dbName);
     setDownloadResult(null);
@@ -218,7 +229,9 @@ export function useBlastDb({
       setDownloadResult({
         db: dbName,
         msg: resp.async
-          ? `Started copying ${total} files in background. Status will update as files arrive.`
+          ? mode === "update"
+            ? `Started DB update copy for ${total} files. Existing generation remains active until metadata promotion.`
+            : `Started copying ${total} files in background. Status will update as files arrive.`
           : `${resp.files_copied ?? 0} files started${
               resp.files_already_copying
                 ? `, ${resp.files_already_copying} already in progress`
@@ -234,6 +247,8 @@ export function useBlastDb({
       setDownloading(null);
     }
   };
+
+  const handleUpdate = (dbName: string) => handleDownload(dbName, "update");
 
   const handleBuildOracle = async (dbName: string) => {
     if (!enabled || !clusterName) return;
@@ -331,6 +346,7 @@ export function useBlastDb({
     dismissDownloadResult: () => setDownloadResult(null),
     // Actions
     handleDownload,
+    handleUpdate,
     handleBuildOracle,
   };
 }

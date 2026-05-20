@@ -14,7 +14,7 @@ import {
 
 import { ElapsedTimer } from "@/components/BlastFilePreview";
 import { useToast } from "@/components/Toast";
-import type { BlastExportFormat } from "@/api/endpoints";
+import type { BlastDatabaseMetadata, BlastExportFormat } from "@/api/endpoints";
 import { BlastHelpMenu } from "@/pages/blastResults/BlastHelpMenu";
 import {
   buildConfigFilename,
@@ -39,6 +39,7 @@ interface BlastJobHeaderProps {
   /** NCBI-style metadata surfaced in the new 7-line header. */
   program?: string | null;
   database?: string | null;
+  databaseMetadata?: BlastDatabaseMetadata | null;
   configSnapshot?: Record<string, unknown> | undefined;
   infrastructure?: Record<string, unknown> | undefined;
   /** Hooks for the "Download all results" combo. */
@@ -70,6 +71,7 @@ export function BlastJobHeader({
   jobPayload,
   program,
   database,
+  databaseMetadata,
   configSnapshot,
   infrastructure,
   exportingFormat,
@@ -95,6 +97,8 @@ export function BlastJobHeader({
   const region = pickString(infrastructure, ["region"]);
   const evalue = pickString(configSnapshot, ["evalue"]);
   const maxTargets = pickString(configSnapshot, ["max_target_seqs"]);
+  const dbSequenceCount = formatCount(databaseMetadata?.number_of_sequences);
+  const dbLetterCount = formatCount(databaseMetadata?.number_of_letters);
 
   const handleCopyId = async () => {
     try {
@@ -310,6 +314,49 @@ export function BlastJobHeader({
         <Detail>
           <span style={{ wordBreak: "break-all" }}>{database ?? "—"}</span>
         </Detail>
+
+        {databaseMetadata?.title && (
+          <>
+            <Term label="DB title" />
+            <Detail span={3}>{databaseMetadata.title}</Detail>
+          </>
+        )}
+
+        {databaseMetadata?.description && (
+          <>
+            <Term label="DB description" />
+            <Detail span={3}>
+              <span className="muted" style={{ display: "block", maxWidth: 900 }}>
+                {databaseMetadata.description}
+              </span>
+            </Detail>
+          </>
+        )}
+
+        {(databaseMetadata?.molecule_type || databaseMetadata?.update_date) && (
+          <>
+            <Term label="DB molecule" />
+            <Detail>{databaseMetadata.molecule_type ?? "—"}</Detail>
+            <Term label="DB updated" />
+            <Detail>{databaseMetadata.update_date ?? "—"}</Detail>
+          </>
+        )}
+
+        {(dbSequenceCount || dbLetterCount) && (
+          <>
+            <Term label="DB sequences" />
+            <Detail>{dbSequenceCount ?? "—"}</Detail>
+            <Term label="DB letters" />
+            <Detail>{dbLetterCount ?? "—"}</Detail>
+          </>
+        )}
+
+        {databaseMetadata?.source_version && (
+          <>
+            <Term label="DB snapshot" />
+            <Detail span={3}>{databaseMetadata.source_version}</Detail>
+          </>
+        )}
 
         <Term label="Query ID" />
         <Detail>{queryId ?? "—"}</Detail>
@@ -536,6 +583,13 @@ function pickNumber(
     }
   }
   return null;
+}
+
+function formatCount(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return value.toLocaleString();
 }
 
 function deriveMolecule(program: string | null | undefined): string | null {

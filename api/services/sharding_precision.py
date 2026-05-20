@@ -184,6 +184,9 @@ def build_precision_report(
 
     additional = str(opts.get("additional_options") or "")
     additional_outfmt = option_value(additional, "-outfmt") if additional else None
+    additional_searchsp = (
+        positive_int(option_value(additional, "-searchsp")) if additional else None
+    )
     outfmt = additional_outfmt if additional_outfmt is not None else opts.get("outfmt")
     merge_format = merge_format_for_outfmt(outfmt)
     if merge_format is None:
@@ -223,7 +226,14 @@ def build_precision_report(
     # precise mode: a single BLAST invocation can use only one -searchsp. Multi-query
     # precise is therefore allowed only when every query has the same supplied
     # effective search space; mixed spaces require future query-group splitting.
-    supplied_db_search_space = positive_int(opts.get("db_effective_search_space"))
+    configured_db_search_space = positive_int(opts.get("db_effective_search_space"))
+    if (
+        configured_db_search_space is not None
+        and additional_searchsp is not None
+        and configured_db_search_space != additional_searchsp
+    ):
+        blockers.append("db_effective_search_space conflicts with additional_options -searchsp")
+    supplied_db_search_space = configured_db_search_space or additional_searchsp
     query_spaces_error = query_effective_search_spaces_error(
         opts.get("query_effective_search_spaces")
     )

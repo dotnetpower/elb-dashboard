@@ -1,10 +1,9 @@
-"""BLAST job projection, file preview, and external OpenAPI helpers."""
+"""BLAST job projection, file preview, and refresh helpers."""
 
 from __future__ import annotations
 
 import logging
 import os
-import threading as _threading
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,6 +12,46 @@ from fastapi import HTTPException
 from api.auth import CallerIdentity
 
 LOGGER = logging.getLogger(__name__)
+
+from api.services.blast_external_jobs import (  # noqa: E402
+    _EXTERNAL_DETAIL_ENRICH_LIMIT as _EXTERNAL_DETAIL_ENRICH_LIMIT,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _EXTERNAL_NOT_ENABLED_REASONS as _EXTERNAL_NOT_ENABLED_REASONS,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _exception_reason as _exception_reason,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _external_job_detail_or_row as _external_job_detail_or_row,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _external_list_jobs_cached as _external_list_jobs_cached,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _external_result_files as _external_result_files,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _external_status_to_dashboard as _external_status_to_dashboard,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _external_to_blast_job as _external_to_blast_job,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _merge_external_detail as _merge_external_detail,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _openapi_client_kwargs_from_cluster as _openapi_client_kwargs_from_cluster,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _reset_external_jobs_cache as _reset_external_jobs_cache,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _short_external_db_name as _short_external_db_name,
+)
+from api.services.blast_external_jobs import (  # noqa: E402
+    _sync_external_jobs_to_table as _sync_external_jobs_to_table,
+)
 
 
 def _payload_value(payload: dict[str, Any] | None, *keys: str) -> Any:
@@ -123,435 +162,16 @@ def _config_preview_from_payload(
     )
 
 
-def _external_status_to_dashboard(status: str) -> str:
-    if status in {"success", "completed"}:
-        return "completed"
-    if status in {"queued", "running", "failed", "cancelled"}:
-        return status
-    return "running" if status else "unknown"
-
-
-def _exception_reason(exc: Exception) -> str:
-    if isinstance(exc, HTTPException):
-        detail = exc.detail
-        if isinstance(detail, dict):
-            code = detail.get("code")
-            if code not in (None, ""):
-                return str(code)
-        if detail not in (None, ""):
-            return str(detail)[:120]
-        return f"http_{exc.status_code}"
-    return type(exc).__name__
-
-
-# Reasons that mean "the external OpenAPI execution plane is intentionally not
-# wired up yet" rather than "it failed at runtime". Surfacing these as
-# `external_degraded` makes every `/api/blast/jobs` poll look like an error in
-# the request inspector (constant red Degraded badge), which is misleading —
-# the dashboard works fine on the local state repo alone. Skip them.
-_EXTERNAL_NOT_ENABLED_REASONS = frozenset(
-    {
-        "openapi_not_configured",
-        "openapi_not_enabled",
-    }
+_PROGRESS_STEP_ORDER = (
+    "preparing",
+    "warming_up",
+    "configuring",
+    "staging_db",
+    "submitting",
+    "running",
+    "exporting_results",
+    "completed",
 )
-_EXTERNAL_DETAIL_ENRICH_LIMIT = 20
-
-# Short in-memory cache for the external OpenAPI `/v1/jobs` listing.
-# Multiple dashboard components poll the jobs endpoint independently
-# (Dashboard card, AKS pulse row, Jobs page), so without this cache the
-# upstream HTTP call is fired ~4x per dashboard refresh cycle. 15s is
-# well below the smallest polling interval (20s) and within the
-# dashboard's tolerance for stale list rows.
-_EXTERNAL_JOBS_CACHE_TTL_SECONDS = 15.0
-_EXTERNAL_JOBS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_EXTERNAL_JOBS_CACHE_LOCK = _threading.Lock()
-
-
-def _external_list_jobs_cached(external_kwargs: dict[str, Any]) -> list[dict[str, Any]]:
-    """Cached wrapper around ``external_blast.list_jobs(**kwargs)``.
-
-    The cache key is the JSON-serialised kwargs (base_url + token), so
-    different clusters / tokens never share an entry.
-    """
-    import json
-    import time as _time
-
-    from api.services import external_blast
-
-    key = json.dumps(external_kwargs, sort_keys=True, default=str)
-    now = _time.monotonic()
-    with _EXTERNAL_JOBS_CACHE_LOCK:
-        entry = _EXTERNAL_JOBS_CACHE.get(key)
-        if entry and entry[0] > now:
-            return entry[1]
-    rows = external_blast.list_jobs(**external_kwargs).get("jobs", []) or []
-    if not isinstance(rows, list):
-        rows = []
-    with _EXTERNAL_JOBS_CACHE_LOCK:
-        _EXTERNAL_JOBS_CACHE[key] = (now + _EXTERNAL_JOBS_CACHE_TTL_SECONDS, rows)
-        # Tiny LRU-ish trim. There are usually 1-2 keys at most (one per
-        # active cluster scope); we cap defensively so the process never
-        # accumulates entries from short-lived clusters.
-        if len(_EXTERNAL_JOBS_CACHE) > 32:
-            oldest = min(_EXTERNAL_JOBS_CACHE.items(), key=lambda kv: kv[1][0])[0]
-            _EXTERNAL_JOBS_CACHE.pop(oldest, None)
-    return rows
-
-
-def _reset_external_jobs_cache() -> None:
-    """Test hook: clear the in-memory cache between assertions.
-
-    Production callers never need to invoke this; the cache TTL is short
-    enough that staleness is bounded. Tests that re-mock
-    ``external_blast.list_jobs`` between cases must reset the cache so
-    their new mock is not bypassed by a stale entry.
-    """
-    with _EXTERNAL_JOBS_CACHE_LOCK:
-        _EXTERNAL_JOBS_CACHE.clear()
-
-
-def _sync_external_jobs_to_table(
-    external_jobs: list[dict[str, Any]],
-    *,
-    caller_oid: str,
-    tenant_id: str = "",
-) -> tuple[int, int, set[str]]:
-    """Best-effort upsert of external OpenAPI jobs into Azure Table Storage.
-
-    Returns ``(created, updated, tombstoned_ids)``. Failures are logged
-    but never propagated — the caller already has the in-memory list and
-    does not depend on the sync succeeding.
-
-    ``tombstoned_ids`` is the set of external job_ids whose Table row has
-    ``status='deleted'``. The caller MUST filter these out of any list it
-    returns to the dashboard; otherwise the soft-deleted row reappears on
-    every poll because the external plane still remembers it.
-
-    Behaviour:
-
-    * Unknown job_id → ``create`` (claims ownership for the current caller).
-    * Known job_id whose status/phase has drifted in the external plane →
-      ``update`` so the dashboard's list view reflects the latest state
-      without waiting for a per-job detail fetch.
-    * Known job_id with no status drift → left alone (avoids writing a
-      new jobhistory row on every poll).
-    * Tombstoned (``status='deleted'``) job_id → left alone AND added to
-      the returned set so the caller drops it from the response.
-    """
-    if not external_jobs:
-        return (0, 0, set())
-    try:
-        from api.services.state_repo import JobState, JobStateRepository
-
-        repo = JobStateRepository()
-    except Exception:
-        return (0, 0, set())
-
-    job_ids = [str(ext.get("job_id") or "") for ext in external_jobs]
-    try:
-        existing_map = repo.get_many([jid for jid in job_ids if jid])
-    except Exception as exc:
-        LOGGER.debug("sync_external_jobs batch lookup failed: %s", type(exc).__name__)
-        existing_map = {}
-
-    created = 0
-    updated = 0
-    tombstoned: set[str] = set()
-    for ext in external_jobs:
-        job_id = str(ext.get("job_id") or "")
-        if not job_id:
-            continue
-        try:
-            converted = _external_to_blast_job(ext)
-            ext_status = str(converted.get("status") or "unknown")
-            ext_phase = str(converted.get("phase") or ext_status)
-            existing = existing_map.get(job_id)
-            if existing is not None:
-                cur_status = str(existing.status or "")
-                cur_phase = str(existing.phase or "")
-                # Respect tombstone: the user already asked to delete
-                # this row. Do not resurrect it on the next external
-                # poll just because the upstream still remembers it.
-                if cur_status == "deleted":
-                    tombstoned.add(job_id)
-                    continue
-                # Only refresh status/phase if the external plane has
-                # moved on. Avoids appending a jobhistory row per poll.
-                if ext_status and (ext_status != cur_status or ext_phase != cur_phase):
-                    try:
-                        repo.update(
-                            job_id,
-                            status=ext_status,
-                            phase=ext_phase,
-                        )
-                        updated += 1
-                    except KeyError:
-                        # Row vanished between batch lookup and update;
-                        # fall through to the create path below.
-                        existing = None
-                if existing is not None:
-                    continue
-            payload = converted.get("payload") or {"external": ext}
-            state = JobState(
-                job_id=job_id,
-                type="blast",
-                status=ext_status,
-                phase=ext_phase,
-                owner_oid=caller_oid,
-                tenant_id=tenant_id,
-                created_at=str(converted.get("created_at") or ""),
-                updated_at=str(converted.get("updated_at") or ""),
-                payload=payload,
-                job_title=str(converted.get("job_title") or ""),
-                program=str(converted.get("program") or ""),
-                db=str(converted.get("db") or ""),
-                query_label=str(converted.get("query_label") or ""),
-                subscription_id=str(
-                    (converted.get("infrastructure") or {}).get("subscription_id") or ""
-                ),
-                resource_group=str(
-                    (converted.get("infrastructure") or {}).get("resource_group") or ""
-                ),
-                cluster_name=str((converted.get("infrastructure") or {}).get("cluster_name") or ""),
-                storage_account=str(
-                    (converted.get("infrastructure") or {}).get("storage_account") or ""
-                ),
-            )
-            repo.create(state)
-            created += 1
-        except Exception as exc:
-            LOGGER.debug(
-                "sync_external_job_to_table failed job_id=%s: %s",
-                job_id,
-                type(exc).__name__,
-            )
-    if created or updated:
-        LOGGER.info("external job sync: created=%d updated=%d", created, updated)
-    return (created, updated, tombstoned)
-
-
-def _short_external_db_name(*values: Any) -> str:
-    for value in values:
-        raw = str(value or "").strip()
-        if not raw:
-            continue
-        if raw.startswith(("http://", "https://", "az://")):
-            parsed = urlparse(
-                "https://" + raw.removeprefix("az://") if raw.startswith("az://") else raw
-            )
-            parts = [part for part in parsed.path.split("/") if part]
-            if parts:
-                return parts[-1]
-        parts = [part for part in raw.replace("\\", "/").split("/") if part]
-        return parts[-1] if parts else raw
-    return ""
-
-
-def _external_error_message(error: Any) -> tuple[str | None, str | None]:
-    if not error:
-        return None, None
-    if isinstance(error, dict):
-        code = str(error.get("code") or "").strip() or None
-        message = str(error.get("message") or code or "").strip() or None
-        return code, message
-    message = str(error).strip()
-    return None, message or None
-
-
-def _external_execution_summary(job: dict[str, Any]) -> dict[str, int]:
-    execution = job.get("execution")
-    if not isinstance(execution, dict):
-        result = job.get("result")
-        if isinstance(result, dict) and isinstance(result.get("execution"), dict):
-            execution = result.get("execution")
-    if not isinstance(execution, dict):
-        return {}
-
-    def number(key: str) -> int:
-        value = execution.get(key)
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            return 0
-
-    shard_count = number("shard_count")
-    succeeded = number("shards_succeeded")
-    active = number("shards_active")
-    failed = number("shards_failed")
-    done = min(shard_count, succeeded + failed) if shard_count else succeeded + failed
-    out: dict[str, int] = {
-        "splits_done": done,
-        "splits_failed": failed,
-    }
-    if shard_count:
-        out["splits_total"] = shard_count
-    out["splits_active"] = active
-    return out
-
-
-def _merge_external_detail(row: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(row)
-    for key, value in detail.items():
-        if value not in (None, "", [], {}):
-            merged[key] = value
-    return merged
-
-
-def _external_job_detail_or_row(
-    external_blast: Any,
-    row: dict[str, Any],
-    external_kwargs: dict[str, str],
-) -> dict[str, Any]:
-    job_id = str(row.get("job_id") or "").strip()
-    if not job_id:
-        return row
-    try:
-        detail = external_blast.get_job(job_id, **external_kwargs)
-    except Exception as exc:
-        LOGGER.info(
-            "external blast job detail unavailable job_id=%s: %s",
-            job_id,
-            _exception_reason(exc),
-        )
-        return row
-    if not isinstance(detail, dict):
-        return row
-    return _merge_external_detail(row, detail)
-
-
-def _external_to_blast_job(job: dict[str, Any]) -> dict[str, Any]:
-    from api.services.state_repo import canonical_job_metadata
-
-    external_status = str(job.get("status") or "unknown")
-    status = _external_status_to_dashboard(external_status)
-    metadata = canonical_job_metadata(
-        {
-            "job_title": job.get("job_title") or job.get("title"),
-            "program": job.get("program"),
-            "db": job.get("db_name") or job.get("db"),
-            "query_file": job.get("query_file") or job.get("query"),
-            "subscription_id": job.get("subscription_id"),
-            "resource_group": job.get("resource_group"),
-            "cluster_name": job.get("cluster_name"),
-            "storage_account": job.get("storage_account"),
-        },
-        job_id=str(job.get("job_id") or ""),
-    )
-    db = metadata["db"]
-    program = metadata["program"]
-    created_at = str(job.get("created_at") or "")
-    updated_at = str(
-        job.get("updated_at")
-        or job.get("last_progress_at")
-        or job.get("completed_at")
-        or job.get("failed_at")
-        or created_at
-    )
-    source = str(job.get("submission_source") or "external_api")
-    error_code, error_message = _external_error_message(job.get("error"))
-    out: dict[str, Any] = {
-        "job_id": job.get("job_id"),
-        "job_title": metadata["job_title"],
-        "program": program,
-        "db": db,
-        "status": status,
-        "phase": status,
-        "created_at": created_at,
-        "updated_at": updated_at,
-        "source": source,
-        "submission_source": source,
-        "external_correlation_id": job.get("external_correlation_id") or "",
-        "query_label": metadata["query_label"] or "query.fa",
-        "custom_status": {
-            "phase": status,
-            "blast_status": external_status,
-            "progress_pct": job.get("progress_pct"),
-            "queue_position": job.get("queue_position"),
-        },
-        "output": {
-            "status": status,
-            "external_status": external_status,
-            "result": job.get("result"),
-            "execution": job.get("execution"),
-        },
-        "payload": {"external": job},
-    }
-    out.update(_external_execution_summary(job))
-    infrastructure = {
-        "subscription_id": metadata["subscription_id"],
-        "resource_group": metadata["resource_group"],
-        "cluster_name": metadata["cluster_name"],
-        "storage_account": metadata["storage_account"],
-    }
-    if any(infrastructure.values()):
-        out["infrastructure"] = {k: v for k, v in infrastructure.items() if v}
-    if error_message:
-        out["error"] = error_message
-    if error_code:
-        out["error_code"] = error_code
-    return out
-
-
-def _openapi_client_kwargs_from_cluster(
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> dict[str, str]:
-    if not (subscription_id and resource_group and cluster_name):
-        return {}
-    try:
-        from api.services import get_credential
-        from api.services.k8s_monitoring import (
-            k8s_get_deployment_env_value,
-            k8s_get_service_ip,
-        )
-
-        credential = get_credential()
-        ip = k8s_get_service_ip(
-            credential,
-            subscription_id,
-            resource_group,
-            cluster_name,
-            "elb-openapi",
-        )
-        if not ip:
-            return {}
-        try:
-            from api.services.openapi_runtime import save_openapi_base_url
-
-            save_openapi_base_url(
-                f"http://{ip}",
-                metadata={
-                    "subscription_id": subscription_id,
-                    "resource_group": resource_group,
-                    "cluster_name": cluster_name,
-                    "service_name": "elb-openapi",
-                },
-            )
-        except Exception as exc:
-            LOGGER.debug("openapi runtime cache write skipped: %s", type(exc).__name__)
-        api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
-        if not api_token:
-            api_token = (
-                k8s_get_deployment_env_value(
-                    credential,
-                    subscription_id,
-                    resource_group,
-                    cluster_name,
-                    "elb-openapi",
-                    "ELB_OPENAPI_API_TOKEN",
-                    container_name="openapi",
-                )
-                or ""
-            ).strip()
-        kwargs = {"base_url": f"http://{ip}"}
-        if api_token:
-            kwargs["api_token"] = api_token
-        return kwargs
-    except Exception as exc:
-        LOGGER.info("openapi cluster context unavailable: %s", type(exc).__name__)
-        return {}
 
 
 def _split_child_summary_from_repo(repo: Any, parent_job_id: str) -> dict[str, Any] | None:
@@ -631,7 +251,12 @@ def _split_child_summaries_from_repo(
     return summaries
 
 
-def _local_to_blast_job(state: Any, split_children: dict[str, Any] | None = None) -> dict[str, Any]:
+def _local_to_blast_job(
+    state: Any,
+    split_children: dict[str, Any] | None = None,
+    *,
+    include_database_metadata: bool = False,
+) -> dict[str, Any]:
     payload = state.payload if isinstance(state.payload, dict) else {}
     progress = payload.get("_progress") if isinstance(payload.get("_progress"), dict) else None
     program = str(getattr(state, "program", None) or _payload_value(payload, "program") or "blast")
@@ -673,6 +298,13 @@ def _local_to_blast_job(state: Any, split_children: dict[str, Any] | None = None
             "phase": state.phase or state.status,
             "steps": progress.get("steps", {}),
         }
+    if include_database_metadata:
+        database_metadata = _database_metadata_for_response(
+            db,
+            str(infrastructure.get("storage_account") or ""),
+        )
+        if database_metadata is not None:
+            out["database_metadata"] = database_metadata
     # Optional dashboard-friendly query name (used by the cluster bento
     # Active jobs cell to show "BRCA1 - chr17.fa" rather than the raw uuid).
     query_label = getattr(state, "query_label", None) or _payload_value(
@@ -701,6 +333,23 @@ def _local_to_blast_job(state: Any, split_children: dict[str, Any] | None = None
             out["splits_failed"] = failed
             out["splits_total"] = total
     return out
+
+
+def _database_metadata_for_response(
+    database: str,
+    storage_account: str,
+) -> dict[str, Any] | None:
+    try:
+        from api.services.blast_db_metadata import resolve_database_display_metadata
+
+        return resolve_database_display_metadata(storage_account, database)
+    except Exception as exc:
+        LOGGER.info(
+            "database metadata projection skipped db=%s: %s",
+            database,
+            type(exc).__name__,
+        )
+        return None
 
 
 def _scope_value_matches(actual: object, expected: str) -> bool:
@@ -831,10 +480,32 @@ def _payload_with_refresh_progress(
     steps = dict(progress.get("steps") if isinstance(progress.get("steps"), dict) else {})
     step_key = "exporting_results" if phase == "results_pending" else phase
     step = dict(steps.get(step_key) if isinstance(steps.get(step_key), dict) else {})
-    step.update({"phase": phase, "status": status, "k8s": k8s})
+    from datetime import UTC, datetime
+
+    updated_at = datetime.now(UTC).isoformat(timespec="seconds")
+    step.setdefault("started_at", str(step.get("updated_at") or updated_at))
+    step.update({"phase": phase, "status": status, "updated_at": updated_at, "k8s": k8s})
     if status == "completed":
         step["success"] = True
+        step.setdefault("completed_at", updated_at)
     steps[step_key] = step
+    if status != "failed" and step_key in _PROGRESS_STEP_ORDER:
+        current_idx = _PROGRESS_STEP_ORDER.index(step_key)
+        for previous_key in _PROGRESS_STEP_ORDER[:current_idx]:
+            previous = steps.get(previous_key)
+            if not isinstance(previous, dict) or previous.get("status") != "running":
+                continue
+            normalised = dict(previous)
+            normalised.setdefault("started_at", str(previous.get("updated_at") or updated_at))
+            normalised.update(
+                {
+                    "status": "completed",
+                    "updated_at": updated_at,
+                    "completed_at": updated_at,
+                    "success": True,
+                }
+            )
+            steps[previous_key] = normalised
     progress.update({"phase": phase, "status": status, "steps": steps})
     out["_progress"] = progress
     return out
@@ -876,32 +547,6 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
     except Exception as exc:
         LOGGER.debug("elastic blast job id discovery skipped job_id=%s: %s", job_id, exc)
     return ""
-
-
-def _external_result_files(job: dict[str, Any]) -> list[dict[str, Any]]:
-    result = job.get("result") if isinstance(job.get("result"), dict) else {}
-    files = result.get("files") if isinstance(result, dict) else []
-    if not isinstance(files, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for item in files:
-        if not isinstance(item, dict):
-            continue
-        filename = str(item.get("filename") or item.get("name") or "")
-        file_id = str(item.get("file_id") or "")
-        if not filename or not file_id:
-            continue
-        out.append(
-            {
-                "file_id": file_id,
-                "name": filename,
-                "size": item.get("size_bytes") or item.get("size"),
-                "last_modified": item.get("last_modified"),
-                "format": item.get("format"),
-                "source": "external",
-            }
-        )
-    return out
 
 
 def _ensure_job_read_allowed(job_id: str, caller: CallerIdentity) -> None:
