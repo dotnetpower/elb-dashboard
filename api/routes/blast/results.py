@@ -18,144 +18,22 @@ from api.routes._blast_shared import (
     _maybe_open_local_storage_access,
     _queries_blob_path,
 )
+from api.routes.blast.result_helpers import (
+    enqueue_result_artifact_backfill,
+    read_ready_result_artifact,
+    result_artifact_state,
+    validate_result_blob_for_job,
+)
 from api.services.blast_result_analytics import (
-    RESULTS_ALIGNMENTS_MAX_BYTES,
-    RESULTS_ALIGNMENTS_MAX_HITS,
-    RESULTS_DEFAULT_PAGE_SIZE,
     RESULTS_EXPORT_MAX_BYTES,
     RESULTS_MAX_FILES,
-    InvalidResultBlobName,
     annotate_result_hit,
-    enrich_taxonomy_with_lineage,
     list_parseable_result_blobs,
-    result_hit_matches_filters,
-    result_hit_rank_aggregates,
-    result_hit_sort_key,
-    rollup_subject_aggregates,
-    rollup_taxonomy,
-    validate_result_blob_name,
 )
 
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _read_ready_result_artifact(job_id: str, artifact_type: str) -> dict[str, Any] | None:
-    try:
-        from api.services.job_artifacts import read_result_analytics_artifact
-
-        payload = read_result_analytics_artifact(job_id, artifact_type)
-        if payload is not None:
-            return {**payload, "artifact_state": "ready", "source": "artifact"}
-    except Exception as exc:
-        LOGGER.info(
-            "result artifact unavailable job_id=%s type=%s: %s",
-            job_id,
-            artifact_type,
-            type(exc).__name__,
-        )
-    return None
-
-
-def _result_artifact_state(job_id: str, artifact_type: str) -> dict[str, Any]:
-    try:
-        from api.services.job_artifacts import artifact_state_payload
-
-        return artifact_state_payload(job_id, artifact_type) or {"artifact_state": "missing"}
-    except Exception as exc:
-        LOGGER.info(
-            "result artifact state unavailable job_id=%s type=%s: %s",
-            job_id,
-            artifact_type,
-            type(exc).__name__,
-        )
-        return {"artifact_state": "unavailable"}
-
-
-def _enqueue_result_artifact_backfill(job_id: str, artifact_type: str) -> None:
-    try:
-        from api.services.job_artifacts import artifact_build_should_enqueue
-        from api.tasks.blast_artifacts import finalize_job_artifacts
-
-        if not artifact_build_should_enqueue(job_id, [artifact_type]):
-            return
-        finalize_job_artifacts.apply_async(kwargs={"job_id": job_id})
-    except Exception as exc:
-        LOGGER.info(
-            "result artifact backfill enqueue skipped job_id=%s: %s",
-            job_id,
-            type(exc).__name__,
-        )
-
-
-def _default_alignments_request(
-    *,
-    blob_name: str,
-    max_alignments: int,
-    page: int,
-    page_size: int | None,
-    query_id: str,
-    subject_id: str,
-    organism: str,
-    min_identity: float,
-    min_bitscore: float,
-    max_evalue: float,
-    min_query_cover: float,
-    sort_by: str,
-    sort_dir: str,
-) -> bool:
-    return (
-        not blob_name.strip()
-        and max_alignments == 50
-        and page == 1
-        and page_size is None
-        and not query_id.strip()
-        and not subject_id.strip()
-        and not organism.strip()
-        and min_identity == 0.0
-        and min_bitscore == 0.0
-        and max_evalue == 10.0
-        and min_query_cover == 0.0
-        and sort_by == "relevance"
-        and sort_dir == "asc"
-    )
-
-
-def _default_taxonomy_request(
-    *,
-    blob_name: str,
-    query_id: str,
-    subject_id: str,
-    organism: str,
-    min_identity: float,
-    min_bitscore: float,
-    max_evalue: float,
-    min_query_cover: float,
-    include_lineage: bool,
-) -> bool:
-    return (
-        not blob_name.strip()
-        and not query_id.strip()
-        and not subject_id.strip()
-        and not organism.strip()
-        and min_identity == 0.0
-        and min_bitscore == 0.0
-        and max_evalue == 10.0
-        and min_query_cover == 0.0
-        and not include_lineage
-    )
-
-
-def _validate_result_blob_name(blob_name: str, job_id: str) -> None:
-    try:
-        validate_result_blob_name(blob_name, job_id)
-    except InvalidResultBlobName as exc:
-        detail: dict[str, str] = {"code": exc.code}
-        message = str(exc)
-        if message:
-            detail["message"] = message
-        raise HTTPException(400, detail=detail) from exc
 
 
 # --- Result download / aggregate / export ---
@@ -294,7 +172,7 @@ def blast_job_results(
 ) -> dict[str, Any]:
     """List result blobs for a BLAST job from storage."""
     _ensure_job_read_allowed(job_id, caller)
-    artifact = _read_ready_result_artifact(job_id, "result_manifest")
+    artifact = read_ready_result_artifact(job_id, "result_manifest")
     if artifact is not None:
         return artifact
     local_failure: dict[str, Any] | None = None
@@ -384,10 +262,10 @@ def blast_job_results_aggregate(
 ) -> dict[str, Any]:
     """Parse result blobs and return aggregate statistics for analytics."""
     _ensure_job_read_allowed(job_id, caller)
-    artifact = _read_ready_result_artifact(job_id, "result_aggregate")
+    artifact = read_ready_result_artifact(job_id, "result_aggregate")
     if artifact is not None:
         return artifact
-    _enqueue_result_artifact_backfill(job_id, "result_aggregate")
+    enqueue_result_artifact_backfill(job_id, "result_aggregate")
     from api.services import get_credential
 
     cred = get_credential()
@@ -411,7 +289,7 @@ def blast_job_results_aggregate(
             "stats": None,
         }
 
-    artifact_state = _result_artifact_state(job_id, "result_aggregate")
+    artifact_state = result_artifact_state(job_id, "result_aggregate")
     if not result_blobs:
         return {
             "job_id": job_id,
@@ -445,420 +323,6 @@ def blast_job_results_aggregate(
     return {**payload, **artifact_state, "source": "live_parse"}
 
 
-@router.get("/jobs/{job_id}/results/alignments")
-def blast_job_results_alignments(
-    job_id: str = Path(...),
-    subscription_id: str = Query(default=""),
-    resource_group: str = Query(default=""),
-    storage_account: str = Query(...),
-    blob_name: str = Query(default=""),
-    max_alignments: int = Query(default=50, ge=1, le=500),
-    page: int = Query(default=1, ge=1, le=10000),
-    page_size: int | None = Query(default=None, ge=1, le=500),
-    query_id: str = Query(default=""),
-    subject_id: str = Query(default=""),
-    organism: str = Query(default=""),
-    min_identity: float = Query(default=0.0, ge=0.0, le=100.0),
-    min_bitscore: float = Query(default=0.0, ge=0.0),
-    max_evalue: float = Query(default=10.0, ge=0.0),
-    min_query_cover: float = Query(default=0.0, ge=0.0, le=100.0),
-    sort_by: str = Query(
-        default="relevance", pattern=r"^(relevance|evalue|bitscore|pident|qcovs|length)$"
-    ),
-    sort_dir: str = Query(default="asc", pattern=r"^(asc|desc)$"),
-    caller: CallerIdentity = Depends(require_caller),
-) -> dict[str, Any]:
-    """Return parsed alignments from result files, optionally filtered.
-
-    With no `blob_name`, all parseable result blobs under the job prefix are
-    read up to the safety file cap. That keeps the Hits tab honest for split
-    jobs: it reports the page being viewed rather than showing the first blob
-    as if it represented the whole run.
-    """
-    _ensure_job_read_allowed(job_id, caller)
-    if _default_alignments_request(
-        blob_name=blob_name,
-        max_alignments=max_alignments,
-        page=page,
-        page_size=page_size,
-        query_id=query_id,
-        subject_id=subject_id,
-        organism=organism,
-        min_identity=min_identity,
-        min_bitscore=min_bitscore,
-        max_evalue=max_evalue,
-        min_query_cover=min_query_cover,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-    ):
-        artifact = _read_ready_result_artifact(job_id, "result_alignments")
-        if artifact is not None:
-            return artifact
-        _enqueue_result_artifact_backfill(job_id, "result_alignments")
-    from api.services import get_credential
-    from api.services.blast_results_parser import parse_blast_result_content
-    from api.services.storage_data import read_result_blob_text
-
-    cred = get_credential()
-    _maybe_open_local_storage_access(
-        cred,
-        subscription_id,
-        resource_group,
-        storage_account,
-        context="blast_job_results_alignments",
-    )
-
-    target_blob = blob_name.strip()
-    result_blobs: list[dict[str, Any]] = []
-    try:
-        if not target_blob:
-            result_blobs = list_parseable_result_blobs(storage_account, job_id)
-            if not result_blobs:
-                return {
-                    "job_id": job_id,
-                    "blob_name": "",
-                    "blob_names": [],
-                    "alignments": [],
-                    "degraded": True,
-                    "degraded_reason": "no_result_files",
-                    "message": "No result files",
-                    "total_hits": 0,
-                    "filtered_hits": 0,
-                    "returned": 0,
-                    "query_ids": [],
-                    "page": page,
-                    "page_size": page_size or max_alignments,
-                    "pages": 0,
-                    "files_parsed": 0,
-                    "total_files": 0,
-                    "read_failures": 0,
-                }
-        else:
-            _validate_result_blob_name(target_blob, job_id)
-            result_blobs = [{"name": target_blob}]
-    except HTTPException:
-        raise
-    except Exception as exc:
-        LOGGER.warning("results alignments: list failed: %s", type(exc).__name__)
-        return {
-            "job_id": job_id,
-            "blob_name": target_blob,
-            "blob_names": [],
-            "alignments": [],
-            "degraded": True,
-            "degraded_reason": "storage_unreachable",
-            "message": "Result storage is unreachable from the API.",
-            "total_hits": 0,
-            "filtered_hits": 0,
-            "returned": 0,
-            "query_ids": [],
-            "page": page,
-            "page_size": page_size or max_alignments,
-            "pages": 0,
-            "files_parsed": 0,
-            "total_files": 0,
-            "read_failures": 0,
-        }
-
-    all_hits: list[dict[str, Any]] = []
-    parsed_files = 0
-    read_failures = 0
-    hit_limit_reached = False
-    blob_names: list[str] = []
-    for blob_info in result_blobs[:RESULTS_MAX_FILES]:
-        if len(all_hits) >= RESULTS_ALIGNMENTS_MAX_HITS:
-            hit_limit_reached = True
-            break
-        blob_path = str(blob_info.get("name") or "")
-        if not blob_path:
-            continue
-        try:
-            content = read_result_blob_text(
-                cred,
-                storage_account,
-                "results",
-                blob_path,
-                max_bytes=RESULTS_ALIGNMENTS_MAX_BYTES,
-            )
-            parsed_hits = parse_blast_result_content(content)
-            remaining_hit_slots = RESULTS_ALIGNMENTS_MAX_HITS - len(all_hits)
-            all_hits.extend(
-                annotate_result_hit(hit, blob_path) for hit in parsed_hits[:remaining_hit_slots]
-            )
-            if len(parsed_hits) > remaining_hit_slots:
-                hit_limit_reached = True
-            parsed_files += 1
-            blob_names.append(blob_path)
-            if hit_limit_reached:
-                break
-        except Exception as exc:
-            read_failures += 1
-            LOGGER.warning(
-                "results alignments: failed to parse %s: %s", blob_path, type(exc).__name__
-            )
-
-    if parsed_files == 0 and read_failures > 0:
-        return {
-            "job_id": job_id,
-            "blob_name": target_blob,
-            "blob_names": blob_names,
-            "alignments": [],
-            "degraded": True,
-            "degraded_reason": "all_reads_failed",
-            "message": f"Failed to read any of {read_failures} result file(s).",
-            "total_hits": 0,
-            "filtered_hits": 0,
-            "returned": 0,
-            "query_ids": [],
-            "page": page,
-            "page_size": page_size or max_alignments,
-            "pages": 0,
-            "files_parsed": 0,
-            "total_files": len(result_blobs),
-            "read_failures": read_failures,
-            "truncated": len(result_blobs) > RESULTS_MAX_FILES,
-            "hit_limit_reached": False,
-        }
-
-    query_ids = sorted({str(h.get("qseqid", "")) for h in all_hits if h.get("qseqid")})
-
-    filtered: list[dict[str, Any]] = []
-    qid_filter = query_id.strip()
-    subject_filter = subject_id.strip()
-    organism_filter = organism.strip()
-    for hit in all_hits:
-        if result_hit_matches_filters(
-            hit,
-            query_id=qid_filter,
-            subject_id=subject_filter,
-            organism=organism_filter,
-            min_identity=min_identity,
-            min_bitscore=min_bitscore,
-            max_evalue=max_evalue,
-            min_query_cover=min_query_cover,
-        ):
-            filtered.append(hit)
-
-    rank_aggregates = result_hit_rank_aggregates(filtered) if sort_by == "relevance" else None
-    filtered.sort(key=lambda hit: result_hit_sort_key(hit, sort_by, sort_dir, rank_aggregates))
-    effective_page_size = page_size or max_alignments or RESULTS_DEFAULT_PAGE_SIZE
-    start = (page - 1) * effective_page_size
-    end = start + effective_page_size
-    page_hits = filtered[start:end]
-    page_count = (len(filtered) + effective_page_size - 1) // effective_page_size
-
-    return {
-        "job_id": job_id,
-        "blob_name": blob_names[0] if len(blob_names) == 1 else target_blob,
-        "blob_names": blob_names,
-        "alignments": page_hits,
-        "total_hits": len(all_hits),
-        "filtered_hits": len(filtered),
-        "returned": len(page_hits),
-        "query_ids": query_ids[:200],
-        "subject_aggregates": rollup_subject_aggregates(filtered),
-        "page": page,
-        "page_size": effective_page_size,
-        "pages": page_count,
-        "files_parsed": parsed_files,
-        "total_files": len(result_blobs),
-        "read_failures": read_failures,
-        "truncated": len(result_blobs) > RESULTS_MAX_FILES or hit_limit_reached,
-        "hit_limit_reached": hit_limit_reached,
-        "filters": {
-            "query_id": qid_filter or None,
-            "subject_id": subject_filter or None,
-            "organism": organism_filter or None,
-            "min_identity": min_identity,
-            "min_bitscore": min_bitscore,
-            "max_evalue": max_evalue,
-            "min_query_cover": min_query_cover,
-            "sort_by": sort_by,
-            "sort_dir": sort_dir,
-        },
-    }
-
-
-@router.get("/jobs/{job_id}/results/taxonomy")
-def blast_job_results_taxonomy(
-    job_id: str = Path(...),
-    subscription_id: str = Query(default=""),
-    resource_group: str = Query(default=""),
-    storage_account: str = Query(...),
-    blob_name: str = Query(default=""),
-    query_id: str = Query(default=""),
-    subject_id: str = Query(default=""),
-    organism: str = Query(default=""),
-    min_identity: float = Query(default=0.0, ge=0.0, le=100.0),
-    min_bitscore: float = Query(default=0.0, ge=0.0),
-    max_evalue: float = Query(default=10.0, ge=0.0),
-    min_query_cover: float = Query(default=0.0, ge=0.0, le=100.0),
-    include_lineage: bool = Query(default=False),
-    lineage_taxid_limit: int = Query(default=20, ge=1, le=100),
-    caller: CallerIdentity = Depends(require_caller),
-) -> dict[str, Any]:
-    """Server-side organism rollup of the BLAST hits.
-
-    Mirrors the NCBI "Taxonomy → Organism" report shape:
-
-    .. code-block:: json
-
-        {
-          "organisms": [
-            {"organism": "Monkeypox virus", "taxid": "10244",
-             "count": 99, "best_evalue": 0.0, "top_bitscore": 854.0},
-            ...
-          ],
-          "total_hits": 100,
-          "files_parsed": 3,
-          ...
-        }
-
-    The same query filters as ``/results/alignments`` are honoured so a
-    narrowing applied on the Descriptions tab carries over to Taxonomy.
-    Page size does NOT apply — taxonomy rollup is always over the
-    *filtered* (not paginated) hit set.
-    """
-    _ensure_job_read_allowed(job_id, caller)
-    if _default_taxonomy_request(
-        blob_name=blob_name,
-        query_id=query_id,
-        subject_id=subject_id,
-        organism=organism,
-        min_identity=min_identity,
-        min_bitscore=min_bitscore,
-        max_evalue=max_evalue,
-        min_query_cover=min_query_cover,
-        include_lineage=include_lineage,
-    ):
-        artifact = _read_ready_result_artifact(job_id, "result_taxonomy")
-        if artifact is not None:
-            return artifact
-        _enqueue_result_artifact_backfill(job_id, "result_taxonomy")
-    from api.services import get_credential
-    from api.services.blast_results_parser import parse_blast_result_content
-    from api.services.storage_data import read_result_blob_text
-
-    cred = get_credential()
-    _maybe_open_local_storage_access(
-        cred,
-        subscription_id,
-        resource_group,
-        storage_account,
-        context="blast_job_results_taxonomy",
-    )
-
-    target_blob = blob_name.strip()
-    result_blobs: list[dict[str, Any]] = []
-    if not target_blob:
-        try:
-            result_blobs = list_parseable_result_blobs(storage_account, job_id)
-        except Exception as exc:
-            LOGGER.warning("results taxonomy: list failed: %s", type(exc).__name__)
-            return {
-                "job_id": job_id,
-                "organisms": [],
-                "degraded": True,
-                "degraded_reason": "storage_unreachable",
-                "total_hits": 0,
-                "files_parsed": 0,
-                "total_files": 0,
-                "read_failures": 0,
-            }
-        if not result_blobs:
-            return {
-                "job_id": job_id,
-                "organisms": [],
-                "message": "No result files",
-                "total_hits": 0,
-                "files_parsed": 0,
-                "total_files": 0,
-                "read_failures": 0,
-            }
-    else:
-        _validate_result_blob_name(target_blob, job_id)
-        result_blobs = [{"name": target_blob}]
-
-    all_hits: list[dict[str, Any]] = []
-    parsed_files = 0
-    read_failures = 0
-    for blob_info in result_blobs[:RESULTS_MAX_FILES]:
-        if len(all_hits) >= RESULTS_ALIGNMENTS_MAX_HITS:
-            break
-        blob_path = str(blob_info.get("name") or "")
-        if not blob_path:
-            continue
-        try:
-            content = read_result_blob_text(
-                cred,
-                storage_account,
-                "results",
-                blob_path,
-                max_bytes=RESULTS_ALIGNMENTS_MAX_BYTES,
-            )
-            parsed_hits = parse_blast_result_content(content)
-            remaining = RESULTS_ALIGNMENTS_MAX_HITS - len(all_hits)
-            all_hits.extend(annotate_result_hit(hit, blob_path) for hit in parsed_hits[:remaining])
-            parsed_files += 1
-        except Exception as exc:
-            read_failures += 1
-            LOGGER.warning(
-                "results taxonomy: failed to parse %s: %s",
-                blob_path,
-                type(exc).__name__,
-            )
-
-    if parsed_files == 0 and read_failures > 0:
-        return {
-            "job_id": job_id,
-            "organisms": [],
-            "degraded": True,
-            "degraded_reason": "all_reads_failed",
-            "message": f"Failed to read any of {read_failures} result file(s).",
-            "total_hits": 0,
-            "files_parsed": 0,
-            "total_files": len(result_blobs),
-            "read_failures": read_failures,
-        }
-
-    qid_filter = query_id.strip()
-    subject_filter = subject_id.strip()
-    organism_filter = organism.strip()
-    filtered = [
-        hit
-        for hit in all_hits
-        if result_hit_matches_filters(
-            hit,
-            query_id=qid_filter,
-            subject_id=subject_filter,
-            organism=organism_filter,
-            min_identity=min_identity,
-            min_bitscore=min_bitscore,
-            max_evalue=max_evalue,
-            min_query_cover=min_query_cover,
-        )
-    ]
-
-    organisms = rollup_taxonomy(filtered)
-    lineage_meta = {"requested": include_lineage, "looked_up": 0, "failed": 0}
-    if include_lineage and organisms:
-        organisms, lineage_meta = enrich_taxonomy_with_lineage(
-            organisms, taxid_limit=lineage_taxid_limit
-        )
-
-    return {
-        "job_id": job_id,
-        "organisms": organisms,
-        "total_hits": len(all_hits),
-        "filtered_hits": len(filtered),
-        "files_parsed": parsed_files,
-        "total_files": len(result_blobs),
-        "read_failures": read_failures,
-        "truncated": len(result_blobs) > RESULTS_MAX_FILES,
-        "lineage": lineage_meta,
-    }
-
-
 @router.get("/jobs/{job_id}/results/download")
 def blast_job_results_download(
     job_id: str = Path(...),
@@ -870,7 +334,7 @@ def blast_job_results_download(
 ) -> StreamingResponse:
     """Stream a single result blob through the api sidecar."""
     _ensure_job_read_allowed(job_id, caller)
-    _validate_result_blob_name(blob_name, job_id)
+    validate_result_blob_for_job(blob_name, job_id)
     from api.services import get_credential
     from api.services.storage_data import (
         result_media_type,
