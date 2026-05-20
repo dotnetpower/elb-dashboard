@@ -236,14 +236,8 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           image: apiImage
           command: [ 'python3', '/app/api/wait_redis.py' ]
           args: [
-            'celery'
-            '-A'
-            'api.celery_app:celery_app'
-            'worker'
-            '--loglevel=info'
-            '-Q'
-            'default,acr,azure,blast,storage'
-            '--concurrency=2'
+            'python3'
+            '/app/api/run_celery_workers.py'
           ]
           resources: {
             cpu: json('0.5')

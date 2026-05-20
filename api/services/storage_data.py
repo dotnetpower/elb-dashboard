@@ -491,9 +491,17 @@ def list_databases(
         # Default sharding fields so the frontend can rely on their presence.
         info.setdefault("sharded", False)
         info.setdefault("shard_sets", [])
+        info.setdefault("shard_source_version", None)
+        info.setdefault("shards_stale", False)
         info.setdefault("sharding_in_progress", False)
         info.setdefault("sharding_started_at", None)
         info.setdefault("sharding_error", None)
+        info.setdefault("update_in_progress", False)
+        info.setdefault("updating_to_source_version", None)
+        info.setdefault("update_started_at", None)
+        info.setdefault("update_completed_at", None)
+        info.setdefault("update_error", None)
+        info.setdefault("update_failed_at", None)
         if db_name in blastdb_json_blobs:
             try:
                 blast_meta = _json.loads(blastdb_json_blobs[db_name])
@@ -506,6 +514,17 @@ def list_databases(
                     value = blast_meta.get(source)
                     if isinstance(value, (int, float)) and value > 0:
                         info[target] = int(value)
+                for source, target in (
+                    ("title", "title"),
+                    ("description", "description"),
+                    ("dbtype", "molecule_type"),
+                    ("last-updated", "update_date"),
+                    ("last_updated", "update_date"),
+                    ("date", "update_date"),
+                ):
+                    value = blast_meta.get(source)
+                    if isinstance(value, str) and value.strip():
+                        info[target] = value.strip()
             except Exception as exc:
                 LOGGER.debug("BLAST DB .njs metadata parse skipped for %s: %s", db_name, exc)
         if db_name in metadata_blobs:
@@ -530,6 +549,18 @@ def list_databases(
                             if isinstance(n, (int, str)) and str(n).isdigit()
                         }
                     )
+                shard_source_version = meta.get("shard_source_version")
+                if isinstance(shard_source_version, str) and shard_source_version.strip():
+                    info["shard_source_version"] = shard_source_version.strip()
+                elif info.get("sharded") and info.get("source_version"):
+                    # Legacy metadata predates explicit shard generation tagging; treat
+                    # the existing layouts as belonging to the recorded DB generation.
+                    info["shard_source_version"] = info.get("source_version")
+                db_source_version = str(info.get("source_version") or "")
+                shard_version = str(info.get("shard_source_version") or "")
+                info["shards_stale"] = bool(
+                    info.get("sharded") and db_source_version and shard_version != db_source_version
+                )
                 # In-flight shard state surfaced from the daemon-thread
                 # writer in /api/blast/databases/{db}/shard. The SPA
                 # renders these directly so a page reload still shows
@@ -540,6 +571,18 @@ def list_databases(
                     info["sharding_started_at"] = meta["sharding_started_at"]
                 if isinstance(meta.get("sharding_error"), str):
                     info["sharding_error"] = meta["sharding_error"][:300]
+                if isinstance(meta.get("update_in_progress"), bool):
+                    info["update_in_progress"] = meta["update_in_progress"]
+                for key in (
+                    "updating_to_source_version",
+                    "update_started_at",
+                    "update_completed_at",
+                    "update_failed_at",
+                ):
+                    if isinstance(meta.get(key), str):
+                        info[key] = meta[key]
+                if isinstance(meta.get("update_error"), str):
+                    info["update_error"] = meta["update_error"][:300]
                 # Allow metadata to override total_bytes if the prepare-db
                 # pipeline computed it more precisely than blob enumeration
                 # (e.g. for very large multi-volume DBs).
@@ -564,8 +607,7 @@ def list_databases(
                     db_source_version = str(info.get("source_version") or "")
                     oracle_source_version = str(oracle.get("source_version") or "")
                     source_version_stale = bool(
-                        db_source_version
-                        and oracle_source_version != db_source_version
+                        db_source_version and oracle_source_version != db_source_version
                     )
                     info["db_order_oracle"] = {
                         "status": (

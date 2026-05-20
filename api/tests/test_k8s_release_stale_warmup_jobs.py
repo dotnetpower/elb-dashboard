@@ -15,10 +15,16 @@ from unittest.mock import MagicMock, patch
 from api.services import k8s_monitoring as km
 
 
-def _make_job(name: str, node: str) -> dict[str, Any]:
+def _make_job(name: str, node: str, source_version: str = "") -> dict[str, Any]:
+    annotations = {"elb.dashboard/source-version": source_version} if source_version else {}
     return {
-        "metadata": {"name": name},
-        "spec": {"template": {"spec": {"nodeName": node}}},
+        "metadata": {"name": name, "annotations": annotations},
+        "spec": {
+            "template": {
+                "metadata": {"annotations": annotations},
+                "spec": {"nodeName": node},
+            }
+        },
     }
 
 
@@ -35,9 +41,11 @@ def _patch_session(jobs: list[dict[str, Any]], delete_status: int = 200):
     session.get.return_value = list_response
     session.delete.return_value = delete_response
     session.close = MagicMock()
-    return session, patch.object(
-        km, "_get_k8s_session", return_value=(session, "https://aks")
-    ), patch.object(km, "_namespace_or_default", return_value="default")
+    return (
+        session,
+        patch.object(km, "_get_k8s_session", return_value=(session, "https://aks")),
+        patch.object(km, "_namespace_or_default", return_value="default"),
+    )
 
 
 def test_release_stale_warmup_jobs_deletes_only_jobs_on_dead_nodes() -> None:
@@ -125,3 +133,31 @@ def test_release_stale_warmup_jobs_reports_partial_on_delete_error() -> None:
     assert out["deleted"] == []
     assert out["errors"][0]["name"] == "warm-core-nt-00"
     assert out["errors"][0]["status_code"] == 500
+
+
+def test_release_stale_warmup_jobs_deletes_jobs_from_old_source_version() -> None:
+    jobs = [
+        _make_job("warm-core-nt-00", "node-a", source_version="old"),
+        _make_job("warm-core-nt-01", "node-b", source_version="new"),
+        _make_job("warm-core-nt-02", "node-c"),
+    ]
+    _session, session_patch, ns_patch = _patch_session(jobs)
+    with session_patch, ns_patch:
+        out = km.k8s_release_stale_warmup_jobs(
+            MagicMock(),
+            "sub",
+            "rg",
+            "aks",
+            "core_nt",
+            current_node_names=["node-a", "node-b", "node-c"],
+            current_source_version="new",
+        )
+
+    assert out["status"] == "released"
+    assert [item["name"] for item in out["deleted"]] == [
+        "warm-core-nt-00",
+        "warm-core-nt-02",
+    ]
+    assert out["deleted"][0]["stale_source_version"] == "old"
+    assert out["deleted"][1]["stale_source_version"] == ""
+    assert out["kept"] == ["warm-core-nt-01"]

@@ -96,6 +96,7 @@ export interface BlastJobSummary {
    * pre-date payload persistence; callers must null-check.
    */
   payload?: Record<string, unknown>;
+  provenance?: BlastProvenanceBundle;
   config_snapshot?: Record<string, unknown>;
   infrastructure?: {
     subscription_id?: string;
@@ -106,6 +107,7 @@ export interface BlastJobSummary {
     cluster_name?: string;
     terminal_vm?: string;
   };
+  database_metadata?: BlastDatabaseMetadata;
   parent_job_id?: string;
   split_children?: {
     child_count: number;
@@ -131,6 +133,44 @@ export interface BlastJobSummary {
   error?: string;
 }
 
+export interface BlastExecutionStepsSnapshot {
+  schema_version: number;
+  job_id: string;
+  status: string;
+  phase: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  artifact_state?: "ready" | "missing" | "inline_fallback" | string;
+  custom_status?: unknown;
+  output?: unknown;
+}
+
+export interface BlastProvenanceBundle {
+  schema_version: number;
+  job_id: string;
+  artifact?: { container?: string; path?: string };
+  blast?: { program?: string; version?: string };
+  database?: Record<string, unknown>;
+  query?: Record<string, unknown>;
+  options?: Record<string, unknown>;
+  compatibility?: BlastCompatibilityContract | null;
+  precision?: BlastPrecisionReport | null;
+}
+
+export interface BlastDatabaseMetadata {
+  name: string;
+  database: string;
+  title?: string;
+  description?: string;
+  molecule_type?: string;
+  update_date?: string;
+  number_of_sequences?: number;
+  number_of_letters?: number;
+  source_version?: string;
+  downloaded_at?: string;
+  source?: string;
+}
+
 export interface BlastResultFile {
   file_id?: string;
   name: string;
@@ -138,6 +178,35 @@ export interface BlastResultFile {
   last_modified: string | null;
   format?: string | null;
   source?: string | null;
+}
+
+export interface BlastResultManifest {
+  schema_version: number;
+  job_id: string;
+  status: "available" | "no_result_files" | "degraded" | string;
+  source: string;
+  degraded_reason?: string | null;
+  file_count: number;
+  parseable_count: number;
+  files: Array<{
+    file_id: string;
+    name: string;
+    size?: number | null;
+    last_modified?: string | null;
+    format: string;
+    parseable: boolean;
+    source?: string | null;
+  }>;
+}
+
+export interface BlastJobEvent {
+  id: string;
+  job_id: string;
+  event: string;
+  phase: string;
+  status: string;
+  timestamp: string;
+  payload: Record<string, unknown>;
 }
 
 export interface BlastDatabase {
@@ -159,12 +228,20 @@ export interface BlastDatabase {
   sharded?: boolean;
   /** Sorted list of preset shard counts that have been pre-built (e.g. [1,2,3,4,5,6,8,10]). */
   shard_sets?: number[];
+  shard_source_version?: string | null;
+  shards_stale?: boolean;
   /** True while a /shard daemon thread (or warmup auto-shard) is running. */
   sharding_in_progress?: boolean;
   /** ISO timestamp set when sharding starts; cleared on completion. */
   sharding_started_at?: string | null;
   /** Sanitised error string from the last failed sharding attempt; cleared on next start. */
   sharding_error?: string | null;
+  update_in_progress?: boolean;
+  updating_to_source_version?: string | null;
+  update_started_at?: string | null;
+  update_completed_at?: string | null;
+  update_error?: string | null;
+  update_failed_at?: string | null;
   db_order_oracle?: {
     status: "ready" | "building" | "failed" | string;
     run_id?: string | null;
@@ -280,6 +357,38 @@ export interface BlastWarmupPlan {
   recommendations: string[];
 }
 
+export interface BlastPrecisionReport {
+  requested_mode: "off" | "approximate" | "precise";
+  effective_mode: "off" | "approximate" | "precise";
+  precision_level:
+    | "full"
+    | "precise_single_query"
+    | "precise_tabular"
+    | "precise_tabular_split"
+    | "precise_xml"
+    | "precise_xml_split"
+    | "approximate"
+    | "blocked";
+  eligible: boolean;
+  merge_strategy: string;
+  required_options: Record<string, unknown>;
+  blocking_errors: string[];
+  warnings: string[];
+}
+
+export interface BlastCompatibilityContract {
+  mode: "precise" | "calibration_required" | "approximate";
+  level: string;
+  eligible: boolean;
+  database: string;
+  search_space_source: string;
+  searchsp?: number | null;
+  evidence?: Record<string, unknown> | null;
+  precision?: BlastPrecisionReport | null;
+  blocking_errors: string[];
+  warnings: string[];
+}
+
 export type BlastHitNumeric = number | string;
 
 export interface BlastHit {
@@ -368,6 +477,8 @@ export const blastApi = {
     max_target_seqs?: number;
     outfmt?: number;
     query_data?: string;
+    query_effective_search_spaces?: number[];
+    query_count?: number;
     shard_sets?: number[];
     sharding_mode?: "off" | "approximate" | "precise";
     word_size?: number;
@@ -384,24 +495,8 @@ export const blastApi = {
         action_params?: Record<string, string>;
         severity?: string;
         suggested_dbs?: string[];
-        precision?: {
-          requested_mode: "off" | "approximate" | "precise";
-          effective_mode: "off" | "approximate" | "precise";
-          precision_level:
-            | "full"
-            | "precise_single_query"
-            | "precise_tabular"
-            | "precise_tabular_split"
-            | "precise_xml"
-            | "precise_xml_split"
-            | "approximate"
-            | "blocked";
-          eligible: boolean;
-          merge_strategy: string;
-          required_options: Record<string, unknown>;
-          blocking_errors: string[];
-          warnings: string[];
-        };
+        precision?: BlastPrecisionReport;
+        compatibility?: BlastCompatibilityContract;
         query_metadata?: {
           query_count: number;
           total_letters: number;
@@ -413,6 +508,7 @@ export const blastApi = {
       }>;
       critical_blockers: number;
       summary: string;
+      compatibility?: BlastCompatibilityContract | null;
     }>("/blast/pre-flight", req),
 
   submit: (req: BlastSubmitRequest) => api.post<BlastSubmitResponse>("/blast/jobs", req),
@@ -469,6 +565,32 @@ export const blastApi = {
       `/blast/jobs/${encodeURIComponent(jobId)}${history ? "?history=1" : ""}`,
     ),
 
+  getExecutionSteps: (jobId: string) =>
+    api.get<BlastExecutionStepsSnapshot>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/execution-steps`,
+    ),
+
+  createLogStreamTicket: (
+    jobId: string,
+    context?: {
+      subscriptionId?: string;
+      resourceGroup?: string;
+      clusterName?: string;
+      namespace?: string;
+      tailLines?: number;
+    },
+  ) =>
+    api.post<{ ticket: string; ttl_seconds: number }>(
+      `/blast/logs/${encodeURIComponent(jobId)}/ticket`,
+      {
+        subscription_id: context?.subscriptionId,
+        resource_group: context?.resourceGroup,
+        cluster_name: context?.clusterName,
+        namespace: context?.namespace ?? "default",
+        tail_lines: context?.tailLines ?? 120,
+      },
+    ),
+
   cancelJob: (
     jobId: string,
     context?: {
@@ -515,10 +637,16 @@ export const blastApi = {
     api.get<{
       job_id: string;
       files: BlastResultFile[];
+      manifest?: BlastResultManifest;
       public_access_disabled?: boolean;
       message?: string;
     }>(
       `/blast/jobs/${encodeURIComponent(jobId)}/results?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
+    ),
+
+  listEvents: (jobId: string) =>
+    api.get<{ job_id: string; events: BlastJobEvent[] }>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/events`,
     ),
 
   downloadResult: (

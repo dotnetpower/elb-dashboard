@@ -76,6 +76,13 @@ scripts/dev/local-run.sh compose-local -- up --build
 scripts/dev/local-run.sh compose-local -- up -d --build
 ```
 
+Host-mode API startup keeps `127.0.0.1:8085` stable because the Vite dev
+server and smoke scripts expect that port. `local-run.sh api` takes a per-port
+startup lock and checks `/api/health` before invoking uvicorn: if the local API
+is already healthy, the command exits successfully instead of writing an opaque
+`Address already in use` failure; if another process owns the port, the log
+prints the listener details from `ss` or `lsof`.
+
 Docker Compose logging:
 
 - foreground `compose-full -- up --build` writes `compose-full.log`;

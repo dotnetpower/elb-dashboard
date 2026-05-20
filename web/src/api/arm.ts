@@ -3,7 +3,72 @@ import { notifyAuthSessionIssue } from "@/auth/sessionEvents";
 import {
   InteractionRequiredAuthError,
   BrowserAuthError,
+  type AccountInfo,
 } from "@azure/msal-browser";
+
+interface ArmTokenCacheEntry {
+  accountKey: string;
+  accessToken: string;
+  expiresAtMs: number;
+}
+
+const ARM_TOKEN_REFRESH_SKEW_MS = 60_000;
+
+let cachedArmToken: ArmTokenCacheEntry | null = null;
+let armTokenInFlight:
+  | { accountKey: string; promise: Promise<ArmTokenCacheEntry> }
+  | null = null;
+
+function accountCacheKey(account: AccountInfo): string {
+  return account.homeAccountId || account.localAccountId || account.username;
+}
+
+function usableCachedArmToken(accountKey: string): string | null {
+  if (!cachedArmToken || cachedArmToken.accountKey !== accountKey) return null;
+  if (cachedArmToken.expiresAtMs - ARM_TOKEN_REFRESH_SKEW_MS <= Date.now()) {
+    cachedArmToken = null;
+    return null;
+  }
+  return cachedArmToken.accessToken;
+}
+
+function clearArmAccessTokenCache(): void {
+  cachedArmToken = null;
+  armTokenInFlight = null;
+}
+
+async function acquireFreshArmToken(account: AccountInfo): Promise<string> {
+  const accountKey = accountCacheKey(account);
+  if (armTokenInFlight?.accountKey === accountKey) {
+    return (await armTokenInFlight.promise).accessToken;
+  }
+
+  let promise: Promise<ArmTokenCacheEntry>;
+  promise = msalInstance
+    .acquireTokenSilent({
+      ...armLoginRequest,
+      account,
+    })
+    .then((result) => {
+      const expiresAtMs = result.expiresOn?.getTime() ?? 0;
+      const entry: ArmTokenCacheEntry = {
+        accountKey,
+        accessToken: result.accessToken,
+        expiresAtMs,
+      };
+      if (expiresAtMs - ARM_TOKEN_REFRESH_SKEW_MS > Date.now()) {
+        cachedArmToken = entry;
+      }
+      return entry;
+    })
+    .finally(() => {
+      if (armTokenInFlight?.promise === promise) {
+        armTokenInFlight = null;
+      }
+    });
+  armTokenInFlight = { accountKey, promise };
+  return (await promise).accessToken;
+}
 
 export interface SubscriptionSummary {
   subscriptionId: string;
@@ -28,12 +93,11 @@ async function getArmAccessToken(): Promise<string> {
     notifyAuthSessionIssue("not_signed_in");
     throw new Error("Session expired. Please sign in again.");
   }
+  const accountKey = accountCacheKey(account);
+  const cached = usableCachedArmToken(accountKey);
+  if (cached) return cached;
   try {
-    const result = await msalInstance.acquireTokenSilent({
-      ...armLoginRequest,
-      account,
-    });
-    return result.accessToken;
+    return await acquireFreshArmToken(account);
   } catch (err) {
     // If another interaction is already in progress, wait and retry once.
     if (
@@ -41,11 +105,8 @@ async function getArmAccessToken(): Promise<string> {
       (err as { errorCode?: string }).errorCode === "interaction_in_progress"
     ) {
       await new Promise((r) => setTimeout(r, 2000));
-      const retry = await msalInstance.acquireTokenSilent({
-        ...armLoginRequest,
-        account,
-      });
-      return retry.accessToken;
+      clearArmAccessTokenCache();
+      return await acquireFreshArmToken(account);
     }
     if (err instanceof InteractionRequiredAuthError) {
       notifyAuthSessionIssue("interaction_required");
@@ -72,7 +133,10 @@ export async function listSubscriptions(): Promise<SubscriptionSummary[]> {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) {
-      if (resp.status === 401) notifyAuthSessionIssue("arm_unauthorized");
+      if (resp.status === 401) {
+        clearArmAccessTokenCache();
+        notifyAuthSessionIssue("arm_unauthorized");
+      }
       throw new Error(
         `ARM subscriptions list failed: HTTP ${resp.status} ${await resp.text()}`,
       );
@@ -105,7 +169,10 @@ async function armPagedList<T>(initialUrl: string): Promise<T[]> {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) {
-      if (resp.status === 401) notifyAuthSessionIssue("arm_unauthorized");
+      if (resp.status === 401) {
+        clearArmAccessTokenCache();
+        notifyAuthSessionIssue("arm_unauthorized");
+      }
       throw new Error(
         `ARM list failed: HTTP ${resp.status} ${await resp.text()}`,
       );

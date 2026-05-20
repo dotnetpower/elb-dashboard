@@ -25,6 +25,29 @@ LOGGER = logging.getLogger(__name__)
 _TABLE_ENDPOINT_ENV = "AZURE_TABLE_ENDPOINT"  # eg https://stelb*.table.core.windows.net
 _ENSURED_TABLES: set[tuple[str, str]] = set()
 _JOB_SCHEMA_VERSION = 2
+_JOBSTATE_SUMMARY_SELECT = [
+    "PartitionKey",
+    "RowKey",
+    "schema_version",
+    "type",
+    "status",
+    "phase",
+    "owner_oid",
+    "tenant_id",
+    "parent_job_id",
+    "task_id",
+    "error_code",
+    "created_at",
+    "updated_at",
+    "job_title",
+    "program",
+    "db",
+    "query_label",
+    "subscription_id",
+    "resource_group",
+    "cluster_name",
+    "storage_account",
+]
 
 
 def _payload_value(payload: dict[str, Any] | None, *keys: str) -> Any:
@@ -275,6 +298,20 @@ class JobStateRepository:
                 return None
         return JobState.from_entity(dict(e))
 
+    def get_summary(self, job_id: str) -> JobState | None:
+        """Return a job row without the large ``payload_json`` property."""
+        with self._state_client() as t:
+            try:
+                e = t.get_entity(
+                    partition_key=job_id,
+                    row_key="current",
+                    select=_JOBSTATE_SUMMARY_SELECT,
+                )
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+                return None
+        return JobState.from_entity(dict(e))
+
     def get_many(self, job_ids: list[str]) -> dict[str, JobState]:
         """Batch lookup for N job_ids using a single OData query.
 
@@ -361,7 +398,13 @@ class JobStateRepository:
         )
         return updated
 
-    def list_for_owner(self, owner_oid: str, limit: int = 50) -> list[JobState]:
+    def list_for_owner(
+        self,
+        owner_oid: str,
+        limit: int = 50,
+        *,
+        include_payload: bool = True,
+    ) -> list[JobState]:
         """Return jobs owned by ``owner_oid`` plus cluster-shared rows.
 
         Rows with ``owner_oid=""`` are treated as cluster-shared: typically
@@ -382,10 +425,13 @@ class JobStateRepository:
         with self._state_client() as t:
             rows = []
             try:
+                kwargs: dict[str, Any] = {"results_per_page": limit}
+                if not include_payload:
+                    kwargs["select"] = _JOBSTATE_SUMMARY_SELECT
                 entities = t.query_entities(
                     f"(owner_oid eq '{safe_oid}' or owner_oid eq '') "
                     "and status ne 'deleted'",
-                    results_per_page=limit,
+                    **kwargs,
                 )
                 for e in entities:
                     rows.append(JobState.from_entity(dict(e)))

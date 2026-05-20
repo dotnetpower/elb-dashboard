@@ -5,6 +5,7 @@ from api.routes._blast_shared import (
     _normalise_blast_submit_body,
     _submit_options_from_body,
 )
+from api.services.blast_submit_payload import canonical_execution_config
 
 
 def test_submit_options_forward_acr_fields() -> None:
@@ -84,6 +85,59 @@ def test_normalise_submit_body_records_forced_local_ssd() -> None:
 
     assert normalised["use_local_ssd"] is True
     assert normalised["options"]["use_local_ssd"] is True
+
+
+def test_normalise_submit_body_overrides_trusted_submit_metadata() -> None:
+    body = {
+        "resource_group": "rg-elb",
+        "cluster_name": "elb-cluster",
+        "storage_account": "elbstg01",
+        "program": "blastn",
+        "database": "core_nt",
+        "query_file": "queries/q.fa",
+        "submission_source": "external_api",
+        "external_correlation_id": "caller-supplied",
+        "priority": 80,
+        "resource_profile": "widepool",
+        "idempotency_key": "req-1",
+    }
+
+    normalised = _normalise_blast_submit_body(body, job_id="job-1")
+
+    assert normalised["submission_source"] == "dashboard"
+    assert normalised["external_correlation_id"] == "job-1"
+    assert normalised["priority"] == 80
+    assert normalised["resource_profile"] == "widepool"
+    assert normalised["idempotency_key"] == "req-1"
+    assert normalised["canonical_request"]["metadata"]["submission_source"] == "dashboard"
+
+
+def test_ui_and_openapi_submit_shapes_share_execution_config() -> None:
+    query = ">q1\nATGCATGCATGC\n"
+    ui_payload = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_data": query,
+        "outfmt": 5,
+        "word_size": 28,
+        "low_complexity_filter": True,
+        "evalue": 10.0,
+        "max_target_seqs": 500,
+    }
+    openapi_payload = {
+        "program": "blastn",
+        "db": "core_nt",
+        "query_fasta": query,
+        "options": {
+            "outfmt": 5,
+            "word_size": 28,
+            "dust": True,
+            "evalue": 10.0,
+            "max_target_seqs": 500,
+        },
+    }
+
+    assert canonical_execution_config(ui_payload) == canonical_execution_config(openapi_payload)
 
 
 def test_web_blast_searchsp_default_applies_for_core_nt() -> None:

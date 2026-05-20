@@ -112,6 +112,28 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     isJobFailed: phaseInfo.isJobFailed,
   });
 
+  const executionStepsQuery = useQuery({
+    queryKey: ["blast-execution-steps", jobId],
+    queryFn: () => blastApi.getExecutionSteps(jobId!),
+    enabled: Boolean(jobId && job && TERMINAL_PHASES.has(phaseInfo.phase)),
+    staleTime: 10_000,
+    refetchInterval: (q) => {
+      const state = q.state.data?.artifact_state;
+      if (!state || state === "ready" || state === "inline_fallback") return false;
+      return 5_000;
+    },
+    retry: 3,
+  });
+
+  const executionStepsJob =
+    job && executionStepsQuery.data
+      ? {
+          ...job,
+          custom_status: executionStepsQuery.data.custom_status ?? job.custom_status,
+          output: executionStepsQuery.data.output ?? job.output,
+        }
+      : job;
+
   const actions = useBlastResultActions({
     jobId,
     subscriptionId,
@@ -157,10 +179,13 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     subscriptionId,
     storageAccount,
     resourceGroup,
+    clusterName,
     // queries
     jobQuery,
     resultsQuery,
+    executionStepsQuery,
     job,
+    executionStepsJob,
     // derived
     ...split,
     publicAccessDisabled,

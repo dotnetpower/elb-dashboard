@@ -61,6 +61,14 @@ export type BlastResultsTab =
   | "files"
   | "run";
 
+const RESULT_TABS = new Set<BlastResultsTab>([
+  "descriptions",
+  "graphic",
+  "alignments",
+  "taxonomy",
+  "files",
+]);
+
 export const DEFAULT_BLAST_TAB: BlastResultsTab = "descriptions";
 
 export function resolveBlastResultsTab(value: string | null): BlastResultsTab {
@@ -79,6 +87,7 @@ export function resolveBlastResultsTab(value: string | null): BlastResultsTab {
 
 export interface BlastResultsTabsProps {
   active: BlastResultsTab;
+  resultsPending?: boolean;
 }
 
 /**
@@ -91,7 +100,7 @@ export interface BlastResultsTabsProps {
  * page reloads and we keep React Router's back/forward behaviour for
  * the in-page navigation.
  */
-export function BlastResultsTabs({ active }: BlastResultsTabsProps) {
+export function BlastResultsTabs({ active, resultsPending = false }: BlastResultsTabsProps) {
   const [searchParams] = useSearchParams();
 
   return (
@@ -138,6 +147,22 @@ export function BlastResultsTabs({ active }: BlastResultsTabsProps) {
           >
             {tab.icon}
             {tab.label}
+            {resultsPending && RESULT_TABS.has(tab.key) && (
+              <span
+                style={{
+                  marginLeft: 2,
+                  padding: "1px 5px",
+                  borderRadius: 999,
+                  border: "1px solid color-mix(in srgb, var(--accent) 35%, transparent)",
+                  color: "var(--accent)",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  lineHeight: 1.4,
+                }}
+              >
+                Running
+              </span>
+            )}
           </Link>
         );
       })}

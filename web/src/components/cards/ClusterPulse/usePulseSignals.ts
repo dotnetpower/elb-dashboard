@@ -20,7 +20,7 @@ import {
   jobClusterName,
   toJobRowView,
 } from "@/components/cards/ClusterBento/jobMapping";
-import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/atoms";
+import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/jobTypes";
 
 export const JOB_PREVIEW = 4;
 const REQUEST_METRICS_WINDOW_SEC = 900; // 15 min

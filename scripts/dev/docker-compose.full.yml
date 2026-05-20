@@ -262,14 +262,8 @@ services:
     command:
       - python3
       - /app/api/wait_redis.py
-      - celery
-      - -A
-      - api.celery_app:celery_app
-      - worker
-      - --loglevel=info
-      - -Q
-      - default,acr,azure,blast,storage
-      - --concurrency=2
+      - python3
+      - /app/api/run_celery_workers.py
     environment:
       LOG_LEVEL: DEBUG
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}

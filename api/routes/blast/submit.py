@@ -1,4 +1,4 @@
-"""/api/blast submit, pre-flight, and pending lab-tool routes."""
+"""/api/blast submit and pending lab-tool routes."""
 
 from __future__ import annotations
 
@@ -11,236 +11,89 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 
 from api.auth import CallerIdentity, require_caller
-from api.routes._blast_shared import (
-    _apply_web_blast_searchsp_default,
-    _normalise_blast_submit_body,
-    _stub_log,
-)
+from api.routes._blast_shared import _normalise_blast_submit_body, _stub_log
 from api.routes.blast.common import LAB_TOOL_PENDING
+from api.services.blast_submit_payload import (
+    canonical_submit_metadata,
+    canonical_submit_snapshot,
+    submit_contracts,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-@router.post("/pre-flight")
-def blast_pre_flight(
-    body: dict[str, Any] = Body(...),
-    caller: CallerIdentity = Depends(require_caller),
-) -> dict[str, Any]:
-    """Run pre-flight checks before BLAST submit.
-
-    Validates that the required infrastructure is in place:
-    AKS cluster running, storage accessible, database exists, query valid.
-    """
-    checks: list[dict[str, Any]] = []
-    critical = 0
-
-    sub = body.get("subscription_id", "")
-    rg = body.get("resource_group", "")
-    cluster = body.get("cluster_name") or body.get("aks_cluster_name") or ""
-    storage = body.get("storage_account", "")
-    db = body.get("db") or body.get("database", "")
-    raw_options = body.get("options") if isinstance(body.get("options"), dict) else {}
-    precision_options = {**raw_options}
-    for key in (
-        "additional_options",
-        "allow_approximate_sharding",
-        "db_auto_partition",
-        "db_partitions",
-        "db_partition_prefix",
-        "db_effective_search_space",
-        "db_total_letters",
-        "outfmt",
-        "query_effective_search_spaces",
-        "searchsp",
-        "sharding_mode",
-    ):
-        if key in body:
-            if key == "searchsp":
-                precision_options.setdefault("db_effective_search_space", body[key])
-            else:
-                precision_options[key] = body[key]
-    _apply_web_blast_searchsp_default(str(db), precision_options)
-
-    # 1. AKS cluster check
-    try:
-        from api.services import get_credential
-        from api.services.monitoring import list_aks_clusters
-
-        cred = get_credential()
-        clusters = list_aks_clusters(cred, sub, rg)
-        found = next((c for c in clusters if c.get("name") == cluster), None)
-        if not found:
-            checks.append(
-                {
-                    "id": "aks_cluster",
-                    "status": "fail",
-                    "title": "AKS Cluster",
-                    "detail": f"Cluster '{cluster}' not found in '{rg}'",
-                    "severity": "critical",
-                }
-            )
-            critical += 1
-        elif found.get("power_state") != "Running":
-            checks.append(
-                {
-                    "id": "aks_cluster",
-                    "status": "fail",
-                    "title": "AKS Cluster",
-                    "detail": f"Cluster is {found.get('power_state', 'unknown')}. Start it first.",
-                    "severity": "critical",
-                    "action": "Start cluster",
-                    "action_type": "start_cluster",
-                }
-            )
-            critical += 1
-        else:
-            checks.append(
-                {
-                    "id": "aks_cluster",
-                    "status": "pass",
-                    "title": "AKS Cluster",
-                    "detail": f"{cluster} is running ({found.get('node_count', '?')} nodes)",
-                }
-            )
-    except Exception as exc:
-        checks.append(
-            {
-                "id": "aks_cluster",
-                "status": "warn",
-                "title": "AKS Cluster",
-                "detail": f"Could not verify: {type(exc).__name__}",
-            }
+def _submit_job_id(body: dict[str, Any], caller: CallerIdentity) -> str:
+    idempotency_key = body.get("idempotency_key")
+    if isinstance(idempotency_key, str) and 0 < len(idempotency_key) <= 256:
+        scope = ":".join(
+            [
+                caller.tenant_id or "tenant",
+                caller.object_id or "caller",
+                idempotency_key,
+            ]
         )
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"elb-dashboard:blast-submit:{scope}"))
+    return str(uuid.uuid4())
 
-    # 2. Storage check
-    if storage:
-        checks.append(
-            {
-                "id": "storage",
-                "status": "pass",
-                "title": "Storage Account",
-                "detail": f"{storage} configured",
-            }
-        )
-    else:
-        checks.append(
-            {
-                "id": "storage",
-                "status": "fail",
-                "title": "Storage Account",
-                "detail": "No storage account configured",
-                "severity": "critical",
-            }
-        )
-        critical += 1
 
-    # 3. Database check
-    if db:
-        checks.append(
-            {
-                "id": "database",
-                "status": "pass",
-                "title": "BLAST Database",
-                "detail": f"Database '{db}' selected",
-            }
-        )
-    else:
-        checks.append(
-            {
-                "id": "database",
-                "status": "fail",
-                "title": "BLAST Database",
-                "detail": "No database selected",
-                "severity": "critical",
-            }
-        )
-        critical += 1
-
-    # 3b. Sharding precision policy check
-    try:
-        from api.services.sharding_precision import build_precision_report
-
-        query_metadata = None
-        query_count = body.get("query_count")
-        query_data = body.get("query_data")
-        if isinstance(query_data, str) and query_data.strip():
-            from api.services.query_metadata import parse_fasta_metadata
-
-            query_metadata = parse_fasta_metadata(query_data)
-            query_count = query_metadata.query_count
-        elif not isinstance(query_count, int):
-            query_count = None
-        shard_sets = body.get("shard_sets")
-        if not isinstance(shard_sets, list):
-            shard_sets = None
-        precision_report = build_precision_report(
-            precision_options,
-            query_count=query_count,
-            db_stats_available=bool(precision_options.get("db_total_letters")),
-            shard_sets=shard_sets,
-        )
-        status = "pass" if precision_report.eligible else "fail"
-        checks.append(
-            {
-                "id": "sharding_precision",
-                "status": status,
-                "title": "Sharding Precision",
-                "detail": precision_report.precision_level,
-                "severity": "critical" if not precision_report.eligible else None,
-                "precision": precision_report.as_dict(),
-                "query_metadata": query_metadata.as_dict() if query_metadata else None,
-            }
-        )
-        if not precision_report.eligible:
-            critical += 1
-    except Exception as exc:
-        checks.append(
-            {
-                "id": "sharding_precision",
-                "status": "fail",
-                "title": "Sharding Precision",
-                "detail": str(exc)[:200],
-                "severity": "critical",
-            }
-        )
-        critical += 1
-
-    # 4. Redis/Celery broker check
-    try:
-        from api.celery_app import celery_app
-
-        conn = celery_app.connection()
-        conn.ensure_connection(max_retries=1, timeout=2)
-        conn.close()
-        checks.append(
-            {
-                "id": "broker",
-                "status": "pass",
-                "title": "Task Broker",
-                "detail": "Redis is reachable",
-            }
-        )
-    except Exception:
-        checks.append(
-            {
-                "id": "broker",
-                "status": "fail",
-                "title": "Task Broker",
-                "detail": "Redis is not reachable. Tasks cannot be queued.",
-                "severity": "critical",
-            }
-        )
-        critical += 1
-
-    ready = critical == 0
+def _submit_response(job_id: str, task_id: str | None, *, status: str = "queued") -> dict[str, Any]:
+    instance_id = task_id or job_id
     return {
-        "ready": ready,
-        "checks": checks,
-        "critical_blockers": critical,
-        "summary": "All checks passed" if ready else f"{critical} critical issue(s) found",
+        "id": job_id,
+        "job_id": job_id,
+        "task_id": task_id,
+        "instance_id": instance_id,
+        "statusQueryGetUri": f"/api/tasks/{instance_id}",
+        "status": status,
     }
+
+
+def _validate_submit_contracts(body: dict[str, Any]) -> dict[str, Any]:
+    """Validate precision and Web BLAST compatibility before side effects."""
+
+    try:
+        contracts = submit_contracts(body)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            422,
+            detail={"code": "sharding_precision_invalid", "message": str(exc)[:500]},
+        ) from exc
+
+    precision = contracts["precision"]
+    if not precision.get("eligible"):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "sharding_precision_blocked",
+                "message": "; ".join(precision.get("blocking_errors") or []),
+                "precision": precision,
+            },
+        )
+
+    compatibility = contracts["compatibility_contract"]
+    if not compatibility.get("eligible"):
+        raise HTTPException(
+            422,
+            detail={
+                "code": "web_blast_compatibility_blocked",
+                "message": "; ".join(compatibility.get("blocking_errors") or []),
+                "compatibility": compatibility,
+            },
+        )
+    return contracts
+
+
+def _reset_jobs_list_cache() -> None:
+    try:
+        from api.routes.blast.jobs import _reset_blast_jobs_list_cache
+
+        _reset_blast_jobs_list_cache()
+    except Exception as exc:
+        LOGGER.debug("jobs list cache reset skipped: %s", type(exc).__name__)
 
 
 @router.post("/submit")
@@ -248,7 +101,8 @@ def blast_submit(
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    job_id = str(uuid.uuid4())
+    job_id = _submit_job_id(body, caller)
+    early_contracts = _validate_submit_contracts(body)
     normalised_body = _normalise_blast_submit_body(body, job_id=job_id)
 
     # Input validation
@@ -265,6 +119,7 @@ def blast_submit(
     # Precision gate: exact/precise sharding claims must be validated before a
     # Celery task is queued. Approximate mode remains explicit and warning-only.
     try:
+        from api.services.blast_compatibility import build_compatibility_contract
         from api.services.sharding_precision import build_precision_report, normalize_sharding_mode
 
         precision_options = dict(req.options or {})
@@ -272,15 +127,15 @@ def blast_submit(
             if key in body and key not in precision_options:
                 precision_options[key] = body[key]
         mode = normalize_sharding_mode(precision_options)
+        report = build_precision_report(
+            precision_options,
+            query_count=precision_options.get("query_count"),
+            db_stats_available=bool(precision_options.get("db_total_letters")),
+            shard_sets=precision_options.get("shard_sets")
+            if isinstance(precision_options.get("shard_sets"), list)
+            else None,
+        )
         if mode == "precise":
-            report = build_precision_report(
-                precision_options,
-                query_count=precision_options.get("query_count"),
-                db_stats_available=bool(precision_options.get("db_total_letters")),
-                shard_sets=precision_options.get("shard_sets")
-                if isinstance(precision_options.get("shard_sets"), list)
-                else None,
-            )
             if not report.eligible:
                 raise HTTPException(
                     422,
@@ -290,6 +145,27 @@ def blast_submit(
                         "precision": report.as_dict(),
                     },
                 )
+        compatibility_contract = build_compatibility_contract(
+            database=req.database,
+            options=precision_options,
+            precision_report=report,
+        )
+        if not compatibility_contract.eligible:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "web_blast_compatibility_blocked",
+                    "message": "; ".join(compatibility_contract.blocking_errors),
+                    "compatibility": compatibility_contract.as_dict(),
+                },
+            )
+        normalised_body["compatibility_contract"] = early_contracts["compatibility_contract"]
+        from api.services.blast_provenance import build_blast_provenance
+
+        normalised_body["provenance"] = build_blast_provenance(
+            job_id=job_id,
+            payload=normalised_body,
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -298,41 +174,43 @@ def blast_submit(
             detail={"code": "sharding_precision_invalid", "message": str(exc)[:500]},
         ) from exc
 
-    # Capacity pre-check — verify AKS cluster exists and is running
-    try:
-        from api.services import get_credential
-        from api.services.monitoring import list_aks_clusters
+    # Keep submit latency low: ARM cluster readiness checks run in the worker
+    # path unless explicitly enabled for diagnostics.
+    if os.environ.get("BLAST_SUBMIT_SYNC_CAPACITY_CHECK", "").lower() == "true":
+        try:
+            from api.services import get_credential
+            from api.services.monitoring import list_aks_clusters
 
-        cred = get_credential()
-        sub = req.subscription_id or os.environ.get("AZURE_SUBSCRIPTION_ID", "")
-        clusters = list_aks_clusters(cred, sub, req.resource_group)
-        cluster = next((c for c in clusters if c.get("name") == req.cluster_name), None)
-        if not cluster:
-            raise HTTPException(
-                409,
-                detail={
-                    "code": "cluster_not_found",
-                    "message": (
-                        f"AKS cluster '{req.cluster_name}' not found in '{req.resource_group}'"
-                    ),
-                    "retryable": False,
-                },
-            )
-        power = cluster.get("power_state", "")
-        if power != "Running":
-            raise HTTPException(
-                503,
-                detail={
-                    "code": "cluster_not_ready",
-                    "message": f"AKS cluster '{req.cluster_name}' is {power}. Start it first.",
-                    "retryable": True,
-                    "retry_after_seconds": 60,
-                },
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        LOGGER.warning("capacity pre-check failed (non-blocking): %s", exc)
+            cred = get_credential()
+            sub = req.subscription_id or os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+            clusters = list_aks_clusters(cred, sub, req.resource_group)
+            cluster = next((c for c in clusters if c.get("name") == req.cluster_name), None)
+            if not cluster:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "cluster_not_found",
+                        "message": (
+                            f"AKS cluster '{req.cluster_name}' not found in '{req.resource_group}'"
+                        ),
+                        "retryable": False,
+                    },
+                )
+            power = cluster.get("power_state", "")
+            if power != "Running":
+                raise HTTPException(
+                    503,
+                    detail={
+                        "code": "cluster_not_ready",
+                        "message": f"AKS cluster '{req.cluster_name}' is {power}. Start it first.",
+                        "retryable": True,
+                        "retry_after_seconds": 60,
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            LOGGER.warning("capacity pre-check failed (non-blocking): %s", exc)
 
     from api.tasks.blast import submit
 
@@ -351,6 +229,14 @@ def blast_submit(
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
         repo = JobStateRepository()
+        if normalised_body.get("idempotency_key"):
+            existing = repo.get(job_id)
+            if existing is not None:
+                return _submit_response(
+                    job_id,
+                    existing.task_id,
+                    status=existing.status or "queued",
+                )
         state = JobState(
             job_id=job_id,
             type="blast",
@@ -363,6 +249,7 @@ def blast_submit(
             payload=normalised_body,
         )
         repo.create(state)
+        _reset_jobs_list_cache()
     except Exception as exc:
         LOGGER.warning("failed to create job state: %s", exc)
 
@@ -396,6 +283,7 @@ def blast_submit(
                     phase="broker_unavailable",
                     error_code="broker_unavailable",
                 )
+                _reset_jobs_list_cache()
             except Exception as cleanup_exc:
                 LOGGER.warning(
                     "submit broker failure cleanup failed job_id=%s: %s",
@@ -403,14 +291,7 @@ def blast_submit(
                     type(cleanup_exc).__name__,
                 )
         raise exc
-    return {
-        "id": job_id,
-        "job_id": job_id,
-        "task_id": result.id,
-        "instance_id": result.id,
-        "statusQueryGetUri": f"/api/tasks/{result.id}",
-        "status": "queued",
-    }
+    return _submit_response(job_id, result.id)
 
 
 @router.post("/jobs", status_code=202)
@@ -440,7 +321,15 @@ def blast_job_submit(
         ) from exc
 
     payload = request.model_dump(exclude_none=True)
-    payload["submission_source"] = "external_api"
+    payload.update(canonical_submit_metadata(payload, submission_source="external_api"))
+    payload["canonical_request"] = canonical_submit_snapshot(payload)
+    payload.update(submit_contracts(payload))
+    from api.services.blast_provenance import build_blast_provenance
+
+    payload["provenance"] = build_blast_provenance(
+        job_id=str(payload["external_correlation_id"]),
+        payload=payload,
+    )
     LOGGER.info(
         "canonical external BLAST submit accepted caller_oid=%s db=%s program=%s",
         caller.object_id,

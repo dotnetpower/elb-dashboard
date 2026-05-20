@@ -11,6 +11,7 @@ import {
   type NcbiScoreBin,
 } from "./helpers";
 import { OverviewPanel } from "./OverviewPanel";
+import { ResultsPendingPanel } from "./ResultsPendingPanel";
 import type { BlastAnalyticsState } from "./useBlastAnalyticsState";
 
 const SCORE_BIN_ORDER: NcbiScoreBin[] = [
@@ -23,6 +24,7 @@ const SCORE_BIN_ORDER: NcbiScoreBin[] = [
 
 export interface GraphicSummaryPanelProps {
   analytics: BlastAnalyticsState;
+  resultsPending?: boolean;
 }
 
 /**
@@ -37,12 +39,16 @@ export interface GraphicSummaryPanelProps {
  * render one ruler per group (matching what NCBI does when you submit a
  * multi-FASTA — each query becomes its own block).
  */
-export function GraphicSummaryPanel({ analytics }: GraphicSummaryPanelProps) {
+export function GraphicSummaryPanel({ analytics, resultsPending = false }: GraphicSummaryPanelProps) {
   const { alignQuery, alignments, applyImmediate } = analytics;
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
   const groups = useMemo(() => groupHitsByQuery(alignments), [alignments]);
+
+  if (resultsPending) {
+    return <ResultsPendingPanel />;
+  }
 
   /**
    * NCBI's behaviour: clicking a hit bar drops you into the Alignments

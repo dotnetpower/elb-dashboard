@@ -95,13 +95,27 @@ export function useClusterDbChips(args: {
         shardLayouts: db.shard_sets?.length ?? 0,
         shardingInProgress: !!db.sharding_in_progress,
         shardingError: db.sharding_error ?? null,
+        sourceVersion: db.source_version ?? null,
+        warmSourceVersion: null,
+        warmSourceVersions: [],
+        warmStale: false,
         warmupPlan: db.warmup_plan,
       });
     }
     for (const w of warmupDbs) {
       const existing = byName.get(w.name);
-      if (existing) existing.warm = w;
-      else
+      const warmVersions = (w.source_versions ?? []).filter(Boolean);
+      const warmVersion = w.source_version ?? (warmVersions.length === 1 ? warmVersions[0] : null);
+      if (existing) {
+        existing.warm = w;
+        existing.warmSourceVersion = warmVersion;
+        existing.warmSourceVersions = warmVersions;
+        existing.warmStale = Boolean(
+          (existing.sourceVersion && warmVersion && existing.sourceVersion !== warmVersion) ||
+            w.status === "Stale" ||
+            warmVersions.length > 1,
+        );
+      } else
         byName.set(w.name, {
           name: w.name,
           warm: w,
@@ -109,6 +123,10 @@ export function useClusterDbChips(args: {
           shardLayouts: 0,
           shardingInProgress: false,
           shardingError: null,
+          sourceVersion: null,
+          warmSourceVersion: warmVersion,
+          warmSourceVersions: warmVersions,
+          warmStale: w.status === "Stale" || warmVersions.length > 1,
         });
     }
     return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));

@@ -29,9 +29,17 @@ export function ResultsCard({ jobId, state }: ResultsCardProps) {
     terminalSidecar,
     cluster,
     queryClient,
+    job,
   } = state;
 
   const refetchResults = resultsQuery.refetch;
+  const manifest = resultsQuery.data?.manifest;
+  const payload = job?.payload ?? {};
+  const provenance = recordFrom(payload.provenance);
+  const compatibility =
+    recordFrom(provenance?.compatibility) ?? recordFrom(payload.compatibility_contract);
+  const compatibilityMode = stringValue(compatibility?.mode);
+  const blastVersion = stringValue(recordFrom(provenance?.blast)?.version);
 
   return (
     <section className="glass-card">
@@ -67,6 +75,29 @@ export function ResultsCard({ jobId, state }: ResultsCardProps) {
         </button>
       </div>
 
+      {(manifest || compatibilityMode || blastVersion) && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+            gap: 8,
+            marginTop: "var(--space-3)",
+            marginBottom: "var(--space-3)",
+          }}
+        >
+          {compatibilityMode && (
+            <ResultSummaryPill label="Compatibility" value={compatibilityMode} />
+          )}
+          {blastVersion && <ResultSummaryPill label="BLAST+" value={blastVersion} />}
+          {manifest && (
+            <ResultSummaryPill
+              label="Manifest"
+              value={`${manifest.status} · ${manifest.parseable_count}/${manifest.file_count}`}
+            />
+          )}
+        </div>
+      )}
+
       <ResultsBody
         jobId={jobId}
         subscriptionId={subscriptionId}
@@ -97,4 +128,35 @@ export function ResultsCard({ jobId, state }: ResultsCardProps) {
       />
     </section>
   );
+}
+
+function ResultSummaryPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      style={{
+        border: "1px solid rgba(148, 163, 184, 0.22)",
+        borderRadius: 8,
+        padding: "8px 10px",
+        background: "rgba(15, 23, 42, 0.20)",
+        minWidth: 0,
+      }}
+    >
+      <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 13, fontWeight: 600, overflowWrap: "anywhere" }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function recordFrom(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }

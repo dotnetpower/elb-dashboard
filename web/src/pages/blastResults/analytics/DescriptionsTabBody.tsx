@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { BlastHitsTable } from "./BlastHitsTable";
 import { DegradedBanner } from "./DegradedBanner";
 import { ResultFilterBar } from "./ResultFilterBar";
+import { ResultsPendingPanel } from "./ResultsPendingPanel";
 import { isPartialResult, isResultFilesUnavailable, ncbiNuccoreUrl } from "./helpers";
 import type { BlastAnalyticsState } from "./useBlastAnalyticsState";
 import type { BlastHit } from "@/api/endpoints";
@@ -43,6 +44,10 @@ export function DescriptionsTabBody({ analytics, resultsPending = false }: Descr
     navigate(`?${next.toString()}`, { replace: false });
   };
 
+  if (resultsPending) {
+    return <ResultsPendingPanel />;
+  }
+
   return (
     <div>
       {!resultFilesUnavailable && (
@@ -66,7 +71,7 @@ export function DescriptionsTabBody({ analytics, resultsPending = false }: Descr
         </div>
       )}
 
-      {isPartialResult(alignQuery.data) && (
+      {isPartialResult(alignQuery.data) && !resultsPending && (
         <DegradedBanner data={alignQuery.data} resultsPending={resultsPending} />
       )}
 

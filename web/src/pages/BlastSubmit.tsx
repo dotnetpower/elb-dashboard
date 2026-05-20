@@ -353,6 +353,7 @@ export function BlastSubmit() {
         submitError={submitMutation.isError ? submitMutation.error : null}
         preFlightResult={preFlightResult}
         preFlightPending={preFlightMutation.isPending}
+        effectiveSearchSpace={selectedDbInfo?.web_blast_searchsp}
         lastSavedAt={lastSavedAt}
         onPreFlight={() => preFlightMutation.mutate()}
         onSubmit={handleSubmit}

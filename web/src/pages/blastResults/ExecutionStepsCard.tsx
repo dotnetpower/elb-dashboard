@@ -9,7 +9,15 @@ export interface ExecutionStepsCardProps {
 }
 
 export function ExecutionStepsCard({ state }: ExecutionStepsCardProps) {
-  const { job, effectivePhase, subscriptionId, storageAccount, resourceGroup } = state;
+  const {
+    job,
+    executionStepsJob,
+    effectivePhase,
+    subscriptionId,
+    storageAccount,
+    resourceGroup,
+    clusterName,
+  } = state;
   if (!job) return null;
   return (
     <section className="glass-card" style={{ padding: "14px 16px" }}>
@@ -26,10 +34,11 @@ export function ExecutionStepsCard({ state }: ExecutionStepsCardProps) {
       </h3>
       <StepLogSection
         phase={effectivePhase}
-        job={job as unknown as Record<string, unknown>}
+        job={(executionStepsJob ?? job) as unknown as Record<string, unknown>}
         subscriptionId={subscriptionId}
         storageAccount={storageAccount}
         resourceGroup={resourceGroup}
+        clusterName={clusterName}
       />
     </section>
   );

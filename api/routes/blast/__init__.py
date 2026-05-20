@@ -15,6 +15,8 @@ from api.routes._blast_shared import (
 )
 from api.routes.blast import databases as _databases_routes
 from api.routes.blast import jobs as _jobs_routes
+from api.routes.blast import logs as _logs_routes
+from api.routes.blast import preflight as _preflight_routes
 from api.routes.blast import results as _results_routes
 from api.routes.blast import schedules as _schedules_routes
 from api.routes.blast import submit as _submit_routes
@@ -44,11 +46,18 @@ from api.routes.blast.jobs import (
     blast_job_delete as blast_job_delete,
 )
 from api.routes.blast.jobs import (
+    blast_job_events as blast_job_events,
+)
+from api.routes.blast.jobs import (
     blast_job_get as blast_job_get,
+)
+from api.routes.blast.jobs import (
+    blast_job_queue as blast_job_queue,
 )
 from api.routes.blast.jobs import (
     blast_jobs_list as blast_jobs_list,
 )
+from api.routes.blast.preflight import blast_pre_flight as blast_pre_flight
 from api.routes.blast.results import (
     blast_job_file as blast_job_file,
 )
@@ -92,9 +101,6 @@ from api.routes.blast.submit import (
     blast_job_submit as blast_job_submit,
 )
 from api.routes.blast.submit import (
-    blast_pre_flight as blast_pre_flight,
-)
-from api.routes.blast.submit import (
     blast_preprocess_stub as blast_preprocess_stub,
 )
 from api.routes.blast.submit import (
@@ -127,6 +133,8 @@ from api.routes.blast.taxonomy import (
 
 blast_router = APIRouter(prefix="/api/blast", tags=["blast"])
 blast_router.include_router(_jobs_routes.router)
+blast_router.include_router(_logs_routes.router)
+blast_router.include_router(_preflight_routes.router)
 blast_router.include_router(_submit_routes.router)
 blast_router.include_router(_databases_routes.router)
 blast_router.include_router(_taxonomy_routes.router)

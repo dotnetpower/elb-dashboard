@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field
 
 from api.auth import CallerIdentity, require_caller
 from api.services import external_blast
+from api.services.blast_submit_payload import (
+    canonical_submit_metadata,
+    canonical_submit_snapshot,
+    submit_contracts,
+)
 
 router = APIRouter(prefix="/api/v1/elastic-blast", tags=["external-elastic-blast"])
 LOGGER = logging.getLogger(__name__)
@@ -60,7 +65,15 @@ def submit_external_blast_job(
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
     payload = request.model_dump(exclude_none=True)
-    payload["submission_source"] = "external_api"
+    payload.update(canonical_submit_metadata(payload, submission_source="external_api"))
+    payload["canonical_request"] = canonical_submit_snapshot(payload)
+    payload.update(submit_contracts(payload))
+    from api.services.blast_provenance import build_blast_provenance
+
+    payload["provenance"] = build_blast_provenance(
+        job_id=str(payload["external_correlation_id"]),
+        payload=payload,
+    )
     LOGGER.info(
         "external BLAST submit accepted caller_oid=%s db=%s program=%s",
         caller.object_id,
@@ -96,6 +109,59 @@ def get_external_blast_job(
     LOGGER.info("external BLAST status requested caller_oid=%s job_id=%s", caller.object_id, job_id)
     del caller
     return external_blast.get_job(job_id)
+
+
+@router.get("/jobs/{job_id}/events")
+def list_external_blast_job_events(
+    job_id: str = Path(..., min_length=6, max_length=12, pattern=r"^[a-f0-9]+$"),
+    caller: CallerIdentity = _REQUIRE_CALLER,
+) -> dict[str, Any]:
+    LOGGER.info("external BLAST events requested caller_oid=%s job_id=%s", caller.object_id, job_id)
+    del caller
+    try:
+        from api.services.blast_events import canonical_job_events
+        from api.services.state_repo import JobStateRepository
+
+        rows = JobStateRepository().get_history(job_id, limit=200)
+        if rows:
+            return {"job_id": job_id, "events": canonical_job_events(rows)}
+    except Exception as exc:
+        LOGGER.info("external BLAST local events unavailable: %s", type(exc).__name__)
+    detail = external_blast.get_job(job_id)
+    status = str(detail.get("status") or detail.get("phase") or "unknown")
+    return {
+        "job_id": job_id,
+        "events": [
+            {
+                "id": "current",
+                "job_id": job_id,
+                "event": status,
+                "phase": status,
+                "status": status,
+                "timestamp": str(detail.get("updated_at") or detail.get("created_at") or ""),
+                "payload": detail,
+            }
+        ],
+    }
+
+
+@router.get("/jobs/{job_id}/manifest")
+def get_external_blast_job_manifest(
+    job_id: str = Path(..., min_length=6, max_length=12, pattern=r"^[a-f0-9]+$"),
+    caller: CallerIdentity = _REQUIRE_CALLER,
+) -> dict[str, Any]:
+    LOGGER.info(
+        "external BLAST manifest requested caller_oid=%s job_id=%s",
+        caller.object_id,
+        job_id,
+    )
+    del caller
+    from api.routes._blast_shared import _external_result_files
+    from api.services.blast_result_manifest import build_result_manifest
+
+    detail = external_blast.get_job(job_id)
+    files = _external_result_files(detail)
+    return build_result_manifest(job_id=job_id, files=files, source="external")
 
 
 @router.get("/jobs/{job_id}/files/{file_id}")

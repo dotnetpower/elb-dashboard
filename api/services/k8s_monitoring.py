@@ -20,6 +20,7 @@ from azure.core.credentials import TokenCredential
 
 from api.services.azure_clients import aks_client as aks_client
 from api.services.k8s import client as _k8s_client
+from api.services.k8s_metrics import k8s_top_nodes
 from api.services.k8s_nodes import (
     _candidate_warmup_node_names,
     k8s_get_nodes,
@@ -479,8 +480,9 @@ def k8s_release_stale_warmup_jobs(
     db_name: str,
     current_node_names: Iterable[str],
     namespace: str = "default",
+    current_source_version: str = "",
 ) -> dict[str, Any]:
-    """Delete warmup Jobs (and their pods) pinned to nodes no longer present.
+    """Delete warmup Jobs (and their pods) pinned to stale nodes or generations.
 
     ``Job.spec.template.spec.nodeName`` is immutable, so when AKS stop/start
     rotates VMSS instances the dashboard's previously-succeeded warmup Jobs
@@ -490,10 +492,11 @@ def k8s_release_stale_warmup_jobs(
     because the existing Job names collide and ensure skips them.
 
     This helper finds Jobs labelled ``app=db-warmup, db=<name>`` whose pinned
-    ``nodeName`` is not in ``current_node_names`` and deletes them with
+    ``nodeName`` is not in ``current_node_names`` or whose source-version
+    annotation does not match ``current_source_version`` and deletes them with
     ``propagationPolicy=Background`` so the pods clean up too. The next
     ``k8s_ensure_job_manifests`` call will then recreate fresh Jobs on the
-    current ready nodes.
+    current ready nodes and DB generation.
     """
 
     db_label = _warmup_db_label_value(db_name)
@@ -531,7 +534,17 @@ def k8s_release_stale_warmup_jobs(
             if not name:
                 continue
             pinned = job.get("spec", {}).get("template", {}).get("spec", {}).get("nodeName") or ""
-            if not pinned or str(pinned) in live_nodes:
+            metadata_annotations = metadata.get("annotations", {}) or {}
+            template_metadata = job.get("spec", {}).get("template", {}).get("metadata", {}) or {}
+            template_annotations = template_metadata.get("annotations", {}) or {}
+            source_version = str(
+                metadata_annotations.get("elb.dashboard/source-version")
+                or template_annotations.get("elb.dashboard/source-version")
+                or ""
+            )
+            source_stale = bool(current_source_version and source_version != current_source_version)
+            node_stale = bool(pinned and str(pinned) not in live_nodes)
+            if not node_stale and not source_stale:
                 kept.append(name)
                 continue
             del_response = session.delete(
@@ -540,12 +553,21 @@ def k8s_release_stale_warmup_jobs(
                 timeout=10,
             )
             if del_response.status_code in (200, 201, 202, 404):
-                deleted.append({"name": name, "stale_node": str(pinned)})
+                deleted.append(
+                    {
+                        "name": name,
+                        "stale_node": str(pinned) if node_stale else "",
+                        "stale_source_version": source_version if source_stale else "",
+                        "current_source_version": current_source_version if source_stale else "",
+                    }
+                )
             else:
                 errors.append(
                     {
                         "name": name,
-                        "stale_node": str(pinned),
+                        "stale_node": str(pinned) if node_stale else "",
+                        "stale_source_version": source_version if source_stale else "",
+                        "current_source_version": current_source_version if source_stale else "",
                         "status_code": del_response.status_code,
                         "detail": del_response.text[:200],
                     }
@@ -712,6 +734,11 @@ def _database_status_from_setup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
                     mol_type = env.get("value", "")
         if not db_name:
             continue
+        shard = ""
+        shard_match = re.match(r"^(?P<db>.+)_shard_(?P<shard>\d{2,})$", str(db_name))
+        if shard_match:
+            db_name = shard_match.group("db")
+            shard = shard_match.group("shard")
 
         info = db_map.setdefault(
             db_name,
@@ -722,6 +749,7 @@ def _database_status_from_setup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
                 "nodes_failed": 0,
                 "nodes_active": 0,
                 "total_jobs": 0,
+                "shards": [],
             },
         )
         job_status = job.get("status", {})
@@ -729,8 +757,11 @@ def _database_status_from_setup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
         info["nodes_ready"] += job_status.get("succeeded", 0)
         info["nodes_failed"] += job_status.get("failed", 0)
         info["nodes_active"] += job_status.get("active", 0)
+        if shard:
+            info["shards"].append(shard)
 
     for info in db_map.values():
+        info["shards"] = sorted(set(info.get("shards", [])))
         total = info["total_jobs"]
         if info["nodes_ready"] == total and total > 0:
             info["status"] = "Ready"
@@ -969,140 +1000,6 @@ def k8s_get_pods(
         return pods
     finally:
         session.close()
-
-
-def k8s_top_nodes(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> list[dict[str, Any]]:
-    """Return node resource usage from the Kubernetes metrics API.
-
-    Each entry includes both raw values (``cpu_m``, ``mem_ki``,
-    ``cpu_capacity_m``, ``mem_capacity_ki``) and pre-formatted strings so the
-    SPA can humanize freely (e.g. ``0.10 / 32 cores``, ``1.2 / 252 GiB``)
-    without re-parsing kubernetes-style quantities. Each entry also carries
-    pool/Ready metadata pulled from the same ``/api/v1/nodes`` snapshot so
-    the dashboard can colour rows by pool and flag NotReady nodes inline.
-    """
-
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        capacity = _node_capacity_with_meta(session, server)
-        response = session.get(f"{server}/apis/metrics.k8s.io/v1beta1/nodes", timeout=10)
-        response.raise_for_status()
-        nodes: list[dict[str, Any]] = []
-        for item in response.json().get("items", []):
-            name = item["metadata"]["name"]
-            usage = item.get("usage", {})
-            cpu_m = _parse_cpu_millicores(usage.get("cpu", "0"))
-            mem_ki = _parse_memory_ki(usage.get("memory", "0"))
-            meta = capacity.get(
-                name,
-                {
-                    "cpu_m": 1,
-                    "mem_ki": 1,
-                    "pool": "",
-                    "ready": True,
-                    "conditions": {},
-                },
-            )
-            cpu_cap = meta.get("cpu_m") or 1
-            mem_cap = meta.get("mem_ki") or 1
-            nodes.append(
-                {
-                    "name": name,
-                    "cpu": f"{cpu_m}m",
-                    "cpu_pct": round(cpu_m / cpu_cap * 100) if cpu_cap else 0,
-                    "memory": f"{mem_ki // 1024}Mi",
-                    "memory_pct": round(mem_ki / mem_cap * 100) if mem_cap else 0,
-                    "memory_total": f"{mem_cap // 1024}Mi",
-                    # Raw numbers for client-side humanization.
-                    "cpu_m": cpu_m,
-                    "mem_ki": mem_ki,
-                    "cpu_capacity_m": cpu_cap,
-                    "mem_capacity_ki": mem_cap,
-                    # Pool / health metadata.
-                    "pool": meta.get("pool", ""),
-                    "ready": bool(meta.get("ready", True)),
-                    "conditions": meta.get("conditions", {}),
-                }
-            )
-        return nodes
-    finally:
-        session.close()
-
-
-def _node_capacity(session: Any, server: str) -> dict[str, dict[str, int]]:
-    response = session.get(f"{server}/api/v1/nodes", timeout=10)
-    response.raise_for_status()
-    capacity: dict[str, dict[str, int]] = {}
-    for item in response.json().get("items", []):
-        name = item["metadata"]["name"]
-        cap = item.get("status", {}).get("capacity", {})
-        capacity[name] = {
-            "cpu_m": _parse_cpu_millicores(cap.get("cpu", "0")),
-            "mem_ki": _parse_memory_ki(cap.get("memory", "0")),
-        }
-    return capacity
-
-
-def _node_capacity_with_meta(session: Any, server: str) -> dict[str, dict[str, Any]]:
-    """Like ``_node_capacity`` but also returns pool / Ready / conditions.
-
-    A single ``/api/v1/nodes`` GET feeds both capacity and metadata so we do
-    not double-roundtrip kube-apiserver from ``k8s_top_nodes``.
-    """
-    response = session.get(f"{server}/api/v1/nodes", timeout=10)
-    response.raise_for_status()
-    out: dict[str, dict[str, Any]] = {}
-    for item in response.json().get("items", []):
-        meta = item.get("metadata", {})
-        labels = meta.get("labels", {}) or {}
-        status = item.get("status", {})
-        cap = status.get("capacity", {})
-        # AKS labels system / user pools with ``agentpool=<name>``.
-        pool = labels.get("agentpool") or labels.get("kubernetes.azure.com/agentpool") or ""
-        # Ready + pressure flags from the conditions array.
-        ready = False
-        conditions: dict[str, str] = {}
-        for cond in status.get("conditions", []) or []:
-            ctype = cond.get("type", "")
-            cstatus = cond.get("status", "")
-            if not ctype:
-                continue
-            conditions[ctype] = cstatus
-            if ctype == "Ready":
-                ready = cstatus == "True"
-        out[meta.get("name", "")] = {
-            "cpu_m": _parse_cpu_millicores(cap.get("cpu", "0")),
-            "mem_ki": _parse_memory_ki(cap.get("memory", "0")),
-            "pool": pool,
-            "ready": ready,
-            "conditions": conditions,
-        }
-    return out
-
-
-def _parse_cpu_millicores(raw: str) -> int:
-    value = str(raw)
-    if value.endswith("n"):
-        return int(value[:-1]) // 1_000_000
-    if value.endswith("m"):
-        return int(value[:-1])
-    return int(value) * 1000
-
-
-def _parse_memory_ki(raw: str) -> int:
-    value = str(raw)
-    if value.endswith("Ki"):
-        return int(value[:-2])
-    if value.endswith("Mi"):
-        return int(value[:-2]) * 1024
-    if value.endswith("Gi"):
-        return int(value[:-2]) * 1024 * 1024
-    return int(value) // 1024
 
 
 def k8s_pod_logs(

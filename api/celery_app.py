@@ -29,6 +29,7 @@ celery_app = Celery(
         "api.tasks.azure",
         "api.tasks.acr",
         "api.tasks.blast",
+        "api.tasks.blast_artifacts",
         "api.tasks.storage",
         "api.tasks.openapi",
     ],
@@ -54,6 +55,7 @@ celery_app.conf.update(
     task_routes={
         "api.tasks.azure.*": {"queue": "azure"},
         "api.tasks.acr.*": {"queue": "acr"},
+        "api.tasks.blast.artifacts.*": {"queue": "blast-artifacts"},
         "api.tasks.blast.*": {"queue": "blast"},
         "api.tasks.storage.*": {"queue": "storage"},
         # OpenAPI deploys talk to AKS / MSI / Authorization, same as

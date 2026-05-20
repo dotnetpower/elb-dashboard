@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import type { BlastJobSummary } from "@/api/endpoints";
@@ -24,6 +24,13 @@ export function DateGroupSection({
 }: DateGroupSectionProps) {
   const [open, setOpen] = useState(defaultOpen);
   const runningCount = jobs.filter(isDashboardJobActive).length;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (runningCount === 0) return undefined;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [runningCount]);
 
   return (
     <div>
@@ -122,6 +129,7 @@ export function DateGroupSection({
                   job={job}
                   onDelete={onDelete}
                   deleting={deleting}
+                  now={now}
                 />
               ))}
             </tbody>

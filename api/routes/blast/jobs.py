@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
+import threading
+import time
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -19,6 +23,7 @@ from api.routes._blast_shared import (
     _local_to_blast_job,
     _payload_value,
     _refresh_running_blast_state,
+    _reset_external_jobs_cache,
     _split_child_summaries_from_repo,
     _split_child_summary_from_repo,
     _sync_external_jobs_to_table,
@@ -27,6 +32,116 @@ from api.routes._blast_shared import (
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_JOBS_LIST_CACHE_TTL_SECONDS = 5.0
+_JOBS_LIST_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_JOBS_LIST_CACHE_LOCK = threading.Lock()
+
+_EXTERNAL_LIST_DETAIL_STATUSES = frozenset(
+    {
+        "pending",
+        "queued",
+        "running",
+        "submitted",
+        "submitting",
+        "inprogress",
+        "in_progress",
+        "splitting",
+        "reducing",
+    }
+)
+_LOCAL_SPLIT_PARENT_PHASES = frozenset(
+    {
+        "split_queries_started",
+        "split_children_failed",
+        "split_children_submitted",
+        "split_children_aggregating",
+        "split_children_cancelled",
+        "split_children_merge_ready",
+        "split_results_merging",
+        "split_results_merge_invalid",
+    }
+)
+
+
+def _local_list_row_may_have_split_children(row: Any) -> bool:
+    phase = str(getattr(row, "phase", "") or "").strip().casefold()
+    status = str(getattr(row, "status", "") or "").strip().casefold()
+    return phase in _LOCAL_SPLIT_PARENT_PHASES or status in _LOCAL_SPLIT_PARENT_PHASES
+
+
+def _blast_jobs_list_cache_key(
+    *,
+    caller_oid: str,
+    limit: int,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> str:
+    return json.dumps(
+        {
+            "caller_oid": caller_oid,
+            "limit": limit,
+            "subscription_id": subscription_id,
+            "resource_group": resource_group,
+            "cluster_name": cluster_name,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _blast_jobs_list_cache_get(key: str) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _JOBS_LIST_CACHE_LOCK:
+        entry = _JOBS_LIST_CACHE.get(key)
+        if entry is None:
+            return None
+        expires_at, payload = entry
+        if expires_at <= now:
+            _JOBS_LIST_CACHE.pop(key, None)
+            return None
+        return copy.deepcopy(payload)
+
+
+def _blast_jobs_list_cache_set(key: str, response: dict[str, Any]) -> None:
+    with _JOBS_LIST_CACHE_LOCK:
+        _JOBS_LIST_CACHE[key] = (
+            time.monotonic() + _JOBS_LIST_CACHE_TTL_SECONDS,
+            copy.deepcopy(response),
+        )
+        if len(_JOBS_LIST_CACHE) > 128:
+            oldest = min(_JOBS_LIST_CACHE.items(), key=lambda kv: kv[1][0])[0]
+            _JOBS_LIST_CACHE.pop(oldest, None)
+
+
+def _reset_blast_jobs_list_cache() -> None:
+    with _JOBS_LIST_CACHE_LOCK:
+        _JOBS_LIST_CACHE.clear()
+
+
+def _external_list_row_needs_detail(row: dict[str, Any]) -> bool:
+    status = str(row.get("status") or row.get("phase") or "").strip().casefold()
+    return status in _EXTERNAL_LIST_DETAIL_STATUSES
+
+
+def _external_row_with_scope_defaults(
+    row: dict[str, Any],
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any]:
+    if not (subscription_id or resource_group or cluster_name):
+        return row
+    scoped = dict(row)
+    if subscription_id:
+        scoped.setdefault("subscription_id", subscription_id)
+    if resource_group:
+        scoped.setdefault("resource_group", resource_group)
+    if cluster_name:
+        scoped.setdefault("cluster_name", cluster_name)
+    return scoped
 
 
 @router.get("/jobs")
@@ -43,6 +158,17 @@ def blast_jobs_list(
     OpenAPI submissions live in the sibling service's ConfigMaps, so merging
     them here keeps the SPA on one canonical jobs endpoint.
     """
+    cache_key = _blast_jobs_list_cache_key(
+        caller_oid=caller.object_id,
+        limit=limit,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    cached = _blast_jobs_list_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     jobs: list[dict[str, Any]] = []
     degraded: dict[str, Any] = {}
     try:
@@ -51,7 +177,7 @@ def blast_jobs_list(
         repo = JobStateRepository()
         rows = [
             row
-            for row in repo.list_for_owner(caller.object_id, limit=limit)
+            for row in repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
             if row.type == "blast"
             and _local_state_matches_job_scope(
                 row,
@@ -60,7 +186,7 @@ def blast_jobs_list(
                 cluster_name=cluster_name,
             )
         ]
-        parent_ids = [row.job_id for row in rows]
+        parent_ids = [row.job_id for row in rows if _local_list_row_may_have_split_children(row)]
         split_summaries = _split_child_summaries_from_repo(
             repo,
             caller.object_id,
@@ -118,7 +244,13 @@ def blast_jobs_list(
                 job_id = str(row.get("job_id") or "")
                 if not job_id or job_id in seen:
                     continue
-                if detail_budget > 0:
+                row = _external_row_with_scope_defaults(
+                    row,
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                )
+                if detail_budget > 0 and _external_list_row_needs_detail(row):
                     row = _external_job_detail_or_row(external_blast, row, external_kwargs)
                     detail_budget -= 1
                 candidate_rows.append(row)
@@ -165,7 +297,64 @@ def blast_jobs_list(
         response.update(degraded)
     if external_degraded:
         response.update(external_degraded)
+    _blast_jobs_list_cache_set(cache_key, response)
     return response
+
+
+@router.get("/jobs/{job_id}/execution-steps")
+def blast_job_execution_steps(
+    job_id: str = Path(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the lightweight Execution Steps snapshot for a job."""
+    try:
+        from api.services.job_artifacts import (
+            artifact_state_payload,
+            build_execution_steps_snapshot,
+            read_execution_steps_snapshot,
+        )
+        from api.services.state_repo import JobStateRepository
+
+        repo = JobStateRepository()
+        summary = repo.get_summary(job_id)
+        if summary is None:
+            raise HTTPException(404, "job not found")
+        if summary.owner_oid and summary.owner_oid != caller.object_id:
+            raise HTTPException(403, "not owner")
+
+        try:
+            snapshot = read_execution_steps_snapshot(job_id)
+        except Exception as exc:
+            LOGGER.info(
+                "execution steps snapshot unavailable job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
+            snapshot = None
+        if snapshot is not None:
+            return {**snapshot, "artifact_state": "ready"}
+
+        state = repo.get(job_id)
+        if state is None:
+            raise HTTPException(404, "job not found")
+        fallback = build_execution_steps_snapshot(state)
+        artifact_state = artifact_state_payload(job_id, "execution_steps") or {
+            "artifact_state": "missing"
+        }
+        fallback["artifact_state"] = artifact_state.get("artifact_state", "missing")
+        fallback["artifact_error_code"] = artifact_state.get("error_code")
+        return fallback
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("blast_job_execution_steps failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            {
+                "code": "execution_steps_unavailable",
+                "message": f"Could not read execution steps: {type(exc).__name__}",
+            },
+        ) from exc
 
 
 @router.get("/jobs/{job_id}")
@@ -187,6 +376,7 @@ def blast_job_get(
             out = _local_to_blast_job(
                 state,
                 split_children=_split_child_summary_from_repo(repo, state.job_id),
+                include_database_metadata=True,
             )
             if history:
                 out["history"] = repo.get_history(job_id, limit=200)
@@ -200,7 +390,10 @@ def blast_job_get(
     try:
         from api.services import external_blast
 
-        return _external_to_blast_job(external_blast.get_job(job_id))
+        return _external_to_blast_job(
+            external_blast.get_job(job_id),
+            include_database_metadata=True,
+        )
     except HTTPException as exc:
         if exc.status_code == 404 and local_unavailable is not None:
             raise HTTPException(
@@ -217,6 +410,68 @@ def blast_job_get(
                 f"{type(exc).__name__}",
             ) from exc
         raise HTTPException(404, "job not found") from exc
+
+
+@router.get("/jobs/{job_id}/events")
+def blast_job_events(
+    job_id: str = Path(...),
+    limit: int = Query(default=200, ge=1, le=500),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    try:
+        from api.services.blast_events import canonical_job_events
+        from api.services.state_repo import JobStateRepository
+
+        repo = JobStateRepository()
+        state = repo.get(job_id)
+        if state is None:
+            raise HTTPException(404, "job not found")
+        if state.owner_oid and state.owner_oid != caller.object_id:
+            raise HTTPException(403, "not owner")
+        return {
+            "job_id": job_id,
+            "events": canonical_job_events(repo.get_history(job_id, limit=limit)),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("blast_job_events failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            {
+                "code": "job_events_unavailable",
+                "message": f"Could not read job events: {type(exc).__name__}",
+            },
+        ) from exc
+
+
+@router.get("/jobs/{job_id}/queue")
+def blast_job_queue(
+    job_id: str = Path(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    try:
+        from api.services.blast_queue import queue_snapshot
+        from api.services.state_repo import JobStateRepository
+
+        repo = JobStateRepository()
+        state = repo.get(job_id)
+        if state is None:
+            raise HTTPException(404, "job not found")
+        if state.owner_oid and state.owner_oid != caller.object_id:
+            raise HTTPException(403, "not owner")
+        return queue_snapshot(repo.list_active(job_type="blast", limit=500), job_id=job_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("blast_job_queue failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            {
+                "code": "job_queue_unavailable",
+                "message": f"Could not read queue state: {type(exc).__name__}",
+            },
+        ) from exc
 
 
 @router.post("/jobs/{job_id}/cancel")
@@ -284,6 +539,7 @@ def blast_job_delete(
         if state.owner_oid and state.owner_oid != caller.object_id:
             raise HTTPException(403, "not owner")
         repo.update(job_id, status="deleted", phase="deleted")
+        _reset_external_jobs_cache()
         return {"job_id": job_id, "status": "deleted"}
     except HTTPException:
         raise

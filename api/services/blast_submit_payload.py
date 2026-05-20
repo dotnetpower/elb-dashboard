@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import uuid
+from hashlib import sha256
 from typing import Any
 
 from fastapi import HTTPException
@@ -51,6 +53,144 @@ _BLAST_SUBMIT_OPTION_KEYS = frozenset(
 )
 
 _SEARCHSP_OPTION_RE = re.compile(r"(?<!\S)-searchsp(?:\s|=|$)")
+_SUBMISSION_SOURCES = frozenset({"dashboard", "external_api"})
+
+
+def canonical_submit_metadata(
+    body: dict[str, Any],
+    *,
+    submission_source: str,
+    correlation_id: str | None = None,
+) -> dict[str, Any]:
+    if submission_source not in _SUBMISSION_SOURCES:
+        raise ValueError("submission_source must be server-derived")
+
+    metadata: dict[str, Any] = {
+        "submission_source": submission_source,
+        "external_correlation_id": correlation_id or str(uuid.uuid4()),
+        "priority": 50,
+        "resource_profile": "standard",
+    }
+    priority = body.get("priority")
+    if isinstance(priority, int) and 0 <= priority <= 100:
+        metadata["priority"] = priority
+    resource_profile = body.get("resource_profile")
+    if isinstance(resource_profile, str) and re.fullmatch(
+        r"[A-Za-z0-9._-]{1,64}", resource_profile
+    ):
+        metadata["resource_profile"] = resource_profile
+    idempotency_key = body.get("idempotency_key")
+    if isinstance(idempotency_key, str) and 0 < len(idempotency_key) <= 256:
+        metadata["idempotency_key"] = idempotency_key
+    return metadata
+
+
+def canonical_submit_snapshot(body: dict[str, Any]) -> dict[str, Any]:
+    """Return a stable, side-effect-free submit snapshot for UI and OpenAPI payloads."""
+    database = str(body.get("database") or body.get("db") or "").strip()
+    program = str(body.get("program") or "blastn").strip()
+    options = _canonical_options_from_body(body, database=database)
+    snapshot: dict[str, Any] = {
+        "schema_version": 1,
+        "program": program,
+        "database": database,
+        "query": _canonical_query_from_body(body),
+        "options": options,
+        "metadata": {
+            key: body[key]
+            for key in (
+                "submission_source",
+                "external_correlation_id",
+                "idempotency_key",
+                "priority",
+                "resource_profile",
+            )
+            if body.get(key) not in (None, "")
+        },
+    }
+    for key in ("resource_group", "cluster_name", "aks_cluster_name", "storage_account"):
+        if body.get(key) not in (None, ""):
+            snapshot[key] = body[key]
+    return snapshot
+
+
+def canonical_execution_config(body: dict[str, Any]) -> dict[str, Any]:
+    """Return the comparable execution core shared by dashboard and OpenAPI submits."""
+    snapshot = canonical_submit_snapshot(body)
+    return {
+        "program": snapshot["program"],
+        "database": snapshot["database"],
+        "options": snapshot["options"],
+        "query": {
+            key: value
+            for key, value in snapshot["query"].items()
+            if key in {"kind", "query_count", "total_letters"}
+        },
+    }
+
+
+def submit_contracts(body: dict[str, Any]) -> dict[str, Any]:
+    """Return shared precision and compatibility contracts for a submit payload."""
+    from api.services.blast_compatibility import build_compatibility_contract
+    from api.services.sharding_precision import build_precision_report
+
+    database = str(body.get("database") or body.get("db") or "").strip()
+    options = _canonical_options_from_body(body, database=database)
+    query = _canonical_query_from_body(body)
+    query_count = query.get("query_count")
+    report = build_precision_report(
+        options,
+        query_count=query_count if isinstance(query_count, int) else options.get("query_count"),
+        db_stats_available=bool(options.get("db_total_letters")),
+        shard_sets=options.get("shard_sets")
+        if isinstance(options.get("shard_sets"), list)
+        else None,
+    )
+    compatibility = build_compatibility_contract(
+        database=database,
+        options=options,
+        precision_report=report,
+    )
+    return {
+        "precision": report.as_dict(),
+        "compatibility_contract": compatibility.as_dict(),
+    }
+
+
+def _canonical_options_from_body(body: dict[str, Any], *, database: str) -> dict[str, Any]:
+    options = _submit_options_from_body(body)
+    if "dust" in options and "low_complexity_filter" not in options:
+        options["low_complexity_filter"] = bool(options["dust"])
+    options.pop("dust", None)
+    _apply_web_blast_searchsp_default(database, options)
+    return {key: options[key] for key in sorted(options)}
+
+
+def _canonical_query_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    query_fasta = body.get("query_fasta") or body.get("query_data")
+    if isinstance(query_fasta, str) and query_fasta.strip():
+        query: dict[str, Any] = {
+            "kind": "inline_fasta",
+            "sha256": sha256(query_fasta.encode("utf-8")).hexdigest(),
+        }
+        try:
+            from api.services.query_metadata import parse_fasta_metadata
+
+            metadata = parse_fasta_metadata(query_fasta).as_dict()
+            query.update(
+                {
+                    "query_count": metadata.get("query_count"),
+                    "total_letters": metadata.get("total_letters"),
+                    "records": metadata.get("records"),
+                }
+            )
+        except Exception:
+            query["metadata_status"] = "invalid"
+        return query
+    query_file = body.get("query_file") or body.get("query_blob_url")
+    if query_file not in (None, ""):
+        return {"kind": "query_file", "path": str(query_file)}
+    return {"kind": "missing"}
 
 
 def _submit_options_from_body(body: dict[str, Any]) -> dict[str, Any]:
@@ -119,6 +259,13 @@ def _upload_inline_query_for_submit(
 
 def _normalise_blast_submit_body(body: dict[str, Any], *, job_id: str) -> dict[str, Any]:
     normalised = dict(body)
+    normalised.update(
+        canonical_submit_metadata(
+            body,
+            submission_source="dashboard",
+            correlation_id=job_id,
+        )
+    )
     if not normalised.get("cluster_name") and normalised.get("aks_cluster_name"):
         normalised["cluster_name"] = normalised["aks_cluster_name"]
     if not normalised.get("database") and normalised.get("db"):
@@ -165,4 +312,5 @@ def _normalise_blast_submit_body(body: dict[str, Any], *, job_id: str) -> dict[s
 
     if options:
         normalised["options"] = options
+    normalised["canonical_request"] = canonical_submit_snapshot(normalised)
     return normalised

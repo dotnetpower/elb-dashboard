@@ -2,12 +2,17 @@
 
 export const STATUS_COLORS: Record<string, string> = {
   submitted: "var(--accent)",
+  preparing: "var(--accent)",
   checking_vm: "var(--accent)",
   uploading: "var(--accent)",
   configuring: "var(--accent)",
+  warmup_ready: "var(--accent)",
+  waiting_for_warmup: "var(--warning)",
+  warming_up: "var(--accent)",
   reading_split_query: "var(--accent)",
   splitting_queries: "var(--accent)",
   enabling_storage: "var(--accent)",
+  staging_db: "var(--warning)",
   submitting: "var(--warning)",
   split_children_submitted: "var(--warning)",
   split_children_aggregating: "var(--warning)",

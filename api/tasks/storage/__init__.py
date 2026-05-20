@@ -252,6 +252,8 @@ def warmup_database(
                 final.pop("sharding_error", None)
                 final["sharded"] = bool(summary.get("shard_sets"))
                 final["shard_sets"] = summary.get("shard_sets", [])
+                if final.get("source_version"):
+                    final["shard_source_version"] = final.get("source_version")
                 final["sharded_at"] = datetime.now(UTC).isoformat()
                 if summary.get("total_bytes"):
                     final.setdefault("total_bytes", summary["total_bytes"])
@@ -393,6 +395,7 @@ def warmup_database(
                     num_shards=selected_shards,
                     nodes=nodes,
                     image=_build_elb_image(acr_name),
+                    source_version=str(match.get("source_version") or ""),
                 )
 
                 role_summary: dict[str, str] = {"status": "skipped"}
@@ -447,6 +450,7 @@ def warmup_database(
                     cluster_name,
                     database_name,
                     nodes,
+                    current_source_version=str(match.get("source_version") or ""),
                 )
 
                 _record_task_progress(
@@ -547,20 +551,34 @@ def check_database_updates(
     resource_group: str,
     storage_account: str,
 ) -> dict[str, Any]:
-    """Check if any downloaded BLAST databases have updates available.
+    """Check downloaded BLAST DB generations against NCBI latest-dir.
 
-    Compares local blob metadata timestamps against NCBI FTP timestamps.
-    Scheduled by beat for periodic checks.
+    Side effects: none. Scheduled by beat for periodic visibility; it reports
+    stale DBs but deliberately does not auto-download large snapshots.
     """
-    # For now, list what databases exist in the storage account
     try:
+        from api.routes.storage.common import _resolve_latest_dir
         from api.services.storage_data import list_databases
 
         cred = get_credential()
-        databases = list_databases(cred, subscription_id, resource_group, storage_account)
+        databases = list_databases(cred, storage_account)
+        latest_version = _resolve_latest_dir()
+        updates_available = [
+            {
+                "db": str(database.get("name") or ""),
+                "source_version": database.get("source_version"),
+                "latest_version": latest_version,
+                "update_in_progress": bool(database.get("update_in_progress")),
+            }
+            for database in databases
+            if database.get("name")
+            and database.get("source_version")
+            and database.get("source_version") != latest_version
+        ]
         return {
             "databases": databases,
-            "updates_available": [],  # TODO: compare with NCBI FTP
+            "latest_version": latest_version,
+            "updates_available": updates_available,
             "status": "completed",
         }
     except Exception as exc:

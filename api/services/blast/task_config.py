@@ -104,13 +104,29 @@ def results_job_url(storage_account: str, job_id: str) -> str:
 
 
 def metadata_has_prepared_shard_layout(db_name: str, meta: Mapping[str, Any]) -> bool:
+    metadata_db_name = str(meta.get("db_name") or "")
+    if metadata_db_name and metadata_db_name != db_name:
+        return False
+    if meta.get("update_in_progress") or meta.get("sharding_in_progress"):
+        return False
+    if meta.get("shards_stale"):
+        return False
     shard_sets = meta.get("shard_sets")
-    return (
-        db_name == "core_nt"
-        and bool(meta.get("sharded"))
-        and isinstance(shard_sets, list)
-        and any(isinstance(value, int) and value > 1 for value in shard_sets)
-    )
+    if not bool(meta.get("sharded")) or not isinstance(shard_sets, list):
+        return False
+    has_partitioned_layout = False
+    for value in shard_sets:
+        try:
+            has_partitioned_layout = int(value) > 1
+        except (TypeError, ValueError):
+            has_partitioned_layout = False
+        if has_partitioned_layout:
+            break
+    if not has_partitioned_layout:
+        return False
+    source_version = str(meta.get("source_version") or "")
+    shard_source_version = str(meta.get("shard_source_version") or source_version or "")
+    return not (source_version and shard_source_version != source_version)
 
 
 def build_config_content(
@@ -235,20 +251,22 @@ def ensure_node_warmup_ready_for_submit(
     options: Mapping[str, Any] | None,
     metadata_resolver: Callable[[str, str], Mapping[str, Any] | None] = resolve_db_metadata,
 ) -> dict[str, Any] | None:
+    db_name = extract_db_name(database)
+    meta = metadata_resolver(storage_account, db_name) if storage_account and db_name else None
     options = suppress_sharding_for_unsharded_database(
         storage_account=storage_account,
         database=database,
         options=options,
-        metadata_resolver=metadata_resolver,
+        metadata_resolver=lambda *_args: meta,
     )
     if not submit_requires_node_warmup(options):
         return None
-    db_name = extract_db_name(database)
     if not db_name:
         raise WarmupNotReadyError(
             "node warmup readiness cannot be checked without a database name",
             retryable=False,
         )
+    storage_source_version = str(meta.get("source_version") or "") if meta else ""
     try:
         from api.services import get_credential
         from api.services.monitoring import k8s_warmup_status
@@ -271,6 +289,26 @@ def ensure_node_warmup_ready_for_submit(
             continue
         db_status = str(item.get("status") or "Unknown")
         if db_status == "Ready":
+            warm_source_version = str(item.get("source_version") or "")
+            warm_source_versions = {
+                str(value) for value in item.get("source_versions", []) or [] if str(value)
+            }
+            if storage_source_version:
+                if not warm_source_version and not warm_source_versions:
+                    raise WarmupNotReadyError(
+                        f"node warmup for {db_name} has no DB generation marker",
+                        retryable=True,
+                    )
+                if warm_source_versions and warm_source_versions != {storage_source_version}:
+                    raise WarmupNotReadyError(
+                        f"node warmup for {db_name} is for a stale DB generation",
+                        retryable=True,
+                    )
+                if warm_source_version and warm_source_version != storage_source_version:
+                    raise WarmupNotReadyError(
+                        f"node warmup for {db_name} is for a stale DB generation",
+                        retryable=True,
+                    )
             return dict(item)
         ready = int(item.get("nodes_ready") or 0)
         total = int(item.get("total_jobs") or 0)

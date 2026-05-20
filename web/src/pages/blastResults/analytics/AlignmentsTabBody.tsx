@@ -3,6 +3,7 @@ import { Eye, Loader2 } from "lucide-react";
 import { AlignmentViewer } from "./AlignmentViewer";
 import { DegradedBanner } from "./DegradedBanner";
 import { ResultFilterBar } from "./ResultFilterBar";
+import { ResultsPendingPanel } from "./ResultsPendingPanel";
 import { isPartialResult } from "./helpers";
 import { hitKey } from "./useBlastAnalyticsState";
 import type { BlastAnalyticsState } from "./useBlastAnalyticsState";
@@ -17,6 +18,10 @@ export function AlignmentsTabBody({ analytics, resultsPending = false }: Alignme
   const { alignQuery, alignments } = analytics;
   const filteredHitCount =
     alignQuery.data?.filtered_hits ?? alignQuery.data?.total_hits ?? 0;
+
+  if (resultsPending) {
+    return <ResultsPendingPanel />;
+  }
 
   return (
     <div>
@@ -42,7 +47,7 @@ export function AlignmentsTabBody({ analytics, resultsPending = false }: Alignme
         </div>
       )}
 
-      {isPartialResult(alignQuery.data) && (
+      {isPartialResult(alignQuery.data) && !resultsPending && (
         <DegradedBanner data={alignQuery.data} resultsPending={resultsPending} />
       )}
 

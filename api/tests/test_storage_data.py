@@ -169,6 +169,44 @@ def test_list_databases_only_marks_verified_defaults_as_web_blast_searchsp(
     assert "web_blast_searchsp" not in databases["labdb"]
 
 
+def test_list_databases_reads_blastdb_json_display_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blobs = [
+        _blob("core_nt/core_nt.nsq"),
+        _blob("core_nt/core_nt.njs"),
+    ]
+    payloads = {
+        "core_nt/core_nt.njs": json.dumps(
+            {
+                "title": "Core nucleotide BLAST database",
+                "description": "A curated nucleotide collection",
+                "dbtype": "Nucleotide",
+                "last-updated": "2026-05-18T00:00:00Z",
+                "number-of-sequences": 125_929_380,
+                "number-of-letters": 1_234_567_890,
+            }
+        )
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    databases = {
+        item["name"]: item for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+    }
+
+    assert databases["core_nt"]["title"] == "Core nucleotide BLAST database"
+    assert databases["core_nt"]["description"] == "A curated nucleotide collection"
+    assert databases["core_nt"]["molecule_type"] == "Nucleotide"
+    assert databases["core_nt"]["update_date"] == "2026-05-18T00:00:00Z"
+    assert databases["core_nt"]["total_sequences"] == 125_929_380
+    assert databases["core_nt"]["total_letters"] == 1_234_567_890
+
+
 def test_list_databases_surfaces_db_order_oracle_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -244,6 +282,48 @@ def test_list_databases_marks_db_order_oracle_stale_on_source_version_mismatch(
 
     assert databases["core_nt"]["source_version"] == "new-snapshot"
     assert databases["core_nt"]["db_order_oracle"]["status"] == "stale"
+
+
+def test_list_databases_surfaces_update_and_shard_generation_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blobs = [
+        _blob("core_nt.nsq"),
+        _blob("core_nt-metadata.json"),
+    ]
+    payloads = {
+        "core_nt-metadata.json": json.dumps(
+            {
+                "source_version": "2026-05-20-00-00-00",
+                "sharded": True,
+                "shard_sets": [10, "4", 4],
+                "shard_source_version": "2026-05-19-00-00-00",
+                "update_in_progress": True,
+                "updating_to_source_version": "2026-05-21-00-00-00",
+                "update_started_at": "2026-05-20T10:00:00+00:00",
+                "update_error": "copy failed after retry",
+                "update_failed_at": "2026-05-20T10:03:00+00:00",
+            }
+        )
+    }
+    fake_container = FakeContainerClient(blobs, payloads)
+    monkeypatch.setattr(
+        storage_data,
+        "_blob_service",
+        lambda *_args: FakeListBlobService(fake_container),
+    )
+
+    databases = {
+        item["name"]: item for item in storage_data.list_databases(object(), "elbstg01", "blast-db")
+    }
+
+    core_nt = databases["core_nt"]
+    assert core_nt["shard_sets"] == [4, 10]
+    assert core_nt["shard_source_version"] == "2026-05-19-00-00-00"
+    assert core_nt["shards_stale"] is True
+    assert core_nt["update_in_progress"] is True
+    assert core_nt["updating_to_source_version"] == "2026-05-21-00-00-00"
+    assert core_nt["update_error"] == "copy failed after retry"
 
 
 @pytest.mark.parametrize(

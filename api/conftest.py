@@ -19,7 +19,10 @@ def _reset_external_jobs_cache():
     expects to be the only source of truth.
     """
     from api.routes._blast_shared import _reset_external_jobs_cache as _reset
+    from api.routes.blast.jobs import _reset_blast_jobs_list_cache
 
     _reset()
+    _reset_blast_jobs_list_cache()
     yield
     _reset()
+    _reset_blast_jobs_list_cache()

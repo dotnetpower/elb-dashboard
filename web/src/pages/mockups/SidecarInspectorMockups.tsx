@@ -791,7 +791,6 @@ export function VariantA({ data }: { data: MockReq[] }) {
   const [tableSelected, setTableSelected] = useState<MockReq | null>(null);
   const [paused, setPaused] = useState(false);
   const [errorsOnly, setErrorsOnly] = useState(false);
-  const [windowMin, setWindowMin] = useState<1 | 5 | 15>(5);
   const [query, setQuery] = useState("");
   const [tableLimit, setTableLimit] = useState(25);
   const tableDetailRef = useRef<HTMLDivElement | null>(null);
@@ -810,6 +809,7 @@ export function VariantA({ data }: { data: MockReq[] }) {
   // so live + fixture data both stay visible. (Mockup fixtures were
   // generated against NOW at module load; live data is recent by
   // definition.)
+  const windowMin = 5;
   const referenceTs = data.length > 0 ? Math.max(...data.map((d) => d.ts)) : Date.now();
   const windowStart = referenceTs - windowMin * 60_000;
   const windowed = useMemo(
@@ -879,7 +879,6 @@ export function VariantA({ data }: { data: MockReq[] }) {
           <div style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <LiveIndicator paused={paused} />
             <CountChips counts={counts} />
-            <WindowSelector value={windowMin} onChange={setWindowMin} />
             <button
               type="button"
               className="glass-button"
@@ -968,56 +967,6 @@ export function VariantA({ data }: { data: MockReq[] }) {
         </div>
       )}
       {graphSelected && <Drawer onClose={() => setGraphSelected(null)} req={graphSelected} />}
-    </div>
-  );
-}
-
-function WindowSelector({
-  value,
-  onChange,
-}: {
-  value: 1 | 5 | 15;
-  onChange: (v: 1 | 5 | 15) => void;
-}) {
-  const options: (1 | 5 | 15)[] = [1, 5, 15];
-  return (
-    <div
-      role="radiogroup"
-      aria-label="Time window"
-      style={{
-        display: "inline-flex",
-        border: "1px solid var(--border-weak)",
-        borderRadius: 4,
-        overflow: "hidden",
-        fontSize: 10,
-        background: "rgba(255,255,255,0.04)",
-      }}
-    >
-      {options.map((opt, i) => {
-        const active = value === opt;
-        return (
-          <button
-            key={opt}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            onClick={() => onChange(opt)}
-            title={`Show last ${opt} minute${opt === 1 ? "" : "s"}`}
-            style={{
-              padding: "3px 8px",
-              border: "none",
-              borderLeft: i === 0 ? "none" : "1px solid var(--border-weak)",
-              background: active ? "rgba(122,167,255,0.18)" : "transparent",
-              color: active ? "var(--accent)" : "var(--text-muted)",
-              fontWeight: active ? 700 : 500,
-              cursor: "pointer",
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {opt}m
-          </button>
-        );
-      })}
     </div>
   );
 }

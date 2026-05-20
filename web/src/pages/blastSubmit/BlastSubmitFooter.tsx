@@ -30,6 +30,7 @@ export interface BlastSubmitFooterProps {
   submitError: unknown;
   preFlightResult: PreFlightResult | null;
   preFlightPending: boolean;
+  effectiveSearchSpace?: number;
   /** Wall-clock time of the last successful draft auto-save (N1). */
   lastSavedAt?: Date | null;
   onPreFlight: () => void;
@@ -59,6 +60,7 @@ export function BlastSubmitFooter({
   submitError,
   preFlightResult,
   preFlightPending,
+  effectiveSearchSpace,
   lastSavedAt,
   onPreFlight,
   onSubmit,
@@ -118,7 +120,12 @@ export function BlastSubmitFooter({
       )}
 
       {canSubmit && (
-        <BlastCommandPreview form={form} programMeta={programMeta} toast={toast} />
+        <BlastCommandPreview
+          form={form}
+          programMeta={programMeta}
+          effectiveSearchSpace={effectiveSearchSpace}
+          toast={toast}
+        />
       )}
       <div className="blast-submit-bar">
         <div className="blast-submit-summary">

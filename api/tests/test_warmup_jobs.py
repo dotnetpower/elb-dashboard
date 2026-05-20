@@ -53,14 +53,45 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         assert host_path == "/workspace/blast"
         assert container["volumeMounts"][0]["mountPath"] == DEFAULT_CONTAINER_DB_PATH
         assert "source /tmp/shard_volpaths.txt" not in container["args"][0]
-        assert "CACHE_INCOMPLETE missing taxonomy4blast.sqlite3" in container["args"][0]
+        assert "CLEANUP partial downloads" in container["args"][0]
+        assert "CACHE_INCOMPLETE missing taxdb files" in container["args"][0]
+        assert "CACHE_INCOMPLETE missing nucleotide volume files" in container["args"][0]
+        assert "CACHE_STALE missing source-version marker" in container["args"][0]
+        assert "ERROR taxdb files missing after download" in container["args"][0]
+        assert "valid_nsq_count=" in container["args"][0]
+        assert "printf '%s' ok > .download-complete" in container["args"][0]
         assert "blast-vmtouch-aks.sh" in container["args"][0]
+
+
+def test_plan_tags_warmup_jobs_with_source_version() -> None:
+    plan = build_warmup_job_plan(
+        db_name="core_nt",
+        mol_type="nucl",
+        storage_account="elbstg01",
+        num_shards=2,
+        nodes=_nodes(2),
+        image="elbacr01.azurecr.io/ncbi/elb:1.4.0",
+        source_version="2026-05-20-00-00-00",
+    )
+
+    for job in plan.jobs:
+        assert job["metadata"]["annotations"] == {
+            "elb.dashboard/source-version": "2026-05-20-00-00-00"
+        }
+        assert job["spec"]["template"]["metadata"]["annotations"] == {
+            "elb.dashboard/source-version": "2026-05-20-00-00-00"
+        }
+        env = {
+            item["name"]: item["value"]
+            for item in job["spec"]["template"]["spec"]["containers"][0]["env"]
+        }
+        assert env["ELB_DB_SOURCE_VERSION"] == "2026-05-20-00-00-00"
 
 
 def test_warmup_scripts_configmap_contains_job_scripts() -> None:
     manifest = build_warmup_scripts_configmap()
 
-    assert manifest["metadata"]["name"] == "elb-scripts"
+    assert manifest["metadata"]["name"] == "elb-warmup-scripts"
     assert "init-db-shard-aks.sh" in manifest["data"]
     assert "blast-vmtouch-aks.sh" in manifest["data"]
     assert "azcopy login --identity" in manifest["data"]["init-db-shard-aks.sh"]
@@ -68,7 +99,23 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
         "AZCOPY_CONCURRENCY_VALUE=${AZCOPY_CONCURRENCY_VALUE:-16}"
         in manifest["data"]["init-db-shard-aks.sh"]
     )
-    assert "taxonomy4blast.sqlite3" in manifest["data"]["init-db-shard-aks.sh"]
+    assert "taxdb.btd;taxdb.bti" in manifest["data"]["init-db-shard-aks.sh"]
+    assert 'cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"' in manifest["data"]["init-db-shard-aks.sh"]
+    assert "CLEANUP partial downloads" in manifest["data"]["init-db-shard-aks.sh"]
+    assert "CACHE_INCOMPLETE missing taxdb files" in manifest["data"]["init-db-shard-aks.sh"]
+    assert (
+        "CACHE_INCOMPLETE missing nucleotide volume files"
+        in manifest["data"]["init-db-shard-aks.sh"]
+    )
+    assert "ERROR: taxdb files missing after download" in manifest["data"]["init-db-shard-aks.sh"]
+    assert "CACHE_STALE missing source-version marker" in manifest["data"]["init-db-shard-aks.sh"]
+    assert (
+        "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}" in manifest["data"]["init-db-shard-aks.sh"]
+    )
+    assert ".download-source-version" in manifest["data"]["init-db-shard-aks.sh"]
+    assert "valid_nsq_count=" in manifest["data"]["init-db-shard-aks.sh"]
+    assert "printf '%s' ok > .download-complete" in manifest["data"]["init-db-shard-aks.sh"]
+    assert "exit 0" in manifest["data"]["init-db-shard-aks.sh"]
     assert "vmtouch" in manifest["data"]["blast-vmtouch-aks.sh"]
 
 
@@ -140,6 +187,50 @@ def test_database_status_from_warmup_jobs_aggregates_shards() -> None:
             "status": "Failed",
         }
     ]
+
+
+def test_database_status_from_warmup_jobs_marks_mixed_generations_stale() -> None:
+    jobs = [
+        {
+            "metadata": {
+                "labels": {"db": "core_nt", "shard": "00"},
+                "annotations": {"elb.dashboard/source-version": "old"},
+            },
+            "status": {"succeeded": 1},
+        },
+        {
+            "metadata": {"labels": {"db": "core_nt", "shard": "01"}},
+            "spec": {
+                "template": {"metadata": {"annotations": {"elb.dashboard/source-version": "new"}}}
+            },
+            "status": {"succeeded": 1},
+        },
+    ]
+
+    status = database_status_from_warmup_jobs(jobs)
+
+    assert status[0]["status"] == "Stale"
+    assert status[0]["source_versions"] == ["new", "old"]
+    assert status[0]["active_message"] == "Warmup jobs belong to multiple DB source versions."
+
+
+def test_database_status_from_warmup_jobs_aggregates_shard_named_db_labels() -> None:
+    jobs = [
+        {
+            "metadata": {"labels": {"db": "core_nt_shard_00"}},
+            "status": {"succeeded": 1},
+        },
+        {
+            "metadata": {"labels": {"db": "core_nt_shard_01"}},
+            "status": {"succeeded": 1},
+        },
+    ]
+
+    status = database_status_from_warmup_jobs(jobs)
+
+    assert len(status) == 1
+    assert status[0]["name"] == "core_nt"
+    assert status[0]["shards"] == ["00", "01"]
 
 
 def test_database_status_from_warmup_jobs_marks_all_ready() -> None:

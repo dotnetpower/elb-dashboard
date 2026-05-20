@@ -206,6 +206,146 @@ def test_reconcile_auto_warmup_enqueues_when_all_ready_workload_nodes(
     assert calls[0]["kwargs"]["require_all_warmup_nodes"] is True
 
 
+def test_reconcile_auto_warmup_skips_stale_downloaded_generation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 10,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 10)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
+    )
+    monkeypatch.setattr(
+        "api.services.storage_data.list_databases",
+        lambda credential, storage_account: [
+            {"name": "core_nt", "source_version": "2026-05-19-00-00-00"}
+        ],
+    )
+    monkeypatch.setattr(
+        "api.routes.storage.common._resolve_latest_dir",
+        lambda: "2026-05-20-00-00-00",
+    )
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.celery_app.celery_app.send_task",
+        lambda *args, **kwargs: calls.append({"args": args, "kwargs": kwargs}),
+    )
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
+
+    assert result["clusters"][0]["status"] == "ready_noop"
+    assert result["clusters"][0]["skipped"] == [
+        {
+            "db": "core_nt",
+            "reason": "update_required",
+            "source_version": "2026-05-19-00-00-00",
+            "latest_version": "2026-05-20-00-00-00",
+        }
+    ]
+    assert calls == []
+
+
+def test_reconcile_auto_warmup_reenqueues_stale_warm_generation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 10,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 10)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda credential, subscription_id, resource_group, cluster_name: {
+            "databases": [
+                {
+                    "name": "core_nt",
+                    "status": "Ready",
+                    "source_version": "2026-05-19-00-00-00",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.storage_data.list_databases",
+        lambda credential, storage_account: [
+            {"name": "core_nt", "source_version": "2026-05-20-00-00-00"}
+        ],
+    )
+    monkeypatch.setattr(
+        "api.routes.storage.common._resolve_latest_dir",
+        lambda: "2026-05-20-00-00-00",
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeTask:
+        id = "warmup-task-current-generation"
+
+    def fake_send_task(task_name: str, *, kwargs: dict[str, Any], queue: str) -> FakeTask:
+        calls.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
+        return FakeTask()
+
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
+
+    assert result["clusters"][0]["status"] == "triggered"
+    assert result["clusters"][0]["enqueued"] == [
+        {"db": "core_nt", "task_id": "warmup-task-current-generation"}
+    ]
+    assert calls[0]["kwargs"]["database_name"] == "core_nt"
+
+
 def test_reconcile_auto_warmup_skips_until_cluster_ready(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))

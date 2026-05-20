@@ -11,6 +11,7 @@ import {
 import { BlastDbCustomInput } from "@/components/cards/storage/BlastDbCustomInput";
 import { BlastDbLargeConfirm } from "@/components/cards/storage/BlastDbLargeConfirm";
 import { BlastDbRow } from "@/components/cards/storage/BlastDbRow";
+import { BlastDbUpdateConfirm } from "@/components/cards/storage/BlastDbUpdateConfirm";
 import {
   readAutoWarmupDbs,
   setAutoWarmupDb,
@@ -34,6 +35,7 @@ interface BlastDbModalProps {
  */
 export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
   const [confirmLargeDb, setConfirmLargeDb] = useState<string | null>(null);
+  const [confirmUpdateDb, setConfirmUpdateDb] = useState<string | null>(null);
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(
     () => readAutoWarmupDbs(),
   );
@@ -44,6 +46,7 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
       if (e.key === "Escape") {
         onClose();
         setConfirmLargeDb(null);
+        setConfirmUpdateDb(null);
       }
     };
     window.addEventListener("keydown", handleEsc);
@@ -80,6 +83,13 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
 
   const startDownload = (name: string) => {
     void handleDownload(name);
+    setConfirmLargeDb(null);
+    setConfirmUpdateDb(null);
+  };
+
+  const startUpdate = (name: string) => {
+    void state.handleUpdate(name);
+    setConfirmUpdateDb(null);
     setConfirmLargeDb(null);
   };
 
@@ -334,7 +344,8 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                       isDownloaded &&
                       !!meta?.source_version &&
                       !!latestVersion &&
-                      meta.source_version !== latestVersion;
+                      meta.source_version !== latestVersion &&
+                      !meta.update_in_progress;
                     return (
                       <BlastDbRow
                         key={db.value}
@@ -352,8 +363,11 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                         oracleBuilding={oracleBuilding === db.value}
                         oracleDisabled={!isDownloaded || oracleBuilding !== null}
                         autoWarmupChecked={autoWarmupDbs.has(db.value)}
-                        autoWarmupDisabled={!isDownloaded}
+                        autoWarmupDisabled={
+                          !isDownloaded || hasUpdate || !!meta?.update_in_progress
+                        }
                         onDownload={() => startDownload(db.value)}
+                        onUpdate={() => setConfirmUpdateDb(db.value)}
                         onBuildOracle={() => void handleBuildOracle(db.value)}
                         onConfirmLarge={() => setConfirmLargeDb(db.value)}
                         onToggleAutoWarmup={(checked) =>
@@ -379,6 +393,16 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
               dbValue={confirmLargeDb}
               onConfirm={() => startDownload(confirmLargeDb)}
               onCancel={() => setConfirmLargeDb(null)}
+            />
+          )}
+
+          {confirmUpdateDb && (
+            <BlastDbUpdateConfirm
+              dbValue={confirmUpdateDb}
+              meta={downloadedDbs.get(confirmUpdateDb)}
+              latestVersion={latestVersion}
+              onConfirm={() => startUpdate(confirmUpdateDb)}
+              onCancel={() => setConfirmUpdateDb(null)}
             />
           )}
 

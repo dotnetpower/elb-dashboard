@@ -34,6 +34,11 @@ from api.services.blast_oracles import (
 from api.services.blast_task_config import WarmupNotReadyError
 from api.services.query_grouping import QuerySplitExecutionPlan
 from api.services.terminal_exec import TerminalExecError
+from api.tasks.blast.progress import (
+    _merge_progress_payload,
+    _phase_is_terminal_for_artifacts,
+    _tail_text,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +50,16 @@ RETRYABLE_EXIT_CODES = {8, 10}
 BLAST_SUBMIT_LOCK_KEY = "elb:blast:elastic-blast-submit"
 BLAST_SUBMIT_LOCK_TTL_SECONDS = 900
 ELASTIC_BLAST_JOB_ID_RE = re.compile(r"/results/[^/]+/(job-[A-Za-z0-9_-]+)")
+PROGRESS_STEP_ORDER = (
+    "preparing",
+    "warming_up",
+    "configuring",
+    "staging_db",
+    "submitting",
+    "running",
+    "exporting_results",
+    "completed",
+)
 STRICT_TIE_ORDER_MIN_TARGET_SEQS = 5000
 QUERY_FASTA_READ_MAX_BYTES = 100 * 1024 * 1024
 SPLIT_UPLOAD_VERIFY_BYTES = 1024
@@ -1369,83 +1384,18 @@ def _retry_after(payload: Mapping[str, Any] | None, default: int) -> int:
     return max(1, min(parsed, 300))
 
 
-def _step_key_for_phase(phase: str) -> str:
-    return {
-        "configuring": "configuring",
-        "warmup_ready": "warming_up",
-        "submitting": "submitting",
-        "submitted": "submitting",
-        "submit_retryable_failure": "submitting",
-        "submit_failed": "submitting",
-        "results_pending": "exporting_results",
-        "completed": "completed",
-        "failed": "submitting",
-    }.get(phase, phase)
+def _enqueue_artifact_finalizer(job_id: str, phase: str, status: str) -> None:
+    if not _phase_is_terminal_for_artifacts(phase, status):
+        return
+    try:
+        from api.services.job_artifacts import artifact_build_should_enqueue
+        from api.tasks.blast_artifacts import finalize_job_artifacts
 
-
-def _tail_text(lines: list[str], limit: int = LIVE_OUTPUT_SNIPPET_CHARS) -> str:
-    text = "\n".join(line for line in lines if line)
-    if len(text) <= limit:
-        return text
-    return text[-limit:]
-
-
-def _compact_progress_details(details: Mapping[str, Any]) -> dict[str, Any]:
-    allowed = {
-        "config_blob_path",
-        "config_url",
-        "config_upload_error",
-        "decision",
-        "duration_ms",
-        "exit_code",
-        "k8s",
-        "last_output",
-        "log_line_count",
-        "output",
-        "timed_out",
-    }
-    compact: dict[str, Any] = {}
-    for key, value in details.items():
-        if key not in allowed:
-            continue
-        if key in {"last_output", "output"}:
-            compact[key] = _snippet(value, LIVE_OUTPUT_SNIPPET_CHARS)
-        else:
-            compact[key] = value
-    return compact
-
-
-def _merge_progress_payload(
-    existing_payload: Mapping[str, Any] | None,
-    *,
-    phase: str,
-    status: str,
-    error_code: str,
-    details: Mapping[str, Any],
-) -> dict[str, Any]:
-    payload = dict(existing_payload or {})
-    progress = dict(payload.get("_progress") if isinstance(payload.get("_progress"), dict) else {})
-    steps = dict(progress.get("steps") if isinstance(progress.get("steps"), dict) else {})
-    step_key = _step_key_for_phase(phase)
-    step = dict(steps.get(step_key) if isinstance(steps.get(step_key), dict) else {})
-    step.update(
-        {
-            "phase": phase,
-            "status": status,
-            "updated_at": _now_iso(),
-            **_compact_progress_details(details),
-        }
-    )
-    if error_code:
-        step["error"] = error_code
-    if status == "completed":
-        step["success"] = True
-    if status == "failed":
-        step["success"] = False
-    steps[step_key] = step
-    progress.update({"phase": phase, "status": status, "steps": steps})
-    payload["_progress"] = progress
-    return payload
+        if not artifact_build_should_enqueue(job_id, ["artifact_finalizer"]):
+            return
+        finalize_job_artifacts.apply_async(kwargs={"job_id": job_id})
+    except Exception as exc:
+        LOGGER.info("artifact finalizer enqueue skipped job_id=%s: %s", job_id, type(exc).__name__)
 
 
 def _update_state(
@@ -1501,6 +1451,7 @@ def _update_state(
                 **details,
             },
         )
+        _enqueue_artifact_finalizer(job_id, phase, status)
     except Exception as exc:
         LOGGER.warning("blast state update failed job_id=%s phase=%s: %s", job_id, phase, exc)
 
@@ -1510,6 +1461,7 @@ def _stream_submit_command(
     job_id: str,
     task: Any,
     config_content: str,
+    progress_phase: str = "submitting",
 ) -> dict[str, Any]:
     from api.services.sanitise import sanitise
     from api.services.terminal_exec import stream as terminal_stream
@@ -1519,6 +1471,31 @@ def _stream_submit_command(
     summary: dict[str, Any] = {"exit_code": 1, "duration_ms": 0, "timed_out": False}
     last_update = 0.0
     log_line_count = 0
+    chunk_sequence = 0
+    pending_log_events: list[dict[str, Any]] = []
+
+    def flush_log_chunk() -> None:
+        nonlocal chunk_sequence, pending_log_events
+        if not pending_log_events:
+            return
+        try:
+            from api.services.job_artifacts import write_execution_log_chunk
+
+            write_execution_log_chunk(
+                job_id,
+                progress_phase,
+                chunk_sequence,
+                pending_log_events,
+            )
+            chunk_sequence += 1
+            pending_log_events = []
+        except Exception as exc:
+            LOGGER.debug(
+                "submit log chunk write skipped job_id=%s sequence=%s: %s",
+                job_id,
+                chunk_sequence,
+                type(exc).__name__,
+            )
 
     for item in terminal_stream(
         argv=_elastic_blast_argv("submit", job_id),
@@ -1533,19 +1510,35 @@ def _stream_submit_command(
                 stderr_lines.append(line)
             else:
                 stdout_lines.append(line)
+            try:
+                from api.services.job_logs.event_bus import publish_job_log_event
+
+                publish_job_log_event(
+                    job_id,
+                    source="terminal_exec",
+                    phase=progress_phase,
+                    stream=stream_name,
+                    line=line,
+                )
+            except Exception as exc:
+                LOGGER.debug("submit live log publish skipped job_id=%s: %s", job_id, exc)
             log_line_count += 1
+            pending_log_events.append(
+                {"stream": stream_name, "line": line, "index": log_line_count}
+            )
             now = time.monotonic()
             if now - last_update >= 2.0:
+                flush_log_chunk()
                 live_output = _tail_text(stdout_lines + stderr_lines)
                 _progress(
                     task,
-                    "submitting",
+                    progress_phase,
                     last_output=live_output,
                     log_line_count=log_line_count,
                 )
                 _update_state(
                     job_id,
-                    "submitting",
+                    progress_phase,
                     status="running",
                     event="submit_log",
                     last_output=live_output,
@@ -1557,16 +1550,17 @@ def _stream_submit_command(
 
     stdout = "\n".join(stdout_lines)
     stderr = "\n".join(stderr_lines)
+    flush_log_chunk()
     if stdout or stderr:
         _update_state(
             job_id,
-            "submitting",
+            progress_phase,
             status="running",
             event="submit_log",
             last_output=_tail_text(stdout_lines + stderr_lines),
             log_line_count=log_line_count,
         )
-    return {**summary, "stdout": stdout, "stderr": stderr}
+    return {**summary, "stdout": stdout, "stderr": stderr, "log_line_count": log_line_count}
 
 
 def _acquire_submit_lock(job_id: str) -> tuple[Any, str] | None:
@@ -1953,8 +1947,13 @@ def submit(
         _update_state(job_id, "config_invalid", status="failed", error_code=error)
         return {"job_id": job_id, "status": "failed", "phase": "config_invalid", "error": error}
 
-    _progress(self, "submitting")
-    _update_state(job_id, "submitting")
+    requires_node_warmup = _submit_requires_node_warmup(effective_options)
+    if requires_node_warmup:
+        _progress(self, "staging_db")
+        _update_state(job_id, "staging_db")
+    else:
+        _progress(self, "submitting")
+        _update_state(job_id, "submitting")
 
     try:
         from api.services.terminal_exec import run as terminal_run
@@ -1976,6 +1975,7 @@ def submit(
                 job_id=job_id,
                 task=self,
                 config_content=config_content,
+                progress_phase="submitting",
             )
         finally:
             _release_submit_lock(lock_client, lock_token)
@@ -1998,6 +1998,9 @@ def submit(
 
     payload = _last_json(str(result.get("stdout", "")))
     exit_code = int(result.get("exit_code", 1) or 0)
+    submit_output = "\n".join(
+        str(value) for value in (result.get("stdout"), result.get("stderr")) if value
+    )
     elastic_blast_job_id = _extract_elastic_blast_job_id(
         result.get("stdout")
     ) or _discover_elastic_blast_job_id(
@@ -2005,6 +2008,29 @@ def submit(
         job_id,
     )
     if exit_code == 0:
+        if requires_node_warmup:
+            _update_state(
+                job_id,
+                "staging_db",
+                status="completed",
+                output=_snippet(submit_output, LIVE_OUTPUT_SNIPPET_CHARS),
+                last_output=_snippet(submit_output, LIVE_OUTPUT_SNIPPET_CHARS),
+                log_line_count=result.get("log_line_count"),
+                exit_code=exit_code,
+                duration_ms=result.get("duration_ms"),
+                timed_out=result.get("timed_out"),
+            )
+        _update_state(
+            job_id,
+            "submitting",
+            status="completed",
+            output=_snippet(submit_output, LIVE_OUTPUT_SNIPPET_CHARS),
+            last_output=_snippet(submit_output, LIVE_OUTPUT_SNIPPET_CHARS),
+            log_line_count=result.get("log_line_count"),
+            exit_code=exit_code,
+            duration_ms=result.get("duration_ms"),
+            timed_out=result.get("timed_out"),
+        )
         phase, status = _submit_success_status(payload)
         if status == "running":
             phase, status, k8s_status = _refresh_submit_terminal_status(
@@ -2030,7 +2056,7 @@ def submit(
             cluster_name=(payload or {}).get("cluster_name"),
             elastic_blast_job_id=elastic_blast_job_id or None,
             k8s=k8s_status,
-            output=_snippet(result.get("stdout"), STDOUT_SNIPPET_CHARS),
+            output=_snippet(submit_output, STDOUT_SNIPPET_CHARS),
             exit_code=exit_code,
             duration_ms=result.get("duration_ms"),
             timed_out=result.get("timed_out"),
@@ -2041,7 +2067,7 @@ def submit(
             "phase": phase,
             "decision": (payload or {}).get("decision", "accepted"),
             "k8s": k8s_status,
-            "output": _snippet(result.get("stdout"), STDOUT_SNIPPET_CHARS),
+            "output": _snippet(submit_output, STDOUT_SNIPPET_CHARS),
         }
 
     error = _result_error(result, payload)
@@ -2332,6 +2358,7 @@ def reconcile_stale_jobs(
                 status, phase = _celery_success_row_status(row, celery_result)
                 if row.status != status or row.phase != phase:
                     repo.update(row.job_id, status=status, phase=phase)
+                _enqueue_artifact_finalizer(row.job_id, phase, status)
                 if status == "completed":
                     summary["completed"] += 1
                 else:
@@ -2345,6 +2372,7 @@ def reconcile_stale_jobs(
                     phase="failed",
                     error_code=err[:120],
                 )
+                _enqueue_artifact_finalizer(row.job_id, "failed", "failed")
                 summary["failed"] += 1
                 continue
 
@@ -2384,6 +2412,7 @@ def reconcile_stale_jobs(
                             summary["external_refreshed"] += 1
                             refreshed = True
                             if ext_status in {"completed", "failed"}:
+                                _enqueue_artifact_finalizer(row.job_id, ext_phase, ext_status)
                                 # Counted under external_refreshed; do not
                                 # double-count under completed/failed.
                                 pass
@@ -2411,6 +2440,7 @@ def reconcile_stale_jobs(
                     phase="worker_lost",
                     error_code="worker_lost",
                 )
+                _enqueue_artifact_finalizer(row.job_id, "worker_lost", "failed")
                 summary["worker_lost"] += 1
             else:
                 summary["untouched"] += 1

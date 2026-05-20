@@ -19,6 +19,10 @@ import {
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
+import { BlastJobIdentity } from "@/components/cards/BlastJobIdentity";
+
+import type { DisplayJobState, JobRowView } from "./jobTypes";
+
 /* -------------------------------------------------------------------------- */
 /* Health pill                                                                */
 /* -------------------------------------------------------------------------- */
@@ -365,14 +369,6 @@ export function KpiInline({
 /* Job state badge + split progress                                           */
 /* -------------------------------------------------------------------------- */
 
-export type DisplayJobState =
-  | "Pending"
-  | "Running"
-  | "Reducing"
-  | "Completed"
-  | "Failed"
-  | "Unknown";
-
 const JOB_STATE_TONES: Record<DisplayJobState, { color: string; bg: string }> = {
   Pending: { color: "var(--text-faint)", bg: "rgba(255,255,255,0.04)" },
   Running: { color: "var(--accent)", bg: "rgba(110,159,255,0.10)" },
@@ -439,25 +435,6 @@ export function SplitProgress({
 /* JobRow — one BLAST job row in the active jobs cell                         */
 /* -------------------------------------------------------------------------- */
 
-export interface JobRowView {
-  jobId: string;
-  /** Truncated/display id (e.g. last 8 chars). Falls back to `jobId`. */
-  displayId?: string;
-  title: string;
-  db: string;
-  query: string;
-  state: DisplayJobState;
-  /** Absolute creation time (ISO-8601). Used to compute elapsed seconds. */
-  createdAt?: string | null;
-  /** Optional pre-computed elapsed seconds (overrides createdAt-based math). */
-  elapsedSec?: number | null;
-  /** Optional ETA in seconds. */
-  etaSec?: number | null;
-  splitsDone?: number | null;
-  splitsTotal?: number | null;
-  note?: string | null;
-}
-
 export function fmtDuration(sec: number | null | undefined): string {
   if (sec == null || !Number.isFinite(sec) || sec < 0) return "—";
   if (sec < 60) return `${Math.round(sec)}s`;
@@ -495,7 +472,7 @@ export function JobRow({ j, dense = false }: { j: JobRowView; dense?: boolean })
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "82px 1fr 90px 96px auto",
+        gridTemplateColumns: "auto minmax(0, 1fr) auto",
         alignItems: "center",
         gap: 12,
         padding: dense ? "6px 10px" : "8px 12px",
@@ -505,52 +482,37 @@ export function JobRow({ j, dense = false }: { j: JobRowView; dense?: boolean })
         fontSize: 11.5,
       }}
     >
+      <JobStateBadge s={j.state} />
+      <BlastJobIdentity
+        title={j.title}
+        fallbackTitle={j.jobId}
+        program={j.program}
+        db={j.db}
+        query={j.query}
+        clusterName={j.clusterName}
+        note={j.note}
+        noteTone={tone}
+        compact
+      />
       <span
         style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          color: "var(--text-primary)",
-          fontWeight: 500,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-        title={j.jobId}
-      >
-        {j.displayId ?? j.jobId.slice(0, 8)}
-      </span>
-      <span
-        style={{
-          color: "var(--text-muted)",
-          fontSize: 11,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>{j.title || j.db || "—"}</span>
-        {j.note ? (
-          <span style={{ color: tone, marginLeft: 6 }}>· {j.note}</span>
-        ) : j.query ? (
-          <span style={{ marginLeft: 6 }}>· {j.query}</span>
-        ) : null}
-      </span>
-      <SplitProgress done={splitsDone} total={splitsTotal} color={tone} />
-      <span
-        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
           fontVariantNumeric: "tabular-nums",
           fontSize: 11,
           color: "var(--text-muted)",
           textAlign: "right",
+          whiteSpace: "nowrap",
         }}
       >
+        <SplitProgress done={splitsDone} total={splitsTotal} color={tone} />
         {j.state === "Pending"
           ? "queued"
           : j.etaSec
             ? `${fmtDuration(elapsed)} · ETA ${fmtDuration(j.etaSec)}`
             : fmtDuration(elapsed)}
       </span>
-      <JobStateBadge s={j.state} />
     </div>
   );
 }

@@ -16,7 +16,7 @@ import {
   XCircle,
 } from "lucide-react";
 
-import type { DisplayJobState } from "@/components/cards/ClusterBento/atoms";
+import type { DisplayJobState } from "@/components/cards/ClusterBento/jobTypes";
 
 import { jobStateTone, toneColor, type HealthTone } from "./helpers";
 

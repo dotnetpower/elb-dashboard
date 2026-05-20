@@ -1,4 +1,12 @@
-import { CheckCircle2, Circle, Download, ListOrdered, Loader2 } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Circle,
+  Download,
+  ListOrdered,
+  Loader2,
+  RefreshCw,
+} from "lucide-react";
 
 import {
   type BlastDbCatalogItem,
@@ -25,6 +33,7 @@ interface BlastDbRowProps {
   autoWarmupChecked: boolean;
   autoWarmupDisabled: boolean;
   onDownload: () => void;
+  onUpdate: () => void;
   onBuildOracle: () => void;
   onConfirmLarge: () => void;
   onToggleAutoWarmup: (checked: boolean) => void;
@@ -54,6 +63,7 @@ export function BlastDbRow({
   autoWarmupChecked,
   autoWarmupDisabled,
   onDownload,
+  onUpdate,
   onBuildOracle,
   onConfirmLarge,
   onToggleAutoWarmup,
@@ -65,6 +75,7 @@ export function BlastDbRow({
       onDownload();
     }
   };
+  const isUpdating = Boolean(meta?.update_in_progress);
 
   return (
     <div
@@ -219,6 +230,54 @@ export function BlastDbRow({
           )}
           {isDownloaded && meta && (
             <>
+              {isUpdating && (
+                <span
+                  className="db-shard-chip"
+                  title={
+                    meta.updating_to_source_version
+                      ? `Updating to ${formatNcbiVersion(meta.updating_to_source_version)}`
+                      : "Updating DB generation"
+                  }
+                  style={{
+                    fontSize: 10,
+                    padding: "1px 6px",
+                    borderRadius: 3,
+                    color: "var(--accent)",
+                    background: "rgba(110,159,255,0.10)",
+                    border: "1px solid rgba(110,159,255,0.28)",
+                    fontWeight: 500,
+                    whiteSpace: "nowrap",
+                    letterSpacing: 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <Loader2 size={10} className="spin" /> Updating
+                </span>
+              )}
+              {meta.update_error && !isUpdating && (
+                <span
+                  className="db-shard-chip"
+                  title={meta.update_error}
+                  style={{
+                    fontSize: 10,
+                    padding: "1px 6px",
+                    borderRadius: 3,
+                    color: "var(--warning)",
+                    background: "rgba(240,198,116,0.08)",
+                    border: "1px solid rgba(240,198,116,0.24)",
+                    fontWeight: 500,
+                    whiteSpace: "nowrap",
+                    letterSpacing: 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <AlertCircle size={10} /> Update failed
+                </span>
+              )}
               {meta.total_bytes ? (
                 <span style={{ color: "var(--success)" }}>
                   {formatBytes(meta.total_bytes)}
@@ -243,20 +302,29 @@ export function BlastDbRow({
               {meta.sharded && (meta.shard_sets?.length ?? 0) > 0 && (
                 <span
                   className="db-shard-chip"
-                  title={`Pre-built shard layouts: N = ${meta.shard_sets!.join(", ")}. Auto-selected per submit based on cluster size & RAM.`}
+                  title={
+                    meta.shards_stale
+                      ? `Shard layouts were built for ${formatNcbiVersion(meta.shard_source_version ?? "")}; rebuild before relying on them for ${formatNcbiVersion(meta.source_version ?? "")}.`
+                      : `Pre-built shard layouts: N = ${meta.shard_sets!.join(", ")}. Auto-selected per submit based on cluster size & RAM.`
+                  }
                   style={{
                     fontSize: 10,
                     padding: "1px 6px",
                     borderRadius: 3,
-                    color: "var(--accent)",
-                    background: "rgba(110,159,255,0.10)",
-                    border: "1px solid rgba(110,159,255,0.28)",
+                    color: meta.shards_stale ? "var(--warning)" : "var(--accent)",
+                    background: meta.shards_stale
+                      ? "rgba(240,198,116,0.08)"
+                      : "rgba(110,159,255,0.10)",
+                    border: meta.shards_stale
+                      ? "1px solid rgba(240,198,116,0.24)"
+                      : "1px solid rgba(110,159,255,0.28)",
                     fontWeight: 500,
                     whiteSpace: "nowrap",
-                    letterSpacing: 0.1,
+                    letterSpacing: 0,
                   }}
                 >
-                  Sharded · {meta.shard_sets!.length} layouts
+                  {meta.shards_stale ? "Shards stale" : "Sharded"} ·{" "}
+                  {meta.shard_sets!.length} layouts
                 </span>
               )}
               {meta.db_order_oracle && (
@@ -270,15 +338,25 @@ export function BlastDbRow({
                     color:
                       meta.db_order_oracle.status === "ready"
                         ? "var(--success)"
+                        : meta.db_order_oracle.status === "stale"
+                          ? "var(--warning)"
                         : "var(--accent)",
-                    background: "rgba(106,214,163,0.08)",
-                    border: "1px solid rgba(106,214,163,0.22)",
+                    background:
+                      meta.db_order_oracle.status === "stale"
+                        ? "rgba(240,198,116,0.08)"
+                        : "rgba(106,214,163,0.08)",
+                    border:
+                      meta.db_order_oracle.status === "stale"
+                        ? "1px solid rgba(240,198,116,0.24)"
+                        : "1px solid rgba(106,214,163,0.22)",
                     fontWeight: 500,
                     whiteSpace: "nowrap",
                     letterSpacing: 0,
                   }}
                 >
-                  Order · {meta.db_order_oracle.status}
+                  {meta.db_order_oracle.status === "stale"
+                    ? "Order stale"
+                    : `Order · ${meta.db_order_oracle.status}`}
                 </span>
               )}
             </>
@@ -294,7 +372,13 @@ export function BlastDbRow({
             }}
             title={
               autoWarmupDisabled
-                ? "Download this database before enabling automatic warmup"
+                ? !isDownloaded
+                  ? "Download this database before enabling automatic warmup"
+                  : isUpdating
+                    ? "Automatic warmup waits until this update finishes"
+                    : hasUpdate
+                      ? "Update this database before enabling automatic warmup"
+                      : "Automatic warmup is unavailable"
                 : "Warm this database automatically when an AKS workload cluster is running"
             }
           >
@@ -338,7 +422,14 @@ export function BlastDbRow({
           paddingTop: 1,
         }}
       >
-        {hasUpdate ? (
+        {isUpdating ? (
+          <span
+            className="gt gt-b"
+            style={{ fontSize: 10, display: "inline-flex", alignItems: "center", gap: 4 }}
+          >
+            <Loader2 size={10} className="spin" /> Updating
+          </span>
+        ) : hasUpdate ? (
           <button
             className="glass-button"
             style={{
@@ -352,12 +443,12 @@ export function BlastDbRow({
             }}
             onClick={(e) => {
               e.stopPropagation();
-              triggerDownload();
+              onUpdate();
             }}
             disabled={downloadDisabled}
             title={`Update from ${formatNcbiVersion(meta!.source_version!)} to ${formatNcbiVersion(latestVersion!)}`}
           >
-            <Download size={11} /> Update
+            <RefreshCw size={11} /> Update
           </button>
         ) : isDownloaded ? (
           <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>

@@ -172,6 +172,9 @@ docs/features_change/YYYY-MM/YYYY-MM-DD-<short-name>.md
 
 containing: motivation, user-facing change, API/IaC diff summary, validation evidence (screenshot, curl, or test name).
 
+### GitHub issue closure hygiene
+When work is tied to a registered GitHub issue, do not leave the issue silent. Before marking the task done, verify the issue's acceptance criteria against the implemented diff and validation evidence. If the criteria are met, add an issue comment summarising the shipped change and validation, then close the issue. If anything remains, leave the issue open and comment with the completed work, validation evidence, and explicit remaining gap.
+
 ### Validation before marking done
 * Backend changes (`api/`): `uv run pytest -q api/tests` + a local smoke test (`uv run uvicorn api.main:app --reload` for HTTP routes; `uv run celery -A api.celery_app worker -l info` for task changes). Curl the new route or trigger the new task with evidence in the change note.
 * Frontend changes: `npm run build` (in `web/`) + screenshot of the affected page.

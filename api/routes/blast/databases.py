@@ -288,6 +288,8 @@ def blast_database_shard(
             final.pop("sharding_error", None)
             final["sharded"] = bool(summary.get("shard_sets"))
             final["shard_sets"] = summary.get("shard_sets", [])
+            if final.get("source_version"):
+                final["shard_source_version"] = final.get("source_version")
             final["sharded_at"] = datetime.now(UTC).isoformat()
             if summary.get("total_bytes"):
                 final.setdefault("total_bytes", summary["total_bytes"])
@@ -357,7 +359,7 @@ def blast_database_order_oracle(
         k8s_ready_warmup_node_names,
         k8s_warmup_status,
     )
-    from api.services.storage_data import upload_blob_text
+    from api.services.storage_data import list_databases, upload_blob_text
 
     sub = str(body.get("subscription_id") or "")
     storage_rg = str(body.get("resource_group") or "")
@@ -399,6 +401,31 @@ def blast_database_order_oracle(
         account_name,
         context="blast_database_order_oracle",
     )
+    db_meta = next(
+        (
+            item
+            for item in list_databases(cred, account_name, "blast-db")
+            if isinstance(item, dict) and item.get("name") == db_name
+        ),
+        None,
+    )
+    if not isinstance(db_meta, dict):
+        raise HTTPException(404, f"database {db_name} is not downloaded")
+    storage_source_version = str(db_meta.get("source_version") or "")
+    requested_source_version = str(body.get("source_version") or "")
+    if requested_source_version and storage_source_version != requested_source_version:
+        raise HTTPException(
+            409,
+            (
+                f"database {db_name} source_version changed; refresh before building "
+                "the order oracle"
+            ),
+        )
+    if db_meta.get("update_in_progress"):
+        raise HTTPException(409, f"database {db_name} is updating; wait for promotion")
+    if db_meta.get("shards_stale"):
+        raise HTTPException(409, f"database {db_name} shard layouts are stale; rebuild shards")
+
     warmup = k8s_warmup_status(cred, sub, storage_rg, cluster_name)
     db_status = next(
         (
@@ -413,6 +440,18 @@ def blast_database_order_oracle(
             409,
             f"node-local warmup for {db_name} must be Ready before building its order oracle",
         )
+    warm_source_version = str(db_status.get("source_version") or "")
+    warm_source_versions = [
+        str(item) for item in db_status.get("source_versions", []) or [] if str(item)
+    ]
+    if db_status.get("status") == "Stale" or len(set(warm_source_versions)) > 1:
+        raise HTTPException(409, f"node-local warmup for {db_name} has stale source versions")
+    if (
+        storage_source_version
+        and warm_source_version
+        and warm_source_version != storage_source_version
+    ):
+        raise HTTPException(409, f"node-local warmup for {db_name} is for a stale DB generation")
 
     pod_nodes: dict[str, str] = {}
     for pod in db_status.get("pod_statuses", []) or []:
@@ -442,7 +481,7 @@ def blast_database_order_oracle(
         raise HTTPException(409, "could not map every warmed shard to a Ready node")
 
     run_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
-    source_version = str(body.get("source_version") or db_status.get("source_version") or "")
+    source_version = storage_source_version or warm_source_version
     part_prefix = f"{ORACLE_PREFIX_ROOT}/{db_name}/{ORACLE_PARTS_DIR}/{run_id}/"
     status_blob = oracle_status_blob_path(db_name)
     status_payload = {
