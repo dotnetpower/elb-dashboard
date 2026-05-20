@@ -1,3 +1,16 @@
+"""Tests for OpenAPI Task behavior.
+
+Responsibility: Tests for OpenAPI Task behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_build_manifests_sets_local_ssd_precise_openapi_env`,
+`test_kubectl_apply_logs_in_with_managed_identity_when_needed`,
+`test_kubectl_apply_reuses_existing_az_login`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_openapi_task.py`.
+"""
+
 from __future__ import annotations
 
 import json
@@ -28,7 +41,32 @@ def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
 
     assert env["ELB_NUM_NODES"] == "10"
     assert env["ELB_CORE_NT_SHARDS"] == "10"
+    assert "ELB_OPENAPI_API_TOKEN" not in env
     assert "PYTHONPATH" not in env
+
+
+def test_build_manifests_preserves_openapi_api_token() -> None:
+    manifest = openapi._build_manifests(
+        image="elbacr.azurecr.io/elb-openapi:4.9",
+        mi_client_id="mi-client-id",
+        cluster_name="elb-cluster",
+        resource_group="rg-elb",
+        storage_account="elbstg",
+        region="koreacentral",
+        tenant_id="tenant-id",
+        acr_name="elbacr",
+        acr_resource_group="rg-acr",
+        num_nodes=10,
+        api_token="generated-token",
+    )
+    docs = [json.loads(chunk) for chunk in manifest.split("\n---\n")]
+    deployment = next(doc for doc in docs if doc["kind"] == "Deployment")
+    env = {
+        item["name"]: item["value"]
+        for item in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+
+    assert env["ELB_OPENAPI_API_TOKEN"] == "generated-token"
 
 
 def test_kubectl_apply_logs_in_with_managed_identity_when_needed(monkeypatch) -> None:

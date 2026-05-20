@@ -23,6 +23,11 @@ hooks:
     run: |
       set -eu
       echo "==> Pre-provision: registering required Azure providers (idempotent)..."
+      if [ -z "${API_CLIENT_ID:-}" ]; then
+        echo "ERROR: API_CLIENT_ID is not set."
+        echo "Run scripts/dev/setup-app-registration.sh after creating/selecting your azd environment, then re-run azd up."
+        exit 1
+      fi
       for ns in \
         Microsoft.App \
         Microsoft.OperationalInsights \

@@ -1,4 +1,17 @@
-"""Unit tests for `_local_to_blast_job` derived progress fields."""
+"""Unit tests for `_local_to_blast_job` derived progress fields.
+
+Responsibility: Unit tests for `_local_to_blast_job` derived progress fields
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_state`, `test_local_to_blast_job_minimum_shape`,
+`test_local_to_blast_job_query_label_extracted`,
+`test_local_to_blast_job_can_include_database_metadata`,
+`test_local_to_blast_job_exposes_error_for_frontend`,
+`test_local_to_blast_job_exposes_progress_steps`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_local_to_blast_job.py`.
+"""
 
 from __future__ import annotations
 

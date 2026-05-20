@@ -1,4 +1,13 @@
-"""Network helpers for private workload Storage access."""
+"""Network helpers for private workload Storage access.
+
+Responsibility: Network helpers for private workload Storage access
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_resource_group_from_id`, `_private_dns_zone_id`,
+`ensure_workload_storage_private_endpoints`
+Risky contracts: Validate Storage account/blob inputs and preserve the no-browser-SAS policy.
+Validation: `uv run pytest -q api/tests/test_storage_data.py`.
+"""
 
 from __future__ import annotations
 

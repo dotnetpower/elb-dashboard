@@ -1,3 +1,17 @@
+"""Tests for BLAST Tasks behavior.
+
+Responsibility: Tests for BLAST Tasks behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `FakeK8sResponse`, `FakeK8sSession`, `_parse_ini`,
+`test_build_config_content_targets_existing_cluster_and_storage_urls`,
+`test_build_config_content_preserves_full_blob_urls`,
+`test_build_config_content_rejects_relative_path_traversal`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_tasks.py`.
+"""
+
 from __future__ import annotations
 
 import configparser
@@ -7,10 +21,12 @@ import json
 import xml.etree.ElementTree as ET
 
 import pytest
+from api._http_utils import BlastSubmitRequest
 from api.services.query_grouping import build_query_split_execution_plan
 from api.services.query_metadata import parse_fasta_metadata
 from api.tasks import blast
 from azure.core.exceptions import ResourceNotFoundError
+from pydantic import ValidationError
 
 
 class FakeK8sResponse:
@@ -93,6 +109,81 @@ def test_build_config_content_preserves_full_blob_urls() -> None:
     assert cfg.get("blast", "queries") == "https://stelb.blob.core.windows.net/queries/custom.fa"
 
 
+def test_build_config_content_rejects_mismatched_storage_blob_urls() -> None:
+    with pytest.raises(ValueError, match="database URL must belong"):
+        blast._build_config_content(
+            job_id="job-123",
+            resource_group="rg-elb",
+            cluster_name="aks-elb",
+            storage_account="elbstg01",
+            database="https://stgelb.blob.core.windows.net/blast-db/custom/mydb",
+            query_file="queries/custom.fa",
+        )
+
+    with pytest.raises(ValueError, match="query_file URL must belong"):
+        blast._build_config_content(
+            job_id="job-123",
+            resource_group="rg-elb",
+            cluster_name="aks-elb",
+            storage_account="elbstg01",
+            database="core_nt",
+            query_file="https://stgelb.blob.core.windows.net/queries/custom.fa",
+        )
+
+
+@pytest.mark.parametrize(
+    ("database", "query_file", "match"),
+    [
+        (
+            "https://elbstg01.blob.core.windows.net/other/custom/mydb",
+            "queries/custom.fa",
+            "database URL must point to the blast-db container",
+        ),
+        (
+            "https://elbstg01.blob.core.windows.net/blast-db/custom/mydb?sig=bad",
+            "queries/custom.fa",
+            "database URL must not include query strings",
+        ),
+        (
+            "core_nt",
+            "https://elbstg01.blob.core.windows.net/results/custom.fa",
+            "query_file URL must point to the queries container",
+        ),
+        (
+            "core_nt",
+            "http://elbstg01.blob.core.windows.net/queries/custom.fa",
+            "query_file URL must use https",
+        ),
+    ],
+)
+def test_build_config_content_rejects_unsafe_absolute_urls(
+    database: str,
+    query_file: str,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        blast._build_config_content(
+            job_id="job-123",
+            resource_group="rg-elb",
+            cluster_name="aks-elb",
+            storage_account="elbstg01",
+            database=database,
+            query_file=query_file,
+        )
+
+
+def test_blast_submit_request_rejects_storage_url_account_mismatch() -> None:
+    with pytest.raises(ValidationError, match="database URL must belong"):
+        BlastSubmitRequest(
+            resource_group="rg-elb",
+            cluster_name="aks-elb",
+            storage_account="elbstg01",
+            program="blastn",
+            database="https://stgelb.blob.core.windows.net/blast-db/custom/mydb",
+            query_file="queries/custom.fa",
+        )
+
+
 def test_build_config_content_rejects_relative_path_traversal() -> None:
     with pytest.raises(ValueError, match="query_file"):
         blast._build_config_content(
@@ -160,6 +251,83 @@ def test_update_state_uses_repository_contract(monkeypatch) -> None:
     assert repo.history[0][0] == "job-123"
     assert repo.history[0][1] == "submitted"
     assert repo.history[0][2]["decision"] == "accepted"
+
+
+def test_stream_submit_command_defers_log_artifact_writes(monkeypatch) -> None:
+    def fake_stream(**_kwargs: object):
+        yield {"stream": "stdout", "line": "line one"}
+        yield {"stream": "stderr", "line": "line two"}
+        yield {"exit_code": 0, "duration_ms": 123, "timed_out": False}
+
+    class FakeTask:
+        def __init__(self) -> None:
+            self.states: list[dict[str, object]] = []
+
+        def update_state(self, *, state: str, meta: dict[str, object]) -> None:
+            self.states.append({"state": state, "meta": meta})
+
+    artifact_calls: list[tuple[object, ...]] = []
+    state_updates: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    monkeypatch.setattr("api.services.terminal_exec.stream", fake_stream)
+    monkeypatch.setattr(
+        "api.services.job_artifacts.write_execution_log_chunk",
+        lambda *args: artifact_calls.append(args),
+    )
+    monkeypatch.setattr(
+        "api.services.job_logs.event_bus.publish_job_log_event",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        blast,
+        "_update_state",
+        lambda *args, **kwargs: state_updates.append((args, kwargs)),
+    )
+
+    result = blast._stream_submit_command(
+        job_id="job-123",
+        task=FakeTask(),
+        config_content="[cluster]\n",
+    )
+
+    assert artifact_calls == []
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "line one"
+    assert result["stderr"] == "line two"
+    assert result["_log_events"] == [
+        {"stream": "stdout", "line": "line one", "index": 1},
+        {"stream": "stderr", "line": "line two", "index": 2},
+    ]
+    assert state_updates[0][0][:3] == ("job-123", "submitting")
+
+
+def test_persist_submit_log_events_chunks_after_stream(monkeypatch) -> None:
+    calls: list[tuple[str, str, int, list[dict[str, object]]]] = []
+
+    def fake_write(
+        job_id: str,
+        step_key: str,
+        sequence: int,
+        events: list[dict[str, object]],
+    ) -> None:
+        calls.append((job_id, step_key, sequence, events))
+
+    monkeypatch.setattr("api.services.job_artifacts.write_execution_log_chunk", fake_write)
+    events = [
+        {"stream": "stdout", "line": f"line {index}", "index": index}
+        for index in range(blast.SUBMIT_LOG_CHUNK_EVENT_COUNT + 1)
+    ]
+
+    blast._persist_submit_log_events(
+        job_id="job-123",
+        progress_phase="submitting",
+        events=events,
+    )
+
+    assert [(call[0], call[1], call[2], len(call[3])) for call in calls] == [
+        ("job-123", "submitting", 0, blast.SUBMIT_LOG_CHUNK_EVENT_COUNT),
+        ("job-123", "submitting", 1, 1),
+    ]
 
 
 def test_k8s_cancel_blast_job_deletes_only_scoped_jobs(monkeypatch) -> None:
@@ -2269,6 +2437,23 @@ def test_merge_progress_payload_completes_steps_when_phase_advances() -> None:
     assert steps["warming_up"]["success"] is True
     assert steps["configuring"]["status"] == "running"
     assert steps["configuring"]["config_blob_path"] == "queries/job-123/elastic-blast.ini"
+
+
+def test_merge_progress_payload_marks_warmup_ready_step_completed() -> None:
+    payload = blast._merge_progress_payload(
+        {"_progress": {"phase": "preparing", "status": "running", "steps": {}}},
+        phase="warmup_ready",
+        status="running",
+        error_code="",
+        details={},
+    )
+
+    progress = payload["_progress"]
+    step = progress["steps"]["warming_up"]
+    assert progress["phase"] == "warmup_ready"
+    assert progress["status"] == "running"
+    assert step["status"] == "completed"
+    assert step["success"] is True
 
 
 def test_merge_progress_payload_tracks_staging_db_before_submit() -> None:

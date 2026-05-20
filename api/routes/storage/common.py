@@ -1,4 +1,14 @@
-"""Shared Storage route helpers."""
+"""Shared Storage route helpers.
+
+Responsibility: Shared Storage route helpers
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_check`, `_resolve_latest_dir`, `_list_keys`
+Risky contracts: Never issue browser SAS URLs; local public Storage access remains debug-only
+and IP-allowlisted.
+Validation: `uv run pytest -q api/tests/test_storage_data.py
+api/tests/test_storage_public_access.py`.
+"""
 
 from __future__ import annotations
 

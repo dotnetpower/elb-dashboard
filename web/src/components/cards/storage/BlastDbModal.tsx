@@ -36,8 +36,8 @@ interface BlastDbModalProps {
 export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
   const [confirmLargeDb, setConfirmLargeDb] = useState<string | null>(null);
   const [confirmUpdateDb, setConfirmUpdateDb] = useState<string | null>(null);
-  const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(
-    () => readAutoWarmupDbs(),
+  const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
+    readAutoWarmupDbs(),
   );
 
   // ESC key closes
@@ -69,6 +69,8 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
     canEnableLocalAccess,
     openingLocalDebug,
     enableLocalAccess,
+    storageAccessTitle,
+    storageAccessHint,
     downloadedDbs,
     updatesAvailable,
     downloading,
@@ -174,10 +176,7 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
           {downloadedDbs.size > 0 && (
             <span>
               {formatBytes(
-                [...downloadedDbs.values()].reduce(
-                  (s, d) => s + (d.total_bytes ?? 0),
-                  0,
-                ),
+                [...downloadedDbs.values()].reduce((s, d) => s + (d.total_bytes ?? 0), 0),
               )}{" "}
               used
             </span>
@@ -249,10 +248,9 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
           >
             <Lock size={14} style={{ flexShrink: 0, marginTop: 1 }} />
             <div style={{ flex: 1 }}>
-              <strong>Storage is Private only.</strong> This local browser session
-              cannot scan the database container through the private endpoint;
-              downloaded state cannot be detected. The catalog below still shows all
-              available databases.
+              <strong>{storageAccessTitle}.</strong> {storageAccessHint} Downloaded state
+              cannot be detected until Storage accepts the local data-plane request. The
+              catalog below still shows all available databases.
             </div>
             {canEnableLocalAccess && (
               <button
@@ -334,8 +332,7 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                       ? Math.min(
                           100,
                           Math.round(
-                            ((meta?.file_count ?? 0) /
-                              inProgressInfo.expectedFiles) *
+                            ((meta?.file_count ?? 0) / inProgressInfo.expectedFiles) *
                               100,
                           ),
                         )
@@ -407,9 +404,8 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
           )}
 
           <div className="muted" style={{ fontSize: 10, marginTop: "var(--space-2)" }}>
-            Server-side copy from NCBI S3 →{" "}
-            <code style={{ fontSize: 10 }}>blast-db</code> container. No local
-            download required.
+            Server-side copy from NCBI S3 → <code style={{ fontSize: 10 }}>blast-db</code>{" "}
+            container. No local download required.
           </div>
         </div>
       </div>

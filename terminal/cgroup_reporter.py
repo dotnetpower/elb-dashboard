@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Standalone cgroup v2 reporter for the terminal sidecar.
 
-Mirror of api/services/cgroup_reporter.py — kept here as a self-contained
-script because the terminal image's build context is the `terminal/`
-directory, not the repo root, so it cannot import from `api.*`.
-
-If you change the protocol (Redis key shape or payload fields), update
-both files in the same commit; the api endpoint
-(api/services/sidecar_metrics.py) reads the result.
+Responsibility: Standalone cgroup v2 reporter for the terminal sidecar
+Edit boundaries: Keep terminal-side behavior here; api/worker callers should use service
+wrappers.
+Key entry points: `_read_cpu_usec`, `_read_mem_bytes`, `_read_mem_max`, `main`
+Risky contracts: Do not expose terminal services directly to the internet or log secrets.
+Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py
+api/tests/test_terminal_command_guard.py`.
 """
 
 from __future__ import annotations

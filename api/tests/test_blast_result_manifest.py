@@ -1,3 +1,15 @@
+"""Tests for BLAST Result Manifest behavior.
+
+Responsibility: Tests for BLAST Result Manifest behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_result_manifest_classifies_parseable_result_files`,
+`test_result_manifest_distinguishes_no_result_files_from_degraded`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_result_manifest.py`.
+"""
+
 from __future__ import annotations
 
 from api.services.blast_result_manifest import build_result_manifest

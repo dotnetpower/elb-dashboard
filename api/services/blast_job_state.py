@@ -1,4 +1,14 @@
-"""BLAST job projection, file preview, and refresh helpers."""
+"""BLAST job projection, file preview, and refresh helpers.
+
+Responsibility: BLAST job projection, file preview, and refresh helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_payload_value`, `_queries_blob_path`, `_job_query_blob_path`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 
@@ -133,7 +143,8 @@ def _job_payload_for_file_preview(job_id: str, caller: CallerIdentity) -> dict[s
         return {}
     if getattr(state, "owner_oid", None) and state.owner_oid != caller.object_id:
         raise HTTPException(403, "not owner")
-    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    raw_payload = getattr(state, "payload", None)
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
     return payload
 
 
@@ -145,7 +156,8 @@ def _config_preview_from_payload(
 ) -> str:
     from api.tasks.blast import _build_config_content
 
-    options = dict(payload.get("options") if isinstance(payload.get("options"), dict) else {})
+    raw_options = payload.get("options")
+    options = dict(raw_options) if isinstance(raw_options, dict) else {}
     for key in ("acr_resource_group", "acr_name"):
         value = payload.get(key)
         if value not in (None, ""):
@@ -476,10 +488,13 @@ def _payload_with_refresh_progress(
     elastic_blast_job_id = str(k8s.get("job_id") or "")
     if elastic_blast_job_id.startswith("job-"):
         out["elastic_blast_job_id"] = elastic_blast_job_id
-    progress = dict(out.get("_progress") if isinstance(out.get("_progress"), dict) else {})
-    steps = dict(progress.get("steps") if isinstance(progress.get("steps"), dict) else {})
+    _raw_progress = out.get("_progress")
+    progress = dict(_raw_progress) if isinstance(_raw_progress, dict) else {}
+    _raw_steps = progress.get("steps")
+    steps = dict(_raw_steps) if isinstance(_raw_steps, dict) else {}
     step_key = "exporting_results" if phase == "results_pending" else phase
-    step = dict(steps.get(step_key) if isinstance(steps.get(step_key), dict) else {})
+    _raw_step = steps.get(step_key)
+    step = dict(_raw_step) if isinstance(_raw_step, dict) else {}
     from datetime import UTC, datetime
 
     updated_at = datetime.now(UTC).isoformat(timespec="seconds")

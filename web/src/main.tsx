@@ -11,6 +11,8 @@ import { ToastProvider } from "@/components/Toast";
 import { AutoRefreshProvider } from "@/hooks/useAutoRefresh";
 import { isDevBypassEnabled } from "@/config/runtime";
 import "@/theme/glass.css";
+import "@/theme/blast-submit-layout.css";
+import "@/theme/dashboard-layout.css";
 // Inter — the default UI typeface used across the SPA.
 import "@fontsource/inter/400.css";
 import "@fontsource/inter/500.css";

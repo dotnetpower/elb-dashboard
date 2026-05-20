@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Patch the vendored elastic-blast-azure clone for dashboard sharded runs."""
+"""Patch the vendored elastic-blast-azure clone for dashboard sharded runs.
+
+Responsibility: Patch the vendored elastic-blast-azure clone for dashboard sharded runs
+Edit boundaries: Keep terminal-side behavior here; api/worker callers should use service
+wrappers.
+Key entry points: `_replace_once`, `_replace_once_unless_present`,
+`_replace_all_unless_present`, `patch_azure_py`, `patch_finalizer_template`,
+`patch_finalizer_script`
+Risky contracts: Do not expose terminal services directly to the internet or log secrets.
+Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py
+api/tests/test_terminal_command_guard.py`.
+"""
 
 from __future__ import annotations
 

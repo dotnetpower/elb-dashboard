@@ -1,4 +1,15 @@
-"""BLAST database metadata helpers shared by submit, oracle, and result views."""
+"""BLAST database metadata helpers shared by submit, oracle, and result views.
+
+Responsibility: BLAST database metadata helpers shared by submit, oracle, and result views
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `extract_db_name`, `resolve_db_metadata`, `resolve_database_display_metadata`,
+`resolve_blastdb_json_metadata`, `database_display_metadata_from_info`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 

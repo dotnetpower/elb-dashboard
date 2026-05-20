@@ -1,5 +1,18 @@
+"""Tests for OpenAPI Proxy Route behavior.
+
+Responsibility: Tests for OpenAPI Proxy Route behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `client`, `_patch_service_ip`, proxy forwarding, token fallback, JSON body,
+service-missing, and invalid-path tests.
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_openapi_proxy_route.py`.
+"""
+
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -30,6 +43,7 @@ def test_openapi_proxy_forwards_try_it_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_service_ip(monkeypatch, "20.30.40.50")
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "api-token")
     calls: list[dict[str, Any]] = []
 
     class StubAsyncClient:
@@ -72,10 +86,107 @@ def test_openapi_proxy_forwards_try_it_request(
         {
             "method": "GET",
             "url": "http://20.30.40.50/healthz",
-            "headers": {"accept": "application/json"},
+            "headers": {"accept": "application/json", "X-ELB-API-Token": "api-token"},
             "content": None,
         }
     ]
+
+
+def test_openapi_proxy_uses_runtime_token_when_env_token_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_service_ip(monkeypatch, "20.30.40.50")
+    monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
+
+    from api.services import openapi_runtime
+
+    monkeypatch.setattr(openapi_runtime, "get_openapi_api_token", lambda: "runtime-token")
+    calls: list[dict[str, Any]] = []
+
+    class StubAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> StubAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        async def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str],
+            content: bytes | None,
+        ) -> httpx.Response:
+            calls.append({"method": method, "url": url, "headers": headers, "content": content})
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubAsyncClient)
+
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={"resource_group": "rg-elb", "cluster_name": "aks-elb", "path": "/v1/jobs"},
+    )
+
+    assert response.status_code == 200
+    assert calls[0]["headers"]["X-ELB-API-Token"] == "runtime-token"
+
+
+def test_openapi_proxy_forwards_query_path_and_json_body(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_service_ip(monkeypatch, "20.30.40.50")
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "api-token")
+    calls: list[dict[str, Any]] = []
+
+    class StubAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> StubAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        async def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str],
+            content: bytes | None,
+        ) -> httpx.Response:
+            calls.append({"method": method, "url": url, "headers": headers, "content": content})
+            return httpx.Response(422, json={"detail": "validation"})
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubAsyncClient)
+
+    response = client.post(
+        "/api/aks/openapi/proxy",
+        params={
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "path": "/v1/jobs?dry_run=true",
+        },
+        headers={"Content-Type": "application/json"},
+        json={"db": "16S_ribosomal_RNA"},
+    )
+
+    assert response.status_code == 422
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"] == "http://20.30.40.50/v1/jobs?dry_run=true"
+    assert calls[0]["headers"] == {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "X-ELB-API-Token": "api-token",
+    }
+    assert json.loads(calls[0]["content"] or b"{}") == {"db": "16S_ribosomal_RNA"}
 
 
 def test_openapi_proxy_returns_503_when_service_ip_missing(

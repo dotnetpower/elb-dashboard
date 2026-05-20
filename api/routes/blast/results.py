@@ -1,4 +1,15 @@
-"""/api/blast result file, analytics, and export routes."""
+"""BLAST result-file, manifest, aggregate, and export routes.
+
+Responsibility: BLAST result-file, manifest, aggregate, and export routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `blast_job_file`, `blast_job_results`, `blast_job_results_aggregate`,
+`blast_job_results_download`, `blast_job_results_export`, `blast_job_result_file`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 
@@ -134,12 +145,21 @@ def blast_job_file(
                 if payload:
                     from api.routes import blast as blast_package
 
-                    content = blast_package._config_preview_from_payload(
-                        job_id=job_id,
-                        storage_account=storage_account,
-                        payload=payload,
-                    )
-                    selected_blob = f"{job_id}/elastic-blast.ini"
+                    try:
+                        content = blast_package._config_preview_from_payload(
+                            job_id=job_id,
+                            storage_account=storage_account,
+                            payload=payload,
+                        )
+                        selected_blob = f"{job_id}/elastic-blast.ini"
+                    except ValueError as exc:
+                        raise HTTPException(
+                            422,
+                            detail={
+                                "code": "invalid_config_payload",
+                                "message": str(exc)[:500],
+                            },
+                        ) from exc
             if not selected_blob:
                 raise last_not_found or FileNotFoundError(name_raw)
         return {

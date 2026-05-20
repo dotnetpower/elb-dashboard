@@ -1,3 +1,18 @@
+"""Tests for Azure Tasks behavior.
+
+Responsibility: Tests for Azure Tasks behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_attach_acr_uses_subscription_scoped_role_definition`,
+`test_grant_storage_blob_contributor_uses_storage_scope`,
+`test_ensure_aks_runtime_rbac_grants_acr_and_storage`,
+`test_ensure_aks_runtime_rbac_reports_nonfatal_failures`,
+`test_start_aks_enqueues_openapi_after_cluster_start`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_azure_tasks.py`.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

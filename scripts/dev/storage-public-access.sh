@@ -14,13 +14,18 @@
 # Running this script with `on` flips the account to:
 #
 #   publicNetworkAccess = Enabled
-#   networkAcls.defaultAction = Deny
-#   networkAcls.ipRules       = [<your caller IP>]
+#   networkAcls.defaultAction = Allow
+#   networkAcls.bypass        = AzureServices
 #
-# i.e. the data plane becomes reachable only from your current public IP.
-# Entra ID auth is still enforced — your `az login` identity must already
-# hold `Storage Blob Data Reader` (or higher) on the account / container
-# scope. The script does NOT grant RBAC for you.
+# i.e. the data plane is reachable from any IP, but Entra ID auth is still
+# enforced (allowSharedKeyAccess=false). Your `az login` identity must already
+# hold `Storage Blob Data Reader` (or higher) on the account / container scope.
+#
+# Why not Deny + ipRule? For ADLS Gen2 (isHnsEnabled=true) accounts with an
+# approved private endpoint, defaultAction=Deny + ipRule does not reliably
+# propagate to the data plane. defaultAction=Allow is the only method that
+# works reliably for local development access. See docs/features_change/ for
+# the root-cause analysis.
 #
 # Running with `off` reverts to the production posture
 # (publicNetworkAccess = Disabled, ipRules cleared).
@@ -111,40 +116,22 @@ case "$ACTION" in
     ;;
 
   on)
-    if [[ -z "$IP" ]]; then
-      ts "Detecting caller public IP via api.ipify.org ..."
-      IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-      [[ -n "$IP" ]] || die "could not auto-detect IP; pass --ip <your-public-ip>"
-    fi
-    # Storage ipRules reject /32 and other CIDR notations on a single IPv4 — bare IP only.
-    [[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "IP '$IP' is not a bare IPv4 address"
-
-    ts "Opening '$ACCOUNT' for caller IP $IP (defaultAction=Deny, ipRules=[$IP]) ..."
+    ts "Opening '$ACCOUNT' for local debugging (publicNetworkAccess=Enabled, defaultAction=Allow) ..."
     # 1. Enable the public surface.
     az storage account update "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
         --public-network-access Enabled -o none
-    # 2. Set the firewall to deny by default with our IP allowed. `--bypass AzureServices`
-    #    keeps Azure Monitor / portal previews working without weakening the rule.
+    # 2. Set defaultAction=Allow with bypass=AzureServices.
+    #    Note: defaultAction=Deny + ipRule does NOT reliably propagate to the
+    #    data plane for ADLS Gen2 (isHnsEnabled=true) accounts with a private
+    #    endpoint. defaultAction=Allow is used instead. Azure AD auth
+    #    (allowSharedKeyAccess=false) is still enforced on every request.
     az storage account update "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
-        --default-action Deny --bypass AzureServices -o none
-    # 3. Replace any previous dev IPs with just the current one so stale entries
-    #    do not accumulate. `network-rule remove` then `network-rule add`.
-    existing_ips="$(az storage account network-rule list "${SUB_FLAG[@]}" -g "$RG" --account-name "$ACCOUNT" \
-        --query 'ipRules[].ipAddressOrRange' -o tsv 2>/dev/null || true)"
-    if [[ -n "$existing_ips" ]]; then
-      while IFS= read -r prev_ip; do
-        [[ -z "$prev_ip" ]] && continue
-        az storage account network-rule remove "${SUB_FLAG[@]}" -g "$RG" --account-name "$ACCOUNT" \
-            --ip-address "$prev_ip" -o none 2>/dev/null || true
-      done <<< "$existing_ips"
-    fi
-    az storage account network-rule add "${SUB_FLAG[@]}" -g "$RG" --account-name "$ACCOUNT" \
-        --ip-address "$IP" -o none
+        --default-action Allow --bypass AzureServices -o none
 
-    ts "Waiting ~10 s for the firewall change to propagate ..."
-    sleep 10
+    ts "Waiting ~90 s for the firewall change to propagate ..."
+    sleep 90
 
-    green "OPEN — storage account '$ACCOUNT' now accepts data-plane traffic from $IP"
+    green "OPEN — storage account '$ACCOUNT' now accepts data-plane traffic (defaultAction=Allow)"
     print_state
 
     cat <<EOF
@@ -154,7 +141,8 @@ Reminder:
       'Storage Blob Data Reader'  (read-only views)
       'Storage Blob Data Contributor' (uploads / writes)
     on $ACCOUNT (or one of its containers).
-  * Close the surface as soon as you are done:
+  * defaultAction=Allow means any authenticated Azure AD identity can reach
+    the data plane. Close the surface as soon as you are done:
       $0 off --account $ACCOUNT --rg $RG
 EOF
     ;;

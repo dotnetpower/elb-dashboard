@@ -1,4 +1,15 @@
-"""/api/blast database catalogue, sharding, and oracle routes."""
+"""/api/blast database catalogue, sharding, and oracle routes.
+
+Responsibility: /api/blast database catalogue, sharding, and oracle routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `blast_databases`, `blast_database_shard`, `blast_database_order_oracle`,
+`blast_databases_check_updates`, `blast_databases_versions`, `blast_databases_build_stub`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 
@@ -128,7 +139,7 @@ def blast_database_shard(
         ensure_shard_sets,
     )
     from api.services.sanitise import sanitise
-    from api.services.storage_data import _blob_service  # type: ignore[attr-defined]
+    from api.services.storage_data import _blob_service
 
     sub = body.get("subscription_id", "")
     storage_rg = body.get("resource_group", "")
@@ -279,24 +290,24 @@ def blast_database_shard(
             bc2 = svc2.get_container_client(DEFAULT_CONTAINER).get_blob_client(
                 f"{db_name}-metadata.json"
             )
-            final: dict[str, Any] = {}
+            final_meta: dict[str, Any] = {}
             try:
-                final = json.loads(bc2.download_blob().readall().decode("utf-8"))
+                final_meta = json.loads(bc2.download_blob().readall().decode("utf-8"))
             except Exception:
-                final = {"db_name": db_name}
-            final["sharding_in_progress"] = False
-            final.pop("sharding_error", None)
-            final["sharded"] = bool(summary.get("shard_sets"))
-            final["shard_sets"] = summary.get("shard_sets", [])
-            if final.get("source_version"):
-                final["shard_source_version"] = final.get("source_version")
-            final["sharded_at"] = datetime.now(UTC).isoformat()
+                final_meta = {"db_name": db_name}
+            final_meta["sharding_in_progress"] = False
+            final_meta.pop("sharding_error", None)
+            final_meta["sharded"] = bool(summary.get("shard_sets"))
+            final_meta["shard_sets"] = summary.get("shard_sets", [])
+            if final_meta.get("source_version"):
+                final_meta["shard_source_version"] = final_meta.get("source_version")
+            final_meta["sharded_at"] = datetime.now(UTC).isoformat()
             if summary.get("total_bytes"):
-                final.setdefault("total_bytes", summary["total_bytes"])
+                final_meta.setdefault("total_bytes", summary["total_bytes"])
             for key in ("total_letters", "total_sequences", "bytes_to_cache", "bytes_total"):
                 if summary.get(key):
-                    final.setdefault(key, summary[key])
-            bc2.upload_blob(json.dumps(final).encode("utf-8"), overwrite=True)
+                    final_meta.setdefault(key, summary[key])
+            bc2.upload_blob(json.dumps(final_meta).encode("utf-8"), overwrite=True)
             LOGGER.info(
                 "blast_database_shard daemon ok db=%s shard_sets=%s",
                 db_name,

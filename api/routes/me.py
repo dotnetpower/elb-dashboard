@@ -1,4 +1,13 @@
-"""Caller identity endpoint. Returns the validated token's `oid`/`tid`/`upn`."""
+"""Caller identity endpoint. Returns the validated token's `oid`/`tid`/`upn`.
+
+Responsibility: Caller identity endpoint. Returns the validated token's `oid`/`tid`/`upn`
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `me`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 

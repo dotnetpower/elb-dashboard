@@ -154,6 +154,16 @@ where the failure was found, but knowing them up front saves a lot of time.
 - **English only** in source / commits / docs / UI strings. (Korean only in
   the conversation with the user.)
 - **Conventional Commits** (`feat:`, `fix:`, `chore:`, `docs:`, …).
+- **Python context headers**: every new `*.py` file must start with a natural
+   module summary docstring plus `Responsibility`, `Edit boundaries`,
+   `Key entry points`, `Risky contracts`, and `Validation`. Do not use the
+   literal `AI Context Header.` label, and keep the fields synchronized when
+   the code changes.
+- **SRP gate for Python edits**: if a new or changed module's context header
+   cannot describe one responsibility cleanly, split it by layer before adding
+   more code. Routes handle HTTP/auth/response shaping, services handle reusable
+   domain/cloud/data-plane logic, tasks handle long-running side effects, and
+   tests cover one behaviour family.
 - **Per-feature change notes** in `docs/features_change/YYYY-MM/YYYY-MM-DD-<name>.md`
   before each behaviour-changing commit.
 - **GitHub issue hygiene**: if a change implements a registered issue, comment with

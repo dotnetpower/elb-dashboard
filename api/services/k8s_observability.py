@@ -1,9 +1,17 @@
-"""Kubernetes pod log and event observability helpers."""
+"""Kubernetes pod log and event observability helpers.
+
+Responsibility: Kubernetes pod log and event observability helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `k8s_pod_logs`, `k8s_list_events`, `_capped`
+Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
+Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
+"""
 
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
 
@@ -34,7 +42,7 @@ def k8s_pod_logs(
             timeout=15,
         )
         response.raise_for_status()
-        return response.text
+        return cast(str, response.text)
     finally:
         session.close()
 

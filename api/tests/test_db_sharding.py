@@ -1,9 +1,14 @@
 """Unit tests for api.services.db_sharding.
 
-These tests cover the pure-Python parts (validation, layout planning,
-text rendering, partition selection) without touching Azure. Blob-touching
-helpers (``list_db_volumes``, ``upload_shard_set``) are exercised via a
-``_blob_service`` monkeypatch with a fake container client.
+Responsibility: Unit tests for api.services.db_sharding
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_FakeBlob`, `_FakeBlobClient`, `_FakeContainerClient`,
+`test_validate_db_name_accepts_real_db_names`, `test_validate_db_name_rejects_hostile_input`,
+`test_plan_shard_layout_contiguous_blocks`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_db_sharding.py`.
 """
 
 from __future__ import annotations

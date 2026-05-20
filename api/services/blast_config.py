@@ -1,4 +1,14 @@
-"""Generate elastic-blast INI configuration from structured input."""
+"""Generate elastic-blast INI configuration from structured input.
+
+Responsibility: Generate elastic-blast INI configuration from structured input
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `generate_config`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +29,7 @@ from api.services.sharding_precision import (
     outfmt_is_merge_compatible,
     uniform_query_effective_search_space,
 )
+from api.services.storage_url_validation import validate_storage_blob_reference
 
 
 def generate_config(params: dict[str, Any]) -> str:
@@ -33,7 +44,7 @@ def generate_config(params: dict[str, Any]) -> str:
         if raw in (None, ""):
             return None
         try:
-            value = int(raw)
+            value = int(raw)  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{key} must be a positive integer") from exc
         if value <= 0:
@@ -87,8 +98,28 @@ def generate_config(params: dict[str, Any]) -> str:
     if acr_name:
         cfg.set("cloud-provider", "azure-acr-name", acr_name)
     cfg.set("cloud-provider", "azure-resource-group", params.get("resource_group", ""))
-    if params.get("storage_account"):
-        cfg.set("cloud-provider", "azure-storage-account", params["storage_account"])
+    storage_account = str(params.get("storage_account") or "")
+    if storage_account:
+        validate_storage_blob_reference(
+            storage_account=storage_account,
+            value=params.get("db"),
+            label="db",
+            expected_container="blast-db",
+        )
+        validate_storage_blob_reference(
+            storage_account=storage_account,
+            value=params.get("query_blob_url"),
+            label="query_blob_url",
+            expected_container="queries",
+        )
+        validate_storage_blob_reference(
+            storage_account=storage_account,
+            value=params.get("results_url"),
+            label="results_url",
+            expected_container="results",
+            require_blob_path=False,
+        )
+        cfg.set("cloud-provider", "azure-storage-account", storage_account)
 
     # Derive storage container from db path (e.g. "blast-db/16S_ribosomal_RNA/...")
     db_raw = params.get("db", "")

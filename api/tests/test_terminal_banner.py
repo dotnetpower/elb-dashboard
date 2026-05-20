@@ -1,4 +1,14 @@
-"""Tests for the browser terminal login banner renderer."""
+"""Tests for the browser terminal login banner renderer.
+
+Responsibility: Tests for the browser terminal login banner renderer
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_banner_renders_plain_fallback_without_tty`,
+`test_banner_can_render_colour_prompt_for_xterm`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_terminal_banner.py`.
+"""
 
 from __future__ import annotations
 

@@ -1,14 +1,22 @@
-"""AKS SKU routes."""
+"""AKS SKU routes.
+
+Responsibility: AKS SKU routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `aks_skus`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
-
-from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _stub_log
-from api.services.aks_skus import sku_list_response
+from api.services.aks_skus import SkuListResponse, sku_list_response
 
 router = APIRouter()
 
@@ -17,7 +25,7 @@ router = APIRouter()
 def aks_skus(
     location: str = Query(default="koreacentral"),
     caller: CallerIdentity = Depends(require_caller),
-) -> dict[str, Any]:
+) -> SkuListResponse:
     _stub_log("aks/skus", location=location)
     # Source-of-truth lives in api.services.aks_skus, which mirrors the
     # sibling repo's elastic_blast.azure_traits.AZURE_HPC_MACHINES allow-list.

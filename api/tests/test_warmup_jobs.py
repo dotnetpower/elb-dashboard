@@ -1,3 +1,17 @@
+"""Tests for Warmup Jobs behavior.
+
+Responsibility: Tests for Warmup Jobs behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_nodes`, `test_e16_x10_plan_pins_one_core_nt_shard_per_node`,
+`test_plan_tags_warmup_jobs_with_source_version`,
+`test_warmup_scripts_configmap_contains_job_scripts`,
+`test_plan_rejects_too_few_nodes_for_one_shard_per_node`, `test_plan_rejects_unsafe_inputs`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_warmup_jobs.py`.
+"""
+
 from __future__ import annotations
 
 import pytest

@@ -1,14 +1,19 @@
-"""Azure resource monitoring facade.
+"""Azure resource monitoring and provisioning facade.
 
-This module owns ARM-backed AKS, Storage, ACR, and legacy VM helpers. Direct
-Kubernetes API helpers live in ``api.services.k8s_monitoring`` and are
-re-exported here for existing route/task imports.
+Responsibility: Azure resource monitoring and provisioning facade
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `list_aks_clusters`, `_select_workload_agent_pool`, `_kubelet_object_id`,
+`get_storage_summary`, `set_storage_public_access`, `list_acr_repositories`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
 from azure.core.exceptions import ResourceNotFoundError
@@ -121,7 +126,7 @@ def _select_workload_agent_pool(pools: list[Any]) -> Any | None:
 def _kubelet_object_id(cluster: Any) -> str | None:
     if not cluster.identity_profile or "kubeletidentity" not in cluster.identity_profile:
         return None
-    return cluster.identity_profile["kubeletidentity"].object_id
+    return cast(str | None, cluster.identity_profile["kubeletidentity"].object_id)
 
 
 # ---------------------------------------------------------------------------

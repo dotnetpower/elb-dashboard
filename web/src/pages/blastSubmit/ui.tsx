@@ -4,6 +4,35 @@ import { Check, Copy, HelpCircle, Terminal } from "lucide-react";
 import { buildCommandString, type FormState, PROGRAMS } from "@/pages/blastSubmitModel";
 import type { ToastFn } from "@/pages/blastSubmit/types";
 
+type CommandTokenKind = "command" | "flag" | "number" | "value";
+
+function classifyCommandToken(token: string, index: number): CommandTokenKind {
+  if (index === 0) return "command";
+  if (token.startsWith("-")) return "flag";
+  if (/^[0-9.]+$/.test(token)) return "number";
+  return "value";
+}
+
+function renderCommandPreview(command: string) {
+  let tokenIndex = 0;
+
+  return command.split(/(\s+)/).map((token, index) => {
+    if (/^\s+$/.test(token)) return token;
+
+    const kind = classifyCommandToken(token, tokenIndex);
+    tokenIndex += 1;
+
+    return (
+      <span
+        key={`${token}-${index}`}
+        className={`blast-cmd-token blast-cmd-token--${kind}`}
+      >
+        {token}
+      </span>
+    );
+  });
+}
+
 export function Tip({ text }: { text: string }) {
   return (
     <span
@@ -79,7 +108,7 @@ export function BlastCommandPreview({
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <code className="blast-cmd-preview__code">{cmd}</code>
+      <code className="blast-cmd-preview__code">{renderCommandPreview(cmd)}</code>
     </div>
   );
 }

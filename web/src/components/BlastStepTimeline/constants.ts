@@ -50,6 +50,7 @@ export const FAILURE_PHASES = new Set([
   "split_submit_invalid",
   "split_results_merge_invalid",
   "warmup_failed",
+  "warmup_not_ready",
 ]);
 
 export type StepState = "done" | "active" | "pending" | "error" | "skipped";
@@ -73,6 +74,7 @@ export const PHASE_TO_STEP: Record<string, string> = {
   split_submit_invalid: "submitting",
   split_results_merge_invalid: "exporting_results",
   warmup_failed: "warming_up",
+  warmup_not_ready: "warming_up",
 };
 
 export const PHASE_MESSAGES: Record<string, string> = {
@@ -83,6 +85,7 @@ export const PHASE_MESSAGES: Record<string, string> = {
   configuring: "Generating ElasticBLAST configuration...",
   warming_up: "Checking node-local DB warmup readiness...",
   warmup_failed: "Cluster warmup failed.",
+  warmup_not_ready: "Node-local DB warmup is not ready.",
   warmup_ready: "Node-local DB warmup is ready.",
   waiting_for_warmup: "Waiting for node-local DB warmup...",
   staging_db: "Reusing or staging DB shards on node-local SSD...",

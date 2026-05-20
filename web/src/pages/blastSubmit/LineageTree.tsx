@@ -1,5 +1,12 @@
 import { useState, useMemo } from "react";
-import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  RotateCcw,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import type { TaxonomyLineageNode } from "@/api/blast";
 
 /* ── rank definitions ── */
@@ -39,6 +46,14 @@ const LABEL_GAP = 12;
 const LEFT_PAD = 10;
 const TOP_PAD = 12;
 const RANK_Y_OFFSET = 15;
+const ZOOM_MIN = 0.85;
+const ZOOM_MAX = 2;
+const ZOOM_STEP = 0.15;
+const ZOOM_DEFAULT = 1.35;
+
+function clampZoom(value: number): number {
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
+}
 
 interface LayoutNode {
   node: TaxonomyLineageNode;
@@ -127,10 +142,7 @@ function layoutNodes(
  * before `before`, or null if none exists.  Used so connectors anchor on
  * lineage nodes only and never on a sibling stub.
  */
-function findPrevLineage(
-  result: LayoutNode[],
-  before: number,
-): number | null {
+function findPrevLineage(result: LayoutNode[], before: number): number | null {
   for (let j = before - 1; j >= 0; j--) {
     if (!result[j].sibling) return j;
   }
@@ -157,6 +169,7 @@ export function LineageTree({
 }: LineageTreeProps) {
   const [expanded, setExpanded] = useState(false);
   const [showSiblings, setShowSiblings] = useState(true);
+  const [zoom, setZoom] = useState(ZOOM_DEFAULT);
 
   const majorCount = useMemo(
     () => nodes.filter((n) => MAJOR_RANKS.has(n.rank.toLowerCase())).length,
@@ -168,20 +181,13 @@ export function LineageTree({
 
   const laid = useMemo(
     () =>
-      layoutNodes(
-        nodes,
-        selectedTaxid,
-        expanded,
-        showSiblings ? siblings : undefined,
-      ),
+      layoutNodes(nodes, selectedTaxid, expanded, showSiblings ? siblings : undefined),
     [nodes, selectedTaxid, expanded, showSiblings, siblings],
   );
 
   if (nodes.length === 0) {
     return (
-      <div className="lineage-tree lineage-tree--text">
-        {lineageText || "\u2014"}
-      </div>
+      <div className="lineage-tree lineage-tree--text">{lineageText || "\u2014"}</div>
     );
   }
 
@@ -189,9 +195,7 @@ export function LineageTree({
   // to the text view rather than reading `laid[laid.length - 1]`.
   if (laid.length === 0) {
     return (
-      <div className="lineage-tree lineage-tree--text">
-        {lineageText || "\u2014"}
-      </div>
+      <div className="lineage-tree lineage-tree--text">{lineageText || "\u2014"}</div>
     );
   }
 
@@ -200,145 +204,188 @@ export function LineageTree({
   // Reserve enough horizontal room for the deepest label (longest name ~16 chars).
   const maxX = laid.reduce((m, l) => Math.max(m, l.x), 0);
   const svgWidth = Math.max(360, maxX + 180);
+  const zoomPercent = Math.round(zoom * 100);
+  const zoomStyle = {
+    width: `${zoomPercent}%`,
+    minWidth: `${zoomPercent}%`,
+  };
 
   return (
-    <div className="lineage-tree lineage-tree--cladogram" role="tree" aria-label="Taxonomic lineage">
+    <div
+      className="lineage-tree lineage-tree--cladogram"
+      role="tree"
+      aria-label="Taxonomic lineage"
+    >
       <div className="lineage-tree__header">
-        {hasMinor && (
-          <button
-            type="button"
-            className="lineage-tree__toggle"
-            onClick={() => setExpanded((v) => !v)}
-            aria-expanded={expanded}
-            title={expanded ? "Show major ranks only" : "Show all ranks"}
-          >
-            {expanded ? (
-              <ChevronDown size={12} strokeWidth={2} />
-            ) : (
-              <ChevronRight size={12} strokeWidth={2} />
-            )}
-            <span>
-              {expanded
-                ? `All ${nodes.length} ranks`
-                : `${majorCount} major ranks`}
-            </span>
-            {!expanded && (
-              <span className="lineage-tree__toggle-hint">
-                +{minorCount} more
+        <div className="lineage-tree__toggles">
+          {hasMinor && (
+            <button
+              type="button"
+              className="lineage-tree__toggle"
+              onClick={() => setExpanded((v) => !v)}
+              aria-expanded={expanded}
+              title={expanded ? "Show major ranks only" : "Show all ranks"}
+            >
+              {expanded ? (
+                <ChevronDown size={12} strokeWidth={2} />
+              ) : (
+                <ChevronRight size={12} strokeWidth={2} />
+              )}
+              <span>
+                {expanded ? `All ${nodes.length} ranks` : `${majorCount} major ranks`}
               </span>
-            )}
-          </button>
-        )}
-        {(hasSiblings || siblingsLoading) && (
+              {!expanded && (
+                <span className="lineage-tree__toggle-hint">+{minorCount} more</span>
+              )}
+            </button>
+          )}
+          {(hasSiblings || siblingsLoading) && (
+            <button
+              type="button"
+              className="lineage-tree__toggle"
+              onClick={() => setShowSiblings((v) => !v)}
+              aria-pressed={showSiblings}
+              disabled={siblingsLoading && !hasSiblings}
+              title={
+                showSiblings ? "Hide sibling taxa" : "Show sibling taxa at each rank"
+              }
+            >
+              {siblingsLoading && !hasSiblings ? (
+                <Loader2 size={12} className="spin" />
+              ) : showSiblings ? (
+                <ChevronDown size={12} strokeWidth={2} />
+              ) : (
+                <ChevronRight size={12} strokeWidth={2} />
+              )}
+              <span>Siblings</span>
+              {siblingsLoading && (
+                <span className="lineage-tree__toggle-hint">loading…</span>
+              )}
+            </button>
+          )}
+        </div>
+
+        <div className="lineage-tree__zoom" aria-label="Lineage zoom controls">
           <button
             type="button"
-            className="lineage-tree__toggle"
-            onClick={() => setShowSiblings((v) => !v)}
-            aria-pressed={showSiblings}
-            disabled={siblingsLoading && !hasSiblings}
-            title={
-              showSiblings
-                ? "Hide sibling taxa"
-                : "Show sibling taxa at each rank"
-            }
+            className="lineage-tree__zoom-button"
+            onClick={() => setZoom((value) => clampZoom(value - ZOOM_STEP))}
+            disabled={zoom <= ZOOM_MIN}
+            aria-label="Zoom out lineage tree"
+            title="Zoom out"
           >
-            {siblingsLoading && !hasSiblings ? (
-              <Loader2 size={12} className="spin" />
-            ) : showSiblings ? (
-              <ChevronDown size={12} strokeWidth={2} />
-            ) : (
-              <ChevronRight size={12} strokeWidth={2} />
-            )}
-            <span>Siblings</span>
-            {siblingsLoading && (
-              <span className="lineage-tree__toggle-hint">loading…</span>
-            )}
+            <ZoomOut size={12} strokeWidth={1.8} />
           </button>
-        )}
+          <span className="lineage-tree__zoom-value">{zoomPercent}%</span>
+          <button
+            type="button"
+            className="lineage-tree__zoom-button"
+            onClick={() => setZoom((value) => clampZoom(value + ZOOM_STEP))}
+            disabled={zoom >= ZOOM_MAX}
+            aria-label="Zoom in lineage tree"
+            title="Zoom in"
+          >
+            <ZoomIn size={12} strokeWidth={1.8} />
+          </button>
+          <button
+            type="button"
+            className="lineage-tree__zoom-button"
+            onClick={() => setZoom(ZOOM_DEFAULT)}
+            disabled={zoom === ZOOM_DEFAULT}
+            aria-label="Reset lineage tree zoom"
+            title="Reset zoom"
+          >
+            <RotateCcw size={12} strokeWidth={1.8} />
+          </button>
+        </div>
       </div>
 
-      <svg
-        className="lineage-tree__svg"
-        viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-        width="100%"
-        preserveAspectRatio="xMinYMin meet"
-        role="presentation"
+      <div
+        className="lineage-tree__canvas"
+        tabIndex={0}
+        aria-label="Scrollable lineage tree canvas"
       >
-        {/* Connector lines — angled cladogram style */}
-        {laid.map((item, i) => {
-          if (item.parentIndex === null) return null;
-          const parent = laid[item.parentIndex];
-          return (
-            <path
-              key={`c-${i}-${item.node.taxid}`}
-              d={`M ${parent.x} ${parent.y} L ${parent.x} ${item.y} L ${item.x} ${item.y}`}
-              fill="none"
-              stroke={item.color}
-              strokeWidth={item.major ? 1.5 : 1}
-              strokeOpacity={
-                item.sibling ? 0.16 : item.major ? 0.35 : 0.18
-              }
-              strokeDasharray={item.sibling ? "3 3" : undefined}
-            />
-          );
-        })}
+        <svg
+          className="lineage-tree__svg"
+          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+          style={zoomStyle}
+          preserveAspectRatio="xMinYMin meet"
+          role="presentation"
+        >
+          {/* Connector lines — angled cladogram style */}
+          {laid.map((item, i) => {
+            if (item.parentIndex === null) return null;
+            const parent = laid[item.parentIndex];
+            return (
+              <path
+                key={`c-${i}-${item.node.taxid}`}
+                d={`M ${parent.x} ${parent.y} L ${parent.x} ${item.y} L ${item.x} ${item.y}`}
+                fill="none"
+                stroke={item.color}
+                strokeWidth={item.major ? 1.5 : 1}
+                strokeOpacity={item.sibling ? 0.16 : item.major ? 0.35 : 0.18}
+                strokeDasharray={item.sibling ? "3 3" : undefined}
+              />
+            );
+          })}
 
-        {/* Nodes and labels */}
-        {laid.map((item, i) => (
-          <g key={`n-${i}-${item.node.taxid}`} role="treeitem">
-            <circle
-              cx={item.x}
-              cy={item.y}
-              r={item.r}
-              fill={item.selected ? item.color : "transparent"}
-              stroke={item.color}
-              strokeWidth={item.major ? 2 : 1.5}
-              opacity={item.sibling ? 0.55 : item.major ? 1 : 0.7}
-            />
-
-            {item.selected && (
+          {/* Nodes and labels */}
+          {laid.map((item, i) => (
+            <g key={`n-${i}-${item.node.taxid}`} role="treeitem">
               <circle
                 cx={item.x}
                 cy={item.y}
-                r={item.r + 3}
-                fill="none"
+                r={item.r}
+                fill={item.selected ? item.color : "transparent"}
                 stroke={item.color}
-                strokeWidth={1}
-                opacity={0.3}
+                strokeWidth={item.major ? 2 : 1.5}
+                opacity={item.sibling ? 0.55 : item.major ? 1 : 0.7}
               />
-            )}
 
-            <text
-              x={item.x + item.r + LABEL_GAP}
-              y={item.y}
-              dominantBaseline="central"
-              className={
-                item.selected
-                  ? "lineage-tree__svg-label lineage-tree__svg-label--selected"
-                  : item.sibling
-                    ? "lineage-tree__svg-label lineage-tree__svg-label--minor lineage-tree__svg-label--sibling"
-                    : item.major
-                      ? "lineage-tree__svg-label"
-                      : "lineage-tree__svg-label lineage-tree__svg-label--minor"
-              }
-              opacity={item.sibling ? 0.65 : 1}
-            >
-              {item.node.scientific_name}
-            </text>
+              {item.selected && (
+                <circle
+                  cx={item.x}
+                  cy={item.y}
+                  r={item.r + 3}
+                  fill="none"
+                  stroke={item.color}
+                  strokeWidth={1}
+                  opacity={0.3}
+                />
+              )}
 
-            {item.major && !item.sibling && (
               <text
                 x={item.x + item.r + LABEL_GAP}
-                y={item.y + RANK_Y_OFFSET}
-                className="lineage-tree__svg-rank"
-                fill={item.color}
+                y={item.y}
+                dominantBaseline="central"
+                className={
+                  item.selected
+                    ? "lineage-tree__svg-label lineage-tree__svg-label--selected"
+                    : item.sibling
+                      ? "lineage-tree__svg-label lineage-tree__svg-label--minor lineage-tree__svg-label--sibling"
+                      : item.major
+                        ? "lineage-tree__svg-label"
+                        : "lineage-tree__svg-label lineage-tree__svg-label--minor"
+                }
+                opacity={item.sibling ? 0.65 : 1}
               >
-                {item.node.rank}
+                {item.node.scientific_name}
               </text>
-            )}
-          </g>
-        ))}
-      </svg>
+
+              {item.major && !item.sibling && (
+                <text
+                  x={item.x + item.r + LABEL_GAP}
+                  y={item.y + RANK_Y_OFFSET}
+                  className="lineage-tree__svg-rank"
+                  fill={item.color}
+                >
+                  {item.node.rank}
+                </text>
+              )}
+            </g>
+          ))}
+        </svg>
+      </div>
     </div>
   );
 }

@@ -1,4 +1,14 @@
-"""Canonical BLAST result manifest helpers."""
+"""Canonical BLAST result manifest helpers.
+
+Responsibility: Canonical BLAST result manifest helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `build_result_manifest`, `_manifest_entry`, `_format_from_name`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 

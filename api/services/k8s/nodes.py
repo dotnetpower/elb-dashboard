@@ -1,4 +1,12 @@
-"""Kubernetes node listing and warmup-node selection helpers."""
+"""Kubernetes node listing and warmup-node selection helpers.
+
+Responsibility: Kubernetes node listing and warmup-node selection helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `k8s_get_nodes`, `k8s_ready_warmup_node_names`, `_candidate_warmup_node_names`
+Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
+Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
+"""
 
 from __future__ import annotations
 

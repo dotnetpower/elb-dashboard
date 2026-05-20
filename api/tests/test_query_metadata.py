@@ -1,3 +1,16 @@
+"""Tests for Query Metadata behavior.
+
+Responsibility: Tests for Query Metadata behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_parse_single_query_fasta_metadata`,
+`test_parse_multi_query_mixed_lengths`, `test_reject_sequence_before_header`,
+`test_reject_empty_record`, `test_reject_duplicate_query_ids`, `test_record_limit`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_query_metadata.py`.
+"""
+
 from __future__ import annotations
 
 import pytest

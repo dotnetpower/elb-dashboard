@@ -89,6 +89,7 @@ export function ResponseViewer({
           lineHeight: 1.6,
           maxHeight: 400,
           overflow: "auto",
+          whiteSpace: "pre-wrap",
           color: "var(--text-primary)",
           fontFamily: "var(--font-mono)",
           background: "transparent",

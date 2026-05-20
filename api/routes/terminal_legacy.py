@@ -1,15 +1,12 @@
 """Legacy `/api/terminal/{vm_name}/*` endpoints.
 
-The Container Apps topology has no Remote Terminal VM. The browser shell is
-the `terminal` sidecar, reached only via the WebSocket proxy at
-`/api/terminal/ws` (see api/routes/terminal_ws.py).
-
-These shims exist so that older SPA bundles still cached in a browser do not
-crash on `404`. They return `410 Gone` with a structured body so the SPA's
-error boundary can render an informative "removed" state and offer a Reload
-button.
-
-When the SPA is rebuilt to drop these calls, this module can be removed.
+Responsibility: Legacy `/api/terminal/{vm_name}/*` endpoints
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_gone`, `provision`, `status`, `password`, `start`, `stop`
+Risky contracts: Terminal access must stay bearer/ticket-gated and upstreams must remain
+loopback-only.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations

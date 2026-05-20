@@ -1,3 +1,16 @@
+"""Tests for Kubernetes BLAST Status behavior.
+
+Responsibility: Tests for Kubernetes BLAST Status behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_Response`, `_Session`, `_job`,
+`test_k8s_check_blast_status_ignores_other_jobs_when_scoped`,
+`test_k8s_check_blast_status_uses_scoped_job_label_without_pod`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_k8s_blast_status.py`.
+"""
+
 from __future__ import annotations
 
 from typing import Any

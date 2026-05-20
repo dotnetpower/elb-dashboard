@@ -1,8 +1,18 @@
-"""ACR monitor routes."""
+"""ACR monitor routes.
+
+Responsibility: ACR monitor routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `list_acr`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py
+api/tests/test_monitor_cache.py`.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Query
 
@@ -31,7 +41,7 @@ def list_acr(
             lambda: monitoring_svc.list_acr_repositories(cred, sub, resource_group, registry_name),
         )
     except Exception as exc:
-        return _graceful(
+        return cast(dict[str, Any], _graceful(
             "list_acr",
             exc,
             empty={
@@ -43,7 +53,7 @@ def list_acr(
                 "building_images": [],
                 "build_details": [],
             },
-        )
+        ))
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,12 @@
-"""Task status endpoint — poll Celery task results.
+"""Task status endpoint - poll Celery task results.
 
-The SPA polls ``GET /api/tasks/{task_id}`` to track progress of long-running
-Celery tasks (AKS provision, ACR build, BLAST submit, DB warmup, etc.).
+Responsibility: Task status endpoint - poll Celery task results
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `get_task_status`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations

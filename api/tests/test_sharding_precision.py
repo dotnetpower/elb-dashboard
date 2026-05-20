@@ -1,3 +1,18 @@
+"""Tests for Sharding Precision behavior.
+
+Responsibility: Tests for Sharding Precision behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_default_sharding_mode_is_off`,
+`test_legacy_approximate_flag_maps_to_approximate`,
+`test_legacy_explicit_partitions_map_to_approximate`,
+`test_explicit_off_conflicts_with_explicit_partitions`, `test_invalid_sharding_mode_rejected`,
+`test_off_mode_reports_full_precision`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_sharding_precision.py`.
+"""
+
 from __future__ import annotations
 
 import pytest

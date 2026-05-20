@@ -1,3 +1,15 @@
+"""Tests for ACR Build Task behavior.
+
+Responsibility: Tests for ACR Build Task behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_FakeRegistries`, `_FakeManagementClient`, `_scheduled_task_yaml`,
+`test_job_submit_build_patches_azure_snapshot_flow`, `test_pre_build_command_is_shell_quoted`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_acr_build_task.py`.
+"""
+
 from __future__ import annotations
 
 import base64

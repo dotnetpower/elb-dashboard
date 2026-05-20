@@ -1,12 +1,13 @@
 """Direct Kubernetes API helpers for AKS-backed ElasticBLAST monitoring.
 
-This module owns kubeconfig parsing, short-lived credential material, and all
-read-only or narrowly-scoped Kubernetes API calls. ARM, Storage, ACR, and VM
-helpers intentionally stay in ``api.services.monitoring``.
-
-Do not reintroduce AKS Run Command here. Add another direct ``k8s_*`` helper
-for Kubernetes API reads, or use ``api.services.terminal_exec`` for genuinely
-shell-only tooling that must run inside the terminal sidecar.
+Responsibility: Direct Kubernetes API helpers for AKS-backed ElasticBLAST monitoring
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `reset_k8s_credential_cache`, `_get_k8s_session`,
+`_get_k8s_credential_material`, `k8s_ensure_job_manifests`,
+`k8s_ensure_warmup_scripts_configmap`, `k8s_check_blast_status`
+Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
+Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
 
@@ -135,7 +136,7 @@ def _owned_job_names(pods: list[dict[str, Any]]) -> set[str]:
 
 
 def _job_has_label_value(job: dict[str, Any], name: str, value: str) -> bool:
-    return job.get("metadata", {}).get("labels", {}).get(name) == value
+    return cast(bool, job.get("metadata", {}).get("labels", {}).get(name) == value)
 
 
 def k8s_ensure_job_manifests(

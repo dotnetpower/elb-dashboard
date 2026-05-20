@@ -1,3 +1,16 @@
+"""Tests for Storage Network behavior.
+
+Responsibility: Tests for Storage Network behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_Poller`, `_PrivateEndpoints`, `_PrivateDnsZoneGroups`,
+`test_ensure_workload_storage_private_endpoints_creates_blob_and_dfs`,
+`test_ensure_workload_storage_private_endpoints_skips_when_unconfigured`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_storage_network.py`.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

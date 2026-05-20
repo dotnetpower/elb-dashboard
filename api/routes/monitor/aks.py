@@ -1,9 +1,20 @@
-"""AKS monitor routes."""
+"""AKS monitor routes.
+
+Responsibility: AKS monitor routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `list_aks`, `aks_nodes`, `aks_pods`, `aks_top_nodes`, `aks_pod_logs`,
+`aks_service_ip`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py
+api/tests/test_monitor_cache.py`.
+"""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
@@ -36,7 +47,7 @@ def list_aks(
             lambda: {"clusters": monitoring_svc.list_aks_clusters(cred, sub, resource_group)},
         )
     except Exception as exc:
-        return _graceful("aks_list", exc, empty={"clusters": []})
+        return cast(dict[str, Any], _graceful("aks_list", exc, empty={"clusters": []}))
 
 
 @router.get("/aks/nodes")
@@ -58,7 +69,7 @@ def aks_nodes(
             },
         )
     except Exception as exc:
-        return _graceful("aks_nodes", exc, empty={"nodes": []})
+        return cast(dict[str, Any], _graceful("aks_nodes", exc, empty={"nodes": []}))
 
 
 @router.get("/aks/pods")
@@ -78,7 +89,7 @@ def aks_pods(
             lambda: {"pods": monitoring_svc.k8s_get_pods(cred, sub, resource_group, cluster_name)},
         )
     except Exception as exc:
-        return _graceful("aks_pods", exc, empty={"pods": []})
+        return cast(dict[str, Any], _graceful("aks_pods", exc, empty={"pods": []}))
 
 
 @router.get("/aks/top-nodes")
@@ -100,7 +111,7 @@ def aks_top_nodes(
             },
         )
     except Exception as exc:
-        return _graceful("aks_top_nodes", exc, empty={"nodes": []})
+        return cast(dict[str, Any], _graceful("aks_top_nodes", exc, empty={"nodes": []}))
 
 
 @router.get("/aks/pod-logs")
@@ -123,7 +134,7 @@ def aks_pod_logs(
         )
         return {"logs": logs}
     except Exception as exc:
-        return _graceful("aks_pod_logs", exc, empty={"logs": ""})
+        return cast(dict[str, Any], _graceful("aks_pod_logs", exc, empty={"logs": ""}))
 
 
 @router.get("/aks/service-ip")
@@ -187,7 +198,7 @@ def aks_warmup_status(
             lambda: monitoring_svc.k8s_warmup_status(cred, sub, resource_group, cluster_name),
         )
     except Exception as exc:
-        return _graceful("aks_warmup_status", exc, empty={"databases": []})
+        return cast(dict[str, Any], _graceful("aks_warmup_status", exc, empty={"databases": []}))
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +271,7 @@ def aks_events(
             load_events,
         )
     except Exception as exc:
-        return _graceful("aks_events", exc, empty={"events": []})
+        return cast(dict[str, Any], _graceful("aks_events", exc, empty={"events": []}))
 
 
 # ---------------------------------------------------------------------------

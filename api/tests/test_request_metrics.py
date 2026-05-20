@@ -1,4 +1,15 @@
-"""Unit tests for `api.services.request_metrics`."""
+"""Unit tests for `api.services.request_metrics`.
+
+Responsibility: Unit tests for `api.services.request_metrics`
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `setup_function`, `test_normalise_path_collapses_known_patterns`,
+`test_normalise_path_strips_query`, `test_summarise_no_samples_returns_degraded`,
+`test_record_and_summarise_percentiles`, `test_error_count_includes_5xx_and_dispatch_failure`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_request_metrics.py`.
+"""
 
 from __future__ import annotations
 

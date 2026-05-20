@@ -1,8 +1,14 @@
 """Tests for sidecar_metrics aggregation logic.
 
-Live Redis interaction (`MGET`, `INFO`) is covered by the docker-compose
-smoke step in the change note; here we verify the staleness classifier
-which is the only piece of branchy business logic.
+Responsibility: Tests for sidecar_metrics aggregation logic
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `FakeRedis`, `test_classify_missing_payload_is_down`,
+`test_classify_fresh_payload_is_ok`, `test_classify_aged_payload_is_degraded`,
+`test_classify_stale_payload_is_down`, `test_classify_handles_zero_ts`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_sidecar_metrics.py`.
 """
 
 from __future__ import annotations

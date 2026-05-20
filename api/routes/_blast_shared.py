@@ -1,13 +1,12 @@
-"""Shared helpers, module-level constants, and small utilities used by the
-BLAST / AKS / ACR / warmup / audit route modules.
+"""Shared helpers and compatibility re-exports for route modules.
 
-This module is *not* a route module — it contains only pure-Python helpers
-and Depends/Body/Query singletons. Splitting these out keeps each route
-file focused on its HTTP surface and lets tests monkey-patch the helpers
-in one place.
-
-History: extracted from the former ``api/routes/stubs.py`` mega-file
-(see ``docs/features_change/2026-05/2026-05-19-split-stubs-drop-legacy.md``).
+Responsibility: Shared helpers and compatibility re-exports for route modules
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_stub_log`, `_maybe_open_local_storage_access`, `_safe_delay`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -175,7 +174,7 @@ def _maybe_open_local_storage_access(
     return access
 
 
-def _safe_delay(task, **kwargs):
+def _safe_delay(task: Any, **kwargs: Any) -> Any:
     """Enqueue a Celery task, returning the AsyncResult. If the broker is
     unreachable (Redis down), raise 503 with a retryable hint instead of
     letting the OperationalError bubble as a 500."""
@@ -197,7 +196,7 @@ def _safe_delay(task, **kwargs):
         raise
 
 
-def _safe_send_task(task_name: str, *, queue: str | None = None, **kwargs):
+def _safe_send_task(task_name: str, *, queue: str | None = None, **kwargs: Any) -> Any:
     """Enqueue a Celery task through the configured app, not shared_task current_app."""
     try:
         from api.celery_app import celery_app

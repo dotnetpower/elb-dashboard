@@ -1,3 +1,16 @@
+"""Tests for Taxonomy Image behavior.
+
+Responsibility: Tests for Taxonomy Image behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_install_transport`, `test_fetch_image_returns_thumbnail_url`,
+`test_fetch_image_404_returns_null`, `test_fetch_image_swallows_network_errors`,
+`test_fetch_image_caches_subsequent_lookups`, `test_fetch_image_rejects_off_origin_thumbnail`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_taxonomy_image.py`.
+"""
+
 from __future__ import annotations
 
 from typing import Any

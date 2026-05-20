@@ -1,4 +1,16 @@
-"""Unit tests for `k8s_list_events` output hardening."""
+"""Unit tests for `k8s_list_events` output hardening.
+
+Responsibility: Unit tests for `k8s_list_events` output hardening
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_kubeconfig_bytes`, `test_k8s_credential_material_cache_reuses_arm_result`,
+`_fake_events_payload`, `test_k8s_list_events_caps_string_fields_and_clamps_count`,
+`test_k8s_list_events_coerces_invalid_count_and_type`,
+`test_k8s_list_events_skips_non_dict_items`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
+"""
 
 from __future__ import annotations
 

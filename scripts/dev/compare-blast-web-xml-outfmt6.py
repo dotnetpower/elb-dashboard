@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Compare NCBI Web BLAST XML with BLAST outfmt 6 rows.
 
-This is a fast equivalence helper for current Web BLAST probes: fetch XML for a
-RID, run a tiny direct BLAST probe against cached shard/full DB data, then
-compare accession order and primary HSP value fields without waiting for a full
-ElasticBLAST submit/finalizer cycle.
+Responsibility: Compare NCBI Web BLAST XML with BLAST outfmt 6 rows
+Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
+Key entry points: `Row`, `_decimal_text`, `_versioned_accession`, `compare`, `build_report`,
+`main`
+Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Validation: `uv run python scripts/dev/compare-blast-web-xml-outfmt6.py --help`.
 """
 
 from __future__ import annotations

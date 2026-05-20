@@ -1,8 +1,16 @@
 """Tests for the warmup feasibility planner.
 
-Covers all six ``WarmupStatus`` codes plus boundary cases. The planner
-is pure-python and side-effect free, so tests do not need any monkey-
-patching of Azure SDK clients.
+Responsibility: Tests for the warmup feasibility planner
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_core_nt_on_three_e32s_v5_is_feasible`,
+`test_tiny_db_is_trivially_feasible`, `test_core_nt_on_one_node_is_cluster_too_small`,
+`test_cluster_too_small_recommendations_never_downgrade_sku`,
+`test_huge_db_on_e32s_v5_is_node_sku_too_small`,
+`test_huge_db_on_more_nodes_still_node_sku_too_small`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_warmup_planner.py`.
 """
 
 from __future__ import annotations

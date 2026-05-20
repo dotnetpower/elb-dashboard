@@ -1,8 +1,12 @@
 """Output sanitisation helpers.
 
-Used before returning shell command output (Run Command, kubectl, az) to
-the SPA so we never echo bearer tokens, SAS query strings, or full secret
-URIs even if a downstream tool happens to log them.
+Responsibility: Output sanitisation helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `sanitise`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

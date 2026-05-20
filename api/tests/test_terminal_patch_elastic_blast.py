@@ -1,3 +1,17 @@
+"""Tests for Terminal Patch Elastic BLAST behavior.
+
+Responsibility: Tests for Terminal Patch Elastic BLAST behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_load_patch_module`,
+`test_patch_init_shard_script_writes_hardened_cache_skip`,
+`test_patch_init_shard_script_is_idempotent`,
+`test_patch_init_shard_script_updates_installed_package_copy`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_terminal_patch_elastic_blast.py`.
+"""
+
 from __future__ import annotations
 
 import importlib.util

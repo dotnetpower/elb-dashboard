@@ -1,3 +1,15 @@
+"""Tests for BLAST Equivalence Evidence behavior.
+
+Responsibility: Tests for BLAST Equivalence Evidence behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_verified_search_space_registry_requires_evidence_metadata`,
+`test_evidence_registry_matrix_includes_core_nt`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_equivalence_evidence.py`.
+"""
+
 from __future__ import annotations
 
 from api.services.blast_equivalence_evidence import (

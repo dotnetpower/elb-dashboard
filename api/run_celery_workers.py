@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Run latency-critical and artifact Celery workers as isolated processes."""
+"""Run latency-critical and artifact Celery workers as isolated processes.
+
+Responsibility: Run latency-critical and artifact Celery workers as isolated processes
+Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Key entry points: `_validated`, `_worker_command`, `_terminate`, `main`
+Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,15 @@
-"""Live BLAST job log SSE routes."""
+"""Live BLAST job log SSE routes.
+
+Responsibility: Live BLAST job log SSE routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `BlastLogTicketRequest`, `_LogTicket`, `blast_job_logs_ticket`,
+`blast_job_logs_events`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +19,7 @@ import logging
 import secrets
 import threading
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
@@ -111,7 +123,7 @@ async def _consume_log_ticket(job_id: str, token: str | None) -> _LogTicket:
 async def blast_job_logs_events(
     job_id: str = Path(...),
     ticket: str | None = Query(default=None),
-):
+) -> StreamingResponse:
     """Server-Sent Events stream of live BLAST job logs.
 
     Event types:
@@ -213,7 +225,7 @@ async def blast_job_logs_events(
             stop.set()
         await asyncio.gather(*followed.values(), return_exceptions=True)
 
-    async def event_stream():
+    async def event_stream() -> AsyncGenerator[str, None]:
         tasks: list[asyncio.Task[Any]] = []
         try:
             await emit_snapshot()

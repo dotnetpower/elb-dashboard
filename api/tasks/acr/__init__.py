@@ -1,8 +1,11 @@
-"""ACR image build Celery tasks — build ElasticBLAST container images via Azure SDK.
+"""ACR image build Celery tasks - build ElasticBLAST container images via Azure SDK.
 
-Side effects: Schedules `az acr build` runs on the ACR via the management API.
-All tasks are idempotent — re-running a build for an already-built tag is a no-op
-at the ACR level.
+Responsibility: ACR image build Celery tasks - build ElasticBLAST container images via Azure SDK
+Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
+persist state.
+Key entry points: `build_images`, `_schedule_acr_build`
+Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Validation: `uv run pytest -q api/tests/test_azure_tasks.py api/tests/test_blast_tasks.py`.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ _BUILD_API_VERSION = "2019-06-01-preview"
     retry_jitter=True,
 )
 def build_images(
-    self,
+    self: Any,
     *,
     subscription_id: str,
     resource_group: str,

@@ -1,8 +1,14 @@
-"""Liveness + readiness endpoints. No auth required — used by Container Apps health probes.
+"""Liveness + readiness endpoints. No auth required - used by Container Apps health probes.
 
-The diagnostic ``/health/azure-discovery`` endpoint is the one exception:
-it touches ARM and references subscription identifiers, so it is gated
-behind the standard MSAL bearer dependency (``require_caller``).
+Responsibility: Liveness + readiness endpoints. No auth required - used by Container Apps health
+probes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `health`, `readiness`, `celery_diag`, `celery_enqueue_noop`,
+`celery_task_result`, `azure_discovery_probe`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -44,7 +50,7 @@ def health() -> dict[str, str]:
 
 
 @router.get("/health/ready")
-def readiness() -> dict[str, Any]:
+def readiness() -> Any:
     """Readiness/deep health probe — checks downstream dependencies.
 
     Returns 200 with component statuses when the service can accept work.
@@ -143,7 +149,7 @@ def celery_diag() -> dict[str, Any]:
                 out["queues"][q] = f"err:{type(exc).__name__}"
         out["broker_url"] = CELERY_BROKER_URL
         out["redis_keys_db0"] = sorted(
-            k.decode() for k in r.keys("*") if not k.startswith(b"_kombu")
+            k.decode() for k in r.keys("*") if not k.startswith(b"_kombu")  # type: ignore[union-attr]
         )
     except Exception as exc:
         out["errors"].append(f"redis: {type(exc).__name__}: {exc}")

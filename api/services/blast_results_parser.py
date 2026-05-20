@@ -1,24 +1,14 @@
 """Parser + aggregator for BLAST result output.
 
-Ported from the retired Azure Functions tree so that
-`/api/blast/jobs/{id}/results/aggregate`, `.../alignments`, and `.../export`
-can return real data to the `BlastAnalytics` page instead of degraded stubs.
-
-The parsers are deliberately **stateless and side-effect-free** so they can run
-inside the api sidecar's HTTP handler without enqueuing a Celery task: the
-blobs we parse are kilobytes-to-low-megabytes, capped by `max_bytes` in
-`storage_data.read_result_blob_text`, so the cost is bounded.
-
-Format support:
-    * `-outfmt 5` (BLAST XML) — converted to the same canonical hit row shape
-        used by tabular output so the UI can render Web BLAST-like tables and
-        alignment previews.
-  * `-outfmt 6` (tabular, no header) — assumed to use the BLAST default
-    12-column layout (`qseqid sseqid pident length mismatch gapopen qstart
-    qend sstart send evalue bitscore`).
-  * `-outfmt 7` (tabular with `# Fields:` comment lines) — parsed by mapping
-    the field labels back to canonical column names so custom `-outfmt 7
-    'qseqid sseqid pident qlen slen ...'` invocations still work.
+Responsibility: Parser + aggregator for BLAST result output
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `parse_blast_result_content`, `parse_blast_xml`, `parse_blast_tabular`,
+`aggregate_blast_hits`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
 """
 
 from __future__ import annotations

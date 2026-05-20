@@ -126,6 +126,19 @@ Calm, muted, low-contrast surfaces. **Detail moved to [docs/copilot/glass-ui.md]
   * Adding a dev-only tool: edit `[dependency-groups].dev` then `uv lock`.
   * Run anything from the venv with `uv run <cmd>` (e.g. `uv run uvicorn …`, `uv run pytest …`, `uv run ruff check`).
 * New code goes in `api/`. The Azure Functions tree was deleted from the repository on 2026-05-19 — do not try to re-create it under `legacy/`.
+* Every new Python file (`api/`, `terminal/`, `scripts/dev/`, `web/*.py`, and tests)
+  must start with a natural module docstring context header. Do **not** use a literal
+  `AI Context Header.` label. The first line is a concise module summary, followed
+  by these fields: `Responsibility`, `Edit boundaries`, `Key entry points`,
+  `Risky contracts`, and `Validation`. Keep it synchronized with the actual code
+  whenever entry points, contracts, or validation commands change.
+* Use the context header as an SRP gate. If the `Responsibility` line needs "and"
+  chains, unrelated nouns, or more than one architectural layer (route + service +
+  task + parser), split the work before adding more code. Routes own HTTP/auth/
+  response shaping; services own reusable domain/Azure/Kubernetes/Storage logic;
+  tasks own long-running side effects and progress checkpoints; tests own one
+  behaviour family. When editing a large module, prefer adding a focused helper
+  module over broadening the existing header.
 * Format with `ruff format`, lint with `ruff check`. No `black`/`isort` duplication.
 * Type hints required on all public functions; `mypy --strict` clean.
 * Pydantic v2 for request/response models; never accept untyped `dict` at HTTP boundaries.

@@ -1,4 +1,14 @@
-"""Redis Stream event bus for live BLAST job logs."""
+"""Redis Stream event bus for live BLAST job logs.
+
+Responsibility: Redis Stream event bus for live BLAST job logs
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_now_iso`, `_safe_stream_key`, `_redis_client`, `publish_job_log_event`,
+`read_job_log_events`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 

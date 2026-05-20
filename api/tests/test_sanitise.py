@@ -1,4 +1,14 @@
-"""Tests for output sanitisation."""
+"""Tests for output sanitisation.
+
+Responsibility: Tests for output sanitisation
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_masks_sas_query_string`, `test_masks_bearer_token`,
+`test_masks_account_key`, `test_masks_guids_when_requested`, `test_returns_empty_for_none`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_sanitise.py`.
+"""
 
 from __future__ import annotations
 

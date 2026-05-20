@@ -53,7 +53,7 @@ export function AlgorithmParametersSection({
   const matchMismatchValue = form.match_score || form.mismatch_score ? `${form.match_score || "1"},${form.mismatch_score || "-2"}` : "1,-2";
 
   return (
-    <section className="glass-card blast-section">
+    <section className="glass-card blast-section bsl-runtime bsl-done">
       <button onClick={() => setShowParams((value) => !value)} className="blast-params-toggle">
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span className="blast-step-badge" style={{ fontSize: 10, width: 20, height: 20 }}>

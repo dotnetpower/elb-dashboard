@@ -1,23 +1,13 @@
 """Process-local request metrics ring buffer.
 
-Tracks one sample per HTTP request handled by the api sidecar so the SPA
-can render p50/p95/p99 latency, error rate, and a per-minute throughput
-sparkline without depending on an external time-series store.
-
-Bounded memory: a single deque with `maxlen=DEFAULT_CAPACITY`, oldest
-sample evicted FIFO. Thread-safe via a single coarse lock — recording
-is microseconds, summarisation iterates a snapshot under the lock.
-
-This metrics view is per-process. When the api sidecar is replicated or
-restarted, the buffer resets. That is intentional — a real time-series
-backend is out of scope (no managed DB), and the dashboard treats
-`degraded_reason: "no_samples"` as "data not available yet".
-
-Path normalisation strips path parameters that would otherwise blow up
-the cardinality of `by_path` aggregates (job id, cluster name, etc.).
-The substitutions are conservative: only well-known prefixes get
-collapsed, anything else keeps its raw shape so we don't accidentally
-hide a legitimately distinct route.
+Responsibility: Process-local request metrics ring buffer
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_capacity`, `_Sample`, `normalise_path`, `metrics`, `reset_for_tests`,
+`record_samples_for_tests`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

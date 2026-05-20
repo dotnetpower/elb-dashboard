@@ -1,0 +1,1180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dashboard Health Proposals</title>
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      :root {
+        --font-sans:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        --font-mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+        --page-bg: #eef2f8;
+        --page-text: #0f172a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--page-bg);
+        color: var(--page-text);
+        font-family: var(--font-sans);
+        line-height: 1.4;
+      }
+      button {
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .page {
+        min-height: 100vh;
+        padding: 12px;
+      }
+
+      .screen {
+        --canvas: #f6f8fc;
+        --panel: #ffffff;
+        --panel-soft: #f3f5fa;
+        --line: rgba(15, 23, 42, 0.08);
+        --line-strong: rgba(15, 23, 42, 0.16);
+        --text: #0f172a;
+        --muted: #5a6577;
+        --faint: #8b96a8;
+        --accent: #2563eb;
+        --accent-soft: rgba(37, 99, 235, 0.1);
+        --success: #15803d;
+        --success-soft: rgba(21, 128, 61, 0.12);
+        --warning: #b45309;
+        --warning-soft: rgba(180, 83, 9, 0.12);
+        --danger: #b42318;
+        --danger-soft: rgba(180, 35, 24, 0.12);
+        --teal: #0f766e;
+        --teal-soft: rgba(15, 118, 110, 0.12);
+        min-height: calc(100vh - 24px);
+        max-width: 1780px;
+        margin: 0 auto 16px;
+        padding: 18px 20px 20px;
+        border: 1px solid var(--line-strong);
+        border-radius: 16px;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.65), transparent 240px),
+          var(--canvas);
+        color: var(--text);
+        box-shadow: 0 18px 54px rgba(15, 23, 42, 0.12);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .screen.is-dark {
+        --canvas: #0b0f17;
+        --panel: #141a25;
+        --panel-soft: #1a2030;
+        --line: rgba(255, 255, 255, 0.075);
+        --line-strong: rgba(255, 255, 255, 0.15);
+        --text: #e7edf6;
+        --muted: #a4adbd;
+        --faint: #818b9d;
+        --accent: #7aa2ff;
+        --accent-soft: rgba(122, 162, 255, 0.14);
+        --success: #76c66f;
+        --success-soft: rgba(118, 198, 111, 0.16);
+        --warning: #f1b45b;
+        --warning-soft: rgba(241, 180, 91, 0.16);
+        --danger: #ff8581;
+        --danger-soft: rgba(255, 133, 129, 0.16);
+        --teal: #63d5c3;
+        --teal-soft: rgba(99, 213, 195, 0.14);
+        background:
+          radial-gradient(
+            720px 320px at 10% 0%,
+            rgba(59, 130, 246, 0.18),
+            transparent 60%
+          ),
+          radial-gradient(
+            600px 280px at 88% 0%,
+            rgba(124, 58, 237, 0.16),
+            transparent 60%
+          ),
+          var(--canvas);
+        box-shadow: 0 18px 60px rgba(2, 6, 23, 0.55);
+      }
+
+      .screen-top {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 18px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      .screen-kicker {
+        margin: 0 0 4px;
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+      .screen-title {
+        margin: 0;
+        font-size: clamp(22px, 1.85vw, 30px);
+        line-height: 1.05;
+      }
+      .screen-subtitle {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .theme-toggle {
+        display: inline-flex;
+        padding: 2px;
+        border: 1px solid var(--line-strong);
+        border-radius: 999px;
+        background: var(--panel-soft);
+      }
+      .theme-toggle button {
+        min-height: 30px;
+        padding: 0 12px;
+        border: 0;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .screen:not(.is-dark) .theme-toggle button[data-theme="light"],
+      .screen.is-dark .theme-toggle button[data-theme="dark"] {
+        background: var(--panel);
+        color: var(--accent);
+        box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+      }
+
+      .btn,
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 30px;
+        padding: 0 12px;
+        border: 1px solid var(--line-strong);
+        border-radius: 999px;
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .layout {
+        display: grid;
+        flex: 1;
+        min-height: 0;
+        gap: 12px;
+      }
+      .btn.primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #fff;
+      }
+      .pill.ok {
+        border-color: color-mix(in srgb, var(--success) 30%, transparent);
+        background: var(--success-soft);
+        color: var(--success);
+      }
+      .pill.warn {
+        border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+        background: var(--warning-soft);
+        color: var(--warning);
+      }
+      .pill.bad {
+        border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+        background: var(--danger-soft);
+        color: var(--danger);
+      }
+      .pill.blue {
+        border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 16px 18px;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+      .panel-kicker {
+        margin: 0;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .panel-meta {
+        color: var(--faint);
+        font-size: 12px;
+      }
+      .panel-meta .dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        margin-right: 6px;
+        border-radius: 50%;
+        background: var(--success);
+        vertical-align: middle;
+        box-shadow: 0 0 0 4px var(--success-soft);
+        animation: pulse 1.8s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          box-shadow: 0 0 0 4px var(--success-soft);
+        }
+        50% {
+          box-shadow: 0 0 0 8px transparent;
+        }
+      }
+
+      /* === Health verdict === */
+      .verdict {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 18px;
+        align-items: center;
+      }
+      .verdict-icon {
+        width: 64px;
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 18px;
+        background: var(--success-soft);
+        color: var(--success);
+        font-size: 32px;
+        font-weight: 700;
+      }
+      .verdict.is-warn .verdict-icon {
+        background: var(--warning-soft);
+        color: var(--warning);
+      }
+      .verdict.is-bad .verdict-icon {
+        background: var(--danger-soft);
+        color: var(--danger);
+      }
+      .verdict-text {
+        min-width: 0;
+      }
+      .verdict-answer {
+        margin: 0;
+        font-size: clamp(22px, 2vw, 30px);
+        font-weight: 700;
+        line-height: 1.1;
+      }
+      .verdict-because {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .metric-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 14px;
+      }
+      .metric {
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel-soft);
+        min-width: 0;
+      }
+      .metric-label {
+        margin: 0 0 4px;
+        font-size: 11px;
+        color: var(--faint);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .metric-value {
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: 17px;
+        font-weight: 700;
+      }
+      .metric-trend {
+        margin: 2px 0 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .metric-trend.up {
+        color: var(--success);
+      }
+      .metric-trend.down {
+        color: var(--danger);
+      }
+
+      /* === Server checks === */
+      .check-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .check-row {
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: var(--panel-soft);
+        font-size: 13px;
+      }
+      .check-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--success);
+        box-shadow: 0 0 0 3px var(--success-soft);
+      }
+      .check-dot.warn {
+        background: var(--warning);
+        box-shadow: 0 0 0 3px var(--warning-soft);
+      }
+      .check-dot.bad {
+        background: var(--danger);
+        box-shadow: 0 0 0 3px var(--danger-soft);
+      }
+      .check-label {
+        font-weight: 600;
+      }
+      .check-detail {
+        color: var(--faint);
+        font-family: var(--font-mono);
+        font-size: 12px;
+      }
+
+      /* === Jobs === */
+      .jobs-summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .jobs-summary .metric {
+        text-align: left;
+      }
+      .jobs-summary .metric strong {
+        display: block;
+        font-size: 22px;
+        font-family: var(--font-mono);
+        font-weight: 700;
+        margin-bottom: 2px;
+      }
+      .jobs-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        flex: 1;
+      }
+      .job-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        gap: 10px;
+        align-items: center;
+        padding: 8px 10px;
+        background: var(--panel-soft);
+        border-radius: 8px;
+        font-size: 13px;
+      }
+      .job-name {
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .job-sub {
+        color: var(--faint);
+        font-size: 11px;
+        font-family: var(--font-mono);
+      }
+      .progress {
+        position: relative;
+        height: 6px;
+        width: 130px;
+        background: var(--line);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .progress span {
+        display: block;
+        height: 100%;
+        background: var(--accent);
+        border-radius: 999px;
+      }
+      .progress.ok span {
+        background: var(--success);
+      }
+      .progress.warn span {
+        background: var(--warning);
+      }
+
+      /* === Traffic chart === */
+      .traffic-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 14px;
+        margin-bottom: 12px;
+      }
+      .traffic-now {
+        margin: 0;
+        font-family: var(--font-mono);
+        font-size: 30px;
+        font-weight: 700;
+        line-height: 1;
+      }
+      .traffic-unit {
+        font-size: 13px;
+        color: var(--muted);
+        margin-left: 6px;
+        font-family: var(--font-sans);
+        font-weight: 600;
+      }
+      .traffic-delta {
+        color: var(--success);
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .traffic-delta.down {
+        color: var(--danger);
+      }
+
+      .chart {
+        position: relative;
+        flex: 1;
+        min-height: 160px;
+        background: repeating-linear-gradient(
+          to top,
+          transparent 0 24px,
+          var(--line) 24px 25px
+        );
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .chart svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      .chart .area {
+        fill: var(--accent-soft);
+      }
+      .chart .line {
+        stroke: var(--accent);
+        stroke-width: 2;
+        fill: none;
+      }
+      .chart .line-2 {
+        stroke: var(--success);
+        stroke-width: 1.5;
+        stroke-dasharray: 3 3;
+        fill: none;
+      }
+      .chart-axis {
+        position: absolute;
+        inset: auto 8px 4px 8px;
+        display: flex;
+        justify-content: space-between;
+        color: var(--faint);
+        font-size: 10px;
+        font-family: var(--font-mono);
+      }
+
+      .legend {
+        display: flex;
+        gap: 14px;
+        margin-top: 8px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .legend span::before {
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 2px;
+        margin-right: 6px;
+        background: var(--accent);
+        vertical-align: middle;
+      }
+      .legend span.dashed::before {
+        background: var(--success);
+        height: 0;
+        border-top: 2px dashed var(--success);
+      }
+
+      /* === Layout A: 2x2 grid === */
+      .layout-a {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        grid-template-rows: minmax(0, auto) minmax(180px, 1fr);
+        min-height: 0;
+        flex: 1;
+      }
+      .layout-a .panel {
+        padding: 12px 14px;
+      }
+      .layout-a .verdict-icon {
+        width: 48px;
+        height: 48px;
+        font-size: 22px;
+        border-radius: 12px;
+      }
+      .layout-a .verdict-answer {
+        font-size: 16px;
+      }
+      .layout-a .verdict-because {
+        font-size: 11px;
+        margin-top: 3px;
+      }
+      .layout-a .metric-row {
+        margin-top: 10px;
+        gap: 8px;
+      }
+      .layout-a .metric {
+        padding: 7px 9px;
+      }
+      .layout-a .metric-value {
+        font-size: 14px;
+      }
+      .layout-a .metric-label {
+        font-size: 10px;
+      }
+      .layout-a .metric-trend {
+        font-size: 10px;
+      }
+      .layout-a .panel-head {
+        margin-bottom: 8px;
+      }
+      .layout-a .job-row {
+        padding: 6px 10px;
+        font-size: 11px;
+      }
+      .layout-a .jobs-list {
+        gap: 5px;
+      }
+      .layout-a .progress {
+        width: 90px;
+      }
+      .layout-a .chart {
+        min-height: 100px;
+      }
+      .layout-a .traffic-now {
+        font-size: 22px;
+      }
+
+      /* === Layout B: hero + side === */
+      .layout-b {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+        grid-template-rows: auto minmax(260px, 1fr);
+      }
+      .hero-panel {
+        grid-column: 1 / -1;
+        display: grid;
+        gap: 18px;
+        grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+        align-items: center;
+      }
+      .hero-stat {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      /* === Layout C: 3 equal columns === */
+      .layout-c {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        min-height: 0;
+      }
+      .layout-c .panel {
+        min-height: 460px;
+      }
+
+      footer {
+        margin-top: 20px;
+        text-align: center;
+        color: var(--faint);
+        font-size: 12px;
+      }
+
+      @media (max-width: 1100px) {
+        .layout-c,
+        .layout-b {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .hero-panel {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <!-- ========================================================= -->
+      <!-- Proposal A - Stacked verdicts                              -->
+      <!-- ========================================================= -->
+      <section class="screen" id="proposal-a">
+        <div class="screen-top">
+          <div>
+            <p class="screen-kicker">Proposal A</p>
+            <h2 class="screen-title">Stacked verdicts</h2>
+            <p class="screen-subtitle">
+              Three honest answers, top to bottom: is the server healthy, are jobs
+              healthy, what is the traffic right now.
+            </p>
+          </div>
+          <div class="top-actions">
+            <div class="theme-toggle">
+              <button data-target="proposal-a" data-theme="light">Light</button>
+              <button data-target="proposal-a" data-theme="dark">Dark</button>
+            </div>
+            <button class="btn primary">New Search</button>
+          </div>
+        </div>
+
+        <div class="layout layout-a">
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">Server health</p>
+              <span class="panel-meta"><span class="dot"></span>updated 4s ago</span>
+            </header>
+            <div class="verdict">
+              <div class="verdict-icon">OK</div>
+              <div class="verdict-text">
+                <p class="verdict-answer">All control plane components are healthy.</p>
+                <p class="verdict-because">
+                  API, worker, beat, Redis, terminal sidecar, and AKS API are reachable.
+                </p>
+              </div>
+            </div>
+            <div class="metric-row">
+              <div class="metric">
+                <p class="metric-label">API p95</p>
+                <p class="metric-value">144 ms</p>
+                <p class="metric-trend up">below 200 ms target</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">AKS nodes</p>
+                <p class="metric-value">4 / 4 ready</p>
+                <p class="metric-trend">no pressure</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">Storage path</p>
+                <p class="metric-value">private OK</p>
+                <p class="metric-trend">publicNetworkAccess disabled</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">Jobs health</p>
+              <span class="panel-meta"><span class="dot"></span>2 running</span>
+            </header>
+            <div class="verdict">
+              <div class="verdict-icon">OK</div>
+              <div class="verdict-text">
+                <p class="verdict-answer">No stuck or failed BLAST jobs.</p>
+                <p class="verdict-because">
+                  All active jobs are progressing on schedule; queue depth is empty.
+                </p>
+              </div>
+            </div>
+            <div class="metric-row">
+              <div class="metric">
+                <p class="metric-label">Running</p>
+                <p class="metric-value">2</p>
+                <p class="metric-trend">both progressing</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">Queued</p>
+                <p class="metric-value">0</p>
+                <p class="metric-trend">no backlog</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">Failed 24h</p>
+                <p class="metric-value">0</p>
+                <p class="metric-trend up">clean window</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">Active jobs</p>
+              <span class="panel-meta">latest first</span>
+            </header>
+            <div class="jobs-list">
+              <div class="job-row">
+                <span class="pill blue">RUN</span>
+                <div>
+                  <div class="job-name">blastn-nt-eukaryotes</div>
+                  <div class="job-sub">submitted 12m ago - 3 shards - owner moonchoi</div>
+                </div>
+                <div class="progress"><span style="width: 64%"></span></div>
+                <span class="pill ok">64%</span>
+              </div>
+              <div class="job-row">
+                <span class="pill blue">RUN</span>
+                <div>
+                  <div class="job-name">blastp-refseq-protein</div>
+                  <div class="job-sub">submitted 4m ago - 1 shard - owner jsmith</div>
+                </div>
+                <div class="progress"><span style="width: 22%"></span></div>
+                <span class="pill ok">22%</span>
+              </div>
+              <div class="job-row">
+                <span class="pill ok">DONE</span>
+                <div>
+                  <div class="job-name">blastn-nt-prokaryotes</div>
+                  <div class="job-sub">finished 2h ago - 4m 12s runtime</div>
+                </div>
+                <div class="progress ok"><span style="width: 100%"></span></div>
+                <span class="pill ok">100%</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">Current traffic</p>
+              <span class="panel-meta">last 30 minutes - 10s tick</span>
+            </header>
+            <div class="traffic-head">
+              <div>
+                <p class="traffic-now">42<span class="traffic-unit">req/min</span></p>
+                <span class="traffic-delta">+12% vs 30m ago</span>
+              </div>
+              <div style="text-align: right">
+                <p class="panel-meta" style="margin: 0">Concurrent BLAST shards</p>
+                <p class="traffic-now" style="font-size: 22px; margin-top: 4px">7</p>
+              </div>
+            </div>
+            <div class="chart">
+              <svg viewBox="0 0 400 160" preserveAspectRatio="none">
+                <path
+                  class="area"
+                  d="M0,130 L25,118 L50,124 L75,108 L100,112 L125,96 L150,102 L175,86 L200,90 L225,72 L250,80 L275,62 L300,70 L325,56 L350,64 L375,50 L400,58 L400,160 L0,160 Z"
+                />
+                <path
+                  class="line"
+                  d="M0,130 L25,118 L50,124 L75,108 L100,112 L125,96 L150,102 L175,86 L200,90 L225,72 L250,80 L275,62 L300,70 L325,56 L350,64 L375,50 L400,58"
+                />
+                <path
+                  class="line-2"
+                  d="M0,120 L25,118 L50,116 L75,114 L100,112 L125,110 L150,108 L175,106 L200,104 L225,102 L250,100 L275,98 L300,96 L325,94 L350,92 L375,90 L400,88"
+                />
+              </svg>
+              <div class="chart-axis">
+                <span>-30m</span><span>-20m</span><span>-10m</span><span>now</span>
+              </div>
+            </div>
+            <div class="legend">
+              <span>req/min (live)</span>
+              <span class="dashed">7d baseline</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ========================================================= -->
+      <!-- Proposal B - Hero verdict + traffic                        -->
+      <!-- ========================================================= -->
+      <section class="screen" id="proposal-b">
+        <div class="screen-top">
+          <div>
+            <p class="screen-kicker">Proposal B</p>
+            <h2 class="screen-title">Single hero verdict</h2>
+            <p class="screen-subtitle">
+              One big banner that answers both health questions at once, with live traffic
+              taking the rest of the canvas.
+            </p>
+          </div>
+          <div class="top-actions">
+            <div class="theme-toggle">
+              <button data-target="proposal-b" data-theme="light">Light</button>
+              <button data-target="proposal-b" data-theme="dark">Dark</button>
+            </div>
+            <button class="btn primary">New Search</button>
+          </div>
+        </div>
+
+        <div class="layout layout-b">
+          <article class="panel hero-panel">
+            <div>
+              <header class="panel-head">
+                <p class="panel-kicker">System verdict</p>
+                <span class="panel-meta"><span class="dot"></span>live</span>
+              </header>
+              <div class="verdict">
+                <div class="verdict-icon">OK</div>
+                <div class="verdict-text">
+                  <p class="verdict-answer">
+                    Server is healthy and 2 jobs are running cleanly.
+                  </p>
+                  <p class="verdict-because">
+                    No failed sidecars, no queue backlog, no failed BLAST jobs in the last
+                    24 hours.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div class="hero-stat">
+              <div class="metric">
+                <p class="metric-label">Server</p>
+                <p class="metric-value">healthy</p>
+                <p class="metric-trend up">6 / 6 sidecars OK</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">Jobs</p>
+                <p class="metric-value">2 running</p>
+                <p class="metric-trend">0 queued, 0 failed</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">Traffic</p>
+                <p class="metric-value">42 req/min</p>
+                <p class="metric-trend up">+12% vs 30m</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">Active jobs</p>
+              <span class="panel-meta">2 running - 0 queued</span>
+            </header>
+            <div class="jobs-summary">
+              <div class="metric">
+                <strong>2</strong>
+                <p class="metric-label">Running</p>
+              </div>
+              <div class="metric">
+                <strong>0</strong>
+                <p class="metric-label">Queued</p>
+              </div>
+              <div class="metric">
+                <strong>14</strong>
+                <p class="metric-label">Done 24h</p>
+              </div>
+              <div class="metric">
+                <strong>0</strong>
+                <p class="metric-label">Failed 24h</p>
+              </div>
+            </div>
+            <div class="jobs-list">
+              <div class="job-row">
+                <span class="pill blue">RUN</span>
+                <div>
+                  <div class="job-name">blastn-nt-eukaryotes</div>
+                  <div class="job-sub">12m - 3 shards - moonchoi</div>
+                </div>
+                <div class="progress"><span style="width: 64%"></span></div>
+                <span class="pill ok">64%</span>
+              </div>
+              <div class="job-row">
+                <span class="pill blue">RUN</span>
+                <div>
+                  <div class="job-name">blastp-refseq-protein</div>
+                  <div class="job-sub">4m - 1 shard - jsmith</div>
+                </div>
+                <div class="progress"><span style="width: 22%"></span></div>
+                <span class="pill ok">22%</span>
+              </div>
+              <div class="job-row">
+                <span class="pill ok">DONE</span>
+                <div>
+                  <div class="job-name">blastn-nt-prokaryotes</div>
+                  <div class="job-sub">2h ago - 4m 12s</div>
+                </div>
+                <div class="progress ok"><span style="width: 100%"></span></div>
+                <span class="pill ok">100%</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">Current traffic</p>
+              <span class="panel-meta">last 60 minutes</span>
+            </header>
+            <div class="traffic-head">
+              <div>
+                <p class="traffic-now">42<span class="traffic-unit">req/min</span></p>
+                <span class="traffic-delta">+12% vs 30m ago</span>
+              </div>
+              <div style="text-align: right">
+                <p class="panel-meta" style="margin: 0">Active BLAST shards</p>
+                <p class="traffic-now" style="font-size: 22px; margin-top: 4px">7</p>
+              </div>
+            </div>
+            <div class="chart">
+              <svg viewBox="0 0 400 160" preserveAspectRatio="none">
+                <path
+                  class="area"
+                  d="M0,128 L20,124 L40,118 L60,116 L80,104 L100,108 L120,92 L140,98 L160,84 L180,90 L200,72 L220,80 L240,66 L260,74 L280,58 L300,68 L320,52 L340,60 L360,46 L380,54 L400,42 L400,160 L0,160 Z"
+                />
+                <path
+                  class="line"
+                  d="M0,128 L20,124 L40,118 L60,116 L80,104 L100,108 L120,92 L140,98 L160,84 L180,90 L200,72 L220,80 L240,66 L260,74 L280,58 L300,68 L320,52 L340,60 L360,46 L380,54 L400,42"
+                />
+                <path
+                  class="line-2"
+                  d="M0,118 L40,116 L80,114 L120,112 L160,110 L200,108 L240,106 L280,104 L320,102 L360,100 L400,98"
+                />
+              </svg>
+              <div class="chart-axis">
+                <span>-60m</span><span>-40m</span><span>-20m</span><span>now</span>
+              </div>
+            </div>
+            <div class="legend">
+              <span>req/min (live)</span>
+              <span class="dashed">7d baseline</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ========================================================= -->
+      <!-- Proposal C - Three equal columns                           -->
+      <!-- ========================================================= -->
+      <section class="screen" id="proposal-c">
+        <div class="screen-top">
+          <div>
+            <p class="screen-kicker">Proposal C</p>
+            <h2 class="screen-title">Three answers side by side</h2>
+            <p class="screen-subtitle">
+              Equal columns force every answer to fit the same space: server health, jobs
+              health, current traffic.
+            </p>
+          </div>
+          <div class="top-actions">
+            <div class="theme-toggle">
+              <button data-target="proposal-c" data-theme="light">Light</button>
+              <button data-target="proposal-c" data-theme="dark">Dark</button>
+            </div>
+            <button class="btn primary">New Search</button>
+          </div>
+        </div>
+
+        <div class="layout layout-c">
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">1. Is the server healthy?</p>
+              <span class="pill ok">Yes</span>
+            </header>
+            <div class="verdict">
+              <div class="verdict-icon">OK</div>
+              <div class="verdict-text">
+                <p class="verdict-answer">All 6 sidecars OK.</p>
+                <p class="verdict-because">
+                  API, worker, beat, Redis, frontend, terminal are running.
+                </p>
+              </div>
+            </div>
+            <div class="check-list" style="margin-top: 14px">
+              <div class="check-row">
+                <span class="check-dot"></span>
+                <span class="check-label">API sidecar</span>
+                <span class="check-detail">p95 144 ms</span>
+              </div>
+              <div class="check-row">
+                <span class="check-dot"></span>
+                <span class="check-label">Worker + beat</span>
+                <span class="check-detail">heartbeat 4s ago</span>
+              </div>
+              <div class="check-row">
+                <span class="check-dot"></span>
+                <span class="check-label">Redis broker</span>
+                <span class="check-detail">0 backlog</span>
+              </div>
+              <div class="check-row">
+                <span class="check-dot"></span>
+                <span class="check-label">Terminal sidecar</span>
+                <span class="check-detail">ttyd loopback OK</span>
+              </div>
+              <div class="check-row">
+                <span class="check-dot"></span>
+                <span class="check-label">AKS cluster</span>
+                <span class="check-detail">4 / 4 nodes ready</span>
+              </div>
+              <div class="check-row">
+                <span class="check-dot"></span>
+                <span class="check-label">Storage</span>
+                <span class="check-detail">private endpoint OK</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">2. Are jobs healthy?</p>
+              <span class="pill ok">Yes</span>
+            </header>
+            <div class="verdict">
+              <div class="verdict-icon">OK</div>
+              <div class="verdict-text">
+                <p class="verdict-answer">2 running, 0 failed today.</p>
+                <p class="verdict-because">No stuck shards; queue empty.</p>
+              </div>
+            </div>
+            <div class="jobs-summary" style="margin-top: 14px">
+              <div class="metric">
+                <strong>2</strong>
+                <p class="metric-label">Running</p>
+              </div>
+              <div class="metric">
+                <strong>0</strong>
+                <p class="metric-label">Queued</p>
+              </div>
+              <div class="metric">
+                <strong>14</strong>
+                <p class="metric-label">Done 24h</p>
+              </div>
+              <div class="metric">
+                <strong>0</strong>
+                <p class="metric-label">Failed 24h</p>
+              </div>
+            </div>
+            <div class="jobs-list" style="margin-top: 4px">
+              <div class="job-row">
+                <span class="pill blue">RUN</span>
+                <div>
+                  <div class="job-name">blastn-nt-eukaryotes</div>
+                  <div class="job-sub">12m - 3 shards</div>
+                </div>
+                <div class="progress"><span style="width: 64%"></span></div>
+                <span class="pill ok">64%</span>
+              </div>
+              <div class="job-row">
+                <span class="pill blue">RUN</span>
+                <div>
+                  <div class="job-name">blastp-refseq-protein</div>
+                  <div class="job-sub">4m - 1 shard</div>
+                </div>
+                <div class="progress"><span style="width: 22%"></span></div>
+                <span class="pill ok">22%</span>
+              </div>
+              <div class="job-row">
+                <span class="pill ok">DONE</span>
+                <div>
+                  <div class="job-name">blastn-nt-prokaryotes</div>
+                  <div class="job-sub">2h ago - 4m 12s</div>
+                </div>
+                <div class="progress ok"><span style="width: 100%"></span></div>
+                <span class="pill ok">100%</span>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <header class="panel-head">
+              <p class="panel-kicker">3. What is the traffic right now?</p>
+              <span class="pill blue">live</span>
+            </header>
+            <div class="traffic-head">
+              <div>
+                <p class="traffic-now">42<span class="traffic-unit">req/min</span></p>
+                <span class="traffic-delta">+12% vs 30m ago</span>
+              </div>
+              <div style="text-align: right">
+                <p class="panel-meta" style="margin: 0">Active shards</p>
+                <p class="traffic-now" style="font-size: 22px; margin-top: 4px">7</p>
+              </div>
+            </div>
+            <div class="chart">
+              <svg viewBox="0 0 400 160" preserveAspectRatio="none">
+                <path
+                  class="area"
+                  d="M0,134 L25,128 L50,120 L75,124 L100,108 L125,114 L150,96 L175,102 L200,86 L225,92 L250,74 L275,82 L300,66 L325,74 L350,58 L375,66 L400,48 L400,160 L0,160 Z"
+                />
+                <path
+                  class="line"
+                  d="M0,134 L25,128 L50,120 L75,124 L100,108 L125,114 L150,96 L175,102 L200,86 L225,92 L250,74 L275,82 L300,66 L325,74 L350,58 L375,66 L400,48"
+                />
+                <path
+                  class="line-2"
+                  d="M0,120 L50,118 L100,116 L150,114 L200,112 L250,110 L300,108 L350,106 L400,104"
+                />
+              </svg>
+              <div class="chart-axis">
+                <span>-30m</span><span>-20m</span><span>-10m</span><span>now</span>
+              </div>
+            </div>
+            <div class="legend">
+              <span>req/min (live)</span>
+              <span class="dashed">7d baseline</span>
+            </div>
+            <div class="metric-row" style="margin-top: 14px">
+              <div class="metric">
+                <p class="metric-label">Peak 30m</p>
+                <p class="metric-value">58</p>
+                <p class="metric-trend">req/min</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">Avg 30m</p>
+                <p class="metric-value">36</p>
+                <p class="metric-trend">req/min</p>
+              </div>
+              <div class="metric">
+                <p class="metric-label">CPU avg</p>
+                <p class="metric-value">42%</p>
+                <p class="metric-trend">across nodes</p>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <footer>Three dashboard direction proposals - all mock data.</footer>
+    </div>
+
+    <script>
+      for (const button of document.querySelectorAll(".theme-toggle button")) {
+        button.addEventListener("click", () => {
+          const target = document.getElementById(button.dataset.target || "");
+          if (!target) return;
+          target.classList.toggle("is-dark", button.dataset.theme === "dark");
+        });
+      }
+    </script>
+  </body>
+</html>

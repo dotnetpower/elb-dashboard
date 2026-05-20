@@ -1,12 +1,11 @@
 import { type PropsWithChildren, useState, useRef, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
-import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn, Palette as PaletteIcon } from "lucide-react";
+import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn, Dna } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { LatestJobChip } from "@/components/LatestJobChip";
 import { useTheme } from "@/hooks/useTheme";
-import { usePalette } from "@/hooks/usePalette";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { apiLoginRequest } from "@/auth/msal";
 import { subscribeAuthSessionIssues, type AuthSessionIssue } from "@/auth/sessionEvents";
@@ -179,7 +178,6 @@ export function Layout({ children }: PropsWithChildren) {
   const autoRefreshMs = useAutoRefreshInterval();
   const autoRefreshLabel = autoRefreshMs >= 1000 ? `${Math.round(autoRefreshMs / 1000)}s` : `${autoRefreshMs}ms`;
   const { theme, toggle: toggleTheme } = useTheme();
-  const { palette, toggle: togglePalette } = usePalette();
   const cluster = useClusterReadiness();
   const customDbEnabled = isFeatureEnabled("customDb");
   const labToolsEnabled = isFeatureEnabled("labTools");
@@ -219,7 +217,9 @@ export function Layout({ children }: PropsWithChildren) {
         </button>
 
         <div className="layout__logo">
-          <div className="layout__logo-icon" />
+          <div className="layout__logo-icon" aria-hidden="true">
+            <Dna size={18} strokeWidth={1.5} />
+          </div>
           <div>
             <div className="layout__logo-text">ElasticBLAST</div>
             <div className="layout__logo-sub">Control Plane</div>
@@ -313,22 +313,6 @@ export function Layout({ children }: PropsWithChildren) {
         >
           {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
         </button>
-
-        {/* Light-only palette toggle: Aurora <-> Microsoft brand */}
-        {theme === "light" && (
-          <button
-            className="cfg-gear"
-            onClick={togglePalette}
-            title={
-              palette === "aurora"
-                ? "Try Microsoft brand palette"
-                : "Back to Aurora palette"
-            }
-            style={{ marginLeft: 0 }}
-          >
-            <PaletteIcon size={14} />
-          </button>
-        )}
 
         <UserMenuDropdown
           account={account}

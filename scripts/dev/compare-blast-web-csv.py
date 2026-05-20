@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Compare an NCBI Web BLAST CSV export with BLAST tabular output.
 
-The Web CSV export is treated as the reference. The candidate is BLAST outfmt 6
-with the standard 12 columns: qseqid, sseqid, pident, length, mismatch, gapopen,
-qstart, qend, sstart, send, evalue, bitscore.
+Responsibility: Compare an NCBI Web BLAST CSV export with BLAST tabular output
+Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
+Key entry points: `Row`, `_decimal_text`, `_read_web_csv`, `compare`, `build_report`, `main`
+Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Validation: `uv run python scripts/dev/compare-blast-web-csv.py --help`.
 """
 
 from __future__ import annotations

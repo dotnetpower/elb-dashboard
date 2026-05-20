@@ -1,14 +1,12 @@
 """Aggregate control-plane sidecar metrics from Redis db 2.
 
-Reporter sidecars publish ``sidecar:metrics:<name>`` JSON snapshots every few
-seconds. This service turns those raw entries into the stable payload consumed
-by ``GET /api/monitor/sidecars`` and the SSE stream.
-
-Design goals:
-  * one Redis ``MGET`` for reporter sidecars,
-  * Redis self-metrics from ``INFO`` without a separate reporter,
-  * malformed or stale entries isolated to that sidecar,
-  * Redis outages represented as an honest all-down snapshot, not a 500.
+Responsibility: Aggregate control-plane sidecar metrics from Redis db 2
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `HealthThresholds`, `RedisCpuSampler`, `_redis_url`, `collect_snapshot`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -87,7 +85,7 @@ def _redis_url() -> str:
 def _ts_from_payload(payload: Mapping[str, Any]) -> float | None:
     raw = payload.get("ts")
     try:
-        ts = float(raw)
+        ts = float(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
     return ts if math.isfinite(ts) else None
@@ -155,7 +153,7 @@ def _apply_local_probe_fallbacks(
     sidecars: dict[str, dict[str, Any]],
     now: float,
     *,
-    probe_http_ok=_probe_http_ok,
+    probe_http_ok: Any = _probe_http_ok,
 ) -> None:
     if not _local_probe_enabled():
         return
@@ -180,7 +178,7 @@ def _decode_reporter_entry(name: str, blob: object, now: float) -> dict[str, Any
     if blob is None:
         return _down_entry(name, "missing")
     try:
-        decoded = json.loads(blob)
+        decoded = json.loads(blob)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return _down_entry(name, "bad_json")
     if not isinstance(decoded, dict):
@@ -210,8 +208,8 @@ def _all_down_snapshot(now: float, reason: str, error: str | None = None) -> dic
 
 
 def _mget_reporters(client: redis.Redis) -> Sequence[object]:
-    raw = client.mget(_reporter_keys())
-    return raw if raw is not None else ()
+    raw: list[object] = client.mget(_reporter_keys())  # type: ignore[assignment]
+    return raw if raw is not None else []
 
 
 def _redis_self_snapshot(
@@ -220,9 +218,9 @@ def _redis_self_snapshot(
     sampler: RedisCpuSampler = _REDIS_CPU_SAMPLER,
 ) -> dict[str, Any]:
     try:
-        info_mem = client.info("memory")
-        info_cpu = client.info("cpu")
-        info_server = client.info("server")
+        info_mem: dict[str, Any] = client.info("memory")  # type: ignore[assignment]
+        info_cpu: dict[str, Any] = client.info("cpu")  # type: ignore[assignment]
+        info_server: dict[str, Any] = client.info("server")  # type: ignore[assignment]
     except redis.RedisError as exc:
         LOGGER.warning("redis self-info failed: %s", exc)
         return {

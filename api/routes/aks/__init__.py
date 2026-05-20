@@ -1,4 +1,14 @@
-"""``/api/aks/*`` route package."""
+"""/api/aks/*`` route package.
+
+Responsibility: /api/aks/*`` route package
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `package imports`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 
@@ -26,10 +36,19 @@ from api.routes.aks.openapi import (
     aks_openapi_deploy_status as aks_openapi_deploy_status,
 )
 from api.routes.aks.openapi import (
+    aks_openapi_deployment as aks_openapi_deployment,
+)
+from api.routes.aks.openapi import (
     aks_openapi_proxy as aks_openapi_proxy,
 )
 from api.routes.aks.openapi import (
     aks_openapi_spec as aks_openapi_spec,
+)
+from api.routes.aks.openapi import (
+    aks_openapi_token as aks_openapi_token,
+)
+from api.routes.aks.openapi import (
+    aks_openapi_token_generate as aks_openapi_token_generate,
 )
 from api.routes.aks.provision import aks_provision as aks_provision
 from api.routes.aks.roles import aks_assign_roles as aks_assign_roles

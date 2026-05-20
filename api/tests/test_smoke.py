@@ -1,7 +1,15 @@
 """Unit tests for the api sidecar.
 
-Runs against the FastAPI app via TestClient. No Azure cloud calls — tests
-that require the cloud are skipped automatically.
+Responsibility: Unit tests for the api sidecar
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `client`, `test_health_returns_200_with_version`,
+`test_health_response_has_request_id_header`, `test_request_id_echoed_when_supplied`,
+`test_auth_required_endpoints_reject_anonymous`,
+`test_auth_required_with_invalid_token_returns_401`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_smoke.py`.
 """
 
 from __future__ import annotations
@@ -205,6 +213,30 @@ def test_blast_submit_blocks_invalid_precise_sharding_before_queue(
     body = r.json()
     assert body["code"] == "sharding_precision_blocked"
     assert "db_effective_search_space" in body["message"]
+
+
+def test_blast_submit_rejects_storage_account_mismatch_before_queue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    r = client.post(
+        "/api/blast/submit",
+        json={
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "database": "https://stgelb.blob.core.windows.net/blast-db/core_nt/core_nt",
+            "query_file": "queries/q.fa",
+            "options": {"sharding_mode": "off", "disable_sharding": True},
+        },
+    )
+
+    assert r.status_code == 422
+    body = r.json()
+    assert body["code"] == "validation_error"
+    assert "database URL must belong" in body["message"]
 
 
 def test_blast_preflight_blocks_precise_multi_query(
@@ -458,6 +490,53 @@ def test_blast_submit_allows_mixed_precise_split_parent_queue(
     assert calls[0]["caller_oid"] == "00000000-0000-0000-0000-000000000000"
     assert calls[0]["caller_tenant_id"] == "common"
     assert calls[0]["options"]["query_effective_search_spaces"] == [225, 300]
+
+
+def test_blast_submit_persists_celery_task_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
+    )
+
+    class FakeAsyncResult:
+        id = "task-persisted"
+
+    updates: list[tuple[str, dict[str, object]]] = []
+
+    class FakeRepository:
+        def get(self, job_id: str) -> object | None:
+            return None
+
+        def create(self, state: object) -> None:
+            return None
+
+        def update(self, job_id: str, **kwargs: object) -> object:
+            updates.append((job_id, kwargs))
+            return SimpleNamespace(job_id=job_id, **kwargs)
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
+    monkeypatch.setattr("api.tasks.blast.submit.delay", lambda **_kwargs: FakeAsyncResult())
+
+    r = client.post(
+        "/api/blast/submit",
+        json={
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "elbstg01",
+            "program": "blastn",
+            "database": "core_nt",
+            "query_file": "queries/original/input.fa",
+            "options": {"sharding_mode": "off"},
+        },
+    )
+
+    assert r.status_code == 200
+    assert r.json()["task_id"] == "task-persisted"
+    assert any(update == {"task_id": "task-persisted"} for _job_id, update in updates)
 
 
 def test_blast_submit_merges_top_level_precision_metadata(
@@ -868,6 +947,52 @@ def test_blast_job_file_generates_config_preview_when_blob_missing(
         ("queries", "job-123/elastic-blast.ini"),
         ("queries", "uploads/job-123/elastic-blast.ini"),
     ]
+
+
+def test_blast_job_file_config_preview_rejects_storage_account_mismatch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    class FakeRepo:
+        def get(self, job_id: str) -> object:
+            return SimpleNamespace(
+                job_id=job_id,
+                owner_oid="00000000-0000-0000-0000-000000000000",
+                payload={
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "storage_account": "elbstg01",
+                    "program": "blastn",
+                    "database": "https://stgelb.blob.core.windows.net/blast-db/core_nt/core_nt",
+                    "query_file": "queries/uploads/job-123/query.fa",
+                },
+            )
+
+    def fake_read_blob_text(
+        _credential: object,
+        _account_name: str,
+        container: str,
+        blob_path: str,
+        *,
+        max_bytes: int,
+    ) -> str:
+        del container, blob_path, max_bytes
+        raise RuntimeError("BlobNotFound")
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+
+    r = client.get(
+        "/api/blast/jobs/job-123/file"
+        "?name=elastic-blast.ini&subscription_id=sub-1&storage_account=elbstg01"
+    )
+
+    assert r.status_code == 422
+    body = r.json()
+    assert body["code"] == "invalid_config_payload"
+    assert "database URL must belong" in body["message"]
 
 
 def test_blast_submit_blocks_precise_mapping_search_spaces(

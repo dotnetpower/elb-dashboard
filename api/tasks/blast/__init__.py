@@ -1,15 +1,12 @@
-"""BLAST Celery tasks backed by the terminal sidecar and Kubernetes API.
+"""BLAST Celery tasks for submit, cancel, status, and reconciliation.
 
-Side effects: invokes ``elastic-blast submit`` via ``api.services.terminal_exec``,
-deletes BLAST Kubernetes Jobs via the direct AKS API, and records progress in
-Azure Table Storage.
-
-Reliability contract:
-  * submissions are idempotent by ``job_id``;
-  * config is piped through stdin (no shell, no temp-file dependency);
-  * transient terminal / capacity failures retry through Celery;
-  * every phase writes a best-effort state + history event;
-  * status checks use the direct Kubernetes API helper scoped by job id.
+Responsibility: BLAST Celery tasks for submit, cancel, status, and reconciliation
+Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
+persist state.
+Key entry points: `TerminalAzureLoginError`, `_now_iso`, `_snippet`, `submit`,
+`merge_split_results`, `cancel`
+Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Validation: `uv run pytest -q api/tests/test_blast_tasks.py`.
 """
 
 from __future__ import annotations
@@ -21,7 +18,7 @@ import re
 import time
 from collections.abc import Iterator, Mapping
 from datetime import UTC
-from typing import Any
+from typing import Any, cast
 
 from celery import shared_task
 
@@ -49,6 +46,8 @@ RETRYABLE_ERROR_CATEGORIES = {"transient", "capacity", "conflict"}
 RETRYABLE_EXIT_CODES = {8, 10}
 BLAST_SUBMIT_LOCK_KEY = "elb:blast:elastic-blast-submit"
 BLAST_SUBMIT_LOCK_TTL_SECONDS = 900
+SUBMIT_LIVE_STATE_UPDATE_INTERVAL_SECONDS = 15.0
+SUBMIT_LOG_CHUNK_EVENT_COUNT = 100
 ELASTIC_BLAST_JOB_ID_RE = re.compile(r"/results/[^/]+/(job-[A-Za-z0-9_-]+)")
 PROGRESS_STEP_ORDER = (
     "preparing",
@@ -121,7 +120,7 @@ def _snippet(value: object, limit: int = ERROR_SNIPPET_CHARS) -> str:
     return _blast_task_config.snippet(value, limit)
 
 
-def _ensure_terminal_azure_cli_login(terminal_run) -> None:
+def _ensure_terminal_azure_cli_login(terminal_run: Any) -> None:
     """Ensure shell-only ElasticBLAST calls have an Azure CLI account.
 
     The browser terminal remains interactive and user-owned. The programmatic
@@ -211,21 +210,21 @@ def _disable_sharding_options(options: Mapping[str, Any] | None) -> dict[str, An
 
 def _expand_strict_tie_order_candidate_pool(
     options: Mapping[str, Any] | None,
-) -> Mapping[str, Any] | None:
+) -> dict[str, Any] | None:
     if not isinstance(options, Mapping):
-        return options
+        return None if options is None else dict(options)
     has_oracle = bool(
         options.get("tie_order_oracle_accessions") or options.get("tie_order_oracle_text")
     )
     if not has_oracle or not _option_enabled(options, "tie_order_oracle_strict"):
-        return options
+        return cast(dict[str, Any], options)
     current_raw = options.get("max_target_seqs")
     try:
-        current = int(current_raw) if current_raw not in (None, "") else 0
+        current = int(current_raw) if current_raw not in (None, "") else 0  # type: ignore[arg-type]
     except (TypeError, ValueError):
         current = 0
     if current >= STRICT_TIE_ORDER_MIN_TARGET_SEQS:
-        return options
+        return dict(options)
     expanded = dict(options)
     expanded["requested_max_target_seqs"] = current_raw
     expanded["max_target_seqs"] = STRICT_TIE_ORDER_MIN_TARGET_SEQS
@@ -417,7 +416,9 @@ def _dispatch_split_child_submits(
     from api.services.state_repo import JobState, JobStateRepository
 
     if terminal_run is None:
-        from api.services.terminal_exec import run as terminal_run
+        from api.services.terminal_exec import run as _terminal_run
+
+        terminal_run = _terminal_run
 
     repo = JobStateRepository()
     dispatched: list[dict[str, Any]] = []
@@ -1107,8 +1108,8 @@ def _build_parent_split_xml_result_bytes(
             if iter_num is None:
                 iter_num = ET.Element("Iteration_iter-num")
                 iteration_copy.insert(0, iter_num)
-            iter_num.text = str(len(base_iterations) + 1)
-            base_iterations.append(iteration_copy)
+            iter_num.text = str(len(base_iterations) + 1)  # type: ignore[arg-type]
+            base_iterations.append(iteration_copy)  # type: ignore[union-attr]
     if base_root is None or base_iterations is None:
         raise ValueError("no child XML results to merge")
     ET.indent(base_root, space="  ")
@@ -1378,7 +1379,7 @@ def _is_retryable_result(result: Mapping[str, Any], payload: Mapping[str, Any] |
 def _retry_after(payload: Mapping[str, Any] | None, default: int) -> int:
     raw = (payload or {}).get("retry_after_seconds")
     try:
-        parsed = int(raw)
+        parsed = int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
     return max(1, min(parsed, 300))
@@ -1471,31 +1472,7 @@ def _stream_submit_command(
     summary: dict[str, Any] = {"exit_code": 1, "duration_ms": 0, "timed_out": False}
     last_update = 0.0
     log_line_count = 0
-    chunk_sequence = 0
-    pending_log_events: list[dict[str, Any]] = []
-
-    def flush_log_chunk() -> None:
-        nonlocal chunk_sequence, pending_log_events
-        if not pending_log_events:
-            return
-        try:
-            from api.services.job_artifacts import write_execution_log_chunk
-
-            write_execution_log_chunk(
-                job_id,
-                progress_phase,
-                chunk_sequence,
-                pending_log_events,
-            )
-            chunk_sequence += 1
-            pending_log_events = []
-        except Exception as exc:
-            LOGGER.debug(
-                "submit log chunk write skipped job_id=%s sequence=%s: %s",
-                job_id,
-                chunk_sequence,
-                type(exc).__name__,
-            )
+    log_events: list[dict[str, Any]] = []
 
     for item in terminal_stream(
         argv=_elastic_blast_argv("submit", job_id),
@@ -1523,12 +1500,9 @@ def _stream_submit_command(
             except Exception as exc:
                 LOGGER.debug("submit live log publish skipped job_id=%s: %s", job_id, exc)
             log_line_count += 1
-            pending_log_events.append(
-                {"stream": stream_name, "line": line, "index": log_line_count}
-            )
+            log_events.append({"stream": stream_name, "line": line, "index": log_line_count})
             now = time.monotonic()
-            if now - last_update >= 2.0:
-                flush_log_chunk()
+            if now - last_update >= SUBMIT_LIVE_STATE_UPDATE_INTERVAL_SECONDS:
                 live_output = _tail_text(stdout_lines + stderr_lines)
                 _progress(
                     task,
@@ -1550,17 +1524,39 @@ def _stream_submit_command(
 
     stdout = "\n".join(stdout_lines)
     stderr = "\n".join(stderr_lines)
-    flush_log_chunk()
-    if stdout or stderr:
-        _update_state(
+    return {
+        **summary,
+        "stdout": stdout,
+        "stderr": stderr,
+        "log_line_count": log_line_count,
+        "_log_events": log_events,
+    }
+
+
+def _persist_submit_log_events(
+    *,
+    job_id: str,
+    progress_phase: str,
+    events: list[dict[str, Any]],
+) -> None:
+    if not events:
+        return
+    try:
+        from api.services.job_artifacts import write_execution_log_chunk
+
+        for chunk_sequence, start in enumerate(range(0, len(events), SUBMIT_LOG_CHUNK_EVENT_COUNT)):
+            write_execution_log_chunk(
+                job_id,
+                progress_phase,
+                chunk_sequence,
+                events[start : start + SUBMIT_LOG_CHUNK_EVENT_COUNT],
+            )
+    except Exception as exc:
+        LOGGER.debug(
+            "submit log chunk persistence skipped job_id=%s: %s",
             job_id,
-            progress_phase,
-            status="running",
-            event="submit_log",
-            last_output=_tail_text(stdout_lines + stderr_lines),
-            log_line_count=log_line_count,
+            type(exc).__name__,
         )
-    return {**summary, "stdout": stdout, "stderr": stderr, "log_line_count": log_line_count}
 
 
 def _acquire_submit_lock(job_id: str) -> tuple[Any, str] | None:
@@ -1763,7 +1759,7 @@ def _celery_success_row_status(row: Any, result: Any) -> tuple[str, str]:
     retry_jitter=True,
 )
 def submit(
-    self,
+    self: Any,
     *,
     job_id: str,
     subscription_id: str,
@@ -1816,17 +1812,14 @@ def submit(
                 warmup=warmup_ready,
             )
     except WarmupNotReadyError as exc:
-        if exc.retryable:
-            return _retry_or_fail(
-                self,
-                job_id=job_id,
-                phase="waiting_for_warmup",
-                exc=exc,
-                error_code="node_warmup_not_ready",
-                retry_after_seconds=60,
-            )
         error = _snippet(exc)
-        _update_state(job_id, "warmup_not_ready", status="failed", error_code=error)
+        _update_state(
+            job_id,
+            "warmup_not_ready",
+            status="failed",
+            error_code="node_warmup_not_ready",
+            last_output=error,
+        )
         return {
             "job_id": job_id,
             "status": "failed",
@@ -1996,6 +1989,25 @@ def submit(
             error_code="terminal_az_login_failed",
         )
 
+    submit_log_events = result.pop("_log_events", [])
+    if isinstance(submit_log_events, list):
+        _persist_submit_log_events(
+            job_id=job_id,
+            progress_phase="submitting",
+            events=submit_log_events,
+        )
+    if result.get("stdout") or result.get("stderr"):
+        _update_state(
+            job_id,
+            "submitting",
+            status="running",
+            event="submit_log",
+            last_output=_tail_text(
+                [str(line) for line in (result.get("stdout"), result.get("stderr")) if line]
+            ),
+            log_line_count=result.get("log_line_count"),
+        )
+
     payload = _last_json(str(result.get("stdout", "")))
     exit_code = int(result.get("exit_code", 1) or 0)
     submit_output = "\n".join(
@@ -2087,7 +2099,7 @@ def submit(
 
 @shared_task(name="api.tasks.blast.merge_split_results", bind=True, max_retries=3)
 def merge_split_results(
-    self,
+    self: Any,
     *,
     parent_job_id: str,
     storage_account: str,
@@ -2134,7 +2146,7 @@ def merge_split_results(
 
 @shared_task(name="api.tasks.blast.cancel", bind=True, max_retries=2)
 def cancel(
-    self,
+    self: Any,
     *,
     job_id: str,
     subscription_id: str,
@@ -2212,7 +2224,7 @@ def cancel(
 
 @shared_task(name="api.tasks.blast.check_status", bind=True)
 def check_status(
-    self,
+    self: Any,
     *,
     job_id: str,
     subscription_id: str,
@@ -2276,7 +2288,7 @@ def check_status(
 
 @shared_task(name="api.tasks.blast.reconcile_stale_jobs", bind=True)
 def reconcile_stale_jobs(
-    self,
+    self: Any,
     *,
     stale_threshold_seconds: int = 600,
     limit: int = 200,

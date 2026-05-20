@@ -1,3 +1,16 @@
+"""Tests for Compare BLAST Web Csv behavior.
+
+Responsibility: Tests for Compare BLAST Web Csv behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_run`, `test_compare_web_csv_to_outfmt6_accepts_equivalent_rows`,
+`test_compare_web_csv_to_outfmt6_reports_snapshot_mismatch`,
+`test_compare_web_csv_to_outfmt6_reports_tie_window_equivalence`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_compare_blast_web_csv.py`.
+"""
+
 from __future__ import annotations
 
 import json

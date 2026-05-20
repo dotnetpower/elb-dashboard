@@ -1,8 +1,16 @@
 """HTTP-level tests for the BLAST results endpoints.
 
-Validate that the wired routes (`/api/blast/jobs/{id}/results/aggregate`,
-`/alignments`, `/export`) parse blobs from storage and return the shape the
-SPA expects, including filter behaviour and CSV / TSV / JSON export.
+Responsibility: HTTP-level tests for the BLAST results endpoints
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `patched_storage`, `test_aggregate_returns_stats_shape`,
+`test_results_list_opens_storage_for_local_debug_when_scope_present`,
+`test_aggregate_empty_listing_returns_no_results`,
+`test_alignments_empty_listing_returns_degraded_no_result_files`,
+`test_aggregate_no_hits_returns_complete_stats_shape`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_results_routes.py`.
 """
 
 from __future__ import annotations

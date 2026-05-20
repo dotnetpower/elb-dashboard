@@ -40,6 +40,14 @@ export function EndpointCard({
     [ep.requestBody],
   );
   const exampleKeys = useMemo(() => Object.keys(examples), [examples]);
+  const pathParameters = useMemo(
+    () => ep.parameters.filter((param) => param.in === "path"),
+    [ep.parameters],
+  );
+  const queryParameters = useMemo(
+    () => ep.parameters.filter((param) => param.in === "query"),
+    [ep.parameters],
+  );
   const simple = isSimpleEndpoint(ep);
 
   const initBody = useCallback(() => {
@@ -360,7 +368,7 @@ export function EndpointCard({
               </button>
             </div>
 
-            {ep.parameters.filter((param) => param.in === "path").length > 0 && (
+            {pathParameters.length > 0 && (
               <div style={{ marginBottom: 12 }}>
                 <div
                   style={{
@@ -373,53 +381,108 @@ export function EndpointCard({
                 >
                   Path Parameters
                 </div>
-                {ep.parameters
-                  .filter((param) => param.in === "path")
-                  .map((param) => (
-                    <div
-                      key={param.name}
-                      style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}
+                {pathParameters.map((param) => (
+                  <div
+                    key={param.name}
+                    style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}
+                  >
+                    <label
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        minWidth: 80,
+                        fontFamily: "var(--font-mono)",
+                      }}
                     >
-                      <label
-                        style={{
-                          fontSize: 11,
-                          color: "var(--text-muted)",
-                          minWidth: 80,
-                          fontFamily: "var(--font-mono)",
-                        }}
-                      >
-                        {param.name}
-                      </label>
-                      <input
-                        type="text"
-                        placeholder={
-                          param.schema?.default != null ? String(param.schema.default) : param.name
-                        }
-                        value={paramValues[param.name] || ""}
-                        onChange={(event) =>
-                          setParamValues((prev) => ({ ...prev, [param.name]: event.target.value }))
-                        }
-                        style={{
-                          flex: 1,
-                          padding: "6px 10px",
-                          fontSize: 12,
-                          background: "var(--bg-primary)",
-                          border: "1px solid var(--border-weak)",
-                          borderRadius: 6,
-                          color: "var(--text-primary)",
-                          outline: "none",
-                          fontFamily: "var(--font-mono)",
-                          transition: "border-color var(--motion-fast)",
-                        }}
-                        onFocus={(event) => {
-                          event.target.style.borderColor = "var(--border-focus)";
-                        }}
-                        onBlur={(event) => {
-                          event.target.style.borderColor = "var(--border-weak)";
-                        }}
-                      />
-                    </div>
-                  ))}
+                      {param.name}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={param.schema?.default != null ? String(param.schema.default) : param.name}
+                      value={paramValues[param.name] || ""}
+                      onChange={(event) =>
+                        setParamValues((prev) => ({ ...prev, [param.name]: event.target.value }))
+                      }
+                      style={{
+                        flex: 1,
+                        padding: "6px 10px",
+                        fontSize: 12,
+                        background: "var(--bg-primary)",
+                        border: "1px solid var(--border-weak)",
+                        borderRadius: 6,
+                        color: "var(--text-primary)",
+                        outline: "none",
+                        fontFamily: "var(--font-mono)",
+                        transition: "border-color var(--motion-fast)",
+                      }}
+                      onFocus={(event) => {
+                        event.target.style.borderColor = "var(--border-focus)";
+                      }}
+                      onBlur={(event) => {
+                        event.target.style.borderColor = "var(--border-weak)";
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {queryParameters.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: "var(--text-faint)",
+                    marginBottom: 6,
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Query Parameters
+                </div>
+                {queryParameters.map((param) => (
+                  <div
+                    key={param.name}
+                    style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}
+                  >
+                    <label
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        minWidth: 80,
+                        fontFamily: "var(--font-mono)",
+                      }}
+                    >
+                      {param.name}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={param.schema?.default != null ? String(param.schema.default) : param.name}
+                      value={paramValues[param.name] || ""}
+                      onChange={(event) =>
+                        setParamValues((prev) => ({ ...prev, [param.name]: event.target.value }))
+                      }
+                      style={{
+                        flex: 1,
+                        padding: "6px 10px",
+                        fontSize: 12,
+                        background: "var(--bg-primary)",
+                        border: "1px solid var(--border-weak)",
+                        borderRadius: 6,
+                        color: "var(--text-primary)",
+                        outline: "none",
+                        fontFamily: "var(--font-mono)",
+                        transition: "border-color var(--motion-fast)",
+                      }}
+                      onFocus={(event) => {
+                        event.target.style.borderColor = "var(--border-focus)";
+                      }}
+                      onBlur={(event) => {
+                        event.target.style.borderColor = "var(--border-weak)";
+                      }}
+                    />
+                  </div>
+                ))}
               </div>
             )}
 

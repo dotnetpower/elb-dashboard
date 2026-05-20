@@ -1,4 +1,15 @@
-"""BLAST task config building and submit readiness helpers."""
+"""BLAST task config building and submit readiness helpers.
+
+Responsibility: BLAST task config building and submit readiness helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `WarmupNotReadyError`, `snippet`, `storage_url`, `relative_blob_path`,
+`validate_storage_blob_reference`, `normalise_query_url`, `query_blob_path_from_query_file`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +19,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from api.services.blast_db_metadata import extract_db_name, resolve_db_metadata
+from api.services.storage_url_validation import (
+    validate_storage_blob_reference as validate_storage_blob_reference,
+)
 
 ERROR_SNIPPET_CHARS = 500
 
@@ -37,10 +51,14 @@ def relative_blob_path(value: str, label: str) -> str:
 
 def normalise_query_url(storage_account: str, query_file: str) -> str:
     query = query_file.strip()
-    if query.startswith("https://"):
-        return query
-    if query.startswith("az://"):
-        return "https://" + query.removeprefix("az://")
+    absolute = validate_storage_blob_reference(
+        storage_account=storage_account,
+        value=query,
+        label="query_file",
+        expected_container="queries",
+    )
+    if absolute is not None:
+        return absolute
     if query.startswith("queries/"):
         return storage_url(
             storage_account,
@@ -79,10 +97,14 @@ def query_blob_path_from_query_file(*, storage_account: str, query_file: str) ->
 
 def normalise_database_url(storage_account: str, database: str) -> str:
     db = database.strip()
-    if db.startswith("https://"):
-        return db
-    if db.startswith("az://"):
-        return "https://" + db.removeprefix("az://")
+    absolute = validate_storage_blob_reference(
+        storage_account=storage_account,
+        value=db,
+        label="database",
+        expected_container="blast-db",
+    )
+    if absolute is not None:
+        return absolute
     if db.startswith("blast-db/"):
         return storage_url(
             storage_account,

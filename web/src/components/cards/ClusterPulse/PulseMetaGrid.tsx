@@ -38,10 +38,10 @@ export function PulseMetaGrid({
   return (
     <div
       style={{
-        padding: "12px 14px 10px 14px",
+        padding: "7px 10px 8px 10px",
         display: "grid",
-        gridTemplateColumns: "repeat(4, 1fr)",
-        gap: 14,
+        gridTemplateColumns: "repeat(auto-fit, minmax(72px, 1fr))",
+        gap: "6px 10px",
       }}
     >
       <MetaCell

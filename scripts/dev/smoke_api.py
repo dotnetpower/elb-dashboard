@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 """End-to-end smoke test for the deployed Container App.
 
-Runs against the live ingress hostname. For endpoints that require an
-MSAL bearer token we use a developer ARM token (audience mismatch will
-trigger 401 at the api sidecar — we treat that as "endpoint reachable",
-which is enough for the smoke). Endpoints that should respond without auth
-(health) are checked for actual 200.
-
-Exit code: 0 when every probe passes (200 or expected 401/410/422), non-zero
-when any probe is unreachable, returns 5xx, or returns malformed JSON.
-
-Usage:
-  python scripts/dev/smoke_api.py
-  python scripts/dev/smoke_api.py --url https://ca-elb-control.<...>.io
+Responsibility: End-to-end smoke test for the deployed Container App
+Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
+Key entry points: `Probe`, `get_arm_token`, `run_probe`, `main`
+Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Validation: `uv run python scripts/dev/smoke_api.py --help`.
 """
 
 from __future__ import annotations

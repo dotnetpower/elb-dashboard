@@ -7,7 +7,10 @@ import {
   buildCommandString,
   type FormState,
 } from "@/pages/blastSubmitModel";
-import { buildSubmitRequest } from "@/pages/blastSubmit/useSubmitMutation";
+import {
+  buildSubmittedJobUrl,
+  buildSubmitRequest,
+} from "@/pages/blastSubmit/useSubmitMutation";
 
 const cluster: AksClusterSummary = {
   name: "aks-elb",
@@ -253,5 +256,21 @@ describe("blast submit taxonomy filter", () => {
 
     expect(request.additional_options).toContain("-task blastn-short");
     expect(command).toContain("-task blastn-short");
+  });
+});
+
+describe("blast submit navigation", () => {
+  it("preserves run context on the submitted job URL", () => {
+    const request = makeRequest(makeForm());
+
+    expect(buildSubmittedJobUrl({ job_id: "job 1" }, request)).toBe(
+      "/blast/jobs/job%201?submitted=1&subscription_id=sub-1&resource_group=rg-elb&storage_account=stelb&cluster_name=aks-elb",
+    );
+  });
+
+  it("falls back to the jobs list when the response has no job id", () => {
+    const request = makeRequest(makeForm());
+
+    expect(buildSubmittedJobUrl({}, request)).toBe("/blast/jobs");
   });
 });

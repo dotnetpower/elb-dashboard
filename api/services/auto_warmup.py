@@ -1,4 +1,14 @@
-"""Server-side Auto warm preferences for AKS warm cache reconciliation."""
+"""Server-side Auto warm preferences for AKS warm cache reconciliation.
+
+Responsibility: Server-side Auto warm preferences for AKS warm cache reconciliation
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_now_iso`, `_clean_db_names`, `_clean_programs`, `AutoWarmupPreference`,
+`preference_key`, `normalise_preference`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from azure.core.exceptions import ResourceExistsError
 from azure.data.tables import TableClient, TableServiceClient, UpdateMode
@@ -279,7 +289,7 @@ def _read_file_state() -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return {}
 

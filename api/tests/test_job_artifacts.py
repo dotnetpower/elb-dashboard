@@ -1,3 +1,17 @@
+"""Tests for Job Artifacts behavior.
+
+Responsibility: Tests for Job Artifacts behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_state`, `test_build_execution_steps_snapshot_preserves_steps`,
+`test_artifact_finalizer_only_runs_for_terminal_phases`,
+`test_artifact_finalizer_deduplicates_pending_sentinel`,
+`test_read_json_artifact_supports_gzip`, `test_artifact_build_should_enqueue_stale_pending`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_job_artifacts.py`.
+"""
+
 from __future__ import annotations
 
 import gzip

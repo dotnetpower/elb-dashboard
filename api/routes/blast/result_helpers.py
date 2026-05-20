@@ -1,4 +1,16 @@
-"""Shared helpers for BLAST result routes."""
+"""Shared helpers for BLAST result routes.
+
+Responsibility: Shared helpers for BLAST result routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `read_ready_result_artifact`, `result_artifact_state`,
+`enqueue_result_artifact_backfill`, `default_alignments_request`, `default_taxonomy_request`,
+`validate_result_blob_for_job`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 

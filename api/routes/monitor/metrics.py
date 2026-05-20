@@ -1,4 +1,14 @@
-"""Request metrics and HTTP inspector routes."""
+"""Request metrics and HTTP inspector routes.
+
+Responsibility: Request metrics and HTTP inspector routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `request_metrics`, `sidecar_requests`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py
+api/tests/test_monitor_cache.py`.
+"""
 
 from __future__ import annotations
 

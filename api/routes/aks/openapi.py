@@ -1,12 +1,25 @@
-"""AKS-hosted OpenAPI deployment, spec, and proxy routes."""
+"""AKS-hosted OpenAPI deployment, spec, and proxy routes.
+
+Responsibility: AKS-hosted OpenAPI deployment, spec, and proxy routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `aks_openapi_deploy`, `aks_openapi_deploy_status`,
+`aks_openapi_deployment`, `aks_openapi_token`, `aks_openapi_token_generate`,
+`aks_openapi_spec`, `aks_openapi_proxy`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
+from pydantic import BaseModel
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _OPENAPI_PROXY_ALLOWED_HEADERS, _safe_delay
@@ -14,6 +27,31 @@ from api.routes._blast_shared import _OPENAPI_PROXY_ALLOWED_HEADERS, _safe_delay
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class OpenApiTokenRequest(BaseModel):
+    subscription_id: str = ""
+    resource_group: str
+    cluster_name: str
+    regenerate: bool = False
+
+
+def _raise_openapi_route_error(exc: Exception) -> None:
+    from api.services.openapi_deployment import OpenApiDeploymentError
+    from api.services.openapi_token import OpenApiTokenError
+
+    if isinstance(exc, (OpenApiTokenError, OpenApiDeploymentError)):
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "code": "openapi_token_unavailable",
+            "message": "The OpenAPI API token could not be read or updated.",
+        },
+    ) from exc
 
 
 @router.post("/openapi/deploy")
@@ -131,6 +169,85 @@ def aks_openapi_deploy_status(
     }
 
 
+@router.get("/openapi/deployment")
+def aks_openapi_deployment(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the deployed ``elb-openapi`` image tag from the AKS deployment."""
+
+    from api.services import get_credential
+    from api.services.openapi_deployment import get_openapi_deployment_status
+
+    del caller
+    try:
+        return get_openapi_deployment_status(
+            get_credential(),
+            subscription_id=subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+    except Exception as exc:
+        _raise_openapi_route_error(exc)
+        raise
+
+
+@router.get("/openapi/token")
+def aks_openapi_token(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the current API token configured on the ``elb-openapi`` deployment."""
+
+    from api.services import get_credential
+    from api.services.openapi_token import get_openapi_api_token_status
+
+    del caller
+    try:
+        return get_openapi_api_token_status(
+            get_credential(),
+            subscription_id=subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+    except Exception as exc:
+        _raise_openapi_route_error(exc)
+        raise
+
+
+@router.post("/openapi/token")
+def aks_openapi_token_generate(
+    body: OpenApiTokenRequest,
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Generate or rotate the API token on the ``elb-openapi`` deployment."""
+
+    from api.services import get_credential
+    from api.services.openapi_token import ensure_openapi_api_token
+
+    LOGGER.info(
+        "openapi token update requested cluster=%s caller_oid=%s regenerate=%s",
+        body.cluster_name,
+        caller.object_id,
+        body.regenerate,
+    )
+    try:
+        return ensure_openapi_api_token(
+            get_credential(),
+            subscription_id=body.subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
+            resource_group=body.resource_group,
+            cluster_name=body.cluster_name,
+            regenerate=body.regenerate,
+        )
+    except Exception as exc:
+        _raise_openapi_route_error(exc)
+        raise
+
+
 @router.get("/openapi/spec")
 def aks_openapi_spec(
     subscription_id: str = Query(default=""),
@@ -172,7 +289,7 @@ def aks_openapi_spec(
             for path in ("/openapi.json", "/docs/openapi.json"):
                 resp = client.get(f"http://{ip}{path}")
                 if resp.status_code == 200:
-                    return resp.json()
+                    return cast(dict[str, Any], resp.json())
     except Exception as exc:
         LOGGER.warning("openapi/spec: fetch failed for %s: %s", ip, exc)
 
@@ -241,6 +358,26 @@ async def aks_openapi_proxy(
         for key, value in request.headers.items()
         if key.lower() in _OPENAPI_PROXY_ALLOWED_HEADERS
     }
+    api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
+    if not api_token:
+        from api.services.openapi_runtime import get_openapi_api_token
+
+        api_token = get_openapi_api_token()
+    if not api_token:
+        try:
+            from api.services.openapi_token import get_openapi_api_token_status
+
+            token_status = get_openapi_api_token_status(
+                cred,
+                subscription_id=sub,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+            )
+            api_token = str(token_status.get("token") or "").strip()
+        except Exception as exc:
+            LOGGER.debug("openapi/proxy: API token lookup skipped: %s", type(exc).__name__)
+    if api_token:
+        headers["X-ELB-API-Token"] = api_token
     body = await request.body()
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:

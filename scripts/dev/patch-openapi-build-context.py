@@ -2,14 +2,12 @@
 # ruff: noqa: E501
 """Patch the sibling docker-openapi build context for dashboard runtime policy.
 
-The sibling repository remains the source for the OpenAPI service, but this
-dashboard currently needs two runtime guarantees that are not safe to leave to
-the historical image defaults:
-
-* the uvicorn Python environment must see the installed ``elastic_blast``
-  package so it can create the ``elb-scripts`` ConfigMap;
-* ``resource_profile=core_nt_precise`` must emit the local-SSD, 10-shard
-  ``core_nt`` ElasticBLAST config used by the dashboard validation path.
+Responsibility: Patch the sibling docker-openapi build context for dashboard runtime policy
+Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
+Key entry points: `_replace_once`, `_insert_once`, `_copy_support_files`, `patch_dockerfile`,
+`patch_app`, `main`
+Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Validation: `uv run python scripts/dev/patch-openapi-build-context.py --help`.
 """
 
 from __future__ import annotations

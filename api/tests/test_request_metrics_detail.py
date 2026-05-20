@@ -1,13 +1,15 @@
 """Unit tests for the per-request HTTP DETAIL inspector ring buffer.
 
-Covers:
-* `redact_headers()` replaces sensitive header values.
-* `capture_body()` decodes / truncates / refuses binary content.
-* `record_detail()` records exactly one sample and survives malformed input.
-* `_DetailRingBuffer` evicts oldest entries when at capacity (FIFO).
-* `list_recent()` returns newest-first.
-* End-to-end: `RequestIdMiddleware` populates the buffer for POST bodies
-  and the `/api/monitor/sidecar-requests` route returns it.
+Responsibility: Unit tests for the per-request HTTP DETAIL inspector ring buffer
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_reset_detail_buffer`, `test_redact_headers_blanks_sensitive_values_only`,
+`test_capture_body_decodes_json_and_truncates_at_cap`,
+`test_capture_body_refuses_binary_content_type`, `test_capture_body_empty_input_returns_none`,
+`test_record_detail_persists_a_single_sample_with_redaction`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_request_metrics_detail.py`.
 """
 
 from __future__ import annotations

@@ -1,8 +1,15 @@
 """Tests for the AKS SKU allow-list source-of-truth.
 
-These are guard-rails: if the sibling repo bumps its
-``AZURE_HPC_MACHINES`` allow-list, the assertions below catch a stale mirror
-in CI before users hit ``NotImplementedError`` at submit time.
+Responsibility: Tests for the AKS SKU allow-list source-of-truth
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_default_sku_in_allow_list`, `test_default_sku_priced`,
+`test_default_sku_matches_sibling_default`,
+`test_allowed_skus_match_sibling_azure_hpc_machines`, `test_blast_config_pricing_is_re_export`,
+`test_pricing_subset_of_allow_list`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_aks_skus.py`.
 """
 
 from __future__ import annotations

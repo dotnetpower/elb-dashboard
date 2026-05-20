@@ -93,7 +93,10 @@ export function useDbWithWarmupPlan({
     enabled: Boolean(subId && storageAccount && workloadRg),
   });
 
-  const databases = dbQuery.data?.databases ?? [];
+  const databases = useMemo(
+    () => dbQuery.data?.databases ?? [],
+    [dbQuery.data?.databases],
+  );
 
   const selectedDbInfo = useMemo(
     () => databases.find((d) => d.name === selectedDbShortName),

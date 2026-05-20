@@ -1,4 +1,14 @@
-"""Runtime endpoint cache for the ElasticBLAST OpenAPI service."""
+"""Runtime endpoint cache for the ElasticBLAST OpenAPI service.
+
+Responsibility: Runtime endpoint and API token cache for the ElasticBLAST OpenAPI service
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_redis_url`, `_normalise_base_url`, `save_openapi_base_url`,
+`get_openapi_base_url`, `save_openapi_api_token`, `get_openapi_api_token`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +23,7 @@ import redis
 LOGGER = logging.getLogger(__name__)
 
 _RUNTIME_KEY = "openapi:runtime:base-url"
+_TOKEN_KEY = "openapi:runtime:api-token"  # noqa: S105 - Redis key name, not a secret value.
 
 
 def _redis_url() -> str:
@@ -66,3 +77,48 @@ def get_openapi_base_url(*, client: Any | None = None) -> str:
     if not isinstance(payload, dict):
         return ""
     return _normalise_base_url(str(payload.get("base_url") or ""))
+
+
+def save_openapi_api_token(
+    token: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+    client: Any | None = None,
+) -> bool:
+    """Persist the current OpenAPI API token in ops Redis."""
+    value = token.strip()
+    if not value:
+        return False
+    payload = {
+        "token": value,
+        "metadata": metadata or {},
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    redis_client = client or redis.Redis.from_url(_redis_url(), socket_timeout=1.5)
+    try:
+        redis_client.set(_TOKEN_KEY, json.dumps(payload, separators=(",", ":")))
+        return True
+    except Exception as exc:
+        LOGGER.warning("openapi runtime token cache write failed: %s", type(exc).__name__)
+        return False
+
+
+def get_openapi_api_token(*, client: Any | None = None) -> str:
+    """Return the cached OpenAPI API token, or an empty string if unavailable."""
+    redis_client = client or redis.Redis.from_url(_redis_url(), socket_timeout=1.5)
+    try:
+        raw = redis_client.get(_TOKEN_KEY)
+    except Exception as exc:
+        LOGGER.debug("openapi runtime token cache read failed: %s", type(exc).__name__)
+        return ""
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return str(raw).strip()
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("token") or "").strip()

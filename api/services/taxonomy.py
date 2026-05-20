@@ -1,13 +1,13 @@
 """NCBI taxonomy search helpers for BLAST submit filters.
 
-Two-stage design (cheap list -> rich detail) avoids the per-row XML fetch
-cost. `search_taxonomy` only calls esummary (small JSON), so `lineage`,
-`synonyms`, `parent_taxid`, `genetic_code` are intentionally left empty
-in the list payload — the dashboard pulls them lazily via
-`fetch_taxonomy_detail(taxid)` (efetch XML) when the user actually
-selects a candidate. XML parsing goes through `defusedxml` so that the
-NCBI response cannot trigger XXE / billion-laughs against the api
-sidecar.
+Responsibility: NCBI taxonomy search helpers for BLAST submit filters
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `TaxonomySearchUnavailable`, `clear_taxonomy_cache`, `search_taxonomy`,
+`fetch_taxonomy_detail`, `clear_taxonomy_detail_cache`, `clear_taxonomy_siblings_cache`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -286,7 +286,7 @@ def _normalise_taxid(value: object) -> int:
     if isinstance(value, bool):
         raise ValueError("taxonomy taxid must be a positive integer")
     try:
-        taxid = int(value)  # type: ignore[arg-type]
+        taxid: int = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError) as exc:
         raise ValueError("taxonomy taxid must be a positive integer") from exc
     # NCBI taxids stay well under 1e10. Cap defensively so a hostile caller
@@ -385,7 +385,7 @@ def _find_subelement(parent: Any, container: str, leaf: str) -> Any:
 
 
 def _parse_other_names(node: Any) -> dict[str, Any]:
-    empty = {
+    empty: dict[str, Any] = {
         "common_name": None,
         "authority": None,
         "synonyms": [],

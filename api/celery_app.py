@@ -1,13 +1,10 @@
-"""Celery application factory for the worker and beat sidecars.
+"""Celery application configuration for worker and beat sidecars.
 
-The worker and beat containers run the same image as the api sidecar but
-override the entrypoint to launch `celery worker` / `celery beat` against
-this `celery_app`. Tasks live under `api.tasks.*`.
-
-Phase 1 ships the Celery infrastructure but no real task implementations.
-Phases 2-3 will add the actual task handlers (BLAST submit / delete /
-warmup, ACR builds, AKS provision, schedule reconciler, etc.) backed by the
-Storage state repository.
+Responsibility: Celery application configuration for worker and beat sidecars
+Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Key entry points: `_start_reporter`, `_on_worker_init`, `_on_beat_init`
+Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -112,13 +109,13 @@ from celery.signals import (  # noqa: E402 — keep near user
 )
 
 
-@worker_init.connect
-def _on_worker_init(**_kwargs):
+@worker_init.connect  # type: ignore[untyped-decorator]
+def _on_worker_init(**_kwargs: object) -> None:
     _start_reporter("worker")
 
 
-@beat_init.connect
-def _on_beat_init(**_kwargs):
+@beat_init.connect  # type: ignore[untyped-decorator]
+def _on_beat_init(**_kwargs: object) -> None:
     _start_reporter("beat")
 
 
@@ -132,8 +129,8 @@ def _on_beat_init(**_kwargs):
 _PRODUCER_ROLE = os.environ.get("SIDECAR_NAME", "api")
 
 
-@before_task_publish.connect
-def _on_before_task_publish(**_kwargs):
+@before_task_publish.connect  # type: ignore[untyped-decorator]
+def _on_before_task_publish(**_kwargs: object) -> None:
     from api.services.event_emitter import ROW_ASYNC, ROW_SCHED, emit
 
     emit(ROW_SCHED if _PRODUCER_ROLE == "beat" else ROW_ASYNC)

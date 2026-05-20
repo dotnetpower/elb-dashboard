@@ -1,7 +1,12 @@
-"""Storage Celery tasks — BLAST database warmup/download.
+"""Storage and warmup Celery tasks for prepared BLAST databases.
 
-Side effects: Copies BLAST database files from NCBI FTP to the workload
-Storage account using azcopy via the terminal sidecar.
+Responsibility: Storage and warmup Celery tasks for prepared BLAST databases
+Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
+persist state.
+Key entry points: `_now_iso`, `_update_state`, `_record_task_progress`, `warmup_database`,
+`check_database_updates`, `reconcile_auto_warmup`
+Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Validation: `uv run pytest -q api/tests/test_warmup_jobs.py`.
 """
 
 from __future__ import annotations
@@ -139,7 +144,7 @@ def _wait_for_warmup_jobs(
     retry_jitter=True,
 )
 def warmup_database(
-    self,
+    self: Any,
     *,
     job_id: str,
     subscription_id: str,
@@ -214,7 +219,7 @@ def warmup_database(
                     ensure_shard_sets,
                 )
                 from api.services.sanitise import sanitise
-                from api.services.storage_data import _blob_service  # type: ignore[attr-defined]
+                from api.services.storage_data import _blob_service
 
                 # Mark in-progress before the long call so the SPA's
                 # chip strip can reflect the auto-shard step.
@@ -402,7 +407,7 @@ def warmup_database(
                 try:
                     from api.tasks.azure import (
                         _attach_acr,
-                        _grant_storage_blob_reader_to_aks,
+                        _grant_storage_blob_contributor_to_aks,
                     )
 
                     if acr_name:
@@ -414,7 +419,7 @@ def warmup_database(
                             acr_resource_group or resource_group,
                             acr_name,
                         )
-                    _grant_storage_blob_reader_to_aks(
+                    _grant_storage_blob_contributor_to_aks(
                         cred,
                         subscription_id,
                         resource_group,
@@ -545,7 +550,7 @@ def warmup_database(
 
 @shared_task(name="api.tasks.storage.check_database_updates", bind=True)
 def check_database_updates(
-    self,
+    self: Any,
     *,
     subscription_id: str,
     resource_group: str,
@@ -593,7 +598,7 @@ def check_database_updates(
 
 @shared_task(name="api.tasks.storage.reconcile_auto_warmup", bind=True)
 def reconcile_auto_warmup(
-    self,
+    self: Any,
     *,
     preference: dict[str, Any] | None = None,
     force: bool = False,

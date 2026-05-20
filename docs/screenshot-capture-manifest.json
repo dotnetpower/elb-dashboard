@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "baseUrl": "http://127.0.0.1:8090",
+  "docsBaseUrl": "http://127.0.0.1:8011/elb-dashboard/",
+  "outputDir": "docs/images/screenshots",
+  "viewports": {
+    "desktop": { "width": 1440, "height": 1000 },
+    "mobile": { "width": 390, "height": 844 }
+  },
+  "defaults": {
+    "waitForSelector": "main",
+    "redactionRequired": true,
+    "fullPage": true
+  },
+  "redactionRules": [
+    "Mask subscription IDs, tenant IDs, principal IDs, object IDs, user emails, UPNs, tokens, SAS URLs, and private query content before committing screenshots.",
+    "Use demo accounts and non-sensitive BLAST inputs only.",
+    "Do not publish screenshots with browser devtools, personal bookmarks, or local filesystem paths."
+  ],
+  "targets": [
+    {
+      "id": "dashboard-overview-desktop",
+      "title": "Dashboard overview",
+      "path": "/",
+      "viewport": "desktop",
+      "waitForSelector": ".dashboard-grid, main",
+      "output": "docs/images/screenshots/dashboard-overview-desktop.png",
+      "guide": "docs/user-guide/dashboard.md",
+      "notes": "Capture a populated monitoring state with cluster, storage, ACR, terminal, and jobs cards visible."
+    },
+    {
+      "id": "new-search-desktop",
+      "title": "New BLAST search",
+      "path": "/blast/submit",
+      "viewport": "desktop",
+      "waitForSelector": ".blast-header, main",
+      "output": "docs/images/screenshots/new-search-desktop.png",
+      "guide": "docs/user-guide/new-search.md",
+      "notes": "Capture a valid draft search with program, database, query, compute, and command preview visible."
+    },
+    {
+      "id": "jobs-desktop",
+      "title": "Recent jobs",
+      "path": "/blast/jobs",
+      "viewport": "desktop",
+      "waitForSelector": "main",
+      "output": "docs/images/screenshots/jobs-desktop.png",
+      "guide": "docs/user-guide/jobs.md",
+      "notes": "Capture at least one completed or running demo job."
+    },
+    {
+      "id": "results-desktop",
+      "title": "Job results",
+      "path": "/blast/jobs/{demoJobId}",
+      "viewport": "desktop",
+      "waitForSelector": "main",
+      "output": "docs/images/screenshots/results-desktop.png",
+      "guide": "docs/user-guide/results.md",
+      "requires": ["demoJobId"],
+      "notes": "Replace {demoJobId} with a safe demo job before capture."
+    },
+    {
+      "id": "terminal-desktop",
+      "title": "Browser terminal",
+      "path": "/terminal",
+      "viewport": "desktop",
+      "waitForSelector": "main",
+      "output": "docs/images/screenshots/terminal-desktop.png",
+      "guide": "docs/user-guide/terminal.md",
+      "notes": "Capture a connected terminal with no secrets in scrollback."
+    },
+    {
+      "id": "api-reference-desktop",
+      "title": "API Reference",
+      "path": "/docs",
+      "viewport": "desktop",
+      "waitForSelector": "main",
+      "output": "docs/images/screenshots/api-reference-desktop.png",
+      "guide": "docs/user-guide/api-reference.md",
+      "notes": "Capture the endpoint list and a representative request panel."
+    },
+    {
+      "id": "dashboard-mobile",
+      "title": "Dashboard mobile",
+      "path": "/",
+      "viewport": "mobile",
+      "waitForSelector": "main",
+      "output": "docs/images/screenshots/dashboard-mobile.png",
+      "guide": "docs/user-guide/dashboard.md",
+      "notes": "Use this to verify navigation and card stacking on narrow screens."
+    }
+  ]
+}

@@ -1,3 +1,15 @@
+"""Tests for BLAST Log Routes behavior.
+
+Responsibility: Tests for BLAST Log Routes behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_log_ticket_route_binds_ticket_to_job_and_owner`,
+`test_log_ticket_route_rejects_other_owner`, `test_log_sse_path_is_excluded_from_http_inspector`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_log_routes.py`.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

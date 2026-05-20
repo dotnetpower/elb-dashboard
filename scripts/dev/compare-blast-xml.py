@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Compare BLAST XML outputs using canonical result fields.
 
-The comparator is intentionally stricter than a smoke test and looser than
-byte-for-byte XML identity. It ignores expected provenance differences such as
-local database paths, but compares the biological/statistical result surface in
-order: queries, statistics, hits, HSP coordinates, alignment strings, e-values,
-and bit scores.
+Responsibility: Compare BLAST XML outputs using canonical result fields
+Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
+Key entry points: `Difference`, `_read_xml`, `_text`, `canonicalize`, `compare`, `build_report`
+Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Validation: `uv run python scripts/dev/compare-blast-xml.py --help`.
 """
 
 from __future__ import annotations

@@ -1,4 +1,14 @@
-"""Control-plane sidecar snapshot, ticket, and SSE routes."""
+"""Sidecar snapshot, ticket, and SSE monitoring routes.
+
+Responsibility: Sidecar snapshot, ticket, and SSE monitoring routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_SidecarTicket`, `sidecars_snapshot`, `sidecars_ticket`, `sidecars_events`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py
+api/tests/test_monitor_cache.py`.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +18,9 @@ import logging
 import os
 import secrets
 import time as _time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -55,7 +66,7 @@ async def sidecars_snapshot(
 
         return monitor_package.collect_snapshot(drain_events=False)
     except Exception as exc:
-        return _graceful(
+        return cast(dict[str, Any], _graceful(
             "sidecars_snapshot",
             exc,
             empty={
@@ -63,7 +74,7 @@ async def sidecars_snapshot(
                 "revision": os.environ.get("CONTAINER_APP_REVISION", "local"),
                 "sidecars": {},
             },
-        )
+        ))
 
 
 @router.post("/sidecars/ticket")
@@ -97,7 +108,7 @@ async def _consume_sidecar_ticket(token: str | None) -> _SidecarTicket:
 
 
 @router.get("/sidecars/events")
-async def sidecars_events(ticket: str | None = Query(default=None)):
+async def sidecars_events(ticket: str | None = Query(default=None)) -> StreamingResponse:
     """Server-Sent Events stream of sidecar metric snapshots.
 
     Protocol:
@@ -121,7 +132,7 @@ async def sidecars_events(ticket: str | None = Query(default=None)):
 
     queue, initial = await monitor_package._SIDECAR_BROADCASTER.subscribe()
 
-    async def event_stream():
+    async def event_stream() -> AsyncGenerator[str, None]:
         try:
             # Initial snapshot was captured atomically with the subscribe
             # (drain_events=False) so we don't steal a tick from the

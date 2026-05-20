@@ -10,7 +10,7 @@ export function OptimizeSection({ form, set }: ProgramSectionProps) {
   }
 
   return (
-    <section className="glass-card blast-section">
+    <section className="glass-card blast-section bsl-runtime bsl-done">
       <SectionHeader
         step={5}
         icon={<SlidersHorizontal size={16} strokeWidth={1.5} />}

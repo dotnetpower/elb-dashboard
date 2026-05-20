@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Wait for Redis to become reachable, then exec the remaining arguments.
 
-Usage (in container command):
-  python3 /app/wait_redis.py celery -A api.celery_app:celery_app worker ...
+Responsibility: Wait for Redis to become reachable, then exec the remaining arguments
+Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Key entry points: Module import side effects and constants.
+Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Validation: `uv run pytest -q api/tests`.
 """
 
 import os

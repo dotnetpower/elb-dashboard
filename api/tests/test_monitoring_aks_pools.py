@@ -1,3 +1,16 @@
+"""Tests for Monitoring AKS Pools behavior.
+
+Responsibility: Tests for Monitoring AKS Pools behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_pool`, `_cluster`,
+`test_list_aks_clusters_summarises_blastpool_not_systempool`,
+`test_list_aks_clusters_falls_back_to_user_pool_without_blastpool`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_monitoring_aks_pools.py`.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

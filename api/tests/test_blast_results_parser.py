@@ -1,8 +1,15 @@
 """Tests for `api.services.blast_results_parser`.
 
-Covers BLAST `-outfmt 6` (no header) and `-outfmt 7` (with `# Fields:`
-comment lines), numeric coercion, custom column orderings, and the
-aggregate statistics shape expected by `web/src/pages/BlastAnalytics.tsx`.
+Responsibility: Tests for `api.services.blast_results_parser`
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_parse_outfmt6_default_columns`, `test_parse_outfmt7_uses_field_header`,
+`test_parse_outfmt5_xml_to_canonical_hit_rows`, `test_parse_result_content_detects_xml`,
+`test_parse_result_content_detects_bom_prefixed_xml`,
+`test_parse_outfmt5_xml_tolerates_namespaces`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py`.
 """
 
 from __future__ import annotations

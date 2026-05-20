@@ -30,6 +30,7 @@ export interface DatabaseSectionProps {
   set: SetBlastField;
   programMeta: ProgramMeta;
   databases?: BlastDatabase[];
+  dbLoading?: boolean;
   warmDbs?: Map<string, WarmupDbInfo>;
   warmupKnown: boolean;
   dbWarning: string | null;

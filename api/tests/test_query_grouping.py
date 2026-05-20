@@ -1,3 +1,18 @@
+"""Tests for Query Grouping behavior.
+
+Responsibility: Tests for Query Grouping behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_uniform_query_group_plan_does_not_require_split`,
+`test_mixed_query_group_plan_groups_by_search_space_in_first_seen_order`,
+`test_query_group_plan_rejects_count_mismatch`, `test_query_group_plan_rejects_mapping_input`,
+`test_materialize_group_fastas_preserves_headers_sequences_and_group_order`,
+`test_materialize_group_fasta_rejects_bad_indices`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_query_grouping.py`.
+"""
+
 from __future__ import annotations
 
 import pytest

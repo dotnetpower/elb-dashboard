@@ -34,7 +34,7 @@
 #   scripts/dev/quick-deploy.sh terminal --rebuild-terminal-base
 #
 # Required env (export them or `source /tmp/azd-env.sh`):
-#   AZURE_RESOURCE_GROUP         e.g. rg-elb-ca
+#   AZURE_RESOURCE_GROUP         e.g. rg-elb-dashboard
 #   ACR_NAME                     short name (no .azurecr.io)
 #   ACR_LOGIN_SERVER             e.g. crelbXYZ.azurecr.io
 #   CONTAINER_APP_NAME           e.g. ca-elb-control

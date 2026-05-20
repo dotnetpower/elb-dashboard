@@ -29,7 +29,7 @@ Environment:
   RUNNER_NAMESPACE      Default: elb-equivalence
   RUNNER_NAME           Default: elb-equivalence-runner
   RUNNER_IMAGE          Default: terminal sidecar image from ca-elb-control, if az can read it.
-  CONTAINERAPP_RG       Default: rg-elb-ca
+  CONTAINERAPP_RG       Default: rg-elb-dashboard
   CONTAINERAPP_NAME     Default: ca-elb-control
   SYSTEM_NODE_SELECTOR  Default: kubernetes.azure.com/mode=system
   BLAST_NODE_SELECTOR   Default: workload=blast
@@ -52,7 +52,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 RUNNER_NAMESPACE=${RUNNER_NAMESPACE:-elb-equivalence}
 RUNNER_NAME=${RUNNER_NAME:-elb-equivalence-runner}
-CONTAINERAPP_RG=${CONTAINERAPP_RG:-rg-elb-ca}
+CONTAINERAPP_RG=${CONTAINERAPP_RG:-rg-elb-dashboard}
 CONTAINERAPP_NAME=${CONTAINERAPP_NAME:-ca-elb-control}
 SYSTEM_NODE_SELECTOR=${SYSTEM_NODE_SELECTOR:-kubernetes.azure.com/mode=system}
 BLAST_NODE_SELECTOR=${BLAST_NODE_SELECTOR:-workload=blast}

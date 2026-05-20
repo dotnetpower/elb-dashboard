@@ -1,3 +1,18 @@
+"""Tests for State Repo behavior.
+
+Responsibility: Tests for State Repo behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_job_state_round_trips_parent_job_id`,
+`test_job_state_writes_canonical_v2_job_metadata`, `test_job_state_honours_explicit_job_title`,
+`test_list_for_owner_ensures_missing_jobstate_table`,
+`test_list_children_for_owner_groups_parent_rows`,
+`test_create_ensures_state_and_history_tables`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_state_repo.py`.
+"""
+
 from __future__ import annotations
 
 from api.services import state_repo

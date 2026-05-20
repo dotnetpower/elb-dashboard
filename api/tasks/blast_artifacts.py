@@ -1,4 +1,12 @@
-"""Background BLAST artifact finalization tasks."""
+"""Background BLAST artifact finalization tasks.
+
+Responsibility: Background BLAST artifact finalization tasks
+Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
+persist state.
+Key entry points: `finalize_job_artifacts`
+Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Validation: `uv run pytest -q api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +26,7 @@ LOGGER = logging.getLogger(__name__)
     retry_backoff_max=120,
     retry_jitter=True,
 )
-def finalize_job_artifacts(self, *, job_id: str) -> dict[str, Any]:
+def finalize_job_artifacts(self: Any, *, job_id: str) -> dict[str, Any]:
     """Persist immutable UI artifacts for a terminal BLAST job.
 
     Side effects: writes Execution Steps and result analytics artifacts to the

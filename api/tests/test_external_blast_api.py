@@ -1,3 +1,18 @@
+"""Tests for External BLAST API behavior.
+
+Responsibility: Tests for External BLAST API behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_external_blast_submit_forwards_contract`,
+`test_canonical_jobs_external_submit_uses_trusted_metadata`,
+`test_external_blast_events_falls_back_to_current_status`,
+`test_external_blast_manifest_maps_result_files`, `test_external_blast_rejects_non_xml_outfmt`,
+`test_external_blast_rejects_invalid_program`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_external_blast_api.py`.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

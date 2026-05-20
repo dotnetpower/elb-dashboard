@@ -103,15 +103,22 @@ export function useBlastDb({
   });
   const latestVersion = latestQuery.data?.latest_version ?? null;
 
-  // The backend signals "local laptop cannot reach data plane" two ways:
-  //  - explicit `public_access_disabled: true` flag, OR
-  //  - `degraded_reason === "network_blocked"` (older code path).
-  // Treat both identically so the UI's blocked-state UX always lights up.
+  // The backend signals "local laptop cannot reach data plane" through either
+  // private-only accounts or selected-network firewall rejects. Treat both as
+  // local-debug recoverable so the IP allowlist action remains visible.
   const dbDegradedReason = (dbQuery.data as { degraded_reason?: string } | undefined)
     ?.degraded_reason;
+  const localFirewallBlocked = dbDegradedReason === "firewall_blocked";
   const publicAccessDisabled =
     dbQuery.data?.public_access_disabled === true ||
-    dbDegradedReason === "network_blocked";
+    dbDegradedReason === "network_blocked" ||
+    localFirewallBlocked;
+  const storageAccessTitle = localFirewallBlocked
+    ? "Storage firewall is still blocking this host"
+    : "Storage is Private only";
+  const storageAccessHint = localFirewallBlocked
+    ? "This local browser session is still being rejected by the selected-network firewall. Refresh the IP allowlist for local testing; production continues to use the private endpoint."
+    : "This local browser session cannot read the database list through the private endpoint. Open an IP-allowlisted debug window for local testing; production continues to use the private endpoint.";
 
   // Local-debug toggle visibility — fetched once, refreshed every 60s while
   // the storage account is blocked. The endpoint always returns 200 with
@@ -150,9 +157,7 @@ export function useBlastDb({
     if (!latestVersion) return 0;
     return [...downloadedDbs.values()].filter(
       (d) =>
-        d.source_version &&
-        d.source_version !== latestVersion &&
-        !d.update_in_progress,
+        d.source_version && d.source_version !== latestVersion && !d.update_in_progress,
     ).length;
   }, [downloadedDbs, latestVersion]);
 
@@ -203,7 +208,10 @@ export function useBlastDb({
     });
   }, [downloadedDbs, inProgress]);
 
-  const handleDownload = async (dbName: string, mode: "download" | "update" = "download") => {
+  const handleDownload = async (
+    dbName: string,
+    mode: "download" | "update" = "download",
+  ) => {
     if (!enabled) return;
     setDownloading(dbName);
     setDownloadResult(null);
@@ -312,7 +320,10 @@ export function useBlastDb({
               : result.action === "noop"
                 ? `No-op: ${result.reason ?? "refused"}`
                 : `Failed: ${result.error ?? "unknown error"}`;
-      return { ok: result.action !== "failed" && result.action !== "noop", message: summary };
+      return {
+        ok: result.action !== "failed" && result.action !== "noop",
+        message: summary,
+      };
     } catch (e) {
       const msg = formatApiError(e, "storage");
       setLocalDebugError(msg);
@@ -327,6 +338,9 @@ export function useBlastDb({
     dbQuery,
     latestVersion,
     publicAccessDisabled,
+    localFirewallBlocked,
+    storageAccessTitle,
+    storageAccessHint,
     downloadedDbs,
     updatesAvailable,
     // Local-debug state (only meaningful when the api process is local)

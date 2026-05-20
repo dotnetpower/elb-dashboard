@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="ElasticBLAST logo">
+  <defs>
+    <linearGradient id="elb-logo-gradient" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6e9fff" />
+      <stop offset="1" stop-color="#b877d9" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#elb-logo-gradient)" />
+  <g
+    transform="translate(14 14) scale(1.5)"
+    fill="none"
+    stroke="#fff"
+    stroke-width="1.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="m10 16 1.5 1.5" />
+    <path d="m14 8-1.5-1.5" />
+    <path d="M15 2c-1.798 1.998-2.518 3.995-2.807 5.993" />
+    <path d="m16.5 10.5 1 1" />
+    <path d="m17 6-2.891-2.891" />
+    <path d="M2 15c6.667-6 13.333 0 20-6" />
+    <path d="m20 9 .891.891" />
+    <path d="M3.109 14.109 4 15" />
+    <path d="m6.5 12.5 1 1" />
+    <path d="m7 18 2.891 2.891" />
+    <path d="M9 22c1.798-1.998 2.518-3.995 2.807-5.993" />
+  </g>
+</svg>

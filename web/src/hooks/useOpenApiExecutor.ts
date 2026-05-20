@@ -42,13 +42,17 @@ export function useOpenApiExecutor({
   const requestSeqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // React 18 StrictMode runs mount → cleanup → re-mount in dev. We must
+    // re-arm mountedRef on every mount, otherwise the cleanup from the first
+    // pass leaves it false and isCurrent() permanently returns false, which
+    // strands the loading spinner.
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
       abortRef.current?.abort();
-    },
-    [],
-  );
+    };
+  }, []);
 
   const execute = useCallback(async () => {
     abortRef.current?.abort();
@@ -88,16 +92,26 @@ export function useOpenApiExecutor({
   return { execute, response, loading, copyResponse };
 }
 
-function buildTargetPath(
+export function buildTargetPath(
   path: string,
   parameters: Array<{ name: string; in: string }>,
   paramValues: Record<string, string>,
 ): string {
   let targetPath = path;
   for (const parameter of parameters.filter((p) => p.in === "path")) {
-    targetPath = targetPath.replace(`{${parameter.name}}`, paramValues[parameter.name] || "");
+    targetPath = targetPath.replace(
+      `{${parameter.name}}`,
+      encodeURIComponent(paramValues[parameter.name] || ""),
+    );
   }
-  return targetPath;
+  const query = new URLSearchParams();
+  for (const parameter of parameters.filter((p) => p.in === "query")) {
+    const value = paramValues[parameter.name];
+    if (value !== undefined && value !== "") query.append(parameter.name, value);
+  }
+  const queryString = query.toString();
+  if (!queryString) return targetPath;
+  return `${targetPath}${targetPath.includes("?") ? "&" : "?"}${queryString}`;
 }
 
 async function executeViaProxy(
@@ -114,7 +128,10 @@ async function executeViaProxy(
     path: targetPath,
   });
   const opts: RequestInit = { method: endpoint.method.toUpperCase(), signal };
-  if (endpoint.requestBody && bodyText) opts.body = bodyText;
+  if (endpoint.requestBody && bodyText) {
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = bodyText;
+  }
   return fetchApiRawNoRedirect(`/aks/openapi/proxy?${params.toString()}`, opts);
 }
 

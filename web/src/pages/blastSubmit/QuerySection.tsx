@@ -21,7 +21,10 @@ import {
   primerDiagnostics,
   reverseComplementFasta,
 } from "@/pages/blastSubmit/fastaUtils";
-import { QUERY_EXAMPLE_TEMPLATES, type QueryExampleTemplate } from "@/pages/blastSubmit/queryExamples";
+import {
+  QUERY_EXAMPLE_TEMPLATES,
+  type QueryExampleTemplate,
+} from "@/pages/blastSubmit/queryExamples";
 import { buildGeneratedJobTitle } from "@/pages/blastSubmitModel";
 import type { QuerySectionProps } from "@/pages/blastSubmit/types";
 import { SectionHeader, Tip } from "@/pages/blastSubmit/ui";
@@ -61,7 +64,8 @@ export function QuerySection({
   // tblastn uses a *protein* query against a translated nucleotide DB,
   // so GC% / reverse-complement make no sense for it. blastx uses a
   // nucleotide query translated into protein — the query IS nucleotide.
-  const isNucleotideProgram = form.program === "blastn" || form.program === "blastx" || form.program === "tblastx";
+  const isNucleotideProgram =
+    form.program === "blastn" || form.program === "blastx" || form.program === "tblastx";
 
   // Per-record primer-design diagnostics. Only activated for short
   // nucleotide oligos (≤ 50 nt) because Tm/hairpin/self-dimer are
@@ -111,7 +115,10 @@ export function QuerySection({
   const handleReverseComplement = () => {
     if (!form.query_data.trim()) return;
     if (!isNucleotideProgram) {
-      toast("Reverse complement only applies to nucleotide programs (blastn / tblastn / tblastx).", "info");
+      toast(
+        "Reverse complement only applies to nucleotide programs (blastn / tblastn / tblastx).",
+        "info",
+      );
       return;
     }
     const flipped = reverseComplementFasta(form.query_data);
@@ -127,7 +134,10 @@ export function QuerySection({
       return;
     }
     set("query_data", text);
-    toast(`Removed ${removed} duplicate sequence${removed === 1 ? "" : "s"}; ${kept} unique kept.`, "success");
+    toast(
+      `Removed ${removed} duplicate sequence${removed === 1 ? "" : "s"}; ${kept} unique kept.`,
+      "success",
+    );
   };
 
   const loadExample = (example: QueryExampleTemplate) => {
@@ -139,7 +149,7 @@ export function QuerySection({
   };
 
   return (
-    <section className="glass-card glass-card--strong blast-section">
+    <section className="glass-card glass-card--strong blast-section bsl-input">
       <SectionHeader
         step={2}
         icon={<Dna size={16} strokeWidth={1.5} />}
@@ -224,12 +234,13 @@ export function QuerySection({
         )}
       </div>
 
-      {primerFindings.length > 0 && (
-        <PrimerDiagnosticsPanel findings={primerFindings} />
-      )}
+      {primerFindings.length > 0 && <PrimerDiagnosticsPanel findings={primerFindings} />}
 
       <div className="blast-query-actions">
-        <label className="glass-button blast-action-btn" style={{ cursor: "pointer" }}>
+        <label
+          className="glass-button blast-action-btn blast-action-btn--upload"
+          style={{ cursor: "pointer" }}
+        >
           <Upload size={13} strokeWidth={1.5} /> Upload file
           <input
             ref={fileInputRef}
@@ -244,7 +255,7 @@ export function QuerySection({
           />
         </label>
         <button
-          className="glass-button blast-action-btn"
+          className="glass-button blast-action-btn blast-action-btn--example"
           onClick={() => setExampleModalOpen(true)}
           type="button"
         >
@@ -252,7 +263,7 @@ export function QuerySection({
         </button>
         {form.query_data && isNucleotideProgram && (
           <button
-            className="glass-button blast-action-btn"
+            className="glass-button blast-action-btn blast-action-btn--transform"
             onClick={handleReverseComplement}
             type="button"
             title="Replace each sequence with its reverse complement (5'→3' becomes 3'→5'). Useful for primer-pair sanity checks."
@@ -262,7 +273,7 @@ export function QuerySection({
         )}
         {form.query_data && seqCount > 1 && (
           <button
-            className="glass-button blast-action-btn"
+            className="glass-button blast-action-btn blast-action-btn--dedupe"
             onClick={handleDeduplicate}
             type="button"
             title="Remove sequences that are exact duplicates of an earlier record."
@@ -272,7 +283,7 @@ export function QuerySection({
         )}
         {form.query_data && (
           <button
-            className="glass-button blast-action-btn"
+            className="glass-button blast-action-btn blast-action-btn--clear"
             onClick={() => set("query_data", "")}
             type="button"
           >
@@ -282,7 +293,10 @@ export function QuerySection({
       </div>
 
       <div className="blast-subrange-row">
-        <span className="glass-label" style={{ fontSize: 11, minWidth: "fit-content", marginBottom: 0 }}>
+        <span
+          className="glass-label"
+          style={{ fontSize: 11, minWidth: "fit-content", marginBottom: 0 }}
+        >
           Query subrange <Tip text="Restrict search to a range of the query (1-based)." />
         </span>
         <input
@@ -349,7 +363,12 @@ function QueryExampleDialog({
             <div className="glass-badge">FASTA templates</div>
             <h3 id="query-example-dialog-title">Load Query Example</h3>
           </div>
-          <button className="glass-button" type="button" onClick={onClose} aria-label="Close examples">
+          <button
+            className="glass-button"
+            type="button"
+            onClick={onClose}
+            aria-label="Close examples"
+          >
             <X size={14} strokeWidth={1.5} />
           </button>
         </div>
@@ -445,7 +464,13 @@ function PrimerDiagnosticsPanel({
                 flexWrap: "wrap",
               }}
             >
-              <span style={{ minWidth: 120, fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
+              <span
+                style={{
+                  minWidth: 120,
+                  fontFamily: "var(--font-mono)",
+                  color: "var(--text-muted)",
+                }}
+              >
                 {f.id} ({f.length} nt)
               </span>
               <span
@@ -464,12 +489,18 @@ function PrimerDiagnosticsPanel({
                 GC-run {gcRun}
               </span>
               {hairpinWarn && (
-                <span style={{ color: "var(--warning)" }} title="Potential hairpin / self-complementary stem detected.">
+                <span
+                  style={{ color: "var(--warning)" }}
+                  title="Potential hairpin / self-complementary stem detected."
+                >
                   <AlertTriangle size={11} /> hairpin stem {hairpinLength}
                 </span>
               )}
               {dimerWarn && (
-                <span style={{ color: "var(--warning)" }} title="Potential self-dimer (3′-complementary overlap) detected.">
+                <span
+                  style={{ color: "var(--warning)" }}
+                  title="Potential self-dimer (3′-complementary overlap) detected."
+                >
                   <AlertTriangle size={11} /> self-dimer {selfDimerLength}
                 </span>
               )}

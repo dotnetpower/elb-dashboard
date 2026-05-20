@@ -1,18 +1,14 @@
 """End-to-end tests for the api ↔ terminal exec channel.
 
-Boots the real ``terminal/exec_server.py`` on an ephemeral loopback port in a
-background thread, then exercises ``api.services.terminal_exec`` against it.
-This validates:
-
-  * Token auth (positive + negative).
-  * argv allowlist enforcement.
-  * Buffered ``run()`` round-trip + sanitisation.
-  * Streamed ``stream()`` round-trip + line ordering + summary line.
-  * Concurrency cap (HTTP 503 when busy).
-  * ``healthz()`` works without auth.
-
-The exec server only requires Python 3.12 stdlib + a writable ``/tmp``, so
-no Docker / Container Apps environment is needed.
+Responsibility: End-to-end tests for the api ↔ terminal exec channel
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_free_port`, `exec_server`, `test_healthz_works_without_auth`,
+`test_run_rejects_when_token_missing`, `test_run_rejects_when_token_wrong`,
+`test_run_rejects_argv_outside_allowlist`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_terminal_exec.py`.
 """
 
 from __future__ import annotations

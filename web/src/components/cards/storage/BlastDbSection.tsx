@@ -56,6 +56,8 @@ export function BlastDbSection({
     canEnableLocalAccess,
     openingLocalDebug,
     enableLocalAccess,
+    storageAccessTitle,
+    storageAccessHint,
   } = state;
 
   const showLocalDebugBanner = publicAccessDisabled && canEnableLocalAccess;
@@ -76,7 +78,7 @@ export function BlastDbSection({
               title="Storage is Private only. Database list cannot be read from this local network."
             >
               <Lock size={10} strokeWidth={2} style={{ marginRight: 3 }} />
-              private only
+              access blocked
             </span>
           )}
           {!publicAccessDisabled && downloadedDbs.size > 0 && (
@@ -125,13 +127,9 @@ export function BlastDbSection({
           <Lock size={14} style={{ color: "var(--warning)", flexShrink: 0 }} />
           <div style={{ flex: 1 }}>
             <div style={{ color: "var(--text-primary)", fontWeight: 500 }}>
-              Storage is Private only
+              {storageAccessTitle}
             </div>
-            <div style={{ marginTop: 2 }}>
-              This local browser session cannot read the database list through the
-              private endpoint. Open an IP-allowlisted debug window for local
-              testing; production continues to use the private endpoint.
-            </div>
+            <div style={{ marginTop: 2 }}>{storageAccessHint}</div>
           </div>
           <button
             className="glass-button glass-button--primary"
@@ -160,7 +158,9 @@ export function BlastDbSection({
       )}
 
       {downloadedDbs.size > 0 && (
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", padding: "2px 4px 4px" }}>
+        <div
+          style={{ display: "flex", gap: 4, flexWrap: "wrap", padding: "2px 4px 4px" }}
+        >
           {[...downloadedDbs.keys()].map((name) => (
             <span key={name} className="dv3-pill dv3-pill-success">
               {name}

@@ -1,31 +1,12 @@
-"""Warmup feasibility planner — pure-python, side-effect free.
+"""Warmup feasibility planner - pure-python, side-effect free.
 
-Given a database size and a target AKS pool topology, compute whether a
-DaemonSet-based warmup (one BLAST pod per shard, page-cache-resident on
-the local SSD) is *feasible* and, if so, what shard layout the SPA should
-display before the user clicks "Warmup".
-
-The two binding constraints are documented in
-``api/services/db_sharding.py`` (sibling v3 benchmark report §4.1):
-
-1. **Per-pod budget** — each BLAST pod scans one shard. To avoid page
-   cache eviction during the scan, that shard must fit in
-   ``SAFE_SHARD_FRACTION_OF_NODE_RAM`` of node RAM (default 50%).
-   The shard count picked by ``select_partitions_for_submit`` already
-   honours this when possible — but the function clamps to the largest
-   element of ``PRESET_SHARD_SETS`` (today: 10), so a sufficiently
-   large DB can fail the constraint even after clamping. When that
-   happens, **the SKU is too small** — no amount of nodes helps.
-
-2. **Per-node budget** — each *node* page-caches whatever fraction of
-   the DB its scheduled pods need. With one shard per node that is
-   ``db / num_nodes``; with shards > num_nodes it is also
-   ``db / num_nodes`` (each node hosts ``shards / num_nodes`` pods).
-   So the per-node pressure is independent of the shard count and
-   reduces to ``db_gib / num_nodes`` ≤ safe budget.
-
-This module is **read-only**: it never mutates Storage or Kubernetes
-state. The only side effect is a debug log line per call.
+Responsibility: Warmup feasibility planner - pure-python, side-effect free
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `WarmupPlan`, `compute_warmup_feasibility`, `_refusal`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

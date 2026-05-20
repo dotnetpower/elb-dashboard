@@ -16,10 +16,7 @@ import {
   type FormState,
 } from "@/pages/blastSubmitModel";
 
-import {
-  getWorkloadNodeCount,
-  getWorkloadNodeSku,
-} from "./computeEnvironment";
+import { getWorkloadNodeCount, getWorkloadNodeSku } from "./computeEnvironment";
 import type { ToastFn } from "./types";
 
 function hasPreparedShardLayoutForSubmit(db: string, shardSets?: number[]): boolean {
@@ -35,8 +32,10 @@ function appendOption(options: string, flag: string, value?: string): string {
 export function buildEffectiveAdditionalOptions(form: FormState): string | undefined {
   let opts = form.additional_options || "";
   if (shouldUseBlastnShortTask(form)) opts = appendOption(opts, "-task", "blastn-short");
-  if (form.low_complexity_filter && form.program === "blastn") opts = appendOption(opts, "-dust", "yes");
-  if (form.query_from && form.query_to) opts = appendOption(opts, "-query_loc", `${form.query_from}-${form.query_to}`);
+  if (form.low_complexity_filter && form.program === "blastn")
+    opts = appendOption(opts, "-dust", "yes");
+  if (form.query_from && form.query_to)
+    opts = appendOption(opts, "-query_loc", `${form.query_from}-${form.query_to}`);
   if (form.match_score) opts = appendOption(opts, "-reward", form.match_score);
   if (form.mismatch_score) opts = appendOption(opts, "-penalty", form.mismatch_score);
   if (form.max_matches_in_query_range && form.max_matches_in_query_range !== "0") {
@@ -59,6 +58,26 @@ export interface UseSubmitMutationArgs {
   clearDraft: () => void;
 }
 
+export function buildSubmittedJobUrl(
+  resp: { job_id?: string; id?: string; instance_id?: string } | undefined,
+  req: Pick<
+    BlastSubmitRequest,
+    "subscription_id" | "resource_group" | "storage_account" | "aks_cluster_name"
+  >,
+): string {
+  const jobId = resp?.job_id || resp?.id || resp?.instance_id;
+  if (!jobId) return "/blast/jobs";
+
+  const params = new URLSearchParams();
+  params.set("submitted", "1");
+  if (req.subscription_id) params.set("subscription_id", req.subscription_id);
+  if (req.resource_group) params.set("resource_group", req.resource_group);
+  if (req.storage_account) params.set("storage_account", req.storage_account);
+  if (req.aks_cluster_name) params.set("cluster_name", req.aks_cluster_name);
+  const query = params.toString();
+  return `/blast/jobs/${encodeURIComponent(jobId)}${query ? `?${query}` : ""}`;
+}
+
 export function useSubmitMutation({
   navigate,
   toast,
@@ -66,12 +85,10 @@ export function useSubmitMutation({
 }: UseSubmitMutationArgs) {
   return useMutation({
     mutationFn: (req: BlastSubmitRequest) => blastApi.submit(req),
-    onSuccess: (resp) => {
+    onSuccess: (resp, req) => {
       clearDraft();
       toast("BLAST search submitted! Tracking your job…", "success");
-      const jobId = resp?.job_id || resp?.id || resp?.instance_id;
-      if (jobId) navigate(`/blast/jobs/${encodeURIComponent(jobId)}`);
-      else navigate("/blast/jobs");
+      navigate(buildSubmittedJobUrl(resp, req));
     },
     onError: (err: Error) => {
       const friendly = formatApiError(err, "blast");
@@ -119,7 +136,8 @@ export function buildSubmitRequest({
   const opts = buildEffectiveAdditionalOptions(form);
 
   const dbShort = form.db.split("/").pop() || form.db;
-  const autoTitle = form.job_title.trim() || buildGeneratedJobTitle(`${form.program} · ${dbShort}`);
+  const autoTitle =
+    form.job_title.trim() || buildGeneratedJobTitle(`${form.program} · ${dbShort}`);
   const hasTaxid = form.taxid.trim().length > 0;
   const taxid = hasTaxid ? parsePositiveTaxid(form.taxid) : null;
   if (hasTaxid && taxid === null) {
@@ -168,8 +186,7 @@ export function buildSubmitRequest({
     db_total_letters: dbTotalLetters,
     db_total_bytes: dbTotalBytes,
     shard_sets: useSharding ? dbShardSets : undefined,
-    allow_approximate_sharding:
-      effectiveShardingMode === "approximate" || undefined,
+    allow_approximate_sharding: effectiveShardingMode === "approximate" || undefined,
     disable_sharding: !useSharding,
     acr_resource_group: acrRg || undefined,
     acr_name: acrName || undefined,

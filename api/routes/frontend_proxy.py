@@ -1,9 +1,12 @@
-"""Catch-all reverse proxy: forwards non-/api/* requests to the frontend
-sidecar at FRONTEND_UPSTREAM (default http://127.0.0.1:8081).
+"""Catch-all reverse proxy: forwards non-/api/* requests to the frontend.
 
-Streams the response body so large SPA assets do not buffer in memory.
-Lives in `api/` so the SPA and the API share one origin (no CORS
-preflight) and one MSAL redirect URI.
+Responsibility: Catch-all reverse proxy: forwards non-/api/* requests to the frontend
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_get_client`, `reverse_proxy`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations

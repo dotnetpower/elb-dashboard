@@ -20,13 +20,7 @@ import type { DisplayJobState } from "@/components/cards/ClusterBento/jobTypes";
 
 import { jobStateTone, toneColor, type HealthTone } from "./helpers";
 
-export function HealthDot({
-  tone,
-  size = 8,
-}: {
-  tone: HealthTone;
-  size?: number;
-}) {
+export function HealthDot({ tone, size = 8 }: { tone: HealthTone; size?: number }) {
   const color = toneColor(tone);
   if (tone === "transitioning") {
     return (
@@ -50,8 +44,7 @@ export function HealthDot({
         height: size,
         borderRadius: "50%",
         background: color,
-        boxShadow:
-          tone === "healthy" ? `0 0 6px ${color}88` : `0 0 8px ${color}cc`,
+        boxShadow: tone === "healthy" ? `0 0 6px ${color}88` : `0 0 8px ${color}cc`,
         flexShrink: 0,
       }}
     />
@@ -80,7 +73,7 @@ export function PulseStat({
         flexDirection: "column",
         alignItems: "flex-end",
         gap: 1,
-        minWidth: 88,
+        minWidth: 68,
         cursor: tooltip ? "help" : undefined,
       }}
     >
@@ -89,10 +82,11 @@ export function PulseStat({
           display: "inline-flex",
           alignItems: "center",
           gap: 4,
-          fontSize: 10,
+          fontSize: 9,
           color: "var(--text-faint)",
           textTransform: "uppercase",
-          letterSpacing: "0.08em",
+          letterSpacing: "0.06em",
+          lineHeight: 1.1,
         }}
       >
         {icon}
@@ -104,7 +98,7 @@ export function PulseStat({
           fontWeight: 600,
           color: tone ?? "var(--text-primary)",
           fontVariantNumeric: "tabular-nums",
-          lineHeight: 1.1,
+          lineHeight: 1,
         }}
       >
         {value}
@@ -131,26 +125,31 @@ export function MetaCell({
       style={{
         display: "flex",
         flexDirection: "column",
-        gap: 2,
+        gap: 1,
         cursor: tooltip ? "help" : undefined,
+        minWidth: 0,
       }}
     >
       <span
         style={{
-          fontSize: 10,
+          fontSize: 9,
           color: "var(--text-faint)",
           textTransform: "uppercase",
-          letterSpacing: "0.08em",
+          letterSpacing: "0.06em",
+          lineHeight: 1.1,
         }}
       >
         {label}
       </span>
       <span
         style={{
-          fontSize: 12,
+          fontSize: 11,
           fontWeight: 500,
           color: tone ?? "var(--text-primary)",
           fontVariantNumeric: "tabular-nums",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
         }}
       >
         {value}
@@ -192,16 +191,17 @@ export function ActionBtn({
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 6,
-        padding: "5px 11px",
-        fontSize: 11,
+        gap: 4,
+        padding: "3px 8px",
+        fontSize: 10,
         fontWeight: 500,
         color,
         background,
         border: `1px solid ${borderColor}`,
-        borderRadius: 7,
+        borderRadius: 6,
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.55 : 1,
+        lineHeight: 1.2,
       }}
     >
       {icon}

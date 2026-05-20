@@ -12,10 +12,7 @@
 import { useId, useState } from "react";
 
 import type { AksClusterSummary } from "@/api/endpoints";
-import {
-  isAksProvisioning,
-  isAksWorkloadReady,
-} from "@/utils/aksStatus";
+import { isAksProvisioning, isAksWorkloadReady } from "@/utils/aksStatus";
 
 import { JobsSection } from "./JobsSection";
 import { PulseActions } from "./PulseActions";
@@ -71,8 +68,7 @@ export function ClusterPulse({
 
   // Default-open rules: stopped/transitioning/provisioning are open so
   // the operator sees the Start button + readiness panel immediately.
-  const defaultOpen =
-    isStopped || isTransitioning || provisioningBusy || !isRunning;
+  const defaultOpen = isStopped || isTransitioning || provisioningBusy || !isRunning;
 
   const [open, setOpen] = useState(() => {
     try {
@@ -123,7 +119,7 @@ export function ClusterPulse({
   return (
     <div
       className="glass-card cluster-pulse-card"
-      style={{ padding: 0, borderRadius: 12, overflow: "hidden" }}
+      style={{ padding: 0, borderRadius: 10, overflow: "hidden" }}
     >
       <PulseRowSummary
         clusterName={c.name}
@@ -143,9 +139,7 @@ export function ClusterPulse({
             ? "—"
             : signals.activeJobs.length.toString()
         }
-        activeTone={
-          signals.activeJobs.length > 5 ? "var(--warning)" : undefined
-        }
+        activeTone={signals.activeJobs.length > 5 ? "var(--warning)" : undefined}
         pressureLabel={
           !showOperationalDetails || signals.pressureValue == null
             ? "—"
@@ -225,7 +219,7 @@ export function ClusterPulse({
           {expansionExtras && (
             <div
               style={{
-                padding: "0 14px 12px 14px",
+                padding: "0 10px 8px 10px",
                 borderTop: "1px solid var(--border-weak)",
               }}
             >

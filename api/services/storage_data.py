@@ -1,4 +1,13 @@
-"""Storage helpers for BLAST query upload and results listing."""
+"""Azure Blob data-plane helpers for BLAST storage workflows.
+
+Responsibility: Azure Blob data-plane helpers for BLAST storage workflows
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `encode_blob_file_id`, `decode_blob_file_id`, `safe_download_filename`,
+`result_media_type`, `upload_blob_bytes`, `upload_blob_text`
+Risky contracts: Validate Storage account/blob inputs and preserve the no-browser-SAS policy.
+Validation: `uv run pytest -q api/tests/test_storage_data.py`.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +17,7 @@ import logging
 import re
 import zlib
 from collections.abc import Iterable, Iterator
-from typing import Any
+from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
 from azure.storage.blob import BlobServiceClient, ContentSettings
@@ -99,7 +108,7 @@ def upload_blob_bytes(
         overwrite=True,
         content_settings=ContentSettings(content_type=content_type),
     )
-    return blob.url
+    return cast(str, blob.url)
 
 
 def upload_blob_text(
@@ -290,9 +299,11 @@ def classify_storage_failure(
             "message": f"Storage container or account '{account_name}' not found{suffix}",
         }
 
+    is_permission_mismatch = "AuthorizationPermissionMismatch" in err_str
+    is_authorization_failure = "AuthorizationFailure" in err_str
     is_auth_like = (
-        "AuthorizationFailure" in err_str
-        or "AuthorizationPermissionMismatch" in err_str
+        is_authorization_failure
+        or is_permission_mismatch
         or "This request is not authorized" in err_str
     )
     if not is_auth_like:
@@ -303,6 +314,8 @@ def classify_storage_failure(
         }
 
     public_state: str | None = None
+    default_action: str | None = None
+    ip_rules: list[str] = []
     if subscription_id and resource_group:
         try:
             from api.services.azure_clients import storage_client
@@ -311,6 +324,16 @@ def classify_storage_failure(
             account = sc.storage_accounts.get_properties(resource_group, account_name)
             raw = getattr(account, "public_network_access", None)
             public_state = str(raw) if raw is not None else None
+            network_rule_set = getattr(account, "network_rule_set", None)
+            if network_rule_set is not None:
+                raw_default = getattr(network_rule_set, "default_action", None)
+                default_action = str(raw_default) if raw_default is not None else None
+                for rule in getattr(network_rule_set, "ip_rules", None) or []:
+                    ip_value = getattr(rule, "ip_address_or_range", None) or getattr(
+                        rule, "value", None
+                    )
+                    if ip_value:
+                        ip_rules.append(str(ip_value))
         except Exception as arm_exc:
             LOGGER.debug("classify_storage_failure ARM check failed: %s", arm_exc)
 
@@ -330,6 +353,40 @@ def classify_storage_failure(
                 f"--rg {resource_group or '<resource-group>'}` and close it again with "
                 "`storage-public-access.sh off` when done. In a deployed environment, "
                 "run `azd up` and verify from the Container App."
+            ),
+        }
+
+    if is_authorization_failure and public_state == "Enabled" and default_action == "Deny":
+        caller_ip: str | None = None
+        try:
+            from api.services.storage_public_access import _detect_caller_ip
+
+            caller_ip = _detect_caller_ip()
+        except Exception as ip_exc:
+            LOGGER.debug("classify_storage_failure caller IP check failed: %s", ip_exc)
+        caller_ip_in_rules = bool(caller_ip and caller_ip in ip_rules)
+        local_detail = (
+            f" Current detected IP {caller_ip} is already in ipRules; Azure may still be "
+            "propagating the firewall update or seeing a different egress path."
+            if caller_ip_in_rules
+            else f" Current detected IP {caller_ip or '<unknown>'} is not in ipRules."
+        )
+        return {
+            "degraded": True,
+            "degraded_reason": "firewall_blocked",
+            "public_access_disabled": False,
+            "local_debug_access_blocked": True,
+            "caller_ip": caller_ip,
+            "caller_ip_in_rules": caller_ip_in_rules,
+            "message": (
+                f"Storage account '{account_name}' allows only selected networks "
+                "(publicNetworkAccess: Enabled, defaultAction: Deny), and Storage still "
+                "rejected this local data-plane request. "
+                f"Run `scripts/dev/storage-public-access.sh on --account {account_name} "
+                f"--rg {resource_group or '<resource-group>'}` to refresh the IP allowlist, "
+                "then retry after firewall propagation."
+                f"{local_detail} If this persists after the network check passes, refresh "
+                "your Azure CLI login so data-plane RBAC tokens are current."
             ),
         }
 

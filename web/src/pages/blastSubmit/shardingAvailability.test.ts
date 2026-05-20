@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { AksClusterSummary, BlastDatabase } from "@/api/endpoints";
-import { deriveShardingAvailability } from "@/pages/blastSubmit/shardingAvailability";
+import {
+  deriveShardingAvailability,
+  reconcileShardingSelection,
+} from "@/pages/blastSubmit/shardingAvailability";
+import { INITIAL } from "@/pages/blastSubmitModel";
 
 const cluster: AksClusterSummary = {
   name: "elb-cluster",
@@ -46,7 +50,7 @@ describe("deriveShardingAvailability", () => {
       outfmt: 5,
     });
 
-    expect(availability.options.off.enabled).toBe(false);
+    expect(availability.options.off.enabled).toBe(true);
     expect(availability.preferredMode).toBe("precise");
     expect(availability.options.precise.enabled).toBe(true);
     expect(availability.options.precise.label).toBe("Web-equivalent shard");
@@ -66,7 +70,9 @@ describe("deriveShardingAvailability", () => {
     expect(availability.options.approximate.enabled).toBe(true);
     expect(availability.options.precise.enabled).toBe(false);
     expect(availability.options.precise.label).toBe("Precise shard");
-    expect(availability.options.precise.reason).toContain("Verified Web BLAST search-space evidence");
+    expect(availability.options.precise.reason).toContain(
+      "Verified Web BLAST search-space evidence",
+    );
   });
 
   it("disables sharded modes when the DB is not warm on the selected cluster", () => {
@@ -86,7 +92,12 @@ describe("deriveShardingAvailability", () => {
   it("keeps baseline mode available for warm DBs without prepared shard layouts", () => {
     const availability = deriveShardingAvailability({
       cluster,
-      database: { ...database, name: "18S_fungal_sequences", sharded: false, shard_sets: [] },
+      database: {
+        ...database,
+        name: "18S_fungal_sequences",
+        sharded: false,
+        shard_sets: [],
+      },
       isDbAlreadyWarm: true,
       outfmt: 5,
     });
@@ -101,7 +112,12 @@ describe("deriveShardingAvailability", () => {
   it("does not treat single-part non-core-nt shard metadata as prepared sharding", () => {
     const availability = deriveShardingAvailability({
       cluster,
-      database: { ...database, name: "18S_fungal_sequences", sharded: true, shard_sets: [1] },
+      database: {
+        ...database,
+        name: "18S_fungal_sequences",
+        sharded: true,
+        shard_sets: [1],
+      },
       isDbAlreadyWarm: true,
       outfmt: 5,
     });
@@ -135,5 +151,82 @@ describe("deriveShardingAvailability", () => {
 
     expect(availability.options.precise.enabled).toBe(false);
     expect(availability.options.precise.reason).toContain("output format 5 or 6");
+  });
+});
+
+describe("reconcileShardingSelection", () => {
+  it("promotes the default warmed profile to the preferred sharded mode", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+
+    const result = reconcileShardingSelection({
+      form: {
+        ...INITIAL,
+        enable_warmup: true,
+        sharding_mode: "off",
+        db_auto_partition: false,
+        disable_sharding: false,
+      },
+      availability,
+      isDbAlreadyWarm: true,
+    });
+
+    expect(result.enable_warmup).toBe(true);
+    expect(result.sharding_mode).toBe("precise");
+    expect(result.db_auto_partition).toBe(true);
+    expect(result.disable_sharding).toBe(false);
+  });
+
+  it("preserves an explicit sharding opt-out", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+    const form = {
+      ...INITIAL,
+      enable_warmup: true,
+      sharding_mode: "off" as const,
+      db_auto_partition: false,
+      disable_sharding: true,
+    };
+
+    const result = reconcileShardingSelection({
+      form,
+      availability,
+      isDbAlreadyWarm: true,
+    });
+
+    expect(result).toBe(form);
+  });
+
+  it("falls back when a selected sharded mode becomes unavailable", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: false,
+      outfmt: 5,
+    });
+
+    const result = reconcileShardingSelection({
+      form: {
+        ...INITIAL,
+        enable_warmup: true,
+        sharding_mode: "precise",
+        db_auto_partition: true,
+        disable_sharding: false,
+      },
+      availability,
+      isDbAlreadyWarm: false,
+    });
+
+    expect(result.sharding_mode).toBe("off");
+    expect(result.db_auto_partition).toBe(false);
+    expect(result.disable_sharding).toBe(false);
   });
 });

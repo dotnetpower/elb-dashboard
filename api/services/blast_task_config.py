@@ -1,4 +1,14 @@
-"""Compatibility wrapper for `api.services.blast.task_config`."""
+"""Compatibility wrapper for `api.services.blast.task_config`.
+
+Responsibility: Compatibility wrapper for `api.services.blast.task_config`
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: Module import side effects and constants.
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from api.services.blast.task_config import (
     WarmupNotReadyError,
@@ -16,6 +26,7 @@ from api.services.blast.task_config import (
     storage_url,
     submit_requires_node_warmup,
     suppress_sharding_for_unsharded_database,
+    validate_storage_blob_reference,
 )
 
 __all__ = [
@@ -34,4 +45,5 @@ __all__ = [
     "storage_url",
     "submit_requires_node_warmup",
     "suppress_sharding_for_unsharded_database",
+    "validate_storage_blob_reference",
 ]

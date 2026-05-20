@@ -1,4 +1,13 @@
-"""Tests for the terminal sidecar entrypoint wiring."""
+"""Tests for the terminal sidecar entrypoint wiring.
+
+Responsibility: Tests for the terminal sidecar entrypoint wiring
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_ttyd_attaches_to_persistent_tmux_session`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_terminal_entrypoint.py`.
+"""
 
 from __future__ import annotations
 

@@ -1,10 +1,16 @@
 """Regression tests for `k8s_release_stale_warmup_jobs`.
 
-After AKS stop/start, succeeded warmup Jobs may still exist but be pinned to
-VMSS node names that no longer belong to the cluster. Because
-`spec.template.spec.nodeName` is immutable, the only way back to a Ready
-state is to delete those Jobs so `k8s_ensure_job_manifests` can recreate
-fresh ones on the current ready nodes.
+Responsibility: Regression tests for `k8s_release_stale_warmup_jobs`
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_make_job`, `_patch_session`,
+`test_release_stale_warmup_jobs_deletes_only_jobs_on_dead_nodes`,
+`test_release_stale_warmup_jobs_keeps_jobs_when_all_nodes_live`,
+`test_release_stale_warmup_jobs_skips_jobs_without_node_pin`,
+`test_release_stale_warmup_jobs_reports_partial_on_delete_error`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_k8s_release_stale_warmup_jobs.py`.
 """
 
 from __future__ import annotations

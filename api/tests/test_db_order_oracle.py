@@ -1,3 +1,17 @@
+"""Tests for database Order Oracle behavior.
+
+Responsibility: Tests for database Order Oracle behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_oracle_blob_paths_are_stable`,
+`test_build_db_order_oracle_job_plan_pins_shards_to_nodes`,
+`test_build_db_order_oracle_job_plan_uses_per_shard_host_paths`,
+`test_build_db_order_oracle_job_plan_rejects_unsafe_inputs`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_db_order_oracle.py`.
+"""
+
 from __future__ import annotations
 
 import pytest

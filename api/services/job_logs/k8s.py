@@ -1,4 +1,14 @@
-"""Kubernetes pod log discovery and follow helpers for BLAST jobs."""
+"""Kubernetes pod log discovery and follow helpers for BLAST jobs.
+
+Responsibility: Kubernetes pod log discovery and follow helpers for BLAST jobs
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `K8sLogTarget`, `elastic_blast_suffix`, `_pod_env_has_value`,
+`discover_k8s_log_targets`, `stream_k8s_log_lines`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 

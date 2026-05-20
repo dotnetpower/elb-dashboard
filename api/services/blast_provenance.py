@@ -1,4 +1,14 @@
-"""BLAST provenance bundle construction."""
+"""BLAST provenance bundle construction.
+
+Responsibility: BLAST provenance bundle construction
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `build_blast_provenance`, `query_sha256`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 

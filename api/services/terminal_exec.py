@@ -1,70 +1,12 @@
-"""terminal_exec — programmatic shell channel into the `terminal` sidecar.
+"""Programmatic shell channel client for the terminal sidecar.
 
-WHEN to reach for this module
------------------------------
-You almost never should. The vast majority of work the control plane does is
-already covered by:
-
-  * `azure.mgmt.*` Python SDKs (loaded directly in the api/worker images via
-    `api.services.azure_clients`) — for ARM operations.
-  * `kubernetes` Python client wrapped by `api.services.monitoring.k8s_*`
-    helpers — for Kubernetes operations (uses the kubeconfig token directly,
-    no `kubectl` process needed).
-  * `azure.storage.blob` SDK in `api.services.storage_data` — for blob
-    upload/list/read.
-  * `azure.data.tables` and `azure.storage.blob` for state — see
-    `api.services.state_repo`.
-
-`terminal_exec` is for the genuinely-shell-only cases:
-
-  * `azcopy` for very large parallel transfers that the SDK cannot match.
-  * `elastic-blast` CLI invocations that the operator currently runs by hand
-    in the browser terminal but that we want to script from a Celery task.
-  * `kubectl exec` into BLAST pods.
-
-Why NOT Run Command
--------------------
-* `ManagedClusters.begin_run_command` and `VirtualMachines.begin_run_command`
-  both take ~30 s for trivial operations (poll-based async ARM endpoint).
-* They are managed by the resource provider, not by us — failures are opaque
-  and rate-limited.
-* They require ARM RBAC writes and audit-log every invocation, which is
-  costly for high-frequency monitoring polls.
-
-The terminal sidecar already ships every CLI we need (`azure-cli`, `kubectl`,
-`azcopy`, `elastic-blast`, `python3.12`, `tmux`, `jq`, `git`, `make`,
-`primer3`, `ttyd`). It runs in the same Container App revision as the api /
-worker / beat sidecars, so loopback (`127.0.0.1`) RPC has zero network cost.
-
-Wire model
-----------
-
-  api / worker sidecar                       terminal sidecar
-  ┌──────────────────┐                     ┌────────────────────────────┐
-  │ terminal_exec    │  POST /exec[/stream]│  exec_server.py            │
-  │ .run() / .stream()├────────────────────►│  (stdlib http.server)      │
-  │                  │ 127.0.0.1:7682      │                            │
-  │ X-Exec-Token: …  │  shared secret  ────►  hmac.compare_digest        │
-  │                  │                     │  argv[0] allowlist         │
-  │                  │                     │  Semaphore(EXEC_MAX_…)     │
-  │                  │                     │  /tmp/exec/<uuid> cwd      │
-  │                  │  JSON / NDJSON ◄────┤  subprocess.Popen          │
-  └──────────────────┘                     └────────────────────────────┘
-
-The shared secret is provisioned by Bicep as a Container Apps secret
-(`exec-token`) and injected into both sidecars via `secretRef`. It rotates
-on every deployment.
-
-Concurrency: the exec server caps in-flight requests at
-``EXEC_MAX_CONCURRENCY`` (default 4). Excess requests are rejected with HTTP
-503 — Celery's task retry policy is the right place to back off.
-
-Output sanitisation: stdout/stderr come back raw from the subprocess.
-``run()`` runs them through ``api.services.sanitise.sanitise`` before
-returning. ``stream()`` yields raw lines (so progress parsers like
-``azcopy --output-type=json`` get the bytes the tool actually produced); the
-caller is responsible for sanitising before forwarding to any HTTP /
-WebSocket boundary.
+Responsibility: Programmatic shell channel client for the terminal sidecar
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `TerminalExecError`, `_upstream`, `_token`, `run`, `stream`, `healthz`
+Risky contracts: `run()` sanitises output; `stream()` yields raw lines that callers must
+sanitise.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -73,7 +15,7 @@ import json
 import logging
 import os
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -223,7 +165,7 @@ def run(
             f"exec server returned {resp.status_code}: {sanitise(resp.text)[:300]}"
         )
 
-    result = resp.json()
+    result: dict[str, Any] = resp.json()
     if "stdout" in result:
         result["stdout"] = sanitise(result["stdout"])
     if "stderr" in result:
@@ -300,4 +242,4 @@ def healthz() -> dict[str, Any]:
         raise TerminalExecError(
             f"exec server /healthz returned {resp.status_code}: {sanitise(resp.text)[:200]}"
         )
-    return resp.json()
+    return cast(dict[str, Any], resp.json())

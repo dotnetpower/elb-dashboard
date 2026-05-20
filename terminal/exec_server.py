@@ -1,48 +1,14 @@
 #!/usr/bin/env python3
-"""Loopback exec server for the `terminal` sidecar.
+"""Loopback exec server for the terminal sidecar.
 
-Listens on ``127.0.0.1:7682`` (configurable via ``EXEC_PORT``). The api /
-worker sidecars in the same Container App revision POST commands here so
-they can run shell-only tooling (``azcopy``, ``kubectl``, ``elastic-blast``,
-``az``) without shipping that toolchain in their own images. Run Command is
-intentionally NOT used — see ``api/services/terminal_exec.py`` for the
-contract and the rationale.
-
-Security model
---------------
-* Bind 127.0.0.1 only — the Container App's public ingress targets the api
-  sidecar, never this port.
-* Caller MUST present ``X-Exec-Token: <secret>``; compared with
-  ``hmac.compare_digest``. The token is provisioned to both sidecars by
-  Bicep (Container Apps secret reference) and rotated on every deployment.
-* ``argv[0]`` is allowlisted against ``ALLOWED_BIN``. Everything else is
-  rejected with HTTP 403.
-* ``subprocess.Popen(argv, shell=False)`` — no shell, no injection.
-* Each request runs in a fresh ``/tmp/exec/<uuid>/`` cwd unless an explicit
-  ``cwd`` is supplied.
-* Concurrent in-flight executions are capped by ``EXEC_MAX_CONCURRENCY``
-  (default 4) so the 0.5 vCPU / 1.0 GiB sidecar cannot be DoS'd.
-
-Endpoints
----------
-* ``GET  /healthz``         — always 200, no auth.
-* ``POST /exec``            — run-and-buffer; returns one JSON object.
-* ``POST /exec/stream``     — run-and-stream; returns JSON Lines, one per
-                              stdout/stderr line, terminated by a summary
-                              line ``{"exit_code": int, "duration_ms": int}``.
-
-Request body (JSON):
-
-    {
-      "argv": ["azcopy", "copy", "src", "dst"],
-      "stdin": "...",                  # optional
-      "cwd": null | "/home/azureuser", # null -> per-request /tmp/exec/<uuid>
-      "timeout_seconds": 60            # capped at MAX_TIMEOUT
-    }
-
-The server never logs the request body or the token. Per-execution audit
-records (one line per request) are written to stderr in JSON for the
-Container Apps log stream.
+Responsibility: Loopback exec server for the terminal sidecar
+Edit boundaries: Keep terminal-side behavior here; api/worker callers should use service
+wrappers.
+Key entry points: `_audit`, `_check_token`, `_validate_argv`, `main`
+Risky contracts: Bind loopback only, require `X-Exec-Token`, use `shell=False`, and kill process
+groups on timeout.
+Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py
+api/tests/test_terminal_command_guard.py`.
 """
 
 from __future__ import annotations

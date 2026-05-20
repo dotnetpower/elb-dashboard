@@ -1,3 +1,19 @@
+"""Tests for Auto Warmup behavior.
+
+Responsibility: Tests for Auto Warmup behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_patch_ready_warmup_nodes`,
+`test_reconcile_auto_warmup_enqueues_downloaded_db`,
+`test_reconcile_auto_warmup_waits_for_all_ready_workload_nodes`,
+`test_reconcile_auto_warmup_enqueues_when_all_ready_workload_nodes`,
+`test_reconcile_auto_warmup_skips_stale_downloaded_generation`,
+`test_reconcile_auto_warmup_reenqueues_stale_warm_generation`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_auto_warmup.py`.
+"""
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor

@@ -38,6 +38,7 @@ import {
 import {
   filterCommonTaxa,
   getCommonTaxon,
+  topCommonTaxa,
   type CommonTaxon,
 } from "@/pages/blastSubmit/taxonomyCommon";
 import { TaxonomyDefaultIcon } from "@/pages/blastSubmit/TaxonomyDefaultIcon";
@@ -146,7 +147,6 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
   const [focused, setFocused] = useState<FocusedCandidate | null>(() =>
     candidateFromInitial(initial),
   );
-  const [isInclusive, setIsInclusive] = useState<boolean>(initial.is_inclusive);
 
   // Reset modal-local state whenever it opens with a possibly-new selection.
   // Depend on primitive fields of `initial` (not the object reference) so
@@ -156,11 +156,16 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
     setSearchText("");
     setSubmittedQuery("");
     setFocused(candidateFromInitial(initial));
-    setIsInclusive(initial.is_inclusive);
     // Focus the search box after the modal mounts.
     queueMicrotask(() => searchInputRef.current?.focus());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, initial.taxid, initial.taxid_label, initial.taxid_rank, initial.is_inclusive]);
+  }, [
+    open,
+    initial.taxid,
+    initial.taxid_label,
+    initial.taxid_rank,
+    initial.is_inclusive,
+  ]);
 
   // Escape closes (cancels) the modal.
   useEffect(() => {
@@ -176,7 +181,8 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
   const query = submittedQuery.trim();
   const searchTooLong = normalisedSearchText.length > MAX_TAXONOMY_QUERY_CHARS;
   const searchTaxidInvalid =
-    /^\d+$/.test(normalisedSearchText) && parsePositiveTaxid(normalisedSearchText) === null;
+    /^\d+$/.test(normalisedSearchText) &&
+    parsePositiveTaxid(normalisedSearchText) === null;
   const searchReady = canSearchTaxonomy(normalisedSearchText);
 
   // Debounced submit of the search text.
@@ -208,6 +214,7 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
     if (!normalisedSearchText) return [];
     return filterCommonTaxa(normalisedSearchText, 6);
   }, [normalisedSearchText]);
+  const popularTaxa = useMemo(() => topCommonTaxa(8), []);
 
   // Merge curated + live results, de-dupe by taxid (curated wins for ordering
   // when both contain the same row). Used for keyboard navigation + display.
@@ -230,6 +237,12 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
     }
     return out;
   }, [localMatches, results]);
+  const searchHasNoMatch =
+    normalisedSearchText.length > 0 &&
+    searchReady &&
+    !searchQuery.isFetching &&
+    searchQuery.isFetched &&
+    mergedResults.length === 0;
 
   // Auto-focus the first merged result once a fresh search lands. Prefer the
   // top curated match when present (it appears first anyway and is the
@@ -237,9 +250,12 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
   useEffect(() => {
     if (mergedResults.length === 0) return;
     setFocused((prev) => {
-      if (prev && mergedResults.some((r) =>
-        (r.kind === "common" ? r.taxon.taxid : r.row.taxid) === prev.taxid,
-      )) {
+      if (
+        prev &&
+        mergedResults.some(
+          (r) => (r.kind === "common" ? r.taxon.taxid : r.row.taxid) === prev.taxid,
+        )
+      ) {
         return prev;
       }
       const first = mergedResults[0];
@@ -298,16 +314,14 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
   const moveFocus = useCallback(
     (delta: 1 | -1) => {
       if (focusableTaxids.length === 0) return;
-      const currentIdx = focused
-        ? focusableTaxids.indexOf(focused.taxid)
-        : -1;
+      const currentIdx = focused ? focusableTaxids.indexOf(focused.taxid) : -1;
       const nextIdx =
         currentIdx === -1
           ? 0
           : (currentIdx + delta + focusableTaxids.length) % focusableTaxids.length;
       const nextTaxid = focusableTaxids[nextIdx];
-      const fromMerged = mergedResults.find((r) =>
-        (r.kind === "common" ? r.taxon.taxid : r.row.taxid) === nextTaxid,
+      const fromMerged = mergedResults.find(
+        (r) => (r.kind === "common" ? r.taxon.taxid : r.row.taxid) === nextTaxid,
       );
       if (fromMerged) {
         setFocused(
@@ -323,24 +337,31 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
     [focusableTaxids, focused, mergedResults, recent.entries],
   );
 
+  const applyCandidate = useCallback(
+    (candidate: FocusedCandidate) => {
+      const value: TaxonomyModalValue = {
+        taxid: String(candidate.taxid),
+        taxid_label: candidate.scientific_name,
+        taxid_rank: candidate.rank ?? "",
+        is_inclusive: initial.is_inclusive,
+      };
+      recent.push({
+        taxid: candidate.taxid,
+        scientific_name: candidate.scientific_name,
+        common_name: candidate.common_name ?? null,
+        rank: candidate.rank ?? null,
+        is_inclusive: initial.is_inclusive,
+      });
+      onApply(value);
+      onClose();
+    },
+    [initial.is_inclusive, onApply, onClose, recent],
+  );
+
   const apply = useCallback(() => {
     if (!focused) return;
-    const value: TaxonomyModalValue = {
-      taxid: String(focused.taxid),
-      taxid_label: focused.scientific_name,
-      taxid_rank: focused.rank ?? "",
-      is_inclusive: isInclusive,
-    };
-    recent.push({
-      taxid: focused.taxid,
-      scientific_name: focused.scientific_name,
-      common_name: focused.common_name ?? null,
-      rank: focused.rank ?? null,
-      is_inclusive: isInclusive,
-    });
-    onApply(value);
-    onClose();
-  }, [focused, isInclusive, onApply, onClose, recent]);
+    applyCandidate(focused);
+  }, [applyCandidate, focused]);
 
   const clearAndClose = useCallback(() => {
     onApply({ taxid: "", taxid_label: "", taxid_rank: "", is_inclusive: true });
@@ -381,9 +402,9 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
         taxid: String(focused.taxid),
         taxid_label: focused.scientific_name,
         taxid_rank: focused.rank ?? "",
-        is_inclusive: isInclusive,
+        is_inclusive: initial.is_inclusive,
       }
-    : { taxid: "", taxid_label: "", taxid_rank: "", is_inclusive: isInclusive };
+    : { taxid: "", taxid_label: "", taxid_rank: "", is_inclusive: initial.is_inclusive };
 
   return (
     <div
@@ -432,7 +453,10 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
                   type="text"
                   className="glass-input taxonomy-modal__search-input"
                   value={searchText}
-                  onChange={(event) => setSearchText(event.target.value)}
+                  onChange={(event) => {
+                    setSearchText(event.target.value);
+                    setFocused(null);
+                  }}
                   onKeyDown={handleSearchKey}
                   placeholder="Search NCBI Taxonomy (e.g. Homo sapiens or 9606)"
                   spellCheck={false}
@@ -474,6 +498,7 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
                   <div className="taxonomy-modal__chips">
                     {recent.entries.map((row) => {
                       const isFocused = focused?.taxid === row.taxid;
+                      const candidate = candidateFromRecent(row);
                       return (
                         <button
                           key={row.taxid}
@@ -481,19 +506,17 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
                           className={`taxonomy-modal__chip${
                             isFocused ? " taxonomy-modal__chip--active" : ""
                           }`}
-                          onClick={() => setFocused(candidateFromRecent(row))}
+                          onClick={() => setFocused(candidate)}
                           onDoubleClick={() => {
-                            setFocused(candidateFromRecent(row));
-                            apply();
+                            setFocused(candidate);
+                            applyCandidate(candidate);
                           }}
                           title={`${row.scientific_name} · taxid ${row.taxid}`}
                         >
                           <span className="taxonomy-modal__chip-name">
                             {row.scientific_name}
                           </span>
-                          <span className="taxonomy-modal__chip-taxid">
-                            {row.taxid}
-                          </span>
+                          <span className="taxonomy-modal__chip-taxid">{row.taxid}</span>
                         </button>
                       );
                     })}
@@ -541,23 +564,19 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
                         row.kind === "common"
                           ? row.taxon.common_name
                           : row.row.common_name;
-                      const rank =
-                        row.kind === "common" ? row.taxon.rank : row.row.rank;
+                      const rank = row.kind === "common" ? row.taxon.rank : row.row.rank;
                       const meta =
                         row.kind === "common"
                           ? rank
                           : `${rank}${row.row.division ? ` · ${row.row.division}` : ""}`;
                       const isCommon =
-                        row.kind === "common" ||
-                        getCommonTaxon(row.row.taxid) !== null;
+                        row.kind === "common" || getCommonTaxon(row.row.taxid) !== null;
                       const isFocused = focused?.taxid === taxid;
-                      const pick = () => {
-                        if (row.kind === "common") {
-                          setFocused(candidateFromCommon(row.taxon));
-                        } else {
-                          setFocused(candidateFromResult(row.row));
-                        }
-                      };
+                      const candidate =
+                        row.kind === "common"
+                          ? candidateFromCommon(row.taxon)
+                          : candidateFromResult(row.row);
+                      const pick = () => setFocused(candidate);
                       return (
                         <li key={`${row.kind}-${taxid}`}>
                           <button
@@ -570,7 +589,7 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
                             onClick={pick}
                             onDoubleClick={() => {
                               pick();
-                              apply();
+                              applyCandidate(candidate);
                             }}
                           >
                             <span
@@ -595,9 +614,7 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
                                 )}
                               </span>
                             </span>
-                            <span className="taxonomy-modal__result-taxid">
-                              {taxid}
-                            </span>
+                            <span className="taxonomy-modal__result-taxid">{taxid}</span>
                           </button>
                         </li>
                       );
@@ -606,22 +623,56 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
                 </div>
               )}
 
-              {normalisedSearchText &&
-                mergedResults.length === 0 &&
-                !searchQuery.isFetching && (
-                  <div className="taxonomy-modal__muted">
-                    No taxa found for &ldquo;{normalisedSearchText}&rdquo;.
-                  </div>
-                )}
+              {searchHasNoMatch && (
+                <div className="taxonomy-modal__error" role="alert">
+                  <AlertTriangle size={13} strokeWidth={1.6} />
+                  No valid taxonomy match found for &ldquo;{normalisedSearchText}&rdquo;.
+                </div>
+              )}
 
               {!normalisedSearchText && recent.entries.length === 0 && (
-                <div className="taxonomy-modal__muted">
-                  Start typing an organism name or NCBI taxid above.
+                <div className="taxonomy-modal__section taxonomy-modal__popular">
+                  <div className="taxonomy-modal__section-head">
+                    <span>Popular</span>
+                    <span className="taxonomy-modal__footer-recent">Quick pick</span>
+                  </div>
+                  <div className="taxonomy-modal__chips">
+                    {popularTaxa.map((taxon) => {
+                      const isFocused = focused?.taxid === taxon.taxid;
+                      const candidate = candidateFromCommon(taxon);
+                      const pick = () => setFocused(candidate);
+                      return (
+                        <button
+                          key={taxon.taxid}
+                          type="button"
+                          className={`taxonomy-modal__chip${
+                            isFocused ? " taxonomy-modal__chip--active" : ""
+                          }`}
+                          onClick={pick}
+                          onDoubleClick={() => {
+                            pick();
+                            applyCandidate(candidate);
+                          }}
+                          title={`${taxon.scientific_name} · taxid ${taxon.taxid}`}
+                        >
+                          <span className="taxonomy-modal__chip-name">
+                            {taxon.common_name ?? taxon.scientific_name}
+                          </span>
+                          <span className="taxonomy-modal__chip-taxid">
+                            {taxon.taxid}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="taxonomy-modal__muted">
+                    Search an organism name or NCBI taxid to find more taxa.
+                  </div>
                 </div>
               )}
             </div>
 
-            {/* ── Column 2: text detail + filter mode ── */}
+            {/* ── Column 2: text detail ── */}
             <div className="taxonomy-modal__right">
               <TaxonomyDetailPanel
                 focused={focused}
@@ -634,42 +685,6 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
                 siblings={treeQuery.data?.siblings}
                 siblingsLoading={treeQuery.isLoading}
               />
-
-              <div className="taxonomy-modal__mode">
-                <div className="taxonomy-modal__section-head">
-                  <span>Filter mode</span>
-                </div>
-                <div
-                  className="taxonomy-modal__segmented"
-                  role="group"
-                  aria-label="Taxonomy filter mode"
-                >
-                  <button
-                    type="button"
-                    className={`taxonomy-modal__segment${
-                      isInclusive ? " taxonomy-modal__segment--active" : ""
-                    }`}
-                    onClick={() => setIsInclusive(true)}
-                    aria-pressed={isInclusive}
-                  >
-                    Include only this taxon
-                  </button>
-                  <button
-                    type="button"
-                    className={`taxonomy-modal__segment${
-                      !isInclusive ? " taxonomy-modal__segment--active" : ""
-                    }`}
-                    onClick={() => setIsInclusive(false)}
-                    aria-pressed={!isInclusive}
-                  >
-                    Exclude this taxon
-                  </button>
-                </div>
-                <div className="taxonomy-modal__note">
-                  <AlertTriangle size={12} strokeWidth={1.6} />
-                  Requires the selected BLAST database to include taxonomy metadata.
-                </div>
-              </div>
             </div>
 
             {/* ── Column 3: image preview ── */}
@@ -689,9 +704,7 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
         <footer className="taxonomy-modal__footer">
           <div className="taxonomy-modal__footer-meta">
             Preview:{" "}
-            <span className="taxonomy-modal__command">
-              {previewCommand(detailValue)}
-            </span>
+            <span className="taxonomy-modal__command">{previewCommand(detailValue)}</span>
             <span className="taxonomy-modal__footer-recent">
               {recent.entries.length}/{RECENT_TAXONOMY_MAX_ENTRIES} recent
             </span>
@@ -705,11 +718,7 @@ export function TaxonomyModal({ open, initial, onApply, onClose }: TaxonomyModal
             >
               Clear filter
             </button>
-            <button
-              type="button"
-              className="glass-button"
-              onClick={onClose}
-            >
+            <button type="button" className="glass-button" onClick={onClose}>
               Cancel
             </button>
             <button
@@ -734,11 +743,7 @@ interface ImagePanelProps {
   imageLoading: boolean;
 }
 
-function TaxonomyImagePanel({
-  focused,
-  image,
-  imageLoading,
-}: ImagePanelProps) {
+function TaxonomyImagePanel({ focused, image, imageLoading }: ImagePanelProps) {
   if (!focused) {
     return (
       <div className="taxonomy-modal__image taxonomy-modal__image--empty">
@@ -834,9 +839,7 @@ function TaxonomyDetailPanel({
   return (
     <div className="taxonomy-modal__detail">
       <div className="taxonomy-modal__detail-head">
-        <div className="taxonomy-modal__detail-name">
-          {focused.scientific_name}
-        </div>
+        <div className="taxonomy-modal__detail-name">{focused.scientific_name}</div>
         <div className="taxonomy-modal__detail-sub">
           {focused.common_name ? `Common: ${focused.common_name} · ` : ""}
           taxid {focused.taxid}
@@ -866,52 +869,48 @@ function TaxonomyDetailPanel({
             siblingsLoading={siblingsLoading}
           />
           <dl className="taxonomy-modal__detail-grid">
-          {detail.parent_taxid !== null && (
-            <>
-              <dt>Parent</dt>
-              <dd className="taxonomy-modal__detail-mono">
-                taxid {detail.parent_taxid}
-              </dd>
-            </>
-          )}
-          {detail.authority && (
-            <>
-              <dt>Authority</dt>
-              <dd>{detail.authority}</dd>
-            </>
-          )}
-          {synonyms.length > 0 && (
-            <>
-              <dt>Synonyms</dt>
-              <dd>{synonyms.join(", ")}</dd>
-            </>
-          )}
-          {equivalentNames.length > 0 && (
-            <>
-              <dt>Also known as</dt>
-              <dd>{equivalentNames.join(", ")}</dd>
-            </>
-          )}
-          {detail.genetic_code && (
-            <>
-              <dt>Genetic code</dt>
-              <dd>
-                {detail.genetic_code}
-                {detail.mito_genetic_code
-                  ? ` · mito: ${detail.mito_genetic_code}`
-                  : ""}
-              </dd>
-            </>
-          )}
-          {detail.update_date && (
-            <>
-              <dt>Updated</dt>
-              <dd className="taxonomy-modal__detail-mono">
-                {detail.update_date}
-              </dd>
-            </>
-          )}
-        </dl>
+            {detail.parent_taxid !== null && (
+              <>
+                <dt>Parent</dt>
+                <dd className="taxonomy-modal__detail-mono">
+                  taxid {detail.parent_taxid}
+                </dd>
+              </>
+            )}
+            {detail.authority && (
+              <>
+                <dt>Authority</dt>
+                <dd>{detail.authority}</dd>
+              </>
+            )}
+            {synonyms.length > 0 && (
+              <>
+                <dt>Synonyms</dt>
+                <dd>{synonyms.join(", ")}</dd>
+              </>
+            )}
+            {equivalentNames.length > 0 && (
+              <>
+                <dt>Also known as</dt>
+                <dd>{equivalentNames.join(", ")}</dd>
+              </>
+            )}
+            {detail.genetic_code && (
+              <>
+                <dt>Genetic code</dt>
+                <dd>
+                  {detail.genetic_code}
+                  {detail.mito_genetic_code ? ` · mito: ${detail.mito_genetic_code}` : ""}
+                </dd>
+              </>
+            )}
+            {detail.update_date && (
+              <>
+                <dt>Updated</dt>
+                <dd className="taxonomy-modal__detail-mono">{detail.update_date}</dd>
+              </>
+            )}
+          </dl>
         </>
       )}
     </div>

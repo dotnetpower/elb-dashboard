@@ -1,4 +1,15 @@
-"""/api/blast submit and pending lab-tool routes."""
+"""BLAST submit route and payload validation controller.
+
+Responsibility: BLAST submit route and payload validation controller
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_submit_job_id`, `_submit_response`, `_validate_submit_contracts`,
+`blast_submit`, `blast_job_submit`, `blast_submit_status`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 
@@ -270,6 +281,18 @@ def blast_submit(
             caller_oid=caller.object_id,
             caller_tenant_id=caller.tenant_id,
         )
+        task_id = str(getattr(result, "id", "") or "")
+        if repo is not None and task_id:
+            try:
+                repo.update(job_id, task_id=task_id)
+                _reset_jobs_list_cache()
+            except Exception as exc:
+                LOGGER.warning(
+                    "submit task id persist failed job_id=%s task_id=%s: %s",
+                    job_id,
+                    task_id,
+                    type(exc).__name__,
+                )
     except HTTPException as exc:
         # Broker was unreachable. The Table row we just wrote would
         # otherwise sit stuck on `queued` forever — mark it as failed so

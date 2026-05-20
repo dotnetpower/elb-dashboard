@@ -15,7 +15,7 @@ export function DashboardGrid({ config }: DashboardGridProps) {
   const terminalEnabled = isFeatureEnabled("terminal");
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div className="dashboard-workspace">
       {/*
         ClusterCard now owns its own row.  The bento layout inside has
         7 cells across 3 columns plus a 4-row activity rail; squeezing
@@ -24,37 +24,64 @@ export function DashboardGrid({ config }: DashboardGridProps) {
         in the dense grid below — they each carry far less data per
         card.
       */}
-      <ClusterCard
-        subscriptionId={config.subscriptionId}
-        resourceGroup={config.workloadResourceGroup}
-        region={config.region}
-        acrResourceGroup={config.acrResourceGroup}
-        acrName={config.acrName}
-        storageResourceGroup={config.workloadResourceGroup}
-        storageAccount={config.storageAccountName}
-        terminalResourceGroup={config.terminalResourceGroup}
-        terminalVmName={config.terminalVmName}
-      />
-
-      <div className="dashboard-grid">
-        <AcrCard
-          subscriptionId={config.subscriptionId}
-          resourceGroup={config.acrResourceGroup}
-          registryName={config.acrName}
-        />
-        <StorageCard
+      <section
+        className="dashboard-workspace__section dashboard-workspace__section--cluster"
+        aria-label="Cluster overview"
+      >
+        <div className="dashboard-section-label">
+          <span className="dashboard-section-label__dot dashboard-section-label__dot--cluster" />
+          Cluster plane
+        </div>
+        <ClusterCard
           subscriptionId={config.subscriptionId}
           resourceGroup={config.workloadResourceGroup}
-          accountName={config.storageAccountName}
-          clusterName="elb-cluster"
+          region={config.region}
+          acrResourceGroup={config.acrResourceGroup}
           acrName={config.acrName}
+          storageResourceGroup={config.workloadResourceGroup}
+          storageAccount={config.storageAccountName}
+          terminalResourceGroup={config.terminalResourceGroup}
+          terminalVmName={config.terminalVmName}
         />
-        {terminalEnabled && <TerminalCard />}
-      </div>
+      </section>
 
-      <SidecarsCard />
+      <section className="dashboard-workspace__section" aria-label="Resource plane">
+        <div className="dashboard-section-label">
+          <span className="dashboard-section-label__dot dashboard-section-label__dot--resource" />
+          Resource plane
+        </div>
+        <div className="dashboard-grid dashboard-grid--resources">
+          <AcrCard
+            subscriptionId={config.subscriptionId}
+            resourceGroup={config.acrResourceGroup}
+            registryName={config.acrName}
+          />
+          <StorageCard
+            subscriptionId={config.subscriptionId}
+            resourceGroup={config.workloadResourceGroup}
+            accountName={config.storageAccountName}
+            clusterName="elb-cluster"
+            acrName={config.acrName}
+          />
+          {terminalEnabled && <TerminalCard />}
+        </div>
+      </section>
 
-      <JobCard />
+      <section className="dashboard-workspace__section" aria-label="Sidecar runtime">
+        <div className="dashboard-section-label">
+          <span className="dashboard-section-label__dot dashboard-section-label__dot--runtime" />
+          Sidecar runtime
+        </div>
+        <SidecarsCard />
+      </section>
+
+      <section className="dashboard-workspace__section" aria-label="BLAST jobs">
+        <div className="dashboard-section-label">
+          <span className="dashboard-section-label__dot dashboard-section-label__dot--jobs" />
+          BLAST jobs
+        </div>
+        <JobCard />
+      </section>
     </div>
   );
 }

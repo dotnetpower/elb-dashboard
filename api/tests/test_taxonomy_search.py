@@ -1,3 +1,17 @@
+"""Tests for Taxonomy Search behavior.
+
+Responsibility: Tests for Taxonomy Search behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_summary_payload`, `test_taxonomy_search_name_uses_eutils_and_caches`,
+`test_taxonomy_search_numeric_taxid_skips_esearch`,
+`test_taxonomy_search_rejects_invalid_query`,
+`test_taxonomy_search_rejects_invalid_numeric_taxid`, `test_taxonomy_search_rejects_bool_limit`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_taxonomy_search.py`.
+"""
+
 from __future__ import annotations
 
 from fastapi.testclient import TestClient

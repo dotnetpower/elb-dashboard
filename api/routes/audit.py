@@ -1,4 +1,13 @@
-"""``/api/audit/log`` — best-effort read from the jobhistory table."""
+"""/api/audit/log`` - best-effort read from the jobhistory table.
+
+Responsibility: /api/audit/log`` - best-effort read from the jobhistory table
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `audit_log`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 

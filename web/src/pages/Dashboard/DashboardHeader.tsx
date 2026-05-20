@@ -1,8 +1,4 @@
-import {
-  HelpCircle,
-  LayoutGrid,
-  Settings as SettingsIcon,
-} from "lucide-react";
+import { HelpCircle, LayoutGrid, Settings as SettingsIcon } from "lucide-react";
 
 import { armProxyApi } from "@/api/endpoints";
 import { ResourcePicker } from "@/components/ResourcePicker";
@@ -27,45 +23,22 @@ export function DashboardHeader({
   onOpenSettings,
 }: DashboardHeaderProps) {
   return (
-    <header
-      className="page-header"
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        marginBottom: 0,
-      }}
-    >
-      {/* Row 1 — title (left) + workspace + auto-refresh + buttons (right). */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-          flexWrap: "wrap",
-        }}
-      >
-        <div
-          className="page-header__title"
-          style={{ display: "flex", alignItems: "center", gap: 10 }}
-        >
-          <LayoutGrid
-            size={22}
-            strokeWidth={1.5}
-            style={{ color: "var(--accent)" }}
-          />
-          ElasticBLAST Dashboard
+    <header className="dashboard-hero" aria-label="Dashboard overview">
+      <div className="dashboard-hero__topline">
+        <div className="dashboard-hero__title-group">
+          <span className="dashboard-hero__mark" aria-hidden="true">
+            <LayoutGrid size={22} strokeWidth={1.5} />
+          </span>
+          <div>
+            <h1 className="dashboard-hero__title">ElasticBLAST Dashboard</h1>
+            <p className="dashboard-hero__subtitle">
+              Live workspace control for clusters, registries, storage, terminal, and
+              BLAST jobs.
+            </p>
+          </div>
         </div>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            flexWrap: "wrap",
-            justifyContent: "flex-end",
-          }}
-        >
+
+        <div className="dashboard-hero__controls">
           <SubscriptionPicker
             value={config.subscriptionId}
             onChange={(id) => {
@@ -83,15 +56,10 @@ export function DashboardHeader({
               const next = { ...config, workloadResourceGroup: v };
               if (config.subscriptionId && v) {
                 try {
-                  const { tags } = await armProxyApi.getRgTags(
-                    config.subscriptionId,
-                    v,
-                  );
-                  if (tags["elb-acr-rg"])
-                    next.acrResourceGroup = tags["elb-acr-rg"];
+                  const { tags } = await armProxyApi.getRgTags(config.subscriptionId, v);
+                  if (tags["elb-acr-rg"]) next.acrResourceGroup = tags["elb-acr-rg"];
                   if (tags["elb-acr"]) next.acrName = tags["elb-acr"];
-                  if (tags["elb-storage"])
-                    next.storageAccountName = tags["elb-storage"];
+                  if (tags["elb-storage"]) next.storageAccountName = tags["elb-storage"];
                   if (tags["elb-terminal-rg"])
                     next.terminalResourceGroup = tags["elb-terminal-rg"];
                   if (tags["elb-terminal-vm"])
@@ -114,15 +82,11 @@ export function DashboardHeader({
                     );
                     const items = groups.map((g) => {
                       const tags = g.tags ?? {};
-                      const isElb = Object.keys(tags).some((k) =>
-                        k.startsWith("elb-"),
-                      );
+                      const isElb = Object.keys(tags).some((k) => k.startsWith("elb-"));
                       return {
                         value: g.name,
                         label: g.name,
-                        description: isElb
-                          ? g.location
-                          : `${g.location} · no elb-* tag`,
+                        description: isElb ? g.location : `${g.location} · no elb-* tag`,
                         disabled: !isElb,
                       };
                     });
@@ -162,11 +126,6 @@ export function DashboardHeader({
             <SettingsIcon size={14} strokeWidth={1.5} />
           </button>
         </div>
-      </div>
-      {/* Row 2 — description (full width, doesn't compete with controls). */}
-      <div className="page-header__desc" style={{ marginTop: 0 }}>
-        Live view of your BLAST workspace — clusters, registries, storage, and
-        terminal health.
       </div>
     </header>
   );

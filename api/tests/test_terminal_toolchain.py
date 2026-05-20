@@ -1,4 +1,15 @@
-"""Static contract tests for the terminal sidecar toolchain."""
+"""Static contract tests for the terminal sidecar toolchain.
+
+Responsibility: Static contract tests for the terminal sidecar toolchain
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_terminal_dockerfile_installs_linux_and_sequence_tools`,
+`test_tool_versions_script_reports_expected_tools`,
+`test_terminal_manual_covers_beginner_and_bioinformatics_workflows`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py`.
+"""
 
 from __future__ import annotations
 

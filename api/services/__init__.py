@@ -1,36 +1,31 @@
-"""api.services — Azure SDK wrappers used by the api / worker / beat sidecars.
+"""Service-layer facade and shared Azure credential provider.
 
-This package is the **only** place in the active codebase that imports from
-`azure.mgmt.*`, `azure.identity`, `azure.storage.blob`, `azure.data.tables`,
-`azure.keyvault.*`, or `kubernetes`. Routes (`api.routes.*`) and Celery tasks
-(`api.tasks.*`) MUST go through these wrappers so that:
-
-  * Credential acquisition is centralised on `get_credential()` below
-    (DefaultAzureCredential bound to the shared user-assigned MI
-    `id-elb-control` in production).
-  * Output sanitisation (`api.services.sanitise.sanitise`) wraps every value
-    that crosses the HTTP / WebSocket / log boundary.
-  * Storage policy is enforced in one place (see `storage_data.py` for the
-    SAS-issuer ban — `.github/copilot-instructions.md` §9).
-
-Modules: aks_skus, azure_clients, blast_config, image_tags, keyvault,
-monitoring, network, passwords, sanitise, state_repo, storage_data,
-terminal_exec.
+Responsibility: Service-layer facade and shared Azure credential provider
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `get_credential`, `reset_credential`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from azure.identity import DefaultAzureCredential
 
 # Module-level singleton credential. DefaultAzureCredential is thread-safe and
 # does its own internal token caching across the chain (managed identity →
 # environment → az CLI → …) so creating multiple instances wastes both the
 # instantiation cost and the per-instance token caches.
-_CREDENTIAL: object | None = None
+_CREDENTIAL: DefaultAzureCredential | None = None
 _CREDENTIAL_LOCK = threading.Lock()
 
 
-def get_credential():
+def get_credential() -> DefaultAzureCredential:
     """Return the singleton DefaultAzureCredential.
 
     In Container Apps this resolves to the shared user-assigned MI

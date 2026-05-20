@@ -61,9 +61,7 @@ export function ClusterItem({
   const trans = transitioning.get(c.name);
   const isTransitioning = transitioning.has(c.name);
   const showOperationalDetails = isRunning && !isTransitioning;
-  const [transitionStartedAt, setTransitionStartedAt] = useState<number | null>(
-    null,
-  );
+  const [transitionStartedAt, setTransitionStartedAt] = useState<number | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
 
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
@@ -163,13 +161,13 @@ export function ClusterItem({
 
   const expansionExtras =
     showOperationalDetails &&
-    ((dbChips.length > 0 || dbListDegraded) || trans === "starting") ? (
+    (dbChips.length > 0 || dbListDegraded || trans === "starting") ? (
       <div
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: 10,
-          padding: "10px 0 2px 0",
+          gap: 6,
+          padding: "6px 0 0 0",
         }}
       >
         {trans === "starting" && (

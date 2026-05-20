@@ -1,3 +1,18 @@
+"""Tests for Sharded Merge behavior.
+
+Responsibility: Tests for Sharded Merge behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_blast_xml`, `test_merge_sharded_results_respects_top_n_and_report`,
+`test_merge_sharded_results_reports_ties`,
+`test_merge_sharded_results_reports_tie_cutoff_overflow`,
+`test_merge_sharded_results_uses_tie_order_oracle`,
+`test_merge_sharded_results_strict_oracle_excludes_non_oracle_hits`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_sharded_merge.py`.
+"""
+
 from __future__ import annotations
 
 import gzip

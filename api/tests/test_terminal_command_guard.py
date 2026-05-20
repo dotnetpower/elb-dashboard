@@ -1,4 +1,15 @@
-"""Tests for the interactive terminal shell command guard."""
+"""Tests for the interactive terminal shell command guard.
+
+Responsibility: Tests for the interactive terminal shell command guard
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_guard_check`, `test_guard_trap_blocks_before_execution`,
+`test_guard_allows_non_destructive_rm`, `test_guard_blocks_recursive_home_delete`,
+`test_guard_blocks_recursive_workspace_wipe`, `test_guard_blocks_azure_delete_operations`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_terminal_command_guard.py`.
+"""
 
 from __future__ import annotations
 

@@ -2,9 +2,11 @@
 # ruff: noqa: E501
 """Evaluate candidate tie-order keys for Web BLAST equivalence evidence.
 
-This is an offline diagnostic helper. It never changes BLAST output; it records
-which deterministic keys can or cannot explain Web BLAST's ordering through a
-large tied score class.
+Responsibility: Evaluate candidate tie-order keys for Web BLAST equivalence evidence
+Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
+Key entry points: `Candidate`, `_read_candidates`, `_with_metadata`, `main`
+Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Validation: `uv run python scripts/dev/infer-blast-tie-order.py --help`.
 """
 
 from __future__ import annotations

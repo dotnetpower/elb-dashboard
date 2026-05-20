@@ -1,4 +1,14 @@
-"""Client for the sibling ElasticBLAST OpenAPI execution plane."""
+"""Client for the sibling ElasticBLAST OpenAPI execution plane.
+
+Responsibility: Client for the sibling ElasticBLAST OpenAPI execution plane
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `DownloadedFile`, `StreamedFile`, `_base_url`, `submit_job`, `get_job`,
+`list_jobs`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +16,7 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -55,6 +65,10 @@ def _base_url(value: str | None = None) -> str:
 def _headers(*, api_token: str | None = None, internal_token: str | None = None) -> dict[str, str]:
     headers = {"Accept": "application/json"}
     api_token = (api_token or os.environ.get(_API_AUTH_ENV, "")).strip()
+    if not api_token:
+        from api.services.openapi_runtime import get_openapi_api_token
+
+        api_token = get_openapi_api_token()
     if api_token:
         headers["X-ELB-API-Token"] = api_token
     token = (internal_token or os.environ.get(_INTERNAL_AUTH_ENV, "")).strip()
@@ -117,7 +131,7 @@ def submit_job(
                 503,
                 detail={"code": "openapi_unreachable", "message": str(exc)[:300]},
             ) from exc
-        return resp.json()
+        return cast(dict[str, Any], resp.json())
 
 
 def get_job(
@@ -141,7 +155,7 @@ def get_job(
                 503,
                 detail={"code": "openapi_unreachable", "message": str(exc)[:300]},
             ) from exc
-        return resp.json()
+        return cast(dict[str, Any], resp.json())
 
 
 def list_jobs(*, base_url: str | None = None, api_token: str | None = None) -> dict[str, Any]:
@@ -167,7 +181,7 @@ def list_jobs(*, base_url: str | None = None, api_token: str | None = None) -> d
                 503,
                 detail={"code": "openapi_unreachable", "message": str(exc)[:300]},
             ) from exc
-        return resp.json()
+        return cast(dict[str, Any], resp.json())
 
 
 def download_file(

@@ -1,8 +1,15 @@
 """Integration tests for /api/blast/databases warmup_plan enrichment.
 
-Mocks the storage list_databases call so we do not touch Azure, then
-verifies the planner output is attached when (and only when) the SPA
-supplies cluster topology.
+Responsibility: Integration tests for /api/blast/databases warmup_plan enrichment
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `client`, `fake_list_databases`, `test_no_cluster_params_omits_warmup_plan`,
+`test_partial_cluster_params_omits_warmup_plan`,
+`test_warmup_plan_attached_when_cluster_supplied`,
+`test_negative_num_nodes_rejected_by_query_validation`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_databases_warmup_plan.py`.
 """
 
 from __future__ import annotations

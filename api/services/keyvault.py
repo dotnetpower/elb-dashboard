@@ -1,16 +1,13 @@
 """Key Vault secret helpers.
 
-Supports two permission models on the existing vault:
-
-* **Access policies** — preferred. Function App MI gets ``set/get/list/delete``
-  on secrets via an additive ``update_access_policy`` call (idempotent, never
-  re-PUTs the vault).
-* **RBAC authorization** — common when subscription Azure Policy forces it on
-  every new vault. We do NOT try to flip the permission model (that requires
-  ``Microsoft.Authorization/roleAssignments/write`` which the MI lacks under
-  Contributor); instead we best-effort grant the MI the
-  ``Key Vault Secrets Officer`` role on the vault scope, and log a clear
-  manual command when the MI cannot self-grant.
+Responsibility: Key Vault secret helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_get_oid_from_credential`, `_get_existing_vault`, `_build_access_policies`,
+`ensure_keyvault`, `store_secret`, `get_secret`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -19,6 +16,7 @@ import base64
 import json
 import logging
 import time
+from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
 
@@ -40,13 +38,13 @@ def _get_oid_from_credential(credential: TokenCredential) -> str:
         payload_b64 = token.token.split(".")[1]
         payload_b64 += "=" * (4 - len(payload_b64) % 4)
         claims = json.loads(base64.urlsafe_b64decode(payload_b64))
-        return claims.get("oid", "")
+        return cast(str, claims.get("oid", ""))
     except Exception as exc:
         LOGGER.warning("Could not extract OID from credential token: %s", exc)
         return ""
 
 
-def _get_existing_vault(client, resource_group: str, vault_name: str):
+def _get_existing_vault(client: Any, resource_group: str, vault_name: str) -> Any:
     """Return the vault object if it exists, else None."""
     from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 
@@ -62,9 +60,9 @@ def _build_access_policies(
     tenant_id: str,
     mi_oid: str,
     caller_oid: str = "",
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Build access policy entries for the MI and optionally the caller."""
-    policies: list[dict] = []
+    policies: list[dict[str, Any]] = []
     if mi_oid:
         policies.append(
             {
@@ -85,10 +83,10 @@ def _build_access_policies(
 
 
 def _ensure_vault_config(
-    client,
+    client: Any,
     resource_group: str,
     vault_name: str,
-    existing,
+    existing: Any,
     tenant_id: str,
     mi_oid: str,
     caller_oid: str = "",
@@ -256,7 +254,7 @@ def ensure_keyvault(
                 f"/providers/Microsoft.KeyVault/vaults/{vault_name}"
             )
             _try_assign_secrets_officer(credential, subscription_id, vault_id, mi_oid, caller_oid)
-        return existing.properties.vault_uri
+        return cast(str, existing.properties.vault_uri)
 
     access_policies = _build_access_policies(tenant_id, mi_oid, caller_oid)
     poller = client.vaults.begin_create_or_update(
@@ -292,7 +290,7 @@ def ensure_keyvault(
         )
         _try_assign_secrets_officer(credential, subscription_id, vault.id, mi_oid, caller_oid)
 
-    return vault_uri
+    return cast(str, vault_uri)
 
 
 def store_secret(

@@ -1,3 +1,13 @@
+"""Development script for ncbi-searchsp-discovery.
+
+Responsibility: Development script for ncbi-searchsp-discovery
+Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
+Key entry points: `parse_rows`, `parse_stats`, `submit_to_blastalign`, `fetch_xml`, `run_local`,
+`infer_searchsp`
+Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Validation: `uv run python scripts/dev/ncbi-searchsp-discovery.py --help`.
+"""
+
 from __future__ import annotations
 
 import argparse

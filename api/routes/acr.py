@@ -1,4 +1,13 @@
-"""``/api/acr/*`` — ACR image build."""
+"""/api/acr/*`` - ACR image build.
+
+Responsibility: /api/acr/*`` - ACR image build
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `acr_build_images`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 

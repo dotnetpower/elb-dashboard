@@ -86,7 +86,6 @@ export function useClusterHealth(
     provisioningBusy,
     cpuPct,
     memPct,
-    apiP95,
     apiErrors,
     jobsDegraded,
     metricsDegraded,

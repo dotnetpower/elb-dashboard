@@ -1,14 +1,13 @@
 """Best-effort thumbnail lookup for an organism scientific name.
 
-Calls Wikipedia's REST page-summary endpoint with the *scientific name*
-slugged into the URL path. The endpoint is well-known and serves CC
-licensed thumbnails when available. The lookup is deliberately
-SSRF-locked (hardcoded base URL, strict input sanitisation, single path
-segment) and never raises on upstream failure — it returns
-``image_url=None`` so the dashboard can render a default icon.
-
-All callers go through `fetch_taxonomy_image` which caches both hits
-and misses for 24 h to keep NCBI/Wiki request budgets predictable.
+Responsibility: Best-effort thumbnail lookup for an organism scientific name
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `TaxonomyImageUnavailable`, `fetch_taxonomy_image`,
+`clear_taxonomy_image_cache`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

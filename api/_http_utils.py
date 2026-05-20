@@ -1,8 +1,11 @@
-"""Shared HTTP boundary helpers — request/response models, error formatting,
-body-size guard, idempotency-key support, and capacity pre-checks.
+"""Shared HTTP boundary helpers - request/response models, error formatting,.
 
-Every mutation POST endpoint MUST use a Pydantic model from this module
-(or a typed sub-model) instead of raw ``dict[str, Any]``.
+Responsibility: Shared HTTP boundary helpers - request/response models, error formatting,
+Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Key entry points: `_validate_azure_name`, `_validate_subscription_id`, `BlastSubmitRequest`,
+`AksProvisionRequest`, `AksLifecycleRequest`, `AcrBuildRequest`
+Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Validators
@@ -61,6 +64,24 @@ class BlastSubmitRequest(BaseModel):
     @classmethod
     def check_cluster_name(cls, v: str) -> str:
         return _validate_azure_name(v, "cluster_name")
+
+    @model_validator(mode="after")
+    def check_storage_blob_urls(self) -> BlastSubmitRequest:
+        from api.services.blast_task_config import validate_storage_blob_reference
+
+        validate_storage_blob_reference(
+            storage_account=self.storage_account,
+            value=self.database,
+            label="database",
+            expected_container="blast-db",
+        )
+        validate_storage_blob_reference(
+            storage_account=self.storage_account,
+            value=self.query_file,
+            label="query_file",
+            expected_container="queries",
+        )
+        return self
 
 
 # ---------------------------------------------------------------------------

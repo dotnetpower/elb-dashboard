@@ -1,8 +1,13 @@
 """Build query grouping plans for future mixed-search-space precise sharding.
 
-This module is intentionally pure: it does not upload blobs, enqueue Celery
-tasks, or call ElasticBLAST. It prepares the validated per-group FASTA payloads
-and options that a future split dispatcher can execute.
+Responsibility: Build query grouping plans for future mixed-search-space precise sharding
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `QueryGroupPlanItem`, `QueryGroupPlan`, `QuerySplitExecutionItem`,
+`QuerySplitExecutionPlan`, `build_query_group_plan`, `materialize_group_fasta`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

@@ -1,4 +1,13 @@
-"""Cryptographically strong password generator for VM admin accounts."""
+"""Cryptographically strong password generator for VM admin accounts.
+
+Responsibility: Cryptographically strong password generator for VM admin accounts
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `generate_admin_password`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 

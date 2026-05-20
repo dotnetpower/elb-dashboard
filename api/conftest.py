@@ -1,6 +1,14 @@
-"""pytest configuration for api/."""
+"""pytest configuration for api/.
+
+Responsibility: pytest configuration for api/
+Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Key entry points: `_reset_external_jobs_cache`
+Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 import sys
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -11,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 
 @pytest.fixture(autouse=True)
-def _reset_external_jobs_cache():
+def _reset_external_jobs_cache() -> Generator[None, None, None]:
     """Clear the in-memory external-OpenAPI jobs cache between every test.
 
     Without this, a test that mocks ``external_blast.list_jobs`` with one

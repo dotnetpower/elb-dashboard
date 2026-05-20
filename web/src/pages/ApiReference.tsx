@@ -9,10 +9,15 @@ import { OpenApiDeployPanel } from "@/components/OpenApiDeployPanel";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { ApiHero } from "@/pages/apiReference/ApiHero";
 import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
+import { ApiTokenPanel } from "@/pages/apiReference/ApiTokenPanel";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { parseSpec } from "@/pages/apiReference/spec";
 import { TagSection } from "@/pages/apiReference/TagSection";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
+
+function normaliseImageTag(value: string): string {
+  return value.trim().replace(/^v/i, "");
+}
 
 export function ApiReference() {
   const [savedConfig] = useState(() => loadSavedConfig());
@@ -58,6 +63,14 @@ export function ApiReference() {
     queryFn: () => aksApi.proxyOpenApiSpec(sub, rg, clusterName),
     enabled: Boolean(baseUrl),
     staleTime: 60_000,
+  });
+
+  const deploymentQuery = useQuery({
+    queryKey: ["openapi-deployment", sub, rg, clusterName],
+    queryFn: () => aksApi.openApiDeployment(sub, rg, clusterName),
+    enabled: Boolean(baseUrl && hasOpenApiImage && clusterName),
+    staleTime: 60_000,
+    retry: 1,
   });
 
   const spec = useMemo(() => {
@@ -128,17 +141,13 @@ export function ApiReference() {
       )}
 
       {baseUrl && hasOpenApiImage && (() => {
-        // Only render the "Update OpenAPI" panel when the dashboard's
-        // pinned tag (from api/services/image_tags.py) is actually
-        // *newer* than what the cluster is currently serving. We treat
-        // the deployed OpenAPI document's `info.version` as the source
-        // of truth for what the pod is running (the tag in ACR is just
-        // the latest available build, not necessarily what is rolled
-        // out). When the two match, the cluster is already up to date
-        // and the panel would be a misleading "Update to v4.9" button.
+        // Only render the update panel when the actual deployed container
+        // image tag differs from the dashboard-pinned tag. The OpenAPI
+        // document's `info.version` is the API app version, not the image
+        // tag, so it is not a reliable update signal.
         const pinnedTag = acrQuery.data?.expected_image_tags?.["elb-openapi"];
-        const runningVersion = spec?.version;
-        if (pinnedTag && runningVersion && pinnedTag === runningVersion) {
+        const deployedTag = deploymentQuery.data?.image_tag;
+        if (!pinnedTag || !deployedTag || normaliseImageTag(pinnedTag) === normaliseImageTag(deployedTag)) {
           return null;
         }
         return (
@@ -153,10 +162,11 @@ export function ApiReference() {
             onRetry={() => {
               svcQuery.refetch();
               specQuery.refetch();
+              deploymentQuery.refetch();
             }}
-            retrying={svcQuery.isFetching || specQuery.isFetching}
+            retrying={svcQuery.isFetching || specQuery.isFetching || deploymentQuery.isFetching}
             pinnedTag={pinnedTag}
-            currentTag={acrQuery.data?.actual_tags?.["elb-openapi"]?.[0]}
+            currentTag={deployedTag}
           />
         );
       })()}
@@ -164,6 +174,10 @@ export function ApiReference() {
       {baseUrl && specQuery.isLoading && <SpecLoadingState />}
 
       {specQuery.isError && <SpecErrorState message={(specQuery.error as Error).message} />}
+
+      {baseUrl && hasOpenApiImage && clusterName && (
+        <ApiTokenPanel subscriptionId={sub} resourceGroup={rg} clusterName={clusterName} />
+      )}
 
       {spec && grouped.length > 0 && (
         // A1: two-column layout — sticky sidebar (tag list + endpoint search +

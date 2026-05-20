@@ -1,27 +1,12 @@
 """Cross-sidecar UI animation event emitter.
 
-The Control Plane Sidecars card animates a single particle along each
-row of its topology graph for every *real* event that just happened —
-HTTP request to the api, task enqueued onto the broker, scheduled beat
-tick, terminal proxy hit. The infinite CSS animation that originally
-shipped was decorative and didn't reflect anything; this module is the
-plumbing that replaces it with truth.
-
-Counters live in the in-revision Redis (db 2) under a single hash so the
-api sidecar's snapshot builder can drain them with one round-trip every
-SSE tick (5 s). Each emitter call is a single HINCRBY — fire-and-forget,
-non-blocking, never raised: animation is decorative and must not affect
-the request that triggered it.
-
-Row → meaning mapping (mirrored in `web/src/components/cards/SidecarsCard.tsx`):
-
-    row1  Browser → frontend → api      every non-health, non-terminal request
-    row2  api → redis → worker          every Celery task enqueued by api
-    row3  beat → redis                   every Celery task enqueued by beat
-    row4  api ↔ terminal                 every /api/terminal/* request
-
-Note: emitting from worker / beat / terminal still writes to the same hash
-because they all share OPS_REDIS_URL; the api sidecar drains and reports.
+Responsibility: Cross-sidecar UI animation event emitter
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_float_env`, `_int_env`, `_get_client`, `emit`, `drain`, `reset_for_tests`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -30,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from typing import Any
 
 import redis
 
@@ -158,7 +144,7 @@ def drain(client: redis.Redis | None = None) -> dict[str, int]:
         pipe = cli.pipeline()
         pipe.hgetall(EVENTS_HASH)
         pipe.delete(EVENTS_HASH)
-        results = pipe.execute()
+        results: list[Any] = pipe.execute()  # type: ignore[no-untyped-call]
     except Exception as exc:
         # Same circuit breaker as emit() — keeps the next snapshot tick
         # from re-paying the timeout while Redis is misbehaving.

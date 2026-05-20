@@ -1,0 +1,74 @@
+site_name: ElasticBLAST Control Plane
+site_description: Browser-only control plane for ElasticBLAST on Azure.
+site_url: https://dotnetpower.github.io/elb-dashboard/
+repo_url: https://github.com/dotnetpower/elb-dashboard
+repo_name: dotnetpower/elb-dashboard
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: en
+  logo: images/elasticblast-logo.svg
+  palette:
+    scheme: default
+    primary: white
+    accent: deep purple
+  font: false
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
+
+nav:
+  - Overview: index.md
+  - Get Started: get-started.md
+  - Auth: auth.md
+  - User Guide:
+      - Guide Home: user-guide/index.md
+      - Dashboard: user-guide/dashboard.md
+      - New Search: user-guide/new-search.md
+      - Jobs: user-guide/jobs.md
+      - Results: user-guide/results.md
+      - API Reference: user-guide/api-reference.md
+      - Terminal: user-guide/terminal.md
+  - Contributor Guide:
+      - Screenshot Workflow: contributor-guide/screenshot-workflow.md
+  - Architecture:
+      - Container Apps Migration: container-apps-migration.md
+      - BLAST SearchSP Discovery: blast-searchsp-discovery.md
+      - Web BLAST Compatibility Plan: web-blast-compatibility-implementation-plan.md
+  - Agent Reference:
+      - Repo Layout: copilot/repo-layout.md
+      - Auth Flow: copilot/auth-flow.md
+      - Browser Terminal: copilot/browser-terminal.md
+      - Resource Plane: copilot/resource-plane.md
+      - Monitoring UI: copilot/monitoring-ui.md
+      - Glass UI: copilot/glass-ui.md
+      - Codebase Map: copilot/codebase-map.md
+
+exclude_docs: |
+  features_change/**
+  temp/**
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - tables
+  - toc:
+      permalink: true
+
+validation:
+  links:
+    not_found: ignore
+    unrecognized_links: ignore

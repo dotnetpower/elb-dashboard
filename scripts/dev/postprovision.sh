@@ -31,6 +31,7 @@ REQUIRED_VARS=(
   SHARED_IDENTITY_RESOURCE_ID
   SHARED_IDENTITY_CLIENT_ID
   AZURE_TENANT_ID
+  AZURE_SUBSCRIPTION_ID
 )
 for v in "${REQUIRED_VARS[@]}"; do
   if [ -z "${!v:-}" ]; then
@@ -40,12 +41,30 @@ for v in "${REQUIRED_VARS[@]}"; do
 done
 
 API_CLIENT_ID_VAL="${API_CLIENT_ID:-}"
+if [ -z "$API_CLIENT_ID_VAL" ]; then
+  cat >&2 <<'EOF'
+FATAL: API_CLIENT_ID is not set. The frontend cannot initialize MSAL without it.
+
+Run the App Registration setup script before azd up/postprovision, for example:
+  scripts/dev/setup-app-registration.sh
+  azd up
+EOF
+  exit 1
+fi
 APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="${APPLICATIONINSIGHTS_CONNECTION_STRING:-}"
 VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
 VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
 VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# Ensure az CLI uses the correct subscription for all subsequent calls
+# (including those in sourced helper scripts). This matters when the script is
+# run directly (e.g. after a failed azd hook) rather than through `azd up`.
+if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
+  az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+fi
+
 . "$REPO_ROOT/scripts/dev/acr-build-access.sh"
 . "$REPO_ROOT/scripts/dev/terminal-base-image.sh"
 TAG="$(date -u +%Y%m%d%H%M%S)"
@@ -114,6 +133,7 @@ build_image() {
     echo "[build-$image_name] starting at $(date -u +%H:%M:%S)"
     az acr build \
       --registry "$ACR_NAME" \
+      --subscription "${AZURE_SUBSCRIPTION_ID}" \
       --image "${image_name}:${TAG}" \
       --image "${image_name}:latest" \
       --file "$dockerfile" \

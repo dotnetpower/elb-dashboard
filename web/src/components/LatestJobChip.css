@@ -70,6 +70,18 @@
   flex-shrink: 0;
 }
 
+@media (max-width: 1320px) {
+  .latest-job-chip {
+    max-width: 156px;
+  }
+  .latest-job-chip__title {
+    max-width: 78px;
+  }
+  .latest-job-chip__time {
+    display: none;
+  }
+}
+
 /* Tone variants — use the existing semantic tokens to stay in the
  * calm/muted glassmorphic palette. */
 .latest-job-chip[data-state="ok"] {

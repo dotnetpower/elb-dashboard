@@ -1,13 +1,19 @@
 """Precision policy for sharded BLAST submissions.
 
-This module answers one question before a job is queued: can the requested
-sharded run plausibly preserve full-DB BLAST semantics, and if not, should it be
-blocked or explicitly marked approximate?
+Responsibility: Precision policy for sharded BLAST submissions
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `PrecisionReport`, `normalize_sharding_mode`, `option_value`,
+`outfmt_is_merge_compatible`, `merge_format_for_outfmt`, `positive_int`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
 
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -48,7 +54,7 @@ class PrecisionReport:
         }
 
 
-def normalize_sharding_mode(options: dict[str, Any] | None) -> ShardingMode:
+def normalize_sharding_mode(options: Mapping[str, Any] | None) -> ShardingMode:
     """Return the explicit sharding mode, mapping legacy flags conservatively."""
     opts = options or {}
     raw = str(opts.get("sharding_mode") or "").strip().lower()
@@ -107,7 +113,7 @@ def positive_int(value: object | None) -> int | None:
     if value in (None, ""):
         return None
     try:
-        parsed = int(value)  # type: ignore[arg-type]
+        parsed = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None

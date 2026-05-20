@@ -1,12 +1,13 @@
-"""Helpers for instantiating Azure SDK management clients with a credential.
+"""Azure SDK client factories for service wrappers.
 
-All Azure operations use the Function App's Managed Identity. The user's
-identity is verified via JWT (token.py) for authorization, but the MI
-performs the actual ARM/storage/ACR calls. This avoids OBO consent issues
-and removes the need for API_CLIENT_SECRET.
-
-For local development with AUTH_DEV_BYPASS=true, DefaultAzureCredential
-picks up the developer's local `az login` session.
+Responsibility: Azure SDK client factories for service wrappers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_get_mi_credential`, `credential_for_caller`, `resource_client`,
+`network_client`, `compute_client`, `storage_client`
+Risky contracts: Use managed identity/DefaultAzureCredential only; do not add client secrets or
+OBO flows.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

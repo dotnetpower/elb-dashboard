@@ -1,3 +1,18 @@
+"""Tests for Route Contracts behavior.
+
+Responsibility: Tests for Route Contracts behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_route_index`, `test_blast_package_keeps_public_import_surface`,
+`test_aks_package_keeps_public_import_surface`,
+`test_storage_package_keeps_public_import_surface`,
+`test_blast_specific_result_routes_precede_file_id_catchall`,
+`test_api_routes_registered_before_frontend_catchall`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
+"""
+
 from __future__ import annotations
 
 from api.main import app
@@ -28,7 +43,10 @@ def test_aks_package_keeps_public_import_surface() -> None:
     assert callable(aks.aks_skus)
     assert callable(aks.aks_provision)
     assert callable(aks.aks_openapi_deploy)
+    assert callable(aks.aks_openapi_deployment)
     assert callable(aks.aks_openapi_proxy)
+    assert callable(aks.aks_openapi_token)
+    assert callable(aks.aks_openapi_token_generate)
     assert callable(aks.aks_start)
     assert callable(aks.aks_assign_roles)
     assert callable(aks._invalidate_aks_monitor_cache)
@@ -62,7 +80,10 @@ def test_api_routes_registered_before_frontend_catchall() -> None:
         ("POST", "/api/blast/jobs"),
         ("GET", "/api/aks/skus"),
         ("POST", "/api/aks/provision"),
+        ("GET", "/api/aks/openapi/deployment"),
         ("GET", "/api/aks/openapi/spec"),
+        ("GET", "/api/aks/openapi/token"),
+        ("POST", "/api/aks/openapi/token"),
         ("GET", "/api/aks/openapi/proxy"),
         ("POST", "/api/storage/prepare-db"),
         ("GET", "/api/storage/local-debug"),

@@ -2,11 +2,7 @@ import { useCallback, useState } from "react";
 
 import { GettingStartedGuide } from "@/components/GettingStartedGuide";
 import { SettingsPanel } from "@/components/SettingsPanel";
-import {
-  clearConfig,
-  SetupWizard,
-  type ResourceConfig,
-} from "@/components/SetupWizard";
+import { clearConfig, SetupWizard, type ResourceConfig } from "@/components/SetupWizard";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 import { DashboardGrid } from "./DashboardGrid";
@@ -109,9 +105,7 @@ export function Dashboard() {
           hasImages={hasImages}
           hasTerminal={hasTerminal}
           terminalEnabled={terminalEnabled}
-          clusterRunning={
-            aksQuery.data?.clusters?.some(isAksWorkloadReady) ?? false
-          }
+          clusterRunning={aksQuery.data?.clusters?.some(isAksWorkloadReady) ?? false}
           acrName={config.acrName}
           onDismiss={handleDismissGettingStarted}
         />

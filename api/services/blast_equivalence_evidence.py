@@ -1,4 +1,14 @@
-"""Evidence registry validation for Web BLAST compatibility entries."""
+"""Evidence registry validation for Web BLAST compatibility entries.
+
+Responsibility: Evidence registry validation for Web BLAST compatibility entries
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `evidence_registry_matrix`, `validate_evidence_registry`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 

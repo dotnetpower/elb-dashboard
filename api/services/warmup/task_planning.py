@@ -1,4 +1,14 @@
-"""Planning helpers used by Storage warmup Celery tasks."""
+"""Planning helpers used by Storage warmup Celery tasks.
+
+Responsibility: Planning helpers used by Storage warmup Celery tasks
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `program_to_mol_type`, `available_shard_sets`, `select_warmup_shard_count`,
+`build_elb_image`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 

@@ -1,23 +1,11 @@
 """Deploy ``elb-openapi`` to an existing AKS cluster.
 
-Side effects (idempotent):
-  * Create / update User-Assigned Managed Identity ``id-elb-openapi``.
-  * Create / update a Federated Identity Credential binding the AKS OIDC
-    issuer to the ``elb-openapi-sa`` ServiceAccount.
-  * Assign Contributor / Storage Blob Data Contributor / AKS Cluster User
-    roles to the MI (best-effort — non-fatal on conflict).
-  * Apply 5 Kubernetes manifests (ServiceAccount, Deployment, Service,
-    ClusterRole, ClusterRoleBinding) via the terminal sidecar's allowlisted
-    ``kubectl apply -f -``.
-  * Poll the LoadBalancer for an external IP for up to ~120 s.
-
-Translated 1:1 from the retired Azure Functions
-``setup_workload_identity_activity`` and ``deploy_openapi_activity``
-(which used the now-banned AKS Run Command). The repo policy is:
-
-  * Workload-identity / role wiring → Azure SDK (this file).
-  * Manifest application → terminal sidecar's ``kubectl`` (terminal_exec).
-  * External IP polling → direct K8s API (``k8s_get_service_ip``).
+Responsibility: Deploy ``elb-openapi`` to an existing AKS cluster
+Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
+persist state.
+Key entry points: `_blast_node_count`, `_now_iso`, `_record_progress`, `deploy_openapi_service`
+Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Validation: `uv run pytest -q api/tests/test_azure_tasks.py api/tests/test_blast_tasks.py`.
 """
 
 from __future__ import annotations
@@ -71,7 +59,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _record_progress(self, phase: str, **extra: Any) -> None:
+def _record_progress(self: Any, phase: str, **extra: Any) -> None:
     """Push a Celery PROGRESS update so the SPA can render the phase.
 
     The status route maps any non-terminal Celery state plus the
@@ -236,6 +224,7 @@ def _build_manifests(
     acr_name: str,
     acr_resource_group: str,
     num_nodes: int = 10,
+    api_token: str = "",
 ) -> str:
     """Return the multi-document JSON payload to feed ``kubectl apply -f -``.
 
@@ -255,6 +244,27 @@ def _build_manifests(
             "labels": {"azure.workload.identity/use": "true"},
         },
     }
+
+    openapi_env = [
+        {"name": "ELB_CLUSTER_NAME", "value": cluster_name},
+        {"name": "ELB_STORAGE_ACCOUNT", "value": storage_account},
+        {"name": "ELB_RESOURCE_GROUP", "value": resource_group},
+        {"name": "ELB_AZURE_REGION", "value": region},
+        {"name": "ELB_ACR_NAME", "value": acr_name},
+        {"name": "ELB_ACR_RESOURCE_GROUP", "value": acr_resource_group},
+        {"name": "ELB_NUM_NODES", "value": str(max(1, num_nodes))},
+        {"name": "ELB_CORE_NT_SHARDS", "value": str(max(1, num_nodes))},
+        {
+            "name": "PATH",
+            "value": (
+                "/opt/venv/bin:/usr/local/sbin:"
+                "/usr/local/bin:/usr/sbin:/usr/bin:"
+                "/sbin:/bin"
+            ),
+        },
+    ]
+    if api_token:
+        openapi_env.append({"name": "ELB_OPENAPI_API_TOKEN", "value": api_token})
 
     deploy_manifest = {
         "apiVersion": "apps/v1",
@@ -279,22 +289,7 @@ def _build_manifests(
                             "imagePullPolicy": "Always",
                             "ports": [{"containerPort": 8000}],
                             "env": [
-                                {"name": "ELB_CLUSTER_NAME", "value": cluster_name},
-                                {"name": "ELB_STORAGE_ACCOUNT", "value": storage_account},
-                                {"name": "ELB_RESOURCE_GROUP", "value": resource_group},
-                                {"name": "ELB_AZURE_REGION", "value": region},
-                                {"name": "ELB_ACR_NAME", "value": acr_name},
-                                {"name": "ELB_ACR_RESOURCE_GROUP", "value": acr_resource_group},
-                                {"name": "ELB_NUM_NODES", "value": str(max(1, num_nodes))},
-                                {"name": "ELB_CORE_NT_SHARDS", "value": str(max(1, num_nodes))},
-                                {
-                                    "name": "PATH",
-                                    "value": (
-                                        "/opt/venv/bin:/usr/local/sbin:"
-                                        "/usr/local/bin:/usr/sbin:/usr/bin:"
-                                        "/sbin:/bin"
-                                    ),
-                                },
+                                *openapi_env,
                                 # Do not set AZURE_CLIENT_ID manually here. If the
                                 # AKS Workload Identity webhook is present it
                                 # injects AZURE_CLIENT_ID / AZURE_TENANT_ID /
@@ -477,7 +472,7 @@ def _kubectl_apply(
     max_retries=0,
 )
 def deploy_openapi_service(
-    self,
+    self: Any,
     *,
     subscription_id: str,
     resource_group: str,
@@ -550,6 +545,12 @@ def deploy_openapi_service(
             },
         }
 
+    api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
+    if not api_token:
+        from api.services.openapi_runtime import get_openapi_api_token
+
+        api_token = get_openapi_api_token()
+
     # ----- 2. kubectl apply --------------------------------------------------
     _record_progress(self, "applying_manifests", image=image, mi_client_id=mi_client_id[:8])
     manifest = _build_manifests(
@@ -563,6 +564,7 @@ def deploy_openapi_service(
         acr_name=acr_name,
         acr_resource_group=effective_acr_resource_group,
         num_nodes=num_nodes,
+        api_token=api_token,
     )
     try:
         apply_output = _kubectl_apply(

@@ -1,4 +1,15 @@
-"""External OpenAPI BLAST job cache, sync, and projection helpers."""
+"""External OpenAPI BLAST job cache, sync, and projection helpers.
+
+Responsibility: External OpenAPI BLAST job cache, sync, and projection helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_external_status_to_dashboard`, `_exception_reason`,
+`_external_list_jobs_cached`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 
@@ -140,8 +151,8 @@ def _sync_external_jobs_to_table(
     with _EXTERNAL_JOBS_CACHE_LOCK:
         cached = _EXTERNAL_SYNC_CACHE.get(sync_key)
         if cached and cached[0] > now:
-            created, updated, tombstoned = cached[1]
-            return (created, updated, set(tombstoned))
+            c_created, c_updated, c_tombstoned = cached[1]
+            return (c_created, c_updated, set(c_tombstoned))
     try:
         from api.services.state_repo import JobState, JobStateRepository
 
@@ -269,7 +280,7 @@ def _external_execution_summary(job: dict[str, Any]) -> dict[str, int]:
     def number(key: str) -> int:
         value = execution.get(key)
         try:
-            return max(0, int(value))
+            return max(0, int(value))  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return 0
 

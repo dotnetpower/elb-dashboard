@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { AlertTriangle, Filter, History, Pencil, Star, ToggleLeft, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Filter,
+  History,
+  Pencil,
+  Star,
+  ToggleLeft,
+  X,
+} from "lucide-react";
 
 import {
   hasStructuredTaxidOptionConflict,
@@ -12,10 +20,7 @@ import {
   type TaxonomyModalValue,
 } from "@/pages/blastSubmit/TaxonomyModal";
 import { useRecentTaxonomy } from "@/pages/blastSubmit/useRecentTaxonomy";
-import {
-  topCommonTaxa,
-  type CommonTaxon,
-} from "@/pages/blastSubmit/taxonomyCommon";
+import { topCommonTaxa, type CommonTaxon } from "@/pages/blastSubmit/taxonomyCommon";
 
 const QUICK_PICK_LIMIT = 5;
 
@@ -25,6 +30,7 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
 
   const taxidValue = parsePositiveTaxid(form.taxid);
   const taxidInvalid = form.taxid.trim().length > 0 && taxidValue === null;
+  const hasAppliedTaxonomy = taxidValue !== null;
   const hasConflict =
     form.taxid.trim().length > 0 &&
     hasStructuredTaxidOptionConflict(form.additional_options);
@@ -49,6 +55,7 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
     set("taxid", "");
     set("taxid_label", "");
     set("taxid_rank", "");
+    set("is_inclusive", true);
   };
 
   // One-click apply from a recent chip — bypasses the modal entirely and
@@ -71,9 +78,8 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
     });
   };
 
-  // One-click apply from a curated "popular" chip. Defaults to include-mode
-  // which matches researcher intent ~95% of the time; user can flip via the
-  // modal afterwards.
+  // One-click apply from a curated "popular" chip. Defaults to include-mode;
+  // the inline mode toggle below handles include/exclude changes afterwards.
   const pickCommon = (taxon: CommonTaxon) => {
     applyValue({
       taxid: String(taxon.taxid),
@@ -94,7 +100,7 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
   const commonChips = topCommonTaxa(QUICK_PICK_LIMIT);
 
   return (
-    <section className="glass-card blast-section">
+    <section className="glass-card blast-section bsl-input">
       <SectionHeader
         step={4}
         icon={<Filter size={16} strokeWidth={1.5} />}
@@ -105,22 +111,30 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
       <div className="taxonomy-filter-launcher">
         <div className="taxonomy-filter-launcher__copy">
           <span className="glass-label">
-            Filter scope <Tip text="Open a modal to search NCBI Taxonomy and preview the candidate's lineage before applying." />
+            Filter scope{" "}
+            <Tip text="Open a modal to search NCBI Taxonomy and preview the candidate's lineage before applying." />
           </span>
           {taxidValue ? (
-            <div className="taxonomy-filter-launcher__selected">
-              <div className="taxonomy-filter-launcher__selected-main">
-                <strong>{selectedLabel}</strong>
-                <span>taxid {taxidValue}</span>
-                {form.taxid_rank && <span>{form.taxid_rank}</span>}
-                <span
-                  className={`taxonomy-filter-launcher__mode taxonomy-filter-launcher__mode--${
-                    form.is_inclusive ? "include" : "exclude"
-                  }`}
-                >
-                  {form.is_inclusive ? "include only" : "exclude"}
+            <div className="taxonomy-filter-launcher__selected-row">
+              <button
+                type="button"
+                className="taxonomy-filter-launcher__field taxonomy-filter-launcher__selected"
+                onClick={() => setModalOpen(true)}
+                aria-label="Change taxonomy filter"
+              >
+                <span className="taxonomy-filter-launcher__selected-main">
+                  <strong>{selectedLabel}</strong>
+                  <span>taxid {taxidValue}</span>
+                  {form.taxid_rank && <span>{form.taxid_rank}</span>}
+                  <span
+                    className={`taxonomy-filter-launcher__mode taxonomy-filter-launcher__mode--${
+                      form.is_inclusive ? "include" : "exclude"
+                    }`}
+                  >
+                    {form.is_inclusive ? "include only" : "exclude"}
+                  </span>
                 </span>
-              </div>
+              </button>
               <button
                 type="button"
                 className="taxonomy-filter-launcher__clear"
@@ -131,10 +145,23 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
                 <X size={12} strokeWidth={1.6} />
               </button>
             </div>
+          ) : taxidInvalid ? (
+            <button
+              type="button"
+              className="taxonomy-filter-launcher__field taxonomy-filter-launcher__invalid"
+              onClick={() => setModalOpen(true)}
+              aria-invalid="true"
+            >
+              Invalid taxonomy value: {form.taxid.trim()}
+            </button>
           ) : (
-            <div className="taxonomy-filter-launcher__empty">
+            <button
+              type="button"
+              className="taxonomy-filter-launcher__field taxonomy-filter-launcher__empty"
+              onClick={() => setModalOpen(true)}
+            >
               No taxonomy filter set. BLAST will search every taxon in the database.
-            </div>
+            </button>
           )}
         </div>
         <button
@@ -184,9 +211,7 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
                     {row.taxid}
                   </span>
                   {!row.is_inclusive && (
-                    <span className="taxonomy-filter-quickpick__chip-flag">
-                      exclude
-                    </span>
+                    <span className="taxonomy-filter-quickpick__chip-flag">exclude</span>
                   )}
                 </button>
               );
@@ -235,23 +260,36 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
           <span>Filter mode</span>
         </div>
         <div
-          className="taxonomy-filter-mode__segmented"
+          className={`taxonomy-filter-mode__segmented${
+            !hasAppliedTaxonomy ? " taxonomy-filter-mode__segmented--disabled" : ""
+          }`}
           role="group"
           aria-label="Taxonomy filter mode"
+          aria-disabled={!hasAppliedTaxonomy}
         >
           <button
             type="button"
-            className={`taxonomy-filter-mode__seg${form.is_inclusive ? " taxonomy-filter-mode__seg--active" : ""}`}
+            className={`taxonomy-filter-mode__seg${
+              hasAppliedTaxonomy && form.is_inclusive
+                ? " taxonomy-filter-mode__seg--active"
+                : ""
+            }`}
             onClick={() => set("is_inclusive", true)}
-            aria-pressed={form.is_inclusive}
+            aria-pressed={hasAppliedTaxonomy && form.is_inclusive}
+            disabled={!hasAppliedTaxonomy}
           >
             Include only
           </button>
           <button
             type="button"
-            className={`taxonomy-filter-mode__seg${!form.is_inclusive ? " taxonomy-filter-mode__seg--active taxonomy-filter-mode__seg--exclude" : ""}`}
+            className={`taxonomy-filter-mode__seg${
+              hasAppliedTaxonomy && !form.is_inclusive
+                ? " taxonomy-filter-mode__seg--active taxonomy-filter-mode__seg--exclude"
+                : ""
+            }`}
             onClick={() => set("is_inclusive", false)}
-            aria-pressed={!form.is_inclusive}
+            aria-pressed={hasAppliedTaxonomy && !form.is_inclusive}
+            disabled={!hasAppliedTaxonomy}
           >
             Exclude
           </button>
@@ -267,13 +305,15 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
 
       <div className="blast-taxonomy-note">
         <AlertTriangle size={13} />
-        Taxonomy filtering requires the selected BLAST database to include taxonomy metadata.
+        Taxonomy filtering requires the selected BLAST database to include taxonomy
+        metadata.
       </div>
 
       {hasConflict && (
         <div className="blast-warning-box">
           <AlertTriangle size={14} />
-          Remove -taxids or -negative_taxids from Additional options before using this structured filter.
+          Remove -taxids or -negative_taxids from Additional options before using this
+          structured filter.
         </div>
       )}
 
@@ -286,5 +326,3 @@ export function TaxonomyFilterSection({ form, set }: TaxonomyFilterSectionProps)
     </section>
   );
 }
-
-              

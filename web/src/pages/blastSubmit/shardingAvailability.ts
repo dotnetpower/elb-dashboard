@@ -4,10 +4,7 @@ import {
   getWorkloadNodeCount,
   getWorkloadNodeSku,
 } from "@/pages/blastSubmit/computeEnvironment";
-import {
-  type ShardCapacityPlan,
-  planPartitionsForSubmit,
-} from "@/utils/dbSharding";
+import { type ShardCapacityPlan, planPartitionsForSubmit } from "@/utils/dbSharding";
 
 export type ShardingMode = FormState["sharding_mode"];
 
@@ -32,6 +29,12 @@ export interface DeriveShardingAvailabilityArgs {
   outfmt: number;
 }
 
+export interface ReconcileShardingSelectionArgs {
+  form: FormState;
+  availability: ShardingAvailability;
+  isDbAlreadyWarm: boolean;
+}
+
 function isMergeCompatibleOutfmt(outfmt: number): boolean {
   return outfmt === 5 || outfmt === 6;
 }
@@ -39,8 +42,8 @@ function isMergeCompatibleOutfmt(outfmt: number): boolean {
 export function hasPreparedShardLayout(database?: BlastDatabase): boolean {
   return Boolean(
     database?.name === "core_nt" &&
-      database.sharded === true &&
-      database.shard_sets?.some((shardCount) => shardCount > 1),
+    database.sharded === true &&
+    database.shard_sets?.some((shardCount) => shardCount > 1),
   );
 }
 
@@ -55,9 +58,12 @@ function unavailableReason({
 }): string | null {
   if (!database) return "Select a database first.";
   if (!cluster) return "Select a cluster first.";
-  if (!isDbAlreadyWarm) return "Warm this database on the selected cluster before using sharded performance modes.";
-  if (database.sharding_in_progress) return "Shard preparation is still running for this database.";
-  if (database.sharding_error) return `Shard preparation failed: ${database.sharding_error}`;
+  if (!isDbAlreadyWarm)
+    return "Warm this database on the selected cluster before using sharded performance modes.";
+  if (database.sharding_in_progress)
+    return "Shard preparation is still running for this database.";
+  if (database.sharding_error)
+    return `Shard preparation failed: ${database.sharding_error}`;
   if (!hasPreparedShardLayout(database)) {
     return "Prepared shard layouts are not available for this database yet.";
   }
@@ -67,7 +73,11 @@ function unavailableReason({
   if (!isMergeCompatibleOutfmt(outfmt)) {
     return "Sharded result merging supports output format 5 or 6 only.";
   }
-  if (!capacityPlan?.feasible) return capacityPlan?.reason ?? "This database is too large for the selected cluster shard layout.";
+  if (!capacityPlan?.feasible)
+    return (
+      capacityPlan?.reason ??
+      "This database is too large for the selected cluster shard layout."
+    );
   return null;
 }
 
@@ -81,7 +91,12 @@ export function deriveShardingAvailability({
   const nodeSku = cluster ? getWorkloadNodeSku(cluster) : null;
   const capacityPlan =
     database?.total_bytes && nodeCount && nodeSku && hasPreparedShardLayout(database)
-      ? planPartitionsForSubmit(database.total_bytes, nodeCount, nodeSku, database.shard_sets)
+      ? planPartitionsForSubmit(
+          database.total_bytes,
+          nodeCount,
+          nodeSku,
+          database.shard_sets,
+        )
       : null;
   const reason = unavailableReason({
     cluster,
@@ -91,13 +106,13 @@ export function deriveShardingAvailability({
     capacityPlan,
   });
   const enabled = reason == null;
-  const hasVerifiedWebSearchSpace = typeof database?.web_blast_searchsp === "number" && database.web_blast_searchsp > 0;
-  const preciseReason = reason ?? (hasVerifiedWebSearchSpace ? null : "Verified Web BLAST search-space evidence is not available for this database/options scope.");
-  const offDisabled = enabled && isDbAlreadyWarm;
-  const offReason = offDisabled
-    ? "This database is already warmed as prepared shards on the selected cluster. Use a sharded mode to consume the node-local cache."
-    : null;
-
+  const hasVerifiedWebSearchSpace =
+    typeof database?.web_blast_searchsp === "number" && database.web_blast_searchsp > 0;
+  const preciseReason =
+    reason ??
+    (hasVerifiedWebSearchSpace
+      ? null
+      : "Verified Web BLAST search-space evidence is not available for this database/options scope.");
   return {
     capacityPlan,
     preferredMode: preciseReason == null ? "precise" : enabled ? "approximate" : "off",
@@ -105,16 +120,18 @@ export function deriveShardingAvailability({
       off: {
         mode: "off",
         label: "Off",
-        enabled: !offDisabled,
-        reason: offReason,
-        description: "Run against the selected database without partitioned shards. This is the safest baseline and keeps full-DB BLAST semantics, but large databases start slower.",
+        enabled: true,
+        reason: null,
+        description:
+          "Run against the selected database without partitioned shards. This is the safest baseline and keeps full-DB BLAST semantics, but large databases start slower.",
       },
       approximate: {
         mode: "approximate",
         label: "Fast shard",
         enabled,
         reason,
-        description: "Use prepared node-local DB shards and merge top hits. This is a throughput probe mode; full Web BLAST equivalence is not claimed.",
+        description:
+          "Use prepared node-local DB shards and merge top hits. This is a throughput probe mode; full Web BLAST equivalence is not claimed.",
       },
       precise: {
         mode: "precise",
@@ -126,5 +143,45 @@ export function deriveShardingAvailability({
           : "Use warmed shards only after a verified full-DB search-space default or explicit calibration evidence is available for this database/options scope.",
       },
     },
+  };
+}
+
+export function reconcileShardingSelection({
+  form,
+  availability,
+  isDbAlreadyWarm,
+}: ReconcileShardingSelectionArgs): FormState {
+  const selectedMode = availability.options[form.sharding_mode];
+  const shouldFallbackFromUnavailable =
+    form.sharding_mode !== "off" && !selectedMode.enabled;
+  const shouldPreferShardedMode =
+    form.sharding_mode === "off" &&
+    !form.disable_sharding &&
+    availability.preferredMode !== "off" &&
+    availability.options[availability.preferredMode].enabled;
+  const nextShardingMode =
+    shouldFallbackFromUnavailable || shouldPreferShardedMode
+      ? availability.preferredMode
+      : form.sharding_mode;
+  const nextEnableWarmup = form.enable_warmup || isDbAlreadyWarm;
+  const nextDbAutoPartition = nextShardingMode !== "off";
+  const nextDisableSharding =
+    nextShardingMode === "off" ? form.disable_sharding : false;
+
+  if (
+    form.enable_warmup === nextEnableWarmup &&
+    form.sharding_mode === nextShardingMode &&
+    form.db_auto_partition === nextDbAutoPartition &&
+    form.disable_sharding === nextDisableSharding
+  ) {
+    return form;
+  }
+
+  return {
+    ...form,
+    enable_warmup: nextEnableWarmup,
+    sharding_mode: nextShardingMode,
+    db_auto_partition: nextDbAutoPartition,
+    disable_sharding: nextDisableSharding,
   };
 }

@@ -44,12 +44,12 @@ export function PulseRowSummary({
     statusTone === "healthy"
       ? "var(--success)"
       : statusTone === "degraded"
-      ? "var(--warning)"
-      : statusTone === "down"
-        ? "var(--danger)"
-        : statusTone === "transitioning"
-          ? "var(--accent)"
-          : "var(--text-faint)";
+        ? "var(--warning)"
+        : statusTone === "down"
+          ? "var(--danger)"
+          : statusTone === "transitioning"
+            ? "var(--accent)"
+            : "var(--text-faint)";
 
   return (
     <button
@@ -63,11 +63,11 @@ export function PulseRowSummary({
         width: "100%",
         background: "transparent",
         border: "none",
-        padding: "12px 14px",
+        padding: "8px 10px",
         display: "grid",
-        gridTemplateColumns: "auto minmax(0, 1.6fr) auto auto auto 16px",
+        gridTemplateColumns: "auto minmax(0, 1fr) auto auto auto 14px",
         alignItems: "center",
-        gap: 16,
+        gap: 10,
         cursor: "pointer",
         color: "inherit",
         textAlign: "left",
@@ -87,6 +87,7 @@ export function PulseRowSummary({
           style={{
             fontSize: 13,
             fontWeight: 600,
+            lineHeight: 1.15,
             color: "var(--text-primary)",
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -99,6 +100,7 @@ export function PulseRowSummary({
           title={statusLine}
           style={{
             fontSize: 11,
+            lineHeight: 1.2,
             color: statusColor,
             overflow: "hidden",
             textOverflow: "ellipsis",

@@ -1,7 +1,12 @@
-"""Azure infrastructure Celery tasks — AKS provision / start / stop / delete.
+"""Azure infrastructure Celery tasks - AKS provision / start / stop / delete.
 
-Side effects: ARM calls to create/mutate AKS managed clusters and RBAC role
-assignments. All tasks are idempotent.
+Responsibility: Azure infrastructure Celery tasks - AKS provision / start / stop / delete
+Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
+persist state.
+Key entry points: `_now_iso`, `diag_noop`, `_update_state`, `provision_aks`, `start_aks`,
+`stop_aks`
+Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Validation: `uv run pytest -q api/tests/test_azure_tasks.py api/tests/test_blast_tasks.py`.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ def _now_iso() -> str:
 
 
 @shared_task(name="api.tasks.azure.diag_noop", bind=True, max_retries=0)
-def diag_noop(self, *, message: str = "ping") -> dict[str, Any]:
+def diag_noop(self: Any, *, message: str = "ping") -> dict[str, Any]:
     """Diagnostic-only no-op task — proves enqueue ↔ consume round-trip works."""
     LOGGER.info("DIAG_NOOP message=%r task_id=%s", message, self.request.id)
     return {"message": message, "task_id": self.request.id, "ts": _now_iso()}
@@ -49,8 +54,8 @@ def _update_state(task_id: str, phase: str, status: str = "running", **extra: An
             for k, v in extra.items():
                 if hasattr(state, k):
                     setattr(state, k, v)
-            repo.update(state)
-            repo.append_history(task_id, {"phase": phase, "status": status, **extra})
+            repo.update(state.job_id, status=status, phase=phase)
+            repo.append_history(task_id, phase, {"phase": phase, "status": status, **extra})
     except Exception as exc:
         LOGGER.warning("state update failed for %s: %s", task_id, exc)
 
@@ -134,7 +139,7 @@ def _build_cluster_params(
     retry_jitter=True,
 )
 def provision_aks(
-    self,
+    self: Any,
     *,
     job_id: str,
     subscription_id: str,
@@ -309,7 +314,7 @@ def _attach_acr(
         auth_cl.role_assignments.create(
             scope=acr_scope,
             role_assignment_name=role_assignment_id,
-            parameters=RoleAssignmentCreateParameters(
+            parameters=RoleAssignmentCreateParameters(  # type: ignore[call-arg]
                 role_definition_id=role_definition_id,
                 principal_id=kubelet_oid,
                 principal_type="ServicePrincipal",
@@ -367,7 +372,7 @@ def _grant_storage_blob_contributor_to_aks(
         auth_cl.role_assignments.create(
             scope=storage_scope,
             role_assignment_name=role_assignment_id,
-            parameters=RoleAssignmentCreateParameters(
+            parameters=RoleAssignmentCreateParameters(  # type: ignore[call-arg]
                 role_definition_id=role_definition_id,
                 principal_id=kubelet_oid,
                 principal_type="ServicePrincipal",
@@ -442,7 +447,7 @@ def _ensure_aks_runtime_rbac(
     retry_jitter=True,
 )
 def start_aks(
-    self,
+    self: Any,
     *,
     subscription_id: str,
     resource_group: str,
@@ -525,7 +530,7 @@ def start_aks(
     retry_jitter=True,
 )
 def stop_aks(
-    self,
+    self: Any,
     *,
     subscription_id: str,
     resource_group: str,
@@ -550,7 +555,7 @@ def stop_aks(
     retry_jitter=True,
 )
 def delete_aks(
-    self,
+    self: Any,
     *,
     subscription_id: str,
     resource_group: str,
@@ -567,7 +572,7 @@ def delete_aks(
 
 @shared_task(name="api.tasks.azure.assign_aks_roles", bind=True, max_retries=2)
 def assign_aks_roles(
-    self,
+    self: Any,
     *,
     subscription_id: str,
     resource_group: str,

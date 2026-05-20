@@ -1,4 +1,14 @@
-"""Storage local-debug public access routes."""
+"""Storage local-debug public access routes.
+
+Responsibility: Storage local-debug public access routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `storage_local_debug_status`, `storage_local_debug_open`
+Risky contracts: Never issue browser SAS URLs; local public Storage access remains debug-only
+and IP-allowlisted.
+Validation: `uv run pytest -q api/tests/test_storage_data.py
+api/tests/test_storage_public_access.py`.
+"""
 
 from __future__ import annotations
 

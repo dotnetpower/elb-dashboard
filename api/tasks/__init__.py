@@ -1,14 +1,11 @@
 """Celery task modules for the elb-dashboard control plane.
 
-Each module is auto-discovered by the Celery worker via the ``include``
-list in ``api.celery_app``.
-
-Importing ``api.celery_app`` BEFORE the shared_task modules is load-bearing:
-the api sidecar imports `api.tasks.<x>` lazily inside route handlers, and
-without this guard `current_app` would resolve to a phantom default Celery
-app (broker=amqp://, queue="celery", routes={}) — the produced messages
-would land in a queue the worker doesn't subscribe to and tasks would
-silently never run.
+Responsibility: Celery task modules for the elb-dashboard control plane
+Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
+persist state.
+Key entry points: `__all__`
+Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Validation: `uv run pytest -q api/tests/test_azure_tasks.py api/tests/test_blast_tasks.py`.
 """
 
 from __future__ import annotations

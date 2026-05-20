@@ -30,7 +30,7 @@ interface Props {
    *  "No jobs yet" empty state, which previously flashed before the
    *  response landed. */
   jobsLoading: boolean;
-  /** Map of job_id → full BlastJobSummary so we can read `owner_upn`
+  /** Map of job_id -> full BlastJobSummary so we can read `owner_upn`
    *  without re-querying. */
   jobIndex: Map<string, BlastJobSummary>;
   /** Name of the parent cluster, used to deep-link "+N more" into the
@@ -53,6 +53,7 @@ export function JobsSection({
   const navigate = useNavigate();
   const anyActive = jobs.some((j) => jobHasLiveTick(j.state));
   const nowMs = useTickWhenActive(anyActive);
+  const showEmptyJobsInline = !jobsDegraded && !jobsLoading && jobs.length === 0;
 
   const goToJobsPage = () =>
     navigate(`/blast/jobs?cluster=${encodeURIComponent(clusterName)}`);
@@ -60,11 +61,11 @@ export function JobsSection({
   return (
     <div
       style={{
-        padding: "10px 14px 12px 14px",
+        padding: "7px 10px 9px 10px",
         borderTop: "1px solid var(--border-weak)",
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: 6,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -92,7 +93,7 @@ export function JobsSection({
           {jobsDegraded
             ? "job state store unavailable"
             : jobsLoading && jobs.length === 0
-              ? "loading…"
+              ? "loading..."
               : `${activeCount} active · ${completedToday} done in 24h`}
           {!jobsDegraded && !jobsLoading && unknownCount > 0 && (
             <>
@@ -108,49 +109,57 @@ export function JobsSection({
           {!jobsDegraded && !jobsLoading && failed15m > 0 && (
             <>
               {" · "}
-              <span style={{ color: "var(--danger)" }}>
-                {failed15m} failed / 15m
-              </span>
+              <span style={{ color: "var(--danger)" }}>{failed15m} failed / 15m</span>
             </>
           )}
         </span>
+        {showEmptyJobsInline && (
+          <span
+            style={{
+              marginLeft: "auto",
+              fontSize: 11,
+              color: "var(--text-faint)",
+            }}
+          >
+            No jobs yet ·{" "}
+            <button
+              type="button"
+              onClick={() => navigate("/blast/submit")}
+              style={{
+                background: "transparent",
+                border: "none",
+                padding: 0,
+                color: "var(--accent)",
+                fontSize: 11,
+                fontWeight: 500,
+                cursor: "pointer",
+                textDecoration: "underline",
+                textUnderlineOffset: 2,
+              }}
+            >
+              submit one
+            </button>
+          </span>
+        )}
       </div>
 
       {jobsDegraded ? (
-        <div
-          style={{ fontSize: 11, color: "var(--text-faint)", padding: "4px 0" }}
-        >
-          Counts and roster will return automatically once the job-state store
-          recovers.
+        <div style={{ fontSize: 11, color: "var(--text-faint)", padding: "4px 0" }}>
+          Counts and roster will return automatically once the job-state store recovers.
         </div>
       ) : jobsLoading && jobs.length === 0 ? (
         <JobsSkeleton />
-      ) : jobs.length === 0 ? (
+      ) : jobs.length > 0 ? (
         <div
-          style={{ fontSize: 11, color: "var(--text-faint)", padding: "4px 0" }}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 3,
+            maxHeight: 150,
+            overflowY: "auto",
+            paddingRight: 2,
+          }}
         >
-          No jobs yet —{" "}
-          <button
-            type="button"
-            onClick={() => navigate("/blast/submit")}
-            style={{
-              background: "transparent",
-              border: "none",
-              padding: 0,
-              color: "var(--accent)",
-              fontSize: 11,
-              fontWeight: 500,
-              cursor: "pointer",
-              textDecoration: "underline",
-              textUnderlineOffset: 2,
-            }}
-          >
-            submit one
-          </button>
-          .
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <JobsTableHeader />
           {jobs.map((j) => (
             <JobLine
@@ -166,7 +175,7 @@ export function JobsSection({
               onClick={goToJobsPage}
               title={`Open the full Jobs page filtered to ${clusterName}`}
               style={{
-                marginTop: 2,
+                marginTop: 0,
                 alignSelf: "flex-start",
                 background: "transparent",
                 border: "none",
@@ -174,7 +183,7 @@ export function JobsSection({
                 fontSize: 11,
                 fontWeight: 500,
                 cursor: "pointer",
-                padding: "2px 0",
+                padding: "1px 0",
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 4,
@@ -185,7 +194,7 @@ export function JobsSection({
             </button>
           )}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -213,7 +222,7 @@ function JobsSkeleton() {
       role="status"
       aria-live="polite"
       aria-label="Loading jobs"
-      style={{ display: "flex", flexDirection: "column", gap: 4 }}
+      style={{ display: "flex", flexDirection: "column", gap: 3 }}
     >
       {[0, 1, 2].map((i) => (
         <div
@@ -221,10 +230,10 @@ function JobsSkeleton() {
           className="pulse-soft"
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) 90px 88px 110px",
+            gridTemplateColumns: "minmax(0, 1fr) 76px 76px 92px",
             alignItems: "center",
-            gap: 12,
-            padding: "8px 10px",
+            gap: 8,
+            padding: "5px 8px",
             borderRadius: 6,
             background: "var(--pulse-row-bg)",
             border: "1px solid var(--border-weak)",
@@ -240,13 +249,7 @@ function JobsSkeleton() {
   );
 }
 
-function SkeletonBar({
-  width,
-  height,
-}: {
-  width: string | number;
-  height: number;
-}) {
+function SkeletonBar({ width, height }: { width: string | number; height: number }) {
   return (
     <span
       aria-hidden="true"
@@ -268,14 +271,14 @@ function JobsTableHeader() {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) 90px 88px 110px",
+        gridTemplateColumns: "minmax(0, 1fr) 76px 76px 92px",
         alignItems: "center",
-        gap: 12,
-        padding: "2px 10px",
-        fontSize: 10,
+        gap: 8,
+        padding: "1px 8px",
+        fontSize: 9,
         fontWeight: 500,
         textTransform: "uppercase",
-        letterSpacing: "0.08em",
+        letterSpacing: "0.06em",
         color: "var(--text-faint)",
         borderBottom: "1px solid var(--border-weak)",
       }}

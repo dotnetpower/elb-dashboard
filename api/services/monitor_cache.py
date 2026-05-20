@@ -1,8 +1,13 @@
 """Short-lived monitor snapshot cache.
 
-Dashboard monitor routes read slow Azure control-plane and Kubernetes APIs.
-This cache keeps the HTTP hot path fast for repeated polls while still letting
-the first request after a cold start fetch authoritative data.
+Responsibility: Short-lived monitor snapshot cache
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_SnapshotEntry`, `reset_monitor_snapshot_cache`,
+`invalidate_monitor_snapshot_prefix`, `cached_snapshot`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -213,14 +218,14 @@ def _refresh(
         return entry
     except Exception:
         with _LOCK:
-            entry = _CACHE.get(cache_key)
-            if entry is not None:
-                entry.refreshing = False
+            stale_entry = _CACHE.get(cache_key)
+            if stale_entry is not None:
+                stale_entry.refreshing = False
         LOGGER.warning("monitor snapshot refresh failed key=%s", cache_key, exc_info=True)
         raise
 
 
-def _start_refresh_thread(target: Callable[[], None]) -> None:
+def _start_refresh_thread(target: Callable[[], object]) -> None:
     def run() -> None:
         try:
             target()

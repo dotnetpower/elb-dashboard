@@ -1,8 +1,13 @@
 """Job artifact storage helpers for large BLAST UI data.
 
-Hot job state stays in Azure Table Storage. Large, immutable or append-heavy
-payloads (execution-step snapshots, full logs, and result analytics artifacts)
-live in Blob Storage and are indexed by a tiny Table row per artifact.
+Responsibility: Job artifact storage helpers for large BLAST UI data
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `ArtifactState`, `_now_iso`, `_platform_storage_account_name`,
+`write_json_artifact`, `read_json_artifact`, `upsert_artifact_state`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
@@ -64,9 +69,9 @@ def _platform_storage_account_name() -> str:
         account = host.split(".", 1)[0]
         if account:
             return account
-    account = os.environ.get("AZURE_STORAGE_ACCOUNT") or os.environ.get("STORAGE_ACCOUNT_NAME")
-    if account:
-        return account.strip()
+    fallback = os.environ.get("AZURE_STORAGE_ACCOUNT") or os.environ.get("STORAGE_ACCOUNT_NAME")
+    if fallback:
+        return fallback.strip()
     raise RuntimeError("AZURE_BLOB_ENDPOINT is not set")
 
 
@@ -220,7 +225,7 @@ def read_json_artifact(
             max_bytes=max_bytes,
         )
     try:
-        return json.loads(text)
+        return cast(dict[str, Any], json.loads(text))
     except json.JSONDecodeError:
         LOGGER.warning("invalid JSON artifact job_id=%s type=%s", job_id, artifact_type)
         return None
@@ -317,8 +322,10 @@ def artifact_build_should_enqueue(job_id: str, artifact_types: list[str]) -> boo
 def build_execution_steps_snapshot(state: Any) -> dict[str, Any]:
     state_payload = getattr(state, "payload", None)
     payload = state_payload if isinstance(state_payload, dict) else {}
-    progress = payload.get("_progress") if isinstance(payload.get("_progress"), dict) else {}
-    steps = progress.get("steps") if isinstance(progress.get("steps"), dict) else {}
+    raw_progress = payload.get("_progress")
+    progress: dict[str, Any] = raw_progress if isinstance(raw_progress, dict) else {}
+    raw_steps = progress.get("steps")
+    steps: dict[str, Any] = raw_steps if isinstance(raw_steps, dict) else {}
     return {
         "schema_version": 1,
         "job_id": str(getattr(state, "job_id", "")),

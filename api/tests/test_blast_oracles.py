@@ -1,3 +1,19 @@
+"""Tests for BLAST Oracles behavior.
+
+Responsibility: Tests for BLAST Oracles behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_strict_tie_order_oracle_expands_candidate_pool`,
+`test_non_strict_tie_order_oracle_keeps_candidate_pool`,
+`test_upload_tie_order_oracle_writes_finalizer_metadata`,
+`test_upload_tie_order_oracle_rejects_oversized_payload`,
+`test_upload_tie_order_oracle_rejects_non_string_accession_items`,
+`test_upload_db_order_oracle_pointer_writes_url_manifest`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_oracles.py`.
+"""
+
 from __future__ import annotations
 
 import json

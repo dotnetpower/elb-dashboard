@@ -1,4 +1,14 @@
-"""``/api/storage/*`` route package."""
+"""/api/storage/*`` route package.
+
+Responsibility: /api/storage/*`` route package
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `package imports`
+Risky contracts: Never issue browser SAS URLs; local public Storage access remains debug-only
+and IP-allowlisted.
+Validation: `uv run pytest -q api/tests/test_storage_data.py
+api/tests/test_storage_public_access.py`.
+"""
 
 from __future__ import annotations
 

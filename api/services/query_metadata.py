@@ -1,4 +1,13 @@
-"""Small FASTA metadata helpers for BLAST pre-flight checks."""
+"""Small FASTA metadata helpers for BLAST pre-flight checks.
+
+Responsibility: Small FASTA metadata helpers for BLAST pre-flight checks
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `QueryRecordSummary`, `QueryMetadata`, `parse_fasta_metadata`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 

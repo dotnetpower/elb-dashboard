@@ -32,6 +32,7 @@ export interface SubmitValidationArgs {
   warmupBlocked: boolean;
   selectedDbPlan: BlastWarmupPlan | null | undefined;
   shardingBlockedReason?: string | null;
+  dataLoading?: boolean;
   submitPending: boolean;
 }
 
@@ -62,6 +63,7 @@ export function deriveSubmitValidation({
   warmupBlocked,
   selectedDbPlan,
   shardingBlockedReason,
+  dataLoading = false,
   submitPending,
 }: SubmitValidationArgs): SubmitValidationResult {
   const knownDbs = dbQueryData?.databases ?? [];
@@ -73,22 +75,23 @@ export function deriveSubmitValidation({
   const taxidValid = !hasTaxid || parsePositiveTaxid(form.taxid) !== null;
   const taxidOptionConflict =
     hasTaxid && hasStructuredTaxidOptionConflict(form.additional_options);
+  const taxonomyReady = !hasTaxid || (taxidValid && !taxidOptionConflict);
 
   const canSubmit = Boolean(
     subId &&
-      workloadRg &&
-      form.program &&
-      form.db &&
-      form.query_data &&
-      storageAccount &&
-      selectedCluster &&
-      isAksWorkloadReady(selectedCluster) &&
-      !dbMissingFromStorage &&
-      !warmupBlocked &&
-      !shardingBlockedReason &&
-      taxidValid &&
-      !taxidOptionConflict &&
-      !submitPending,
+    workloadRg &&
+    form.program &&
+    form.db &&
+    form.query_data &&
+    storageAccount &&
+    selectedCluster &&
+    isAksWorkloadReady(selectedCluster) &&
+    !dbMissingFromStorage &&
+    !warmupBlocked &&
+    !shardingBlockedReason &&
+    !dataLoading &&
+    taxonomyReady &&
+    !submitPending,
   );
 
   const missing: MissingItem[] = [];
@@ -118,6 +121,7 @@ export function deriveSubmitValidation({
         "Warmup is not feasible on this cluster — disable warmup or upgrade the cluster",
     });
   if (shardingBlockedReason) missing.push({ text: shardingBlockedReason });
+  if (dataLoading) missing.push({ text: "Runtime data is still loading" });
   if (!taxidValid) missing.push({ text: "Taxonomy taxid must be a positive integer" });
   if (taxidOptionConflict) {
     missing.push({
@@ -140,6 +144,7 @@ export function deriveSubmitValidation({
     { ok: Boolean(subId && workloadRg), label: "Config" },
     { ok: Boolean(form.query_data && seqStats.isFasta), label: "Sequence" },
     { ok: Boolean(form.db), label: "Database" },
+    { ok: taxonomyReady, label: "Taxonomy" },
     {
       ok: Boolean(selectedCluster && isAksWorkloadReady(selectedCluster)),
       label: "Cluster",

@@ -1,3 +1,18 @@
+"""Tests for BLAST Submit Route Options behavior.
+
+Responsibility: Tests for BLAST Submit Route Options behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_submit_options_forward_acr_fields`,
+`test_submit_options_forward_taxid_filter_fields`, `test_submit_options_accept_searchsp_alias`,
+`test_submit_options_forward_tie_order_oracle_controls`,
+`test_submit_options_forward_db_order_oracle_opt_out`,
+`test_submit_options_force_local_ssd_even_when_caller_disables_it`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_submit_route_options.py`.
+"""
+
 from __future__ import annotations
 
 from api.routes._blast_shared import (

@@ -1,26 +1,11 @@
-"""MSAL bearer-token validation for the FastAPI api sidecar.
+"""MSAL bearer-token validation for FastAPI routes.
 
-Uses the standard OIDC discovery + JWKS caching strategy. Pure FastAPI/PyJWT
-implementation with no dependency on the legacy Azure Functions runtime.
-
-Performance model
------------------
-Every `/api/*` request that depends on `require_caller` would otherwise pay
-~2-5 ms of full RSA signature verification + claim validation, repeated for
-every dashboard poll. Three layers of caching keep the p50 hot-path well
-under 0.1 ms:
-
-  1. ``PyJWKClient`` caches signing keys keyed by ``kid``.
-  2. The OIDC discovery document is cached for 1 h (``_JWKS_TTL_SECONDS``).
-  3. Validated ``CallerIdentity`` objects are cached by SHA-256 of the token
-     until ``exp - 30 s`` (capped at 5 min) — see ``_CLAIMS_CACHE`` below.
-
-The claims cache is intentionally short-lived (≤ 5 min) so a token revoked
-mid-session takes at most ~5 min to drop. Refreshing is transparent: when a
-SPA acquires a new token, its SHA differs and we re-validate from scratch.
-
-The dev bypass (``AUTH_DEV_BYPASS=true``) returns a synthetic identity and
-short-circuits all validation. Never set in production.
+Responsibility: MSAL bearer-token validation for FastAPI routes
+Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Key entry points: `CallerIdentity`, `AuthError`, `_discovery_url`, `require_caller`,
+`reset_caches`
+Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

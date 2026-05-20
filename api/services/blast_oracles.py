@@ -1,8 +1,14 @@
 """Tie-order oracle helpers for BLAST finalizers.
 
-These helpers keep oracle Storage metadata and finalizer pointer files out of
-the Celery task module. The task decides *when* to attach an oracle; this module
-owns how oracle payloads are normalized, validated, and uploaded.
+Responsibility: Tie-order oracle helpers for BLAST finalizers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `upload_tie_order_oracle_if_present`,
+`upload_db_order_oracle_pointer_if_available`, `db_order_oracle_part_urls`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
 """
 
 from __future__ import annotations

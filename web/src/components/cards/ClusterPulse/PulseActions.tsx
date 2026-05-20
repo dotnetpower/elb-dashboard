@@ -32,21 +32,33 @@ export function PulseActions({
   return (
     <div
       style={{
-        padding: "10px 14px",
+        padding: "6px 10px",
         borderBottom: "1px solid var(--border-weak)",
         display: "flex",
         justifyContent: "space-between",
         alignItems: "center",
-        gap: 8,
+        gap: 6,
         flexWrap: "wrap",
       }}
     >
       <span title="Open the per-cluster detail modal (node pools, identity, network)">
-        <ActionBtn tone="accent" onClick={onOpenDetail} icon={<Info size={11} aria-hidden="true" />}>
+        <ActionBtn
+          tone="accent"
+          onClick={onOpenDetail}
+          icon={<Info size={11} aria-hidden="true" />}
+        >
           Open cluster detail
         </ActionBtn>
       </span>
-      <div style={{ display: "flex", gap: 8, marginLeft: "auto", flexWrap: "wrap", justifyContent: "flex-end" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 6,
+          marginLeft: "auto",
+          flexWrap: "wrap",
+          justifyContent: "flex-end",
+        }}
+      >
         {!trans && canControlPower && c.power_state === "Stopped" && (
           <span title="Start the AKS cluster (~5 min to ready)">
             <ActionBtn

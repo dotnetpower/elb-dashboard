@@ -13,15 +13,14 @@ import { useNavigate } from "react-router-dom";
 
 import { BlastJobIdentity } from "@/components/cards/BlastJobIdentity";
 import { isActiveJobState } from "@/components/cards/ClusterBento/jobMapping";
-import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/jobTypes";
+import type {
+  DisplayJobState,
+  JobRowView,
+} from "@/components/cards/ClusterBento/jobTypes";
 import { statusColor } from "@/constants";
 import { timeAgo } from "@/pages/BlastJobs/dateGroup";
 
-import {
-  jobStateTone,
-  ownerLabel,
-  summariseNote,
-} from "./helpers";
+import { jobStateTone, ownerLabel, summariseNote } from "./helpers";
 
 interface Props {
   job: JobRowView;
@@ -62,10 +61,10 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
       }}
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) 90px 88px 110px",
+        gridTemplateColumns: "minmax(0, 1fr) 76px 76px 92px",
         alignItems: "center",
-        gap: 12,
-        padding: "8px 10px",
+        gap: 8,
+        padding: "5px 8px",
         borderRadius: 6,
         background: "var(--pulse-row-bg)",
         border: "1px solid var(--border-weak)",
@@ -78,7 +77,7 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 8,
+          gap: 6,
           minWidth: 0,
         }}
       >
@@ -106,7 +105,7 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
       <span
         title={submitter.title}
         style={{
-          fontSize: 11,
+          fontSize: 10,
           color: "var(--text-muted)",
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -119,10 +118,10 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
         <span
           style={{
             display: "inline-block",
-            fontSize: 10,
+            fontSize: 9,
             textTransform: "uppercase",
-            letterSpacing: "0.04em",
-            padding: "2px 6px",
+            letterSpacing: "0.03em",
+            padding: "1px 5px",
             borderRadius: 4,
             background: `${phaseColor}18`,
             color: phaseColor,
@@ -138,16 +137,14 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
           display: "flex",
           flexDirection: "column",
           alignItems: "flex-end",
-          gap: 1,
+          gap: 0,
           fontVariantNumeric: "tabular-nums",
         }}
         title={createdAt ? new Date(createdAt).toLocaleString() : ""}
       >
-        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-          {timeAgoLabel}
-        </span>
+        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{timeAgoLabel}</span>
         {createdAt && (
-          <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
+          <span style={{ fontSize: 9, color: "var(--text-faint)" }}>
             {durationCaption} {durationLabel}
           </span>
         )}

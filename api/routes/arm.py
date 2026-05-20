@@ -1,17 +1,19 @@
 """ARM discovery + Resource Group tag routes (`/api/arm/*`).
 
-Backend-proxied Azure Resource Manager calls so the SPA can use its
-MSAL token without needing direct ARM access from the browser.
-
-Uses the `api.services.azure_clients` wrappers under the api sidecar's
-managed identity, so the SPA does not need to acquire ARM-scoped tokens
-itself for these routes.
+Responsibility: ARM discovery + Resource Group tag routes (`/api/arm/*`)
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `list_subscriptions`, `list_resource_groups`, `get_rg_tags`, `set_rg_tags`,
+`list_storage_accounts`, `list_acrs`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 
@@ -106,7 +108,10 @@ def get_rg_tags(
         tags = {k: v for k, v in (rg.tags or {}).items() if k.startswith(ELB_TAG_PREFIX)}
         return {"resource_group": rg.name, "tags": tags}
     except Exception as exc:
-        return _graceful("get_rg_tags", exc, empty={"resource_group": resource_group, "tags": {}})
+        return cast(
+            dict[str, Any],
+            _graceful("get_rg_tags", exc, empty={"resource_group": resource_group, "tags": {}}),
+        )
 
 
 @router.post("/resource-group/tags")

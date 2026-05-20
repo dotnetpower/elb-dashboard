@@ -1,7 +1,13 @@
-"""Storage table-backed repositories for job state and history.
+"""Azure Table-backed repositories for job state and history.
 
-`jobstate` table — one row per job, PartitionKey=job_id, RowKey="current".
-`jobhistory` table — many rows per job, PartitionKey=job_id, RowKey=ulid.
+Responsibility: Azure Table-backed repositories for job state and history
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_payload_value`, `_basename`, `canonical_job_metadata`, `JobState`,
+`JobStateRepository`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

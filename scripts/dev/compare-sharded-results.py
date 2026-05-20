@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Compare full BLAST tabular output with merged shard output.
 
-This harness intentionally operates on local outfmt 6/std files so precision
-work can be validated without launching AKS. Generate full and shard outputs
-with the same BLAST+ version/options, then run this script to exercise the same
-merge engine used by the terminal finalizer.
+Responsibility: Compare full BLAST tabular output with merged shard output
+Edit boundaries: Keep this as an operator/dev utility; do not make production code depend on it.
+Key entry points: `_read_rows`, `main`
+Risky contracts: Assume local developer context only; avoid broad production-side effects.
+Validation: `uv run python scripts/dev/compare-sharded-results.py --help`.
 """
 
 from __future__ import annotations
@@ -12,13 +13,14 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MERGE_SCRIPT = ROOT / "terminal" / "merge-sharded-results.sh"
+BASH = shutil.which("bash") or "/usr/bin/bash"
 
 
 def _read_rows(path: Path) -> list[str]:
@@ -51,9 +53,9 @@ def main() -> int:
                 for row in _read_rows(shard_path):
                     output.write(row + "\n")
 
-        subprocess.run(
+        subprocess.run(  # noqa: S603 - argv is explicit and shell=False.
             [
-                "bash",
+            BASH,
                 str(MERGE_SCRIPT),
                 str(merge_input),
                 str(merged_gz),

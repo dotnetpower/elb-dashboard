@@ -1,4 +1,12 @@
-"""Kubernetes metrics API helpers."""
+"""Kubernetes metrics API helpers.
+
+Responsibility: Kubernetes metrics API helpers
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `k8s_top_nodes`, `_node_capacity`, `_node_capacity_with_meta`
+Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
+Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
+"""
 
 from __future__ import annotations
 

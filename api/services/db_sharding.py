@@ -1,26 +1,13 @@
-"""DB sharding helpers — generate manifest + .nal alias text files.
+"""DB sharding helpers - generate manifest + .nal alias text files.
 
-ElasticBLAST's local-SSD shard layout (sibling repo
-``src/elastic_blast/templates/scripts/init-db-shard-aks.sh``) expects, for
-each shard ``NN`` of an ``N``-shard layout of database ``<db>``:
-
-* ``blast-db/{N}shards/{db}_shard_{NN}/{db}_shard_{NN}.manifest`` — newline-
-  separated list of volume base names that belong to this shard
-  (e.g. ``core_nt.00\\ncore_nt.01\\n...``).
-* ``blast-db/{N}shards/{db}_shard_{NN}/{db}_shard_{NN}.nal`` — BLAST+ alias
-  file pointing at the AKS-local volume paths
-  (``DBLIST /blast/blastdb/core_nt.00 /blast/blastdb/core_nt.01 ...``).
-
-The actual volume payload stays at ``blast-db/{db}/`` and is **not** copied
-into the shard directory. The AKS init script reads the manifest, derives
-the original DB URL by stripping the shard suffix, and downloads only the
-listed volumes. This is why N-way sharding adds only ~1 KB / shard of
-storage instead of N copies of the database.
-
-Side effects: writes blobs to the workload Storage account via
-``DefaultAzureCredential`` (Managed Identity in production, ``az login``
-locally). All writes are idempotent — re-uploading the same content is
-safe and the deterministic byte content makes concurrent uploads safe too.
+Responsibility: DB sharding helpers - generate manifest + .nal alias text files
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `ShardLayout`, `_validate_db_name`, `_validate_shard_count`,
+`list_db_volumes`, `read_blastdb_stats`, `derive_volumes_from_keys`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -338,7 +325,7 @@ def _shard_blob_paths(db_name: str, num_shards: int, shard_idx: int) -> tuple[st
     return f"{base}/{shard_name}.manifest", f"{base}/{shard_name}.nal"
 
 
-def _shard_set_already_present(cc, db_name: str, num_shards: int) -> bool:
+def _shard_set_already_present(cc: Any, db_name: str, num_shards: int) -> bool:
     """Idempotency probe: shard set is "present" iff EVERY .nal blob exists.
 
     Checking only shard 00 would produce false positives if a previous run

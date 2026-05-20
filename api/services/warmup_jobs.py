@@ -1,11 +1,22 @@
-"""Kubernetes manifest builders for node-local BLAST DB warmup jobs."""
+"""Kubernetes manifest builders for node-local BLAST DB warmup jobs.
+
+Responsibility: Kubernetes manifest builders for node-local BLAST DB warmup jobs
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `WarmupJobPlan`, `build_warmup_scripts_configmap`, `build_warmup_job_plan`,
+`database_status_from_warmup_jobs`, `attach_pod_progress_to_database_status`,
+`infer_warmup_pod_phase`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from api.services.db_sharding import DEFAULT_CONTAINER, MAX_SHARDS, partition_prefix_for
 
@@ -420,9 +431,9 @@ def infer_warmup_pod_phase(pod: dict[str, Any], log_text: str) -> dict[str, Any]
 def _warmup_container_status(status: dict[str, Any]) -> dict[str, Any]:
     for item in status.get("containerStatuses", []) or []:
         if item.get("name") == "warmup":
-            return item
+            return cast(dict[str, Any], item)
     containers = status.get("containerStatuses", []) or []
-    return containers[0] if containers else {}
+    return cast(dict[str, Any], containers[0]) if containers else {}
 
 
 def _phase_from_warmup_log(log_text: str) -> str:

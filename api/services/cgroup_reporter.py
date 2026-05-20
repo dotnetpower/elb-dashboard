@@ -1,37 +1,13 @@
 """cgroup v2 metrics reporter for control-plane sidecars.
 
-Each sidecar (api, worker, beat, terminal, frontend) reads its own cgroup
-files (`/sys/fs/cgroup/cpu.stat` + `/sys/fs/cgroup/memory.current`) every
-``REPORT_INTERVAL`` seconds and SETEXes the snapshot into the in-revision
-Redis (db 2) under ``sidecar:metrics:<name>``. ``REPORT_TTL`` controls how
-long a stale entry survives if the sidecar process dies — the api treats a
-missing key as "down".
-
-Why this instead of App Insights?
-  * App Insights `customMetrics` are aggregated at 1-minute intervals which
-    breaks the dashboard's "Near real-time · 30s" promise.
-  * cgroup v2 files are kernel-maintained, free to read, and exact.
-  * We already host an in-revision Redis sidecar with zero network cost
-    over the loopback interface.
-
-Why a *push* model and not the api scraping each sidecar's loopback?
-  * Some sidecars (nginx, ttyd, redis) don't naturally expose Prometheus
-    endpoints. Adding an HTTP server to each of them would be more code
-    and more attack surface than a tiny SET-only Redis client.
-  * A reporter that crashes silently is detected by TTL expiry; an api
-    scrape that times out is harder to distinguish from a slow sidecar.
-
-Multi-process / async safety:
-  * The reporter runs in its own daemon thread (api/worker/beat) or as a
-    background process (terminal/frontend). It never touches application
-    state.
-  * Redis writes are independent SETEX calls — no transactions, no Lua,
-    no contention.
-
-cgroup v2 path detection:
-  * Container Apps on the v2 stack mounts cgroup v2 at /sys/fs/cgroup
-    (single hierarchy). v1 is rejected with a clear log message because
-    the contract differs (the worker would silently report 0%).
+Responsibility: cgroup v2 metrics reporter for control-plane sidecars
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `CgroupReading`, `_read_cpu_stat`, `_read_proc_self_cpu_usec`, `read_cgroup`,
+`read_procfs_self`, `compute_cpu_pct`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -43,6 +19,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import redis
 
@@ -167,7 +144,7 @@ def _redis_url() -> str:
     return os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
 
 
-def _publish(client: redis.Redis, name: str, payload: dict, ttl: int) -> None:
+def _publish(client: redis.Redis, name: str, payload: dict[str, Any], ttl: int) -> None:
     client.setex(f"{REDIS_KEY_PREFIX}{name}", ttl, json.dumps(payload))
 
 
@@ -261,7 +238,7 @@ def report_loop(
             LOGGER.warning("cgroup_reporter[%s]: tick failed: %s", name, exc)
 
 
-def start_in_thread(name: str, **kwargs) -> threading.Event:
+def start_in_thread(name: str, **kwargs: Any) -> threading.Event:
     """Spawn the reporter as a daemon thread. Returns its stop event."""
     stop = threading.Event()
     t = threading.Thread(

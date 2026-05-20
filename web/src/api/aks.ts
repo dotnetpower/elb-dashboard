@@ -62,6 +62,28 @@ export interface AksSkuListResponse {
   degraded_reason?: string;
 }
 
+export interface OpenApiTokenStatus {
+  configured: boolean;
+  token: string;
+  masked_token: string;
+  header_name: string;
+  env_name: string;
+  source: string;
+  updated_at?: string | null;
+  generated?: boolean;
+  rotated?: boolean;
+}
+
+export interface OpenApiDeploymentStatus {
+  configured: boolean;
+  deployment_name: string;
+  container_name: string;
+  namespace: string;
+  image: string;
+  image_repository: string;
+  image_tag: string;
+}
+
 export const aksApi = {
   listSkus: () => api.get<AksSkuListResponse>("/aks/skus"),
 
@@ -146,4 +168,27 @@ export const aksApi = {
     api.get<Record<string, unknown>>(
       `/aks/openapi/spec?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
     ),
+
+  openApiDeployment: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<OpenApiDeploymentStatus>(
+      `/aks/openapi/deployment?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+
+  openApiToken: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<OpenApiTokenStatus>(
+      `/aks/openapi/token?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+
+  generateOpenApiToken: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    regenerate: boolean,
+  ) =>
+    api.post<OpenApiTokenStatus>("/aks/openapi/token", {
+      subscription_id: subscriptionId,
+      resource_group: rg,
+      cluster_name: clusterName,
+      regenerate,
+    }),
 };

@@ -6,6 +6,7 @@ interface Props {
   title: string;
   message?: string;
   confirmLabel?: string;
+  confirmAriaLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -15,6 +16,7 @@ export function ConfirmDialog({
   title,
   message,
   confirmLabel = "Confirm",
+  confirmAriaLabel,
   onConfirm,
   onCancel,
 }: Props) {
@@ -59,7 +61,7 @@ export function ConfirmDialog({
           <button
             className="glass-button glass-button--danger"
             onClick={onConfirm}
-            aria-label={`Permanently ${confirmLabel.toLowerCase()}`}
+            aria-label={confirmAriaLabel ?? `Permanently ${confirmLabel.toLowerCase()}`}
           >
             {confirmLabel}
           </button>

@@ -17,7 +17,8 @@
 #        - The app's own `user_impersonation` scope.
 #        - Azure Service Management `user_impersonation` (so the SPA can call ARM directly when needed).
 #   6. Writes web/.env.local with the resolved values.
-#   7. Prints the admin-consent URL.
+#   7. Writes API_CLIENT_ID to the active azd environment when one exists.
+#   8. Prints the admin-consent URL.
 set -euo pipefail
 
 APP_NAME="${1:-elastic-blast-control-plane}"
@@ -145,7 +146,22 @@ VITE_AZURE_CLIENT_ID=$app_id
 VITE_AZURE_REDIRECT_URI=$REDIRECT_URI
 EOF
 
-# --- 7. Admin consent URL ---
+# --- 7. Persist the app id into the active azd environment when available ---
+azd_env_name="${AZURE_ENV_NAME:-}"
+if command -v azd >/dev/null 2>&1; then
+  if [[ -n "$azd_env_name" ]] && azd env get-values --environment "$azd_env_name" >/dev/null 2>&1; then
+    echo "==> Writing API_CLIENT_ID to azd environment ($azd_env_name)"
+    azd env set --environment "$azd_env_name" API_CLIENT_ID "$app_id" >/dev/null
+  elif azd env get-values >/dev/null 2>&1; then
+    azd_env_name="$(azd env get-values 2>/dev/null | awk -F= '/^AZURE_ENV_NAME=/{gsub(/\"/, "", $2); print $2; exit}')"
+    echo "==> Writing API_CLIENT_ID to active azd environment${azd_env_name:+ ($azd_env_name)}"
+    azd env set API_CLIENT_ID "$app_id" >/dev/null
+  else
+    echo "==> No active azd environment found; run 'azd env set API_CLIENT_ID $app_id' after creating one."
+  fi
+fi
+
+# --- 8. Admin consent URL ---
 consent_url="https://login.microsoftonline.com/${tenant_id}/adminconsent?client_id=${app_id}&redirect_uri=${REDIRECT_URI}"
 
 cat <<EOF
@@ -163,7 +179,6 @@ Next steps:
      $consent_url
   2. Restart the SPA dev server so .env.local is picked up:
      cd web && npm run dev
-  3. Pass the printed App ID into azd:
-     azd env set API_CLIENT_ID $app_id
-     azd up
+    3. Deploy with azd:
+      azd up
 EOF

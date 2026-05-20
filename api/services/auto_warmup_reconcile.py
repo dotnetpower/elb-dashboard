@@ -1,4 +1,15 @@
-"""Auto warmup reconciliation policy and readiness guards."""
+"""Auto warmup reconciliation policy and readiness guards.
+
+Responsibility: Auto warmup reconciliation policy and readiness guards
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `cluster_is_workload_ready`, `expected_warmup_node_count`,
+`auto_warmup_ready_gate`, `autowarmup_inflight_key`, `autowarmup_inflight_redis`,
+`autowarmup_inflight_acquire`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 

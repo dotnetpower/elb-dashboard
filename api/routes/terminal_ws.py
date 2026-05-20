@@ -1,21 +1,13 @@
-"""WebSocket proxy for the browser terminal session.
+"""Browser terminal ticketing and WebSocket proxy routes.
 
-Browser opens `wss://<api-host>/api/terminal/ws?token=<one-time-ticket>` (the
-token is acquired from `POST /api/terminal/ticket`, which validates the
-caller's MSAL bearer token and stores a short-lived single-use ticket in
-process memory). Then this handler:
-
-1. Validates the ticket.
-2. Opens a WebSocket connection to the terminal sidecar's loopback
-   `ttyd` at TERMINAL_UPSTREAM/ws.
-3. Duplex-copies bytes between the browser WebSocket and the upstream
-   WebSocket until either side closes.
-
-The ticket flow is necessary because browser WebSocket APIs cannot send
-custom Authorization headers (see https://github.com/whatwg/websockets/issues/16).
-The api validates the bearer once via the regular HTTP path
-(`POST /api/terminal/ticket` requires a valid token) and exchanges it for a
-ticket the browser can then put in the URL.
+Responsibility: Browser terminal ticketing and WebSocket proxy routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_Ticket`, `_log_identity_hash`, `issue_ticket`, `terminal_health`,
+`terminal_azure_cli`, `ws_terminal`
+Risky contracts: Terminal access must stay bearer/ticket-gated and upstreams must remain
+loopback-only.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -152,7 +144,7 @@ async def _probe_azure_cli() -> dict[str, object]:
             return {"exit_code": -1, "stdout": "", "stderr": str(exc)[:200]}
 
     result = await asyncio.to_thread(_run)
-    exit_code = int(result.get("exit_code", -1) or -1)
+    exit_code = int(result.get("exit_code", -1) or -1)  # type: ignore[call-overload]
     stdout = str(result.get("stdout") or "").strip()
     if exit_code == 0 and stdout:
         import json as _json
@@ -243,7 +235,7 @@ async def ws_terminal(
         try:
             upstream = await websockets.connect(
                 upstream_url,
-                subprotocols=["tty"],
+                subprotocols=["tty"],  # type: ignore[list-item]
                 ping_interval=20,
                 ping_timeout=20,
                 open_timeout=4,

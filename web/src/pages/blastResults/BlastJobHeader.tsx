@@ -32,6 +32,7 @@ interface BlastJobHeaderProps {
   jobTitle: string | null;
   createdAt: string | null;
   isRunning: boolean;
+  canCancel: boolean;
   cancelDisabled: boolean;
   onRequestCancel: () => void;
   /** Original submit payload, used by Edit search / Duplicate / Export config. */
@@ -66,6 +67,7 @@ export function BlastJobHeader({
   jobTitle,
   createdAt,
   isRunning,
+  canCancel,
   cancelDisabled,
   onRequestCancel,
   jobPayload,
@@ -206,7 +208,7 @@ export function BlastJobHeader({
             <ElapsedTimer startTime={createdAt} />
           </span>
         )}
-        {isRunning && (
+        {canCancel && (
           <button
             className="glass-button"
             onClick={onRequestCancel}
@@ -218,7 +220,7 @@ export function BlastJobHeader({
               fontSize: 12,
               color: "var(--danger)",
             }}
-            title="Cancel this running BLAST search"
+            title="Cancel this BLAST search"
           >
             <StopCircle size={14} strokeWidth={1.5} /> Cancel
           </button>
@@ -377,7 +379,9 @@ export function BlastJobHeader({
         {(queryLength !== null || evalue !== null || maxTargets !== null) && (
           <>
             <Term label="Query length" />
-            <Detail>{queryLength !== null ? `${queryLength.toLocaleString()} nt` : "—"}</Detail>
+            <Detail>
+              {queryLength !== null ? `${queryLength.toLocaleString()} nt` : "—"}
+            </Detail>
             <Term label="E-value cutoff" />
             <Detail>
               {evalue ?? "—"}

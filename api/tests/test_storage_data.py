@@ -1,3 +1,16 @@
+"""Tests for Storage Data behavior.
+
+Responsibility: Tests for Storage Data behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `FakeBlobClient`, `FakeBlobService`,
+`test_upload_group_fasta_writes_queries_blob`, `test_upload_group_fasta_rejects_unsafe_paths`,
+`FakeChunkDownload`, `FakeChunkBlobClient`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_storage_data.py`.
+"""
+
 from __future__ import annotations
 
 import gzip
@@ -53,6 +66,70 @@ def test_upload_group_fasta_writes_queries_blob(monkeypatch: pytest.MonkeyPatch)
 def test_upload_group_fasta_rejects_unsafe_paths(blob_path: str) -> None:
     with pytest.raises(ValueError, match="invalid blob_path"):
         storage_data.upload_group_fasta(object(), "elbstg01", blob_path, ">q1\nAAAA\n")
+
+
+def _storage_account(public: str, default_action: str, ip_rules: list[str]) -> SimpleNamespace:
+    return SimpleNamespace(
+        public_network_access=public,
+        network_rule_set=SimpleNamespace(
+            default_action=default_action,
+            ip_rules=[SimpleNamespace(ip_address_or_range=ip) for ip in ip_rules],
+        ),
+    )
+
+
+def test_classify_storage_failure_reports_selected_network_firewall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_client = SimpleNamespace(
+        storage_accounts=SimpleNamespace(
+            get_properties=lambda _rg, _account: _storage_account(
+                "Enabled", "Deny", ["61.80.8.142"]
+            )
+        )
+    )
+    monkeypatch.setattr(
+        "api.services.azure_clients.storage_client",
+        lambda *_args: storage_client,
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.storage_public_access._detect_caller_ip",
+        lambda: "61.80.8.142",
+        raising=True,
+    )
+
+    result = storage_data.classify_storage_failure(
+        object(), "sub", "rg-elb-01", "elbstg01", RuntimeError("AuthorizationFailure")
+    )
+
+    assert result["degraded_reason"] == "firewall_blocked"
+    assert result["public_access_disabled"] is False
+    assert result["local_debug_access_blocked"] is True
+    assert result["caller_ip_in_rules"] is True
+    assert "selected networks" in result["message"]
+
+
+def test_classify_storage_failure_reports_private_only_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage_client = SimpleNamespace(
+        storage_accounts=SimpleNamespace(
+            get_properties=lambda _rg, _account: _storage_account("Disabled", "Deny", [])
+        )
+    )
+    monkeypatch.setattr(
+        "api.services.azure_clients.storage_client",
+        lambda *_args: storage_client,
+        raising=True,
+    )
+
+    result = storage_data.classify_storage_failure(
+        object(), "sub", "rg-elb-01", "elbstg01", RuntimeError("AuthorizationFailure")
+    )
+
+    assert result["degraded_reason"] == "network_blocked"
+    assert result["public_access_disabled"] is True
 
 
 class FakeChunkDownload:

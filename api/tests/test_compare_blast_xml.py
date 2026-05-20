@@ -1,3 +1,16 @@
+"""Tests for Compare BLAST Xml behavior.
+
+Responsibility: Tests for Compare BLAST Xml behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_xml`, `_run`, `test_compare_blast_xml_ignores_provenance_db_path`,
+`test_compare_blast_xml_detects_hsp_mismatch`,
+`test_compare_blast_xml_can_require_normalized_db_match`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_compare_blast_xml.py`.
+"""
+
 from __future__ import annotations
 
 import gzip

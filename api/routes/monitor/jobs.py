@@ -1,8 +1,18 @@
-"""Job-state monitor routes."""
+"""Job-state monitor routes.
+
+Responsibility: Job-state monitor routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `list_jobs`, `get_job`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py
+api/tests/test_monitor_cache.py`.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -38,7 +48,7 @@ def list_jobs(
             ]
         }
     except Exception as exc:
-        return _graceful("list_jobs", exc, empty={"jobs": []})
+        return cast(dict[str, Any], _graceful("list_jobs", exc, empty={"jobs": []}))
 
 
 @router.get("/jobs/{job_id}")
@@ -75,7 +85,7 @@ def get_job(
     except HTTPException:
         raise
     except Exception as exc:
-        return _graceful("get_job", exc, empty={"state": None, "history": []})
+        return cast(dict[str, Any], _graceful("get_job", exc, empty={"state": None, "history": []}))
 
 
 # ---------------------------------------------------------------------------

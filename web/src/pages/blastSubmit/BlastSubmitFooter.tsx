@@ -89,7 +89,7 @@ export function BlastSubmitFooter({
     <div className="blast-submit-footer">
       {missing.length > 0 && !submitPending && (
         <div className="blast-checklist">
-          <strong style={{ fontSize: 11 }}>Required before submitting:</strong>
+          <strong className="blast-checklist__title">Required before submitting:</strong>
           <ul>
             {missing.map((m) => (
               <li key={m.text}>
@@ -97,13 +97,10 @@ export function BlastSubmitFooter({
                 {m.link && (
                   <Link
                     to={m.link}
-                    style={{
-                      marginLeft: 6,
-                      color: "var(--accent)",
-                      fontSize: 11,
-                    }}
+                    className="blast-checklist__link"
+                    aria-label={`Go to ${m.text}`}
                   >
-                    Go →
+                    Go
                   </Link>
                 )}
               </li>
@@ -144,15 +141,7 @@ export function BlastSubmitFooter({
           )}
           {/* N1: draft auto-save indicator */}
           <span
-            className="blast-submit-summary__saved"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              fontSize: 11,
-              color: "var(--text-faint)",
-              marginLeft: searchSummary ? 12 : 0,
-            }}
+            className={`blast-submit-summary__saved${searchSummary ? " blast-submit-summary__saved--offset" : ""}`}
             title={
               lastSavedAt
                 ? `Draft stored in this browser tab (sessionStorage). Last write: ${lastSavedAt.toLocaleTimeString()}`
@@ -163,13 +152,12 @@ export function BlastSubmitFooter({
             {formatSavedAgo(lastSavedAt, now)}
           </span>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="blast-submit-actions">
           {canSubmit && (
             <button
-              className="glass-button"
+              className="glass-button blast-submit-preflight-btn"
               onClick={onPreFlight}
               disabled={preFlightPending}
-              style={{ fontSize: 12, gap: 5 }}
             >
               {preFlightPending ? (
                 <>
@@ -187,7 +175,6 @@ export function BlastSubmitFooter({
             onClick={onSubmit}
             disabled={runDisabled}
             title={runTitle}
-            aria-disabled={runDisabled}
           >
             {submitPending ? (
               <Loader2 size={16} strokeWidth={1.5} className="spin" />
@@ -207,7 +194,7 @@ export function BlastSubmitFooter({
         </div>
       </div>
       {submitError != null && (
-        <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 6 }}>
+        <div className="blast-submit-error">
           {formatApiError(submitError, "blast")}
         </div>
       )}

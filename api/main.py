@@ -1,22 +1,11 @@
-"""FastAPI application entrypoint for the `api` sidecar.
+"""FastAPI api sidecar entrypoint and router wiring.
 
-Adding a route?  Read [AGENTS.md](../AGENTS.md) "Backend route map" first.
-
-Routing order is significant:
-  1. Specific `/api/*` route groups.
-  2. Catch-all reverse proxy that forwards everything else to the
-     `frontend` sidecar at 127.0.0.1:8081.
-
-Any new `/api/*` router MUST be `app.include_router(...)`-ed **before** the
-`frontend_proxy.router` line below — otherwise the catch-all serves
-`index.html` for the new path and the route is silently shadowed.
-
-Auth contract:
-  * Every `/api/*` route validates the MSAL bearer via `Depends(require_caller)`
-    in `api.auth` (except `/api/health`).
-  * The WebSocket upgrade in `api.routes.terminal_ws` does the same check.
-  * Azure SDK calls go through `api.services.*` under the shared user-assigned
-    Managed Identity `id-elb-control` (see `.github/copilot-instructions.md` §5).
+Responsibility: FastAPI api sidecar entrypoint and router wiring
+Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Key entry points: `_inspector_should_capture`, `_decode_jwt_upn`, `_extract_client_ip`,
+`RequestIdMiddleware`, `create_app`
+Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
@@ -27,6 +16,7 @@ import logging
 import os
 import secrets
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -152,7 +142,9 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     Application Insights without having to enable per-request body capture.
     """
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         rid = request.headers.get("x-request-id") or secrets.token_hex(8)
         request.state.request_id = rid
         t0 = time.monotonic()
@@ -171,10 +163,10 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                 raw = await request.body()
                 captured_request_body = raw[:_INSPECTOR_MAX_BUFFER_BYTES]
 
-                async def _replay_receive(_body: bytes = raw):
+                async def _replay_receive(_body: bytes = raw) -> dict[str, object]:
                     return {"type": "http.request", "body": _body, "more_body": False}
 
-                request._receive = _replay_receive  # type: ignore[attr-defined]
+                request._receive = _replay_receive
             except Exception:
                 captured_request_body = None
 
@@ -345,7 +337,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
 
 @asynccontextmanager
-async def _lifespan(app: FastAPI):
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """App lifespan — currently only used to drain the sidecar SSE
     broadcaster cleanly on shutdown so subscribers see an EOF instead of
     a half-closed socket. See `api.routes.monitor._SidecarBroadcaster`.
@@ -381,7 +373,9 @@ def create_app() -> FastAPI:
     _MAX_BODY = int(os.environ.get("MAX_REQUEST_BODY_BYTES", str(10 * 1024 * 1024)))
 
     @app.middleware("http")
-    async def body_size_guard(request: Request, call_next):
+    async def body_size_guard(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
         cl = request.headers.get("content-length")
         if cl and int(cl) > _MAX_BODY:
             return JSONResponse(
@@ -426,7 +420,7 @@ def create_app() -> FastAPI:
 
     # Make sure unhandled errors return JSON rather than a traceback HTML.
     @app.exception_handler(StarletteHTTPException)
-    async def http_exc_handler(_request, exc: StarletteHTTPException) -> JSONResponse:
+    async def http_exc_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
         detail = exc.detail
         if isinstance(detail, str):
             payload = {"detail": detail}
@@ -435,7 +429,7 @@ def create_app() -> FastAPI:
         return JSONResponse(payload, status_code=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_handler(_request, exc: RequestValidationError) -> JSONResponse:
+    async def validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse({"detail": exc.errors()}, status_code=422)
 
     # Background cgroup reporter — publishes this sidecar's CPU/MEM into

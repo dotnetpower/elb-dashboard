@@ -1,4 +1,14 @@
-"""BLAST submit pre-flight checks."""
+"""BLAST submit pre-flight checks.
+
+Responsibility: BLAST submit pre-flight checks
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `blast_pre_flight`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +38,8 @@ def blast_pre_flight(
     storage = body.get("storage_account", "")
     db = body.get("db") or body.get("database", "")
     compatibility_contract: dict[str, Any] | None = None
-    raw_options = body.get("options") if isinstance(body.get("options"), dict) else {}
+    _raw_opts = body.get("options")
+    raw_options: dict[str, Any] = _raw_opts if isinstance(_raw_opts, dict) else {}
     precision_options = {**raw_options}
     for key in (
         "additional_options",

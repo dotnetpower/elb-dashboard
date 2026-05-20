@@ -1,11 +1,16 @@
 """Tests for `fetch_taxonomy_tree` and the GET /blast/taxonomy/tree route.
 
-The service composes one efetch (via the cached `fetch_taxonomy_detail`)
-with one esearch + one esummary per major rank.  We stub the network
-helpers and assert: (a) siblings are keyed by the previous major rank's
-taxid, (b) the requested species itself is filtered out of its sibling
-list, (c) per-(parent, rank, limit) cache is honoured on the second
-call, (d) the route maps errors as documented.
+Responsibility: Tests for `fetch_taxonomy_tree` and the GET /blast/taxonomy/tree route
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_reset_caches`, `_install_fakes`,
+`test_fetch_taxonomy_tree_groups_siblings_by_parent`,
+`test_fetch_taxonomy_tree_uses_cache_on_second_call`,
+`test_fetch_taxonomy_tree_cache_key_includes_limit`,
+`test_taxonomy_tree_route_maps_bad_taxid_to_422`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_taxonomy_tree.py`.
 """
 
 from __future__ import annotations

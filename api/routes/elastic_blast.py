@@ -1,7 +1,14 @@
 """External ElasticBLAST API facade.
 
-This router exposes the small direct-caller contract while the actual execution
-is delegated to the sibling OpenAPI service.
+Responsibility: External ElasticBLAST API facade
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `ExternalBlastOptions`, `ExternalBlastSubmitRequest`,
+`submit_external_blast_job`, `list_external_blast_jobs`, `get_external_blast_job`,
+`list_external_blast_job_events`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
@@ -50,7 +57,7 @@ class ExternalBlastSubmitRequest(BaseModel):
     ] = Field("blastn")
     taxid: int | None = None
     is_inclusive: bool | None = None
-    options: ExternalBlastOptions = Field(default_factory=ExternalBlastOptions)
+    options: ExternalBlastOptions = Field(default_factory=ExternalBlastOptions)  # type: ignore[arg-type]
     priority: int = Field(50, ge=0, le=100)
     batch_len: int | None = Field(None, ge=1, le=1_000_000_000)
     idempotency_key: str | None = Field(None, min_length=1, max_length=256)

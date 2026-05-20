@@ -1,4 +1,14 @@
-"""``/api/warmup/*`` — auto-preference + start/release/status endpoints."""
+"""/api/warmup/*`` - auto-preference + start/release/status endpoints.
+
+Responsibility: /api/warmup/*`` - auto-preference + start/release/status endpoints
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_resolve_warmup_db_name`, `warmup_auto_preference_put`,
+`warmup_auto_preference_get`, `warmup_start`, `warmup_release`, `warmup_status`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 

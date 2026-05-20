@@ -1,9 +1,13 @@
 """Verified Web BLAST-compatible search-space defaults.
 
-The values here are intentionally small in scope: each entry is a measured
-baseline for a specific database snapshot and BLAST option set. Callers may
-override the injected value with an explicit ``-searchsp`` in
-``additional_options``.
+Responsibility: Verified Web BLAST-compatible search-space defaults
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `WebBlastSearchSpaceDefault`, `database_name_from_path`,
+`default_for_database`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

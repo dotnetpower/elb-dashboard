@@ -1,8 +1,15 @@
-"""Tests for the cgroup reporter — pure-function pieces only.
+"""Tests for the cgroup reporter - pure-function pieces only.
 
-The IO loop and Redis publishing are tested at integration time
-(docker-compose with a real Redis sidecar); see
-``docs/features_change/2026-05/2026-05-15-sidecars-card-sse.md``.
+Responsibility: Tests for the cgroup reporter - pure-function pieces only
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_compute_cpu_pct_zero_window_is_safe`,
+`test_compute_cpu_pct_one_full_core`, `test_compute_cpu_pct_partial_core`,
+`test_compute_cpu_pct_clamps_negative_delta`, `test_compute_cpu_pct_handles_real_clock_drift`,
+`test_read_procfs_self_returns_positive_reading`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_cgroup_reporter.py`.
 """
 
 from __future__ import annotations

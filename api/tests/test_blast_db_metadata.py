@@ -1,3 +1,16 @@
+"""Tests for BLAST database Metadata behavior.
+
+Responsibility: Tests for BLAST database Metadata behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_extract_db_name_handles_every_input_shape`,
+`test_database_display_metadata_merges_core_nt_catalogue_with_storage_stats`,
+`test_database_display_metadata_prefers_blastdb_metadata_title`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_db_metadata.py`.
+"""
+
 from __future__ import annotations
 
 from api.services.blast_db_metadata import database_display_metadata_from_info, extract_db_name

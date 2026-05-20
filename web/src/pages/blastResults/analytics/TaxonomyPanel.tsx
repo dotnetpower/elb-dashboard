@@ -85,10 +85,6 @@ export function TaxonomyPanel({
     staleTime: 60_000,
   });
 
-  if (resultsPending) {
-    return <ResultsPendingPanel />;
-  }
-
   const serverDegraded = Boolean(taxonomyQuery.data?.degraded);
   const serverRows: TaxonomyRow[] = useMemo(() => {
     const data = taxonomyQuery.data;
@@ -105,6 +101,10 @@ export function TaxonomyPanel({
   }, [taxonomyQuery.data, serverDegraded]);
 
   const fallbackRows = useMemo(() => rollupByOrganism(alignments), [alignments]);
+
+  if (resultsPending) {
+    return <ResultsPendingPanel />;
+  }
 
   const usingFallback = serverRows.length === 0 && fallbackRows.length > 0;
   const rows = serverRows.length > 0 ? serverRows : fallbackRows;

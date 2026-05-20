@@ -41,21 +41,23 @@ export function BlastResults() {
   const { job, isRunning, actions, subscriptionId, storageAccount, resourceGroup } =
     state;
   const hasExplicitTab = searchParams.has("tab");
+  const justSubmitted = searchParams.get("submitted") === "1";
+  const canRequestCancel =
+    isRunning || Boolean(justSubmitted && jobId && !job && state.jobQuery.isFetching);
 
   useEffect(() => {
-    if (!isRunning || hasExplicitTab) return;
+    if (!canRequestCancel || hasExplicitTab) return;
     const next = new URLSearchParams(searchParams);
     next.set("tab", "run");
     setSearchParams(next, { replace: true });
-  }, [hasExplicitTab, isRunning, searchParams, setSearchParams]);
+  }, [canRequestCancel, hasExplicitTab, searchParams, setSearchParams]);
 
   const isResultAnalyticsTab =
     tab === "descriptions" ||
     tab === "graphic" ||
     tab === "alignments" ||
     tab === "taxonomy";
-  const analyticsEnabled =
-    isResultAnalyticsTab && !isRunning && Boolean(job);
+  const analyticsEnabled = isResultAnalyticsTab && !isRunning && Boolean(job);
   const resultTabWaitingForJob = isResultAnalyticsTab && !job;
 
   const analytics = useBlastAnalyticsState({
@@ -73,6 +75,7 @@ export function BlastResults() {
         jobTitle={job?.job_title ?? null}
         createdAt={job?.created_at ?? null}
         isRunning={isRunning}
+        canCancel={canRequestCancel}
         cancelDisabled={actions.cancelMutation.isPending}
         onRequestCancel={() => setShowCancelConfirm(true)}
         jobPayload={job?.payload}
@@ -83,7 +86,7 @@ export function BlastResults() {
         infrastructure={job?.infrastructure as Record<string, unknown> | undefined}
         exportingFormat={actions.exportingFormat}
         onExport={actions.handleExport}
-        hasExportTargets={Boolean(subscriptionId && storageAccount)}
+        hasExportTargets={state.showCompletedMetrics}
       />
 
       <BlastResultsTabs active={tab} resultsPending={isRunning} />

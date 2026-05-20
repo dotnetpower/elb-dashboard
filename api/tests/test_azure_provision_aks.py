@@ -1,3 +1,15 @@
+"""Tests for Azure Provision AKS behavior.
+
+Responsibility: Tests for Azure Provision AKS behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_build_cluster_params_enables_blob_csi_driver`,
+`test_build_cluster_params_keeps_expected_pools_and_taints`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py`.
+"""
+
 from __future__ import annotations
 
 from api.tasks.azure import _build_cluster_params

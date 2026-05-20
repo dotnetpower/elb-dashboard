@@ -1,3 +1,17 @@
+"""Tests for Warmup Route behavior.
+
+Responsibility: Tests for Warmup Route behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `client`, `test_warmup_start_forwards_cluster_topology_to_task`,
+`test_aks_start_forwards_auto_warmup_payload`, `test_aks_start_forwards_auto_openapi_payload`,
+`test_aks_assign_roles_forwards_storage_rbac_fields`,
+`test_aks_lifecycle_routes_invalidate_monitor_cache`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_warmup_route.py`.
+"""
+
 from __future__ import annotations
 
 import os

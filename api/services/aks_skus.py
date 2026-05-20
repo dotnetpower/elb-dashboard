@@ -1,25 +1,13 @@
 """Allowed AKS node SKUs for ElasticBLAST on Azure.
 
-This module mirrors the sibling repository's
-``src/elastic_blast/azure_traits.py::AZURE_HPC_MACHINES`` and
-``src/elastic_blast/constants.py::ELB_DFLT_AZURE_MACHINE_TYPE`` /
-``ELB_DFLT_AZURE_SYSTEM_VM_SIZE``.
-
-Keep one source of truth here: ``SKU_CATALOG``. Public allow-lists, pricing
-tables, route payloads, and validators are derived from it so they cannot
-drift from each other.
-
-Node pool layout mirror (from sibling ``constants.py``):
-
-* ``ELB_AZURE_SYSTEM_POOL_NAME = 'systempool'`` — small CriticalAddonsOnly
-  pool that hosts CoreDNS / metrics-server / csi-azuredisk-node etc.
-  Default VM size: ``ELB_DFLT_AZURE_SYSTEM_VM_SIZE = 'Standard_D2s_v3'``.
-* ``ELB_AZURE_BLAST_POOL_NAME = 'blastpool'`` — user pool that runs every
-  ElasticBLAST workload pod. Default VM size:
-  ``ELB_DFLT_AZURE_MACHINE_TYPE = 'Standard_E32s_v5'``.
-* Blast nodes get label ``workload=blast`` and taint
-  ``workload=blast:NoSchedule``; system nodes get taint
-  ``CriticalAddonsOnly=true:NoSchedule``.
+Responsibility: Allowed AKS node SKUs for ElasticBLAST on Azure
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `SkuSpec`, `SkuListResponse`, `SkuCatalogEntry`, `is_allowed`, `list_skus`,
+`sku_list_response`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

@@ -1,4 +1,13 @@
-"""Kubernetes API session and AKS kubeconfig credential helpers."""
+"""Direct Kubernetes API session helpers for AKS clusters.
+
+Responsibility: Direct Kubernetes API session helpers for AKS clusters
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_K8sCredentialMaterial`, `reset_k8s_credential_cache`,
+`_k8s_credential_cache_ttl`
+Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
+Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +22,7 @@ from typing import Any
 import yaml  # type: ignore[import-untyped]
 from azure.core.credentials import TokenCredential
 
-from api.services.azure_clients import aks_client
+from api.services.azure_clients import aks_client as aks_client
 
 _AKS_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
 _K8S_CREDENTIAL_CACHE_TTL_SECONDS = 300.0
@@ -171,5 +180,5 @@ def _get_k8s_session(
         finally:
             cleanup_temp_files()
 
-    session.close = cleanup_close  # type: ignore[assignment]
+    session.close = cleanup_close  # type: ignore[method-assign]
     return session, material.server

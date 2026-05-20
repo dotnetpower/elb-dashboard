@@ -1,4 +1,17 @@
-"""Unit tests for the auto-sharding logic in api.services.blast_config."""
+"""Unit tests for the auto-sharding logic in api.services.blast_config.
+
+Responsibility: Unit tests for the auto-sharding logic in api.services.blast_config
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_parse`, `_base_params`,
+`test_auto_sharding_is_off_but_local_ssd_is_on_by_default`,
+`test_local_ssd_cannot_be_disabled_while_pv_path_is_paused`,
+`test_approximate_sharding_opt_in_injects_partitions_and_prefix`,
+`test_approximate_sharding_uses_full_dbsize_when_available`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_config_sharding.py`.
+"""
 
 from __future__ import annotations
 
@@ -40,6 +53,22 @@ def test_auto_sharding_is_off_but_local_ssd_is_on_by_default() -> None:
     assert not cfg.has_option("blast", "db-partitions")
     assert not cfg.has_option("blast", "db-partition-prefix")
     assert cfg.get("cluster", "exp-use-local-ssd") == "true"
+
+
+def test_generate_config_rejects_storage_account_mismatch() -> None:
+    params = _base_params()
+    params["db"] = "https://stgelb.blob.core.windows.net/blast-db/core_nt/core_nt"
+
+    with pytest.raises(ValueError, match="db URL must belong"):
+        generate_config(params)
+
+
+def test_generate_config_rejects_query_string_blob_urls() -> None:
+    params = _base_params()
+    params["query_blob_url"] = "https://elbstg01.blob.core.windows.net/queries/q.fa?sig=bad"
+
+    with pytest.raises(ValueError, match="query_blob_url URL must not include query strings"):
+        generate_config(params)
 
 
 def test_local_ssd_cannot_be_disabled_while_pv_path_is_paused() -> None:

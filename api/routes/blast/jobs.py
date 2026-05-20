@@ -1,4 +1,15 @@
-"""/api/blast job listing and lifecycle routes."""
+"""/api/blast job listing and lifecycle routes.
+
+Responsibility: /api/blast job listing and lifecycle routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_local_list_row_may_have_split_children`, `_blast_jobs_list_cache_key`,
+`_blast_jobs_list_cache_get`, `blast_jobs_list`, `blast_job_execution_steps`, `blast_job_get`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 
@@ -238,22 +249,22 @@ def blast_jobs_list(
         if isinstance(external_rows, list):
             seen = {str(job.get("job_id")) for job in jobs}
             detail_budget = min(_EXTERNAL_DETAIL_ENRICH_LIMIT, max(0, limit - len(jobs)))
-            for row in external_rows:
-                if not isinstance(row, dict):
+            for ext_row in external_rows:
+                if not isinstance(ext_row, dict):
                     continue
-                job_id = str(row.get("job_id") or "")
+                job_id = str(ext_row.get("job_id") or "")
                 if not job_id or job_id in seen:
                     continue
-                row = _external_row_with_scope_defaults(
-                    row,
+                ext_row = _external_row_with_scope_defaults(
+                    ext_row,
                     subscription_id=subscription_id,
                     resource_group=resource_group,
                     cluster_name=cluster_name,
                 )
-                if detail_budget > 0 and _external_list_row_needs_detail(row):
-                    row = _external_job_detail_or_row(external_blast, row, external_kwargs)
+                if detail_budget > 0 and _external_list_row_needs_detail(ext_row):
+                    ext_row = _external_job_detail_or_row(external_blast, ext_row, external_kwargs)
                     detail_budget -= 1
-                candidate_rows.append(row)
+                candidate_rows.append(ext_row)
 
         # Sync newly-discovered external jobs into Table Storage so they
         # survive AKS restarts and appear on future list calls even when
@@ -271,13 +282,13 @@ def blast_jobs_list(
                 tenant_id=getattr(caller, "tenant_id", ""),
             )
 
-        for row in candidate_rows:
-            job_id = str(row.get("job_id") or "")
+        for ext_row in candidate_rows:
+            job_id = str(ext_row.get("job_id") or "")
             if job_id in tombstoned_ids:
                 # Soft-deleted in our Table; suppress from the list view
                 # so the row stays gone after the user's delete click.
                 continue
-            jobs.append(_external_to_blast_job(row))
+            jobs.append(_external_to_blast_job(ext_row))
     except Exception as exc:
         LOGGER.info("external blast job list unavailable: %s", _exception_reason(exc))
         reason = _exception_reason(exc)

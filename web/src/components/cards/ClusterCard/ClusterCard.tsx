@@ -13,10 +13,7 @@ import { isAksProvisioning, isAksProvisioningFailed } from "@/utils/aksStatus";
 
 import { AddClusterButton } from "./AddClusterButton";
 import { ClusterListSkeleton } from "./ClusterListSkeleton";
-import {
-  ProvisionDoneBanner,
-  ProvisioningBanner,
-} from "./ProvisioningBanner";
+import { ProvisionDoneBanner, ProvisioningBanner } from "./ProvisioningBanner";
 import { ProvisionModal } from "./ProvisionModal";
 import { useClusterActions } from "./useClusterActions";
 import { useClusterProvisioning } from "./useClusterProvisioning";
@@ -121,6 +118,11 @@ export function ClusterCard({
         prov.setProvError(null);
         query.refetch();
       }}
+      rightSlot={
+        enabled && !query.isLoading && !noClusters ? (
+          <AddClusterButton variant="pill" onClick={() => setShowProvision(true)} />
+        ) : null
+      }
       accentColor="cluster"
       collapsible
     >
@@ -187,11 +189,6 @@ export function ClusterCard({
         >
           <AlertTriangle size={12} style={{ verticalAlign: "middle" }} /> {prov.provError}
         </div>
-      )}
-
-      {/* Compact "+ Add Cluster" pill above the list when clusters exist. */}
-      {enabled && !query.isLoading && !noClusters && (
-        <AddClusterButton variant="pill" onClick={() => setShowProvision(true)} />
       )}
 
       <ul

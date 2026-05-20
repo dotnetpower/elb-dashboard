@@ -1,4 +1,14 @@
-"""Kubernetes job builders for cached BLAST DB tie-order oracles."""
+"""Kubernetes job builders for cached BLAST DB tie-order oracles.
+
+Responsibility: Kubernetes job builders for cached BLAST DB tie-order oracles
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `DbOrderOracleJobPlan`, `oracle_status_blob_path`, `oracle_part_blob_path`,
+`oracle_part_url`, `build_db_order_oracle_job_plan`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
+"""
 
 from __future__ import annotations
 

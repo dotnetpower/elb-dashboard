@@ -1,3 +1,14 @@
+"""Tests for BLAST Queue behavior.
+
+Responsibility: Tests for BLAST Queue behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_queue_snapshot_reports_position_and_depth`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_queue.py`.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

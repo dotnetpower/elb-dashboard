@@ -1,8 +1,10 @@
 """FastAPI control-plane API for ElasticBLAST on Azure.
 
-This package backs the `api` sidecar (and the worker/beat sidecars, which
-share the same image and import `api.celery_app`) in the bundled
-Container App `ca-elb-control`.
+Responsibility: FastAPI control-plane API for ElasticBLAST on Azure
+Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Key entry points: `__all__`
+Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

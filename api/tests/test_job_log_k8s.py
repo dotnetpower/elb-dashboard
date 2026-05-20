@@ -1,3 +1,15 @@
+"""Tests for Job Log Kubernetes behavior.
+
+Responsibility: Tests for Job Log Kubernetes behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_discover_k8s_log_targets_filters_to_job_and_maps_phases`,
+`test_stream_k8s_log_lines_uses_following_pod_log_api`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_job_log_k8s.py`.
+"""
+
 from __future__ import annotations
 
 import threading

@@ -1,4 +1,16 @@
-"""Tests for monitor snapshot caching."""
+"""Tests for monitor snapshot caching.
+
+Responsibility: Tests for monitor snapshot caching
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_reset_cache`, `test_cached_snapshot_returns_fresh_hit_without_loader_call`,
+`test_cached_snapshot_returns_stale_while_refreshing`,
+`test_cached_snapshot_cold_miss_failure_propagates`, `test_cached_snapshot_can_be_disabled`,
+`test_cached_snapshot_evicts_oldest_entry_when_capacity_is_reached`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_monitor_cache.py`.
+"""
 
 from __future__ import annotations
 
@@ -149,7 +161,7 @@ def test_invalidate_prefix_removes_only_boundary_matched_keys() -> None:
         "monitor:storage:sub:rg": {"containers": []},
     }
     for key, value in payloads.items():
-        monitor_cache.cached_snapshot(key, lambda v=value: v, ttl_seconds=30)
+        monitor_cache.cached_snapshot(key, lambda v=value: v, ttl_seconds=30)  # type: ignore[misc]
 
     removed = monitor_cache.invalidate_monitor_snapshot_prefix("monitor:aks:sub:rg")
 

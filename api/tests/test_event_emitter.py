@@ -1,4 +1,15 @@
-"""Tests for the cross-sidecar UI animation event emitter."""
+"""Tests for the cross-sidecar UI animation event emitter.
+
+Responsibility: Tests for the cross-sidecar UI animation event emitter
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_FakePipeline`, `_FakeRedis`, `_reload_emitter`,
+`test_emit_increments_hash_field`, `test_invalid_tuning_env_values_fall_back`,
+`test_emit_clamps_large_counts`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_event_emitter.py`.
+"""
 
 from __future__ import annotations
 

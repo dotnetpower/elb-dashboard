@@ -48,8 +48,7 @@ async function acquireFreshApiToken(account: AccountInfo): Promise<string> {
     return (await apiTokenInFlight.promise).accessToken;
   }
 
-  let promise: Promise<ApiTokenCacheEntry>;
-  promise = msalInstance
+  const promise: Promise<ApiTokenCacheEntry> = msalInstance
     .acquireTokenSilent({
       ...apiLoginRequest,
       account,

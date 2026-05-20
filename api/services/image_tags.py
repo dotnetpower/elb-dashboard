@@ -1,8 +1,12 @@
 """Pinned ACR image tags consumed by ElasticBLAST on AKS.
 
-Single source of truth in this repo. Update together with
-`src/elastic_blast/constants.py` in the sibling `elastic-blast-azure` repo.
-The monitoring UI highlights mismatches against this dict.
+Responsibility: Pinned ACR image tags consumed by ElasticBLAST on AKS
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: Module import side effects and constants.
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations

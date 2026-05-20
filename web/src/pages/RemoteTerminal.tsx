@@ -370,10 +370,6 @@ export default function RemoteTerminal() {
           display: "flex",
           alignItems: "center",
           gap: 12,
-          padding: "8px 12px",
-          background: "var(--bg-secondary)",
-          border: "1px solid var(--border-weak)",
-          borderRadius: "var(--radius)",
           fontSize: 12,
         }}
       >

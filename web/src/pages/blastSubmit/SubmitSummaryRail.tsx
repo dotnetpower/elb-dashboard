@@ -1,0 +1,272 @@
+import { Save, CheckCircle2, Loader2, Play, ShieldAlert } from "lucide-react";
+import { Link } from "react-router-dom";
+
+import { BLASTN_OPTIMIZE, type FormState } from "@/pages/blastSubmitModel";
+import { BlastCommandPreview } from "@/pages/blastSubmit/ui";
+import type { PreFlightResult } from "@/pages/blastSubmit/usePreFlight";
+import { PreFlightResultPanel } from "@/pages/blastSubmit/PreFlightResultPanel";
+import type { ProgramMeta, ToastFn } from "@/pages/blastSubmit/types";
+import type { MissingItem } from "@/pages/blastSubmit/submitValidation";
+
+/* ─── Helpers ──────────────────────────────────────────────────────── */
+
+function formatSavedAgo(when: Date | null | undefined, now: number): string {
+  if (!when) return "Not saved yet";
+  const seconds = Math.max(0, Math.round((now - when.getTime()) / 1000));
+  if (seconds < 5) return "Saved just now";
+  if (seconds < 60) return `Saved ${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `Saved ${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return `Saved ${hours}h ago`;
+}
+
+/* ─── Props ────────────────────────────────────────────────────────── */
+
+export interface SubmitSummaryRailProps {
+  form: FormState;
+  programMeta: ProgramMeta;
+  toast: ToastFn;
+  readySteps: { ok: boolean; label: string }[];
+  readyCount: number;
+  missing: MissingItem[];
+  searchSummary: string;
+  paramsSummary: string;
+  canSubmit: boolean;
+  submitPending: boolean;
+  preFlightResult: PreFlightResult | null;
+  preFlightPending: boolean;
+  effectiveSearchSpace?: number;
+  lastSavedAt?: Date | null;
+  set: <K extends keyof FormState>(key: K, value: FormState[K]) => void;
+  onPreFlight: () => void;
+  onSubmit: () => void;
+  now: number;
+}
+
+/* ─── Component ────────────────────────────────────────────────────── */
+
+export function SubmitSummaryRail({
+  form,
+  programMeta,
+  toast,
+  readySteps,
+  readyCount,
+  missing,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  searchSummary: _searchSummary,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  paramsSummary: _paramsSummary,
+  canSubmit,
+  submitPending,
+  preFlightResult,
+  preFlightPending,
+  effectiveSearchSpace,
+  lastSavedAt,
+  set,
+  onPreFlight,
+  onSubmit,
+  now,
+}: SubmitSummaryRailProps) {
+  const preFlightBlocked = preFlightResult != null && preFlightResult.ready === false;
+  const runDisabled = !canSubmit || preFlightBlocked || submitPending;
+  const runTitle = preFlightBlocked
+    ? `Resolve ${preFlightResult?.critical_blockers ?? 0} pre-flight blocker(s) before submitting`
+    : !canSubmit
+      ? "Fill in the required fields above"
+      : undefined;
+
+  const dbName = form.db ? form.db.split("/").pop() || form.db : "—";
+  const optimizeLabel =
+    form.program === "blastn"
+      ? (BLASTN_OPTIMIZE.find((o) => o.value === form.optimize)?.value ?? "—")
+      : "—";
+
+  return (
+    <aside className="bsl-rail" aria-label="Search summary">
+      {/* ── Input summary block ─────────────────────────────────── */}
+      <div className="bsl-rail__group bsl-rail__group--input">
+        <h5 className="bsl-rail__group-title">
+          <span className="bsl-rail__swatch bsl-rail__swatch--input" />
+          Input summary
+        </h5>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Program</span>
+          <span className="bsl-rail__v">{programMeta.label}</span>
+        </div>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Database</span>
+          <span className="bsl-rail__v">{dbName}</span>
+        </div>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Sequences</span>
+          <span className="bsl-rail__v">{form.query_data ? "entered" : "0"}</span>
+        </div>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Taxon filter</span>
+          <span className="bsl-rail__v">{form.taxid_label || "—"}</span>
+        </div>
+        <div className="bsl-rail__full-value">
+          <span className="bsl-rail__k">Job title</span>
+          <span className="bsl-rail__full-text">{form.job_title || "— (auto)"}</span>
+        </div>
+      </div>
+
+      {/* ── Runtime summary block ───────────────────────────────── */}
+      <div className="bsl-rail__group bsl-rail__group--runtime">
+        <h5 className="bsl-rail__group-title">
+          <span className="bsl-rail__swatch bsl-rail__swatch--runtime" />
+          Runtime summary
+        </h5>
+        {form.program === "blastn" && (
+          <div className="bsl-rail__kv">
+            <span className="bsl-rail__k">Task</span>
+            <span className="bsl-rail__v">{optimizeLabel}</span>
+          </div>
+        )}
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Cluster</span>
+          <span className="bsl-rail__v">{form.selectedCluster || "—"}</span>
+        </div>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Warmup</span>
+          <span className="bsl-rail__v">{form.enable_warmup ? "enabled" : "off"}</span>
+        </div>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Sharding</span>
+          <span className="bsl-rail__v">{form.sharding_mode}</span>
+        </div>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">E-value</span>
+          <span className="bsl-rail__v">{form.evalue}</span>
+        </div>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Max targets</span>
+          <span className="bsl-rail__v">{form.max_target_seqs}</span>
+        </div>
+        <div className="bsl-rail__kv">
+          <span className="bsl-rail__k">Output fmt</span>
+          <span className="bsl-rail__v">{form.outfmt}</span>
+        </div>
+      </div>
+
+      {/* ── Readiness block ─────────────────────────────────────── */}
+      <div className="bsl-rail__group">
+        <h5 className="bsl-rail__group-title bsl-rail__readiness-title">
+          Readiness · {readyCount}/{readySteps.length}
+        </h5>
+        <div className="blast-readiness bsl-rail__readiness">
+          {readySteps.map((s) => (
+            <span
+              key={s.label}
+              className={`blast-readiness__dot${s.ok ? " blast-readiness__dot--ok" : ""}`}
+              title={s.label}
+            />
+          ))}
+          <span className="bsl-rail__readiness-status">
+            {readySteps
+              .filter((s) => !s.ok)
+              .map((s) => s.label)
+              .join(" · ") || "All ready"}
+          </span>
+        </div>
+
+        {missing.length > 0 && !submitPending && (
+          <div className="blast-checklist bsl-rail__checklist">
+            <strong className="bsl-rail__checklist-title">
+              Required before submitting
+            </strong>
+            <ul>
+              {missing.map((m) => (
+                <li key={m.text}>
+                  {m.text}
+                  {m.link && (
+                    <Link
+                      to={m.link}
+                      className="bsl-rail__checklist-link"
+                      aria-label={`Go to ${m.text}`}
+                    >
+                      Go
+                    </Link>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* ── Run bar ─────────────────────────────────────────────── */}
+      <div className="bsl-rail__runbar">
+        {preFlightResult && (
+          <PreFlightResultPanel
+            result={preFlightResult}
+            onPickDb={(path) => set("db", path)}
+          />
+        )}
+
+        {canSubmit && (
+          <BlastCommandPreview
+            form={form}
+            programMeta={programMeta}
+            effectiveSearchSpace={effectiveSearchSpace}
+            toast={toast}
+          />
+        )}
+
+        {canSubmit && (
+          <button
+            className="glass-button bsl-rail__preflight-btn"
+            onClick={onPreFlight}
+            disabled={preFlightPending}
+          >
+            {preFlightPending ? (
+              <>
+                <Loader2 size={13} className="spin" /> Checking...
+              </>
+            ) : (
+              <>
+                <CheckCircle2 size={13} /> Check Readiness
+              </>
+            )}
+          </button>
+        )}
+
+        <button
+          className="blast-submit-btn"
+          onClick={onSubmit}
+          disabled={runDisabled}
+          title={runTitle}
+        >
+          {submitPending ? (
+            <Loader2 size={16} strokeWidth={1.5} className="spin" />
+          ) : preFlightBlocked ? (
+            <ShieldAlert size={15} strokeWidth={1.5} />
+          ) : (
+            <Play size={15} strokeWidth={1.5} />
+          )}
+          <span>
+            {submitPending
+              ? "Submitting"
+              : preFlightBlocked
+                ? "Resolve blockers"
+                : "Run BLAST"}
+          </span>
+        </button>
+
+        <div
+          className="bsl-rail__saved"
+          title={
+            lastSavedAt
+              ? `Draft stored in this browser tab (sessionStorage). Last write: ${lastSavedAt.toLocaleTimeString()}`
+              : "Draft will auto-save as you type"
+          }
+        >
+          <Save size={11} strokeWidth={1.5} />
+          {formatSavedAgo(lastSavedAt, now)}
+          <span className="bsl-rail__saved-shortcut">⌘+Enter</span>
+        </div>
+      </div>
+    </aside>
+  );
+}

@@ -1,3 +1,19 @@
+"""Tests for BLAST Compatibility behavior.
+
+Responsibility: Tests for BLAST Compatibility behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_core_nt_precise_contract_uses_verified_default`,
+`test_unknown_db_precise_contract_requires_calibration_even_with_searchsp`,
+`test_explicit_searchsp_mismatch_invalidates_verified_evidence`,
+`test_verified_db_nondefault_search_space_runs_without_precise_claim`,
+`test_explicit_matching_searchsp_is_precise_eligible`,
+`test_approximate_contract_remains_eligible_with_warning`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_blast_compatibility.py`.
+"""
+
 from __future__ import annotations
 
 from api.services.blast_compatibility import build_compatibility_contract

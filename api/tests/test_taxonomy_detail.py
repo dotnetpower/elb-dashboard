@@ -1,3 +1,19 @@
+"""Tests for Taxonomy Detail behavior.
+
+Responsibility: Tests for Taxonomy Detail behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `test_fetch_taxonomy_detail_parses_full_payload`,
+`test_fetch_taxonomy_detail_caches_second_call`,
+`test_fetch_taxonomy_detail_rejects_bad_taxids`,
+`test_fetch_taxonomy_detail_rejects_xxe_payload`,
+`test_fetch_taxonomy_detail_handles_malformed_xml`,
+`test_fetch_taxonomy_detail_requires_taxon_element`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_taxonomy_detail.py`.
+"""
+
 from __future__ import annotations
 
 from typing import Any

@@ -1,4 +1,14 @@
-"""AKS lifecycle routes."""
+"""AKS lifecycle routes.
+
+Responsibility: AKS lifecycle routes
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `aks_start`, `aks_stop`, `aks_delete`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
+api/tests/test_route_contracts.py`.
+"""
 
 from __future__ import annotations
 

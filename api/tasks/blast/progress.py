@@ -1,4 +1,12 @@
-"""BLAST task progress payload helpers."""
+"""BLAST task progress payload helpers.
+
+Responsibility: BLAST task progress payload helpers
+Edit boundaries: Keep long-running side effects here; route handlers should enqueue tasks and
+persist state.
+Key entry points: `_now_iso`, `_snippet`, `_step_key_for_phase`
+Risky contracts: Tasks should be idempotent, retry-aware, and write progress/state checkpoints.
+Validation: `uv run pytest -q api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 
@@ -94,26 +102,30 @@ def _merge_progress_payload(
     details: Mapping[str, Any],
 ) -> dict[str, Any]:
     payload = dict(existing_payload or {})
-    progress = dict(payload.get("_progress") if isinstance(payload.get("_progress"), dict) else {})
-    steps = dict(progress.get("steps") if isinstance(progress.get("steps"), dict) else {})
+    _raw_progress = payload.get("_progress")
+    progress = dict(_raw_progress) if isinstance(_raw_progress, dict) else {}
+    _raw_steps = progress.get("steps")
+    steps = dict(_raw_steps) if isinstance(_raw_steps, dict) else {}
     step_key = _step_key_for_phase(phase)
-    step = dict(steps.get(step_key) if isinstance(steps.get(step_key), dict) else {})
+    _raw_step = steps.get(step_key)
+    step = dict(_raw_step) if isinstance(_raw_step, dict) else {}
     updated_at = _now_iso()
     step.setdefault("started_at", str(step.get("updated_at") or updated_at))
+    step_status = "completed" if phase == "warmup_ready" and status == "running" else status
     step.update(
         {
             "phase": phase,
-            "status": status,
+            "status": step_status,
             "updated_at": updated_at,
             **_compact_progress_details(details),
         }
     )
     if error_code:
         step["error"] = error_code
-    if status == "completed":
+    if step_status == "completed":
         step["success"] = True
         step.setdefault("completed_at", updated_at)
-    if status == "failed":
+    if step_status == "failed":
         step["success"] = False
         step.setdefault("completed_at", updated_at)
     steps[step_key] = step

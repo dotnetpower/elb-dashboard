@@ -1,7 +1,14 @@
-"""Tests for api.services.storage_public_access — local-debug helper.
+"""Tests for api.services.storage_public_access - local-debug helper.
 
-Verifies the operational gate (env opt-in + Container App detection) and the
-ARM update contract (idempotent, never raises, returns shaped dicts).
+Responsibility: Tests for api.services.storage_public_access - local-debug helper
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_clear_env`, `test_gate_disabled_by_default`,
+`test_gate_enabled_only_when_opt_in_set`, `test_gate_falsy_values`,
+`test_gate_blocked_in_container_app`, `test_ensure_noop_when_gate_disabled`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_storage_public_access.py`.
 """
 
 from __future__ import annotations
@@ -58,35 +65,39 @@ def test_ensure_noop_in_container_app(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["action"] == "noop"
 
 
-def _make_account(public: str, ip_rules: list[str]) -> SimpleNamespace:
+def _make_account(
+    public: str,
+    default_action: str = "Deny",
+    ip_rules: list[str] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         public_network_access=public,
         network_rule_set=SimpleNamespace(
-            default_action="Deny" if ip_rules else "Allow",
-            ip_rules=[SimpleNamespace(ip_address_or_range=ip) for ip in ip_rules],
+            default_action=default_action,
+            ip_rules=[SimpleNamespace(ip_address_or_range=ip) for ip in (ip_rules or [])],
             virtual_network_rules=[],
         ),
     )
 
 
 def test_ensure_already_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Already open = publicNetworkAccess=Enabled + defaultAction=Allow.
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
     sc = MagicMock()
-    sc.storage_accounts.get_properties.return_value = _make_account("Enabled", ["1.2.3.4"])
-    with (
-        patch("api.services.azure_clients.storage_client", return_value=sc),
-        patch.object(spa, "_detect_caller_ip", return_value="1.2.3.4"),
-    ):
+    acct = _make_account("Enabled", default_action="Allow")
+    sc.storage_accounts.get_properties.return_value = acct
+    with patch("api.services.azure_clients.storage_client", return_value=sc):
         result = spa.ensure_local_storage_access(MagicMock(), "sub", "rg", "elbstg01")
     assert result["action"] == "already_open"
-    assert result["ip"] == "1.2.3.4"
+    assert result["default_action"] == "Allow"
     sc.storage_accounts.update.assert_not_called()
 
 
 def test_ensure_opens_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
     sc = MagicMock()
-    sc.storage_accounts.get_properties.return_value = _make_account("Disabled", [])
+    acct = _make_account("Disabled", default_action="Deny")
+    sc.storage_accounts.get_properties.return_value = acct
     with (
         patch("api.services.azure_clients.storage_client", return_value=sc),
         patch.object(spa, "_detect_caller_ip", return_value="9.9.9.9"),
@@ -95,6 +106,7 @@ def test_ensure_opens_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["action"] == "opened"
     assert result["ip"] == "9.9.9.9"
     assert result["previous_public"] == "Disabled"
+    assert result["default_action"] == "Allow"
     assert "storage-public-access.sh off" in result["off_hint"]
     sc.storage_accounts.update.assert_called_once()
     args, _ = sc.storage_accounts.update.call_args
@@ -102,29 +114,32 @@ def test_ensure_opens_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args[1] == "elbstg01"
     update_params = args[2]
     assert update_params.public_network_access == "Enabled"
-    assert update_params.network_rule_set.default_action == "Deny"
-    assert [r.ip_address_or_range for r in update_params.network_rule_set.ip_rules] == ["9.9.9.9"]
+    # New strategy: defaultAction=Allow, no per-IP rules.
+    assert update_params.network_rule_set.default_action == "Allow"
+    assert not getattr(update_params.network_rule_set, "ip_rules", None)
 
 
-def test_ensure_appends_caller_ip_when_partially_open(
+def test_ensure_updates_to_allow_when_enabled_with_deny(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Enabled+Deny (e.g. old Deny+ipRule state) is not "already open".
+    # The function must update to Allow regardless of existing ip_rules.
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
     sc = MagicMock()
-    sc.storage_accounts.get_properties.return_value = _make_account("Enabled", ["1.1.1.1"])
+    sc.storage_accounts.get_properties.return_value = _make_account(
+        "Enabled", default_action="Deny", ip_rules=["1.1.1.1"]
+    )
     with (
         patch("api.services.azure_clients.storage_client", return_value=sc),
         patch.object(spa, "_detect_caller_ip", return_value="2.2.2.2"),
     ):
         result = spa.ensure_local_storage_access(MagicMock(), "sub", "rg", "elbstg01")
-    assert result["action"] == "ip_added"
-    assert result["ip"] == "2.2.2.2"
+    assert result["action"] == "opened"
+    assert result["default_action"] == "Allow"
     args, _ = sc.storage_accounts.update.call_args
     update_params = args[2]
-    assert [r.ip_address_or_range for r in update_params.network_rule_set.ip_rules] == [
-        "1.1.1.1",
-        "2.2.2.2",
-    ]
+    assert update_params.network_rule_set.default_action == "Allow"
+    assert not getattr(update_params.network_rule_set, "ip_rules", None)
 
 
 def test_ensure_returns_failed_on_arm_read_error(
@@ -139,34 +154,36 @@ def test_ensure_returns_failed_on_arm_read_error(
     assert "arm_read" in result["error"]
 
 
-def test_ensure_returns_failed_when_caller_ip_unknown(
+def test_ensure_opened_when_caller_ip_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # IP detection is now informational only; a None result does NOT block the update.
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
     sc = MagicMock()
-    sc.storage_accounts.get_properties.return_value = _make_account("Disabled", [])
+    acct = _make_account("Disabled", default_action="Deny")
+    sc.storage_accounts.get_properties.return_value = acct
     with (
         patch("api.services.azure_clients.storage_client", return_value=sc),
         patch.object(spa, "_detect_caller_ip", return_value=None),
     ):
         result = spa.ensure_local_storage_access(MagicMock(), "sub", "rg", "elbstg01")
-    assert result["action"] == "failed"
-    assert "caller public IP" in result["error"]
+    assert result["action"] == "opened"
+    assert result["default_action"] == "Allow"
+    assert "ip" not in result  # no IP to report
+    sc.storage_accounts.update.assert_called_once()
 
 
 def test_ensure_already_open_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Second call within TTL must NOT hit ARM or ipify (CPU hot path)."""
+    """Second call within TTL must NOT hit ARM (CPU hot path)."""
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
     sc = MagicMock()
-    sc.storage_accounts.get_properties.return_value = _make_account("Enabled", ["1.2.3.4"])
-    with (
-        patch("api.services.azure_clients.storage_client", return_value=sc),
-        patch.object(spa, "_detect_caller_ip", return_value="1.2.3.4") as det,
-    ):
+    # Already-open state: Enabled + defaultAction=Allow.
+    acct = _make_account("Enabled", default_action="Allow")
+    sc.storage_accounts.get_properties.return_value = acct
+    with patch("api.services.azure_clients.storage_client", return_value=sc):
         first = spa.ensure_local_storage_access(MagicMock(), "sub", "rg", "elbstg01")
         second = spa.ensure_local_storage_access(MagicMock(), "sub", "rg", "elbstg01")
     assert first["action"] == "already_open"
     assert second["action"] == "already_open"
-    # Cache hit: ARM read + ipify only fired once.
+    # Cache hit: ARM read only fired once, no IP detection needed.
     assert sc.storage_accounts.get_properties.call_count == 1
-    assert det.call_count == 1

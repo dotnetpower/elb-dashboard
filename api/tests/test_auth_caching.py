@@ -1,13 +1,15 @@
 """Tests for the auth-layer caches and dev bypass.
 
-Validates:
-  * `get_credential()` returns the same singleton across calls (singleton).
-  * Validated `CallerIdentity` is cached by token hash with respect to the
-    JWT `exp` claim and the configured max TTL.
-  * `AUTH_DEV_BYPASS=true` short-circuits the bearer requirement.
-
-The cache code paths are exercised directly so we don't need a real signed
-JWT to validate behaviour.
+Responsibility: Tests for the auth-layer caches and dev bypass
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_reset_state`, `test_get_credential_returns_singleton`,
+`test_reset_credential_creates_new_instance`,
+`test_claims_cache_returns_cached_identity_within_ttl`, `test_claims_cache_evicts_after_ttl`,
+`test_claims_cache_caps_ttl_at_max`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_auth_caching.py`.
 """
 
 from __future__ import annotations

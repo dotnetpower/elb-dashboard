@@ -43,8 +43,7 @@ async function acquireFreshArmToken(account: AccountInfo): Promise<string> {
     return (await armTokenInFlight.promise).accessToken;
   }
 
-  let promise: Promise<ArmTokenCacheEntry>;
-  promise = msalInstance
+  const promise: Promise<ArmTokenCacheEntry> = msalInstance
     .acquireTokenSilent({
       ...armLoginRequest,
       account,

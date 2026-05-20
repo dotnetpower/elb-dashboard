@@ -18,29 +18,7 @@ export function ApiHero({
   const methods = spec ? [...new Set(spec.endpoints.map((endpoint) => endpoint.method))] : [];
 
   return (
-    <div
-      className="mono-header api-hero"
-      style={{
-        background: "var(--bg-primary)",
-        border: "1px solid var(--border-weak)",
-        borderRadius: "var(--radius)",
-        padding: "12px 14px",
-        position: "relative",
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 0,
-          right: 0,
-          height: 3,
-          background:
-            "linear-gradient(90deg, var(--accent) 0%, var(--purple) 50%, var(--teal) 100%)",
-          opacity: 0.6,
-        }}
-      />
+    <div className="mono-header api-hero">
 
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
         <div>

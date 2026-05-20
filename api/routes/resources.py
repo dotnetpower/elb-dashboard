@@ -1,17 +1,12 @@
 """Resource provisioning routes (`/api/resources/*`).
 
-Synchronous, idempotent creation of the workspace's foundational resources:
-resource group, storage account (HNS-enabled), and ACR. These are wizard
-steps that the user performs interactively, so they are kept synchronous
-(not Celery tasks) — the SPA blocks until the resource exists, then moves
-to the next wizard step.
-
-All Azure SDK calls run under the api sidecar's managed identity, so the
-caller does not need to acquire ARM-scoped tokens themselves.
-
-Validation is done at the controller boundary; the legacy
-`services.network.ensure_resource_group` / `services.monitoring.ensure_*`
-helpers handle the actual idempotent ARM PUT.
+Responsibility: Resource provisioning routes (`/api/resources/*`)
+Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
+services or tasks.
+Key entry points: `_require_fields`, `_check`, `ensure_rg`, `ensure_storage`, `ensure_acr`
+Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate.
+Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations

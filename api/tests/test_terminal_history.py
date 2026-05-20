@@ -1,4 +1,15 @@
-"""Tests for the per-shell command-history capture script."""
+"""Tests for the per-shell command-history capture script.
+
+Responsibility: Tests for the per-shell command-history capture script
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_run_with_history`, `test_history_directory_created_with_restrictive_mode`,
+`test_histfile_uses_per_pid_filename`, `test_session_log_records_start_and_end`,
+`test_prompt_command_includes_history_append`, `test_history_disabled_for_non_interactive_shell`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_terminal_history.py`.
+"""
 
 from __future__ import annotations
 

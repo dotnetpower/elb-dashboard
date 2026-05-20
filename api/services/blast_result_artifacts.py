@@ -1,4 +1,16 @@
-"""Background builders for BLAST result UI artifacts."""
+"""Background builders for BLAST result UI artifacts.
+
+Responsibility: Background builders for BLAST result UI artifacts
+Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
+instead of duplicating SDK code.
+Key entry points: `_number`, `_hit_is_better`, `_StreamingAggregate`,
+`build_result_manifest_payload`, `build_result_aggregate_payload`,
+`build_default_alignments_payload`
+Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
+log boundaries.
+Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
+api/tests/test_blast_tasks.py`.
+"""
 
 from __future__ import annotations
 

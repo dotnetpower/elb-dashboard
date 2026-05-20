@@ -1,10 +1,16 @@
 """Tests for the in-process SSE fan-out broadcaster.
 
-Two browser tabs (or any number of EventSource subscribers) used to race
-for the same Redis events hash and steal each other's counts. The
-broadcaster removes that race by being the sole drainer; subscribers
-receive the same pre-serialised SSE frame from a per-connection bounded
-queue.
+Responsibility: Tests for the in-process SSE fan-out broadcaster
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_FakeRedisInfo`, `fresh_broadcaster`,
+`test_two_subscribers_see_identical_frames`,
+`test_drain_task_stops_when_last_subscriber_leaves`,
+`test_slow_subscriber_drops_oldest_not_block_others`,
+`test_close_wakes_subscribers_with_sentinel`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_sidecar_broadcaster.py`.
 """
 
 from __future__ import annotations

@@ -1,3 +1,18 @@
+"""Tests for Compare BLAST Web Xml Outfmt6 behavior.
+
+Responsibility: Tests for Compare BLAST Web Xml Outfmt6 behavior
+Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
+Azure calls.
+Key entry points: `_run`, `test_compare_web_xml_to_outfmt6_accepts_equivalent_rows`,
+`test_compare_web_xml_to_outfmt6_writes_oracle_and_normalized_csv`,
+`test_compare_web_xml_to_outfmt6_reports_value_mismatch`,
+`test_compare_web_xml_to_outfmt6_reports_missing_accession_samples`,
+`test_compare_web_xml_to_outfmt6_uses_optional_raw_score_for_rounded_bits`
+Risky contracts: Do not require network access or real Azure credentials unless the test is
+explicitly integration-scoped.
+Validation: `uv run pytest -q api/tests/test_compare_blast_web_xml_outfmt6.py`.
+"""
+
 from __future__ import annotations
 
 import json
