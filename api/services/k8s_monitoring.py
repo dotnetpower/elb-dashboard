@@ -26,6 +26,7 @@ from api.services.k8s_nodes import (
     k8s_get_nodes,
     k8s_ready_warmup_node_names,
 )
+from api.services.k8s_observability import k8s_list_events, k8s_pod_logs
 from api.services.warmup_jobs import (
     DEFAULT_WARMUP_APP_LABEL,
     attach_pod_progress_to_database_status,
@@ -153,7 +154,6 @@ def k8s_ensure_job_manifests(
         return _ensure_job_manifests(session, server, jobs)
     finally:
         session.close()
-
 
 def k8s_ensure_warmup_scripts_configmap(
     credential: TokenCredential,
@@ -1000,130 +1000,3 @@ def k8s_get_pods(
         return pods
     finally:
         session.close()
-
-
-def k8s_pod_logs(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    namespace: str,
-    pod_name: str,
-    tail_lines: int = 200,
-) -> str:
-    """Return pod logs via the Kubernetes API."""
-
-    if not _SAFE_K8S_NAME_RE.match(namespace) or not _SAFE_K8S_NAME_RE.match(pod_name):
-        raise ValueError("Invalid namespace or pod name")
-
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        response = session.get(
-            f"{server}/api/v1/namespaces/{namespace}/pods/{pod_name}/log",
-            params={"tailLines": tail_lines},
-            timeout=15,
-        )
-        response.raise_for_status()
-        return response.text
-    finally:
-        session.close()
-
-
-def k8s_list_events(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    *,
-    namespace: str | None = None,
-    limit: int = 30,
-) -> list[dict[str, Any]]:
-    """Return recent k8s events sorted newest-first.
-
-    `namespace=None` returns events across all namespaces (cluster-wide
-    `/api/v1/events`).  Otherwise scoped to one namespace, which is
-    validated against the same DNS-1123 regex as pod names.
-
-    The output schema is intentionally flat and small — only the fields
-    the dashboard's Live Activity rail consumes.  Free-form `message`
-    is left as-is here; the caller is responsible for sanitising it
-    before sending to the SPA (see `api.routes.monitor.aks_events`).
-    """
-
-    if namespace is not None and not _SAFE_K8S_NAME_RE.match(namespace):
-        raise ValueError("Invalid namespace")
-    if limit <= 0 or limit > 1000:
-        raise ValueError("limit must be in (0, 1000]")
-
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        if namespace:
-            url = f"{server}/api/v1/namespaces/{namespace}/events"
-        else:
-            url = f"{server}/api/v1/events"
-        # We pull a generous slice (`limit*4` capped at 500) and sort
-        # client-side because the K8s API doesn't reliably honour
-        # ordering across paginated reads.  500 events is ~50 KiB JSON
-        # which is well within budget for one dashboard tile.
-        params = {"limit": min(500, max(limit * 4, 100))}
-        response = session.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        items = response.json().get("items", []) or []
-    finally:
-        session.close()
-
-    out: list[dict[str, Any]] = []
-
-    # Defence in depth: every free-form string we surface gets a length
-    # cap.  Even though the route layer also runs `sanitise()` on
-    # `message`, we cap *here* so a malformed event with multi-MB
-    # fields can't bloat the JSON response between this helper and the
-    # route.  Caps mirror what the dashboard can actually display
-    # (Live Activity rail truncates to ~110 chars).
-    def _capped(value: Any, limit: int) -> str:
-        s = str(value or "")
-        return s[:limit]
-
-    for ev in items:
-        if not isinstance(ev, dict):
-            continue
-        meta = ev.get("metadata", {}) if isinstance(ev.get("metadata"), dict) else {}
-        involved = (
-            ev.get("involvedObject", {}) if isinstance(ev.get("involvedObject"), dict) else {}
-        )
-        source = ev.get("source", {}) if isinstance(ev.get("source"), dict) else {}
-        last_ts = (
-            ev.get("lastTimestamp") or ev.get("eventTime") or meta.get("creationTimestamp") or ""
-        )
-        # `count` is sometimes a float in malformed payloads; coerce
-        # safely and clamp to a sane upper bound to avoid surfacing
-        # eye-watering "1.7M events" badges from a single misbehaving
-        # controller.
-        try:
-            count_val = max(1, min(int(float(ev.get("count") or 1)), 1_000_000))
-        except (TypeError, ValueError):
-            count_val = 1
-        # Type field is a closed enum in K8s — coerce anything else to
-        # "Normal" so the frontend's classifier doesn't have to defend
-        # against attacker-controlled severity strings.
-        ev_type = str(ev.get("type") or "Normal")
-        if ev_type not in ("Normal", "Warning"):
-            ev_type = "Normal"
-        out.append(
-            {
-                "namespace": _capped(meta.get("namespace") or involved.get("namespace"), 63),
-                "name": _capped(meta.get("name"), 253),
-                "type": ev_type,
-                "reason": _capped(ev.get("reason"), 64),
-                "message": _capped(ev.get("message"), 1024),
-                "count": count_val,
-                "last_timestamp": _capped(last_ts, 32),
-                "involved_kind": _capped(involved.get("kind"), 64),
-                "involved_name": _capped(involved.get("name"), 253),
-                "source_component": _capped(source.get("component"), 64),
-                "source_host": _capped(source.get("host"), 253),
-            }
-        )
-
-    out.sort(key=lambda e: e.get("last_timestamp") or "", reverse=True)
-    return out[:limit]
