@@ -392,6 +392,28 @@ def test_node_warmup_ready_check_skips_unsharded_submit() -> None:
     )
 
 
+def test_gate_completed_submit_waits_for_result_artifacts(monkeypatch) -> None:
+    monkeypatch.setattr(blast, "_has_parseable_result_artifact", lambda *_args: False)
+
+    assert blast._gate_completed_submit_on_results(
+        job_id="job-1",
+        storage_account="stelb",
+        phase="completed",
+        status="completed",
+    ) == ("results_pending", "running")
+
+
+def test_gate_completed_submit_allows_completed_with_result_artifacts(monkeypatch) -> None:
+    monkeypatch.setattr(blast, "_has_parseable_result_artifact", lambda *_args: True)
+
+    assert blast._gate_completed_submit_on_results(
+        job_id="job-1",
+        storage_account="stelb",
+        phase="completed",
+        status="completed",
+    ) == ("completed", "completed")
+
+
 def test_node_warmup_ready_check_skips_stale_sharded_options_for_unsharded_db(
     monkeypatch,
 ) -> None:
@@ -2257,3 +2279,200 @@ def test_split_parent_storage_submit_to_finalize_e2e(
     assert gzip.decompress(uploaded_results["job-123/merged_results.out.gz"]).count(b".out.gz") == 2
     assert "AAAA" not in str(history)
     assert "CCCC" not in str(history)
+
+
+# ---------------------------------------------------------------------------
+# reconcile_stale_jobs — Celery resilience tests
+# ---------------------------------------------------------------------------
+
+
+class _StaleRow:
+    """Minimal jobstate row stand-in for reconcile_stale_jobs tests."""
+
+    def __init__(
+        self,
+        *,
+        job_id: str,
+        status: str = "running",
+        phase: str = "running",
+        task_id: str = "",
+        updated_at: str = "2026-05-20T00:00:00+00:00",
+        created_at: str = "2026-05-20T00:00:00+00:00",
+        payload: dict[str, object] | None = None,
+        subscription_id: str = "",
+        resource_group: str = "",
+        cluster_name: str = "",
+    ) -> None:
+        self.job_id = job_id
+        self.status = status
+        self.phase = phase
+        self.task_id = task_id
+        self.updated_at = updated_at
+        self.created_at = created_at
+        self.payload = payload
+        self.subscription_id = subscription_id
+        self.resource_group = resource_group
+        self.cluster_name = cluster_name
+
+
+class _FakeReconcileRepo:
+    def __init__(self, active: list[_StaleRow]) -> None:
+        self._active = active
+        self.updates: list[tuple[str, dict[str, object]]] = []
+
+    def list_active(self, *, job_type: str = "blast", limit: int = 500) -> list[_StaleRow]:
+        return list(self._active)
+
+    def update(self, job_id: str, **kwargs: object) -> None:
+        self.updates.append((job_id, kwargs))
+
+
+def _install_repo(monkeypatch: pytest.MonkeyPatch, repo: _FakeReconcileRepo) -> None:
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: repo)
+
+
+def test_reconcile_celery_failure_marks_row_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Celery FAILURE → row becomes failed with the snippet as error_code."""
+    repo = _FakeReconcileRepo([_StaleRow(job_id="j1", task_id="task-1")])
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "FAILURE"
+            self.result = RuntimeError("worker exploded")
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+
+    summary = blast.reconcile_stale_jobs.run()
+
+    assert summary["failed"] == 1
+    assert summary["completed"] == 0
+    assert repo.updates and repo.updates[0][0] == "j1"
+    assert repo.updates[0][1]["status"] == "failed"
+    assert repo.updates[0][1]["phase"] == "failed"
+
+
+def test_reconcile_celery_success_marks_row_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Celery SUCCESS → row becomes completed when status was stale."""
+    repo = _FakeReconcileRepo([_StaleRow(job_id="j2", task_id="task-2", status="running")])
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "SUCCESS"
+            self.result = {"ok": True}
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+
+    summary = blast.reconcile_stale_jobs.run()
+
+    assert summary["completed"] == 1
+    assert repo.updates[0][1]["status"] == "completed"
+
+
+def test_reconcile_submit_success_keeps_running_row_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _FakeReconcileRepo([_StaleRow(job_id="j2", task_id="task-2", status="running")])
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "SUCCESS"
+            self.result = {"status": "running", "phase": "submitted"}
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+
+    summary = blast.reconcile_stale_jobs.run()
+
+    assert summary["completed"] == 0
+    assert summary["untouched"] == 1
+    assert repo.updates[0][1] == {"status": "running", "phase": "submitted"}
+
+
+def test_reconcile_submit_completed_waits_for_result_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j2",
+                task_id="task-2",
+                status="running",
+                payload={"storage_account": "stelb"},
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "SUCCESS"
+            self.result = {"status": "completed", "phase": "completed"}
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr(blast, "_has_parseable_result_artifact", lambda *_args: False)
+
+    summary = blast.reconcile_stale_jobs.run()
+
+    assert summary["completed"] == 0
+    assert summary["untouched"] == 1
+    assert repo.updates[0][1] == {"status": "running", "phase": "results_pending"}
+
+
+def test_reconcile_skips_recently_updated_unknown_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A young row with no Celery record MUST NOT be killed off."""
+    from datetime import datetime
+
+    recent = datetime.now(UTC).isoformat(timespec="seconds")
+    repo = _FakeReconcileRepo(
+        [_StaleRow(job_id="j3", task_id="", updated_at=recent, created_at=recent)]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+
+    summary = blast.reconcile_stale_jobs.run()
+
+    assert summary["untouched"] >= 1
+    assert summary["worker_lost"] == 0
+    assert repo.updates == []
+
+
+def test_reconcile_marks_old_quiet_row_worker_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A row that hasn't moved past the stale threshold MUST be marked lost."""
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j4",
+                task_id="task-4",
+                updated_at="2025-01-01T00:00:00+00:00",
+                created_at="2025-01-01T00:00:00+00:00",
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=60)
+
+    assert summary["worker_lost"] == 1
+    assert repo.updates[0][1]["error_code"] == "worker_lost"
+    assert repo.updates[0][1]["phase"] == "worker_lost"
+
+
+# Local import to keep the file's existing imports section unchanged.
+from datetime import UTC  # noqa: E402

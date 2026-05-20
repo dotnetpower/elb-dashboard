@@ -37,6 +37,7 @@ export interface ClusterHealthInput {
 export interface ClusterHealthVerdict {
   tone: HealthTone;
   statusLine: string;
+  statusTone: HealthTone;
 }
 
 export function useClusterHealth(
@@ -67,7 +68,6 @@ export function useClusterHealth(
     if (nodeNotReady > 0 || nodePressureCount > 0) return "degraded";
     if (cpuPct != null && cpuPct >= 0.95) return "degraded";
     if (memPct != null && memPct >= 0.95) return "degraded";
-    if (apiP95 != null && apiP95 > 2000) return "degraded";
     if (apiErrors > 5) return "degraded";
     if (
       jobsDegraded &&
@@ -95,15 +95,26 @@ export function useClusterHealth(
     nodeTotal,
   ]);
 
-  const statusLine = useMemo(() => {
-    if (trans === "starting") return "Starting cluster…";
-    if (trans === "stopping") return "Stopping cluster…";
+  const status = useMemo<{ statusLine: string; statusTone: HealthTone }>(() => {
+    if (trans === "starting") {
+      return { statusLine: "Starting cluster…", statusTone: "transitioning" };
+    }
+    if (trans === "stopping") {
+      return { statusLine: "Stopping cluster…", statusTone: "transitioning" };
+    }
     if (provisioningBusy) {
       const label = getAksProvisioningLabel(c);
-      return label ? `${label}…` : "Provisioning…";
+      return {
+        statusLine: label ? `${label}…` : "Provisioning…",
+        statusTone: "transitioning",
+      };
     }
-    if (isAksProvisioningFailed(c)) return "Provisioning failed";
-    if (!isRunning) return "Cluster is stopped";
+    if (isAksProvisioningFailed(c)) {
+      return { statusLine: "Provisioning failed", statusTone: "degraded" };
+    }
+    if (!isRunning) {
+      return { statusLine: "Cluster is stopped", statusTone: "down" };
+    }
     if (tone === "degraded") {
       const parts: string[] = [];
       if (cpuPct != null && cpuPct >= 0.85)
@@ -114,10 +125,22 @@ export function useClusterHealth(
         parts.push(`API p95 ${fmtMs(apiP95)}`);
       if (apiErrors > 0) parts.push(`${apiErrors} errors / 15m`);
       if (nodeNotReady > 0) parts.push(`${nodeNotReady} node not ready`);
-      return parts.length > 0 ? parts.join(" · ") : "Degraded";
+      return {
+        statusLine: parts.length > 0 ? parts.join(" · ") : "Degraded",
+        statusTone: "degraded",
+      };
     }
-    if (tone === "unknown") return "Metrics not yet available";
-    return "All systems nominal";
+    if (tone === "unknown") {
+      return { statusLine: "Metrics not yet available", statusTone: "unknown" };
+    }
+    const softParts: string[] = [];
+    if (apiP95 != null && apiP95 > 2000)
+      softParts.push(`API p95 ${fmtMs(apiP95)}`);
+    if (apiErrors > 0) softParts.push(`${apiErrors} errors / 15m`);
+    if (softParts.length > 0) {
+      return { statusLine: softParts.join(" · "), statusTone: "degraded" };
+    }
+    return { statusLine: "All systems nominal", statusTone: "healthy" };
   }, [
     c,
     trans,
@@ -131,5 +154,5 @@ export function useClusterHealth(
     nodeNotReady,
   ]);
 
-  return { tone, statusLine };
+  return { tone, statusLine: status.statusLine, statusTone: status.statusTone };
 }

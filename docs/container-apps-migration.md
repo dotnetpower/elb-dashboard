@@ -4,8 +4,8 @@ This document is the authoritative reference for the **shipped** ElasticBLAST
 control-plane architecture on Azure Container Apps: the bundled
 `ca-elb-control` Container App with six sidecars, the cost model, the storage
 network isolation rules, the browser ↔ storage proxy contract, and the
-identity / RBAC layout. The Azure Functions backend it replaced is preserved
-under [`legacy/functionapp/`](../legacy/functionapp/) for reference only.
+identity / RBAC layout. It replaced the original Azure Functions backend; the
+legacy tree has been deleted from the repository.
 
 ## Decision Summary
 

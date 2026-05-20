@@ -66,6 +66,15 @@ celery_app.conf.update(
             "schedule": 60.0,
             "options": {"queue": "storage"},
         },
+        # Periodic stale-job reconciliation. Catches rows whose worker
+        # died mid-flight, broker dropped the message, or external plane
+        # silently advanced. See docstring on reconcile_stale_jobs for
+        # the decision tree it follows.
+        "blast-reconcile-stale-jobs": {
+            "task": "api.tasks.blast.reconcile_stale_jobs",
+            "schedule": 60.0,
+            "options": {"queue": "blast"},
+        },
     },
     timezone="UTC",
     enable_utc=True,

@@ -57,10 +57,6 @@ api/    Backend — FastAPI for the api sidecar + Celery worker/beat (also conta
 web/        React + Vite + TypeScript SPA + Dockerfile + nginx.conf for the frontend sidecar
 terminal/   Dockerfile + entrypoint for the terminal sidecar (ttyd + elastic-blast toolchain)
 infra/      Bicep IaC (network, identity, ACR, storage, Key Vault, Container Apps Env, Container App)
-legacy/     Retired artefacts kept for reference only — do NOT edit
-  functionapp/  Old Azure Functions v2 backend (function_app.py, orchestrators/, activities/, entities/, routes/, auth/, models/, tests/)
-  infra/        Old Function App + Static Web App Bicep
-  cloud-init/   remote-terminal.yaml from the retired Remote Terminal VM model
 scripts/    Dev helpers + postprovision hook (`postprovision.sh` builds images and swaps the Container App template)
 docs/       Architecture notes + per-feature change log
 ```
@@ -247,15 +243,6 @@ Both helpers are idempotent; both refuse to act inside a Container App
 (`CONTAINER_APP_NAME` env present). See
 [`scripts/dev/README.md`](./scripts/dev/README.md) and
 [`.github/copilot-instructions.md`](./.github/copilot-instructions.md) §9.
-
----
-
-## Legacy walkthrough
-
-The pre-migration end-to-end walkthrough (Function App + Remote Terminal VM + a tiny
-ElasticBLAST job) is preserved at [legacy/walkthrough.md](./legacy/walkthrough.md).
-It targets the retired stack and is **not** the supported deploy flow — use
-[`azd up`](#quick-start-deploy-to-azure-in-one-command) above instead.
 
 ---
 

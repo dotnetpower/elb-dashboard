@@ -1,4 +1,4 @@
-import { Loader2, Server, Zap } from "lucide-react";
+import { Server, Zap } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import type { AksClusterSummary, WarmupDbInfo } from "@/api/endpoints";
@@ -64,17 +64,13 @@ export function ComputeSection({
   return (
     <section className="glass-card blast-section">
       <SectionHeader
-        step={5}
+        step={6}
         icon={<Server size={16} strokeWidth={1.5} />}
-        title="Compute Environment"
-        subtitle="Select an AKS cluster to run the search"
+        title="Execution Profile"
+        subtitle="Choose how this search should run on Azure"
       />
       {!subId && <div className="muted">Configure your Azure resources on the Dashboard first.</div>}
-      {subId && clusterLoading && (
-        <div className="muted">
-          <Loader2 size={12} className="spin" style={{ display: "inline", verticalAlign: "middle" }} /> Loading clusters...
-        </div>
-      )}
+      {subId && clusterLoading && <ClusterLoadingSkeleton />}
       {subId && clusters.length === 0 && !clusterLoading && (
         <div className="muted">
           No AKS clusters in <strong>{workloadRg}</strong>.{" "}
@@ -124,7 +120,51 @@ export function ComputeSection({
             }}
           >
             <Zap size={14} style={{ color: "var(--warning)" }} />
-            Performance
+            Run profile
+          </div>
+          <div className="blast-execution-profiles">
+            <button
+              type="button"
+              className={`blast-execution-profile${form.sharding_mode === "off" && !form.enable_warmup ? " blast-execution-profile--active" : ""}`}
+              onClick={() => {
+                set("enable_warmup", false);
+                set("sharding_mode", "off");
+                set("db_auto_partition", false);
+                set("disable_sharding", true);
+              }}
+            >
+              <span>Baseline</span>
+              <small>Safest full-DB semantics</small>
+            </button>
+            <button
+              type="button"
+              className={`blast-execution-profile${form.enable_warmup && form.sharding_mode === "off" ? " blast-execution-profile--active" : ""}`}
+              onClick={() => {
+                set("enable_warmup", true);
+                set("sharding_mode", "off");
+                set("db_auto_partition", false);
+                set("disable_sharding", true);
+              }}
+            >
+              <span>Warmed database</span>
+              <small>Reuse node-local DB cache</small>
+            </button>
+            <button
+              type="button"
+              className={`blast-execution-profile${form.sharding_mode !== "off" ? " blast-execution-profile--active" : ""}`}
+              disabled={!hasShardedMode}
+              title={hasShardedMode ? "Use prepared shards when the selected cluster has safe capacity." : shardedUnavailableReason ?? undefined}
+              onClick={() => {
+                if (!hasShardedMode) return;
+                set("enable_warmup", true);
+                set("sharding_mode", shardingAvailability.preferredMode);
+                set("db_auto_partition", true);
+                set("disable_sharding", false);
+              }}
+            >
+              <span>Sharded throughput</span>
+              <small>{hasShardedMode ? "Fast path for prepared core_nt shards" : "Unavailable for this DB/cluster"}</small>
+            </button>
           </div>
           <div
             style={{
@@ -309,6 +349,50 @@ function ShardingPreview({
         </div>
       )}
     </div>
+  );
+}
+
+function ClusterLoadingSkeleton() {
+  return (
+    <div
+      aria-label="Loading execution clusters"
+      style={{
+        display: "grid",
+        gap: 8,
+        padding: "10px 12px",
+        borderRadius: 8,
+        background: "rgba(255,255,255,0.035)",
+        border: "1px solid var(--glass-border)",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <SkeletonLine width="42%" />
+        <SkeletonLine width="96px" />
+      </div>
+      <div className="blast-cluster-info" aria-hidden="true">
+        {Array.from({ length: 5 }, (_, index) => (
+          <div key={index} className="blast-cluster-info__cell">
+            <SkeletonLine width="48px" />
+            <SkeletonLine width={index % 2 === 0 ? "72px" : "56px"} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SkeletonLine({ width }: { width: string }) {
+  return (
+    <span
+      className="skeleton"
+      aria-hidden="true"
+      style={{
+        display: "block",
+        width,
+        height: 10,
+        borderRadius: 999,
+      }}
+    />
   );
 }
 

@@ -13,6 +13,7 @@ import type { HealthTone } from "./helpers";
 interface Props {
   clusterName: string;
   tone: HealthTone;
+  statusTone: HealthTone;
   statusLine: string;
   submits15m: string;
   activeCount: string;
@@ -28,6 +29,7 @@ interface Props {
 export function PulseRowSummary({
   clusterName,
   tone,
+  statusTone,
   statusLine,
   submits15m,
   activeCount,
@@ -39,11 +41,13 @@ export function PulseRowSummary({
   panelId,
 }: Props) {
   const statusColor =
-    tone === "degraded"
+    statusTone === "healthy"
+      ? "var(--success)"
+      : statusTone === "degraded"
       ? "var(--warning)"
-      : tone === "down"
+      : statusTone === "down"
         ? "var(--danger)"
-        : tone === "transitioning"
+        : statusTone === "transitioning"
           ? "var(--accent)"
           : "var(--text-faint)";
 

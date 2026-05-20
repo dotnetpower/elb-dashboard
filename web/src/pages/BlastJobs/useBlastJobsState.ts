@@ -1,18 +1,18 @@
 import { useCallback, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 
-import { blastApi, monitoringApi, type BlastJobSummary } from "@/api/endpoints";
-import { loadSavedConfig } from "@/components/SetupWizard";
-import { useClusterReadiness } from "@/hooks/usePrerequisites";
-
+import { blastApi, type BlastJobSummary } from "@/api/endpoints";
 import {
-  FAILED_PHASES,
-  GROUP_ORDER,
-  TERMINAL_PHASES,
-  getDateGroup,
-  type DateGroup,
-} from "./dateGroup";
+  isDashboardJobActive,
+  isDashboardJobCompleted,
+  isDashboardJobFailed,
+  toJobRowView,
+} from "@/components/cards/ClusterBento/jobMapping";
+import { useClusterReadiness } from "@/hooks/usePrerequisites";
+import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
+
+import { GROUP_ORDER, getDateGroup, type DateGroup } from "./dateGroup";
 
 export type FilterKind = "all" | "running" | "completed" | "failed";
 
@@ -37,6 +37,7 @@ export function useBlastJobsState() {
     [searchParams],
   );
   const search = searchParams.get("q") ?? "";
+  const clusterFilter = searchParams.get("cluster") ?? "";
   const setFilter = useCallback(
     (next: FilterKind) => {
       setSearchParams(
@@ -66,45 +67,34 @@ export function useBlastJobsState() {
     [setSearchParams],
   );
   const cluster = useClusterReadiness();
-  const savedConfig = loadSavedConfig();
-  const subscriptionId = savedConfig?.subscriptionId ?? "";
-  const resourceGroup = savedConfig?.workloadResourceGroup ?? "";
-  const clustersQuery = useQuery({
-    queryKey: ["aks", subscriptionId, resourceGroup],
-    queryFn: () => monitoringApi.aks(subscriptionId, resourceGroup),
-    enabled: Boolean(subscriptionId && resourceGroup),
-    staleTime: 30_000,
-  });
-  const clusterName = clustersQuery.data?.clusters?.[0]?.name ?? "";
-
-  const jobsQuery = useQuery({
-    queryKey: ["blast-jobs", subscriptionId, resourceGroup, clusterName],
-    queryFn: () =>
-      blastApi.listJobs({
-        subscriptionId,
-        resourceGroup,
-        clusterName,
-      }),
+  const { jobsQuery, clusterName } = useScopedBlastJobs({
+    clusterName: clusterFilter,
     refetchInterval: 20_000,
   });
 
   const deleteMutation = useMutation({
     mutationFn: (jobId: string) => blastApi.deleteJob(jobId),
-    onSuccess: () => {
+    onSuccess: (_data, jobId) => {
+      // Drop the row from every cache that lists jobs. Both keys exist:
+      //   - ["blast-jobs", ...]              → Dashboard JobCard, Jobs page
+      //   - ["blast-jobs-for-pulse", ...]    → AKS card pulse row
+      // Without both, a freshly-deleted row reappears on the next
+      // 20-60s poll because one cache still serves the stale list.
       queryClient.invalidateQueries({ queryKey: ["blast-jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["blast-jobs-for-pulse"] });
+      // Detail caches that reference the deleted id should also be
+      // dropped so a navigation back to the job hits 404 instead of
+      // showing a stale "deleted" row from cache.
+      queryClient.removeQueries({ queryKey: ["blast-job", jobId] });
     },
   });
 
-  const localJobs = useMemo(
-    () => jobsQuery.data?.jobs ?? [],
-    [jobsQuery.data?.jobs],
-  );
+  const localJobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data?.jobs]);
   const allJobs = useMemo(() => {
     const merged = [...localJobs];
     merged.sort(
       (a, b) =>
-        new Date(b.created_at || 0).getTime() -
-        new Date(a.created_at || 0).getTime(),
+        new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime(),
     );
     return merged;
   }, [localJobs]);
@@ -130,22 +120,26 @@ export function useBlastJobsState() {
     let list = [...allJobs];
     if (filter !== "all") {
       list = list.filter((j) => {
-        const phase = j.phase || j.status;
-        if (filter === "running") return !TERMINAL_PHASES.includes(phase);
-        if (filter === "failed") return FAILED_PHASES.includes(phase);
-        return phase === filter;
+        if (filter === "running") return isDashboardJobActive(j);
+        if (filter === "failed") return isDashboardJobFailed(j);
+        return isDashboardJobCompleted(j);
       });
     }
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter(
-        (j) =>
+      list = list.filter((j) => {
+        const view = toJobRowView(j);
+        return (
           (j.job_title ?? "").toLowerCase().includes(q) ||
           j.job_id.toLowerCase().includes(q) ||
           (j.program ?? "").toLowerCase().includes(q) ||
           (j.db ?? "").toLowerCase().includes(q) ||
-          (j.infrastructure?.cluster_name ?? "").toLowerCase().includes(q),
-      );
+          view.title.toLowerCase().includes(q) ||
+          view.query.toLowerCase().includes(q) ||
+          view.db.toLowerCase().includes(q) ||
+          (j.infrastructure?.cluster_name ?? "").toLowerCase().includes(q)
+        );
+      });
     }
     return list;
   }, [allJobs, filter, search]);
@@ -166,10 +160,9 @@ export function useBlastJobsState() {
   const counts = useMemo(() => {
     const c = { running: 0, completed: 0, failed: 0 };
     allJobs.forEach((j) => {
-      const p = j.phase || j.status;
-      if (p === "completed") c.completed++;
-      else if (FAILED_PHASES.includes(p)) c.failed++;
-      else if (p !== "deleted") c.running++;
+      if (isDashboardJobCompleted(j)) c.completed++;
+      else if (isDashboardJobFailed(j)) c.failed++;
+      else if (isDashboardJobActive(j)) c.running++;
     });
     return c;
   }, [allJobs]);
@@ -184,6 +177,7 @@ export function useBlastJobsState() {
     search,
     setSearch,
     cluster,
+    clusterName,
     jobsQuery,
     deleteMutation,
     allJobs,

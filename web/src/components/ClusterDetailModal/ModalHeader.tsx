@@ -22,8 +22,7 @@ export function ModalHeader({
     <div
       style={{
         padding: "20px 24px 16px",
-        background:
-          "linear-gradient(135deg, rgba(110,159,255,0.08) 0%, rgba(184,119,217,0.06) 100%)",
+        background: "var(--modal-header-bg)",
         borderBottom: "1px solid var(--border-weak)",
       }}
     >
@@ -114,7 +113,7 @@ export function ModalHeader({
                     style={{
                       fontSize: 9,
                       color: "var(--text-faint)",
-                      background: "rgba(255,255,255,0.04)",
+                      background: "var(--modal-surface-soft)",
                       padding: "2px 6px",
                       borderRadius: 4,
                     }}
@@ -132,7 +131,7 @@ export function ModalHeader({
           style={{
             padding: "6px 8px",
             border: "none",
-            background: "rgba(255,255,255,0.05)",
+            background: "var(--modal-surface-soft)",
           }}
           title="Close (Esc)"
         >
@@ -172,7 +171,7 @@ export function ModalHeader({
             style={{
               padding: "10px 12px",
               borderRadius: 8,
-              background: "rgba(255,255,255,0.03)",
+              background: "var(--modal-surface-strong)",
               border: "1px solid var(--border-weak)",
             }}
           >

@@ -15,7 +15,7 @@ export function NoJobsEmpty({ cluster, degradedNotice }: NoJobsEmptyProps) {
       className="glass-card jobs-empty"
       style={{ textAlign: "center", padding: "var(--space-7)" }}
     >
-      <p className="muted">No BLAST jobs yet.</p>
+      <p className="muted">No BLAST searches yet.</p>
       {degradedNotice && (
         <div
           style={{
@@ -83,7 +83,7 @@ export function NoFilteredEmpty({ search, filter }: NoFilteredEmptyProps) {
       style={{ textAlign: "center", padding: "var(--space-5)" }}
     >
       <p className="muted">
-        {search ? `No jobs matching "${search}"` : `No ${filter} jobs.`}
+        {search ? `No searches matching "${search}"` : `No ${filter} searches.`}
       </p>
     </section>
   );

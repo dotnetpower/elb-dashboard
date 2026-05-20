@@ -70,6 +70,12 @@ export function pickExportableForm(form: FormState): ExportableFormFields {
     match_score: form.match_score,
     mismatch_score: form.mismatch_score,
     low_complexity_filter: form.low_complexity_filter,
+    short_query_adjust: form.short_query_adjust,
+    max_matches_in_query_range: form.max_matches_in_query_range,
+    mask_lookup_table_only: form.mask_lookup_table_only,
+    mask_lowercase: form.mask_lowercase,
+    species_repeat_filter: form.species_repeat_filter,
+    repeat_filter_taxid: form.repeat_filter_taxid,
     additional_options: form.additional_options,
     taxid: form.taxid,
     taxid_label: form.taxid_label,
@@ -213,6 +219,12 @@ export function partialFormFromJobPayload(
 
   // Filters / sharding / warmup.
   fields.low_complexity_filter = p.low_complexity_filter !== false;
+  fields.short_query_adjust = p.short_query_adjust !== false;
+  fields.max_matches_in_query_range = numericToString(p.max_matches_in_query_range) || "0";
+  fields.mask_lookup_table_only = p.mask_lookup_table_only !== false;
+  fields.mask_lowercase = Boolean(p.mask_lowercase);
+  fields.species_repeat_filter = Boolean(p.species_repeat_filter);
+  fields.repeat_filter_taxid = numericToString(p.repeat_filter_taxid) || "9606";
   fields.enable_warmup = Boolean(p.enable_warmup);
   fields.disable_sharding = Boolean(p.disable_sharding);
   if (
@@ -325,6 +337,12 @@ function normaliseFormFields(raw: object): ExportableFormFields {
     "match_score",
     "mismatch_score",
     "low_complexity_filter",
+    "short_query_adjust",
+    "max_matches_in_query_range",
+    "mask_lookup_table_only",
+    "mask_lowercase",
+    "species_repeat_filter",
+    "repeat_filter_taxid",
     "additional_options",
     "taxid",
     "taxid_label",
@@ -366,6 +384,10 @@ function normaliseFormFields(raw: object): ExportableFormFields {
       }
     } else if (
       key === "low_complexity_filter" ||
+      key === "short_query_adjust" ||
+      key === "mask_lookup_table_only" ||
+      key === "mask_lowercase" ||
+      key === "species_repeat_filter" ||
       key === "is_inclusive" ||
       key === "enable_warmup" ||
       key === "db_auto_partition" ||

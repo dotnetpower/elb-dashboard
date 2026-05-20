@@ -35,6 +35,7 @@ export function useBlastResultActions({
           file.file_id,
           subscriptionId,
           storageAccount,
+          resourceGroup,
         );
         url = URL.createObjectURL(response.blob);
         const anchor = document.createElement("a");
@@ -49,6 +50,7 @@ export function useBlastResultActions({
           subscriptionId,
           storageAccount,
           file.name,
+          resourceGroup,
         );
         window.open(resp.download_url, "_blank");
       }
@@ -70,6 +72,7 @@ export function useBlastResultActions({
         subscriptionId,
         storageAccount,
         format,
+        resourceGroup,
       );
       const blob = new Blob([response.text], { type: response.contentType });
       url = URL.createObjectURL(blob);

@@ -1,19 +1,6 @@
 export type DateGroup = "Today" | "Yesterday" | "This Week" | "Earlier";
 
-export const GROUP_ORDER: DateGroup[] = [
-  "Today",
-  "Yesterday",
-  "This Week",
-  "Earlier",
-];
-
-export const FAILED_PHASES = ["failed", "submit_failed", "error"];
-export const TERMINAL_PHASES = [
-  "completed",
-  ...FAILED_PHASES,
-  "deleted",
-  "cancelled",
-];
+export const GROUP_ORDER: DateGroup[] = ["Today", "Yesterday", "This Week", "Earlier"];
 
 export function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();

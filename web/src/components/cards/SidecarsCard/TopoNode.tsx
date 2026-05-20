@@ -8,11 +8,38 @@ import { StatusDot } from "./StatusDot";
 export interface TopoNodeProps {
   s: SidecarMetric;
   width?: number;
+  loading?: boolean;
 }
 
-export function TopoNode({ s, width = NODE_W }: TopoNodeProps) {
+function nodeChrome(health: SidecarMetric["health"], loading: boolean) {
+  if (loading) {
+    return {
+      border: "1px solid rgba(154, 163, 184, 0.28)",
+      boxShadow: "0 0 12px rgba(154, 163, 184, 0.08)",
+    };
+  }
+  if (health === "ok") {
+    return {
+      border: "1px solid rgba(106,214,163,0.35)",
+      boxShadow: "0 0 16px rgba(106,214,163,0.12)",
+    };
+  }
+  if (health === "degraded") {
+    return {
+      border: "1px solid rgba(240,198,116,0.45)",
+      boxShadow: "0 0 16px rgba(240,198,116,0.12)",
+    };
+  }
+  return {
+    border: "1px solid rgba(224,123,138,0.45)",
+    boxShadow: "0 0 16px rgba(224,123,138,0.12)",
+  };
+}
+
+export function TopoNode({ s, width = NODE_W, loading = false }: TopoNodeProps) {
   const cpu = s.cpu_pct ?? null;
   const mem = s.mem_pct ?? null;
+  const chrome = nodeChrome(s.health, loading);
   return (
     <div
       style={{
@@ -21,24 +48,14 @@ export function TopoNode({ s, width = NODE_W }: TopoNodeProps) {
         borderRadius: 12,
         position: "relative",
         zIndex: 1,
-        border: `1px solid ${
-          s.health === "ok"
-            ? "rgba(106,214,163,0.35)"
-            : s.health === "degraded"
-              ? "rgba(240,198,116,0.45)"
-              : "rgba(224,123,138,0.45)"
-        }`,
+        border: chrome.border,
         background: "var(--bg-tertiary)",
-        boxShadow:
-          s.health === "ok"
-            ? "0 0 16px rgba(106,214,163,0.12)"
-            : s.health === "degraded"
-              ? "0 0 16px rgba(240,198,116,0.12)"
-              : "0 0 16px rgba(224,123,138,0.12)",
+        boxShadow: chrome.boxShadow,
+        transition: "border-color 160ms ease-out, box-shadow 160ms ease-out",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <StatusDot health={s.health} size={9} />
+        <StatusDot health={s.health} size={9} neutral={loading} />
         <span style={{ color: "var(--text-faint)", display: "flex" }}>
           {ICONS[s.name] ?? <Server size={14} strokeWidth={1.5} />}
         </span>
@@ -47,7 +64,7 @@ export function TopoNode({ s, width = NODE_W }: TopoNodeProps) {
             {s.name}
           </div>
           <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-            {HEALTH_LABEL[s.health]}
+            {loading ? "Loading" : HEALTH_LABEL[s.health]}
           </div>
         </div>
       </div>

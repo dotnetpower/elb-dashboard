@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: scripts/dev/local-run.sh <api|worker|beat|web|redis|terminal-exec|smoke|compose-full|compose-local> [-- extra args]
+usage: scripts/dev/local-run.sh <api|worker|beat|web|redis|terminal-exec|smoke|storage-on|storage-off|storage-status|compose-full|compose-local> [-- extra args]
 
 Starts one local development process through run-with-log.sh so direct terminal
 runs and VS Code tasks both write to .logs/local/latest/.
@@ -13,6 +13,8 @@ Examples:
   scripts/dev/local-run.sh web
   scripts/dev/local-run.sh worker
   scripts/dev/local-run.sh terminal-exec   # exec_server.py on 127.0.0.1:7682 so api/worker can run kubectl/az locally
+  scripts/dev/local-run.sh storage-on      # open workload Storage to this caller IP for local debugging
+  scripts/dev/local-run.sh storage-off     # restore workload Storage to publicNetworkAccess=Disabled
   scripts/dev/local-run.sh smoke -- --url http://127.0.0.1:8085
   scripts/dev/local-run.sh compose-full -- up -d --build
 
@@ -51,6 +53,18 @@ with_local_storage_env() {
   local storage_account=${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}
   export AZURE_TABLE_ENDPOINT=${AZURE_TABLE_ENDPOINT:-https://${storage_account}.table.core.windows.net}
   export AZURE_BLOB_ENDPOINT=${AZURE_BLOB_ENDPOINT:-https://${storage_account}.blob.core.windows.net}
+  export LOCAL_DEBUG_AUTO_OPEN_STORAGE=${LOCAL_DEBUG_AUTO_OPEN_STORAGE:-true}
+}
+
+run_storage_public_access() {
+  local action=$1
+  shift || true
+  local storage_account=${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}
+  local storage_rg=${ELB_LOCAL_STORAGE_RG:-rg-elb-01}
+  exec "$script_dir/storage-public-access.sh" "$action" \
+    --account "$storage_account" \
+    --rg "$storage_rg" \
+    "$@"
 }
 
 # Default token + upstream so `local-run.sh api` and `local-run.sh worker`
@@ -105,7 +119,7 @@ case "$service" in
     with_local_storage_env
     export AUTH_DEV_BYPASS=${AUTH_DEV_BYPASS:-true}
     export ENABLE_DOCS=${ENABLE_DOCS:-true}
-    export LOCAL_DEBUG_AUTO_OPEN_STORAGE=${LOCAL_DEBUG_AUTO_OPEN_STORAGE:-true}
+    export CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost:8090,http://127.0.0.1:8090}
     cd "$project_root/api"
     exec "$run_with_log" api -- uv run uvicorn api.main:app --reload --reload-dir . --reload-exclude 'tests/*' --host 127.0.0.1 --port 8085 "$@"
     ;;
@@ -125,11 +139,22 @@ case "$service" in
     exec "$run_with_log" beat -- uv run celery -A api.celery_app beat -l info --schedule=/tmp/elb-celerybeat-schedule --pidfile=/tmp/elb-celerybeat.pid "$@"
     ;;
   web)
+    export VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8085}
+    export VITE_AUTH_DEV_BYPASS=${VITE_AUTH_DEV_BYPASS:-true}
     cd "$project_root/web"
     exec "$run_with_log" web -- npm run dev "$@"
     ;;
   redis)
     run_redis "$@"
+    ;;
+  storage-on)
+    run_storage_public_access on "$@"
+    ;;
+  storage-off)
+    run_storage_public_access off "$@"
+    ;;
+  storage-status)
+    run_storage_public_access status "$@"
     ;;
   terminal-exec)
     # Run terminal/exec_server.py on the host so `local-run.sh api`/`worker`

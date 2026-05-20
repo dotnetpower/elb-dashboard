@@ -122,12 +122,13 @@ export function ClusterPulse({
 
   return (
     <div
-      className="glass-card"
+      className="glass-card cluster-pulse-card"
       style={{ padding: 0, borderRadius: 12, overflow: "hidden" }}
     >
       <PulseRowSummary
         clusterName={c.name}
         tone={health.tone}
+        statusTone={health.statusTone}
         statusLine={health.statusLine}
         open={open}
         onToggle={toggleOpen}
@@ -166,7 +167,7 @@ export function ClusterPulse({
           id={panelId}
           style={{
             borderTop: "1px solid var(--border-weak)",
-            background: "var(--bg-tertiary)",
+            background: "var(--pulse-body-bg)",
           }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -215,6 +216,7 @@ export function ClusterPulse({
               failed15m={signals.failed15m}
               unknownCount={signals.unknownCount}
               jobsDegraded={signals.jobsDegraded}
+              jobsLoading={signals.jobsLoading}
               jobIndex={signals.jobRowsByJobId}
               clusterName={c.name}
             />

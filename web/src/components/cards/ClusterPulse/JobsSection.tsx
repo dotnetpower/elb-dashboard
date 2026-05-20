@@ -25,6 +25,11 @@ interface Props {
    *  completed=0. */
   unknownCount: number;
   jobsDegraded: boolean;
+  /** True while the first /api/blast/jobs request for this cluster is
+   *  still in flight. Used to render a skeleton roster instead of the
+   *  "No jobs yet" empty state, which previously flashed before the
+   *  response landed. */
+  jobsLoading: boolean;
   /** Map of job_id → full BlastJobSummary so we can read `owner_upn`
    *  without re-querying. */
   jobIndex: Map<string, BlastJobSummary>;
@@ -41,6 +46,7 @@ export function JobsSection({
   failed15m,
   unknownCount,
   jobsDegraded,
+  jobsLoading,
   jobIndex,
   clusterName,
 }: Props) {
@@ -85,8 +91,10 @@ export function JobsSection({
         >
           {jobsDegraded
             ? "job state store unavailable"
-            : `${activeCount} active · ${completedToday} done in 24h`}
-          {!jobsDegraded && unknownCount > 0 && (
+            : jobsLoading && jobs.length === 0
+              ? "loading…"
+              : `${activeCount} active · ${completedToday} done in 24h`}
+          {!jobsDegraded && !jobsLoading && unknownCount > 0 && (
             <>
               {" · "}
               <span
@@ -97,7 +105,7 @@ export function JobsSection({
               </span>
             </>
           )}
-          {!jobsDegraded && failed15m > 0 && (
+          {!jobsDegraded && !jobsLoading && failed15m > 0 && (
             <>
               {" · "}
               <span style={{ color: "var(--danger)" }}>
@@ -115,6 +123,8 @@ export function JobsSection({
           Counts and roster will return automatically once the job-state store
           recovers.
         </div>
+      ) : jobsLoading && jobs.length === 0 ? (
+        <JobsSkeleton />
       ) : jobs.length === 0 ? (
         <div
           style={{ fontSize: 11, color: "var(--text-faint)", padding: "4px 0" }}
@@ -190,4 +200,65 @@ function useTickWhenActive(enabled: boolean): number {
     return () => window.clearInterval(id);
   }, [enabled]);
   return nowMs;
+}
+
+/** Skeleton roster shown during the first /api/blast/jobs fetch so the
+ *  row doesn't briefly flash the "No jobs yet" empty state. Mirrors
+ *  the JobLine row geometry (84px state pill · flexible body · 110px
+ *  splits · 96px progress · 120px time) so the layout doesn't jump
+ *  once real rows arrive. */
+function JobsSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label="Loading jobs"
+      style={{ display: "flex", flexDirection: "column", gap: 4 }}
+    >
+      {[0, 1, 2].map((i) => (
+        <div
+          key={i}
+          className="pulse-soft"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "84px minmax(0, 1fr) 110px 96px 120px",
+            alignItems: "center",
+            gap: 10,
+            padding: "6px 8px",
+            borderRadius: 6,
+            background: "var(--pulse-row-bg)",
+            border: "1px solid var(--border-weak)",
+            borderLeft: "3px solid var(--border-medium)",
+          }}
+        >
+          <SkeletonBar width="60%" height={12} />
+          <SkeletonBar width="82%" height={10} />
+          <SkeletonBar width="70%" height={10} />
+          <SkeletonBar width="100%" height={4} />
+          <SkeletonBar width="75%" height={10} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SkeletonBar({
+  width,
+  height,
+}: {
+  width: string | number;
+  height: number;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        display: "inline-block",
+        width,
+        height,
+        borderRadius: 3,
+        background: "var(--kpi-bar-bg)",
+      }}
+    />
+  );
 }

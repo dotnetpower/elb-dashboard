@@ -49,6 +49,40 @@ def reset_monitor_snapshot_cache() -> None:
         _GENERATION += 1
 
 
+def invalidate_monitor_snapshot_prefix(prefix: str) -> int:
+    """Drop cached snapshots whose key equals ``prefix`` or starts with ``prefix + ":"``.
+
+    Used by mutation endpoints (e.g. AKS start/stop/delete) so the next
+    monitor poll bypasses the cached "Stopped" response and re-fetches
+    authoritative state from ARM. Returns the number of entries removed.
+
+    Bumping ``_GENERATION`` here is load-bearing: a background refresh
+    triggered by the previous stale read may still be in flight when
+    invalidation happens, and its `_refresh` callback would otherwise
+    re-insert the (now-stale) ARM reading into the cache. The generation
+    bump makes that callback a no-op.
+
+    The match is boundary-safe (``prefix == key`` or ``key.startswith(prefix + ":")``)
+    so resource groups whose names share a string prefix (``rg`` vs
+    ``rg-elb-01``) do not invalidate each other.
+    """
+    global _GENERATION
+    if not prefix:
+        return 0
+    removed = 0
+    boundary = prefix + ":"
+    with _LOCK:
+        keys = [key for key in _CACHE if key == prefix or key.startswith(boundary)]
+        for key in keys:
+            _CACHE.pop(key, None)
+            removed += 1
+        if removed:
+            _GENERATION += 1
+    if removed:
+        LOGGER.debug("monitor snapshot invalidate prefix=%s removed=%d", prefix, removed)
+    return removed
+
+
 def cached_snapshot(
     cache_key: str,
     loader: Callable[[], dict[str, Any]],

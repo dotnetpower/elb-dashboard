@@ -70,7 +70,7 @@ export function StorageContainersTable({ containers }: StorageContainersTablePro
             )}
             <span className="right">
               <span
-                className={`dv3-pill ${isPrivate ? "dv3-pill-faint" : "dv3-pill-warning"}`}
+                className={`dv3-pill ${isPrivate ? "dv3-pill-accent" : "dv3-pill-warning"}`}
                 style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
                 title={
                   isPrivate

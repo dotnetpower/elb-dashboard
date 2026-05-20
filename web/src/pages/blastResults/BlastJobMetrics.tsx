@@ -68,11 +68,11 @@ export function BlastJobMetrics({
         }}
       >
         <Link
-          to={`/blast/jobs/${jobId}/analytics`}
+          to={`/blast/jobs/${jobId}?tab=descriptions`}
           className="btn btn--primary btn--sm"
           style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
         >
-          <BarChart3 size={14} strokeWidth={1.5} /> View Analytics &amp; Alignments
+          <BarChart3 size={14} strokeWidth={1.5} /> View hits &amp; alignments
         </Link>
         {hasExportTargets && (
           <>

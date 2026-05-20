@@ -1,6 +1,6 @@
 """Parser + aggregator for BLAST result output.
 
-Ported from `legacy/functionapp/routes/blast_jobs.py` so that
+Ported from the retired Azure Functions tree so that
 `/api/blast/jobs/{id}/results/aggregate`, `.../alignments`, and `.../export`
 can return real data to the `BlastAnalytics` page instead of degraded stubs.
 

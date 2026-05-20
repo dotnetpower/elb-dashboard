@@ -40,7 +40,7 @@ export function BlastJobs() {
       />
 
       {jobsQuery.isLoading && (
-        <RowSkeleton count={3} height={40} label="Loading BLAST jobs…" />
+        <RowSkeleton count={3} height={40} label="Loading BLAST searches…" />
       )}
 
       {allJobs.length > 0 && (
@@ -94,8 +94,8 @@ export function BlastJobs() {
 
       <ConfirmDialog
         open={deleteTarget !== null}
-        title="Delete BLAST Job"
-        message="This will stop the job and clean up resources. This cannot be undone."
+        title="Delete BLAST search"
+        message="This will stop the search and clean up resources. This cannot be undone."
         confirmLabel="Delete"
         onConfirm={() => {
           if (deleteTarget) deleteMutation.mutate(deleteTarget);

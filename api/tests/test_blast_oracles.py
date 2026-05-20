@@ -5,6 +5,26 @@ from types import SimpleNamespace
 
 import pytest
 from api.services import blast_oracles
+from api.tasks import blast as blast_tasks
+
+
+def test_strict_tie_order_oracle_expands_candidate_pool() -> None:
+    options = blast_tasks._expand_strict_tie_order_candidate_pool(
+        {
+            "max_target_seqs": 100,
+            "tie_order_oracle_accessions": ["OZ254258.1"],
+            "tie_order_oracle_strict": True,
+        }
+    )
+
+    assert options["max_target_seqs"] == 5000
+    assert options["requested_max_target_seqs"] == 100
+
+
+def test_non_strict_tie_order_oracle_keeps_candidate_pool() -> None:
+    options = {"max_target_seqs": 100, "tie_order_oracle_accessions": ["OZ254258.1"]}
+
+    assert blast_tasks._expand_strict_tie_order_candidate_pool(options) is options
 
 
 def test_upload_tie_order_oracle_writes_finalizer_metadata(monkeypatch) -> None:

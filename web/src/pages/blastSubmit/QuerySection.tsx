@@ -22,6 +22,7 @@ import {
   reverseComplementFasta,
 } from "@/pages/blastSubmit/fastaUtils";
 import { QUERY_EXAMPLE_TEMPLATES, type QueryExampleTemplate } from "@/pages/blastSubmit/queryExamples";
+import { buildGeneratedJobTitle } from "@/pages/blastSubmitModel";
 import type { QuerySectionProps } from "@/pages/blastSubmit/types";
 import { SectionHeader, Tip } from "@/pages/blastSubmit/ui";
 
@@ -132,7 +133,7 @@ export function QuerySection({
   const loadExample = (example: QueryExampleTemplate) => {
     set("query_data", example.fasta);
     set("program", "blastn");
-    if (!form.job_title.trim()) set("job_title", example.label);
+    if (!form.job_title.trim()) set("job_title", buildGeneratedJobTitle(example.label));
     setExampleModalOpen(false);
     toast(`Example loaded — ${example.label}`, "info");
   };

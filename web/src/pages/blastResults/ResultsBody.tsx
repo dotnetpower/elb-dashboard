@@ -75,8 +75,9 @@ export function ResultsBody({
       >
         <XCircle size={16} style={{ color: "var(--danger)", flexShrink: 0 }} />
         <span style={{ color: "var(--text-muted)" }}>
-          No results available — the job failed at the{" "}
-          <strong style={{ color: "var(--danger)" }}>{failedStepLabel}</strong> step.
+          <strong style={{ color: "var(--danger)" }}>Search failed</strong> during
+          the <strong>{failedStepLabel}</strong> step. Open the Run details tab for
+          diagnostics.
         </span>
       </div>
     );
@@ -144,7 +145,7 @@ export function ResultsBody({
           style={{ color: "var(--accent)", flexShrink: 0 }}
         />
         <span style={{ color: "var(--text-muted)" }}>
-          Results will appear here once the job completes. Current phase:{" "}
+          Output files will appear here once the search completes. Current phase:{" "}
           <strong style={{ color: "var(--accent)" }}>{effectivePhase}</strong>
         </span>
       </div>
@@ -167,7 +168,7 @@ export function ResultsBody({
     }
     return (
       <p className="muted" style={{ marginTop: "var(--space-3)" }}>
-        Results will appear here once the job completes.
+        Output files will appear here once the search completes.
       </p>
     );
   }

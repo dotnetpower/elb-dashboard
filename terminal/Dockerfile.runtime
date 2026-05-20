@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+# Thin terminal runtime overlay for Azure deploys.
+#
+# Build with:
+#   --build-arg TERMINAL_BASE_IMAGE=<acr>/elb-terminal-base:<toolchain-hash>
+
+ARG TERMINAL_BASE_IMAGE=elb-terminal-base:latest
+FROM ${TERMINAL_BASE_IMAGE}
+
+COPY profile.sh    /etc/profile.d/elb-env.sh
+COPY command_guard.sh /etc/profile.d/elb-command-guard.sh
+COPY history.sh    /etc/profile.d/elb-history.sh
+COPY tmux.conf     /etc/tmux.conf
+COPY banner.sh /usr/local/bin/elb-banner
+COPY tool-versions.sh /usr/local/bin/elb-tool-versions
+COPY motd          /etc/motd
+COPY entrypoint.sh /usr/local/bin/elb-entrypoint
+COPY exec_server.py /usr/local/bin/elb-exec-server
+COPY cgroup_reporter.py /usr/local/bin/elb-cgroup-reporter
+RUN chmod +x /usr/local/bin/elb-entrypoint /usr/local/bin/elb-exec-server /usr/local/bin/elb-cgroup-reporter /usr/local/bin/elb-banner /usr/local/bin/elb-tool-versions /etc/profile.d/elb-env.sh /etc/profile.d/elb-command-guard.sh /etc/profile.d/elb-history.sh \
+    && chmod 0644 /etc/tmux.conf
+
+USER azureuser:azureuser
+WORKDIR /home/azureuser
+EXPOSE 7681 7682
+
+ENTRYPOINT ["/usr/local/bin/elb-entrypoint"]

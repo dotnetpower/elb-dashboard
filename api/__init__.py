@@ -2,8 +2,7 @@
 
 This package backs the `api` sidecar (and the worker/beat sidecars, which
 share the same image and import `api.celery_app`) in the bundled
-Container App `ca-elb-control`. The legacy Azure Functions backend has
-been retired and lives under `legacy/functionapp/` for reference only.
+Container App `ca-elb-control`.
 """
 
 from __future__ import annotations

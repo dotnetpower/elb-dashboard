@@ -12,6 +12,10 @@ import type { BlastJobSummary } from "@/api/endpoints";
 
 import type { DisplayJobState, JobRowView } from "./atoms";
 
+type UnknownRecord = Record<string, unknown>;
+
+const STALE_ACTIVE_WITHOUT_PROGRESS_MS = 30 * 60 * 1000;
+
 const ACTIVE_PENDING = new Set([
   "Pending",
   "Provisioning",
@@ -24,21 +28,17 @@ const ACTIVE_PENDING = new Set([
   "waiting_for_warmup",
 ]);
 
-const ACTIVE_RUNNING = new Set([
-  "Running",
-  "InProgress",
-  "Splitting",
-  "running",
-]);
+const ACTIVE_RUNNING = new Set(["Running", "InProgress", "Splitting", "running"]);
 
-const ACTIVE_REDUCING = new Set([
-  "Reducing",
-  "Aggregating",
-  "Combining",
-  "reducing",
-]);
+const ACTIVE_REDUCING = new Set(["Reducing", "Aggregating", "Combining", "reducing"]);
 
-const COMPLETED = new Set(["Completed", "completed", "Succeeded", "succeeded", "success"]);
+const COMPLETED = new Set([
+  "Completed",
+  "completed",
+  "Succeeded",
+  "succeeded",
+  "success",
+]);
 const FAILED = new Set([
   "Failed",
   "failed",
@@ -86,6 +86,22 @@ export function isActiveJobState(s: DisplayJobState): boolean {
   return s === "Pending" || s === "Running" || s === "Reducing";
 }
 
+export function jobDisplayState(j: BlastJobSummary): DisplayJobState {
+  return toJobRowView(j).state;
+}
+
+export function isDashboardJobActive(j: BlastJobSummary): boolean {
+  return isActiveJobState(jobDisplayState(j));
+}
+
+export function isDashboardJobCompleted(j: BlastJobSummary): boolean {
+  return jobDisplayState(j) === "Completed";
+}
+
+export function isDashboardJobFailed(j: BlastJobSummary): boolean {
+  return jobDisplayState(j) === "Failed";
+}
+
 /** Return the cluster name a BLAST job is bound to (or null if unbound). */
 export function jobClusterName(j: BlastJobSummary): string | null {
   // `infrastructure.cluster_name` is the canonical field; `payload` is
@@ -101,18 +117,124 @@ export function toJobRowView(j: BlastJobSummary): JobRowView {
     status: j.status,
     error: j.error,
   });
-  const splitsTotal = j.splits_total ?? j.split_children?.child_count ?? 0;
-  const splitsDone = j.splits_done ?? 0;
-  const query = j.query_label ?? j.job_title ?? j.job_id;
+  const execution = externalExecution(j);
+  const splitsTotal =
+    j.splits_total ?? j.split_children?.child_count ?? execution.total ?? 0;
+  const splitsDone = j.splits_done ?? execution.done ?? 0;
+  const stale = isStaleActiveWithoutProgress(j, state, splitsTotal);
+  const effectiveState = stale ? "Unknown" : state;
+  const query = j.query_label ?? externalQueryLabel(j) ?? "";
+  const title = j.job_title || fallbackJobTitle(j, query);
+  const note = stale
+    ? "Stale state: no live execution signal"
+    : j.error || externalErrorMessage(j) || null;
   return {
     jobId: j.job_id,
     displayId: j.job_id.slice(0, 8),
-    db: j.db || "—",
+    title,
+    db: shortDbLabel(j.db || externalDbLabel(j) || "—"),
     query,
-    state,
+    state: effectiveState,
     createdAt: j.created_at ?? null,
+    elapsedSec: terminalElapsedSec(j, effectiveState),
     splitsDone,
     splitsTotal,
-    note: j.error || null,
+    note,
   };
+}
+
+function fallbackJobTitle(j: BlastJobSummary, query: string): string {
+  const db = shortDbLabel(j.db || externalDbLabel(j) || "");
+  const parts = [j.program || "blast", db, query].filter(Boolean);
+  return parts.length > 0 ? parts.join(" - ") : j.job_id;
+}
+
+function asRecord(value: unknown): UnknownRecord | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as UnknownRecord)
+    : null;
+}
+
+function numberFrom(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, parsed) : null;
+  }
+  return null;
+}
+
+function externalPayload(j: BlastJobSummary): UnknownRecord | null {
+  return asRecord(asRecord(j.payload)?.external);
+}
+
+function externalExecution(j: BlastJobSummary): { done?: number; total?: number } {
+  const output = asRecord(j.output);
+  const outputExecution = asRecord(output?.execution);
+  const payloadExecution = asRecord(externalPayload(j)?.execution);
+  const execution = outputExecution ?? payloadExecution;
+  if (!execution) return {};
+  const total = numberFrom(execution.shard_count) ?? undefined;
+  const succeeded = numberFrom(execution.shards_succeeded) ?? 0;
+  const failed = numberFrom(execution.shards_failed) ?? 0;
+  const done = total == null ? succeeded + failed : Math.min(total, succeeded + failed);
+  return { done, total };
+}
+
+function externalQueryLabel(j: BlastJobSummary): string | null {
+  const external = externalPayload(j);
+  return basename(external?.query_file ?? external?.query ?? external?.query_blob_url);
+}
+
+function externalDbLabel(j: BlastJobSummary): string | null {
+  const external = externalPayload(j);
+  return basename(external?.db_name ?? external?.db);
+}
+
+function externalErrorMessage(j: BlastJobSummary): string | null {
+  const error = asRecord(externalPayload(j)?.error);
+  if (!error) return null;
+  const message = error.message;
+  return typeof message === "string" && message.trim() ? message.trim() : null;
+}
+
+function basename(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim();
+  if (!raw) return null;
+  try {
+    const parsed = raw.startsWith("az://")
+      ? new URL(`https://${raw.slice("az://".length)}`)
+      : new URL(raw);
+    const tail = parsed.pathname.split("/").filter(Boolean).pop();
+    if (tail) return tail;
+  } catch {
+    // Not a URL; fall through to generic path handling.
+  }
+  return raw.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? raw;
+}
+
+function shortDbLabel(value: string): string {
+  return basename(value) ?? value;
+}
+
+function isStaleActiveWithoutProgress(
+  j: BlastJobSummary,
+  state: DisplayJobState,
+  splitsTotal: number,
+): boolean {
+  if (!isActiveJobState(state) || splitsTotal > 0) return false;
+  const timestamp = Date.parse(j.updated_at || j.created_at || "");
+  if (!Number.isFinite(timestamp)) return false;
+  return Date.now() - timestamp > STALE_ACTIVE_WITHOUT_PROGRESS_MS;
+}
+
+function terminalElapsedSec(j: BlastJobSummary, state: DisplayJobState): number | null {
+  if (isActiveJobState(state)) return null;
+  const created = Date.parse(j.created_at || "");
+  const updated = Date.parse(j.updated_at || "");
+  if (!Number.isFinite(created) || !Number.isFinite(updated) || updated < created) {
+    return null;
+  }
+  return Math.max(0, Math.floor((updated - created) / 1000));
 }

@@ -8,8 +8,11 @@ import {
   blastApi,
 } from "@/api/endpoints";
 import {
+  buildGeneratedJobTitle,
+  hasCliFlag,
   hasStructuredTaxidOptionConflict,
   parsePositiveTaxid,
+  shouldUseBlastnShortTask,
   type FormState,
 } from "@/pages/blastSubmitModel";
 
@@ -22,6 +25,32 @@ import type { ToastFn } from "./types";
 function hasPreparedShardLayoutForSubmit(db: string, shardSets?: number[]): boolean {
   const dbName = db.split("/").filter(Boolean).pop() || db;
   return dbName === "core_nt" && Boolean(shardSets?.some((shardCount) => shardCount > 1));
+}
+
+function appendOption(options: string, flag: string, value?: string): string {
+  if (hasCliFlag(options, flag)) return options;
+  return `${options} ${flag}${value ? ` ${value}` : ""}`.trim();
+}
+
+export function buildEffectiveAdditionalOptions(form: FormState): string | undefined {
+  let opts = form.additional_options || "";
+  if (shouldUseBlastnShortTask(form)) opts = appendOption(opts, "-task", "blastn-short");
+  if (form.low_complexity_filter && form.program === "blastn") opts = appendOption(opts, "-dust", "yes");
+  if (form.query_from && form.query_to) opts = appendOption(opts, "-query_loc", `${form.query_from}-${form.query_to}`);
+  if (form.match_score) opts = appendOption(opts, "-reward", form.match_score);
+  if (form.mismatch_score) opts = appendOption(opts, "-penalty", form.mismatch_score);
+  if (form.max_matches_in_query_range && form.max_matches_in_query_range !== "0") {
+    opts = appendOption(opts, "-culling_limit", form.max_matches_in_query_range);
+  }
+  if (form.mask_lookup_table_only) opts = appendOption(opts, "-soft_masking", "true");
+  else if (form.low_complexity_filter && form.program === "blastn") {
+    opts = appendOption(opts, "-soft_masking", "false");
+  }
+  if (form.mask_lowercase) opts = appendOption(opts, "-lcase_masking");
+  if (form.species_repeat_filter && form.repeat_filter_taxid.trim()) {
+    opts = appendOption(opts, "-window_masker_taxid", form.repeat_filter_taxid.trim());
+  }
+  return opts.trim() || undefined;
 }
 
 export interface UseSubmitMutationArgs {
@@ -87,20 +116,10 @@ export function buildSubmitRequest({
 }: BuildSubmitRequestArgs): BlastSubmitRequest {
   const workloadNodeSku = getWorkloadNodeSku(selectedCluster);
   const workloadNodeCount = getWorkloadNodeCount(selectedCluster);
-  let opts = form.additional_options || "";
-  if (
-    form.low_complexity_filter &&
-    form.program === "blastn" &&
-    !opts.includes("-dust")
-  )
-    opts += " -dust yes";
-  if (form.query_from && form.query_to)
-    opts += ` -query_loc ${form.query_from}-${form.query_to}`;
-  if (form.match_score) opts += ` -reward ${form.match_score}`;
-  if (form.mismatch_score) opts += ` -penalty ${form.mismatch_score}`;
+  const opts = buildEffectiveAdditionalOptions(form);
 
   const dbShort = form.db.split("/").pop() || form.db;
-  const autoTitle = form.job_title || `${form.program} · ${dbShort}`;
+  const autoTitle = form.job_title.trim() || buildGeneratedJobTitle(`${form.program} · ${dbShort}`);
   const hasTaxid = form.taxid.trim().length > 0;
   const taxid = hasTaxid ? parsePositiveTaxid(form.taxid) : null;
   if (hasTaxid && taxid === null) {
@@ -134,7 +153,7 @@ export function buildSubmitRequest({
     low_complexity_filter: form.low_complexity_filter,
     taxid: taxid ?? undefined,
     is_inclusive: taxid ? form.is_inclusive : undefined,
-    additional_options: opts.trim() || undefined,
+    additional_options: opts,
     machine_type: workloadNodeSku || "Standard_E32s_v5",
     num_nodes: workloadNodeCount || 3,
     pd_size: "1000Gi",
@@ -144,6 +163,7 @@ export function buildSubmitRequest({
     use_local_ssd: true,
     db_auto_partition: useSharding,
     sharding_mode: effectiveShardingMode,
+    use_db_order_oracle: effectiveShardingMode === "precise" || undefined,
     db_effective_search_space: dbEffectiveSearchSpace,
     db_total_letters: dbTotalLetters,
     db_total_bytes: dbTotalBytes,

@@ -20,7 +20,9 @@ import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from http.client import HTTPConnection, HTTPException
 from typing import Any
+from urllib.parse import urlsplit
 
 import redis
 
@@ -31,6 +33,11 @@ KNOWN_SIDECARS = ("frontend", "api", "worker", "beat", "terminal")
 ALL_SIDECARS = (*KNOWN_SIDECARS, "redis")
 DEFAULT_STALE_AFTER_SEC = 15.0  # 3x the 5s reporter interval.
 DEFAULT_DEGRADED_AFTER_SEC = 10.0
+LOCAL_PROBE_TARGETS = {
+    "frontend": ("LOCAL_FRONTEND_HEALTH_URL", "http://127.0.0.1:8090/"),
+    "terminal": ("LOCAL_TERMINAL_HEALTH_URL", "http://127.0.0.1:7682/healthz"),
+}
+LOCAL_PROBE_TIMEOUT_SEC = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +108,72 @@ def _down_entry(name: str, reason: str, error: str | None = None) -> dict[str, A
     if error:
         entry["_detail"] = error[:120]
     return entry
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _local_probe_enabled() -> bool:
+    """Enable host-mode sidecar probes only for local development.
+
+    Container Apps and docker-compose sidecars publish their own Redis reporter
+    entries. The host-mode dev loop runs Vite and terminal/exec_server.py as
+    plain host processes, so no ``sidecar:metrics:<name>`` key exists for them.
+    In that local-only case, probing the known loopback ports keeps the
+    dashboard topology honest without masking production telemetry failures.
+    """
+
+    revision = os.environ.get("CONTAINER_APP_REVISION", "local")
+    return _env_bool("LOCAL_SIDECAR_PROBES", revision == "local")
+
+
+def _probe_http_ok(url: str, timeout_sec: float = LOCAL_PROBE_TIMEOUT_SEC) -> bool:
+    connection: HTTPConnection | None = None
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return False
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        connection = HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout_sec)
+        connection.request("GET", path, headers={"User-Agent": "elb-dashboard-local-probe"})
+        response = connection.getresponse()
+        return 200 <= int(response.status) < 400
+    except (HTTPException, OSError, TimeoutError, ValueError):
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _apply_local_probe_fallbacks(
+    sidecars: dict[str, dict[str, Any]],
+    now: float,
+    *,
+    probe_http_ok=_probe_http_ok,
+) -> None:
+    if not _local_probe_enabled():
+        return
+
+    for name, (env_name, default_url) in LOCAL_PROBE_TARGETS.items():
+        current = sidecars.get(name)
+        if current is None or current.get("health") != "down" or current.get("_error") != "missing":
+            continue
+        url = os.environ.get(env_name, default_url)
+        if not probe_http_ok(url):
+            continue
+        sidecars[name] = {
+            "name": name,
+            "health": "ok",
+            "ts": now,
+            "source": "local_probe",
+            "probe_url": url,
+        }
 
 
 def _decode_reporter_entry(name: str, blob: object, now: float) -> dict[str, Any]:
@@ -210,6 +283,8 @@ def collect_snapshot(
     for index, name in enumerate(KNOWN_SIDECARS):
         blob = raw_entries[index] if index < len(raw_entries) else None
         sidecars[name] = _decode_reporter_entry(name, blob, now)
+
+    _apply_local_probe_fallbacks(sidecars, now)
 
     sidecars["redis"] = _redis_self_snapshot(redis_client, now)
 

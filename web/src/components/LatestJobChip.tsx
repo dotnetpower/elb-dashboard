@@ -36,12 +36,12 @@ export function LatestJobChip() {
       <Link
         to="/blast/submit"
         className="latest-job-chip"
-        title="No BLAST jobs yet — click to submit your first search"
+        title="No BLAST searches yet — click to run your first one"
         data-state="empty"
       >
         <Search size={13} strokeWidth={1.5} className="latest-job-chip__icon" />
         <span className="latest-job-chip__label">
-          <span className="latest-job-chip__primary">No jobs</span>
+          <span className="latest-job-chip__primary">No searches</span>
           <span className="latest-job-chip__title">Run your first search</span>
         </span>
         <ArrowRight size={11} strokeWidth={1.5} className="latest-job-chip__chev" />

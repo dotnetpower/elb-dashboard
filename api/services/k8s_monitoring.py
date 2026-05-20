@@ -11,21 +11,20 @@ shell-only tooling that must run inside the terminal sidecar.
 
 from __future__ import annotations
 
-import base64
 import logging
-import os
 import re
-import tempfile
-import threading
-import time
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
 from azure.core.credentials import TokenCredential
 
-from api.services.azure_clients import aks_client
+from api.services.azure_clients import aks_client as aks_client
+from api.services.k8s import client as _k8s_client
+from api.services.k8s_nodes import (
+    _candidate_warmup_node_names,
+    k8s_get_nodes,
+    k8s_ready_warmup_node_names,
+)
 from api.services.warmup_jobs import (
     DEFAULT_WARMUP_APP_LABEL,
     attach_pod_progress_to_database_status,
@@ -35,87 +34,36 @@ from api.services.warmup_jobs import (
 
 LOGGER = logging.getLogger(__name__)
 
-_AKS_SERVER_APP_ID = "6dae42f8-4368-4678-94ff-3960e28e3630"
 _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,63}$")
 _SAFE_K8S_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-_K8S_CREDENTIAL_CACHE_TTL_SECONDS = 300.0
 
-
-@dataclass(frozen=True)
-class _K8sCredentialMaterial:
-    server: str
-    ca_data: bytes | None
-    client_cert: bytes | None
-    client_key: bytes | None
-    expires_at: float
-
-
-_K8S_CREDENTIAL_CACHE: dict[tuple[str, str, str, bool], _K8sCredentialMaterial] = {}
-_K8S_CREDENTIAL_CACHE_LOCK = threading.Lock()
+__all__ = [
+    "_candidate_warmup_node_names",
+    "_ensure_job_manifests",
+    "_get_k8s_credential_material",
+    "_get_k8s_session",
+    "k8s_cancel_blast_job",
+    "k8s_check_blast_status",
+    "k8s_check_namespace_exists",
+    "k8s_ensure_job_manifests",
+    "k8s_ensure_warmup_scripts_configmap",
+    "k8s_get_deployment_env_value",
+    "k8s_get_nodes",
+    "k8s_get_pods",
+    "k8s_get_service_ip",
+    "k8s_list_events",
+    "k8s_pod_logs",
+    "k8s_ready_warmup_node_names",
+    "k8s_release_stale_warmup_jobs",
+    "k8s_release_warmup_cache",
+    "k8s_top_nodes",
+    "k8s_warmup_status",
+    "reset_k8s_credential_cache",
+]
 
 
 def reset_k8s_credential_cache() -> None:
-    """Clear cached AKS kubeconfig material. Test-only."""
-    with _K8S_CREDENTIAL_CACHE_LOCK:
-        _K8S_CREDENTIAL_CACHE.clear()
-
-
-def _k8s_credential_cache_ttl() -> float:
-    raw = os.environ.get("K8S_CREDENTIAL_CACHE_TTL_SECONDS", "")
-    if raw:
-        try:
-            return max(0.0, min(float(raw), 3600.0))
-        except ValueError:
-            return _K8S_CREDENTIAL_CACHE_TTL_SECONDS
-    return _K8S_CREDENTIAL_CACHE_TTL_SECONDS
-
-
-def _get_k8s_credential_material(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    *,
-    admin: bool,
-) -> _K8sCredentialMaterial:
-    cache_key = (subscription_id, resource_group, cluster_name, admin)
-    now = time.monotonic()
-    with _K8S_CREDENTIAL_CACHE_LOCK:
-        cached = _K8S_CREDENTIAL_CACHE.get(cache_key)
-    if cached is not None and cached.expires_at > now:
-        return cached
-
-    client = aks_client(credential, subscription_id)
-    if admin:
-        creds = client.managed_clusters.list_cluster_admin_credentials(
-            resource_group,
-            cluster_name,
-        )
-    else:
-        creds = client.managed_clusters.list_cluster_user_credentials(
-            resource_group,
-            cluster_name,
-        )
-    kubeconfig_bytes = creds.kubeconfigs[0].value
-    kubeconfig = yaml.safe_load(bytes(kubeconfig_bytes))
-
-    cluster_info = kubeconfig["clusters"][0]["cluster"]
-    user_info = kubeconfig["users"][0]["user"]
-    ca_data = cluster_info.get("certificate-authority-data", "")
-    client_cert = user_info.get("client-certificate-data")
-    client_key = user_info.get("client-key-data")
-
-    material = _K8sCredentialMaterial(
-        server=cluster_info["server"],
-        ca_data=base64.b64decode(ca_data) if ca_data else None,
-        client_cert=base64.b64decode(client_cert) if client_cert else None,
-        client_key=base64.b64decode(client_key) if client_key else None,
-        expires_at=now + _k8s_credential_cache_ttl(),
-    )
-    if material.expires_at > now:
-        with _K8S_CREDENTIAL_CACHE_LOCK:
-            _K8S_CREDENTIAL_CACHE[cache_key] = material
-    return material
+    _k8s_client.reset_k8s_credential_cache()
 
 
 def _get_k8s_session(
@@ -126,75 +74,40 @@ def _get_k8s_session(
     *,
     admin: bool = False,
 ) -> tuple[Any, str]:
-    """Return ``(requests.Session, server_url)`` for direct K8s API calls.
-
-    The session owns any temporary CA/client-cert files and deletes them when
-    ``session.close()`` is called. Temp files are also cleaned up on partial
-    setup failure so credential material never lingers after an exception.
-    """
-
-    import requests as _requests
-
-    material = _get_k8s_credential_material(
-        credential,
-        subscription_id,
-        resource_group,
-        cluster_name,
-        admin=admin,
-    )
-
-    session = _requests.Session()
-    temp_files: list[str] = []
-
-    def cleanup_temp_files() -> None:
-        for path in temp_files:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
-    def write_secret_file(suffix: str, content: bytes) -> str:
-        handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-        try:
-            handle.write(content)
-            handle.flush()
-        finally:
-            handle.close()
-        os.chmod(handle.name, 0o600)
-        temp_files.append(handle.name)
-        return handle.name
-
+    original = _k8s_client.aks_client
+    _k8s_client.aks_client = aks_client
     try:
-        if material.ca_data:
-            session.verify = write_secret_file(".crt", material.ca_data)
-        else:
-            session.verify = True
+        return _k8s_client._get_k8s_session(
+            credential,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            admin=admin,
+        )
+    finally:
+        _k8s_client.aks_client = original
 
-        if material.client_cert and material.client_key:
-            cert_path = write_secret_file(".crt", material.client_cert)
-            key_path = write_secret_file(".key", material.client_key)
-            session.cert = (cert_path, key_path)
-        else:
-            token = credential.get_token(f"{_AKS_SERVER_APP_ID}/.default")
-            session.headers["Authorization"] = f"Bearer {token.token}"
-    except Exception:
-        cleanup_temp_files()
-        try:
-            session.close()
-        except Exception:  # noqa: S110 - session close failures are non-actionable here
-            pass
-        raise
 
-    original_close = session.close
-
-    def cleanup_close() -> None:
-        try:
-            original_close()
-        finally:
-            cleanup_temp_files()
-
-    session.close = cleanup_close  # type: ignore[assignment]
-    return session, material.server
+def _get_k8s_credential_material(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    *,
+    admin: bool,
+) -> Any:
+    original = _k8s_client.aks_client
+    _k8s_client.aks_client = aks_client
+    try:
+        return _k8s_client._get_k8s_credential_material(
+            credential,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            admin=admin,
+        )
+    finally:
+        _k8s_client.aks_client = original
 
 
 def _namespace_or_default(session: Any, server: str, namespace: str) -> str:
@@ -219,107 +132,8 @@ def _owned_job_names(pods: list[dict[str, Any]]) -> set[str]:
     return names
 
 
-def k8s_get_nodes(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> list[dict[str, Any]]:
-    """Return cluster nodes from the Kubernetes API."""
-
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        response = session.get(f"{server}/api/v1/nodes", timeout=10)
-        response.raise_for_status()
-        nodes: list[dict[str, Any]] = []
-        for item in response.json().get("items", []):
-            meta = item.get("metadata", {})
-            status = item.get("status", {})
-            conditions = {c["type"]: c["status"] for c in status.get("conditions", [])}
-            info = status.get("nodeInfo", {})
-            addresses = {a["type"]: a["address"] for a in status.get("addresses", [])}
-            roles = (
-                ",".join(
-                    key.replace("node-role.kubernetes.io/", "")
-                    for key in meta.get("labels", {})
-                    if key.startswith("node-role.kubernetes.io/")
-                )
-                or "<none>"
-            )
-            nodes.append(
-                {
-                    "name": meta.get("name", ""),
-                    "status": "Ready" if conditions.get("Ready") == "True" else "NotReady",
-                    "roles": roles,
-                    "age": meta.get("creationTimestamp", ""),
-                    "version": info.get("kubeletVersion", ""),
-                    "internal_ip": addresses.get("InternalIP", ""),
-                    "os_image": info.get("osImage", ""),
-                    "kernel": info.get("kernelVersion", ""),
-                    "runtime": info.get("containerRuntimeVersion", ""),
-                }
-            )
-        return nodes
-    finally:
-        session.close()
-
-
-def k8s_ready_warmup_node_names(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    *,
-    preferred_pool: str = "blastpool",
-) -> list[str]:
-    """Return Ready node names suitable for node-local DB warmup Jobs."""
-
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
-    try:
-        response = session.get(f"{server}/api/v1/nodes", timeout=10)
-        response.raise_for_status()
-        return _candidate_warmup_node_names(
-            response.json().get("items", []), preferred_pool=preferred_pool
-        )
-    finally:
-        session.close()
-
-
-def _candidate_warmup_node_names(
-    nodes: list[dict[str, Any]], *, preferred_pool: str = "blastpool"
-) -> list[str]:
-    candidates: list[tuple[str, str, str]] = []
-    for node in nodes:
-        metadata = node.get("metadata", {}) or {}
-        spec = node.get("spec", {}) or {}
-        status = node.get("status", {}) or {}
-        name = str(metadata.get("name") or "")
-        if not name or spec.get("unschedulable") is True:
-            continue
-        conditions = {
-            item.get("type"): item.get("status")
-            for item in status.get("conditions", []) or []
-            if isinstance(item, dict)
-        }
-        if conditions.get("Ready") != "True":
-            continue
-        labels = metadata.get("labels", {}) or {}
-        pool = str(labels.get("agentpool") or labels.get("kubernetes.azure.com/agentpool") or "")
-        mode = str(labels.get("kubernetes.azure.com/mode") or "")
-        candidates.append((name, pool, mode))
-
-    preferred = [name for name, pool, _mode in candidates if pool == preferred_pool]
-    if preferred:
-        return sorted(preferred)
-
-    user_nodes = [
-        name
-        for name, pool, mode in candidates
-        if mode.lower() != "system" and pool.lower() not in {"system", "systempool"}
-    ]
-    if user_nodes:
-        return sorted(user_nodes)
-    return sorted(name for name, _pool, _mode in candidates)
+def _job_has_label_value(job: dict[str, Any], name: str, value: str) -> bool:
+    return job.get("metadata", {}).get("labels", {}).get(name) == value
 
 
 def k8s_ensure_job_manifests(
@@ -454,7 +268,7 @@ def k8s_check_blast_status(
     namespace: str,
     job_id: str | None = None,
 ) -> dict[str, Any]:
-    """Return ElasticBLAST search status scoped by ``BLAST_ELB_JOB_ID``.
+    """Return ElasticBLAST search status scoped by ElasticBLAST's K8s job id.
 
     Empty ``app=blast`` Jobs/Pods means the search has not been scheduled yet,
     so the honest status is ``creating`` rather than ``completed``.
@@ -495,9 +309,14 @@ def k8s_check_blast_status(
             }
 
         all_jobs = jobs_response.json().get("items", [])
-        if job_id and blast_pods:
+        if job_id:
             scoped_names = _owned_job_names(blast_pods)
-            jobs = [job for job in all_jobs if job.get("metadata", {}).get("name") in scoped_names]
+            jobs = [
+                job
+                for job in all_jobs
+                if job.get("metadata", {}).get("name") in scoped_names
+                or _job_has_label_value(job, "elb-job-id", job_id)
+            ]
         else:
             jobs = all_jobs
 
@@ -530,6 +349,7 @@ def k8s_check_blast_status(
 
         return {
             "status": blast_status,
+            "job_id": job_id,
             "pods": len(blast_pods),
             "jobs": len(jobs),
             "succeeded": succeeded,
@@ -710,13 +530,7 @@ def k8s_release_stale_warmup_jobs(
             name = str(metadata.get("name") or "")
             if not name:
                 continue
-            pinned = (
-                job.get("spec", {})
-                .get("template", {})
-                .get("spec", {})
-                .get("nodeName")
-                or ""
-            )
+            pinned = job.get("spec", {}).get("template", {}).get("spec", {}).get("nodeName") or ""
             if not pinned or str(pinned) in live_nodes:
                 kept.append(name)
                 continue

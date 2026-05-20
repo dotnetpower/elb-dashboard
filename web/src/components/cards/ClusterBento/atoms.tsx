@@ -271,7 +271,7 @@ export function PressureBar({ pct, color }: { pct: number; color: string }) {
     <div
       style={{
         height: 4,
-        background: "rgba(255,255,255,0.05)",
+        background: "var(--kpi-bar-bg)",
         borderRadius: 999,
         overflow: "hidden",
       }}
@@ -443,6 +443,7 @@ export interface JobRowView {
   jobId: string;
   /** Truncated/display id (e.g. last 8 chars). Falls back to `jobId`. */
   displayId?: string;
+  title: string;
   db: string;
   query: string;
   state: DisplayJobState;
@@ -527,7 +528,7 @@ export function JobRow({ j, dense = false }: { j: JobRowView; dense?: boolean })
           whiteSpace: "nowrap",
         }}
       >
-        <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>{j.db || "—"}</span>
+        <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>{j.title || j.db || "—"}</span>
         {j.note ? (
           <span style={{ color: tone, marginLeft: 6 }}>· {j.note}</span>
         ) : j.query ? (

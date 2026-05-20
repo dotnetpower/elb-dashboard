@@ -3,6 +3,7 @@
 // On the existing platform Storage account this module adds:
 //   * `job-state`        table      — single-row-per-job state (PartitionKey=job_id, RowKey="current")
 //   * `job-history`      table      — per-step transitions (PartitionKey=job_id, RowKey=ulid)
+//   * `autowarmup`       table      — Auto warm preferences, kept out of jobstate
 //   * `audit`            container  — append blobs, daily-rolled JSON Lines
 //   * `dead-letter`      container  — one blob per Celery task that exhausted retries
 //   * `job-payloads`     container  — sanitised request/result payloads, append blobs
@@ -40,6 +41,11 @@ resource jobStateTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2
 resource jobHistoryTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
   parent: tableService
   name: 'jobhistory'
+}
+
+resource autoWarmupTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+  parent: tableService
+  name: 'autowarmup'
 }
 
 // ---------------------------------------------------------------------------
@@ -125,3 +131,4 @@ resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05
 
 output jobStateTableName string = jobStateTable.name
 output jobHistoryTableName string = jobHistoryTable.name
+output autoWarmupTableName string = autoWarmupTable.name

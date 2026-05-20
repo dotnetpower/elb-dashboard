@@ -64,66 +64,639 @@
   --card-accent-jobs: var(--warning);
 }
 
-/* #50 Light theme */
+/* #50 Light theme — Aurora White (premium glass) */
 [data-theme="light"] {
-  --bg-canvas: #f5f6f8;
+  --bg-canvas: #f6f7fb;
   --bg-primary: #ffffff;
-  --bg-secondary: #f0f1f4;
-  --bg-tertiary: #e8eaed;
-  --bg-hover: #dfe1e5;
-  --border-weak: rgba(0, 0, 0, 0.08);
-  --border-medium: rgba(0, 0, 0, 0.14);
-  --border-focus: rgba(50, 100, 200, 0.45);
-  --text-primary: #1a1c20;
-  --text-muted: #5a5e68;
-  --text-faint: #8c919e;
-  --accent: #3a6fd8;
-  --success: #2f8a3e;
-  --warning: #c77a2a;
-  --danger: #c74040;
-  --purple: #8a50b0;
-  --teal: #2a8a7a;
-  --shadow-panel: 0 1px 3px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.04);
-  --shadow-panel-hover: 0 2px 8px rgba(0, 0, 0, 0.1), 0 4px 16px rgba(0, 0, 0, 0.06);
+  --bg-secondary: #f0f2f8;
+  --bg-tertiary: #e7eaf3;
+  --bg-hover: #dfe3ee;
+  --border-weak: rgba(80, 70, 160, 0.18);
+  --border-medium: rgba(80, 70, 160, 0.30);
+  --border-focus: rgba(91, 108, 255, 0.50);
+  --text-primary: #161a36;
+  --text-muted: #444b76;
+  --text-faint: #6c759a;
+  --accent: #5b6cff;
+  --success: #047857;
+  --warning: #b45309;
+  --danger: #b91c1c;
+  --purple: #7c6df5;
+  --teal: #0f766e;
+
+  /* Glass aliases — used by .panel / .glass-card override below.
+     0.68 is the sweet spot: still translucent enough for aurora to
+     show through, but solid enough that body text reads cleanly. */
+  --glass-bg: rgba(255, 255, 255, 0.68);
+  --glass-bg-strong: rgba(255, 255, 255, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.95);
+  --glass-blur: 22px;
+
+  --shadow-panel:
+    0 1px 0 rgba(255, 255, 255, 0.95) inset,
+    0 12px 32px rgba(80, 70, 160, 0.18);
+  --shadow-panel-hover:
+    0 1px 0 rgba(255, 255, 255, 1) inset,
+    0 18px 44px rgba(80, 70, 160, 0.24);
 }
 
-/* Remove dark radial gradient in light mode */
+/* Aurora canvas — lavender + cobalt wash on white (light mode only) */
 [data-theme="light"],
 [data-theme="light"] body,
 [data-theme="light"] #root {
-  background-image: none !important;
+  background-image:
+    radial-gradient(900px 480px at 12% -8%, rgba(167, 139, 250, 0.28), transparent 65%),
+    radial-gradient(700px 520px at 105% 12%, rgba(96, 165, 250, 0.25), transparent 60%),
+    radial-gradient(600px 600px at 50% 110%, rgba(196, 181, 253, 0.22), transparent 65%),
+    linear-gradient(180deg, #fbfcff 0%, #f0f3fb 100%) !important;
+}
+
+/* Glass surface for panels — light mode only.
+   Dark mode keeps the flat Grafana-style panels. */
+[data-theme="light"] .panel,
+[data-theme="light"] .glass-card {
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+}
+[data-theme="light"] .glass-card--strong {
+  background: var(--glass-bg-strong);
+}
+
+/* Panel header — subtle frosted band so the header reads as a 'hat'
+   over the body, not a continuation of the glass surface. */
+[data-theme="light"] .panel-hd {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0.30) 100%);
+  border-bottom: 1px solid rgba(80, 70, 160, 0.14);
 }
 
 /* Light-mode overrides for elements using dark-theme rgba(255,255,255,...) */
 [data-theme="light"] ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.12);
+  background: rgba(120, 110, 200, 0.22);
 }
 [data-theme="light"] ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(120, 110, 200, 0.36);
 }
 [data-theme="light"] {
-  scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+  scrollbar-color: rgba(120, 110, 200, 0.22) transparent;
 }
 
 [data-theme="light"] .prog {
-  background: rgba(0, 0, 0, 0.06);
+  background: rgba(120, 110, 200, 0.08);
 }
 
 [data-theme="light"] .cfg-chip .lbl {
-  background: rgba(0, 0, 0, 0.03);
+  background: rgba(120, 110, 200, 0.05);
 }
 
 [data-theme="light"] .tooltip-trigger {
-  background: rgba(0, 0, 0, 0.05);
+  background: rgba(120, 110, 200, 0.06);
 }
 
 [data-theme="light"] .code-val {
-  background: rgba(0, 0, 0, 0.04);
+  background: rgba(120, 110, 200, 0.06);
 }
 
 [data-theme="light"] .tooltip-popup {
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 8px 32px rgba(80, 70, 160, 0.14);
 }
+
+/* ──────────────────────────────────────────────────────────────────
+   Light theme consistency pass — premium glass for the chrome
+   (top bar, logo, selectors, status chips, buttons).
+   Dark mode is unaffected — every rule lives under [data-theme="light"].
+   ────────────────────────────────────────────────────────────────── */
+
+/* #1 App bar — glass, not flat white */
+[data-theme="light"] .layout__topbar {
+  background: rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.6) inset,
+              0 6px 18px rgba(80, 70, 160, 0.06);
+}
+
+/* #1 Logo gradient — softer pearlescent lavender + cobalt */
+[data-theme="light"] .layout__logo-icon {
+  background: linear-gradient(135deg, #c4b5fd 0%, #8b9dff 55%, #6a78ff 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 4px 12px rgba(124, 109, 245, 0.28);
+}
+
+/* #1 Nav active pill — use new violet accent rgba (not legacy cobalt) */
+[data-theme="light"] .layout__nav-item.active {
+  background: rgba(91, 108, 255, 0.10);
+  border-left-color: var(--accent);
+}
+
+/* #1 Live indicator — match new deep emerald success color */
+[data-theme="light"] .layout__live {
+  background: rgba(4, 120, 87, 0.08);
+  border-color: rgba(4, 120, 87, 0.22);
+}
+
+/* #3 Selector chips (Subscription / Workload RG / Auto-refresh) — glass */
+[data-theme="light"] .cfg-chip {
+  background: rgba(255, 255, 255, 0.70);
+  border-color: rgba(120, 110, 200, 0.22);
+  backdrop-filter: blur(10px) saturate(160%);
+  -webkit-backdrop-filter: blur(10px) saturate(160%);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset,
+              0 2px 8px rgba(80, 70, 160, 0.06);
+  transition: border-color var(--motion-fast),
+              box-shadow var(--motion-fast);
+}
+[data-theme="light"] .cfg-chip:hover {
+  border-color: rgba(91, 108, 255, 0.32);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset,
+              0 4px 14px rgba(91, 108, 255, 0.10);
+}
+[data-theme="light"] .cfg-chip:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(91, 108, 255, 0.12);
+}
+[data-theme="light"] .cfg-chip .lbl {
+  border-right-color: rgba(120, 110, 200, 0.18);
+}
+[data-theme="light"] .cfg-chip select option {
+  background: #ffffff;
+  color: var(--text-primary);
+}
+/* The select chevron is an inline SVG with a hardcoded dark-mode stroke
+   colour — repaint it lavender in light mode. */
+[data-theme="light"] .cfg-chip select,
+[data-theme="light"] select.glass-input {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%237c6df5' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
+/* #3/#4 Gear / icon-only buttons — glass on hover */
+[data-theme="light"] .cfg-gear:hover {
+  background: rgba(255, 255, 255, 0.70);
+  border-color: rgba(120, 110, 200, 0.22);
+  color: var(--accent);
+}
+
+/* #2 Status tags (.gt-*) — re-tint backgrounds with light-mode foregrounds.
+   Without this they keep dark-mode rgba's that hue-mismatch the new
+   light palette. */
+[data-theme="light"] .gt-g {
+  background: rgba(4, 120, 87, 0.10);
+}
+[data-theme="light"] .gt-o {
+  background: rgba(180, 83, 9, 0.12);
+}
+[data-theme="light"] .gt-r {
+  background: rgba(185, 28, 28, 0.10);
+}
+[data-theme="light"] .gt-b {
+  background: rgba(91, 108, 255, 0.10);
+}
+[data-theme="light"] .gt-p {
+  background: rgba(124, 109, 245, 0.10);
+}
+[data-theme="light"] .gt-m {
+  background: rgba(120, 110, 200, 0.08);
+  color: var(--text-muted);
+}
+
+/* #2 dv3-pill family — same re-tint */
+[data-theme="light"] .dv3-pill-success { background: rgba(4, 120, 87, 0.10); }
+[data-theme="light"] .dv3-pill-accent  { background: rgba(91, 108, 255, 0.10); }
+[data-theme="light"] .dv3-pill-warning { background: rgba(180, 83, 9, 0.12); }
+[data-theme="light"] .dv3-pill-teal    { background: rgba(15, 118, 110, 0.10); }
+[data-theme="light"] .dv3-pill-purple  { background: rgba(124, 109, 245, 0.10); }
+[data-theme="light"] .dv3-pill-danger  { background: rgba(185, 28, 28, 0.10); }
+[data-theme="light"] .dv3-pill-faint {
+  background: rgba(120, 110, 200, 0.06);
+  border-color: rgba(120, 110, 200, 0.18);
+  color: var(--text-muted);
+}
+
+/* #4 Secondary buttons (.glass-button / .gb) — glass surface */
+[data-theme="light"] .glass-button,
+[data-theme="light"] .gb {
+  background: rgba(255, 255, 255, 0.70);
+  border-color: rgba(120, 110, 200, 0.22);
+  backdrop-filter: blur(10px) saturate(160%);
+  -webkit-backdrop-filter: blur(10px) saturate(160%);
+  color: var(--text-primary);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset,
+              0 2px 8px rgba(80, 70, 160, 0.06);
+}
+[data-theme="light"] .glass-button:hover,
+[data-theme="light"] .gb:hover {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(91, 108, 255, 0.32);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.85) inset,
+              0 4px 14px rgba(91, 108, 255, 0.12);
+}
+
+/* #4 Primary button (.glass-button--primary / .gb-p) — solid violet gradient.
+   Dark-mode keeps the faint cobalt rgba; light gets a true premium CTA. */
+[data-theme="light"] .glass-button--primary,
+[data-theme="light"] .gb-p {
+  background: linear-gradient(180deg, #6a78ff 0%, #4f5fe0 100%);
+  border-color: rgba(64, 80, 220, 0.45);
+  color: #ffffff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    0 6px 18px rgba(91, 108, 255, 0.32);
+}
+[data-theme="light"] .glass-button--primary:hover,
+[data-theme="light"] .gb-p:hover {
+  background: linear-gradient(180deg, #7281ff 0%, #5867e6 100%);
+  border-color: rgba(64, 80, 220, 0.55);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    0 8px 22px rgba(91, 108, 255, 0.40);
+}
+[data-theme="light"] .glass-button--primary:disabled,
+[data-theme="light"] .gb-p:disabled {
+  background: rgba(120, 110, 200, 0.18);
+  border-color: rgba(120, 110, 200, 0.25);
+  color: rgba(45, 36, 90, 0.45);
+  box-shadow: none;
+}
+[data-theme="light"] .glass-button--primary:disabled:hover,
+[data-theme="light"] .gb-p:disabled:hover {
+  background: rgba(120, 110, 200, 0.18);
+  border-color: rgba(120, 110, 200, 0.25);
+}
+
+/* #1 Environment pills (used in some toolbars) — match new neutral */
+[data-theme="light"] .env-pill {
+  background: rgba(255, 255, 255, 0.65);
+  border-color: rgba(120, 110, 200, 0.18);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* Stat panels — keep solid white card on glass canvas (more legible
+   for big numbers than nested glass-on-glass). */
+[data-theme="light"] .stat-panel {
+  background: rgba(255, 255, 255, 0.65);
+  border-color: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(14px) saturate(170%);
+  -webkit-backdrop-filter: blur(14px) saturate(170%);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Card system pass — header rhythm, number emphasis, table hover,
+   live-pulse, refresh hit area. All scoped to [data-theme="light"]
+   unless the change is universally beneficial (kpi-bar token, pulse
+   keyframe).
+   ────────────────────────────────────────────────────────────────── */
+
+/* Kpi/progress bar track token — dark keeps the legacy faint white,
+   light needs a visible lavender hairline track. Used by inline
+   styled PressureBar via `background: var(--kpi-bar-bg)`. */
+:root {
+  --kpi-bar-bg: rgba(255, 255, 255, 0.05);
+  /* ClusterPulse layering — dark keeps the flat opaque tokens; light
+     uses translucent whites so the glass card stratifies cleanly:
+     body (deepest) < row (shallow) < highlight (top). */
+  --pulse-body-bg: var(--bg-tertiary);
+  --pulse-row-bg: var(--bg-secondary);
+  /* ClusterDetails modal — dark keeps the legacy near-transparent
+     whites; light overrides below to lift them onto white glass. */
+  --modal-header-bg: linear-gradient(
+    135deg,
+    rgba(110, 159, 255, 0.08) 0%,
+    rgba(184, 119, 217, 0.06) 100%
+  );
+  --modal-surface-strong: rgba(255, 255, 255, 0.03);
+  --modal-surface-soft: rgba(255, 255, 255, 0.04);
+  --modal-zebra: rgba(255, 255, 255, 0.015);
+  --modal-thead-bg: var(--bg-tertiary);
+}
+[data-theme="light"] {
+  --kpi-bar-bg: rgba(120, 110, 200, 0.12);
+  --pulse-body-bg: rgba(255, 255, 255, 0.30);
+  --pulse-row-bg: rgba(255, 255, 255, 0.62);
+  --modal-header-bg: linear-gradient(
+    135deg,
+    rgba(110, 159, 255, 0.16) 0%,
+    rgba(184, 119, 217, 0.12) 100%
+  );
+  --modal-surface-strong: rgba(255, 255, 255, 0.62);
+  --modal-surface-soft: rgba(255, 255, 255, 0.45);
+  --modal-zebra: rgba(120, 110, 200, 0.06);
+  --modal-thead-bg: rgba(120, 110, 200, 0.10);
+}
+
+/* Inner cluster card (ClusterPulse) — paint a cluster-accent frost band
+   over the first ~58px (the PulseRowSummary header) so the nested card
+   inside the AKS panel inherits the same cobalt/violet identity as its
+   parent. The PulseRowSummary button is `background: transparent`, so
+   the gradient on the wrapper shows through cleanly. Below 58px the
+   expanded body's own `--pulse-body-bg` overlays the transparent zone. */
+[data-theme="light"] .cluster-pulse-card {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--card-accent-cluster) 14%, rgba(255, 255, 255, 0.70)) 0%,
+      color-mix(in srgb, var(--card-accent-cluster) 5%, rgba(255, 255, 255, 0.45)) 58px,
+      transparent 58px
+    ),
+    var(--glass-bg);
+  border-color: color-mix(in srgb, var(--card-accent-cluster) 28%, var(--border-weak));
+}
+[data-theme="light"] .cluster-pulse-card > button:first-child {
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--card-accent-cluster) 22%, transparent);
+}
+
+/* #5 Card header rhythm — light's white-on-glass needs slightly tighter
+   padding and a stronger title colour (faint/muted on aurora canvas was
+   nearly unreadable in Pass 2). The band itself is restored above as a
+   subtle frost gradient. */
+[data-theme="light"] .panel-hd {
+  padding: 11px 16px 10px;
+}
+[data-theme="light"] .panel-hd .title {
+  color: var(--text-muted);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+[data-theme="light"] .panel-hd .sub {
+  color: var(--text-muted);
+}
+[data-theme="light"] .panel-bd {
+  padding-top: 12px;
+}
+
+/* #6 Number emphasis — KV rows. tabular-nums + 600 weight so column
+   alignment is rock solid and figures read as "data". */
+[data-theme="light"] .kv .v {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+[data-theme="light"] .kv {
+  border-bottom-color: rgba(120, 110, 200, 0.10);
+}
+
+/* #6 Metric blocks — same tabular treatment so cluster cards align */
+[data-theme="light"] .metric-block .mv,
+[data-theme="light"] .metric-block .mn {
+  font-variant-numeric: tabular-nums;
+}
+
+/* #6 Table row hover — soft lavender wash + 2px violet left bar */
+[data-theme="light"] .gt-tbl tr:hover td {
+  background: rgba(120, 110, 200, 0.05);
+}
+[data-theme="light"] .gt-tbl tbody tr:hover td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* #6 / #5 db-row hover — was hardcoded rgba(255,255,255,0.02) (invisible
+   on light). Restore the same lavender wash. */
+[data-theme="light"] .db-row:hover {
+  background: rgba(120, 110, 200, 0.06) !important;
+}
+
+/* #5 Live indicator — real pulse (not just opacity blink) in light mode.
+   Soft emerald halo, 2.2s ease-in-out. */
+@keyframes pulse-soft {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(4, 120, 87, 0.0);
+  }
+  50% {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 4px rgba(4, 120, 87, 0.12);
+  }
+}
+[data-theme="light"] .layout__live-dot {
+  animation: pulse-soft 2.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="light"] .layout__live-dot {
+    animation: none;
+  }
+}
+
+/* #3 Med — Refresh button hit area. Visual size stays 10px, the
+   touch/click target grows to ~28px via padding. */
+[data-theme="light"] .panel-whisper__btn {
+  padding: 6px;
+  border-radius: 6px;
+}
+[data-theme="light"] .panel-whisper__btn:hover {
+  background: rgba(91, 108, 255, 0.10);
+  color: var(--accent);
+}
+
+/* #4 Disabled state — clearer in light (faint grey on white is invisible). */
+[data-theme="light"] .glass-button:disabled,
+[data-theme="light"] .gb:disabled {
+  opacity: 0.50;
+  cursor: not-allowed;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Visibility pass — Pass 1+2 went too far on transparency. This block
+   re-anchors the chrome so text/borders/chips actually read on the
+   aurora canvas. All overrides scoped to [data-theme="light"].
+   ────────────────────────────────────────────────────────────────── */
+
+/* App bar — bump opacity from 0.62 to 0.82 + a real bottom hairline.
+   Was previously invisible against the OS chrome above it. */
+[data-theme="light"] .layout__topbar {
+  background: rgba(255, 255, 255, 0.82);
+  border-bottom: 1px solid rgba(80, 70, 160, 0.16);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset,
+              0 4px 16px rgba(80, 70, 160, 0.08);
+}
+
+/* Panel border + shadow — give every card a visible edge. */
+[data-theme="light"] .panel,
+[data-theme="light"] .glass-card {
+  border: 1px solid rgba(80, 70, 160, 0.14);
+  box-shadow: var(--shadow-panel);
+}
+
+/* Selector chips — token bumps already help; reinforce hover ring. */
+[data-theme="light"] .cfg-chip {
+  border-color: rgba(80, 70, 160, 0.22);
+}
+[data-theme="light"] .cfg-chip .lbl {
+  border-right-color: rgba(80, 70, 160, 0.18);
+  color: var(--text-muted);
+  font-weight: 500;
+}
+[data-theme="light"] .cfg-gear {
+  border-color: rgba(80, 70, 160, 0.18);
+  color: var(--text-muted);
+}
+[data-theme="light"] .cfg-gear:hover {
+  border-color: rgba(80, 70, 160, 0.28);
+}
+
+/* Secondary buttons — visible outline + slightly stronger background. */
+[data-theme="light"] .glass-button,
+[data-theme="light"] .gb {
+  background: rgba(255, 255, 255, 0.78);
+  border-color: rgba(80, 70, 160, 0.26);
+  color: var(--text-primary);
+}
+[data-theme="light"] .glass-button:hover,
+[data-theme="light"] .gb:hover {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(91, 108, 255, 0.40);
+}
+
+/* Status chips (.gt-*) — bump from 0.10 → 0.16 so they have actual
+   surface presence on white glass. */
+[data-theme="light"] .gt-g { background: rgba(4, 120, 87, 0.14); }
+[data-theme="light"] .gt-o { background: rgba(180, 83, 9, 0.16); }
+[data-theme="light"] .gt-r { background: rgba(185, 28, 28, 0.14); }
+[data-theme="light"] .gt-b { background: rgba(91, 108, 255, 0.14); }
+[data-theme="light"] .gt-p { background: rgba(124, 109, 245, 0.14); }
+[data-theme="light"] .gt-m {
+  background: rgba(80, 70, 160, 0.10);
+  color: var(--text-muted);
+}
+
+/* dv3-pill — same bump for content pills */
+[data-theme="light"] .dv3-pill-success { background: rgba(4, 120, 87, 0.14); }
+[data-theme="light"] .dv3-pill-accent  { background: rgba(91, 108, 255, 0.14); }
+[data-theme="light"] .dv3-pill-warning { background: rgba(180, 83, 9, 0.16); }
+[data-theme="light"] .dv3-pill-teal    { background: rgba(15, 118, 110, 0.14); }
+[data-theme="light"] .dv3-pill-purple  { background: rgba(124, 109, 245, 0.14); }
+[data-theme="light"] .dv3-pill-danger  { background: rgba(185, 28, 28, 0.14); }
+[data-theme="light"] .dv3-pill-faint {
+  background: rgba(80, 70, 160, 0.08);
+  border-color: rgba(80, 70, 160, 0.20);
+  color: var(--text-muted);
+}
+
+/* KV row separators — Pass 2's 0.10 was nearly invisible on glass.
+   0.16 still reads as a hairline but actually separates. */
+[data-theme="light"] .kv {
+  border-bottom-color: rgba(80, 70, 160, 0.14);
+}
+
+/* Live pulse halo — bump from 0.12 → 0.22 alpha so the pulse reads. */
+@keyframes pulse-soft-light {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(4, 120, 87, 0);
+  }
+  50% {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 5px rgba(4, 120, 87, 0.22);
+  }
+}
+[data-theme="light"] .layout__live-dot {
+  animation: pulse-soft-light 2.2s ease-in-out infinite;
+}
+[data-theme="light"] .layout__live {
+  background: rgba(4, 120, 87, 0.10);
+  border-color: rgba(4, 120, 87, 0.28);
+  color: #036148;
+}
+
+/* Refresh "last updated" whisper — was opacity 0.4 (invisible). Bump
+   so users can actually see freshness without hovering. */
+[data-theme="light"] .panel-whisper {
+  opacity: 0.65;
+  color: var(--text-muted);
+}
+[data-theme="light"] .panel:hover .panel-whisper {
+  opacity: 1;
+}
+
+/* AddCluster / dashed "+ Add Cluster" CTA uses inline var(--border-medium).
+   The token deepening above (0.22 → 0.30) handles it automatically. */
+
+/* Section eyebrow labels (JOBS / DATABASES / etc.) — most use
+   `color: var(--text-faint)`. Token deepening handles it, but the
+   section-level explicit colour values need a tiny bump. */
+[data-theme="light"] .eyebrow,
+[data-theme="light"] .section-label,
+[data-theme="light"] .panel-bd > .label,
+[data-theme="light"] .metric-block .mu {
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+/* Stat panels — slightly more opaque so big numbers don't fight the
+   aurora behind them. */
+[data-theme="light"] .stat-panel {
+  background: rgba(255, 255, 255, 0.78);
+  border-color: rgba(80, 70, 160, 0.18);
+}
+
+/* Active job/cluster rows (.dv3-* row backgrounds) — restore a faint
+   tint so the FAILED rows in the JobsSection read as rows, not text. */
+[data-theme="light"] .dv3-row,
+[data-theme="light"] .dv3-job-row {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(80, 70, 160, 0.12);
+}
+[data-theme="light"] .dv3-row:hover,
+[data-theme="light"] .dv3-job-row:hover {
+  background: rgba(255, 255, 255, 0.75);
+  border-color: rgba(80, 70, 160, 0.22);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+   Coloured card headers — each card type already declares its accent
+   via `accentColor` prop on <MonitorCard>, which maps to one of:
+     cluster=blue · storage=emerald · acr=purple ·
+     terminal=teal  · jobs=amber
+   In light mode we tint the frost band with the accent (12%) and
+   colour the title to match. The left strip stays hover-only
+   (inherited from the dark-mode default) so a column of identical
+   AKS cards doesn't get a permanent identity bar.
+   ────────────────────────────────────────────────────────────────── */
+
+/* Tinted frost band per accent — color-mix() gives a faint accent
+   wash on top of the white glass. Falls back gracefully on older
+   browsers (frost stays white-only). */
+[data-theme="light"] .panel--accent-cluster > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-cluster) 12%, rgba(255,255,255,0.65)) 0%,
+    color-mix(in srgb, var(--card-accent-cluster) 4%,  rgba(255,255,255,0.35)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-cluster) 22%, transparent);
+}
+[data-theme="light"] .panel--accent-storage > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-storage) 12%, rgba(255,255,255,0.65)) 0%,
+    color-mix(in srgb, var(--card-accent-storage) 4%,  rgba(255,255,255,0.35)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-storage) 22%, transparent);
+}
+[data-theme="light"] .panel--accent-acr > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-acr) 12%, rgba(255,255,255,0.65)) 0%,
+    color-mix(in srgb, var(--card-accent-acr) 4%,  rgba(255,255,255,0.35)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-acr) 22%, transparent);
+}
+[data-theme="light"] .panel--accent-terminal > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-terminal) 12%, rgba(255,255,255,0.65)) 0%,
+    color-mix(in srgb, var(--card-accent-terminal) 4%,  rgba(255,255,255,0.35)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-terminal) 22%, transparent);
+}
+[data-theme="light"] .panel--accent-jobs > .panel-hd {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--card-accent-jobs) 12%, rgba(255,255,255,0.65)) 0%,
+    color-mix(in srgb, var(--card-accent-jobs) 4%,  rgba(255,255,255,0.35)) 100%);
+  border-bottom-color: color-mix(in srgb, var(--card-accent-jobs) 22%, transparent);
+}
+
+/* Title coloured to match accent — keeps weight 700 from Pass 3.
+   Subtitle stays text-muted so the title pops. */
+[data-theme="light"] .panel--accent-cluster > .panel-hd .title { color: var(--card-accent-cluster); }
+[data-theme="light"] .panel--accent-storage > .panel-hd .title { color: var(--card-accent-storage); }
+[data-theme="light"] .panel--accent-acr      > .panel-hd .title { color: var(--card-accent-acr); }
+[data-theme="light"] .panel--accent-terminal > .panel-hd .title { color: var(--card-accent-terminal); }
+[data-theme="light"] .panel--accent-jobs     > .panel-hd .title { color: var(--card-accent-jobs); }
 
 * {
   box-sizing: border-box;
@@ -1715,14 +2288,129 @@ textarea.form-input {
   font-size: 12px;
   color: var(--text-muted);
 }
+.blast-search-set-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.blast-search-set-tab {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-weak);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.blast-search-set-tab__radio {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-weak);
+  background: transparent;
+  position: relative;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.blast-search-set-tab__radio::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  transition: transform 0.12s ease;
+}
+.blast-search-set-tab__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blast-search-set-tab:hover:not(:disabled) {
+  border-color: rgba(122, 167, 255, 0.35);
+  color: var(--text-primary);
+}
+.blast-search-set-tab:hover:not(:disabled) .blast-search-set-tab__radio {
+  border-color: rgba(122, 167, 255, 0.55);
+}
+.blast-search-set-tab--active {
+  border-color: rgba(122, 167, 255, 0.65);
+  background: rgba(122, 167, 255, 0.14);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px rgba(122, 167, 255, 0.18);
+}
+.blast-search-set-tab--active .blast-search-set-tab__radio {
+  border-color: var(--accent);
+  background: rgba(122, 167, 255, 0.18);
+}
+.blast-search-set-tab--active .blast-search-set-tab__radio::after {
+  transform: translate(-50%, -50%) scale(1);
+}
+.blast-search-set-tab--active small {
+  color: var(--accent);
+}
+.blast-search-set-tab:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+.blast-search-set-tab span {
+  min-width: 0;
+}
+.blast-search-set-tab small {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: rgba(122, 167, 255, 0.07);
+}
+.blast-search-set-tab__hint {
+  color: var(--text-faint);
+  font-weight: 400;
+  opacity: 0.8;
+}
+.blast-db-add-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px dashed rgba(122, 167, 255, 0.25);
+  border-radius: 8px;
+  background: rgba(122, 167, 255, 0.04);
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.blast-db-add-hint svg {
+  flex: 0 0 12px;
+  margin-top: 2px;
+  color: var(--accent);
+}
 .blast-optimize-group {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
+.blast-optimize-group--cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
 .blast-optimize-option {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding: 8px 12px;
   border-radius: 8px;
@@ -1740,11 +2428,40 @@ textarea.form-input {
 .blast-optimize-radio {
   width: 16px;
   height: 16px;
+  margin-top: 1px;
   border-radius: 50%;
   border: 2px solid var(--border-weak);
   flex-shrink: 0;
   position: relative;
   transition: border-color 0.15s;
+}
+.blast-optimize-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  font-size: 11px;
+}
+.blast-optimize-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.blast-option-diff {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+.blast-option-diff span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(122, 167, 255, 0.16);
+  background: rgba(122, 167, 255, 0.06);
+  color: var(--accent);
+  font-size: 10px;
 }
 .blast-optimize-option--active .blast-optimize-radio {
   border-color: var(--accent);
@@ -3007,6 +3724,50 @@ textarea.form-input {
 .blast-cluster-info__value {
   font-weight: 400;
 }
+.blast-execution-profiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.blast-execution-profile {
+  min-height: 58px;
+  display: grid;
+  gap: 4px;
+  align-content: center;
+  text-align: left;
+  padding: 9px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.blast-execution-profile:hover:not(:disabled) {
+  border-color: rgba(122, 167, 255, 0.34);
+  background: rgba(122, 167, 255, 0.06);
+  color: var(--text-primary);
+}
+.blast-execution-profile--active {
+  border-color: rgba(122, 167, 255, 0.45);
+  background: rgba(122, 167, 255, 0.11);
+  color: var(--text-primary);
+}
+.blast-execution-profile:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+.blast-execution-profile span {
+  font-size: 12px;
+  font-weight: 700;
+  color: inherit;
+}
+.blast-execution-profile small {
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--text-faint);
+}
 .blast-params-toggle {
   background: none;
   border: none;
@@ -3051,6 +3812,46 @@ textarea.form-input {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 14px;
+}
+.blast-parameter-groups {
+  display: grid;
+  gap: 12px;
+}
+.blast-parameter-group {
+  padding: 12px;
+  border: 1px solid var(--border-weak);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.blast-parameter-group__title {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-bottom: 10px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(122, 167, 255, 0.18);
+  background: rgba(122, 167, 255, 0.07);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+.blast-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px 14px;
+  align-items: center;
+}
+.blast-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.blast-checkbox-row input {
+  flex-shrink: 0;
 }
 .blast-submit-footer {
   padding: 12px 0 0;
@@ -3124,6 +3925,10 @@ textarea.form-input {
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
+  position: sticky;
+  bottom: 0;
+  z-index: 8;
+  backdrop-filter: blur(14px);
   background: var(--bg-primary);
   border: 1px solid var(--border-weak);
   border-radius: var(--radius);

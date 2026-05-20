@@ -1,22 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import type { BlastJobSummary } from "@/api/endpoints";
+import {
+  isDashboardJobActive,
+  jobDisplayState,
+} from "@/components/cards/ClusterBento/jobMapping";
+import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
 
-import { blastApi } from "@/api/endpoints";
-
-const ACTIVE_PHASES = new Set([
-  "Provisioning",
-  "DownloadingDB",
-  "Splitting",
-  "Running",
-  "Submitted",
-  "InProgress",
-  "Pending",
-]);
-
-type ActiveSubmissionRow = {
-  status?: string;
-  phase?: string;
-  infrastructure?: { cluster_name?: string };
-  payload?: { cluster_name?: string };
+type ActiveSubmissionRow = BlastJobSummary & {
+  payload?: BlastJobSummary["payload"] & { cluster_name?: string };
 };
 
 export type ActiveSubmission = { phase?: string };
@@ -34,14 +24,10 @@ export function useClusterActiveSubmissions(args: {
   isTransitioning: boolean;
 }) {
   const { clusterName, isRunning, isTransitioning } = args;
-
-  const blastJobsQuery = useQuery({
-    queryKey: ["blast-jobs-for-cluster", clusterName],
-    queryFn: () => blastApi.listJobs(),
+  const { jobsQuery: blastJobsQuery } = useScopedBlastJobs({
+    clusterName,
     enabled: isRunning && !isTransitioning,
-    staleTime: 30_000,
     refetchInterval: isRunning ? 60_000 : false,
-    retry: 0,
   });
 
   const tracking =
@@ -49,14 +35,14 @@ export function useClusterActiveSubmissions(args: {
     !(blastJobsQuery.data as unknown as { degraded?: boolean }).degraded;
 
   const submissions: ActiveSubmission[] = (() => {
-    const rows = (blastJobsQuery.data?.jobs ?? []) as unknown as ActiveSubmissionRow[];
-    return rows.filter((r) => {
-      const cluster =
-        r.infrastructure?.cluster_name ?? r.payload?.cluster_name ?? null;
-      if (cluster && cluster !== clusterName) return false;
-      const phase = r.phase ?? r.status ?? "";
-      return ACTIVE_PHASES.has(phase);
-    });
+    const rows = (blastJobsQuery.data?.jobs ?? []) as ActiveSubmissionRow[];
+    return rows
+      .filter((r) => {
+        const cluster = r.infrastructure?.cluster_name ?? r.payload?.cluster_name ?? null;
+        if (cluster && cluster !== clusterName) return false;
+        return isDashboardJobActive(r);
+      })
+      .map((r) => ({ phase: jobDisplayState(r) }));
   })();
 
   return { tracking, submissions };

@@ -1,6 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-
-import { blastApi, type BlastJobSummary } from "@/api/endpoints";
+import type { BlastJobSummary } from "@/api/endpoints";
+import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
 
 /**
  * Polls `/api/blast/jobs` and returns the single most recent job (by
@@ -19,19 +18,14 @@ export interface UseLatestBlastJobResult {
 }
 
 export function useLatestBlastJob(): UseLatestBlastJobResult {
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ["latest-blast-job"],
-    queryFn: () => blastApi.listJobs(),
-    // Researcher leaves the dashboard open on a second monitor — keep
-    // it warm but cheap. 15 s matches the existing dashboard cadence.
+  const { jobsQuery } = useScopedBlastJobs({
     refetchInterval: 15_000,
-    staleTime: 10_000,
   });
 
-  const jobs = data?.jobs ?? [];
+  const jobs = jobsQuery.data?.jobs ?? [];
   const job = jobs.length === 0 ? null : pickLatest(jobs);
 
-  return { job, isLoading, isError };
+  return { job, isLoading: jobsQuery.isLoading, isError: jobsQuery.isError };
 }
 
 function pickLatest(jobs: BlastJobSummary[]): BlastJobSummary {

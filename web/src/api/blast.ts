@@ -500,9 +500,10 @@ export const blastApi = {
     storageAccount: string,
     maxBytes = 4096,
     blobName?: string,
+    resourceGroup?: string,
   ) =>
     api.get<{ name: string; content: string; truncated: boolean }>(
-      `/blast/jobs/${encodeURIComponent(jobId)}/file?name=${encodeURIComponent(blobName || filename)}&subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&max_bytes=${maxBytes}`,
+      `/blast/jobs/${encodeURIComponent(jobId)}/file?name=${encodeURIComponent(blobName || filename)}&subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&max_bytes=${maxBytes}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
     ),
 
   listResults: (
@@ -525,9 +526,10 @@ export const blastApi = {
     subscriptionId: string,
     storageAccount: string,
     blobName: string,
+    resourceGroup?: string,
   ) =>
     api.get<{ download_url: string }>(
-      `/blast/jobs/${encodeURIComponent(jobId)}/results/download?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&blob_name=${encodeURIComponent(blobName)}`,
+      `/blast/jobs/${encodeURIComponent(jobId)}/results/download?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&blob_name=${encodeURIComponent(blobName)}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
     ),
 
   downloadResultFile: async (
@@ -535,9 +537,10 @@ export const blastApi = {
     fileId: string,
     subscriptionId: string,
     storageAccount: string,
+    resourceGroup?: string,
   ) => {
     const response = await fetchApiRaw(
-      `/blast/jobs/${encodeURIComponent(jobId)}/results/${encodeURIComponent(fileId)}?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}`,
+      `/blast/jobs/${encodeURIComponent(jobId)}/results/${encodeURIComponent(fileId)}?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
     );
     if (!response.ok) {
       const text = await response.text();
@@ -555,9 +558,10 @@ export const blastApi = {
     subscriptionId: string,
     storageAccount: string,
     format: BlastExportFormat,
+    resourceGroup?: string,
   ) =>
     api.getText(
-      `/blast/jobs/${encodeURIComponent(jobId)}/results/export?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&format=${format}`,
+      `/blast/jobs/${encodeURIComponent(jobId)}/results/export?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&format=${format}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
     ),
 
   listDatabases: (
@@ -657,7 +661,12 @@ export const blastApi = {
       path: string;
     }>("/blast/databases/build", req),
 
-  resultsAggregate: (jobId: string, subscriptionId: string, storageAccount: string) =>
+  resultsAggregate: (
+    jobId: string,
+    subscriptionId: string,
+    storageAccount: string,
+    resourceGroup?: string,
+  ) =>
     api.get<{
       job_id: string;
       status: string;
@@ -670,13 +679,14 @@ export const blastApi = {
       read_failures?: number;
       truncated?: boolean;
     }>(
-      `/blast/jobs/${encodeURIComponent(jobId)}/results/aggregate?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}`,
+      `/blast/jobs/${encodeURIComponent(jobId)}/results/aggregate?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
     ),
 
   resultsAlignments: (
     jobId: string,
     subscriptionId: string,
     storageAccount: string,
+    resourceGroup?: string,
     opts?: {
       blob_name?: string;
       max_alignments?: number;
@@ -689,7 +699,7 @@ export const blastApi = {
       min_bitscore?: number;
       max_evalue?: number;
       min_query_cover?: number;
-      sort_by?: "evalue" | "bitscore" | "pident" | "qcovs" | "length";
+      sort_by?: "relevance" | "evalue" | "bitscore" | "pident" | "qcovs" | "length";
       sort_dir?: "asc" | "desc";
     },
   ) => {
@@ -697,6 +707,7 @@ export const blastApi = {
       subscription_id: subscriptionId,
       storage_account: storageAccount,
     });
+    if (resourceGroup) params.set("resource_group", resourceGroup);
     if (opts?.blob_name) params.set("blob_name", opts.blob_name);
     if (opts?.max_alignments) params.set("max_alignments", String(opts.max_alignments));
     if (opts?.page) params.set("page", String(opts.page));
@@ -721,6 +732,7 @@ export const blastApi = {
       total_hits: number;
       returned: number;
       query_ids: string[];
+      subject_aggregates?: BlastSubjectAggregate[];
       page?: number;
       page_size?: number;
       pages?: number;
@@ -738,4 +750,103 @@ export const blastApi = {
       `/blast/jobs/${encodeURIComponent(jobId)}/results/alignments?${params.toString()}`,
     );
   },
+
+  /**
+   * Server-side organism rollup of the BLAST hits — same filter
+   * parameters as `resultsAlignments` so a narrowing applied on the
+   * Descriptions tab carries through. Page size does NOT apply; the
+   * rollup is always over the filtered (not paginated) set.
+   *
+   * The frontend `TaxonomyPanel` prefers this endpoint when available
+   * and falls back to its page-local rollup when the server returns
+   * `degraded: true` or no organisms.
+   */
+  resultsTaxonomy: (
+    jobId: string,
+    subscriptionId: string,
+    storageAccount: string,
+    resourceGroup?: string,
+    opts?: {
+      blob_name?: string;
+      query_id?: string;
+      subject_id?: string;
+      organism?: string;
+      min_identity?: number;
+      min_bitscore?: number;
+      max_evalue?: number;
+      min_query_cover?: number;
+      include_lineage?: boolean;
+      lineage_taxid_limit?: number;
+    },
+  ) => {
+    const params = new URLSearchParams({
+      subscription_id: subscriptionId,
+      storage_account: storageAccount,
+    });
+    if (resourceGroup) params.set("resource_group", resourceGroup);
+    if (opts?.blob_name) params.set("blob_name", opts.blob_name);
+    if (opts?.query_id) params.set("query_id", opts.query_id);
+    if (opts?.subject_id) params.set("subject_id", opts.subject_id);
+    if (opts?.organism) params.set("organism", opts.organism);
+    if (opts?.min_identity !== undefined)
+      params.set("min_identity", String(opts.min_identity));
+    if (opts?.min_bitscore !== undefined)
+      params.set("min_bitscore", String(opts.min_bitscore));
+    if (opts?.max_evalue !== undefined) params.set("max_evalue", String(opts.max_evalue));
+    if (opts?.min_query_cover !== undefined)
+      params.set("min_query_cover", String(opts.min_query_cover));
+    if (opts?.include_lineage) params.set("include_lineage", "true");
+    if (opts?.lineage_taxid_limit !== undefined)
+      params.set("lineage_taxid_limit", String(opts.lineage_taxid_limit));
+    return api.get<{
+      job_id: string;
+      organisms: BlastTaxonomyRow[];
+      total_hits: number;
+      filtered_hits?: number;
+      files_parsed: number;
+      total_files: number;
+      read_failures: number;
+      truncated?: boolean;
+      degraded?: boolean;
+      degraded_reason?: string;
+      message?: string;
+      lineage?: {
+        requested: boolean;
+        looked_up: number;
+        failed: number;
+        limit_reached?: number;
+      };
+    }>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/results/taxonomy?${params.toString()}`,
+    );
+  },
 };
+
+export interface BlastSubjectAggregate {
+  sseqid: string;
+  max_bitscore: number;
+  total_bitscore: number;
+  hsp_count: number;
+  stitle?: string;
+  sscinames?: string;
+  staxids?: string;
+}
+
+export interface BlastTaxonomyRow {
+  key: string;
+  organism: string;
+  taxid: string;
+  count: number;
+  best_evalue: number | null;
+  top_bitscore: number | null;
+  /** Raw NCBI Lineage string ("Viruses; Monodnaviria; …"). Present when
+   *  the caller requested `include_lineage=true` and the eutils call
+   *  succeeded for this taxid. */
+  lineage?: string;
+  /** Parsed `LineageEx` chain root → leaf. Same source as `lineage`. */
+  lineage_ex?: Array<{
+    rank: string;
+    taxid: number;
+    scientific_name: string;
+  }>;
+}

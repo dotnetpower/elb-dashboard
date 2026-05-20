@@ -9,7 +9,7 @@ export interface ExecutionStepsCardProps {
 }
 
 export function ExecutionStepsCard({ state }: ExecutionStepsCardProps) {
-  const { job, effectivePhase, subscriptionId, storageAccount } = state;
+  const { job, effectivePhase, subscriptionId, storageAccount, resourceGroup } = state;
   if (!job) return null;
   return (
     <section className="glass-card" style={{ padding: "14px 16px" }}>
@@ -29,6 +29,7 @@ export function ExecutionStepsCard({ state }: ExecutionStepsCardProps) {
         job={job as unknown as Record<string, unknown>}
         subscriptionId={subscriptionId}
         storageAccount={storageAccount}
+        resourceGroup={resourceGroup}
       />
     </section>
   );

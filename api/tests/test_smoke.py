@@ -669,7 +669,7 @@ def test_blast_job_file_generates_config_preview_when_blob_missing(
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
     monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
     monkeypatch.setattr(
-        "api.routes.stubs._config_preview_from_payload",
+        "api.routes.blast._config_preview_from_payload",
         lambda **_kwargs: "[blast]\nprogram=blastn\n",
     )
 
@@ -766,7 +766,7 @@ def test_legacy_terminal_password_is_410(client: TestClient) -> None:
 # Stub responses for not-yet-implemented routes
 # ---------------------------------------------------------------------------
 def test_stub_log_helper_does_not_raise() -> None:
-    from api.routes.stubs import _stub_log
+    from api.routes._blast_shared import _stub_log
 
     _stub_log("test", a=1, b="x")  # must not raise
 

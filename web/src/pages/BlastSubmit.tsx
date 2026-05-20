@@ -8,6 +8,7 @@ import { BlastSubmitFooter } from "@/pages/blastSubmit/BlastSubmitFooter";
 import { BlastSubmitHeader } from "@/pages/blastSubmit/BlastSubmitHeader";
 import { ComputeSection } from "@/pages/blastSubmit/ComputeSection";
 import { DatabaseSection } from "@/pages/blastSubmit/DatabaseSection";
+import { OptimizeSection } from "@/pages/blastSubmit/OptimizeSection";
 import { ProgramSection } from "@/pages/blastSubmit/ProgramSection";
 import { QuerySection } from "@/pages/blastSubmit/QuerySection";
 import { TaxonomyFilterSection } from "@/pages/blastSubmit/TaxonomyFilterSection";
@@ -22,6 +23,7 @@ import { useDbWithWarmupPlan } from "@/pages/blastSubmit/useDbWithWarmupPlan";
 import { useDraftForm } from "@/pages/blastSubmit/useDraftForm";
 import { usePreFlight } from "@/pages/blastSubmit/usePreFlight";
 import {
+  buildEffectiveAdditionalOptions,
   buildSubmitRequest,
   useSubmitMutation,
 } from "@/pages/blastSubmit/useSubmitMutation";
@@ -184,7 +186,7 @@ export function BlastSubmit() {
       aks_cluster_name: selectedCluster?.name || "",
       db: form.db,
       query_data: form.query_data || undefined,
-      additional_options: form.additional_options || undefined,
+      additional_options: buildEffectiveAdditionalOptions(form),
       taxid: selectedTaxid ?? undefined,
       is_inclusive: selectedTaxid ? form.is_inclusive : undefined,
       allow_approximate_sharding:
@@ -309,6 +311,8 @@ export function BlastSubmit() {
       />
 
       <TaxonomyFilterSection form={form} set={set} />
+
+      <OptimizeSection form={form} set={set} programMeta={programMeta} />
 
       <ComputeSection
         subId={subId}

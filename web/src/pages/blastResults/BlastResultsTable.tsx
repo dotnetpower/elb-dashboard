@@ -82,9 +82,9 @@ export function BlastResultsTable({
               color: "var(--warning)",
             }}
           />
-          No BLAST result files (.out) were produced. The files above are diagnostic logs
-          from the cluster. This typically means the search returned no hits for the
-          query/database combination.
+          BLAST produced no `.out` result files. The files above are diagnostic logs
+          from the cluster — most commonly this means the search returned no hits
+          for the query/database combination.
         </div>
       )}
       {supportFiles.length > 0 && resultFiles.length > 0 && (
@@ -348,12 +348,13 @@ export function NoResultFilesPanel({
       }}
     >
       <div style={{ fontSize: 13, color: "var(--text-primary)", marginBottom: 10 }}>
-        No BLAST result files (.out) found in{" "}
-        <code style={{ fontSize: 12 }}>results/{jobId}/</code>.
+        <strong>No significant similarity found.</strong>
       </div>
       <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
-        This typically means the BLAST search returned no hits for the given query and
-        database combination.
+        BLAST returned no hits for this query / database combination. Try lowering the
+        identity threshold, raising the maximum E-value, or selecting a broader
+        database. The output files (if any) are listed below as{" "}
+        <code style={{ fontSize: 11 }}>results/{jobId}/</code>.
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
         <button className="glass-button" onClick={onRetry} style={{ fontSize: 12 }}>

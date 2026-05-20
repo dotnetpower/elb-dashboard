@@ -11,14 +11,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from azure.data.tables import TableClient, UpdateMode
+from azure.core.exceptions import ResourceExistsError
+from azure.data.tables import TableClient, TableServiceClient, UpdateMode
 
 from api.services import get_credential
 
 _TABLE_ENDPOINT_ENV = "AZURE_TABLE_ENDPOINT"
-_TABLE_NAME = "jobstate"
+_TABLE_NAME = "autowarmup"
 _TYPE = "auto_warmup"
 _LOCAL_STATE_ENV = "ELB_LOCAL_STATE_DIR"
+_ENSURED_TABLES: set[str] = set()
 
 
 def _now_iso() -> str:
@@ -219,7 +221,23 @@ def _table_client() -> TableClient:
     return TableClient(endpoint=endpoint, table_name=_TABLE_NAME, credential=get_credential())
 
 
+def _ensure_table() -> None:
+    endpoint = os.environ[_TABLE_ENDPOINT_ENV]
+    if endpoint in _ENSURED_TABLES:
+        return
+    with TableServiceClient(endpoint=endpoint, credential=get_credential()) as service:
+        try:
+            service.create_table_if_not_exists(_TABLE_NAME)
+        except AttributeError:
+            try:
+                service.create_table(_TABLE_NAME)
+            except ResourceExistsError:
+                pass
+    _ENSURED_TABLES.add(endpoint)
+
+
 def _save_table(pref: AutoWarmupPreference) -> None:
+    _ensure_table()
     with _table_client() as table:
         table.upsert_entity(_entity_from_pref(pref), mode=UpdateMode.REPLACE)
 
@@ -227,6 +245,7 @@ def _save_table(pref: AutoWarmupPreference) -> None:
 def _get_table(key: str) -> AutoWarmupPreference | None:
     from azure.core.exceptions import ResourceNotFoundError
 
+    _ensure_table()
     with _table_client() as table:
         try:
             entity = dict(table.get_entity(partition_key=key, row_key="current"))
@@ -237,6 +256,7 @@ def _get_table(key: str) -> AutoWarmupPreference | None:
 
 def _list_table(limit: int) -> list[AutoWarmupPreference]:
     prefs: list[AutoWarmupPreference] = []
+    _ensure_table()
     with _table_client() as table:
         rows = table.query_entities(f"type eq '{_TYPE}'", results_per_page=limit)
         for row in rows:

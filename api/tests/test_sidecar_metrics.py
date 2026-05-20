@@ -12,7 +12,13 @@ import time
 from typing import Any
 
 import redis
-from api.services.sidecar_metrics import ALL_SIDECARS, RedisCpuSampler, _classify, collect_snapshot
+from api.services.sidecar_metrics import (
+    ALL_SIDECARS,
+    RedisCpuSampler,
+    _apply_local_probe_fallbacks,
+    _classify,
+    collect_snapshot,
+)
 
 
 class FakeRedis:
@@ -71,7 +77,8 @@ def test_classify_handles_bad_ts() -> None:
     assert _classify(now=100.0, payload={"ts": "not-a-number"}) == "down"
 
 
-def test_collect_snapshot_isolates_bad_reporter_payloads() -> None:
+def test_collect_snapshot_isolates_bad_reporter_payloads(monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_SIDECAR_PROBES", "false")
     now = time.time()
     client = FakeRedis(
         [
@@ -116,6 +123,46 @@ def test_collect_snapshot_degrades_only_redis_when_info_fails() -> None:
     assert snapshot["sidecars"]["frontend"]["health"] == "ok"
     assert snapshot["sidecars"]["redis"]["health"] == "degraded"
     assert snapshot["sidecars"]["redis"]["_error"] == "redis_info_failed"
+
+
+def test_local_probe_fallback_marks_missing_frontend_and_terminal_ok(monkeypatch) -> None:
+    monkeypatch.setenv("CONTAINER_APP_REVISION", "local")
+    now = time.time()
+    sidecars = {
+        "frontend": {"name": "frontend", "health": "down", "ts": None, "_error": "missing"},
+        "terminal": {"name": "terminal", "health": "down", "ts": None, "_error": "missing"},
+        "api": {"name": "api", "health": "ok", "ts": now},
+    }
+
+    _apply_local_probe_fallbacks(sidecars, now, probe_http_ok=lambda _url: True)
+
+    assert sidecars["frontend"]["health"] == "ok"
+    assert sidecars["frontend"]["source"] == "local_probe"
+    assert sidecars["terminal"]["health"] == "ok"
+    assert sidecars["terminal"]["source"] == "local_probe"
+
+
+def test_local_probe_fallback_does_not_override_reported_down(monkeypatch) -> None:
+    monkeypatch.setenv("CONTAINER_APP_REVISION", "local")
+    sidecars = {
+        "frontend": {"name": "frontend", "health": "down", "ts": None, "_error": "bad_ts"},
+    }
+
+    _apply_local_probe_fallbacks(sidecars, time.time(), probe_http_ok=lambda _url: True)
+
+    assert sidecars["frontend"]["health"] == "down"
+    assert sidecars["frontend"]["_error"] == "bad_ts"
+
+
+def test_local_probe_fallback_is_disabled_for_deployed_revisions(monkeypatch) -> None:
+    monkeypatch.setenv("CONTAINER_APP_REVISION", "ca-elb-control--0000001")
+    sidecars = {
+        "frontend": {"name": "frontend", "health": "down", "ts": None, "_error": "missing"},
+    }
+
+    _apply_local_probe_fallbacks(sidecars, time.time(), probe_http_ok=lambda _url: True)
+
+    assert sidecars["frontend"]["health"] == "down"
 
 
 def test_redis_cpu_sampler_uses_deltas() -> None:

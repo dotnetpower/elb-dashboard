@@ -31,6 +31,7 @@
 #   scripts/dev/quick-deploy.sh terminal
 #   scripts/dev/quick-deploy.sh frontend custom-tag-123
 #   scripts/dev/quick-deploy.sh api --logs        # tail after deploy
+#   scripts/dev/quick-deploy.sh terminal --rebuild-terminal-base
 #
 # Required env (export them or `source /tmp/azd-env.sh`):
 #   AZURE_RESOURCE_GROUP         e.g. rg-elb-ca
@@ -42,6 +43,8 @@ set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+. "$REPO_ROOT/scripts/dev/acr-build-access.sh"
+. "$REPO_ROOT/scripts/dev/terminal-base-image.sh"
 
 ts() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -89,14 +92,16 @@ if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${ACR_NAME:-}" || -z "${ACR_LOGIN_SE
   load_azd_env
 fi
 
-[[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal> [tag] [--logs]"
+[[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal> [tag] [--logs] [--rebuild-terminal-base]"
 
 SIDECAR="$1"; shift || true
 TAG=""
 TAIL_LOGS=false
+REBUILD_TERMINAL_BASE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --logs) TAIL_LOGS=true ;;
+    --rebuild-terminal-base) REBUILD_TERMINAL_BASE=true ;;
     -*)     die "unknown flag: $1" ;;
     *)      TAG="$1" ;;
   esac
@@ -107,7 +112,7 @@ done
 case "$SIDECAR" in
   api|worker|beat) IMAGE_NAME="elb-api";       DOCKERFILE="api/Dockerfile";       BUILD_CTX="." ;;
   frontend)        IMAGE_NAME="elb-frontend";  DOCKERFILE="web/Dockerfile";       BUILD_CTX="." ;;
-  terminal)        IMAGE_NAME="elb-terminal";  DOCKERFILE="terminal/Dockerfile";  BUILD_CTX="terminal/" ;;
+  terminal)        IMAGE_NAME="elb-terminal";  DOCKERFILE="terminal/Dockerfile.runtime";  BUILD_CTX="terminal/" ;;
   *) die "unknown sidecar '$SIDECAR' (expected: api|worker|beat|frontend|terminal)" ;;
 esac
 
@@ -127,19 +132,7 @@ VITE_AZURE_REDIRECT_URI_VAL="${VITE_AZURE_REDIRECT_URI:-__RUNTIME__}"
 VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
 VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
 VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
-ACR_RESTORE_NETWORK=0
-
-restore_acr_network() {
-  if [[ "${ACR_RESTORE_NETWORK:-0}" == "1" ]]; then
-    ts "==> Restoring ACR public network access to Disabled"
-    az acr update \
-      --name "$ACR_NAME" \
-      --public-network-enabled false \
-      --default-action Deny \
-      -o none >/dev/null 2>&1 || ts "WARN: failed to restore ACR public network access"
-  fi
-}
-trap restore_acr_network EXIT
+trap 'acr_restore_build_access "$ACR_NAME"' EXIT
 
 declare -a BUILD_ARGS=()
 if [[ "$SIDECAR" == "frontend" ]]; then
@@ -154,19 +147,17 @@ if [[ "$SIDECAR" == "frontend" ]]; then
     --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
     --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
   )
+elif [[ "$SIDECAR" == "terminal" ]]; then
+  BUILD_ARGS=(
+    --build-arg "TERMINAL_BASE_IMAGE=$(terminal_base_image)"
+  )
 fi
 
 ts "==> Building $IMAGE_NAME:$TAG via ACR (no local Docker)"
 ts "    dockerfile=$DOCKERFILE  context=$BUILD_CTX"
-ACR_PUBLIC_ACCESS=$(az acr show --name "$ACR_NAME" --query publicNetworkAccess -o tsv 2>/dev/null || echo "")
-if [[ "$ACR_PUBLIC_ACCESS" == "Disabled" ]]; then
-  ts "==> Temporarily enabling ACR public network access for az acr build"
-  az acr update \
-    --name "$ACR_NAME" \
-    --public-network-enabled true \
-    --default-action Allow \
-    -o none >/dev/null
-  ACR_RESTORE_NETWORK=1
+acr_ensure_build_access "$ACR_NAME"
+if [[ "$SIDECAR" == "terminal" ]]; then
+  TERMINAL_BASE_REBUILD="$REBUILD_TERMINAL_BASE" ensure_terminal_base_image
 fi
 az acr build \
   --registry "$ACR_NAME" \
@@ -176,8 +167,7 @@ az acr build \
   "$BUILD_CTX" \
   -o none
 
-restore_acr_network
-ACR_RESTORE_NETWORK=0
+acr_restore_build_access "$ACR_NAME"
 
 ts "==> Build complete: $NEW_IMAGE"
 

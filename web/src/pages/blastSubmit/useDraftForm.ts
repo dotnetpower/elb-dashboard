@@ -84,6 +84,7 @@ export function restoreDraftForm(
         restored.disable_sharding = INITIAL.disable_sharding;
       }
       restored.outfmt = base.outfmt;
+      if (typeof restored.db !== "string" || !restored.db.trim()) restored.db = base.db;
       return restored;
     }
   } catch {

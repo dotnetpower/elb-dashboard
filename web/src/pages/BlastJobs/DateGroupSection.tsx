@@ -2,9 +2,10 @@ import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import type { BlastJobSummary } from "@/api/endpoints";
+import { isDashboardJobActive } from "@/components/cards/ClusterBento/jobMapping";
 
 import { JobRow } from "./JobRow";
-import { TERMINAL_PHASES, type DateGroup } from "./dateGroup";
+import { type DateGroup } from "./dateGroup";
 
 export interface DateGroupSectionProps {
   label: DateGroup;
@@ -22,9 +23,7 @@ export function DateGroupSection({
   deleting,
 }: DateGroupSectionProps) {
   const [open, setOpen] = useState(defaultOpen);
-  const runningCount = jobs.filter(
-    (j) => !TERMINAL_PHASES.includes(j.phase || j.status),
-  ).length;
+  const runningCount = jobs.filter(isDashboardJobActive).length;
 
   return (
     <div>

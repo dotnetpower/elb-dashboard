@@ -5,7 +5,7 @@
 | [`docker-compose.local.yml`](./docker-compose.local.yml) | Minimal 2-sidecar (api + frontend) sanity check. Faster boot; no Celery. |
 | [`docker-compose.full.yml`](./docker-compose.full.yml) | **Full 6-sidecar mirror of the bundled Container App.** Use this for any debugging that touches Celery, Redis, the terminal exec channel, or cross-sidecar wiring. |
 | [`compose-with-log.sh`](./compose-with-log.sh) | Docker Compose wrapper used by `local-run.sh compose-full/compose-local`; captures compose output and detached container logs. |
-| [`quick-deploy.sh`](./quick-deploy.sh) | One-sidecar image bump on the live Azure Container App. ~30-90 s per cycle vs. 5-10 min for a full Bicep redeploy. |
+| [`quick-deploy.sh`](./quick-deploy.sh) | One-sidecar image bump on the live Azure Container App. ~30-90 s per cycle vs. 5-10 min for a full Bicep redeploy. Terminal deploys reuse a content-hashed `elb-terminal-base` toolchain image. |
 | [`postprovision.sh`](./postprovision.sh) | Full first-time / structural deploy — sidecar layout, env vars, secrets, probes, scale rules. Run via `azd up` or directly after sourcing `/tmp/azd-env.sh`. |
 | [`smoke_api.py`](./smoke_api.py) | HTTP smoke test against a running api sidecar. |
 | [`preflight-check.sh`](./preflight-check.sh) | Pre-`azd up` sanity. |
@@ -169,13 +169,21 @@ structure. Use:
 ```bash
 source /tmp/azd-env.sh                           # or however you populate env
 scripts/dev/quick-deploy.sh api --logs           # build + patch + tail logs
-scripts/dev/quick-deploy.sh terminal             # only terminal toolchain change
+scripts/dev/quick-deploy.sh terminal             # terminal runtime/script change
+scripts/dev/quick-deploy.sh terminal --rebuild-terminal-base  # force heavy terminal toolchain rebuild
 scripts/dev/quick-deploy.sh frontend             # only SPA change
 ```
 
 `quick-deploy.sh api` automatically patches `worker` and `beat` containers too
 because they share the api image — leaving them on a stale tag was a real
 source of confusion last week.
+
+Terminal deploys are split into a heavy base and a thin runtime overlay. The
+base is tagged from `terminal/Dockerfile.base`, `patch_elastic_blast.py`, and
+`merge-sharded-results.sh`; normal terminal deploys reuse it and rebuild only
+the runtime scripts from `terminal/Dockerfile.runtime`. Use
+`--rebuild-terminal-base` when changing the installed toolchain, pinned tool
+versions, or the patched elastic-blast package.
 
 For full structural changes (env / secrets / probes / new sidecar) **fall
 back to** `postprovision.sh` or `az deployment group create`.

@@ -13,6 +13,23 @@ const OUTPUT_FORMAT_OPTIONS = [
   { value: 11, label: "11 — ASN.1 (archive)" },
 ];
 
+const GAP_COST_OPTIONS = [
+  { value: "", label: "Linear" },
+  { value: "5,2", label: "Existence 5, extension 2" },
+  { value: "2,2", label: "Existence 2, extension 2" },
+  { value: "1,2", label: "Existence 1, extension 2" },
+  { value: "0,2", label: "Existence 0, extension 2" },
+  { value: "3,1", label: "Existence 3, extension 1" },
+  { value: "5,1", label: "Existence 5, extension 1" },
+];
+
+const MATCH_MISMATCH_OPTIONS = [
+  { value: "1,-2", label: "1,-2" },
+  { value: "1,-3", label: "1,-3" },
+  { value: "2,-3", label: "2,-3" },
+  { value: "4,-5", label: "4,-5" },
+];
+
 export function AlgorithmParametersSection({
   form,
   set,
@@ -32,12 +49,15 @@ export function AlgorithmParametersSection({
   webBlastSearchsp?: number;
   webBlastSearchspScope?: string;
 }) {
+  const gapCostValue = form.gap_open || form.gap_extend ? `${form.gap_open},${form.gap_extend}` : "";
+  const matchMismatchValue = form.match_score || form.mismatch_score ? `${form.match_score || "1"},${form.mismatch_score || "-2"}` : "1,-2";
+
   return (
     <section className="glass-card blast-section">
       <button onClick={() => setShowParams((value) => !value)} className="blast-params-toggle">
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span className="blast-step-badge" style={{ fontSize: 10, width: 20, height: 20 }}>
-            6
+            7
           </span>
           <Gauge size={16} strokeWidth={1.5} style={{ color: "var(--accent)" }} />
           <span style={{ fontWeight: 600, fontSize: 14 }}>Algorithm Parameters</span>
@@ -75,130 +95,219 @@ export function AlgorithmParametersSection({
             })}
           </div>
 
-          <div className="blast-params-grid">
-            <label>
-              <span className="glass-label">
-                E-value <Tip text="Expected number of chance matches. Lower = more stringent." />
-              </span>
-              <input
-                className="glass-input"
-                type="number"
-                step="any"
-                value={form.evalue}
-                onChange={(event) => set("evalue", parseFloat(event.target.value) || 0.05)}
-              />
-            </label>
-            <label>
-              <span className="glass-label">
-                Max target seqs <Tip text="Maximum number of aligned sequences to keep." />
-              </span>
-              <input
-                className="glass-input"
-                type="number"
-                value={form.max_target_seqs}
-                onChange={(event) => set("max_target_seqs", parseInt(event.target.value, 10) || 100)}
-              />
-            </label>
-            <label>
-              <span className="glass-label">
-                Word size <Tip text="Length of initial exact match." />
-              </span>
-              <input
-                className="glass-input"
-                type="number"
-                value={form.word_size}
-                onChange={(event) => set("word_size", event.target.value)}
-                placeholder={String(programMeta.defaultWordSize)}
-              />
-            </label>
-            <label>
-              <span className="glass-label">Output format</span>
-              <select
-                className="glass-input"
-                value={form.outfmt}
-                onChange={(event) => set("outfmt", parseInt(event.target.value, 10))}
-              >
-                {OUTPUT_FORMAT_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {webBlastSearchsp && (
-              <label>
-                <span className="glass-label">
-                  Search space <Tip text={webBlastSearchspScope ?? "Verified Web BLAST calibration default."} />
-                </span>
-                <input className="glass-input" value={webBlastSearchsp.toString()} readOnly />
-              </label>
-            )}
-            {form.program === "blastn" && (
-              <>
+          <div className="blast-parameter-groups">
+            <div className="blast-parameter-group">
+              <div className="blast-parameter-group__title">General Parameters</div>
+              <div className="blast-params-grid">
                 <label>
                   <span className="glass-label">
-                    Match score <Tip text="Reward for a nucleotide match. Default: 1" />
+                    Max target sequences <Tip text="Maximum number of aligned sequences to keep." />
                   </span>
                   <input
                     className="glass-input"
                     type="number"
-                    value={form.match_score}
-                    onChange={(event) => set("match_score", event.target.value)}
-                    placeholder="1"
+                    value={form.max_target_seqs}
+                    onChange={(event) => set("max_target_seqs", parseInt(event.target.value, 10) || 100)}
                   />
                 </label>
                 <label>
                   <span className="glass-label">
-                    Mismatch score <Tip text="Penalty for a mismatch. Default: -2" />
+                    Expect threshold <Tip text="Expected number of chance matches. Lower = more stringent." />
                   </span>
                   <input
                     className="glass-input"
                     type="number"
-                    value={form.mismatch_score}
-                    onChange={(event) => set("mismatch_score", event.target.value)}
-                    placeholder="-2"
+                    step="any"
+                    value={form.evalue}
+                    onChange={(event) => set("evalue", parseFloat(event.target.value) || 0.05)}
                   />
                 </label>
-              </>
-            )}
-            <label>
-              <span className="glass-label">
-                Gap open <Tip text="Cost to open a gap." />
-              </span>
-              <input
-                className="glass-input"
-                type="number"
-                value={form.gap_open}
-                onChange={(event) => set("gap_open", event.target.value)}
-                placeholder="Auto"
-              />
-            </label>
-            <label>
-              <span className="glass-label">
-                Gap extend <Tip text="Cost to extend a gap." />
-              </span>
-              <input
-                className="glass-input"
-                type="number"
-                value={form.gap_extend}
-                onChange={(event) => set("gap_extend", event.target.value)}
-                placeholder="Auto"
-              />
-            </label>
-            <div style={{ gridColumn: "1 / -1", display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-              <span className="glass-label" style={{ marginBottom: 0 }}>
-                Filters:
-              </span>
-              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12 }}>
-                <input
-                  type="checkbox"
-                  checked={form.low_complexity_filter}
-                  onChange={(event) => set("low_complexity_filter", event.target.checked)}
-                />
-                Low complexity filter <Tip text="Mask low-complexity regions (DUST for nucleotide, SEG for protein)." />
-              </label>
+                <label>
+                  <span className="glass-label">
+                    Word size <Tip text="Length of initial exact match." />
+                  </span>
+                  <input
+                    className="glass-input"
+                    type="number"
+                    value={form.word_size}
+                    onChange={(event) => set("word_size", event.target.value)}
+                    placeholder={String(programMeta.defaultWordSize)}
+                  />
+                </label>
+                <label>
+                  <span className="glass-label">
+                    Max matches in a query range <Tip text="Maps to BLAST culling limit. Zero keeps the NCBI default." />
+                  </span>
+                  <input
+                    className="glass-input"
+                    type="number"
+                    min={0}
+                    value={form.max_matches_in_query_range}
+                    onChange={(event) => set("max_matches_in_query_range", event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span className="glass-label">Output format</span>
+                  <select
+                    className="glass-input"
+                    value={form.outfmt}
+                    onChange={(event) => set("outfmt", parseInt(event.target.value, 10))}
+                  >
+                    {OUTPUT_FORMAT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {webBlastSearchsp && (
+                  <label>
+                    <span className="glass-label">
+                      Search space <Tip text={webBlastSearchspScope ?? "Verified Web BLAST calibration default."} />
+                    </span>
+                    <input className="glass-input" value={webBlastSearchsp.toString()} readOnly />
+                  </label>
+                )}
+                {form.program === "blastn" && (
+                  <label className="blast-checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={form.short_query_adjust}
+                      onChange={(event) => set("short_query_adjust", event.target.checked)}
+                    />
+                    <span>
+                      Automatically adjust parameters for short input sequences <Tip text="For blastn queries up to 50 bases, use the BLASTN-short task unless you override it in Additional options." />
+                    </span>
+                  </label>
+                )}
+              </div>
             </div>
-            <label style={{ gridColumn: "1 / -1" }}>
+
+            <div className="blast-parameter-group">
+              <div className="blast-parameter-group__title">Scoring Parameters</div>
+              <div className="blast-params-grid">
+                {form.program === "blastn" && (
+                  <label>
+                    <span className="glass-label">
+                      Match/Mismatch scores <Tip text="Reward for a nucleotide match and penalty for a mismatch." />
+                    </span>
+                    <select
+                      className="glass-input"
+                      value={MATCH_MISMATCH_OPTIONS.some((option) => option.value === matchMismatchValue) ? matchMismatchValue : "custom"}
+                      onChange={(event) => {
+                        if (event.target.value === "custom") return;
+                        const [match, mismatch] = event.target.value.split(",");
+                        set("match_score", match ?? "");
+                        set("mismatch_score", mismatch ?? "");
+                      }}
+                    >
+                      {MATCH_MISMATCH_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                )}
+                <label>
+                  <span className="glass-label">
+                    Gap costs <Tip text="NCBI-style gap cost presets. Linear leaves BLAST defaults untouched." />
+                  </span>
+                  <select
+                    className="glass-input"
+                    value={GAP_COST_OPTIONS.some((option) => option.value === gapCostValue) ? gapCostValue : "custom"}
+                    onChange={(event) => {
+                      if (event.target.value === "custom") return;
+                      if (!event.target.value) {
+                        set("gap_open", "");
+                        set("gap_extend", "");
+                        return;
+                      }
+                      const [open, extend] = event.target.value.split(",");
+                      set("gap_open", open ?? "");
+                      set("gap_extend", extend ?? "");
+                    }}
+                  >
+                    {GAP_COST_OPTIONS.map((option) => (
+                      <option key={option.value || "linear"} value={option.value}>{option.label}</option>
+                    ))}
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+                <label>
+                  <span className="glass-label">Gap open</span>
+                  <input
+                    className="glass-input"
+                    type="number"
+                    value={form.gap_open}
+                    onChange={(event) => set("gap_open", event.target.value)}
+                    placeholder="Auto"
+                  />
+                </label>
+                <label>
+                  <span className="glass-label">Gap extend</span>
+                  <input
+                    className="glass-input"
+                    type="number"
+                    value={form.gap_extend}
+                    onChange={(event) => set("gap_extend", event.target.value)}
+                    placeholder="Auto"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="blast-parameter-group">
+              <div className="blast-parameter-group__title">Filters and Masking</div>
+              <div className="blast-filter-grid">
+                <label className="blast-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={form.low_complexity_filter}
+                    onChange={(event) => set("low_complexity_filter", event.target.checked)}
+                  />
+                  <span>Low complexity regions <Tip text="Mask low-complexity regions (DUST for nucleotide, SEG for protein)." /></span>
+                </label>
+                <label className="blast-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={form.mask_lookup_table_only}
+                    onChange={(event) => set("mask_lookup_table_only", event.target.checked)}
+                  />
+                  <span>Mask for lookup table only <Tip text="Use soft masking so masked regions do not seed hits but can still extend alignments." /></span>
+                </label>
+                <label className="blast-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={form.mask_lowercase}
+                    onChange={(event) => set("mask_lowercase", event.target.checked)}
+                  />
+                  <span>Mask lower case letters <Tip text="Treat lower-case bases in the query as masked sequence." /></span>
+                </label>
+                <label className="blast-checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={form.species_repeat_filter}
+                    onChange={(event) => set("species_repeat_filter", event.target.checked)}
+                  />
+                  <span>Species-specific repeats</span>
+                </label>
+                {form.species_repeat_filter && (
+                  <label>
+                    <span className="glass-label">
+                      Repeat taxid <Tip text="NCBI taxid passed to window masker. Homo sapiens is 9606." />
+                    </span>
+                    <input
+                      className="glass-input"
+                      value={form.repeat_filter_taxid}
+                      onChange={(event) => set("repeat_filter_taxid", event.target.value)}
+                      placeholder="9606"
+                    />
+                  </label>
+                )}
+              </div>
+            </div>
+
+            <label>
               <span className="glass-label">
                 Additional options <Tip text="Extra command-line flags for BLAST." />
               </span>

@@ -33,6 +33,7 @@ export function SidecarsCard() {
   const { data, source, lastUpdated, isError, isStale } = useSidecarMetrics();
   const displayData = isStale ? staleSnapshot(data) : data;
   const sidecars = displayData?.sidecars ?? {};
+  const loaded = (id: string): boolean => Boolean(sidecars[id]);
   const get = (id: string): SidecarMetric =>
     sidecars[id] ?? { ...PLACEHOLDER, name: id };
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -57,6 +58,12 @@ export function SidecarsCard() {
   const beat = get("beat");
   const redis = get("redis");
   const terminal = get("terminal");
+  const feLoaded = loaded("frontend");
+  const apiLoaded = loaded("api");
+  const workerLoaded = loaded("worker");
+  const beatLoaded = loaded("beat");
+  const redisLoaded = loaded("redis");
+  const terminalLoaded = loaded("terminal");
 
   const {
     particles,
@@ -171,9 +178,9 @@ export function SidecarsCard() {
           Browser ↣{rowBadge(1)}
         </div>
         <TopoArrow />
-        <TopoNode s={fe} />
+        <TopoNode s={fe} loading={!feLoaded} />
         <TopoArrow />
-        <TopoNode s={api} />
+        <TopoNode s={api} loading={!apiLoaded} />
         {renderRowParticles(1)}
       </div>
       <div
@@ -195,10 +202,10 @@ export function SidecarsCard() {
         <div style={labelStyle}>
           Async ↣{rowBadge(2)}
         </div>
-        <TopoArrow degraded={worker.health !== "ok" || redis.health !== "ok"} />
-        <TopoNode s={redis} />
-        <TopoArrow degraded={worker.health !== "ok"} />
-        <TopoNode s={worker} />
+        <TopoArrow degraded={(workerLoaded && worker.health !== "ok") || (redisLoaded && redis.health !== "ok")} />
+        <TopoNode s={redis} loading={!redisLoaded} />
+        <TopoArrow degraded={workerLoaded && worker.health !== "ok"} />
+        <TopoNode s={worker} loading={!workerLoaded} />
         {renderRowParticles(2)}
       </div>
       <div
@@ -220,7 +227,7 @@ export function SidecarsCard() {
           Scheduled ↣{rowBadge(3)}
         </div>
         <TopoArrow />
-        <TopoNode s={beat} />
+        <TopoNode s={beat} loading={!beatLoaded} />
         <div
           style={{
             gridColumn: "4 / span 2",
@@ -244,9 +251,9 @@ export function SidecarsCard() {
           ws / exec ↣{rowBadge(4)}
         </div>
         <TopoArrow />
-        <TopoNode s={api} />
-        <TopoArrow degraded={terminal.health !== "ok"} />
-        <TopoNode s={terminal} />
+        <TopoNode s={api} loading={!apiLoaded} />
+        <TopoArrow degraded={terminalLoaded && terminal.health !== "ok"} />
+        <TopoNode s={terminal} loading={!terminalLoaded} />
         {renderRowParticles(4)}
       </div>
       <div

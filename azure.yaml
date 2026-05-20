@@ -9,9 +9,6 @@ metadata:
 # Image build is handled by the postprovision hook via `az acr build`, not by
 # `azd deploy` — that lets a fresh `git clone && azd up` go end-to-end
 # without needing Docker locally.
-#
-# The legacy Function App + SWA topology is preserved under legacy/ for
-# reference but is no longer the default deploy target.
 
 infra:
   provider: bicep

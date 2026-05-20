@@ -27,7 +27,9 @@ import { monitoringApi, blastApi } from "@/api/endpoints";
 import type { K8sNodeMetrics, WarmupDbInfo, WarmupStatus } from "@/api/endpoints";
 import type { BlastDatabase, BlastWarmupPlan } from "@/api/blast";
 import { formatApiError } from "@/api/client";
+import type { ApiError } from "@/api/client";
 import { isSystemPool } from "@/components/ClusterDetailModal/k8sFormat";
+import { useToast } from "@/components/Toast";
 
 // Databases that make sense to warmup (must be downloaded to storage first)
 const WARMUP_CANDIDATES = [
@@ -99,6 +101,7 @@ export function WarmupSection({
 }: Props) {
   const [selectedDb, setSelectedDb] = useState("");
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [warmupInstanceId, setWarmupInstanceId] = useState<string | null>(() => {
     try {
       const stored = localStorage.getItem(`elb-warmup-${clusterName}`);
@@ -108,6 +111,11 @@ export function WarmupSection({
     }
   });
   const [startError, setStartError] = useState<string | null>(null);
+  const [releaseNotice, setReleaseNotice] = useState<{
+    db: string;
+    status: "pending" | "success" | "partial" | "error";
+    message: string;
+  } | null>(null);
   const [starting, setStarting] = useState(false);
 
   // Query downloaded databases from storage (to know which are available for warmup).
@@ -175,7 +183,14 @@ export function WarmupSection({
         aks_cluster_name: clusterName,
         db: `blast-db/${dbName}`,
       }),
-    onSuccess: async () => {
+    onMutate: (dbName) => {
+      setReleaseNotice({
+        db: dbName,
+        status: "pending",
+        message: `Releasing warm cache for ${dbName}...`,
+      });
+    },
+    onSuccess: async (result, dbName) => {
       await Promise.all([
         warmupQuery?.refetch(),
         downloadedQuery.refetch(),
@@ -186,6 +201,23 @@ export function WarmupSection({
           queryKey: ["warmup-status-submit", subscriptionId, resourceGroup, clusterName],
         }),
       ]);
+      const deleted = result.deleted?.length ?? 0;
+      const errors = result.errors?.length ?? 0;
+      const isPartial = result.status === "partial" || errors > 0;
+      const message = isPartial
+        ? `Warm cache release for ${dbName} partially completed: ${deleted} resource${deleted === 1 ? "" : "s"} deleted, ${errors} error${errors === 1 ? "" : "s"}.`
+        : `Warm cache released for ${dbName}. ${deleted} resource${deleted === 1 ? "" : "s"} deleted.`;
+      setReleaseNotice({
+        db: dbName,
+        status: isPartial ? "partial" : "success",
+        message,
+      });
+      toast(message, isPartial ? "warning" : "success");
+    },
+    onError: (err, dbName) => {
+      const message = `Warm cache release failed for ${dbName}: ${formatApiError(err, "warmup")}`;
+      setReleaseNotice({ db: dbName, status: "error", message });
+      toast(message, "error");
     },
   });
 
@@ -198,10 +230,12 @@ export function WarmupSection({
     retry: 1, // fail fast on stale instance_id
   });
 
-  // Clear stale instance_id on persistent 404/error
+  // Clear stale instance_id only when the backend explicitly says the
+  // orchestrator no longer exists. Transient network or 5xx failures should not
+  // erase the handle for an active warmup run.
   useEffect(() => {
-    if (orchQuery.isError && warmupInstanceId) {
-      // Orchestrator not found — stale localStorage. Clear it.
+    const status = (orchQuery.error as Partial<ApiError> | null)?.status;
+    if (warmupInstanceId && orchQuery.isError && status === 404) {
       setWarmupInstanceId(null);
       try {
         localStorage.removeItem(`elb-warmup-${clusterName}`);
@@ -209,7 +243,7 @@ export function WarmupSection({
         /* */
       }
     }
-  }, [orchQuery.isError, warmupInstanceId, clusterName]);
+  }, [orchQuery.error, orchQuery.isError, warmupInstanceId, clusterName]);
 
   // Clear instance ID when orchestrator finishes
   useEffect(() => {
@@ -324,12 +358,7 @@ export function WarmupSection({
         }}
       >
         {downloadedQuery.isLoading ? (
-          <div
-            className="muted"
-            style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}
-          >
-            <Loader2 size={12} className="spin" /> Loading database cache candidates...
-          </div>
+          <WarmupRowsSkeleton />
         ) : warmupRows.length === 0 ? (
           <div className="muted" style={{ fontSize: 11 }}>
             No downloaded databases are available for node cache warmup yet.
@@ -353,6 +382,16 @@ export function WarmupSection({
           ))
         )}
       </div>
+
+      {releaseNotice && (
+        <WarmupNotice
+          status={releaseNotice.status}
+          message={releaseNotice.message}
+          onDismiss={
+            releaseNotice.status === "pending" ? undefined : () => setReleaseNotice(null)
+          }
+        />
+      )}
 
       {/* Active warmup orchestrator status */}
       {warmupInstanceId && orchQuery.data && (
@@ -875,6 +914,108 @@ function WarmupDbRow({
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+function WarmupRowsSkeleton() {
+  return (
+    <div aria-label="Loading database cache candidates" style={{ display: "grid", gap: 8 }}>
+      {[0, 1, 2].map((idx) => (
+        <div
+          key={idx}
+          className="warmup-row-skeleton"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(160px, 1.1fr) minmax(220px, 1.5fr) 88px",
+            gap: 10,
+            alignItems: "center",
+            padding: "10px 12px",
+            borderRadius: 8,
+            background: "rgba(255,255,255,0.035)",
+            border: "1px solid var(--border-weak)",
+          }}
+        >
+          <SkeletonBlock width="72%" />
+          <div style={{ display: "grid", gap: 6 }}>
+            <SkeletonBlock width="88%" />
+            <SkeletonBlock width="52%" />
+          </div>
+          <SkeletonBlock width="76px" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SkeletonBlock({ width }: { width: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="skeleton"
+      style={{
+        width,
+        height: 10,
+        borderRadius: 999,
+        display: "block",
+      }}
+    />
+  );
+}
+
+function WarmupNotice({
+  status,
+  message,
+  onDismiss,
+}: {
+  status: "pending" | "success" | "partial" | "error";
+  message: string;
+  onDismiss?: () => void;
+}) {
+  const isPending = status === "pending";
+  const tone =
+    status === "success"
+      ? "var(--success)"
+      : status === "error"
+        ? "var(--danger)"
+        : status === "partial"
+          ? "var(--warning)"
+          : "var(--accent)";
+  return (
+    <div
+      role={status === "error" ? "alert" : "status"}
+      style={{
+        marginTop: 6,
+        marginBottom: "var(--space-2)",
+        padding: "8px 10px",
+        borderRadius: 8,
+        fontSize: 11,
+        background: "rgba(255,255,255,0.04)",
+        border: `1px solid color-mix(in srgb, ${tone} 35%, transparent)`,
+        color: "var(--text-primary)",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+      }}
+    >
+      {isPending ? (
+        <Loader2 size={12} className="spin" style={{ color: tone }} />
+      ) : status === "success" ? (
+        <CheckCircle2 size={12} strokeWidth={1.5} style={{ color: tone }} />
+      ) : (
+        <AlertTriangle size={12} strokeWidth={1.5} style={{ color: tone }} />
+      )}
+      <span style={{ flex: 1 }}>{message}</span>
+      {onDismiss && (
+        <button
+          type="button"
+          className="glass-button"
+          onClick={onDismiss}
+          style={{ padding: "2px 7px", fontSize: 10 }}
+        >
+          Dismiss
+        </button>
+      )}
     </div>
   );
 }

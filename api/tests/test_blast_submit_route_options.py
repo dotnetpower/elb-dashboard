@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from api.routes.stubs import (
+from api.routes._blast_shared import (
     _apply_web_blast_searchsp_default,
     _normalise_blast_submit_body,
     _submit_options_from_body,

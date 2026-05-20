@@ -3,12 +3,22 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from api.services import auto_warmup
 from api.services.auto_warmup import (
     AutoWarmupPreference,
     get_auto_warmup_preference,
     save_auto_warmup_preference,
 )
-from api.tasks.storage import reconcile_auto_warmup
+from api.tasks.storage import reconcile_auto_warmup, warmup_database
+
+
+def _patch_ready_warmup_nodes(monkeypatch, count: int) -> None:
+    monkeypatch.setattr(
+        "api.services.k8s_monitoring.k8s_ready_warmup_node_names",
+        lambda credential, subscription_id, resource_group, cluster_name: [
+            f"aks-blast-{index:06d}" for index in range(count)
+        ],
+    )
 
 
 def test_reconcile_auto_warmup_enqueues_downloaded_db(
@@ -34,6 +44,7 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
             }
         ],
     )
+    _patch_ready_warmup_nodes(monkeypatch, 10)
     monkeypatch.setattr(
         "api.services.monitoring.k8s_warmup_status",
         lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
@@ -75,6 +86,124 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
     assert calls[0]["kwargs"]["database_name"] == "core_nt"
     assert calls[0]["kwargs"]["machine_type"] == "Standard_E16s_v5"
     assert calls[0]["kwargs"]["num_nodes"] == 10
+    assert calls[0]["kwargs"]["require_all_warmup_nodes"] is True
+
+
+def test_reconcile_auto_warmup_waits_for_all_ready_workload_nodes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 10,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 8)
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.celery_app.celery_app.send_task",
+        lambda *args, **kwargs: calls.append({"args": args, "kwargs": kwargs}),
+    )
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+        num_nodes=10,
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
+
+    cluster_result = result["clusters"][0]
+    assert cluster_result["status"] == "waiting_for_warmup_nodes"
+    assert cluster_result["phase"] == "waiting_for_warmup_nodes"
+    assert cluster_result["reason"] == "waiting for all warmup nodes"
+    assert cluster_result["expected_node_count"] == 10
+    assert cluster_result["ready_node_count"] == 8
+    assert cluster_result["skipped"] == [
+        {
+            "reason": "waiting_for_all_warmup_nodes",
+            "expected_node_count": 10,
+            "ready_node_count": 8,
+        }
+    ]
+    assert calls == []
+
+
+def test_reconcile_auto_warmup_enqueues_when_all_ready_workload_nodes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 10,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 10)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
+    )
+    monkeypatch.setattr(
+        "api.services.storage_data.list_databases",
+        lambda credential, storage_account: [{"name": "core_nt"}],
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeTask:
+        id = "warmup-task-ready"
+
+    def fake_send_task(task_name: str, *, kwargs: dict[str, Any], queue: str) -> FakeTask:
+        calls.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
+        return FakeTask()
+
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+        num_nodes=10,
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
+
+    assert result["clusters"][0]["status"] == "triggered"
+    assert result["clusters"][0]["enqueued"] == [{"db": "core_nt", "task_id": "warmup-task-ready"}]
+    assert calls[0]["kwargs"]["num_nodes"] == 10
+    assert calls[0]["kwargs"]["require_all_warmup_nodes"] is True
 
 
 def test_reconcile_auto_warmup_skips_until_cluster_ready(monkeypatch, tmp_path) -> None:
@@ -140,6 +269,7 @@ def test_reconcile_auto_warmup_reenqueues_when_db_not_warm(monkeypatch, tmp_path
             }
         ],
     )
+    _patch_ready_warmup_nodes(monkeypatch, 4)
     monkeypatch.setattr(
         "api.services.monitoring.k8s_warmup_status",
         lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
@@ -180,9 +310,7 @@ def test_reconcile_auto_warmup_reenqueues_when_db_not_warm(monkeypatch, tmp_path
     assert calls[0]["kwargs"]["database_name"] == "core_nt"
 
 
-def test_reconcile_auto_warmup_inflight_lock_prevents_duplicate(
-    monkeypatch, tmp_path
-) -> None:
+def test_reconcile_auto_warmup_inflight_lock_prevents_duplicate(monkeypatch, tmp_path) -> None:
     """A DB whose previous warmup task is still in its pre-Kubernetes phases
     (download / shard / plan) must not be re-enqueued by the next reconcile
     tick, because k8s_warmup_status cannot yet observe the pod.
@@ -206,6 +334,7 @@ def test_reconcile_auto_warmup_inflight_lock_prevents_duplicate(
             }
         ],
     )
+    _patch_ready_warmup_nodes(monkeypatch, 4)
     monkeypatch.setattr(
         "api.services.monitoring.k8s_warmup_status",
         lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
@@ -237,6 +366,74 @@ def test_reconcile_auto_warmup_inflight_lock_prevents_duplicate(
     assert calls == []
 
 
+def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.storage_data.list_databases",
+        lambda credential, storage_account: [
+            {
+                "name": "core_nt",
+                "file_count": 12,
+                "sharded": True,
+                "shard_sets": [8, 10],
+                "total_bytes": 1024,
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 8)
+
+    build_calls: list[dict[str, Any]] = []
+
+    def fake_build_warmup_job_plan(**kwargs: Any) -> object:
+        build_calls.append(kwargs)
+        raise AssertionError("build_warmup_job_plan should not be called")
+
+    monkeypatch.setattr(
+        "api.services.warmup_jobs.build_warmup_job_plan",
+        fake_build_warmup_job_plan,
+    )
+
+    state_updates: list[dict[str, Any]] = []
+    task_progress: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.tasks.storage._update_state",
+        lambda job_id, phase, status="running", **extra: state_updates.append(
+            {"job_id": job_id, "phase": phase, "status": status, **extra}
+        ),
+    )
+    monkeypatch.setattr(
+        "api.tasks.storage._record_task_progress",
+        lambda task, phase, **meta: task_progress.append({"phase": phase, **meta}),
+    )
+
+    result = warmup_database.run(
+        job_id="auto-warmup-elb-cluster-core_nt-1",
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        storage_account="elbstg01",
+        database_name="core_nt",
+        cluster_name="elb-cluster",
+        machine_type="Standard_E16s_v5",
+        num_nodes=10,
+        acr_name="elbacr01",
+        require_all_warmup_nodes=True,
+    )
+
+    assert result["status"] == "deferred"
+    assert result["phase"] == "waiting_for_warmup_nodes"
+    assert result["reason"] == "waiting for all warmup nodes"
+    assert result["node_warmup"]["requested_node_count"] == 10
+    assert result["node_warmup"]["ready_node_count"] == 8
+    assert build_calls == []
+    assert any(update["phase"] == "waiting_for_warmup_nodes" for update in state_updates)
+    assert any(progress["phase"] == "waiting_for_warmup_nodes" for progress in task_progress)
+
+
 def test_auto_warmup_file_store_handles_concurrent_saves(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
@@ -260,3 +457,55 @@ def test_auto_warmup_file_store_handles_concurrent_saves(monkeypatch, tmp_path) 
         pref = get_auto_warmup_preference("sub-1", "rg-elb", f"cluster-{index}")
         assert pref is not None
         assert pref.databases == ["core_nt"]
+
+
+def test_auto_warmup_table_store_uses_dedicated_table(monkeypatch) -> None:
+    created_tables: list[str] = []
+    writes: list[dict[str, object]] = []
+
+    class RecordingTableClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.table_name = str(kwargs["table_name"])
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def upsert_entity(self, entity: dict[str, object], *, mode: object) -> None:
+            writes.append({"table_name": self.table_name, "mode": mode, **entity})
+
+    class RecordingTableService:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableService:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def create_table_if_not_exists(self, table_name: str) -> None:
+            created_tables.append(table_name)
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(auto_warmup, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(auto_warmup, "TableServiceClient", RecordingTableService)
+    monkeypatch.setattr(auto_warmup, "get_credential", lambda: object())
+    auto_warmup._ENSURED_TABLES.clear()
+
+    save_auto_warmup_preference(
+        AutoWarmupPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            storage_account="elbstg01",
+            storage_resource_group="rg-elb",
+        )
+    )
+
+    assert created_tables == ["autowarmup"]
+    assert writes[0]["table_name"] == "autowarmup"
+    assert writes[0]["PartitionKey"] == "auto_warmup:sub-1:rg-elb:elb-cluster"
+    assert writes[0]["type"] == "auto_warmup"

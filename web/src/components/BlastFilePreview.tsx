@@ -128,6 +128,7 @@ export function FilePreview({
   blobName,
   subscriptionId,
   storageAccount,
+  resourceGroup,
   maxBytes,
 }: {
   jobId: string;
@@ -135,10 +136,20 @@ export function FilePreview({
   blobName?: string;
   subscriptionId: string;
   storageAccount: string;
+  resourceGroup?: string;
   maxBytes?: number;
 }) {
   const q = useQuery({
-    queryKey: ["blast-file", jobId, filename, blobName, subscriptionId, storageAccount, maxBytes],
+    queryKey: [
+      "blast-file",
+      jobId,
+      filename,
+      blobName,
+      subscriptionId,
+      storageAccount,
+      resourceGroup,
+      maxBytes,
+    ],
     queryFn: () =>
       blastApi.readJobFile(
         jobId,
@@ -147,6 +158,7 @@ export function FilePreview({
         storageAccount,
         maxBytes ?? 4096,
         blobName,
+        resourceGroup,
       ),
     staleTime: Infinity,
   });

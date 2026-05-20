@@ -6,7 +6,7 @@
  *  - cluster basics: `monitoringApi.aks` (already fetched by the
  *    parent `ClusterCard`).
  *  - CPU / memory aggregate: `useNodeSummary` → `k8s_top_nodes`.
- *  - Active jobs: `blastApi.listJobs()` filtered by cluster_name.
+ *  - Active jobs: scoped `blastApi.listJobs({ subscriptionId, resourceGroup, clusterName })`.
  *  - Submit pipeline metrics: derived from the same job list
  *    (created_at within window).
  *  - API latency / errors: `monitoringApi.requestMetrics({
@@ -93,8 +93,13 @@ export function ClusterBento({
   });
 
   const jobsQuery = useQuery({
-    queryKey: ["blast-jobs-for-bento", cluster.name],
-    queryFn: () => blastApi.listJobs(),
+    queryKey: ["blast-jobs", subscriptionId, resourceGroup, cluster.name],
+    queryFn: () =>
+      blastApi.listJobs({
+        subscriptionId,
+        resourceGroup,
+        clusterName: cluster.name,
+      }),
     enabled: isRunning,
     staleTime: 30_000,
     refetchInterval: isRunning ? 60_000 : false,
@@ -267,12 +272,7 @@ export function ClusterBento({
 
   const showReadinessPanel = !isRunning || transition != null;
   if (showReadinessPanel) {
-    return (
-      <ClusterReadinessBento
-        cluster={cluster}
-        transition={transition}
-      />
-    );
+    return <ClusterReadinessBento cluster={cluster} transition={transition} />;
   }
 
   // ---- layout -------------------------------------------------------------

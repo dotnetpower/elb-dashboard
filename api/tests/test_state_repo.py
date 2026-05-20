@@ -22,6 +22,53 @@ def test_job_state_round_trips_parent_job_id() -> None:
     assert restored.payload == {"group_id": "qg1"}
 
 
+def test_job_state_writes_canonical_v2_job_metadata() -> None:
+    state = JobState(
+        job_id="job-1",
+        type="blast",
+        status="queued",
+        payload={
+            "program": "blastn",
+            "db": "https://acct.blob.core.windows.net/blast-db/core_nt/core_nt",
+            "query_file": "queries/uploads/job-1/query.fa",
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-01",
+            "cluster_name": "elb-aks",
+            "storage_account": "elbstg01",
+        },
+    )
+
+    entity = state.to_entity()
+    restored = JobState.from_entity(entity)
+
+    assert entity["schema_version"] == 2
+    assert entity["job_title"] == "blastn - core_nt - query.fa"
+    assert entity["program"] == "blastn"
+    assert entity["db"] == "core_nt"
+    assert entity["query_label"] == "query.fa"
+    assert entity["subscription_id"] == "sub-1"
+    assert entity["resource_group"] == "rg-elb-01"
+    assert entity["cluster_name"] == "elb-aks"
+    assert entity["storage_account"] == "elbstg01"
+    assert restored.job_title == "blastn - core_nt - query.fa"
+    assert restored.query_label == "query.fa"
+
+
+def test_job_state_honours_explicit_job_title() -> None:
+    state = JobState(
+        job_id="job-2",
+        type="blast",
+        status="queued",
+        payload={"job_title": "Sample panel search", "program": "blastn", "db": "core_nt"},
+    )
+
+    entity = state.to_entity()
+    restored = JobState.from_entity(entity)
+
+    assert entity["job_title"] == "Sample panel search"
+    assert restored.job_title == "Sample panel search"
+
+
 def test_list_for_owner_ensures_missing_jobstate_table(monkeypatch) -> None:
     created_tables: list[str] = []
 
@@ -164,3 +211,163 @@ def test_create_ensures_state_and_history_tables(monkeypatch) -> None:
 
     assert created_tables == ["jobstate", "jobhistory"]
     assert [entity["table_name"] for entity in entities] == ["jobstate", "jobhistory"]
+
+
+def test_list_for_owner_includes_cluster_shared_rows(monkeypatch) -> None:
+    """``list_for_owner`` MUST include rows with owner_oid=='' (external sync)."""
+    captured_filters: list[str] = []
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, *, results_per_page: int):
+            captured_filters.append(query_filter)
+            return []
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    repo.list_for_owner("owner-1")
+
+    assert captured_filters == [
+        "(owner_oid eq 'owner-1' or owner_oid eq '') and status ne 'deleted'"
+    ]
+
+
+def test_get_many_batches_into_single_query(monkeypatch) -> None:
+    """get_many MUST issue a single OData query covering all ids."""
+    captured: list[str] = []
+    rows = [
+        JobState(
+            job_id="abc",
+            type="blast",
+            status="completed",
+        ).to_entity(),
+        JobState(
+            job_id="def",
+            type="blast",
+            status="failed",
+        ).to_entity(),
+    ]
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, *, results_per_page: int):
+            captured.append(query_filter)
+            return rows
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    out = repo.get_many(["abc", "def", "abc"])  # duplicate should be de-duped
+
+    assert len(captured) == 1
+    assert "(PartitionKey eq 'abc' and RowKey eq 'current')" in captured[0]
+    assert "(PartitionKey eq 'def' and RowKey eq 'current')" in captured[0]
+    assert set(out) == {"abc", "def"}
+
+
+def test_create_returns_existing_on_resource_exists(monkeypatch) -> None:
+    """Concurrent create races MUST return the existing row, not raise."""
+    from azure.core.exceptions import ResourceExistsError
+
+    existing_entity = JobState(
+        job_id="raced",
+        type="blast",
+        status="running",
+    ).to_entity()
+
+    class RacingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RacingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def create_entity(self, _entity: dict[str, object]) -> None:
+            raise ResourceExistsError(message="duplicate")
+
+        def get_entity(self, *, partition_key: str, row_key: str) -> dict[str, object]:
+            assert partition_key == "raced"
+            assert row_key == "current"
+            return existing_entity
+
+    class NoopTableService:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> NoopTableService:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def create_table_if_not_exists(self, _table_name: str) -> None:
+            pass
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RacingTableClient)
+    monkeypatch.setattr(state_repo, "TableServiceClient", NoopTableService)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+    state_repo._ENSURED_TABLES.clear()
+
+    repo = JobStateRepository()
+    returned = repo.create(JobState(job_id="raced", type="blast", status="queued"))
+
+    # Existing row wins; the caller's "queued" status is not persisted.
+    assert returned.job_id == "raced"
+    assert returned.status == "running"
+
+
+def test_list_active_filters_to_in_flight_states(monkeypatch) -> None:
+    """list_active MUST scope to in-flight statuses and the requested type."""
+    captured: list[str] = []
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, *, results_per_page: int):
+            captured.append(query_filter)
+            return []
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    repo.list_active(job_type="blast")
+
+    assert captured, "list_active must issue a Table query"
+    filter_expr = captured[0]
+    assert "type eq 'blast'" in filter_expr
+    for active in ("queued", "pending", "running", "reducing"):
+        assert f"status eq '{active}'" in filter_expr

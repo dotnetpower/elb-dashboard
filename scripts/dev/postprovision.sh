@@ -46,25 +46,15 @@ VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
 VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$REPO_ROOT/scripts/dev/acr-build-access.sh"
+. "$REPO_ROOT/scripts/dev/terminal-base-image.sh"
 TAG="$(date -u +%Y%m%d%H%M%S)"
 T0=$(date +%s)
 
 LOG_DIR="/tmp/elb-postprov-$TAG"
 mkdir -p "$LOG_DIR"
 
-ACR_RESTORE_NETWORK=0
-restore_acr_network() {
-  if [ "${ACR_RESTORE_NETWORK:-0}" = "1" ]; then
-    ts "==> Restoring ACR public network access to Disabled"
-    az acr update \
-      --name "$ACR_NAME" \
-      --public-network-enabled false \
-      --default-action Deny \
-      --output none \
-      >/dev/null 2>&1 || ts "WARN: failed to restore ACR public network access; rerun azd provision to reconcile"
-  fi
-}
-trap restore_acr_network EXIT
+trap 'acr_restore_build_access "$ACR_NAME"' EXIT
 
 # ---------------------------------------------------------------------------
 # Pretty timestamped logger so the operator can see real-time progress.
@@ -115,6 +105,10 @@ build_image() {
       --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
       --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
     )
+  elif [ "$image_name" = "elb-terminal" ]; then
+    extra_args=(
+      --build-arg "TERMINAL_BASE_IMAGE=$(terminal_base_image)"
+    )
   fi
   {
     echo "[build-$image_name] starting at $(date -u +%H:%M:%S)"
@@ -134,20 +128,11 @@ build_image() {
 }
 
 ts "==> Building 3 images in parallel via az acr build (no local Docker needed)"
-ACR_PUBLIC_ACCESS=$(az acr show --name "$ACR_NAME" --query publicNetworkAccess -o tsv 2>/dev/null || echo "")
-if [ "$ACR_PUBLIC_ACCESS" = "Disabled" ]; then
-  ts "==> Temporarily enabling ACR public network access for az acr build"
-  az acr update \
-    --name "$ACR_NAME" \
-    --public-network-enabled true \
-    --default-action Allow \
-    --output none \
-    >/dev/null
-  ACR_RESTORE_NETWORK=1
-fi
+acr_ensure_build_access "$ACR_NAME"
+ensure_terminal_base_image
 build_image PID_API      "elb-api"      "$REPO_ROOT/api/Dockerfile"      "$REPO_ROOT"
 build_image PID_FRONTEND "elb-frontend" "$REPO_ROOT/web/Dockerfile"      "$REPO_ROOT"
-build_image PID_TERMINAL "elb-terminal" "$REPO_ROOT/terminal/Dockerfile" "$REPO_ROOT/terminal"
+build_image PID_TERMINAL "elb-terminal" "$REPO_ROOT/terminal/Dockerfile.runtime" "$REPO_ROOT/terminal"
 
 ts "    elb-api:      pid=$PID_API"
 ts "    elb-frontend: pid=$PID_FRONTEND"

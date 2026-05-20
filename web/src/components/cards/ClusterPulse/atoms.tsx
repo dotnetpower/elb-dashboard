@@ -166,7 +166,7 @@ export function ActionBtn({
   onClick,
   disabled,
 }: {
-  tone: "success" | "warning" | "danger" | "neutral";
+  tone: "success" | "warning" | "danger" | "neutral" | "accent";
   children: React.ReactNode;
   icon?: React.ReactNode;
   onClick?: () => void;
@@ -179,7 +179,11 @@ export function ActionBtn({
         ? "var(--warning)"
         : tone === "danger"
           ? "var(--danger)"
-          : "var(--text-muted)";
+          : tone === "accent"
+            ? "var(--accent)"
+            : "var(--text-muted)";
+  const borderColor = tone === "neutral" ? "var(--border-medium)" : color;
+  const background = tone === "accent" ? "rgba(122, 167, 255, 0.12)" : "transparent";
   return (
     <button
       type="button"
@@ -193,8 +197,8 @@ export function ActionBtn({
         fontSize: 11,
         fontWeight: 500,
         color,
-        background: "transparent",
-        border: "1px solid var(--border-medium)",
+        background,
+        border: `1px solid ${borderColor}`,
         borderRadius: 7,
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.55 : 1,

@@ -1,55 +1,43 @@
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { ArrowRight } from "lucide-react";
 
-import { blastApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
+import {
+  isDashboardJobActive,
+  isDashboardJobCompleted,
+  isDashboardJobFailed,
+  toJobRowView,
+} from "@/components/cards/ClusterBento/jobMapping";
 import { useClusterReadiness } from "@/hooks/usePrerequisites";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
+import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
 
-const TERMINAL_PHASES = ["completed", "failed", "submit_failed", "error", "deleted"];
-const FAILED_PHASES = ["failed", "submit_failed", "error"];
 const MAX_DASHBOARD_JOBS = 5;
-
-/** Map a backend phase string to the dv3-job-row phase class. */
-function phaseClass(raw: string | undefined): string {
-  const p = (raw || "").toLowerCase();
-  if (p === "completed") return "completed";
-  if (FAILED_PHASES.includes(p)) return "failed";
-  if (p === "deleted") return "deleted";
-  if (!p) return "idle";
-  return "running";
-}
 
 export function JobCard() {
   const refetchInterval = useAutoRefreshInterval();
-  const query = useQuery({
-    queryKey: ["blast-jobs"],
-    queryFn: () => blastApi.listJobs(),
-    refetchInterval,
-  });
+  const { jobsQuery: query, clusterName } = useScopedBlastJobs({ refetchInterval });
   const cluster = useClusterReadiness();
 
   const jobs = useMemo(() => query.data?.jobs ?? [], [query.data?.jobs]);
-  const running = jobs.filter(
-    (j) => !TERMINAL_PHASES.includes(j.phase || j.status),
-  ).length;
-  const completed = jobs.filter((j) => (j.phase || j.status) === "completed").length;
-  const failed = jobs.filter((j) =>
-    FAILED_PHASES.includes(j.phase || j.status),
-  ).length;
+  const running = jobs.filter(isDashboardJobActive).length;
+  const completed = jobs.filter(isDashboardJobCompleted).length;
+  const failed = jobs.filter(isDashboardJobFailed).length;
 
   // Show running jobs first, then most recent, capped at MAX_DASHBOARD_JOBS
   const displayed = useMemo(() => {
     const reversed = [...jobs].reverse();
-    const active = reversed.filter((j) => !TERMINAL_PHASES.includes(j.phase || j.status));
-    const done = reversed.filter((j) => TERMINAL_PHASES.includes(j.phase || j.status));
+    const active = reversed.filter(isDashboardJobActive);
+    const done = reversed.filter((j) => !isDashboardJobActive(j));
     return [...active, ...done].slice(0, MAX_DASHBOARD_JOBS);
   }, [jobs]);
 
   const hasMore = jobs.length > MAX_DASHBOARD_JOBS;
+  const jobsHref = clusterName
+    ? `/blast/jobs?cluster=${encodeURIComponent(clusterName)}`
+    : "/blast/jobs";
 
   // Status:
   //   loading → first fetch
@@ -130,10 +118,7 @@ export function JobCard() {
       )}
 
       {!query.isLoading && jobs.length === 0 && !query.isError && (
-        <div
-          className="muted"
-          style={{ marginTop: "var(--space-3)", fontSize: 13 }}
-        >
+        <div className="muted" style={{ marginTop: "var(--space-3)", fontSize: 13 }}>
           No jobs yet.
         </div>
       )}
@@ -141,22 +126,24 @@ export function JobCard() {
       {displayed.length > 0 && (
         <div className="dv3-jobs-list">
           {displayed.map((job) => {
-            const phase = job.phase || job.status;
-            const cls = phaseClass(phase);
+            const view = toJobRowView(job);
+            const cls =
+              view.state === "Completed"
+                ? "completed"
+                : view.state === "Failed"
+                  ? "failed"
+                  : view.state === "Unknown"
+                    ? "idle"
+                    : "running";
             return (
               <Link
                 key={job.job_id}
                 to={`/blast/jobs/${encodeURIComponent(job.job_id)}`}
                 className="dv3-job-row"
               >
-                <span className={`phase ${cls}`}>{phase || "queued"}</span>
-                <span className="name">
-                  {job.job_title ||
-                    `${job.program ?? ""} · ${(job.db ?? "").split("/").pop() ?? job.job_id}`}
-                </span>
-                <span className="meta">
-                  {job.job_title ? job.job_id.slice(0, 12) : ""}
-                </span>
+                <span className={`phase ${cls}`}>{view.state}</span>
+                <span className="name">{view.title}</span>
+                <span className="meta">{view.db}</span>
                 <span className="right">
                   <ArrowRight size={12} strokeWidth={1.75} />
                 </span>
@@ -168,7 +155,7 @@ export function JobCard() {
 
       {hasMore && (
         <div className="dv3-jobs-cta">
-          <Link to="/blast/jobs">
+          <Link to={jobsHref}>
             View all {jobs.length} jobs <ArrowRight size={12} />
           </Link>
         </div>

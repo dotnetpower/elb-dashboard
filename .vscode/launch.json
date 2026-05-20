@@ -20,6 +20,7 @@
         "AUTH_DEV_BYPASS": "true",
         "LOG_LEVEL": "DEBUG",
         "ENABLE_DOCS": "true",
+        "CORS_ALLOW_ORIGINS": "http://localhost:8090,http://127.0.0.1:8090",
         "LOCAL_DEBUG_AUTO_OPEN_STORAGE": "true",
         "CELERY_BROKER_URL": "redis://127.0.0.1:6379/0",
         "CELERY_RESULT_BACKEND": "redis://127.0.0.1:6379/1",

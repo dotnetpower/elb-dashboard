@@ -16,6 +16,7 @@ export const STATUS_COLORS: Record<string, string> = {
   split_children_merge_ready: "var(--accent)",
   split_results_waiting_for_artifacts: "var(--accent)",
   split_results_merging: "var(--accent)",
+  results_pending: "var(--accent)",
   creating: "var(--warning)",
   completed: "var(--success)",
   failed: "var(--danger)",

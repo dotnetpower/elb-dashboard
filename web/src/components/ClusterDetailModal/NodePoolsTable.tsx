@@ -33,7 +33,7 @@ export function NodePoolsTable({ agentPools }: { agentPools: AksAgentPool[] }) {
       >
         <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
           <thead>
-            <tr style={{ background: "var(--bg-tertiary)" }}>
+            <tr style={{ background: "var(--modal-thead-bg)" }}>
               {["Pool", "SKU", "Nodes", "OS", "Mode", "Autoscale", "State"].map((h) => (
                 <th
                   key={h}
@@ -58,7 +58,7 @@ export function NodePoolsTable({ agentPools }: { agentPools: AksAgentPool[] }) {
                 key={p.name}
                 style={{
                   background:
-                    i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.015)",
+                    i % 2 === 0 ? "transparent" : "var(--modal-zebra)",
                   borderTop: "1px solid var(--border-weak)",
                 }}
               >

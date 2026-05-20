@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { Server, Trash2 } from "lucide-react";
 
 import type { BlastJobSummary } from "@/api/endpoints";
+import { toJobRowView } from "@/components/cards/ClusterBento/jobMapping";
 import { statusColor } from "@/constants";
 
 import { timeAgo } from "./dateGroup";
@@ -13,15 +14,14 @@ export interface JobRowProps {
 }
 
 export function JobRow({ job, onDelete, deleting }: JobRowProps) {
-  const phase = job.phase || job.status;
-  const color = statusColor(phase);
+  const view = toJobRowView(job);
+  const phase = view.state;
+  const color = statusColor(phase.toLowerCase());
   const cluster = job.infrastructure?.cluster_name;
   const upn = job.owner_upn;
   const shortUser = upn ? upn.split("@")[0] : null;
   const splitChildren = job.split_children;
-  const splitLabel = splitChildren
-    ? `${splitChildren.child_count} child jobs`
-    : null;
+  const splitLabel = splitChildren ? `${splitChildren.child_count} child jobs` : null;
 
   return (
     <tr style={{ borderBottom: "1px solid var(--border-weak)" }}>
@@ -49,9 +49,9 @@ export function JobRow({ job, onDelete, deleting }: JobRowProps) {
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
               }}
-              title={job.job_title || job.job_id}
+              title={view.title || job.job_id}
             >
-              {job.job_title || job.job_id}
+              {view.title || job.job_id}
             </Link>
             <div
               className="muted"
@@ -65,8 +65,10 @@ export function JobRow({ job, onDelete, deleting }: JobRowProps) {
               }}
             >
               <span>
-                {job.program} · {(job.db ?? "").split("/").pop()}
+                {job.program} · {view.db}
               </span>
+              {view.query && view.query !== view.title && <span>{view.query}</span>}
+              {view.note && <span>{view.note}</span>}
               {cluster && (
                 <span
                   style={{

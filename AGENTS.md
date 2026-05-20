@@ -9,7 +9,9 @@
 ## TL;DR for a fresh session
 
 1. **Active backend** is [`api/`](./api/) (FastAPI + Celery, Python 3.12, uv-managed).
-   The retired Azure Functions tree lives at [`legacy/functionapp/`](./legacy/functionapp/) — read-only reference.
+   The retired Azure Functions tree has been removed from the repository
+   (see [docs/container-apps-migration.md](./docs/container-apps-migration.md)
+   for the target architecture).
 2. **Active deploy target** is one Azure Container App `ca-elb-control` with
    six sidecars. Bicep entry point: [`infra/main.bicep`](./infra/main.bicep).
 3. **Local bring-up**:
@@ -35,7 +37,7 @@
 | Touch Azure SDK | [api/services/azure_clients.py](./api/services/azure_clients.py) (the only place that imports `azure.mgmt.*`) | Wrap, then import from a route/task |
 | Change image tags | [api/services/image_tags.py](./api/services/image_tags.py) `IMAGE_TAGS` dict | Cross-check against `dotnetpower/elastic-blast-azure` `src/elastic_blast/constants.py` |
 | Change Container App layout | [infra/modules/containerAppControl.bicep](./infra/modules/containerAppControl.bicep) | Re-run [scripts/dev/postprovision.sh](./scripts/dev/postprovision.sh) for the template diff |
-| Change SPA dashboard cards | [web/src/pages/Dashboard.tsx](./web/src/pages/Dashboard.tsx) + [web/src/api/endpoints.ts](./web/src/api/endpoints.ts) | Add the matching backend route in [api/routes/monitor.py](./api/routes/monitor.py) |
+| Change SPA dashboard cards | [web/src/pages/Dashboard.tsx](./web/src/pages/Dashboard.tsx) + [web/src/api/endpoints.ts](./web/src/api/endpoints.ts) | Add the matching backend route under [api/routes/monitor/](./api/routes/monitor/) |
 | Update browser terminal | [terminal/Dockerfile](./terminal/Dockerfile) + [terminal/entrypoint.sh](./terminal/entrypoint.sh) (ttyd loopback `127.0.0.1:7681`) | WebSocket proxy in [api/routes/terminal_ws.py](./api/routes/terminal_ws.py) |
 | Change auth/JWT validation | [api/auth.py](./api/auth.py) | Tests in [api/tests/test_smoke.py](./api/tests/test_smoke.py) |
 
@@ -50,12 +52,17 @@ HTTP 503 / 410 by design until their Celery tasks land.
 |--------|--------|-------|
 | `/api/health` | [api/routes/health.py](./api/routes/health.py) | real |
 | `/api/me` | [api/routes/me.py](./api/routes/me.py) | real (MSAL bearer required unless `AUTH_DEV_BYPASS=true`) |
-| `/api/monitor/*` | [api/routes/monitor.py](./api/routes/monitor.py) | real (read-only, never 500 — uses `_graceful` to degrade to empty payloads) |
+| `/api/monitor/*` | [api/routes/monitor/](./api/routes/monitor/) | real (read-only, never 500 — uses `_graceful` to degrade to empty payloads) |
 | `/api/arm/*` | [api/routes/arm.py](./api/routes/arm.py) | real (ARM proxy under shared MI) |
 | `/api/resources/*` | [api/routes/resources.py](./api/routes/resources.py) | real (synchronous wizard provisioning) |
+| `/api/storage/*` | [api/routes/storage/](./api/routes/storage/) | real (Storage prepare-db + local-debug firewall helper) |
 | `/api/terminal/ws` | [api/routes/terminal_ws.py](./api/routes/terminal_ws.py) | real (WebSocket → loopback ttyd) |
 | `/api/terminal/{vm}/...` | [api/routes/terminal_legacy.py](./api/routes/terminal_legacy.py) | **410 Gone** by design — the VM model is retired |
-| `/api/aks/*`, `/api/blast/*`, `/api/warmup/*`, `/api/audit/*` | [api/routes/stubs.py](./api/routes/stubs.py) | **503** placeholders awaiting Celery tasks |
+| `/api/aks/*` | [api/routes/aks/](./api/routes/aks/) | real / task-backed AKS actions |
+| `/api/acr/*` | [api/routes/acr.py](./api/routes/acr.py) | real / task-backed ACR build actions |
+| `/api/blast/*` | [api/routes/blast/](./api/routes/blast/) | real / task-backed BLAST package; result analytics live in [api/routes/blast/results.py](./api/routes/blast/results.py) |
+| `/api/warmup/*` | [api/routes/warmup.py](./api/routes/warmup.py) | real / task-backed warmup planning + status |
+| `/api/audit/*` | [api/routes/audit.py](./api/routes/audit.py) | real append-blob audit log |
 | catch-all `/*` (non-`/api/*`) | [api/routes/frontend_proxy.py](./api/routes/frontend_proxy.py) | reverse proxies to frontend sidecar at `127.0.0.1:8081` |
 
 > **Order matters.** [api/main.py](./api/main.py) registers `/api/*` routers
@@ -64,69 +71,10 @@ HTTP 503 / 410 by design until their Celery tasks land.
 
 ---
 
-## Backend module map (`api/`)
+## Backend module map (`api/`) / Frontend (`web/src/`) / Infra (`infra/`)
 
-```
-api/
-├── main.py              # FastAPI app factory + middleware (RequestId, structured logs)
-├── celery_app.py        # Celery app + queue routing (azure / blast / storage / default)
-├── auth.py              # MSAL bearer-token validation (OIDC discovery + JWKS cache)
-├── conftest.py          # pytest sys.path bootstrap
-├── routes/              # FastAPI routers (one file per /api/<area>)
-├── services/            # The ONLY place that touches azure.mgmt.* / azure.identity / k8s
-│   ├── azure_clients.py # Cached Azure SDK client factories (MI under DefaultAzureCredential)
-│   ├── monitoring.py    # AKS / Storage / ACR readers + k8s_* kubelet helpers
-│   ├── network.py       # ensure_resource_group + VNet/Subnet/NSG primitives
-│   ├── compute.py       # VM lifecycle helpers (only used by legacy code paths now)
-│   ├── keyvault.py      # KV secret read/write
-│   ├── storage_data.py  # Blob upload/list/read — NO SAS issuance, see §9 footgun note
-│   ├── state_repo.py    # JobStateRepository (Table Storage + append-blob audit)
-│   ├── sanitise.py      # Output redactor (SAS, bearer, sub-id, secrets) — apply at every UI boundary
-│   ├── passwords.py     # generate_admin_password (used only by legacy, kept for tests)
-│   ├── ssh_exec.py      # paramiko helpers (used only by legacy)
-│   ├── blast_config.py  # Azure SKU / pricing constants
-│   └── image_tags.py    # IMAGE_TAGS dict — bump in sync with sibling repo
-├── tasks/               # Celery tasks live here (mostly empty; populate as you implement stub routes)
-└── tests/               # `uv run pytest -q api/tests` → 56 passing
-```
-
----
-
-## Frontend module map (`web/src/`)
-
-```
-web/src/
-├── App.tsx, main.tsx    # Router + MSAL provider wiring
-├── api/
-│   ├── client.ts        # fetch wrapper that injects MSAL bearer
-│   ├── endpoints.ts     # Typed endpoint helpers (one source of /api/* surface)
-│   ├── arm.ts           # Direct ARM token flow (used only where SPA needs subscription list)
-│   ├── callerIp.ts      # Browser → ipify (caller IP capture)
-│   └── resilience.ts    # Retry / backoff helpers + tests
-├── auth/                # MSAL configuration
-├── components/          # Reusable glass cards, modals, etc.
-├── pages/               # Dashboard, BlastJobs, BlastResults, BlastAnalytics, RemoteTerminal, ...
-├── hooks/, data/, theme/, constants.ts
-```
-
-UI tokens (glassmorphism) are CSS variables; see [.github/copilot-instructions.md §10](./.github/copilot-instructions.md).
-
----
-
-## Infra map (`infra/`)
-
-[`infra/main.bicep`](./infra/main.bicep) wires nine modules in this order:
-`network → monitoring → identity → acr → storage → storageState → keyvault →
-containerEnv → controlApp`. Each one is a single small file under
-[`infra/modules/`](./infra/modules/). Legacy Function-App-era Bicep is
-preserved under [`legacy/infra/`](./legacy/infra/) (do **not** add a new
-module that imports from there).
-
-Public ingress lands on the `api` sidecar at `:8080`. All other sidecars
-listen on loopback only:
-- frontend nginx → `127.0.0.1:8081`
-- terminal ttyd → `127.0.0.1:7681`
-- redis → `127.0.0.1:6379`
+Moved to [docs/copilot/repo-layout.md](./docs/copilot/repo-layout.md) to keep
+this map lean. Read on demand when you need the directory-level detail.
 
 ---
 
@@ -150,18 +98,24 @@ where the failure was found, but knowing them up front saves a lot of time.
 5. **Do not write a `requirements.txt`.** Edit `[project].dependencies` in
    [pyproject.toml](./pyproject.toml) then `uv lock --upgrade-package <name>`
    and commit `pyproject.toml` + `uv.lock` together.
-6. **Do not edit anything under `legacy/`.** It is reference only — no
-   bug-fix backports, no imports, no Bicep references, no test runs.
+6. **The `legacy/` directory no longer exists.** The Azure Functions tree
+   was deleted on 2026-05-19. Do not try to re-create it, do not back-port
+   bug fixes "from legacy", do not import or reference paths under
+   `legacy/`. If you need historical context, read
+   [docs/container-apps-migration.md](./docs/container-apps-migration.md)
+   or `git log` for the deletion commit.
 7. **Order in `api/main.py`:** any new `/api/*` router goes **above** the
    `frontend_proxy.router` include — otherwise the catch-all swallows your
    route and serves index.html.
 8. **Storage `publicNetworkAccess` is `Disabled` in production.** Do not add
-   a production code path, dashboard button, or environment toggle that
-   flips it on. The only sanctioned exception is the manual local-debug
+   a production code path, dashboard button, or deployed-environment toggle
+   that flips it on. The sanctioned exceptions are the explicit local-debug
    helper [scripts/dev/storage-public-access.sh](./scripts/dev/storage-public-access.sh)
-   (`on` opens an IP-allowlisted window for the caller, `off` restores).
-   Do not bypass the script with `--default-action Allow`, `bypass:
-   AzureServices`, or a wider IP range — see
+   and the equivalent `scripts/dev/local-run.sh storage-on|storage-off|storage-status`
+   commands (`on` opens an IP-allowlisted window for the caller, `off` restores).
+   Local backend auto-open must go through `api.services.storage_public_access`
+   and keep the `CONTAINER_APP_NAME` guard. Do not bypass the script with
+   `--default-action Allow`, `bypass: AzureServices`, or a wider IP range — see
    [.github/copilot-instructions.md §9](./.github/copilot-instructions.md).
 9. **Never reach for Azure Run Command.** `ManagedClusters.begin_run_command`
    and `VirtualMachines.begin_run_command` were both removed (~30 s slow,
@@ -170,6 +124,14 @@ where the failure was found, but knowing them up front saves a lot of time.
    contract in [api/services/terminal_exec.py](./api/services/terminal_exec.py).
    The api / worker images intentionally do **not** ship `kubectl` / `azcopy` /
    `elastic-blast` — those live in the `terminal` sidecar.
+10. **Do not redeploy to validate ordinary code changes.** Backend / frontend
+    edits are validated by `uv run pytest`, `uv run uvicorn …`, `npm run dev`,
+    or the `fullstack: start` VS Code task (host mode — no image build). Only
+    run `scripts/dev/quick-deploy.sh`, `scripts/dev/postprovision.sh`,
+    `az acr build`, or `azd provision` when the change touches sidecar layout,
+    Container App template, `terminal/Dockerfile*` / `exec_server.py`, or
+    `infra/*.bicep`, AND the bug cannot be reproduced in Tier 1/2a. State the
+    reason in the change note. Charter §13 calls this out explicitly.
 
 ---
 

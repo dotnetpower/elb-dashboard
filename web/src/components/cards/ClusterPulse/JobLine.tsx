@@ -13,10 +13,7 @@ import { User } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { isActiveJobState } from "@/components/cards/ClusterBento/jobMapping";
-import type {
-  DisplayJobState,
-  JobRowView,
-} from "@/components/cards/ClusterBento/atoms";
+import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/atoms";
 
 import { DbChip, JobStatePill } from "./atoms";
 import {
@@ -42,6 +39,7 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
   const splitsTotal = job.splitsTotal ?? 0;
   const splitsDone = job.splitsDone ?? 0;
   const pct = splitsTotal === 0 ? 0 : Math.min(1, splitsDone / splitsTotal);
+  const progressWidth = splitsTotal === 0 ? 0 : Math.max(2, pct * 100);
   const elapsedSec = computeElapsedSec(job, nowMs);
   const etaSec =
     job.etaSec ??
@@ -77,7 +75,7 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
         gap: 10,
         padding: "6px 8px",
         borderRadius: 6,
-        background: "var(--bg-secondary)",
+        background: "var(--pulse-row-bg)",
         border: "1px solid var(--border-weak)",
         borderLeft: `3px solid ${borderLeftColor}`,
         cursor: "pointer",
@@ -178,7 +176,7 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
         >
           <div
             style={{
-              width: `${Math.max(2, pct * 100)}%`,
+              width: `${progressWidth}%`,
               height: "100%",
               background: tone,
               transition: "width 200ms ease-out",

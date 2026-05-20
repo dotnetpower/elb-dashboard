@@ -40,13 +40,14 @@ def _accession_base(accession):
 def load_tie_order_oracle(warnings):
     oracle_path = os.environ.get("ELB_TIE_ORDER_FILE", "").strip()
     if not oracle_path:
-        return None, {}, 0
+        return None, {}, 0, []
     path = Path(oracle_path)
     if not path.exists():
         warnings.append(f"Tie-order oracle file was not found: {oracle_path}")
-        return oracle_path, {}, 0
+        return oracle_path, {}, 0, []
 
     order = {}
+    accessions = []
     unique_accessions = 0
     for raw_line in path.read_text().splitlines():
         line = raw_line.strip()
@@ -63,6 +64,7 @@ def load_tie_order_oracle(warnings):
             continue
         if accession not in order:
             order[accession] = unique_accessions
+            accessions.append(accession)
             unique_accessions += 1
         base = _accession_base(accession)
         if base and base not in order:
@@ -73,7 +75,28 @@ def load_tie_order_oracle(warnings):
         )
     else:
         warnings.append(f"Tie-order oracle file contained no usable accessions: {oracle_path}")
-    return oracle_path, order, unique_accessions
+    return oracle_path, order, unique_accessions, accessions
+
+
+def observed_accession_keys(accessions):
+    keys = set()
+    for accession in accessions:
+        if not accession:
+            continue
+        keys.add(accession)
+        base = _accession_base(accession)
+        if base:
+            keys.add(base)
+    return keys
+
+
+def oracle_missing_accessions(oracle_accessions, observed_keys):
+    missing = []
+    for accession in oracle_accessions:
+        base = _accession_base(accession)
+        if accession not in observed_keys and (not base or base not in observed_keys):
+            missing.append(accession)
+    return missing
 
 
 def strict_oracle_enabled():
@@ -151,7 +174,7 @@ def parse_outfmt(options_text):
 
 
 def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, max_hits, warnings):
-    oracle_path, tie_order, oracle_unique_accessions = load_tie_order_oracle(warnings)
+    oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
     strict_oracle = bool(tie_order) and strict_oracle_enabled()
     if strict_oracle:
         warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
@@ -192,12 +215,25 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     tie_break_count = 0
     tie_cutoff_overflow_count = 0
     tie_cutoff_queries = []
+    oracle_missing_queries = []
     total_output_hits = 0
 
     with gzip.open(output_gz, "wt") as out:
         for query_id in sorted(query_hits):
             hits = query_hits[query_id]
             if strict_oracle:
+                observed_keys = observed_accession_keys(
+                    tabular_subject_accession(hit[3]) for hit in hits
+                )
+                missing_accessions = oracle_missing_accessions(oracle_accessions, observed_keys)
+                if missing_accessions:
+                    oracle_missing_queries.append(
+                        {
+                            "query_id": query_id,
+                            "missing_count": len(missing_accessions),
+                            "first_missing_accessions": missing_accessions[:20],
+                        }
+                    )
                 hits = [
                     hit
                     for hit in hits
@@ -272,6 +308,10 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         "tie_order_oracle_path": oracle_path,
         "tie_order_oracle_accessions": oracle_unique_accessions,
         "tie_order_oracle_strict": strict_oracle,
+        "tie_order_oracle_missing_count": sum(
+            item["missing_count"] for item in oracle_missing_queries
+        ),
+        "tie_order_oracle_missing_queries": oracle_missing_queries,
         "warnings": warnings,
     }
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
@@ -327,7 +367,7 @@ def hit_rank(hit):
 
 
 def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings):
-    oracle_path, tie_order, oracle_unique_accessions = load_tie_order_oracle(warnings)
+    oracle_path, tie_order, oracle_unique_accessions, oracle_accessions = load_tie_order_oracle(warnings)
     strict_oracle = bool(tie_order) and strict_oracle_enabled()
     if strict_oracle:
         warnings.append("Strict tie-order oracle is enabled; non-oracle hits are excluded")
@@ -425,12 +465,23 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
     tie_break_count = 0
     tie_cutoff_overflow_count = 0
     tie_cutoff_queries = []
+    oracle_missing_queries = []
     total_output_hits = 0
     total_output_hsps = 0
     for query_id in query_order:
         item = queries[query_id]
         hits = item["hits"]
         if strict_oracle:
+            observed_keys = observed_accession_keys(xml_subject_accession(hit[4]) for hit in hits)
+            missing_accessions = oracle_missing_accessions(oracle_accessions, observed_keys)
+            if missing_accessions:
+                oracle_missing_queries.append(
+                    {
+                        "query_id": query_id,
+                        "missing_count": len(missing_accessions),
+                        "first_missing_accessions": missing_accessions[:20],
+                    }
+                )
             hits = [
                 hit
                 for hit in hits
@@ -555,6 +606,10 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         "tie_order_oracle_path": oracle_path,
         "tie_order_oracle_accessions": oracle_unique_accessions,
         "tie_order_oracle_strict": strict_oracle,
+        "tie_order_oracle_missing_count": sum(
+            item["missing_count"] for item in oracle_missing_queries
+        ),
+        "tie_order_oracle_missing_queries": oracle_missing_queries,
         "warnings": warnings,
     }
     Path(report_json).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")

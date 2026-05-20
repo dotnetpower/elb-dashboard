@@ -46,7 +46,11 @@ from api import __version__
 # doesn't subscribe to → tasks silently never run. See `api/tasks/__init__.py`.
 from api import celery_app as _celery_app  # noqa: F401
 from api.routes import (
+    acr,
+    aks,
     arm,
+    audit,
+    blast,
     elastic_blast,
     frontend_proxy,
     health,
@@ -54,10 +58,10 @@ from api.routes import (
     monitor,
     resources,
     storage,
-    stubs,
     tasks,
     terminal_legacy,
     terminal_ws,
+    warmup,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -410,12 +414,11 @@ def create_app() -> FastAPI:
     app.include_router(terminal_ws.router)  # WebSocket + ticket + health
     app.include_router(terminal_legacy.router)  # /api/terminal/{vm}/* → 410 Gone
     app.include_router(tasks.router)  # GET /api/tasks/{id} — Celery task status
-    app.include_router(stubs.resources_router)  # legacy stub (no routes; harmless)
-    app.include_router(stubs.aks_router)
-    app.include_router(stubs.acr_build_router)
-    app.include_router(stubs.blast_router)
-    app.include_router(stubs.warmup_router)
-    app.include_router(stubs.audit_router)
+    app.include_router(aks.aks_router)
+    app.include_router(acr.acr_build_router)
+    app.include_router(blast.blast_router)
+    app.include_router(warmup.warmup_router)
+    app.include_router(audit.audit_router)
 
     # ---- Catch-all reverse proxy to the `frontend` sidecar ----
     app.include_router(frontend_proxy.router)

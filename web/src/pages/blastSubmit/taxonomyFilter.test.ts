@@ -175,6 +175,7 @@ describe("blast submit taxonomy filter", () => {
     expect(request.db_auto_partition).toBe(true);
     expect(request.shard_sets).toEqual([1, 2, 4, 10]);
     expect(request.disable_sharding).toBe(false);
+    expect(request.use_db_order_oracle).toBe(true);
   });
 
   it("renders inclusive taxonomy filters in the command preview", () => {
@@ -193,5 +194,45 @@ describe("blast submit taxonomy filter", () => {
     );
 
     expect(command).toContain("-negative_taxids 562");
+  });
+
+  it("maps NCBI-style masking and culling controls into the submit options", () => {
+    const request = makeRequest(
+      makeForm({
+        max_matches_in_query_range: "2",
+        mask_lookup_table_only: true,
+        mask_lowercase: true,
+        species_repeat_filter: true,
+        repeat_filter_taxid: "9606",
+      }),
+    );
+
+    expect(request.additional_options).toContain("-culling_limit 2");
+    expect(request.additional_options).toContain("-soft_masking true");
+    expect(request.additional_options).toContain("-lcase_masking");
+    expect(request.additional_options).toContain("-window_masker_taxid 9606");
+  });
+
+  it("uses Web BLAST-compatible hard masking by default", () => {
+    const form = makeForm();
+    const request = makeRequest(form);
+    const command = buildCommandString(form, PROGRAMS[0]);
+
+    expect(form.mask_lookup_table_only).toBe(false);
+    expect(request.additional_options).toContain("-dust yes");
+    expect(request.additional_options).toContain("-soft_masking false");
+    expect(request.additional_options).not.toContain("-soft_masking true");
+    expect(command).toContain("-soft_masking false");
+  });
+
+  it("uses blastn-short for short blastn queries when automatic adjustment is enabled", () => {
+    const request = makeRequest(makeForm({ query_data: ">primer\nATGCATGCATGC" }));
+    const command = buildCommandString(
+      makeForm({ query_data: ">primer\nATGCATGCATGC" }),
+      PROGRAMS[0],
+    );
+
+    expect(request.additional_options).toContain("-task blastn-short");
+    expect(command).toContain("-task blastn-short");
   });
 });

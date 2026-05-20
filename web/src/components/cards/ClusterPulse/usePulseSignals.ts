@@ -20,10 +20,7 @@ import {
   jobClusterName,
   toJobRowView,
 } from "@/components/cards/ClusterBento/jobMapping";
-import type {
-  DisplayJobState,
-  JobRowView,
-} from "@/components/cards/ClusterBento/atoms";
+import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/atoms";
 
 export const JOB_PREVIEW = 4;
 const REQUEST_METRICS_WINDOW_SEC = 900; // 15 min
@@ -40,6 +37,11 @@ const JOB_STATE_ORDER: Record<DisplayJobState, number> = {
 export interface PulseSignals {
   /** True when /api/blast/jobs returned a `degraded` flag. */
   jobsDegraded: boolean;
+  /** True while /api/blast/jobs has no cached data yet (first load).
+   *  Used by `<JobsSection>` to render a skeleton roster instead of
+   *  the "No jobs yet" empty state, which previously flashed for ~1s
+   *  on every dashboard mount before the response landed. */
+  jobsLoading: boolean;
   /** True when /api/monitor/request-metrics returned a `degraded` flag. */
   metricsDegraded: boolean;
 
@@ -88,8 +90,13 @@ export function usePulseSignals(args: {
   });
 
   const jobsQuery = useQuery({
-    queryKey: ["blast-jobs-for-pulse", clusterName],
-    queryFn: () => blastApi.listJobs(),
+    queryKey: ["blast-jobs-for-pulse", subscriptionId, resourceGroup, clusterName],
+    queryFn: () =>
+      blastApi.listJobs({
+        subscriptionId,
+        resourceGroup,
+        clusterName,
+      }),
     enabled,
     staleTime: 30_000,
     refetchInterval: enabled ? 60_000 : false,
@@ -117,10 +124,7 @@ export function usePulseSignals(args: {
   const metricsDegraded = metricsQuery.data?.degraded === true;
 
   const clusterJobs = useMemo<BlastJobSummary[]>(
-    () =>
-      (jobsQuery.data?.jobs ?? []).filter(
-        (j) => jobClusterName(j) === clusterName,
-      ),
+    () => (jobsQuery.data?.jobs ?? []).filter((j) => jobClusterName(j) === clusterName),
     [jobsQuery.data, clusterName],
   );
 
@@ -189,10 +193,8 @@ export function usePulseSignals(args: {
     if (userNodes.length === 0) {
       // Fall back to the aggregate summary when we cannot distinguish
       // user vs system nodes; better than going blind.
-      const fallbackCpu =
-        nodeSummary.total > 0 ? nodeSummary.cpuPct / 100 : null;
-      const fallbackMem =
-        nodeSummary.total > 0 ? nodeSummary.memPct / 100 : null;
+      const fallbackCpu = nodeSummary.total > 0 ? nodeSummary.cpuPct / 100 : null;
+      const fallbackMem = nodeSummary.total > 0 ? nodeSummary.memPct / 100 : null;
       return { cpuPct: fallbackCpu, memPct: fallbackMem };
     }
     let cpuMax = userNodes[0].cpu_pct ?? 0;
@@ -205,12 +207,11 @@ export function usePulseSignals(args: {
   }, [topQuery.data, nodeSummary.cpuPct, nodeSummary.memPct, nodeSummary.total]);
 
   const pressureValue =
-    cpuPct == null && memPct == null
-      ? null
-      : Math.max(cpuPct ?? 0, memPct ?? 0);
+    cpuPct == null && memPct == null ? null : Math.max(cpuPct ?? 0, memPct ?? 0);
 
   return {
     jobsDegraded,
+    jobsLoading: jobsQuery.isLoading,
     metricsDegraded,
     jobRows,
     jobRowsByJobId,

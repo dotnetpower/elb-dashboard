@@ -9,6 +9,70 @@ import { readAutoWarmupDbs } from "@/components/cards/storage/autoWarmupPrefs";
 
 type ClustersQueryData = { clusters: AksClusterSummary[] };
 
+type TransitionKind = "starting" | "stopping";
+type PersistedTransition = { action: TransitionKind; deadline: number };
+
+// Persist the transition map so the "Cluster is starting…" banner and the
+// 10 s fast-poll survive a page reload while the async Celery task is still
+// running. The deadline auto-evicts a stuck entry (e.g. the start task
+// failed silently) so the card never gets pinned in starting/stopping mode
+// forever.
+const TRANSITION_STORAGE_KEY = "elb-cluster-transitions";
+const TRANSITION_TTL_MS = 10 * 60_000; // 10 min — Azure AKS start typically completes in 1–3 min.
+
+function persistedKey(subscriptionId: string, resourceGroup: string): string {
+  return `${TRANSITION_STORAGE_KEY}:${subscriptionId}:${resourceGroup}`;
+}
+
+function readPersistedTransitions(
+  subscriptionId: string,
+  resourceGroup: string,
+): Map<string, TransitionKind> {
+  if (typeof window === "undefined") return new Map();
+  if (!subscriptionId || !resourceGroup) return new Map();
+  try {
+    const raw = window.localStorage.getItem(persistedKey(subscriptionId, resourceGroup));
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as Record<string, PersistedTransition>;
+    const now = Date.now();
+    const out = new Map<string, TransitionKind>();
+    for (const [name, entry] of Object.entries(parsed)) {
+      if (entry && typeof entry === "object" && entry.deadline > now) {
+        if (entry.action === "starting" || entry.action === "stopping") {
+          out.set(name, entry.action);
+        }
+      }
+    }
+    return out;
+  } catch {
+    return new Map();
+  }
+}
+
+function writePersistedTransitions(
+  subscriptionId: string,
+  resourceGroup: string,
+  map: Map<string, TransitionKind>,
+): void {
+  if (typeof window === "undefined") return;
+  if (!subscriptionId || !resourceGroup) return;
+  try {
+    const key = persistedKey(subscriptionId, resourceGroup);
+    if (map.size === 0) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    const deadline = Date.now() + TRANSITION_TTL_MS;
+    const payload: Record<string, PersistedTransition> = {};
+    for (const [name, action] of map) {
+      payload[name] = { action, deadline };
+    }
+    window.localStorage.setItem(key, JSON.stringify(payload));
+  } catch {
+    // Quota / private mode — fall back to in-memory only.
+  }
+}
+
 /**
  * Owns start / stop / delete handlers and the in-flight `transitioning`
  * Map that drives the per-cluster animated chip + faster polling. Clears
@@ -45,9 +109,20 @@ export function useClusterActions(args: {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [transitioning, setTransitioning] = useState<
-    Map<string, "starting" | "stopping">
-  >(new Map());
+    Map<string, TransitionKind>
+  >(() => readPersistedTransitions(subscriptionId, resourceGroup));
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+
+  // Persist whenever the in-memory map changes so a reload survives.
+  useEffect(() => {
+    writePersistedTransitions(subscriptionId, resourceGroup, transitioning);
+  }, [subscriptionId, resourceGroup, transitioning]);
+
+  // If the parent re-targets a different subscription/RG, reload the persisted
+  // map for that scope instead of carrying stale entries across scopes.
+  useEffect(() => {
+    setTransitioning(readPersistedTransitions(subscriptionId, resourceGroup));
+  }, [subscriptionId, resourceGroup]);
 
   const handleDelete = async (name: string) => {
     setActionError(null);

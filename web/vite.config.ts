@@ -38,6 +38,9 @@ export default defineConfig({
       ignored: ["**/node_modules/**", "**/.venv/**", "**/.git/**"],
     },
   },
+  optimizeDeps: {
+    include: ["@xterm/xterm", "@xterm/addon-fit"],
+  },
   build: {
     outDir: "dist",
     sourcemap: true,

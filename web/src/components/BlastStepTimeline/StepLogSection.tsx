@@ -24,11 +24,13 @@ export function StepLogSection({
   job,
   subscriptionId,
   storageAccount,
+  resourceGroup,
 }: {
   phase: string;
   job: Record<string, unknown>;
   subscriptionId: string;
   storageAccount: string;
+  resourceGroup?: string;
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -91,6 +93,7 @@ export function StepLogSection({
           blobName={uploadBlobName}
           subscriptionId={subscriptionId}
           storageAccount={storageAccount}
+          resourceGroup={resourceGroup}
           maxBytes={1000}
         />
       );
@@ -110,6 +113,7 @@ export function StepLogSection({
           blobName={configBlobName}
           subscriptionId={subscriptionId}
           storageAccount={storageAccount}
+          resourceGroup={resourceGroup}
           maxBytes={10000}
         />
       );

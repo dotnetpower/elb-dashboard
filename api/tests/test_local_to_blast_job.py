@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from api.routes.stubs import _local_to_blast_job, _split_child_summaries_from_repo
+from api.routes._blast_shared import _local_to_blast_job, _split_child_summaries_from_repo
+from api.services import blast_job_state
 
 
 def _state(**kw):
     base = dict(
         job_id="job-1",
         task_id="celery-1",
+        type="blast",
         status="running",
         phase="Running",
         created_at="2026-05-15T00:00:00Z",
@@ -131,3 +133,83 @@ def test_split_child_summaries_uses_owner_batch_query():
     assert set(out) == {"parent-1"}
     assert out["parent-1"]["child_count"] == 1
     assert out["parent-1"]["children_by_status"] == {"completed": 1}
+
+
+def test_refresh_running_blast_state_waits_for_result_artifacts(monkeypatch):
+    state = _state(
+        status="running",
+        phase="submitted",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+        },
+    )
+
+    class Repo:
+        def __init__(self) -> None:
+            self.updated = None
+            self.history = []
+
+        def update(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return _state(**{**state.__dict__, **kwargs})
+
+        def append_history(self, job_id, event, payload):
+            self.history.append((job_id, event, payload))
+
+    repo = Repo()
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {"status": "completed"},
+    )
+    monkeypatch.setattr(blast_job_state, "_state_has_parseable_result_artifact", lambda *_: False)
+
+    refreshed = blast_job_state._refresh_running_blast_state(repo, state)
+
+    assert refreshed.status == "running"
+    assert refreshed.phase == "results_pending"
+    assert repo.updated[0] == "job-1"
+    assert repo.updated[1]["status"] == "running"
+    assert repo.updated[1]["phase"] == "results_pending"
+    progress = repo.updated[1]["payload"]["_progress"]
+    assert progress["phase"] == "results_pending"
+    assert progress["steps"]["exporting_results"]["phase"] == "results_pending"
+    assert repo.history[0][1] == "k8s_completed_results_pending"
+
+
+def test_refresh_running_blast_state_uses_discovered_elastic_blast_job_id(monkeypatch):
+    state = _state(
+        status="running",
+        phase="submitted",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+        },
+    )
+
+    class Repo:
+        def update(self, job_id, **kwargs):
+            return _state(**{**state.__dict__, **kwargs})
+
+        def append_history(self, *_args, **_kwargs):
+            pass
+
+    seen = {}
+
+    def fake_k8s(*_args, **kwargs):
+        seen["job_id"] = kwargs.get("job_id")
+        return {"status": "running", "job_id": kwargs.get("job_id")}
+
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(blast_job_state, "_discover_elastic_blast_job_id", lambda *_: "job-elastic")
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    refreshed = blast_job_state._refresh_running_blast_state(Repo(), state)
+
+    assert refreshed is state
+    assert seen["job_id"] == "job-elastic"

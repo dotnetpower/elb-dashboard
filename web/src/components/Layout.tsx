@@ -248,7 +248,7 @@ export function Layout({ children }: PropsWithChildren) {
             {newSearchBlocked && <NavWarnDot />}
           </NavLink>
           <NavLink to="/blast/jobs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
-            <List size={14} strokeWidth={1.5} /> Jobs
+            <List size={14} strokeWidth={1.5} /> Recent searches
           </NavLink>
           {customDbEnabled && (
             <NavLink to="/blast/databases/build" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>

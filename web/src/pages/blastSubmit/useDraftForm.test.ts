@@ -9,6 +9,7 @@ import {
   restoreDraftForm,
   saveOutfmtPreference,
 } from "@/pages/blastSubmit/useDraftForm";
+import { DEFAULT_DATABASE_PATH } from "@/pages/blastSubmitModel";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -27,6 +28,30 @@ class MemoryStorage {
 }
 
 describe("blast submit outfmt preference", () => {
+  it("defaults to core_nt for new searches", () => {
+    expect(createInitialForm(null).db).toBe(DEFAULT_DATABASE_PATH);
+  });
+
+  it("restores an empty saved database to the core_nt default", () => {
+    const sessionStorage = new MemoryStorage();
+    sessionStorage.setItem(
+      DRAFT_KEY,
+      JSON.stringify({ draft_version: DRAFT_SCHEMA_VERSION, db: "" }),
+    );
+
+    expect(restoreDraftForm(sessionStorage, null).db).toBe(DEFAULT_DATABASE_PATH);
+  });
+
+  it("restores a malformed saved database to the core_nt default", () => {
+    const sessionStorage = new MemoryStorage();
+    sessionStorage.setItem(
+      DRAFT_KEY,
+      JSON.stringify({ draft_version: DRAFT_SCHEMA_VERSION, db: null }),
+    );
+
+    expect(restoreDraftForm(sessionStorage, null).db).toBe(DEFAULT_DATABASE_PATH);
+  });
+
   it("defaults to BLAST XML outfmt 5", () => {
     expect(createInitialForm(null).outfmt).toBe(5);
   });

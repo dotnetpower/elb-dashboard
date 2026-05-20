@@ -128,7 +128,7 @@ export function DetailsModal({
                 padding: "24px 20px",
                 borderRadius: 8,
                 textAlign: "center",
-                background: "rgba(255,255,255,0.02)",
+                background: "var(--modal-surface-strong)",
                 border: "1px dashed var(--border-weak)",
                 color: "var(--text-faint)",
                 fontSize: 12,

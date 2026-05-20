@@ -46,6 +46,12 @@ describe("pickExportableForm", () => {
       is_inclusive: false,
       additional_options: "-soft_masking true",
       low_complexity_filter: false,
+      short_query_adjust: false,
+      max_matches_in_query_range: "2",
+      mask_lookup_table_only: false,
+      mask_lowercase: true,
+      species_repeat_filter: true,
+      repeat_filter_taxid: "9606",
       enable_warmup: true,
       sharding_mode: "precise",
       db_auto_partition: true,
@@ -67,6 +73,12 @@ describe("pickExportableForm", () => {
     expect(fields.is_inclusive).toBe(false);
     expect(fields.additional_options).toBe("-soft_masking true");
     expect(fields.low_complexity_filter).toBe(false);
+    expect(fields.short_query_adjust).toBe(false);
+    expect(fields.max_matches_in_query_range).toBe("2");
+    expect(fields.mask_lookup_table_only).toBe(false);
+    expect(fields.mask_lowercase).toBe(true);
+    expect(fields.species_repeat_filter).toBe(true);
+    expect(fields.repeat_filter_taxid).toBe("9606");
     expect(fields.enable_warmup).toBe(true);
     expect(fields.sharding_mode).toBe("precise");
     expect(fields.db_auto_partition).toBe(true);

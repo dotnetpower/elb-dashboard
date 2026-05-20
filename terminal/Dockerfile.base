@@ -1,0 +1,86 @@
+# syntax=docker/dockerfile:1.7
+# Heavy terminal toolchain base image.
+#
+# This image changes rarely and is reused by terminal/Dockerfile.runtime during
+# Azure quick deploys. Keep operator-facing shell scripts in Dockerfile.runtime
+# so small terminal fixes do not reinstall the full toolchain.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    BLAST_VERSION=2.17.0 \
+    HOME=/home/azureuser \
+    USER=azureuser \
+    SHELL=/bin/bash \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/opt/elb/venv/bin:/opt/elb/elastic-blast-azure/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg lsb-release apt-transport-https software-properties-common \
+        sudo \
+        git make jq unzip tmux primer3 \
+        nano vim-tiny less tree file wget rsync zip gzip pigz tar \
+        procps psmisc htop iproute2 net-tools iputils-ping dnsutils \
+        mafft seqkit samtools bcftools bedtools fastqc hmmer emboss clustalo muscle \
+        build-essential libffi-dev libssl-dev \
+        python3.12 python3.12-venv python3.12-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --fail --show-error --location --retry 4 --connect-timeout 20 --max-time 300 \
+    "https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/${BLAST_VERSION}/ncbi-blast-${BLAST_VERSION}+-x64-linux.tar.gz" \
+    -o /tmp/ncbi-blast.tgz \
+    && tar -xzf /tmp/ncbi-blast.tgz -C /opt \
+    && ln -sf "/opt/ncbi-blast-${BLAST_VERSION}+/bin/"* /usr/local/bin/ \
+    && rm -f /tmp/ncbi-blast.tgz
+
+RUN curl --fail --show-error --location --retry 4 --connect-timeout 20 --max-time 120 https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/microsoft.gpg \
+    && AZ_REPO=$(lsb_release -cs) \
+    && echo "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ $AZ_REPO main" > /etc/apt/sources.list.d/azure-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends azure-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN KUBECTL_VERSION=$(curl --fail --show-error --location --retry 4 --connect-timeout 20 --max-time 120 https://dl.k8s.io/release/stable.txt) \
+    && curl --fail --show-error --location --retry 4 --connect-timeout 20 --max-time 300 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl \
+    && chmod +x /usr/local/bin/kubectl
+
+RUN curl --fail --show-error --location --retry 4 --connect-timeout 20 --max-time 300 https://aka.ms/downloadazcopy-v10-linux -o /tmp/azcopy.tgz \
+    && tar -xf /tmp/azcopy.tgz -C /tmp \
+    && install -m 0755 /tmp/azcopy_linux_*/azcopy /usr/local/bin/azcopy \
+    && rm -rf /tmp/azcopy*
+
+RUN curl --fail --show-error --location --retry 4 --connect-timeout 20 --max-time 300 https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64 -o /usr/local/bin/ttyd \
+    && chmod +x /usr/local/bin/ttyd
+
+RUN python3.12 -m venv /opt/elb/venv \
+    && /opt/elb/venv/bin/pip install --upgrade pip wheel build setuptools \
+    && /opt/elb/venv/bin/pip install \
+        azure-mgmt-resource azure-mgmt-network azure-mgmt-compute \
+        azure-mgmt-storage azure-mgmt-containerregistry azure-mgmt-containerservice \
+        azure-mgmt-authorization azure-mgmt-msi azure-mgmt-monitor \
+        azure-identity azure-storage-blob azure-keyvault-secrets \
+        redis==5.2.0
+
+COPY patch_elastic_blast.py /tmp/patch_elastic_blast.py
+COPY merge-sharded-results.sh /tmp/merge-sharded-results.sh
+RUN git clone --depth 1 https://github.com/dotnetpower/elastic-blast-azure.git /opt/elb/elastic-blast-azure \
+    && python3.12 /tmp/patch_elastic_blast.py /opt/elb/elastic-blast-azure /tmp/merge-sharded-results.sh \
+    && /opt/elb/venv/bin/pip install --no-cache-dir -r /opt/elb/elastic-blast-azure/requirements/base.txt packit glob2 \
+    && /opt/elb/venv/bin/pip install --no-build-isolation --no-deps /opt/elb/elastic-blast-azure
+
+RUN id azureuser 2>/dev/null || useradd -m -s /bin/bash azureuser \
+    && mkdir -p /home/azureuser \
+    && chown -R azureuser:azureuser /home/azureuser
+
+RUN printf '%s\n' \
+        'azureuser ALL=(root) NOPASSWD: /usr/bin/apt-get update' \
+        'azureuser ALL=(root) NOPASSWD: /usr/bin/apt-get install *' \
+        'azureuser ALL=(root) NOPASSWD: /usr/bin/apt update' \
+        'azureuser ALL=(root) NOPASSWD: /usr/bin/apt install *' \
+        > /etc/sudoers.d/azureuser-apt \
+    && chmod 0440 /etc/sudoers.d/azureuser-apt \
+    && visudo -cf /etc/sudoers.d/azureuser-apt

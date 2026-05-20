@@ -183,6 +183,101 @@ def test_aks_assign_roles_forwards_storage_rbac_fields(
     assert calls[0]["storage_account"] == "elbstg01"
 
 
+@pytest.mark.parametrize(
+    "verb,task_attr",
+    [
+        ("start", "start_aks"),
+        ("stop", "stop_aks"),
+        ("delete", "delete_aks"),
+    ],
+)
+def test_aks_lifecycle_routes_invalidate_monitor_cache(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    verb: str,
+    task_attr: str,
+) -> None:
+    """start/stop/delete must drop every monitor:aks:* cache key for the targeted scope.
+
+    Regression guard: this is the load-bearing fix for the "cluster shows
+    Stopped even after Start" stale-cache bug. If a new monitor:aks:<x>
+    cache key is added under api/routes/monitor/, this test must be
+    updated alongside `api.routes.aks._invalidate_aks_monitor_cache`.
+    """
+    from api.services import monitor_cache
+
+    class FakeAsyncResult:
+        id = f"task-{verb}"
+
+    monkeypatch.setattr(
+        f"api.tasks.azure.{task_attr}.delay",
+        lambda **_: FakeAsyncResult(),
+    )
+
+    sub = "sub-cache-1"
+    rg = "rg-elb"
+    cluster = "elb-cluster"
+    monitor_cache.reset_monitor_snapshot_cache()
+    # Seed every monitor:aks:* key shape we currently produce.
+    seeded = [
+        f"monitor:aks:{sub}:{rg}",
+        f"monitor:aks:nodes:{sub}:{rg}:{cluster}",
+        f"monitor:aks:pods:{sub}:{rg}:{cluster}",
+        f"monitor:aks:top-nodes:{sub}:{rg}:{cluster}",
+        f"monitor:aks:warmup-status:{sub}:{rg}:{cluster}",
+        f"monitor:aks:events:{sub}:{rg}:{cluster}:default:50",
+    ]
+    for key in seeded:
+        monitor_cache.cached_snapshot(key, lambda: {"seeded": True}, ttl_seconds=30)
+    # Neighbour key that shares a string prefix but a different RG must survive.
+    monitor_cache.cached_snapshot(
+        f"monitor:aks:{sub}:{rg}-suffix",
+        lambda: {"different_rg": True},
+        ttl_seconds=30,
+    )
+    # Different namespace (storage) must also survive.
+    monitor_cache.cached_snapshot(
+        f"monitor:storage:{sub}:{rg}:acct",
+        lambda: {"storage": True},
+        ttl_seconds=30,
+    )
+
+    body = {"subscription_id": sub, "resource_group": rg, "cluster_name": cluster}
+    response = client.post(f"/api/aks/{verb}", json=body)
+    assert response.status_code == 200
+
+    # Every seeded key under the targeted scope must be gone — the next monitor
+    # poll has to hit ARM, not the previous "Stopped" snapshot.
+    for key in seeded:
+        reload_calls = 0
+
+        def loader() -> dict[str, Any]:
+            nonlocal reload_calls
+            reload_calls += 1
+            return {"reloaded": True}
+
+        result = monitor_cache.cached_snapshot(key, loader, ttl_seconds=30)
+        assert reload_calls == 1, f"{key} was NOT invalidated"
+        assert result["cache"]["state"] == "refreshed"
+
+    # Sibling scopes were preserved.
+    survivor = monitor_cache.cached_snapshot(
+        f"monitor:aks:{sub}:{rg}-suffix",
+        lambda: {"should_not_run": True},
+        ttl_seconds=30,
+    )
+    assert survivor["cache"]["state"] == "fresh"
+    assert survivor["different_rg"] is True
+
+    storage = monitor_cache.cached_snapshot(
+        f"monitor:storage:{sub}:{rg}:acct",
+        lambda: {"should_not_run": True},
+        ttl_seconds=30,
+    )
+    assert storage["cache"]["state"] == "fresh"
+    assert storage["storage"] is True
+
+
 def test_warmup_auto_preference_round_trip(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
