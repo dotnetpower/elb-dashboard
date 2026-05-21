@@ -112,14 +112,18 @@ def readiness() -> Any:
 
 
 @router.get("/health/celery")
-def celery_diag() -> dict[str, Any]:
+def celery_diag(
+    caller: CallerIdentity = Depends(_require_caller_lazy),
+) -> dict[str, Any]:
     """Diagnostic-only: return per-queue length + worker inspect snapshot.
 
-    Unauthenticated by design (read-only, no secrets in payload). Used to
-    diagnose 'task enqueued but worker silent' problems. Kept after the
-    2026-05-15 routing-fix so future drift can be spotted in seconds:
-    `redis_keys_db0` should contain only the worker's known queue names.
+    Auth-gated (MSAL bearer required) because the payload includes
+    broker URL, queue depth, and worker stats — internal infrastructure
+    detail that should never be reachable anonymously. Used to diagnose
+    'task enqueued but worker silent' problems; `redis_keys_db0` should
+    contain only the worker's known queue names.
     """
+    del caller
     out: dict[str, Any] = {"queues": {}, "workers": None, "errors": []}
 
     # 0. Producer-side celery config (so we can spot a config mismatch
@@ -174,8 +178,16 @@ def celery_diag() -> dict[str, Any]:
 
 
 @router.post("/health/celery/enqueue-noop")
-def celery_enqueue_noop(message: str = "diag-ping") -> dict[str, Any]:
-    """Diagnostic-only: enqueue a no-op task. Returns task_id for status polling."""
+def celery_enqueue_noop(
+    message: str = "diag-ping",
+    caller: CallerIdentity = Depends(_require_caller_lazy),
+) -> dict[str, Any]:
+    """Diagnostic-only: enqueue a no-op task. Returns task_id for status polling.
+
+    Auth-gated — anonymous enqueue would let an unauthenticated caller
+    spam the broker and burn worker capacity.
+    """
+    del caller
     from api.tasks.azure import diag_noop
 
     res = diag_noop.delay(message=message)
@@ -183,8 +195,18 @@ def celery_enqueue_noop(message: str = "diag-ping") -> dict[str, Any]:
 
 
 @router.get("/health/celery/result/{task_id}")
-def celery_task_result(task_id: str) -> dict[str, Any]:
-    """Diagnostic-only: get a celery task result without auth."""
+def celery_task_result(
+    task_id: str,
+    caller: CallerIdentity = Depends(_require_caller_lazy),
+) -> dict[str, Any]:
+    """Diagnostic-only: get a celery task result.
+
+    Auth-gated because task results can carry arbitrary payload (BLAST
+    metadata, ARM responses, error tracebacks containing subscription
+    ids). For per-user ownership enforcement use ``/api/operations/{id}``
+    or ``/api/tasks/{id}`` instead.
+    """
+    del caller
     from celery.result import AsyncResult
 
     from api.celery_app import celery_app

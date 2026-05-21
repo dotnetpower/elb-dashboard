@@ -1045,4 +1045,16 @@ export interface BlastTaxonomyRow {
     taxid: number;
     scientific_name: string;
   }>;
+  /** NCBI "Blast Name" group (viruses, bacteria, mammals, plants, …)
+   *  derived server-side from the lineage chain. */
+  blast_name?: string;
+  /** How the `organism` field was populated:
+   *  - "sscinames" — pulled from the BLAST output column (authoritative).
+   *  - "stitle"    — heuristic extraction from the subject title.
+   *  Empty when the row was bucketed as `unclassified`. */
+  organism_source?: string;
+  /** Set to "name_lookup" when the taxid was resolved server-side from
+   *  the organism name via NCBI eutils (i.e. the row originated from
+   *  the stitle fallback, not from a `staxids` column). */
+  taxid_source?: string;
 }

@@ -37,15 +37,19 @@ export function getFailureText(
   customStatus: Record<string, unknown> | null,
   job: Record<string, unknown>,
 ): string {
+  // Order: authoritative orchestrator-emitted error first, then step-level
+  // diagnostics, then live tail. Putting `step.last_output` last avoids
+  // surfacing benign helper log lines (e.g. "Upload workfiles") as the
+  // failure message when the real cause lives in `job.error` / `output.error`.
   const candidates = [
-    step?.error,
-    step?.output,
-    step?.last_output,
+    job.error,
     output?.error,
     output?.message,
     customStatus?.error,
     customStatus?.message,
-    job.error,
+    step?.error,
+    step?.output,
+    step?.last_output,
   ];
   for (const candidate of candidates) {
     const text = textValue(candidate).trim();

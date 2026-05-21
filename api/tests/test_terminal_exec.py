@@ -229,6 +229,30 @@ def test_run_writes_stdin_file_before_exec(
     assert "queries=x" in result["stdout"]
 
 
+def test_child_env_forces_pythonunbuffered(
+    exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Block-buffered Python children stall the dashboard for tens of seconds.
+
+    elastic-blast is a Python CLI; when its stdout is a pipe (as it is here)
+    Python defaults to 8 KB block buffering and lines arrive in a burst at
+    process end. The terminal sidecar must export PYTHONUNBUFFERED=1 so the
+    streaming NDJSON response sees each line in real time.
+    """
+    _install_stub(
+        tmp_path,
+        "az",
+        '#!/bin/bash\necho "PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-<unset>}"\n',
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+
+    from api.services import terminal_exec
+
+    result = terminal_exec.run(["az", "env"])
+    assert result["exit_code"] == 0
+    assert "PYTHONUNBUFFERED=1" in result["stdout"], result["stdout"]
+
+
 def test_run_rejects_unsafe_stdin_file(
     exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

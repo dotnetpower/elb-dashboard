@@ -277,6 +277,16 @@ case "$service" in
     with_terminal_exec_env
     with_local_storage_env
     cd "$project_root"
+    # Reap any orphaned celery worker processes from a previous run before
+    # spawning fresh ones. Without this the Redis broker accumulates multiple
+    # workers (each from a separate `worker: start`) and submit tasks land
+    # randomly on stale instances that still hold the pre-fix module code,
+    # silently re-introducing already-fixed bugs (see
+    # docs/features_change/2026-05/2026-05-22-blast-submit-pipeline-hardening.md).
+    pkill -TERM -f 'python3 -m celery -A api\.celery_app:celery_app worker' 2>/dev/null || true
+    pkill -TERM -f 'api/run_celery_workers\.py' 2>/dev/null || true
+    sleep 1
+    pkill -KILL -f 'python3 -m celery -A api\.celery_app:celery_app worker' 2>/dev/null || true
     exec "$run_with_log" worker -- uv run python api/run_celery_workers.py "$@"
     ;;
   beat)
@@ -284,6 +294,12 @@ case "$service" in
     with_celery_env
     with_local_storage_env
     cd "$project_root"
+    # Reap orphaned beat schedulers for the same reason as workers above. A
+    # leftover beat would double-fire periodic tasks (reconcile_stale_jobs,
+    # reconcile_auto_warmup, …) against the broker.
+    pkill -TERM -f 'celery -A api\.celery_app beat' 2>/dev/null || true
+    sleep 1
+    pkill -KILL -f 'celery -A api\.celery_app beat' 2>/dev/null || true
     exec "$run_with_log" beat -- uv run celery -A api.celery_app beat -l info --schedule=/tmp/elb-celerybeat-schedule --pidfile=/tmp/elb-celerybeat.pid "$@"
     ;;
   web)

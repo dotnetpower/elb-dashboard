@@ -56,6 +56,14 @@ _EXTERNAL_JOBS_CACHE_TTL_SECONDS = 70.0
 _EXTERNAL_JOBS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _EXTERNAL_JOBS_CACHE_LOCK = threading.Lock()
 _EXTERNAL_JOBS_INFLIGHT: dict[str, threading.Event] = {}
+# Negative cache: when ``list_jobs`` raises ``HTTPException`` (401 missing
+# token, 5xx upstream, ``openapi_not_configured`` 503, …) we cache the
+# exception for a short TTL so SPA polling (every ~14 s) doesn't keep paying
+# the 700-1500 ms upstream round-trip just to learn the same failure again.
+_EXTERNAL_JOBS_NEG_CACHE_TTL_SECONDS = float(
+    os.environ.get("EXTERNAL_JOBS_NEG_CACHE_TTL", "30.0")
+)
+_EXTERNAL_JOBS_NEG_CACHE: dict[str, tuple[float, HTTPException]] = {}
 _EXTERNAL_JOB_DETAIL_CACHE_TTL_SECONDS = 70.0
 _EXTERNAL_JOB_DETAIL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _EXTERNAL_SYNC_CACHE_TTL_SECONDS = 70.0
@@ -79,6 +87,9 @@ def _external_list_jobs_cached(external_kwargs: dict[str, Any]) -> list[dict[str
             entry = _EXTERNAL_JOBS_CACHE.get(key)
             if entry and entry[0] > now:
                 return entry[1]
+            neg = _EXTERNAL_JOBS_NEG_CACHE.get(key)
+            if neg and neg[0] > now:
+                raise neg[1]
             inflight = _EXTERNAL_JOBS_INFLIGHT.get(key)
             if inflight is None:
                 inflight = threading.Event()
@@ -96,10 +107,21 @@ def _external_list_jobs_cached(external_kwargs: dict[str, Any]) -> list[dict[str
             expires_at = _time.monotonic() + _EXTERNAL_JOBS_CACHE_TTL_SECONDS
             with _EXTERNAL_JOBS_CACHE_LOCK:
                 _EXTERNAL_JOBS_CACHE[key] = (expires_at, rows)
+                _EXTERNAL_JOBS_NEG_CACHE.pop(key, None)
                 if len(_EXTERNAL_JOBS_CACHE) > 32:
                     oldest = min(_EXTERNAL_JOBS_CACHE.items(), key=lambda kv: kv[1][0])[0]
                     _EXTERNAL_JOBS_CACHE.pop(oldest, None)
             return rows
+        except HTTPException as exc:
+            expires_at = _time.monotonic() + _EXTERNAL_JOBS_NEG_CACHE_TTL_SECONDS
+            with _EXTERNAL_JOBS_CACHE_LOCK:
+                _EXTERNAL_JOBS_NEG_CACHE[key] = (expires_at, exc)
+                if len(_EXTERNAL_JOBS_NEG_CACHE) > 32:
+                    oldest = min(
+                        _EXTERNAL_JOBS_NEG_CACHE.items(), key=lambda kv: kv[1][0]
+                    )[0]
+                    _EXTERNAL_JOBS_NEG_CACHE.pop(oldest, None)
+            raise
         finally:
             with _EXTERNAL_JOBS_CACHE_LOCK:
                 _EXTERNAL_JOBS_INFLIGHT.pop(key, None)
@@ -112,6 +134,7 @@ def _reset_external_jobs_cache() -> None:
     with _EXTERNAL_JOBS_CACHE_LOCK:
         _EXTERNAL_JOBS_CACHE.clear()
         _EXTERNAL_JOBS_INFLIGHT.clear()
+        _EXTERNAL_JOBS_NEG_CACHE.clear()
         _EXTERNAL_JOB_DETAIL_CACHE.clear()
         _EXTERNAL_SYNC_CACHE.clear()
         _OPENAPI_CLIENT_KWARGS_CACHE.clear()

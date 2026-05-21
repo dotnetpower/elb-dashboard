@@ -28,6 +28,7 @@ from api.routes._blast_shared import (
     _job_query_blob_path,
     _maybe_open_local_storage_access,
     _queries_blob_path,
+    _resolve_job_storage_account,
 )
 from api.routes.blast.result_helpers import (
     enqueue_result_artifact_backfill,
@@ -59,6 +60,7 @@ def blast_job_file(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     """Read a job file from storage (streamed through the api sidecar)."""
+    storage_account = _resolve_job_storage_account(job_id, storage_account)
     try:
         from api.services import get_credential
         from api.services.storage_data import read_blob_text
@@ -192,6 +194,7 @@ def blast_job_results(
 ) -> dict[str, Any]:
     """List result blobs for a BLAST job from storage."""
     _ensure_job_read_allowed(job_id, caller)
+    storage_account = _resolve_job_storage_account(job_id, storage_account)
     artifact = read_ready_result_artifact(job_id, "result_manifest")
     if artifact is not None:
         return artifact
@@ -282,6 +285,7 @@ def blast_job_results_aggregate(
 ) -> dict[str, Any]:
     """Parse result blobs and return aggregate statistics for analytics."""
     _ensure_job_read_allowed(job_id, caller)
+    storage_account = _resolve_job_storage_account(job_id, storage_account)
     artifact = read_ready_result_artifact(job_id, "result_aggregate")
     if artifact is not None:
         return artifact
@@ -354,6 +358,7 @@ def blast_job_results_download(
 ) -> StreamingResponse:
     """Stream a single result blob through the api sidecar."""
     _ensure_job_read_allowed(job_id, caller)
+    storage_account = _resolve_job_storage_account(job_id, storage_account)
     validate_result_blob_for_job(blob_name, job_id)
     from api.services import get_credential
     from api.services.storage_data import (
@@ -394,6 +399,7 @@ def blast_job_results_export(
     captured from `# Fields:` headers when available.
     """
     _ensure_job_read_allowed(job_id, caller)
+    storage_account = _resolve_job_storage_account(job_id, storage_account)
     import csv
     import io
     import json
@@ -498,6 +504,7 @@ def blast_job_result_file(
     `result-001`. The browser never receives a SAS URL in either path.
     """
     _ensure_job_read_allowed(job_id, caller)
+    storage_account = _resolve_job_storage_account(job_id, storage_account)
     try:
         from api.services.storage_data import (
             decode_blob_file_id,

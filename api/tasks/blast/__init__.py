@@ -29,6 +29,7 @@ from api.services.query_grouping import (
 from api.tasks.blast.progress import (
     _merge_progress_payload,  # noqa: F401  # re-exported for tests
     _phase_is_terminal_for_artifacts,  # noqa: F401  # re-exported for state + tests
+    _tail_text,  # noqa: F401  # re-exported for submit_task post-stream snapshot
 )
 from api.tasks.blast.split_constants import (  # noqa: F401  # re-exported for split_pipeline + tests
     QUERY_FASTA_READ_MAX_BYTES,

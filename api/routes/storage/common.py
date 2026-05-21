@@ -12,7 +12,10 @@ api/tests/test_storage_public_access.py`.
 
 from __future__ import annotations
 
+import os
 import re
+import threading
+import time
 from xml.etree import ElementTree
 
 from fastapi import HTTPException
@@ -37,12 +40,26 @@ def _check(value: str, pattern: re.Pattern[str], label: str) -> None:
 
 
 def _resolve_latest_dir() -> str:
-    """Return the latest snapshot directory name from NCBI."""
+    """Return the latest snapshot directory name from NCBI.
+
+    NCBI updates ``latest-dir`` once per snapshot day. We cache for 1 h
+    (env-overridable via ``NCBI_LATEST_DIR_CACHE_TTL``) so the prepare-db
+    + warmup paths don't make a fresh HTTP round-trip every call.
+    """
     import httpx
 
+    now = time.monotonic()
+    with _NCBI_CACHE_LOCK:
+        cached = _LATEST_DIR_CACHE.get(_NCBI_S3_BASE)
+        if cached and cached[0] > now:
+            return cached[1]
     resp = httpx.get(f"{_NCBI_S3_BASE}/latest-dir", timeout=15.0)
     resp.raise_for_status()
-    return resp.text.strip()
+    latest = resp.text.strip()
+    expires_at = time.monotonic() + _LATEST_DIR_CACHE_TTL_SECONDS
+    with _NCBI_CACHE_LOCK:
+        _LATEST_DIR_CACHE[_NCBI_S3_BASE] = (expires_at, latest)
+    return latest
 
 
 def _list_keys(latest_dir: str, db_name: str) -> list[str]:
@@ -50,9 +67,19 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
 
     NCBI publishes BLAST DBs as multiple sharded files plus a few small
     metadata files; for large DBs (``core_nt``, ``nr``) this is hundreds
-    of objects spread across paginated XML responses.
+    of objects spread across paginated XML responses. Result is cached for
+    ``NCBI_LIST_KEYS_CACHE_TTL`` (default 1 h) keyed by
+    ``(latest_dir, db_name)`` because the contents of a given snapshot
+    directory never change after NCBI publishes it.
     """
     import httpx
+
+    cache_key = (latest_dir, db_name)
+    now = time.monotonic()
+    with _NCBI_CACHE_LOCK:
+        cached = _LIST_KEYS_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            return list(cached[1])
 
     prefix = f"{latest_dir}/{db_name}"
     keys: list[str] = []
@@ -75,4 +102,28 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
                 continuation = tok.text if tok is not None and tok.text else ""
             else:
                 break
+    expires_at = time.monotonic() + _LIST_KEYS_CACHE_TTL_SECONDS
+    with _NCBI_CACHE_LOCK:
+        _LIST_KEYS_CACHE[cache_key] = (expires_at, list(keys))
+        if len(_LIST_KEYS_CACHE) > 64:
+            oldest = min(_LIST_KEYS_CACHE.items(), key=lambda kv: kv[1][0])[0]
+            _LIST_KEYS_CACHE.pop(oldest, None)
     return keys
+
+
+_LATEST_DIR_CACHE_TTL_SECONDS = float(
+    os.environ.get("NCBI_LATEST_DIR_CACHE_TTL", "3600.0")
+)
+_LIST_KEYS_CACHE_TTL_SECONDS = float(
+    os.environ.get("NCBI_LIST_KEYS_CACHE_TTL", "3600.0")
+)
+_LATEST_DIR_CACHE: dict[str, tuple[float, str]] = {}
+_LIST_KEYS_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
+_NCBI_CACHE_LOCK = threading.Lock()
+
+
+def reset_ncbi_catalogue_cache() -> None:
+    """Test hook: drop both NCBI catalogue caches."""
+    with _NCBI_CACHE_LOCK:
+        _LATEST_DIR_CACHE.clear()
+        _LIST_KEYS_CACHE.clear()

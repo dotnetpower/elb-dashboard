@@ -1,6 +1,7 @@
 import { FileText } from "lucide-react";
 
 import { StepLogSection } from "@/components/BlastStepTimeline";
+import { useStickToBottom } from "@/hooks/useStickToBottom";
 
 import type { BlastResultsState } from "./useBlastResultsState";
 
@@ -18,6 +19,21 @@ export function ExecutionStepsCard({ state }: ExecutionStepsCardProps) {
     resourceGroup,
     clusterName,
   } = state;
+  // Compose a content "version" that ticks whenever the run produces new
+  // output: phase change, last-write timestamp, and the submitting step's
+  // accumulated log line count. Each tick is a cue to scroll-to-bottom
+  // (only when the user is still anchored near the bottom — see hook).
+  const jobRecord = job as unknown as Record<string, unknown> | null;
+  const stepsForVersion =
+    (jobRecord?.output as
+      | { steps?: Record<string, Record<string, unknown>> }
+      | undefined)?.steps ?? {};
+  const submittingLines =
+    (stepsForVersion["submitting"]?.log_line_count as number | undefined) ?? 0;
+  const updatedAt = (jobRecord?.updated_at as string | undefined) ?? "";
+  const stickVersion = `${effectivePhase}|${updatedAt}|${submittingLines}`;
+  useStickToBottom({ version: stickVersion, enabled: Boolean(job) });
+
   if (!job) return null;
   return (
     <section className="glass-card" style={{ padding: "14px 16px" }}>

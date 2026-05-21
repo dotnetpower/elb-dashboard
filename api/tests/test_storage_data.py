@@ -437,3 +437,89 @@ def test_blob_service_accepts_valid_account_names() -> None:
     assert storage_data._STORAGE_ACCOUNT_NAME_RE.fullmatch("elbstg01")
     assert storage_data._STORAGE_ACCOUNT_NAME_RE.fullmatch("abc")
     assert storage_data._STORAGE_ACCOUNT_NAME_RE.fullmatch("a" * 24)
+
+
+class _FakeCredential:
+    """Stand-in TokenCredential — BlobServiceClient only needs ``get_token`` to
+    exist for construction; we never make a real network call in these tests.
+    """
+
+    def get_token(self, *_scopes, **_kw):  # pragma: no cover - never invoked
+        raise AssertionError("test must not trigger token acquisition")
+
+
+def test_blob_service_pool_returns_same_instance_for_same_account() -> None:
+    """Hot path: repeated lookups MUST return the cached client so azure-core
+    keeps its HTTP connection pool warm. Otherwise every list/download starts
+    a new TLS handshake.
+    """
+    cred = _FakeCredential()
+    storage_data.reset_blob_service_pool()
+    first = storage_data._blob_service(cred, "elbstg01")
+    second = storage_data._blob_service(cred, "elbstg01")
+    assert first is second
+    storage_data.reset_blob_service_pool()
+
+
+def test_blob_service_pool_distinct_per_account_and_credential() -> None:
+    """Key is (id(credential), account). Different account OR different
+    credential object MUST yield a fresh client so we never reuse a token
+    cache across identities.
+    """
+    cred1 = _FakeCredential()
+    cred2 = _FakeCredential()
+    storage_data.reset_blob_service_pool()
+    a = storage_data._blob_service(cred1, "elbstg01")
+    b = storage_data._blob_service(cred1, "elbstg02")
+    c = storage_data._blob_service(cred2, "elbstg01")
+    assert a is not b
+    assert a is not c
+    assert b is not c
+    storage_data.reset_blob_service_pool()
+
+
+def test_blob_service_pool_evicts_lru_when_over_capacity(monkeypatch) -> None:
+    """LRU eviction guard: workloads that touch many accounts (migrations,
+    multi-tenant inspections) MUST not grow the pool unboundedly. Oldest
+    entry is closed and dropped first.
+    """
+    cred = _FakeCredential()
+    storage_data.reset_blob_service_pool()
+    monkeypatch.setattr(storage_data, "_BLOB_SERVICE_POOL_MAX", 2)
+    closed: list[str] = []
+
+    a = storage_data._blob_service(cred, "elbstg01")
+    b = storage_data._blob_service(cred, "elbstg02")
+    # Wrap close on a so we can assert it ran during eviction.
+    original_close = a.close
+
+    def _capture_close():
+        closed.append("elbstg01")
+        original_close()
+
+    a.close = _capture_close  # type: ignore[method-assign]
+
+    c = storage_data._blob_service(cred, "elbstg03")
+    # a (oldest) should have been evicted and its close() invoked.
+    assert closed == ["elbstg01"]
+    assert b is not c
+    storage_data.reset_blob_service_pool()
+
+
+def test_reset_blob_service_pool_closes_clients() -> None:
+    """reset_blob_service_pool must close every pooled client so the HTTP
+    pool returns to the OS. Important on credential rotation in tests."""
+    cred = _FakeCredential()
+    storage_data.reset_blob_service_pool()
+    client = storage_data._blob_service(cred, "elbstg01")
+    closed: list[bool] = []
+    original_close = client.close
+
+    def _capture_close():
+        closed.append(True)
+        original_close()
+
+    client.close = _capture_close  # type: ignore[method-assign]
+    storage_data.reset_blob_service_pool()
+    assert closed == [True]
+

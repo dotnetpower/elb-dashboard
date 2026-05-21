@@ -345,7 +345,16 @@ def blast_job_execution_steps(
     job_id: str = Path(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    """Return the lightweight Execution Steps snapshot for a job."""
+    """Return the lightweight Execution Steps snapshot for a job.
+
+    The execution-steps blob is written ONCE by ``finalize_job_artifacts``
+    right when the job reaches a terminal phase. K8s pod log tails on
+    ``running.last_output`` and other trailing fields can still be backfilled
+    by reconcile beats AFTER that write, so the persisted blob can be
+    silently stale. Prefer the live Table-backed snapshot so trailing
+    backfill surfaces in the UI; fall back to the persisted blob only if
+    Table is unreachable.
+    """
     try:
         from api.services.job_artifacts import (
             artifact_state_payload,
@@ -361,6 +370,30 @@ def blast_job_execution_steps(
         if summary.owner_oid and summary.owner_oid != caller.object_id:
             raise HTTPException(403, "not owner")
 
+        live_state = None
+        live_error: Exception | None = None
+        try:
+            live_state = repo.get(job_id)
+        except Exception as exc:
+            live_error = exc
+            LOGGER.info(
+                "execution steps live state unavailable job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
+
+        if live_state is not None:
+            payload = build_execution_steps_snapshot(live_state)
+            artifact_state = artifact_state_payload(job_id, "execution_steps")
+            if artifact_state:
+                payload["artifact_state"] = artifact_state.get(
+                    "artifact_state", payload.get("artifact_state", "missing")
+                )
+                if artifact_state.get("error_code"):
+                    payload["artifact_error_code"] = artifact_state.get("error_code")
+            return payload
+
+        # Live read failed: fall back to the persisted snapshot blob.
         try:
             snapshot = read_execution_steps_snapshot(job_id)
         except Exception as exc:
@@ -373,16 +406,9 @@ def blast_job_execution_steps(
         if snapshot is not None:
             return {**snapshot, "artifact_state": "ready"}
 
-        state = repo.get(job_id)
-        if state is None:
-            raise HTTPException(404, "job not found")
-        fallback = build_execution_steps_snapshot(state)
-        artifact_state = artifact_state_payload(job_id, "execution_steps") or {
-            "artifact_state": "missing"
-        }
-        fallback["artifact_state"] = artifact_state.get("artifact_state", "missing")
-        fallback["artifact_error_code"] = artifact_state.get("error_code")
-        return fallback
+        if live_error is not None:
+            raise live_error
+        raise HTTPException(404, "job not found")
     except HTTPException:
         raise
     except Exception as exc:

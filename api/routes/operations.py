@@ -11,14 +11,19 @@ Validation: `uv run pytest -q api/tests/test_operations_route.py`.
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 from celery.result import AsyncResult
-from fastapi import APIRouter, Depends, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 
 from api.auth import CallerIdentity, require_caller
 from api.celery_app import celery_app
 from api.services.response_contracts import build_meta, build_operation, request_id_from_scope
+from api.services.state_repo import JobStateRepository
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/operations", tags=["operations"])
 
@@ -43,6 +48,40 @@ def _progress_payload(result: AsyncResult[Any]) -> dict[str, Any] | None:
     return None
 
 
+def _enforce_task_ownership(task_id: str, caller: CallerIdentity) -> None:
+    """Reject the request unless ``caller`` owns the JobState for ``task_id``.
+
+    Lookup misses (no JobState row — system / diag tasks such as
+    ``diag_noop``) are permitted: those tasks do not carry per-user
+    payload.
+
+    Lookup *failures* fail **closed** with 503: a transient table outage
+    or a credential blip must not be exploitable as an ownership bypass.
+    ``AUTH_DEV_BYPASS=true`` is the single exception — without a real
+    state backend the dev loop would otherwise hard-fail on every call,
+    and the dev-bypass synthetic identity is already trust-flagged.
+    """
+    try:
+        state = JobStateRepository().find_by_task_id(task_id)
+    except Exception as exc:
+        LOGGER.warning(
+            "operations ownership lookup failed task_id=%s err=%s",
+            task_id,
+            type(exc).__name__,
+        )
+        if os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true":
+            return
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "ownership_check_unavailable", "retryable": True},
+        ) from exc
+    if state is None:
+        return
+    owner = getattr(state, "owner_oid", None)
+    if owner and owner != caller.object_id:
+        raise HTTPException(status_code=403, detail="not owner")
+
+
 @router.get("/{operation_id}")
 def get_operation_status(
     request: Request,
@@ -55,7 +94,7 @@ def get_operation_status(
     centered on `operation_id` while preserving the existing task backend.
     """
 
-    del caller
+    _enforce_task_ownership(operation_id, caller)
     result: AsyncResult[Any] = AsyncResult(operation_id, app=celery_app)
     celery_status = str(result.status)
     state = _operation_state(celery_status)

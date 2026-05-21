@@ -226,13 +226,18 @@ def reconcile_stale_jobs(
                 err = (
                     _blast._snippet(celery_result) if celery_result is not None else "task_failed"
                 )
-                repo.update(
+                # Go through `_update_state` (which runs `_merge_progress_payload`)
+                # rather than `repo.update(...)` directly. The merge sweeps any
+                # orphan `status: "running"` step entries that the crashed worker
+                # left behind so the dashboard timeline does not keep spinning
+                # on, e.g., `submitting` while the parent row is `failed`.
+                _blast._update_state(
                     row.job_id,
+                    "failed",
                     status="failed",
-                    phase="failed",
+                    event="reconcile_celery_terminal",
                     error_code=err[:120],
                 )
-                _blast._enqueue_artifact_finalizer(row.job_id, "failed", "failed")
                 summary["failed"] += 1
                 continue
 
@@ -327,13 +332,16 @@ def reconcile_stale_jobs(
                 updated_at = now  # never mark recently-created rows lost
             quiet_seconds = (now - updated_at).total_seconds()
             if quiet_seconds >= stale_threshold_seconds:
-                repo.update(
+                # Mirror the FAILURE/REVOKED branch above: route through
+                # `_update_state` so orphan running step entries get demoted
+                # to `failed` and the UI stops spinning.
+                _blast._update_state(
                     row.job_id,
+                    "worker_lost",
                     status="failed",
-                    phase="worker_lost",
+                    event="reconcile_worker_lost",
                     error_code="worker_lost",
                 )
-                _blast._enqueue_artifact_finalizer(row.job_id, "worker_lost", "failed")
                 summary["worker_lost"] += 1
             else:
                 summary["untouched"] += 1

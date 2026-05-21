@@ -46,3 +46,18 @@ def test_masks_guids_when_requested() -> None:
 
 def test_returns_empty_for_none() -> None:
     assert sanitise(None) == ""
+
+
+def test_strips_ansi_csi_color_codes() -> None:
+    # elastic-blast / az / azcopy colour their stdout. The codes must not
+    # reach the JSON state, append-blob log artefacts, or the dashboard UI.
+    text = "\x1b[33m[parallel-prep] running 4 azcopy checks concurrently\x1b[0m"
+    out = sanitise(text, mask_subscription_ids=False)
+    assert out == "[parallel-prep] running 4 azcopy checks concurrently"
+    assert "\x1b" not in out
+
+
+def test_strips_ansi_with_cursor_and_erase_sequences() -> None:
+    text = "before\x1b[2K\x1b[1Gmiddle\x1b[K\x1b[31merror\x1b[0mafter"
+    out = sanitise(text, mask_subscription_ids=False)
+    assert out == "beforemiddleerrorafter"

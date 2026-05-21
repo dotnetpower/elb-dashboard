@@ -58,6 +58,26 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def _publish_db_metadata_invalidate(storage_account: str, database_name: str) -> None:
+    """Best-effort cross-sidecar cache invalidation.
+
+    The api sidecar's display-metadata cache is keyed by
+    ``(storage_account, database_name)``. This worker just rewrote the
+    underlying blob, so publish on the Redis channel that api sidecars
+    subscribe to. Never raises — see ``publish_blast_db_metadata_invalidate``.
+    """
+    try:
+        from api.services.blast_db_metadata import publish_blast_db_metadata_invalidate
+
+        publish_blast_db_metadata_invalidate(storage_account, database_name)
+    except Exception as exc:
+        LOGGER.debug(
+            "warmup_database invalidate publish skipped db=%s: %s",
+            database_name,
+            type(exc).__name__,
+        )
+
+
 def _update_state(job_id: str, phase: str, status: str = "running", **extra: Any) -> None:
     """Best-effort state update."""
     try:
@@ -237,6 +257,7 @@ def warmup_database(
                 pre.pop("sharding_error", None)
                 try:
                     bc.upload_blob(json.dumps(pre).encode("utf-8"), overwrite=True)
+                    _publish_db_metadata_invalidate(storage_account, database_name)
                 except Exception as exc:
                     LOGGER.warning(
                         "warmup_database pre-state write failed db=%s: %s",
@@ -267,6 +288,7 @@ def warmup_database(
                         final.setdefault(key, summary[key])
                 try:
                     bc.upload_blob(json.dumps(final).encode("utf-8"), overwrite=True)
+                    _publish_db_metadata_invalidate(storage_account, database_name)
                 except Exception as exc:
                     LOGGER.warning(
                         "warmup_database final-state write failed db=%s: %s",
@@ -312,6 +334,7 @@ def warmup_database(
                     err_meta["sharding_in_progress"] = False
                     err_meta["sharding_error"] = _sanitise(f"{type(exc).__name__}: {exc}")[:300]
                     bc2.upload_blob(_json.dumps(err_meta).encode("utf-8"), overwrite=True)
+                    _publish_db_metadata_invalidate(storage_account, database_name)
                 except Exception as marker_exc:
                     LOGGER.debug(
                         "warmup_database shard error marker failed db=%s: %s",

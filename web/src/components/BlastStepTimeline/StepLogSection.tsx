@@ -18,6 +18,20 @@ import { StepRow } from "./StepRow";
 import { getTimelineStepState } from "./stepState";
 import { useStepDurations } from "./useStepDurations";
 
+/**
+ * Remove the snapshot-derived live console / console output block from a
+ * pre-built step log so the SSE live stream can replace it without
+ * rendering the same content twice. The snapshot block is the substring
+ * starting at the first occurrence of any of the recognised headers
+ * (`--- Live Console Output ---`, `--- Console Output ---`) and extending
+ * to the end of the string, including any leading blank lines.
+ */
+export function stripConsoleOutputBlock(log: string): string {
+  if (!log) return "";
+  const re = /\n+(?:--- (?:Live )?Console Output ---)[\s\S]*$/;
+  return log.replace(re, "").trimEnd();
+}
+
 export function StepLogSection({
   phase,
   job,
@@ -150,6 +164,11 @@ export function StepLogSection({
             stepsData,
             failedStepIdx,
           });
+          // Default to expanded only for the currently-active step (or a
+          // failed step so the error block is visible without an extra
+          // click). Completed / pending steps stay collapsed by default so
+          // the timeline stays compact; the user's manual toggles persist
+          // in `expanded`.
           const isOpen = expanded[step.key] ?? (state === "active" || state === "error");
           const log = buildStepLog({
             key: step.key,
@@ -162,8 +181,15 @@ export function StepLogSection({
             jobId,
           });
           const liveLog = (liveLogsByPhase[step.key] ?? []).join("\n").trim();
+          // When the SSE stream has events for this step, it IS the live view.
+          // buildStepLog also embeds the JobState snapshot under a
+          // "--- Live Console Output ---" (or "--- Console Output ---")
+          // header, which is the SAME data captured up to ~15 s ago via the
+          // submit task's state-write debounce. Strip that snapshot block so
+          // we don't render the same content twice; keep the prologue
+          // ("Running elastic-blast submit..." + meta) before the stream.
           const combinedLog = liveLog
-            ? `${log ? `${log}\n\n` : ""}--- Live Stream ---\n${liveLog}`
+            ? `${stripConsoleOutputBlock(log ?? "")}\n\n--- Live Console Output ---\n${liveLog}`.trim()
             : log;
           const duration = getStepDuration(step.key, state);
           const extra = renderStepExtra(step.key, state, isOpen);

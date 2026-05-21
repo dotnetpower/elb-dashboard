@@ -18,7 +18,7 @@ import {
   identityColor,
   ncbiNuccoreUrl,
   numberValue,
-  shortBlobName,
+  organismFromStitle,
   taxidLabel,
 } from "./helpers";
 import {
@@ -46,8 +46,11 @@ export interface BlastHitsTableProps {
  * "Sequences producing significant alignments" panel. Adds bulk
  * selection, per-row deep links to NCBI nuccore + Graphics, and
  * groups the column meaning the same way NCBI does (Review badge,
- * Query, Accession, Organism, Description, HSP Cover, % Identity,
- * Length, E-value, Bit Score, Range, Source shard).
+ * Accession, Description, Scientific Name, HSP Cover, % Identity,
+ * Length, E-value, Bit Score, Range). The originating query is
+ * already selectable in the filter bar and visible in the Alignments
+ * tab, so it is not duplicated as a column here; the source shard is
+ * an internal artefact and is hidden from the table.
  */
 export function BlastHitsTable({
   hits,
@@ -136,10 +139,9 @@ export function BlastHitsTable({
                 />
               </th>
               <th style={{ textAlign: "left" }}>Review</th>
-              <th style={{ textAlign: "left" }}>Query</th>
               <th style={{ textAlign: "left" }}>Accession</th>
-              <th style={{ textAlign: "left" }}>Organism</th>
               <th style={{ textAlign: "left" }}>Description</th>
+              <th style={{ textAlign: "left" }}>Scientific Name</th>
               <SortableHeader
                 column="qcovs"
                 label="HSP Cover"
@@ -211,14 +213,6 @@ export function BlastHitsTable({
                       maxWidth: 150,
                     }}
                   >
-                    {hit.qseqid}
-                  </td>
-                  <td
-                    style={{
-                      fontFamily: "var(--font-mono, monospace)",
-                      maxWidth: 150,
-                    }}
-                  >
                     <a
                       href={ncbiNuccoreUrl(hit.sseqid)}
                       target="_blank"
@@ -234,11 +228,14 @@ export function BlastHitsTable({
                       <ExternalLink size={12} strokeWidth={1.5} />
                     </a>
                   </td>
-                  <td style={{ maxWidth: 180, color: "var(--text-muted)" }}>
-                    {hit.sscinames || taxidLabel(hit.staxids) || "—"}
-                  </td>
                   <td style={{ maxWidth: 280, color: "var(--text-muted)" }}>
                     {hit.stitle || "—"}
+                  </td>
+                  <td style={{ maxWidth: 180, color: "var(--text-muted)" }}>
+                    {hit.sscinames ||
+                      taxidLabel(hit.staxids) ||
+                      organismFromStitle(hit.stitle) ||
+                      "—"}
                   </td>
                   <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                     {formatPercent(hit.qcovs)}
@@ -322,15 +319,6 @@ export function BlastHitsTable({
                   </td>
                   <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                     {formatRange(hit.qstart, hit.qend)}
-                  </td>
-                  <td
-                    style={{
-                      maxWidth: 180,
-                      color: "var(--text-muted)",
-                      fontSize: 12,
-                    }}
-                  >
-                    {shortBlobName(hit.source_blob)}
                   </td>
                 </tr>
               );

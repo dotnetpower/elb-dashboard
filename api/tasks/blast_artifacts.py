@@ -18,6 +18,15 @@ from celery import shared_task
 LOGGER = logging.getLogger(__name__)
 
 
+# When pod log persistence returns empty (no targets discovered, fetch
+# failed, or pods haven't flushed yet) we schedule one or two delayed
+# retries so the snapshot eventually picks up the trailing tail. After
+# `_POD_LOG_RETRY_MAX` attempts we stop trying — by then the K8s log GC
+# has almost certainly evicted the pod logs anyway.
+_POD_LOG_RETRY_MAX = 3
+_POD_LOG_RETRY_COUNTDOWN_S = 60
+
+
 @shared_task(
     name="api.tasks.blast.artifacts.finalize_job_artifacts",
     bind=True,
@@ -26,7 +35,12 @@ LOGGER = logging.getLogger(__name__)
     retry_backoff_max=120,
     retry_jitter=True,
 )
-def finalize_job_artifacts(self: Any, *, job_id: str) -> dict[str, Any]:
+def finalize_job_artifacts(
+    self: Any,
+    *,
+    job_id: str,
+    pod_log_attempt: int = 1,
+) -> dict[str, Any]:
     """Persist immutable UI artifacts for a terminal BLAST job.
 
     Side effects: writes Execution Steps and result analytics artifacts to the
@@ -38,6 +52,7 @@ def finalize_job_artifacts(self: Any, *, job_id: str) -> dict[str, Any]:
         "job_id": job_id,
         "execution_steps": "skipped",
         "results": "skipped",
+        "pod_log_attempt": pod_log_attempt,
     }
     try:
         from api.services.job_artifacts import upsert_artifact_state, write_execution_steps_snapshot
@@ -54,6 +69,7 @@ def finalize_job_artifacts(self: Any, *, job_id: str) -> dict[str, Any]:
                 error_code="missing",
             )
             return {**summary, "status": "missing"}
+        pod_logs_empty = True
         try:
             from api.services import get_credential
             from api.services.job_logs.persist import persist_completed_job_pod_logs
@@ -61,6 +77,7 @@ def finalize_job_artifacts(self: Any, *, job_id: str) -> dict[str, Any]:
             persisted = persist_completed_job_pod_logs(get_credential(), state)
             if persisted:
                 summary["pod_logs"] = persisted
+                pod_logs_empty = False
                 # Re-read so the execution-steps snapshot picks up the merged
                 # last_output blobs we just wrote.
                 state = repo.get(job_id) or state
@@ -84,6 +101,25 @@ def finalize_job_artifacts(self: Any, *, job_id: str) -> dict[str, Any]:
                 storage_account,
             )
         upsert_artifact_state(job_id, "artifact_finalizer", status="ready")
+
+        # Pod logs may still be flushing at the K8s pod level right after the
+        # job container exits. If the first capture returned nothing,
+        # schedule a delayed self-retry so the snapshot can be re-built with
+        # the trailing tail once pods finish writing. Cap the retries — past
+        # that point the K8s log GC has likely evicted the pod logs anyway.
+        if pod_logs_empty and pod_log_attempt < _POD_LOG_RETRY_MAX:
+            try:
+                finalize_job_artifacts.apply_async(
+                    kwargs={"job_id": job_id, "pod_log_attempt": pod_log_attempt + 1},
+                    countdown=_POD_LOG_RETRY_COUNTDOWN_S,
+                )
+                summary["pod_log_retry_scheduled"] = True
+            except Exception as exc:
+                LOGGER.info(
+                    "finalize_job_artifacts: pod log retry enqueue skipped job_id=%s: %s",
+                    job_id,
+                    type(exc).__name__,
+                )
         return {**summary, "status": "completed"}
     except Exception as exc:
         LOGGER.warning("finalize_job_artifacts failed job_id=%s: %s", job_id, type(exc).__name__)

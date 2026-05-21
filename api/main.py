@@ -344,6 +344,19 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     a half-closed socket. See `api.routes.monitor._SidecarBroadcaster`.
     """
     try:
+        from api.services.blast_db_metadata import (
+            start_invalidate_subscriber,
+            stop_invalidate_subscriber,
+        )
+
+        start_invalidate_subscriber()
+    except Exception as exc:
+        LOGGER.warning(
+            "blast db metadata invalidate subscriber start failed: %s",
+            type(exc).__name__,
+        )
+        stop_invalidate_subscriber = None  # type: ignore[assignment]
+    try:
         yield
     finally:
         try:
@@ -352,6 +365,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await _SIDECAR_BROADCASTER.close()
         except Exception as exc:
             LOGGER.warning("sidecar broadcaster shutdown failed: %s", exc)
+        if stop_invalidate_subscriber is not None:
+            try:
+                stop_invalidate_subscriber()
+            except Exception as exc:
+                LOGGER.debug(
+                    "blast db metadata invalidate subscriber stop failed: %s",
+                    type(exc).__name__,
+                )
 
 
 def create_app() -> FastAPI:
@@ -390,6 +411,34 @@ def create_app() -> FastAPI:
     # ingress so this is a no-op.
     cors_origins = os.environ.get("CORS_ALLOW_ORIGINS", "").split(",")
     cors_origins = [o.strip() for o in cors_origins if o.strip()]
+    # `*` combined with `allow_credentials=True` is an OWASP-listed
+    # misconfiguration: Starlette emits `Access-Control-Allow-Origin: *`
+    # but browsers refuse to send credentials to a wildcard origin, so
+    # the effective behaviour is broken at best and a CSRF amplifier at
+    # worst (the server still echoes any request body and reads cookies
+    # if downgraded to a non-credentialed flow). Refuse the combination
+    # at boot — the deploy must list each trusted origin explicitly.
+    if "*" in cors_origins:
+        raise RuntimeError(
+            "CORS_ALLOW_ORIGINS='*' is not allowed because allow_credentials=True. "
+            "List the trusted origins explicitly (comma-separated)."
+        )
+    # ``null`` is the literal origin for sandboxed iframes / data: / file:
+    # contexts. Allowing it with ``allow_credentials=True`` would let any
+    # such context send authenticated requests — a textbook CSRF surface.
+    if "null" in [o.lower() for o in cors_origins]:
+        raise RuntimeError(
+            "CORS_ALLOW_ORIGINS contains 'null' which is a sandboxed-iframe origin; "
+            "this combination with allow_credentials=True is forbidden."
+        )
+    # Light syntactic validation: every entry must be a scheme://host string.
+    # Catches typos like ``localhost:8090`` (no scheme) that would otherwise
+    # silently disable CORS for the intended origin.
+    for origin in cors_origins:
+        if "://" not in origin or origin.endswith("://"):
+            raise RuntimeError(
+                f"CORS_ALLOW_ORIGINS entry {origin!r} is not a valid scheme://host origin"
+            )
     if cors_origins:
         app.add_middleware(
             CORSMiddleware,

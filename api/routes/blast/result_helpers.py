@@ -19,7 +19,11 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from api.services.blast_result_analytics import InvalidResultBlobName, validate_result_blob_name
+from api.services.blast_result_analytics import (
+    RESULTS_DEFAULT_PAGE_SIZE,
+    InvalidResultBlobName,
+    validate_result_blob_name,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -88,11 +92,18 @@ def default_alignments_request(
     sort_by: str,
     sort_dir: str,
 ) -> bool:
+    # The pre-baked artifact (built by `build_default_alignments_payload`)
+    # always uses `page_size = RESULTS_DEFAULT_PAGE_SIZE`. The SPA's
+    # default query also asks for that exact page size, so accept either
+    # an unset page_size (legacy callers) or the baked value — anything
+    # else is a user-chosen page size that must take the cold parse path
+    # so the artifact's pre-paginated slice is not served by mistake.
+    page_size_matches_artifact = page_size is None or page_size == RESULTS_DEFAULT_PAGE_SIZE
     return (
         not blob_name.strip()
         and max_alignments == 50
         and page == 1
-        and page_size is None
+        and page_size_matches_artifact
         and not query_id.strip()
         and not subject_id.strip()
         and not organism.strip()
@@ -117,6 +128,11 @@ def default_taxonomy_request(
     min_query_cover: float,
     include_lineage: bool,
 ) -> bool:
+    # The pre-baked taxonomy artifact (built by
+    # `build_default_taxonomy_payload`) now always enriches with
+    # lineage / blast_name. Accept callers that request lineage OR
+    # legacy callers that don't — both can serve the same artifact.
+    del include_lineage  # accepted regardless; artifact carries lineage either way
     return (
         not blob_name.strip()
         and not query_id.strip()
@@ -126,7 +142,6 @@ def default_taxonomy_request(
         and min_bitscore == 0.0
         and max_evalue == 10.0
         and min_query_cover == 0.0
-        and not include_lineage
     )
 
 

@@ -28,6 +28,10 @@ _BASE64_BLOB_RE = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-
 _CONN_STR_RE = re.compile(r"(?i)DefaultEndpointsProtocol=[^\s;]+(?:;[^\s;]+){2,}")
 # Password / secret values after common keys
 _PASSWORD_RE = re.compile(r"(?i)(password|passwd|pwd|secret|token)[\"'\s:=]+\S{8,}")
+# ANSI escape sequences (CSI: ESC [ ... letter). Strip so terminal colour codes
+# from elastic-blast / az / azcopy do not leak into JSON state, log artefacts,
+# or the dashboard UI.
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def sanitise(text: str | None, *, mask_subscription_ids: bool = True) -> str:
@@ -42,6 +46,7 @@ def sanitise(text: str | None, *, mask_subscription_ids: bool = True) -> str:
     if not text:
         return ""
     out = text
+    out = _ANSI_CSI_RE.sub("", out)
     out = _SAS_RE.sub("?<sas-redacted>", out)
     out = _BEARER_RE.sub("Bearer <redacted>", out)
     out = _AZURE_KEY_RE.sub(r"\1=<redacted>", out)

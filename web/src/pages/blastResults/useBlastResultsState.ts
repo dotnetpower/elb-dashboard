@@ -40,6 +40,14 @@ const FAST_POLL_PHASES = new Set([
 
 const FAST_POLL_INTERVAL_MS = 1_000;
 const STEADY_POLL_INTERVAL_MS = 3_000;
+// After a job reaches a terminal phase the worker / reconcile beat can still
+// backfill trailing artefacts (K8s pod log tails on `running.last_output`,
+// final export logs, …) for ~30 s. If we stop polling the moment phase flips
+// to `completed`/`failed`, the dashboard renders the partial snapshot
+// indefinitely (TanStack Query has no reason to refetch). Keep a slow
+// terminal poll going so trailing artefacts surface on the next tick.
+const TERMINAL_BACKFILL_POLL_INTERVAL_MS = 10_000;
+const TERMINAL_BACKFILL_WINDOW_MS = 5 * 60_000;
 
 const RESULTS_READY_PHASES = new Set([
   "completed",
@@ -73,12 +81,31 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     queryKey: ["blast-job", jobId],
     queryFn: () => blastApi.getJob(jobId!, { includeDatabaseMetadata: false }),
     enabled: Boolean(jobId),
+    // After the TERMINAL_BACKFILL_WINDOW_MS polling window ends, the page
+    // sits on whatever snapshot was current at the moment polling stopped.
+    // If the user comes back to the tab later (or remounts the page by
+    // navigating away and back), we want them to see the latest backfilled
+    // pod logs / export logs instead of the stale tail-end snapshot.
+    refetchOnWindowFocus: true,
+    refetchOnMount: "always",
     refetchInterval: (q) => {
       const d = q.state.data;
       if (!d) return FAST_POLL_INTERVAL_MS;
       const resolved = resolveBlastJobPhase(d);
       if (TERMINAL_PHASES.has(resolved.phase) || FAILURE_PHASES.has(resolved.phase)) {
-        return false;
+        // Keep polling slowly for a bounded window after the job reaches a
+        // terminal phase so the reconcile beat's trailing artefact writes
+        // (e.g., K8s pod log tails captured into `running.last_output`)
+        // surface in the UI. Stop entirely once the row has been stable
+        // long enough that no further backfill is expected.
+        const updatedAt = (d as { updated_at?: string }).updated_at;
+        if (typeof updatedAt === "string" && updatedAt) {
+          const ageMs = Date.now() - new Date(updatedAt).getTime();
+          if (Number.isFinite(ageMs) && ageMs > TERMINAL_BACKFILL_WINDOW_MS) {
+            return false;
+          }
+        }
+        return TERMINAL_BACKFILL_POLL_INTERVAL_MS;
       }
       return FAST_POLL_PHASES.has(resolved.phase)
         ? FAST_POLL_INTERVAL_MS
@@ -165,12 +192,33 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     queryFn: () => blastApi.getExecutionSteps(jobId!),
     enabled: Boolean(jobId && job && TERMINAL_PHASES.has(phaseInfo.phase)),
     staleTime: 10_000,
+    // Same rationale as jobQuery: refetch on tab focus / remount so a user
+    // who returns to the page hours later gets the latest live state
+    // instead of whatever the snapshot looked like when polling stopped.
+    refetchOnWindowFocus: true,
+    refetchOnMount: "always",
     refetchInterval: (q) => {
-      const state = q.state.data?.artifact_state;
-      if (!state || state === "ready" || state === "inline_fallback" || state === "missing") {
-        return false;
+      const data = q.state.data;
+      const artifactState = data?.artifact_state;
+      // While the artifact bundle is still being assembled we poll fast.
+      if (artifactState && artifactState !== "ready" && artifactState !== "inline_fallback" && artifactState !== "missing") {
+        return 5_000;
       }
-      return 5_000;
+      // After the artifact bundle is "ready" we KEEP polling at a slow
+      // cadence for the same TERMINAL_BACKFILL_WINDOW_MS used by the main
+      // job query. Reconcile beat appends K8s pod log tails into
+      // `running.last_output` AFTER the job is in `phase=completed`; if we
+      // stopped polling the moment artifact_state flipped to ready, the
+      // dashboard would render an execution-steps snapshot that is missing
+      // those tails forever (until the user manually refreshed).
+      const updatedAt = (data as { updated_at?: string } | undefined)?.updated_at;
+      if (typeof updatedAt === "string" && updatedAt) {
+        const ageMs = Date.now() - new Date(updatedAt).getTime();
+        if (Number.isFinite(ageMs) && ageMs > TERMINAL_BACKFILL_WINDOW_MS) {
+          return false;
+        }
+      }
+      return TERMINAL_BACKFILL_POLL_INTERVAL_MS;
     },
     retry: 3,
   });

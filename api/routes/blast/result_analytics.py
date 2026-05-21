@@ -19,7 +19,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from api.auth import CallerIdentity, require_caller
-from api.routes._blast_shared import _ensure_job_read_allowed, _maybe_open_local_storage_access
+from api.routes._blast_shared import (
+    _ensure_job_read_allowed,
+    _maybe_open_local_storage_access,
+    _resolve_job_storage_account,
+)
 from api.routes.blast.result_helpers import (
     default_alignments_request,
     default_taxonomy_request,
@@ -72,6 +76,7 @@ def blast_job_results_alignments(
 ) -> dict[str, Any]:
     """Return parsed alignments from result files, optionally filtered."""
     _ensure_job_read_allowed(job_id, caller)
+    storage_account = _resolve_job_storage_account(job_id, storage_account)
     if default_alignments_request(
         blob_name=blob_name,
         max_alignments=max_alignments,
@@ -267,6 +272,7 @@ def blast_job_results_taxonomy(
 ) -> dict[str, Any]:
     """Server-side organism rollup of the BLAST hits."""
     _ensure_job_read_allowed(job_id, caller)
+    storage_account = _resolve_job_storage_account(job_id, storage_account)
     if default_taxonomy_request(
         blob_name=blob_name,
         query_id=query_id,
@@ -377,7 +383,12 @@ def blast_job_results_taxonomy(
     ]
 
     organisms = rollup_taxonomy(filtered)
-    lineage_meta = {"requested": include_lineage, "looked_up": 0, "failed": 0}
+    lineage_meta = {
+        "requested": include_lineage,
+        "looked_up": 0,
+        "name_resolved": 0,
+        "failed": 0,
+    }
     if include_lineage and organisms:
         organisms, lineage_meta = enrich_taxonomy_with_lineage(
             organisms, taxid_limit=lineage_taxid_limit

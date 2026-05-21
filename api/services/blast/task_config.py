@@ -38,7 +38,9 @@ def snippet(value: object, limit: int = ERROR_SNIPPET_CHARS) -> str:
 
 def storage_url(storage_account: str, container: str, path: str = "") -> str:
     suffix = path.strip("/")
-    base = f"https://{storage_account}.blob.core.windows.net/{container}"
+    from api.services.storage_endpoint import blob_account_url
+
+    base = f"{blob_account_url(storage_account)}/{container}"
     return f"{base}/{suffix}" if suffix else base
 
 
@@ -80,7 +82,9 @@ def query_blob_path_from_query_file(*, storage_account: str, query_file: str) ->
 
     if raw.startswith("https://"):
         parsed = urlparse(raw)
-        expected_host = f"{storage_account}.blob.core.windows.net"
+        from api.services.storage_endpoint import blob_host_for_account
+
+        expected_host = blob_host_for_account(storage_account)
         if (parsed.hostname or "").lower() != expected_host.lower():
             raise ValueError("query_file URL must belong to the selected Storage account")
         parts = parsed.path.lstrip("/").split("/", 1)

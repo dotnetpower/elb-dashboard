@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -40,6 +40,7 @@ export function BlastResults() {
   const state = useBlastResultsState({ jobId, searchParams });
   const { job, isRunning, actions, subscriptionId, storageAccount, resourceGroup } =
     state;
+  const effectivePhase = state.effectivePhase;
   const hasExplicitTab = searchParams.has("tab");
   const justSubmitted = searchParams.get("submitted") === "1";
   const canRequestCancel =
@@ -51,6 +52,25 @@ export function BlastResults() {
     next.set("tab", "run");
     setSearchParams(next, { replace: true });
   }, [canRequestCancel, hasExplicitTab, searchParams, setSearchParams]);
+
+  // When the job transitions to `completed` while the user is still on the
+  // execution-timeline tab, auto-switch to the Descriptions analytics tab.
+  // We only fire this on the rising edge of the phase (previous value was
+  // non-completed) so a user who navigates BACK to "run" on an already
+  // completed job is not flipped away again. The transition is captured
+  // here in the URL so deep-link / back-button stays predictable.
+  const previousPhaseRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = previousPhaseRef.current;
+    previousPhaseRef.current = effectivePhase;
+    if (!effectivePhase || !jobId) return;
+    if (previous === effectivePhase) return;
+    if (effectivePhase !== "completed") return;
+    if (tab !== "run") return;
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", "descriptions");
+    setSearchParams(next, { replace: true });
+  }, [effectivePhase, jobId, tab, searchParams, setSearchParams]);
 
   const isResultAnalyticsTab =
     tab === "descriptions" ||

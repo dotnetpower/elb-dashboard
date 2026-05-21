@@ -13,9 +13,13 @@ api/tests/test_blast_tasks.py`.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import os
 import re
+import threading
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -91,19 +95,283 @@ def resolve_database_display_metadata(
     from. We merge the workload Storage catalogue (dynamic counts and snapshot
     date) with a small built-in catalogue for stable NCBI descriptions such as
     ``core_nt``.
+
+    Cached for ``BLAST_DB_METADATA_CACHE_TTL`` (default 24 h) keyed by
+    ``(storage_account, db_name, database)``. Concurrent callers on a cache
+    miss coordinate via a single-flight Event so only one of them pays the
+    2-4 Storage blob round-trips; the rest reuse the result.
     """
     db_name = extract_db_name(database)
     if not db_name:
         return None
 
-    info: dict[str, Any] = {}
-    if storage_account:
-        blastdb_json = resolve_blastdb_json_metadata(storage_account, db_name) or {}
-        storage_metadata = resolve_db_metadata(storage_account, db_name) or {}
-        info = {**blastdb_json, **storage_metadata}
+    cache_key = (storage_account or "", db_name, database or "")
+    while True:
+        now = time.monotonic()
+        with _DISPLAY_METADATA_CACHE_LOCK:
+            cached = _DISPLAY_METADATA_CACHE.get(cache_key)
+            if cached and cached[0] > now:
+                # Return a deep copy so caller mutations do not poison the
+                # cache. Cost is negligible compared to the saved Storage
+                # round-trips.
+                return copy.deepcopy(cached[1])
+            inflight = _DISPLAY_METADATA_INFLIGHT.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _DISPLAY_METADATA_INFLIGHT[cache_key] = inflight
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            # Wait briefly for the leader to populate the cache, then retry
+            # the lookup. Timeout matches the typical Storage round-trip
+            # upper bound plus a safety margin; on timeout we fall through
+            # to leader-elect ourselves rather than block forever.
+            inflight.wait(timeout=15.0)
+            continue
+        try:
+            info: dict[str, Any] = {}
+            if storage_account:
+                blastdb_json = resolve_blastdb_json_metadata(storage_account, db_name) or {}
+                storage_metadata = resolve_db_metadata(storage_account, db_name) or {}
+                info = {**blastdb_json, **storage_metadata}
 
-    metadata = database_display_metadata_from_info(db_name, info, fallback_database=database)
-    return metadata or None
+            metadata = database_display_metadata_from_info(
+                db_name, info, fallback_database=database
+            )
+            result = metadata or None
+            expires_at = time.monotonic() + _DISPLAY_METADATA_CACHE_TTL_SECONDS
+            with _DISPLAY_METADATA_CACHE_LOCK:
+                _DISPLAY_METADATA_CACHE[cache_key] = (expires_at, result)
+                if len(_DISPLAY_METADATA_CACHE) > 256:
+                    oldest = min(
+                        _DISPLAY_METADATA_CACHE.items(), key=lambda kv: kv[1][0]
+                    )[0]
+                    _DISPLAY_METADATA_CACHE.pop(oldest, None)
+            return copy.deepcopy(result)
+        finally:
+            with _DISPLAY_METADATA_CACHE_LOCK:
+                _DISPLAY_METADATA_INFLIGHT.pop(cache_key, None)
+                inflight.set()
+
+
+# DB display metadata changes only when an admin reruns ``prepare-db`` (or a
+# `warmup_database` shard step rewrites the layout). Routes that mutate the
+# underlying metadata.json blob MUST call ``invalidate_blast_db_metadata_cache``
+# so the next read picks up the new value before the TTL expires. With
+# explicit invalidation the TTL can be long (24 h) without serving stale data.
+_DISPLAY_METADATA_CACHE_TTL_SECONDS = float(
+    os.environ.get("BLAST_DB_METADATA_CACHE_TTL", "86400.0")
+)
+_DISPLAY_METADATA_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any] | None]] = {}
+_DISPLAY_METADATA_CACHE_LOCK = threading.Lock()
+_DISPLAY_METADATA_INFLIGHT: dict[tuple[str, str, str], threading.Event] = {}
+
+
+def invalidate_blast_db_metadata_cache(
+    storage_account: str | None = None,
+    db_name: str | None = None,
+) -> int:
+    """Drop cached display metadata for one DB or for a whole account.
+
+    - ``(account, db)`` both set: remove only the exact key.
+    - ``account`` only: remove every entry for that account.
+    - both ``None``: clear the cache entirely (equivalent to the test reset).
+
+    Returns the number of entries removed. Safe to call from any sidecar:
+    pure in-process state, no I/O, no Azure SDK touch. Cross-sidecar
+    invalidation is handled separately (Redis pub/sub) when needed.
+    """
+    account_key = (storage_account or "").strip()
+    db_key = (db_name or "").strip()
+    with _DISPLAY_METADATA_CACHE_LOCK:
+        if not account_key and not db_key:
+            removed = len(_DISPLAY_METADATA_CACHE)
+            _DISPLAY_METADATA_CACHE.clear()
+            _DISPLAY_METADATA_INFLIGHT.clear()
+            return removed
+        to_drop: list[tuple[str, str, str]] = []
+        for key in _DISPLAY_METADATA_CACHE:
+            key_account, key_db, _key_db_input = key
+            if account_key and key_account != account_key:
+                continue
+            if db_key and key_db != db_key:
+                continue
+            to_drop.append(key)
+        for key in to_drop:
+            _DISPLAY_METADATA_CACHE.pop(key, None)
+        return len(to_drop)
+
+
+def _reset_blast_db_metadata_cache() -> None:
+    """Test hook: drop the cached merged display metadata."""
+
+    invalidate_blast_db_metadata_cache()
+
+
+# ---------------------------------------------------------------------------
+# Cross-sidecar invalidation via Redis pub/sub.
+#
+# The cache is process-local. ``warmup_database`` (worker sidecar) and
+# ``prepare-db`` (api sidecar) both rewrite ``{db}-metadata.json``, and a
+# write in one process must drop the cache in the other. We use the existing
+# ``OPS_REDIS_URL`` Redis db (already used by event_emitter, openapi_runtime,
+# auto_warmup_reconcile) and a single channel.
+#
+# Reliability tier: best-effort, at-most-once. If the message is lost the
+# TTL (default 24h) bounds the staleness; if pub/sub itself is unavailable
+# the producer logs at debug and continues, never raising into the caller.
+# ---------------------------------------------------------------------------
+_INVALIDATE_CHANNEL = os.environ.get(
+    "BLAST_DB_METADATA_INVALIDATE_CHANNEL",
+    "elb:cache:blast-db-metadata",
+)
+
+
+def publish_blast_db_metadata_invalidate(
+    storage_account: str | None = None,
+    db_name: str | None = None,
+) -> bool:
+    """Best-effort Redis publish to invalidate the cache in peer sidecars.
+
+    Returns ``True`` if the publish succeeded, ``False`` on any failure
+    (including when ``BLAST_DB_METADATA_INVALIDATE_DISABLED=true``). Never
+    raises — Redis being unreachable is a known degraded state we accept
+    (TTL bounds the staleness window).
+    """
+    if os.environ.get("BLAST_DB_METADATA_INVALIDATE_DISABLED", "").lower() == "true":
+        return False
+    try:
+        import redis
+
+        url = os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
+        client = redis.Redis.from_url(url, socket_timeout=1.5)
+        payload = json.dumps(
+            {"account": storage_account or "", "db": db_name or ""},
+            separators=(",", ":"),
+        )
+        client.publish(_INVALIDATE_CHANNEL, payload)
+        return True
+    except Exception as exc:
+        LOGGER.debug(
+            "blast db metadata invalidate publish skipped: %s",
+            type(exc).__name__,
+        )
+        return False
+
+
+def notify_blast_db_metadata_changed(
+    storage_account: str | None = None,
+    db_name: str | None = None,
+) -> None:
+    """Local invalidate + cross-sidecar publish in one call.
+
+    Routes and tasks that rewrite ``{db}-metadata.json`` should call this
+    after the write so the very next read picks up the new value, regardless
+    of which sidecar serves it.
+    """
+    invalidate_blast_db_metadata_cache(storage_account, db_name)
+    publish_blast_db_metadata_invalidate(storage_account, db_name)
+
+
+_INVALIDATE_SUBSCRIBER_THREAD: threading.Thread | None = None
+_INVALIDATE_SUBSCRIBER_STOP: threading.Event | None = None
+_INVALIDATE_SUBSCRIBER_LOCK = threading.Lock()
+
+
+def start_invalidate_subscriber() -> threading.Thread | None:
+    """Start the background pub/sub listener (idempotent).
+
+    Spawned from the api sidecar's FastAPI lifespan. The worker / beat
+    sidecars don't hold the cache so they don't subscribe — they only
+    publish. Reconnects on Redis errors with exponential backoff capped
+    at 30 s. Honours ``BLAST_DB_METADATA_INVALIDATE_DISABLED=true`` (set
+    by tests so pytest never spawns the daemon thread).
+    """
+    if os.environ.get("BLAST_DB_METADATA_INVALIDATE_DISABLED", "").lower() == "true":
+        return None
+    global _INVALIDATE_SUBSCRIBER_THREAD, _INVALIDATE_SUBSCRIBER_STOP
+    with _INVALIDATE_SUBSCRIBER_LOCK:
+        if _INVALIDATE_SUBSCRIBER_THREAD is not None and _INVALIDATE_SUBSCRIBER_THREAD.is_alive():
+            return _INVALIDATE_SUBSCRIBER_THREAD
+        stop_event = threading.Event()
+
+        def _run() -> None:
+            import redis
+
+            backoff = 1.0
+            while not stop_event.is_set():
+                pubsub = None
+                try:
+                    url = os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
+                    client = redis.Redis.from_url(url, socket_timeout=5)
+                    pubsub = client.pubsub(ignore_subscribe_messages=True)
+                    pubsub.subscribe(_INVALIDATE_CHANNEL)
+                    backoff = 1.0
+                    # Use get_message(timeout=1.0) instead of listen() so the
+                    # stop_event is checked at least once per second. listen()
+                    # would block forever on an idle connection and the
+                    # subscriber thread would leak past shutdown.
+                    while not stop_event.is_set():
+                        message = pubsub.get_message(timeout=1.0)
+                        if not message:
+                            continue
+                        data = message.get("data")
+                        if not isinstance(data, (bytes, bytearray)):
+                            continue
+                        try:
+                            payload = json.loads(bytes(data).decode("utf-8"))
+                        except Exception as exc:
+                            LOGGER.debug(
+                                "blast db metadata invalidate payload decode skipped: %s",
+                                type(exc).__name__,
+                            )
+                            continue
+                        if not isinstance(payload, dict):
+                            continue
+                        account = (str(payload.get("account") or "")).strip() or None
+                        db = (str(payload.get("db") or "")).strip() or None
+                        invalidate_blast_db_metadata_cache(account, db)
+                except Exception as exc:
+                    LOGGER.info(
+                        "blast db metadata invalidate subscriber retry: %s",
+                        type(exc).__name__,
+                    )
+                    if stop_event.wait(timeout=backoff):
+                        break
+                    backoff = min(backoff * 2, 30.0)
+                finally:
+                    if pubsub is not None:
+                        try:
+                            pubsub.close()
+                        except Exception as exc:
+                            LOGGER.debug(
+                                "blast db metadata invalidate pubsub close skipped: %s",
+                                type(exc).__name__,
+                            )
+
+        _INVALIDATE_SUBSCRIBER_STOP = stop_event
+        _INVALIDATE_SUBSCRIBER_THREAD = threading.Thread(
+            target=_run,
+            daemon=True,
+            name="elb-cache-invalidate-sub",
+        )
+        _INVALIDATE_SUBSCRIBER_THREAD.start()
+        return _INVALIDATE_SUBSCRIBER_THREAD
+
+
+def stop_invalidate_subscriber(timeout: float = 1.0) -> None:
+    """Signal the subscriber thread to exit. Best-effort join."""
+    global _INVALIDATE_SUBSCRIBER_THREAD, _INVALIDATE_SUBSCRIBER_STOP
+    with _INVALIDATE_SUBSCRIBER_LOCK:
+        stop_event = _INVALIDATE_SUBSCRIBER_STOP
+        thread = _INVALIDATE_SUBSCRIBER_THREAD
+        _INVALIDATE_SUBSCRIBER_STOP = None
+        _INVALIDATE_SUBSCRIBER_THREAD = None
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout)
 
 
 def resolve_blastdb_json_metadata(storage_account: str, db_name: str) -> dict[str, Any] | None:

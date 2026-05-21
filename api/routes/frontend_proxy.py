@@ -36,7 +36,35 @@ _HOP_BY_HOP = {
     "content-length",  # let httpx compute
 }
 
+# Headers the proxy must STRIP for security, even though they are not
+# hop-by-hop. The frontend sidecar only serves static SPA assets — it has
+# no use for the caller's MSAL bearer token, and forwarding the token
+# means it lands in the sidecar's nginx access log and any future
+# upstream middleware. ``cookie`` is unused today but stripped for
+# defence-in-depth: if a future browser feature ever sets one, the
+# proxy must not pass it on to the nginx sidecar by accident. The
+# ``x-forwarded-*`` auth variants cover reverse-proxy chains (some
+# ingress controllers add them automatically) so an unaware setup
+# cannot launder the bearer through to nginx via an indirect header.
+_FRONTEND_STRIP_HEADERS = {
+    "authorization",
+    "cookie",
+    "x-elb-api-token",
+    "x-forwarded-authorization",
+    "x-forwarded-user",
+    "x-forwarded-access-token",
+    "x-forwarded-id-token",
+}
+
 router = APIRouter(tags=["frontend"])
+
+# Methods that have NO meaning for a static-asset frontend. CONNECT / TRACE
+# are commonly used in CSRF / cache-poisoning probes; static assets only
+# need GET / HEAD / OPTIONS in practice but we also keep POST / PUT /
+# PATCH / DELETE so a SPA-side feature that ever calls a frontend-served
+# JSON endpoint is not broken. The api router list is registered before
+# this catch-all so /api/* never reaches us.
+_FRONTEND_ALLOWED_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 
 # Module-level client so connection pool is reused across requests.
 _client: httpx.AsyncClient | None = None
@@ -75,11 +103,40 @@ async def reverse_proxy(full_path: str, request: Request) -> Response:
             media_type="application/json",
         )
 
+    # Path validation: reject characters that have no legitimate place in
+    # a static asset URL and that frequently appear in path-traversal /
+    # log-injection probes. The validation runs even though httpx /
+    # FastAPI will reject most of these later, because (a) we want a
+    # uniform 400 response shape and (b) some malformed paths reach the
+    # frontend nginx sidecar and pollute its access log.
+    if ".." in full_path:
+        return Response(
+            content='{"detail":"path contains parent-traversal segment"}',
+            status_code=400,
+            media_type="application/json",
+        )
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in full_path):
+        return Response(
+            content='{"detail":"path contains control characters"}',
+            status_code=400,
+            media_type="application/json",
+        )
+    if request.method.upper() not in _FRONTEND_ALLOWED_METHODS:
+        return Response(
+            content='{"detail":"method not allowed for frontend assets"}',
+            status_code=405,
+            media_type="application/json",
+        )
+
     upstream_url = "/" + full_path
     if request.url.query:
         upstream_url = f"{upstream_url}?{request.url.query}"
 
-    upstream_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    upstream_headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in _HOP_BY_HOP and k.lower() not in _FRONTEND_STRIP_HEADERS
+    }
 
     client = _get_client()
     try:

@@ -17,8 +17,11 @@ export function getTimelineStepState({
   const step = stepsData[key];
   if (isStepSkipped(step)) return "skipped";
   if (isStepCompleted(step)) return "done";
-  if (isStepRunning(step)) return "active";
-  if (phase === "completed") return "done";
+  // A parent job in a failure phase must never render a spinner. Orphan
+  // `status: "running"` step entries can survive when the worker crashes
+  // mid-step and the top-level row is later reconciled to `failed` without
+  // a payload merge. Resolve the failure path BEFORE isStepRunning so the
+  // affected step shows as error/done/skipped instead of an infinite spin.
   if (FAILURE_PHASES.has(phase)) {
     if (failedStepIdx >= 0) {
       if (idx < failedStepIdx) return "done";
@@ -29,6 +32,8 @@ export function getTimelineStepState({
     if (stepHasEvidence(step)) return "done";
     return "skipped";
   }
+  if (isStepRunning(step)) return "active";
+  if (phase === "completed") return "done";
 
   const currentPhaseIdx = resolveActiveStepIndex(phase, stepsData);
   if (currentPhaseIdx < 0) return "pending";

@@ -51,12 +51,36 @@ def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
     return {"db_name": db_name}
 
 
-def _write_db_metadata(container: Any, db_name: str, payload: dict[str, Any]) -> None:
+def _write_db_metadata(
+    container: Any,
+    db_name: str,
+    payload: dict[str, Any],
+    *,
+    account_name: str,
+) -> None:
     metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
     metadata_blob.upload_blob(
         json.dumps(payload, sort_keys=True).encode("utf-8"),
         overwrite=True,
     )
+    # Drop the merged display-metadata cache so /api/blast/jobs/{id} picks up
+    # the new title / sequence count / sharded badge on the next read instead
+    # of waiting up to ``BLAST_DB_METADATA_CACHE_TTL`` (default 24 h). Invoked
+    # for every prepare-db write — start, success, failure — so the UI never
+    # shows stale state after an admin action. Best-effort: cache invalidation
+    # must not fail the metadata write. ``notify_*`` also publishes to the
+    # Redis pub/sub channel so the worker / beat sidecars (and any peer api
+    # replica) drop their copies too.
+    try:
+        from api.services.blast_db_metadata import notify_blast_db_metadata_changed
+
+        notify_blast_db_metadata_changed(account_name, db_name)
+    except Exception as exc:
+        LOGGER.debug(
+            "db metadata cache invalidate skipped db=%s: %s",
+            db_name,
+            type(exc).__name__,
+        )
 
 
 @router.post("/prepare-db")
@@ -128,8 +152,10 @@ def prepare_db(
     # is involved, no public network toggle is performed.
     from azure.storage.blob import BlobServiceClient
 
+    from api.services.storage_endpoint import blob_account_url
+
     blob_svc = BlobServiceClient(
-        account_url=f"https://{account_name}.blob.core.windows.net",
+        account_url=blob_account_url(account_name),
         credential=cred,
     )
     container = blob_svc.get_container_client("blast-db")
@@ -146,7 +172,7 @@ def prepare_db(
         start_metadata.pop("update_failed_at", None)
         if previous_source_version and previous_source_version != latest_dir:
             start_metadata["previous_source_version"] = previous_source_version
-        _write_db_metadata(container, db_name, start_metadata)
+        _write_db_metadata(container, db_name, start_metadata, account_name=account_name)
     except Exception as exc:
         LOGGER.warning(
             "prepare_db update-start metadata write failed for %s: %s",
@@ -209,7 +235,7 @@ def prepare_db(
                     f"copy initiation failed for {errors} of {len(all_keys)} files"
                 )
                 failed_metadata["update_failed_at"] = datetime.now(UTC).isoformat()
-                _write_db_metadata(container, db_name, failed_metadata)
+                _write_db_metadata(container, db_name, failed_metadata, account_name=account_name)
             except Exception as exc:
                 LOGGER.warning(
                     "prepare_db update-failure metadata write failed for %s: %s",
@@ -295,7 +321,7 @@ def prepare_db(
                 if oracle.get("source_version") and oracle.get("source_version") != latest_dir:
                     oracle["status"] = "stale"
                 final_metadata["db_order_oracle"] = oracle
-            _write_db_metadata(container, db_name, final_metadata)
+            _write_db_metadata(container, db_name, final_metadata, account_name=account_name)
         except Exception as e:
             LOGGER.warning("metadata write failed for %s: %s", db_name, sanitise(str(e))[:200])
 

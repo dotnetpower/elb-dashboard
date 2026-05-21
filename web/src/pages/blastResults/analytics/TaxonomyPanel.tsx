@@ -33,6 +33,11 @@ interface TaxonomyRow {
   bestEvalue: number | null;
   topBitscore: number | null;
   lineageEx?: Array<{ rank: string; taxid: number; scientific_name: string }>;
+  /** NCBI BLAST "Name" group (viruses / bacteria / mammals / plants /
+   *  …). Populated server-side from the lineage chain. */
+  blastName?: string;
+  organismSource?: string;
+  taxidSource?: string;
 }
 
 /**
@@ -79,7 +84,12 @@ export function TaxonomyPanel({
         min_query_cover:
           applied.minQueryCover > 0 ? applied.minQueryCover : undefined,
         max_evalue: applied.maxEvalue,
-        include_lineage: view === "lineage",
+        // Always request lineage. The server uses it to fill in the
+        // NCBI-style "Blast Name" column on the default Organism view,
+        // and the per-taxid eutils calls are cached so the second tab
+        // switch is free. Cost ≤ ~20 cached HTTP requests for the
+        // top-N organisms.
+        include_lineage: true,
       }),
     enabled: Boolean(jobId && subscriptionId && storageAccount && !resultsPending),
     staleTime: 60_000,
@@ -97,6 +107,9 @@ export function TaxonomyPanel({
       bestEvalue: row.best_evalue,
       topBitscore: row.top_bitscore,
       lineageEx: row.lineage_ex,
+      blastName: row.blast_name,
+      organismSource: row.organism_source,
+      taxidSource: row.taxid_source,
     }));
   }, [taxonomyQuery.data, serverDegraded]);
 
@@ -272,6 +285,7 @@ function OrganismTable({ rows, topHitsPerOrg }: OrganismTableProps) {
         <thead>
           <tr>
             <th style={{ textAlign: "left" }}>Organism</th>
+            <th style={{ textAlign: "left" }}>Blast Name</th>
             <th style={{ textAlign: "left" }}>Taxid</th>
             <th style={{ textAlign: "right" }}>Hits</th>
             <th style={{ textAlign: "right" }}>Best E-value</th>
@@ -285,6 +299,24 @@ function OrganismTable({ rows, topHitsPerOrg }: OrganismTableProps) {
               <td style={{ fontWeight: 500 }}>
                 {row.organism ||
                   (row.taxid ? `taxid:${row.taxid}` : "Unclassified")}
+                {row.organismSource === "stitle" && (
+                  <span
+                    className="muted"
+                    style={{ marginLeft: 6, fontSize: 11 }}
+                    title="Resolved from the subject title (best-effort, not from sscinames)."
+                  >
+                    ~
+                  </span>
+                )}
+              </td>
+              <td>
+                {row.blastName ? (
+                  <span className="muted" style={{ textTransform: "lowercase" }}>
+                    {row.blastName}
+                  </span>
+                ) : (
+                  <span className="muted">—</span>
+                )}
               </td>
               <td>
                 {row.taxid ? (
@@ -298,7 +330,11 @@ function OrganismTable({ rows, topHitsPerOrg }: OrganismTableProps) {
                       gap: 4,
                       alignItems: "center",
                     }}
-                    title="Open in NCBI Taxonomy Browser"
+                    title={
+                      row.taxidSource === "name_lookup"
+                        ? "Taxid resolved via NCBI Taxonomy by organism name (BLAST output lacked staxids)."
+                        : "Open in NCBI Taxonomy Browser"
+                    }
                   >
                     {row.taxid}
                     <ExternalLink size={11} strokeWidth={1.5} />

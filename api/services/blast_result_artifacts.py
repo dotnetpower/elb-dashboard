@@ -25,6 +25,7 @@ from api.services.blast_result_analytics import (
     RESULTS_DEFAULT_PAGE_SIZE,
     RESULTS_MAX_FILES,
     annotate_result_hit,
+    enrich_taxonomy_with_lineage,
     list_parseable_result_blobs,
     result_hit_matches_filters,
     result_hit_rank_aggregates,
@@ -331,6 +332,7 @@ def build_default_alignments_payload(job_id: str, storage_account: str) -> dict[
     page_hits = filtered[:page_size]
     page_count = (len(filtered) + page_size - 1) // page_size
     return {
+        "artifact_schema_version": 2,
         "job_id": job_id,
         "blob_name": read["blob_names"][0] if len(read["blob_names"]) == 1 else "",
         "blob_names": read["blob_names"],
@@ -371,7 +373,32 @@ def build_default_taxonomy_payload(job_id: str, storage_account: str) -> dict[st
     )
     hits = list(read["hits"])
     organisms = rollup_taxonomy(hits)
+    lineage_meta: dict[str, Any] = {
+        "requested": True,
+        "looked_up": 0,
+        "name_resolved": 0,
+        "failed": 0,
+    }
+    # Bake lineage / blast_name once on the worker so the SPA's default
+    # Taxonomy open (which always sends `include_lineage=true`) can serve
+    # the artifact and skip the eutils round-trip on the request thread.
+    # The taxid_limit mirrors the route default (20) — only top-20
+    # organisms get the NCBI lookup, which is cheap (cached) and bounded.
+    if organisms:
+        try:
+            organisms, lineage_meta = enrich_taxonomy_with_lineage(
+                organisms, taxid_limit=20
+            )
+        except Exception as exc:
+            # Lineage enrichment is best-effort; never fail the artifact
+            # bake because of an upstream eutils hiccup.
+            LOGGER.info(
+                "default taxonomy artifact: lineage enrichment skipped job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
     return {
+        "artifact_schema_version": 2,
         "job_id": job_id,
         "organisms": organisms,
         "total_hits": len(hits),
@@ -380,7 +407,7 @@ def build_default_taxonomy_payload(job_id: str, storage_account: str) -> dict[st
         "total_files": read["total_files"],
         "read_failures": read["read_failures"],
         "truncated": read["truncated"],
-        "lineage": {"requested": False, "looked_up": 0, "failed": 0},
+        "lineage": lineage_meta,
     }
 
 

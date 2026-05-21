@@ -63,4 +63,70 @@ describe("BLAST step state", () => {
       }),
     ).toBe("done");
   });
+
+  it("never renders a spinner when the parent job is in a failure phase", () => {
+    // Guards against the orphan-`running` step bug: a Celery worker crash
+    // leaves `submitting.status="running"` while the top-level row is later
+    // reconciled to `failed`. The timeline must show error/skipped, never
+    // active (which would spin forever).
+    const stepsData = {
+      preparing: { status: "completed", success: true },
+      warming_up: { status: "completed", success: true },
+      configuring: { status: "completed", success: true },
+      staging_db: { status: "skipped", skipped: true },
+      submitting: {
+        status: "running",
+        last_output: "Upload workfiles",
+        submit_progress: { index: 4, label: "Uploading workfiles", total: 5 },
+      },
+    };
+
+    expect(
+      getTimelineStepState({
+        phase: "failed",
+        idx: SUBMITTING_INDEX,
+        key: "submitting",
+        stepsData,
+        failedStepIdx: SUBMITTING_INDEX,
+      }),
+    ).toBe("error");
+
+    // Even without a resolved failedStepIdx, the running step must not
+    // render as active under a failure phase.
+    expect(
+      getTimelineStepState({
+        phase: "failed",
+        idx: SUBMITTING_INDEX,
+        key: "submitting",
+        stepsData,
+        failedStepIdx: -1,
+      }),
+    ).not.toBe("active");
+  });
+
+  it("activates BLAST Run while phase is the transit `submitted` (post-submit, pre-pod)", () => {
+    // `submitted` is the gap between the submit task completing and the
+    // first `poll_running_status` tick reporting pods=Running. Without
+    // PHASE_TO_STEP["submitted"], every step would resolve to "pending"
+    // and the timeline would sit silent for 10-30 s.
+    const RUNNING_INDEX = 5;
+    const stepsData = {
+      preparing: { status: "completed", success: true },
+      warming_up: { status: "completed", success: true },
+      configuring: { status: "completed", success: true },
+      staging_db: { status: "skipped", skipped: true },
+      submitting: { status: "completed", success: true },
+    };
+
+    expect(resolveActiveStepIndex("submitted", stepsData)).toBe(RUNNING_INDEX);
+    expect(
+      getTimelineStepState({
+        phase: "submitted",
+        idx: RUNNING_INDEX,
+        key: "running",
+        stepsData,
+        failedStepIdx: -1,
+      }),
+    ).toBe("active");
+  });
 });

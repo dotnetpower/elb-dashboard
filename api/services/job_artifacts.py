@@ -45,6 +45,29 @@ _ANALYTICS_ARTIFACT_TYPES = {
     "result_taxonomy": "results/taxonomy.json",
 }
 
+# Minimum payload `artifact_schema_version` a baked analytics artifact
+# must declare to be considered fresh. Bump the entry below — and the
+# `artifact_schema_version` field emitted by the matching builder in
+# `blast_result_artifacts.py` — whenever the payload semantics change.
+# Artifacts with a lower or missing version are treated as stale, the
+# state row is flipped to `failed` so `artifact_build_should_enqueue`
+# returns True, and the next request triggers a rebuild.
+#
+# 2026-05-22 v2 — `rollup_taxonomy` gained the stitle organism
+# fallback and `build_default_taxonomy_payload` now enriches with
+# lineage / blast_name. Older "ready" artifacts must be rebuilt.
+#
+# IMPORTANT: a builder whose minimum is N MUST stamp its payload with
+# `"artifact_schema_version": N` (or higher), otherwise the bake would
+# write a payload that the next read immediately marks stale → infinite
+# rebuild loop. Builders for types with minimum 0 may skip the stamp.
+_ANALYTICS_ARTIFACT_MIN_SCHEMA_VERSION = {
+    "result_manifest": 0,
+    "result_aggregate": 0,
+    "result_alignments": 2,
+    "result_taxonomy": 2,
+}
+
 
 @dataclass(frozen=True)
 class ArtifactState:
@@ -107,8 +130,10 @@ def _ensure_artifacts_container(account_name: str) -> None:
     key = (account_name, ARTIFACTS_CONTAINER)
     if key in _ENSURED_CONTAINERS:
         return
+    from api.services.storage_endpoint import blob_account_url
+
     client = BlobServiceClient(
-        account_url=f"https://{account_name}.blob.core.windows.net",
+        account_url=blob_account_url(account_name),
         credential=get_credential(),
         retry_total=0,
         connection_timeout=5,
@@ -420,4 +445,40 @@ def write_result_analytics_artifact(
 
 
 def read_result_analytics_artifact(job_id: str, artifact_type: str) -> dict[str, Any] | None:
-    return read_json_artifact(job_id, artifact_type, max_bytes=_ANALYTICS_JSON_MAX_BYTES)
+    payload = read_json_artifact(job_id, artifact_type, max_bytes=_ANALYTICS_JSON_MAX_BYTES)
+    if payload is None:
+        return None
+    minimum = _ANALYTICS_ARTIFACT_MIN_SCHEMA_VERSION.get(artifact_type, 1)
+    raw_version = payload.get("artifact_schema_version")
+    try:
+        actual = int(raw_version) if raw_version is not None else 0
+    except (TypeError, ValueError):
+        actual = 0
+    if actual < minimum:
+        # Stale payload from a previous code version. Flip the state row
+        # to `failed` so `artifact_build_should_enqueue` triggers a
+        # rebuild on the next request, and behave as if the artifact
+        # were missing for this read.
+        try:
+            upsert_artifact_state(
+                job_id,
+                artifact_type,
+                status="failed",
+                error_code="schema_stale",
+            )
+        except Exception:
+            LOGGER.debug(
+                "artifact stale state flip failed job_id=%s type=%s",
+                job_id,
+                artifact_type,
+                exc_info=True,
+            )
+        LOGGER.info(
+            "artifact schema stale job_id=%s type=%s actual=%s minimum=%s",
+            job_id,
+            artifact_type,
+            actual,
+            minimum,
+        )
+        return None
+    return payload

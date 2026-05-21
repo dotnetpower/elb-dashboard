@@ -30,6 +30,10 @@ nav:
   - Deployment Reference: deployment-reference.md
   - Auth: auth.md
   - Change Log: changelog.md
+  - Releases:
+      - Overview: releases/index.md
+      - Unreleased: releases/unreleased.md
+      - v0.1.0: releases/v0.1.0.md
   - User Guide:
       - Guide Home: user-guide/index.md
       - Dashboard: user-guide/dashboard.md

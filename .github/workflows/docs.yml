@@ -9,6 +9,7 @@ on:
       - docs/**
       - web/**
       - scripts/docs/**
+      - scripts/dev/render_release_notes.py
       - pyproject.toml
       - uv.lock
       - .github/workflows/docs.yml
@@ -29,6 +30,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history + tags so render_release_notes.py can scan the range
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -51,6 +54,14 @@ jobs:
       - name: Install web dependencies
         working-directory: web
         run: npm install --no-package-lock
+
+      - name: Refresh Unreleased release notes
+        run: |
+          python3 scripts/dev/render_release_notes.py \
+            --version "Unreleased" \
+            --auto-from-last-tag \
+            --to HEAD \
+            --out docs/releases/unreleased.md
 
       - name: Build mock UI preview
         run: bash scripts/docs/build-mock-preview.sh

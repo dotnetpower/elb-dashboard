@@ -15,7 +15,9 @@ import base64
 import binascii
 import logging
 import re
+import threading
 import zlib
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from typing import Any, cast
 
@@ -68,18 +70,76 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
     # names are 3-24 lowercase alphanumeric characters.
     if not _STORAGE_ACCOUNT_NAME_RE.fullmatch(account_name):
         raise ValueError(f"invalid storage account name: {account_name!r}")
-    # Fail fast on network-blocked accounts (publicNetworkAccess: Disabled)
-    # instead of letting the SDK retry for ~30s. The api sidecar is the only
-    # legitimate caller in production and reaches Storage via the private
-    # endpoint, so failures here mean either RBAC deny or local dev — both of
-    # which want a quick degraded response, not a long retry storm.
-    return BlobServiceClient(
-        account_url=f"https://{account_name}.blob.core.windows.net",
-        credential=credential,
-        retry_total=0,
-        connection_timeout=5,
-        read_timeout=10,
-    )
+    # Process-shared pool keyed by (id(credential), account_name). Reusing
+    # the same BlobServiceClient lets azure-core keep its HTTP connection
+    # pool warm across calls (saves the TLS handshake on every list/download)
+    # and avoids re-running the credential discovery on first use. The
+    # ``id(credential)`` half of the key means we never reuse a client built
+    # against a different credential object (token leak guard); in normal
+    # operation ``get_credential()`` is a process-wide singleton so the key
+    # is effectively just the account name.
+    pool_key = (id(credential), account_name)
+    evicted_clients: list[BlobServiceClient] = []
+    with _BLOB_SERVICE_POOL_LOCK:
+        cached = _BLOB_SERVICE_POOL.get(pool_key)
+        if cached is not None:
+            _BLOB_SERVICE_POOL.move_to_end(pool_key)
+            return cached
+        # Fail fast on network-blocked accounts (publicNetworkAccess: Disabled)
+        # instead of letting the SDK retry for ~30s. The api sidecar is the
+        # only legitimate caller in production and reaches Storage via the
+        # private endpoint, so failures here mean either RBAC deny or local
+        # dev — both of which want a quick degraded response, not a long
+        # retry storm.
+        from api.services.storage_endpoint import blob_account_url
+
+        client = BlobServiceClient(
+            account_url=blob_account_url(account_name),
+            credential=credential,
+            retry_total=0,
+            connection_timeout=5,
+            read_timeout=10,
+        )
+        _BLOB_SERVICE_POOL[pool_key] = client
+        while len(_BLOB_SERVICE_POOL) > _BLOB_SERVICE_POOL_MAX:
+            _evicted_key, evicted = _BLOB_SERVICE_POOL.popitem(last=False)
+            evicted_clients.append(evicted)
+    # Close evicted clients outside the lock — BlobServiceClient.close()
+    # tears down the underlying HTTP pool and may do synchronous IO; we
+    # must not hold the pool lock while that happens or every other caller
+    # blocks behind a slow shutdown.
+    for evicted in evicted_clients:
+        try:
+            evicted.close()
+        except Exception as exc:
+            LOGGER.debug(
+                "blob service evict-close failed: %s", type(exc).__name__
+            )
+    return client
+
+
+_BLOB_SERVICE_POOL_MAX = 32
+_BLOB_SERVICE_POOL: OrderedDict[tuple[int, str], BlobServiceClient] = OrderedDict()
+_BLOB_SERVICE_POOL_LOCK = threading.Lock()
+
+
+def reset_blob_service_pool() -> None:
+    """Drop every pooled BlobServiceClient.
+
+    Test hook plus a safety valve for ``reset_credential()`` callers: holding
+    on to a client built against a stale credential object would leak its
+    token cache. Closing the clients releases the underlying HTTP pools.
+    """
+    with _BLOB_SERVICE_POOL_LOCK:
+        clients = list(_BLOB_SERVICE_POOL.values())
+        _BLOB_SERVICE_POOL.clear()
+    for client in clients:
+        try:
+            client.close()
+        except Exception as exc:
+            LOGGER.debug(
+                "blob service reset-close failed: %s", type(exc).__name__
+            )
 
 
 _STORAGE_ACCOUNT_NAME_RE = re.compile(r"^[a-z0-9]{3,24}$")

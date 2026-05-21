@@ -814,6 +814,36 @@ def test_external_jobs_cache_serves_repeat_requests(monkeypatch):
     assert hits["count"] == 1
 
 
+def test_external_jobs_cache_caches_http_failures(monkeypatch):
+    """``HTTPException`` from the upstream MUST be cached for a short TTL so
+    SPA polling doesn't keep paying the 700-1500 ms round-trip to learn the
+    same 401 again. Subsequent calls within the TTL re-raise the cached
+    exception without invoking the upstream.
+    """
+    from api.routes import _blast_shared as shared
+    from api.services import external_blast
+
+    hits = {"count": 0}
+
+    def fail_with_401(**_kwargs):
+        hits["count"] += 1
+        raise HTTPException(
+            401,
+            detail={"code": "openapi_http_401", "detail": "missing token"},
+        )
+
+    monkeypatch.setattr(external_blast, "list_jobs", fail_with_401)
+
+    with pytest.raises(HTTPException) as first:
+        shared._external_list_jobs_cached({"base_url": "http://cluster"})
+    with pytest.raises(HTTPException) as second:
+        shared._external_list_jobs_cached({"base_url": "http://cluster"})
+
+    assert first.value.status_code == 401
+    assert second.value.status_code == 401
+    assert hits["count"] == 1
+
+
 def test_canonical_jobs_list_reports_external_detail_code(monkeypatch):
     """Runtime failures from the external plane (5xx, network, timeout) MUST
     still surface as ``external_degraded`` so operators can see real outages

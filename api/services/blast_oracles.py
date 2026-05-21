@@ -156,10 +156,10 @@ def db_order_oracle_part_urls(
     )
     if len(part_names) < expected_parts:
         return []
-    return [
-        f"https://{storage_account}.blob.core.windows.net/blast-db/{name}"
-        for name in part_names
-    ]
+    from api.services.storage_endpoint import blob_account_url
+
+    base = blob_account_url(storage_account)
+    return [f"{base}/blast-db/{name}" for name in part_names]
 
 
 def _normalise_tie_order_oracle(value: object) -> tuple[str, int] | None:

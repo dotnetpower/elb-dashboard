@@ -156,6 +156,27 @@ def _validate_token(token: str) -> CallerIdentity:
         LOGGER.warning("token validation failed: %s", exc)
         raise AuthError(status.HTTP_401_UNAUTHORIZED, f"invalid token: {exc}") from exc
 
+    # Defence-in-depth: explicitly verify the ``tid`` (tenant id) claim
+    # in addition to the issuer URL check above. The issuer list already
+    # constrains tokens to ``login.microsoftonline.com/<tenant>/v2.0``
+    # and ``sts.windows.net/<tenant>/``, but a future regression that
+    # broadens the issuer list (e.g. accepts ``common``) would otherwise
+    # silently let cross-tenant tokens through. ``tid`` is a mandatory
+    # AAD claim and equals the issuer's tenant for a correctly-issued
+    # token, so a mismatch indicates either tampering, a misconfigured
+    # multi-tenant App Registration, or the regression we want to catch.
+    token_tid = claims.get("tid")
+    if not token_tid or str(token_tid).lower() != tenant_id.lower():
+        LOGGER.warning(
+            "token tenant mismatch: claim tid=%s expected=%s",
+            token_tid,
+            tenant_id,
+        )
+        raise AuthError(
+            status.HTTP_401_UNAUTHORIZED,
+            "token tenant_id does not match configured AZURE_TENANT_ID",
+        )
+
     oid = claims.get("oid")
     if not oid:
         raise AuthError(status.HTTP_401_UNAUTHORIZED, "token missing 'oid' claim")

@@ -188,3 +188,68 @@ def test_worker_command_rejects_untrusted_queue_values() -> None:
 
     with pytest.raises(ValueError, match="invalid concurrency"):
         run_celery_workers._worker_command("worker-main", "default", "0")
+
+
+def test_read_result_analytics_artifact_treats_missing_schema_as_stale(monkeypatch) -> None:
+    """A baked payload without `artifact_schema_version` (i.e. from a
+    pre-v2 code version) must be returned as None, AND the state row
+    must be flipped to `failed` so the next request triggers a rebuild.
+    Locks in the auto-invalidation contract that backs the
+    2026-05-22 Descriptions / Taxonomy fast-path fix."""
+    stale_payload = {
+        "job_id": "job-1",
+        "organisms": [{"key": "unclassified", "organism": "", "count": 100}],
+        # No `artifact_schema_version` field — simulates a v1 payload
+        # written by a pre-Phase-2 worker.
+    }
+    monkeypatch.setattr(
+        job_artifacts,
+        "read_json_artifact",
+        lambda *_args, **_kwargs: stale_payload,
+    )
+    upserts: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda *args, **kwargs: upserts.append({**kwargs, "args": list(args)}),
+    )
+
+    result = job_artifacts.read_result_analytics_artifact("job-1", "result_taxonomy")
+
+    assert result is None
+    assert len(upserts) == 1
+    assert upserts[0]["status"] == "failed"
+    assert upserts[0]["error_code"] == "schema_stale"
+
+
+def test_read_result_analytics_artifact_returns_fresh_payload(monkeypatch) -> None:
+    """Payloads that meet the schema floor pass through unchanged and
+    the state row is left alone."""
+    fresh_payload = {
+        "artifact_schema_version": 2,
+        "job_id": "job-1",
+        "organisms": [
+            {
+                "key": "monkeypox virus",
+                "organism": "Monkeypox virus",
+                "count": 100,
+                "blast_name": "viruses",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        job_artifacts,
+        "read_json_artifact",
+        lambda *_args, **_kwargs: fresh_payload,
+    )
+    upserts: list[object] = []
+    monkeypatch.setattr(
+        job_artifacts,
+        "upsert_artifact_state",
+        lambda *args, **kwargs: upserts.append((args, kwargs)),
+    )
+
+    result = job_artifacts.read_result_analytics_artifact("job-1", "result_taxonomy")
+
+    assert result == fresh_payload
+    assert upserts == []

@@ -80,6 +80,12 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
         # Diagnostic endpoint references subscription ids — must be auth-gated
         # so the ingress does not leak tenant topology to anonymous callers.
         ("GET", "/api/health/azure-discovery"),
+        # Celery diagnostic endpoints leak broker URL / worker stats /
+        # arbitrary task results and accept anonymous enqueue. Auth-gated
+        # since 2026-05-22 (security-audit #3).
+        ("GET", "/api/health/celery"),
+        ("POST", "/api/health/celery/enqueue-noop"),
+        ("GET", "/api/health/celery/result/some-task-id"),
     ],
 )
 def test_auth_required_endpoints_reject_anonymous(
@@ -1198,3 +1204,257 @@ def test_azure_discovery_probe_sanitises_subscription_ids(
     assert body["subscriptions_list"]["count_capped_at_5"] == 1
     assert body["resource_groups_list"]["status"] == "ok"
     assert body["resource_groups_list"]["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Security audit (2026-05-22): #6 ownership + #7 audit sanitisation
+# ---------------------------------------------------------------------------
+def test_operations_status_returns_403_when_owner_differs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/api/operations/{id}` must reject callers who do not own the task."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.routes import operations
+
+    other_owner_state = SimpleNamespace(owner_oid="another-oid-not-the-dev-bypass")
+
+    class FakeRepo:
+        def find_by_task_id(self, _task_id: str) -> object:
+            return other_owner_state
+
+    monkeypatch.setattr(operations, "JobStateRepository", lambda: FakeRepo(), raising=True)
+
+    class _UnusedAR:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            raise AssertionError("ownership rejection should short-circuit")
+
+    monkeypatch.setattr(operations, "AsyncResult", _UnusedAR)
+
+    r = client.get("/api/operations/task-foreign")
+    assert r.status_code == 403
+    assert r.json().get("detail") == "not owner"
+
+
+def test_tasks_status_returns_403_when_owner_differs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/api/tasks/{id}` (legacy alias) must enforce the same ownership gate."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.routes import tasks as tasks_mod
+
+    other_owner_state = SimpleNamespace(owner_oid="another-oid-not-the-dev-bypass")
+
+    class FakeRepo:
+        def find_by_task_id(self, _task_id: str) -> object:
+            return other_owner_state
+
+    monkeypatch.setattr(tasks_mod, "JobStateRepository", lambda: FakeRepo(), raising=True)
+
+    class _UnusedAR:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            raise AssertionError("ownership rejection should short-circuit")
+
+    monkeypatch.setattr(tasks_mod, "AsyncResult", _UnusedAR)
+
+    r = client.get("/api/tasks/task-foreign")
+    assert r.status_code == 403
+
+
+def test_operations_status_allows_when_no_jobstate(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """System / diag tasks without a JobState row stay reachable."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.routes import operations
+
+    class FakeRepo:
+        def find_by_task_id(self, _task_id: str) -> object:
+            return None
+
+    monkeypatch.setattr(operations, "JobStateRepository", lambda: FakeRepo(), raising=True)
+
+    class FakeAsyncResult:
+        status = "SUCCESS"
+
+        def __init__(self, task_id: str, **_kw: object) -> None:
+            self.task_id = task_id
+            self.info = None
+            self.result = {"diag": "noop"}
+
+        def ready(self) -> bool:
+            return True
+
+        def successful(self) -> bool:
+            return True
+
+        def failed(self) -> bool:
+            return False
+
+    monkeypatch.setattr(operations, "AsyncResult", FakeAsyncResult)
+
+    r = client.get("/api/operations/diag-task-id")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["celery"]["status"] == "SUCCESS"
+    assert body["result"] == {"diag": "noop"}
+
+
+def test_audit_log_payload_is_sanitised(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/api/audit/log` must redact SAS / bearer tokens before responding."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    sas_url = "https://stx.blob.core.windows.net/c/q.fa?sv=2024-11-04&sig=ABCDEF1234567890&se=x"
+    raw_payload = (
+        '{"download_url": "' + sas_url + '", '
+        '"hint": "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature"}'
+    )
+
+    class FakeJob:
+        job_id = "job-1"
+        type = "blast"
+
+    class FakeRepo:
+        def list_for_owner(self, _oid: str, limit: int = 50) -> list[FakeJob]:
+            return [FakeJob()]
+
+        def get_history(self, _job_id: str, limit: int = 20) -> list[dict[str, object]]:
+            return [
+                {
+                    "event": "submitted",
+                    "ts": "2026-05-22T00:00:00Z",
+                    "payload_json": raw_payload,
+                }
+            ]
+
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: FakeRepo(),
+        raising=True,
+    )
+
+    r = client.get("/api/audit/log")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["events"], "expected at least one event"
+    payload = body["events"][0]["payload"]
+    assert "sig=" not in payload, "SAS query string leaked"
+    assert "<sas-redacted>" in payload
+    assert "Bearer <redacted>" in payload
+
+
+def test_operations_fails_closed_when_state_repo_raises_in_production(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without AUTH_DEV_BYPASS the ownership lookup must fail **closed**.
+
+    A transient state-repo failure (table not found, credential blip,
+    network) MUST NOT be exploitable as an ownership bypass. The route
+    returns 503 ``ownership_check_unavailable`` so the caller knows to
+    retry instead of getting silently authorised.
+    """
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    from api.auth import _dev_bypass_identity, require_caller
+    from api.main import app
+    from api.routes import operations
+
+    # Skip the real MSAL validation so we can exercise the ownership path
+    # itself; the goal of this test is the fail-closed branch, not the
+    # bearer parser.
+    app.dependency_overrides[require_caller] = _dev_bypass_identity
+    try:
+
+        class ExplodingRepo:
+            def find_by_task_id(self, _task_id: str) -> object:
+                raise RuntimeError("table not found")
+
+        monkeypatch.setattr(operations, "JobStateRepository", lambda: ExplodingRepo())
+
+        class _UnusedAR:
+            def __init__(self, *_a: object, **_kw: object) -> None:
+                raise AssertionError("fail-closed must short-circuit AsyncResult")
+
+        monkeypatch.setattr(operations, "AsyncResult", _UnusedAR)
+
+        r = client.get("/api/operations/task-foreign")
+        assert r.status_code == 503
+        # Custom exception handler in api.main unwraps dict details, so
+        # ``{"code": ..., "retryable": ...}`` is the response body itself.
+        body = r.json()
+        assert body.get("code") == "ownership_check_unavailable"
+        assert body.get("retryable") is True
+    finally:
+        app.dependency_overrides.pop(require_caller, None)
+
+
+def test_operations_fail_open_in_dev_bypass(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under AUTH_DEV_BYPASS the same failure must degrade open (dev loop)."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.routes import operations
+
+    class ExplodingRepo:
+        def find_by_task_id(self, _task_id: str) -> object:
+            raise RuntimeError("AZURE_TABLE_ENDPOINT is not set")
+
+    monkeypatch.setattr(operations, "JobStateRepository", lambda: ExplodingRepo())
+
+    class FakeAsyncResult:
+        status = "PENDING"
+
+        def __init__(self, task_id: str, **_kw: object) -> None:
+            self.task_id = task_id
+            self.info = None
+            self.result = None
+
+        def ready(self) -> bool:
+            return False
+
+        def successful(self) -> bool:
+            return False
+
+        def failed(self) -> bool:
+            return False
+
+    monkeypatch.setattr(operations, "AsyncResult", FakeAsyncResult)
+
+    r = client.get("/api/operations/dev-task")
+    assert r.status_code == 200
+    assert r.json()["celery"]["status"] == "PENDING"
+
+
+def test_audit_log_error_branch_is_sanitised(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback ``error`` string must redact SAS / GUID / keys too.
+
+    State-repo / Storage SDK exceptions routinely embed the account URL,
+    a server-generated request id GUID, and sometimes a SAS query string
+    in the message. The raw exception text is fine for the server-side
+    log but never the HTTP body.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    sub_id = "11111111-2222-3333-4444-555555555555"
+    sas_qs = "?sv=2024-11-04&sig=ZZZZZZZZZZZZZZZZZZZZ&se=2026-12-31"
+    leaky_message = f"GET https://stx.blob.core.windows.net/c/q{sas_qs} failed for sub={sub_id}"
+
+    def _exploding_repo() -> object:
+        raise RuntimeError(leaky_message)
+
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        _exploding_repo,
+        raising=True,
+    )
+
+    r = client.get("/api/audit/log")
+    assert r.status_code == 200
+    body = r.json()
+    err = body.get("error", "")
+    assert err, "expected the sanitised error fallback string"
+    assert "sig=" not in err, "SAS query string leaked in error fallback"
+    assert sub_id not in err, "subscription GUID leaked in error fallback"
+    assert sas_qs not in err

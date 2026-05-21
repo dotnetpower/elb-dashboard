@@ -34,6 +34,64 @@ _DASHBOARD_UUID_JOB_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Allowlist of path prefixes the dashboard's API Reference "Try it" surface
+# legitimately calls on the deployed elb-openapi service. The proxy
+# auto-injects the admin X-ELB-API-Token (see aks_openapi_proxy below),
+# so without this allowlist any authenticated tenant member can ride that
+# admin token into /admin/*, /internal/*, /debug/* on the upstream service.
+# Match rules: an entry ending in '/' is a prefix; an entry without '/' is
+# an exact path. Comparison is case-insensitive so an ingress that lower-
+# cases paths cannot launder a denied path through the gate. Keep this
+# minimal — add new entries only when a new SPA Try-It call surface is
+# genuinely needed.
+_OPENAPI_PROXY_ALLOWED_PATH_PREFIXES: tuple[str, ...] = (
+    "/healthz",
+    "/openapi.json",
+    "/docs/",
+    "/v1/",
+)
+
+# Substrings that are always denied even if they appear inside an
+# allowlisted prefix. Defence-in-depth against an upstream that exposes
+# admin routes under /v1/admin/ or similar — the elb-openapi service
+# should not, but this layer must not assume that.
+_OPENAPI_PROXY_DENIED_PATH_TOKENS: tuple[str, ...] = (
+    "/admin/",
+    "/admin?",
+    "/internal/",
+    "/internal?",
+    "/debug/",
+    "/debug?",
+)
+
+
+def _is_private_ipv4(value: str) -> bool:
+    """Return True if ``value`` parses as a private / loopback / link-local IPv4.
+
+    Used by the OpenAPI proxy to decide whether it is safe to send the
+    admin ``X-ELB-API-Token`` over plain HTTP. The api sidecar and the
+    elb-openapi pod normally live in the same AKS VNet, so the resolved
+    Service IP is RFC1918. A public IP (operator wired the Service as
+    ``LoadBalancer`` with a public LB and no TLS) would expose the admin
+    token to the path between the api sidecar and the LB; refuse to
+    inject the token in that case.
+
+    Limited to IPv4 today because the existing upstream URL construction
+    in the proxy / spec routes (``f"http://{ip}..."``) does not bracket
+    IPv6 addresses and httpx therefore cannot parse them. Adding IPv6
+    support requires both this private-range check AND fixing every
+    ``f"http://{ip}..."`` call site to bracket IPv6 literals. Tracked as
+    a follow-up; meanwhile this function returns False for IPv6, which
+    causes the proxy to refuse — the conservative default.
+    """
+    import ipaddress
+
+    try:
+        ip = ipaddress.IPv4Address(value)
+    except (ValueError, ipaddress.AddressValueError):
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
 
 class OpenApiTokenRequest(BaseModel):
     subscription_id: str = ""
@@ -71,6 +129,85 @@ def _reject_dashboard_uuid_job_path(target_path: str) -> None:
                 "OpenAPI job endpoints expect the short job_id returned by POST /v1/jobs. "
                 "Dashboard job UUIDs are local control-plane IDs; use "
                 "/api/blast/jobs/{job_id} or the Jobs page for those IDs."
+            ),
+        },
+    )
+
+
+def _enforce_openapi_proxy_target_path(target_path: str) -> None:
+    """Reject paths outside the public OpenAPI Try-It surface.
+
+    The proxy auto-injects the admin ``X-ELB-API-Token`` on every call,
+    so without this gate an authenticated tenant member could pass
+    ``?path=/admin/...`` and ride that token into admin-only endpoints
+    on the elb-openapi service. The allowlist mirrors what the SPA's
+    API Reference "Try it" feature legitimately calls. Path traversal
+    segments (``..``; URL-encoded variants such as ``%2e%2e`` and
+    double-encoded ``%252e%252e``) are rejected regardless of prefix,
+    and a small deny-list of admin / internal / debug substrings is
+    enforced as defence-in-depth against an upstream that exposes
+    sensitive routes inside an allowlisted prefix.
+    """
+    import urllib.parse
+
+    path_only = target_path.split("?", 1)[0]
+    # Iteratively percent-decode until the value stops changing so a
+    # double-encoded segment (``%252e%252e`` → ``%2e%2e`` → ``..``) cannot
+    # slip past a single-pass decode. Bounded loop guards against an
+    # adversarial input that would otherwise stretch the decode chain
+    # indefinitely.
+    decoded = path_only
+    for _ in range(5):
+        next_decoded = urllib.parse.unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    # NUL bytes and other C0 control characters can truncate the path at
+    # the upstream (C-string handling) so the allowlist check would see
+    # a different value than the upstream router. Reject them outright.
+    if any(ord(ch) < 0x20 for ch in decoded):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "invalid_openapi_path",
+                "message": "path contains control characters",
+            },
+        )
+    if ".." in decoded:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "openapi_path_traversal_denied",
+                "message": "path contains '..' which is not allowed",
+            },
+        )
+    # Case-insensitive comparison so an ingress that lower-cases the
+    # path cannot launder a denied path through this gate. The allowlist
+    # entries are already lowercase by construction.
+    lowered = decoded.lower()
+    # Re-include any query string for the deny-token check so
+    # ``/v1/admin?x=1`` is caught alongside ``/v1/admin/x``.
+    lowered_full = lowered + target_path[len(path_only) :].lower()
+    for denied in _OPENAPI_PROXY_DENIED_PATH_TOKENS:
+        if denied in lowered_full:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "openapi_path_not_allowlisted",
+                    "message": f"path contains denied segment '{denied.rstrip('?/')}'",
+                },
+            )
+    for prefix in _OPENAPI_PROXY_ALLOWED_PATH_PREFIXES:
+        prefix_root = prefix.rstrip("/")
+        if lowered == prefix or lowered == prefix_root or lowered.startswith(prefix):
+            return
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "code": "openapi_path_not_allowlisted",
+            "message": (
+                "path must start with one of: "
+                + ", ".join(_OPENAPI_PROXY_ALLOWED_PATH_PREFIXES)
             ),
         },
     )
@@ -356,6 +493,7 @@ async def aks_openapi_proxy(
             status_code=400,
             detail={"code": "invalid_openapi_path", "message": "path contains invalid characters"},
         )
+    _enforce_openapi_proxy_target_path(target_path)
     _reject_dashboard_uuid_job_path(target_path)
 
     sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
@@ -373,6 +511,33 @@ async def aks_openapi_proxy(
                 "code": "openapi_service_not_reachable",
                 "message": "The elb-openapi service is not reachable yet.",
                 "retryable": True,
+            },
+        )
+
+    # Refuse to forward when the resolved Service IP is *not* private:
+    # the api sidecar would otherwise send the admin ``X-ELB-API-Token``
+    # over plain HTTP to a public LoadBalancer, exposing the token to
+    # any MITM between the sidecar and the LB. The legitimate deployment
+    # exposes elb-openapi inside the AKS VNet (Service type LoadBalancer
+    # with internal annotation, or ClusterIP), so the IP is RFC1918.
+    # If an operator wires a public LB they must front it with TLS and
+    # call the OpenAPI service directly from the SPA instead of routing
+    # the admin-token-bearing call through this proxy.
+    if not _is_private_ipv4(ip):
+        LOGGER.warning(
+            "openapi/proxy: refusing to forward admin token to non-private IP %s "
+            "(use an internal LoadBalancer or terminate TLS in front of the service)",
+            ip,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "openapi_unsafe_transport",
+                "message": (
+                    "Refusing to send the admin token to a non-private IP. "
+                    "Expose elb-openapi via an internal LoadBalancer (RFC1918) "
+                    "or terminate TLS in front of the public endpoint."
+                ),
             },
         )
 

@@ -686,3 +686,84 @@ def _ensure_job_read_allowed(job_id: str, caller: CallerIdentity) -> None:
         raise HTTPException(503, {"code": "auth_lookup_unavailable"}) from exc
     if state and state.owner_oid and state.owner_oid != caller.object_id:
         raise HTTPException(403, "not owner")
+
+
+def _resolve_job_storage_account(job_id: str, supplied: str) -> str:
+    """Reject a ``storage_account`` query parameter that does not match the
+    JobState row for ``job_id``.
+
+    This closes a confused-deputy gap on the job-bound BLAST routes
+    (``/api/blast/jobs/{job_id}/...``): the caller passes
+    ``storage_account=<x>`` as a query parameter, the api authenticates the
+    request with the shared MI, and the MI very likely has Reader on a
+    different storage account the caller chose. Without this gate a
+    legitimate user could read result blobs from any storage account the
+    MI can reach by lying about which account holds their job.
+
+    Behaviour:
+
+    * Authoritative record exists (JobState row carries a non-empty
+      ``storage_account``) and ``supplied`` does not match → ``403
+      cross_account_mismatch``. The error reveals only that a mismatch
+      occurred; the recorded value is **not** echoed.
+    * Authoritative record exists and matches → return the recorded
+      value (used so downstream code is byte-identical regardless of
+      caller-supplied casing).
+    * Authoritative record does not record the storage account (legacy
+      row written before the field landed, external sync row, or a
+      submit-then-poll race before the row reaches Table Storage) → log
+      a one-liner and return ``supplied`` unchanged. The fallback is
+      intentional: a hard failure here would break the legacy job list.
+    * ``AUTH_DEV_BYPASS=true`` and the lookup raises → return
+      ``supplied`` (dev loop without a real state backend).
+    """
+    if not supplied:
+        return supplied
+    dev_bypass = os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true"
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        state = JobStateRepository().get_summary(job_id)
+    except Exception as exc:
+        if dev_bypass:
+            return supplied
+        LOGGER.warning(
+            "storage account cross-check lookup failed job_id=%s err=%s (failing closed)",
+            job_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(503, {"code": "auth_lookup_unavailable"}) from exc
+    if state is None:
+        # Job genuinely absent from Table Storage. This happens legitimately
+        # right after submit (the row is being written) and on external sync
+        # rows that have not been re-projected yet. Log the fallback so an
+        # operator inspecting access logs can spot a route that is being
+        # called with a bogus job_id repeatedly.
+        LOGGER.info(
+            "storage account cross-check: no JobState row for job_id=%s; "
+            "accepting supplied value",
+            job_id,
+        )
+        return supplied
+    recorded = (getattr(state, "storage_account", "") or "").strip()
+    if not recorded:
+        LOGGER.info(
+            "storage account cross-check: JobState has no recorded account; "
+            "accepting supplied value job_id=%s",
+            job_id,
+        )
+        return supplied
+    if recorded.lower() != supplied.strip().lower():
+        # Do NOT echo the recorded value to the caller — that would leak
+        # the correct account name to anyone probing job_ids.
+        raise HTTPException(
+            403,
+            {
+                "code": "cross_account_mismatch",
+                "message": (
+                    "supplied storage_account does not match the account "
+                    "recorded when this job was submitted"
+                ),
+            },
+        )
+    return recorded

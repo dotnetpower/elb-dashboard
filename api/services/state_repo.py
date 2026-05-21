@@ -382,6 +382,31 @@ class JobStateRepository:
                 return None
         return JobState.from_entity(dict(e))
 
+    def find_by_task_id(self, task_id: str) -> JobState | None:
+        """Return the JobState that recorded ``task_id`` as its Celery task, or None.
+
+        Used by ownership-aware status endpoints (``/api/operations/{id}``,
+        ``/api/tasks/{id}``) so the route can verify the caller owns the
+        job before exposing the task result. Returns the summary row (no
+        ``payload_json``) — the caller only needs ``owner_oid`` for the
+        authorization check.
+        """
+        if not task_id:
+            return None
+        safe_id = _sanitise_odata_value(task_id)
+        with self._state_client() as t:
+            try:
+                entities = t.query_entities(
+                    f"task_id eq '{safe_id}' and RowKey eq 'current'",
+                    select=_JOBSTATE_SUMMARY_SELECT,
+                    results_per_page=1,
+                )
+                for e in entities:
+                    return JobState.from_entity(dict(e))
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+        return None
+
     def get_many(self, job_ids: list[str]) -> dict[str, JobState]:
         """Batch lookup for N job_ids using a single OData query.
 

@@ -188,6 +188,34 @@ def _merge_progress_payload(
             normalised.setdefault("started_at", str(previous.get("updated_at") or updated_at))
             _normalise_step_duration(normalised)
             steps[previous_key] = normalised
+    if status == "failed":
+        # Any other step left in `running` state belongs to a phase the worker
+        # was actively executing when the failure happened (typical: Celery
+        # task crashed mid-`submitting` before a final state write). Without
+        # this sweep the dashboard step timeline keeps spinning indefinitely
+        # because `isStepRunning(step)` is checked per step independently of
+        # the parent phase. Demote them to `failed` so the UI renders an
+        # error indicator instead of an infinite spinner.
+        for other_key, other_step in list(steps.items()):
+            if other_key == step_key:
+                continue
+            if not isinstance(other_step, dict) or other_step.get("status") != "running":
+                continue
+            orphan = dict(other_step)
+            orphan.update(
+                {
+                    "status": "failed",
+                    "updated_at": updated_at,
+                    "completed_at": updated_at,
+                    "success": False,
+                    "source": "orphan_inferred",
+                }
+            )
+            orphan.setdefault("started_at", str(other_step.get("updated_at") or updated_at))
+            if error_code and not orphan.get("error"):
+                orphan["error"] = error_code
+            _normalise_step_duration(orphan)
+            steps[other_key] = orphan
     if status == "running" and phase == "results_pending":
         _synthesise_completed_runtime_steps(
             steps,

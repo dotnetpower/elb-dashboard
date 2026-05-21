@@ -207,6 +207,43 @@ def test_elastic_blast_argv_uses_cfg_file() -> None:
     assert "bash" not in argv
 
 
+def test_submit_task_helpers_are_reexported_on_blast_package() -> None:
+    # submit_task.py calls these via ``_blast.X`` (where ``_blast`` is the
+    # ``api.tasks.blast`` package). Missing re-exports surface only at runtime
+    # as AttributeError after ``elastic-blast submit`` already streamed
+    # output — see docs/features_change/2026-05/2026-05-22-blast-submit-pipeline-hardening.md.
+    required = {
+        "_tail_text",
+        "_update_state",
+        "_progress",
+        "_snippet",
+        "_last_json",
+        "_extract_elastic_blast_job_id",
+        "_discover_elastic_blast_job_id",
+        "_submit_success_status",
+        "_refresh_submit_terminal_status",
+        "_gate_completed_submit_on_results",
+        "_stream_submit_command",
+        "_build_config_content",
+        "_ensure_terminal_azure_cli_login",
+        "_ensure_node_warmup_ready_for_submit",
+        "_retry_or_fail",
+        "_result_error",
+        "_is_retryable_result",
+        "_retry_after",
+        "_requires_split_parent_submission",
+        "_run_storage_query_split_parent_submission",
+        "_submit_requires_node_warmup",
+        "_suppress_sharding_for_unsharded_database",
+        "_expand_strict_tie_order_candidate_pool",
+        "LIVE_OUTPUT_SNIPPET_CHARS",
+        "STDOUT_SNIPPET_CHARS",
+        "TerminalAzureLoginError",
+    }
+    missing = sorted(name for name in required if not hasattr(blast, name))
+    assert not missing, f"submit_task expects these on api.tasks.blast: {missing}"
+
+
 def test_last_json_reads_structured_payload_from_log_tail() -> None:
     payload = blast._last_json('info line\n{"kind":"submit_result","decision":"accepted"}\n')
 
@@ -2411,6 +2448,52 @@ def test_merge_progress_payload_completes_previous_running_steps() -> None:
     assert steps["submitting"]["last_output"] == "submit log"
     assert steps["failed_step"]["status"] == "failed"
     assert steps["completed"]["k8s"] == {"succeeded": 10}
+
+
+def test_merge_progress_payload_demotes_orphan_running_steps_on_failed_update() -> None:
+    # Symptom this guards against: Celery `submit` crashes mid-`submitting`,
+    # the reconcile beat task later writes `phase="failed"`, and the timeline
+    # keeps showing a spinner on `submitting` (status="running"). After the
+    # merge, every non-target step in `running` must be demoted to `failed`.
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "submitting",
+                "status": "running",
+                "steps": {
+                    "preparing": {"phase": "preparing", "status": "completed"},
+                    "warming_up": {"phase": "warmup_ready", "status": "completed"},
+                    "configuring": {"phase": "configuring", "status": "completed"},
+                    "submitting": {
+                        "phase": "submitting",
+                        "status": "running",
+                        "last_output": "Upload workfiles",
+                    },
+                    "running": {"phase": "running", "status": "running"},
+                },
+            }
+        },
+        phase="failed",
+        status="failed",
+        error_code="AttributeError: _tail_text",
+        details={},
+    )
+
+    steps = payload["_progress"]["steps"]
+    # `phase="failed"` maps to step_key="submitting", so that one is the
+    # primary failure record.
+    assert steps["submitting"]["status"] == "failed"
+    assert steps["submitting"]["success"] is False
+    assert steps["submitting"]["error"] == "AttributeError: _tail_text"
+    # The orphan `running` step must also be demoted so the UI stops spinning.
+    assert steps["running"]["status"] == "failed"
+    assert steps["running"]["success"] is False
+    assert steps["running"]["source"] == "orphan_inferred"
+    assert steps["running"]["error"] == "AttributeError: _tail_text"
+    assert steps["running"]["completed_at"]
+    # Already-terminal steps stay put.
+    assert steps["preparing"]["status"] == "completed"
+    assert steps["configuring"]["status"] == "completed"
 
 
 def test_merge_progress_payload_completes_steps_when_phase_advances() -> None:

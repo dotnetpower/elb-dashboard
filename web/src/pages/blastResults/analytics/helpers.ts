@@ -153,6 +153,88 @@ export function taxidLabel(value: string | undefined): string {
     .join(", ");
 }
 
+// Boundary tokens after which the remainder of a BLAST subject title is no
+// longer the scientific name (NCBI titles look like "Monkeypox virus isolate
+// 24MPX2634V genome assembly, complete genome"). Mirrors
+// `api/services/blast_result_analytics.py::extract_organism_from_stitle` so
+// the frontend can show NCBI's "Scientific Name" column for each row even
+// before the server-side Taxonomy enrichment runs.
+const STITLE_STOP_RE = new RegExp(
+  "\\b(?:" +
+    [
+      "isolate",
+      "strain",
+      "clone",
+      "chromosome",
+      "complete",
+      "partial",
+      "genome",
+      "sequence",
+      "scaffold",
+      "contig",
+      "plasmid",
+      "mitochond",
+      "chloroplast",
+      "segment",
+      "cds",
+      "mRNA",
+      "rRNA",
+      "tRNA",
+      "ncRNA",
+      "gene",
+      "BAC",
+    ].join("|") +
+    ")\\b",
+  "i",
+);
+
+const STITLE_LEADING_QUALIFIERS = [
+  "PREDICTED:",
+  "TPA:",
+  "TPA_inf:",
+  "UNVERIFIED:",
+  "MAG:",
+  "PARTIAL:",
+  "LOW QUALITY PROTEIN:",
+  "RecName:",
+];
+
+export function organismFromStitle(stitle: string | undefined): string {
+  if (!stitle) return "";
+  let text = String(stitle).trim();
+  if (!text) return "";
+  if (
+    text.includes("|") &&
+    /^(gi|ref|gb|emb|dbj|sp|tr)\|/.test(text)
+  ) {
+    text = text.includes(" ") ? text.split(" ").slice(1).join(" ") : "";
+  }
+  text = text.replace(/^>+/, "").trim();
+  let changed = true;
+  while (changed && text) {
+    changed = false;
+    for (const qualifier of STITLE_LEADING_QUALIFIERS) {
+      if (text.slice(0, qualifier.length).toUpperCase() === qualifier.toUpperCase()) {
+        text = text.slice(qualifier.length).trim();
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (!text) return "";
+  const stopMatch = STITLE_STOP_RE.exec(text);
+  let cutoff = stopMatch ? stopMatch.index : text.length;
+  const comma = text.indexOf(",");
+  if (comma >= 0 && comma < cutoff) cutoff = comma;
+  const paren = text.indexOf("(");
+  if (paren >= 0 && paren < cutoff) cutoff = paren;
+  const candidate = text.slice(0, cutoff).replace(/^[\s,.:;-]+|[\s,.:;-]+$/g, "");
+  const tokens = candidate.split(/\s+/).filter(Boolean);
+  if (tokens.length < 1 || tokens.length > 6) return "";
+  if (tokens[0].length < 2 || /^\d+$/.test(tokens[0])) return "";
+  return tokens.join(" ");
+}
+
 export function shortBlobName(value: string | undefined): string {
   if (!value) return "—";
   const parts = value.split("/").filter(Boolean);

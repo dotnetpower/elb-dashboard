@@ -71,3 +71,17 @@ def reset_credential() -> None:
     global _CREDENTIAL
     with _CREDENTIAL_LOCK:
         _CREDENTIAL = None
+    # Pooled BlobServiceClients hold a reference to the old credential and
+    # its token cache; drop them so the next call rebuilds against the new
+    # credential. Imported lazily to avoid a cycle (storage_data imports
+    # services indirectly via get_credential helpers).
+    try:
+        from api.services.storage_data import reset_blob_service_pool
+
+        reset_blob_service_pool()
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "blob service pool reset skipped: %s", type(exc).__name__
+        )

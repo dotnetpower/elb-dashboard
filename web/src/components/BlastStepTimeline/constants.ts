@@ -63,6 +63,13 @@ export const PHASE_TO_STEP: Record<string, string> = {
   waiting_for_warmup: "warming_up",
   submit_failed: "submitting",
   staging_db: "staging_db",
+  // `submitted` is a transit phase: the submit task finished, K8s accepted
+  // the job, but the first `poll_running_status` tick has not yet observed
+  // pods=Running. Without this mapping, getTimelineStepState falls back to
+  // PHASE_STEPS lookup of "submitted", which is absent, and every step
+  // resolves to "pending" — so the timeline sits silent for ~10-30 s with
+  // no active spinner. Treat it as the "BLAST Run" step warming up.
+  submitted: "running",
   reading_split_query: "preparing",
   splitting_queries: "configuring",
   split_children_submitted: "submitting",
@@ -90,6 +97,7 @@ export const PHASE_MESSAGES: Record<string, string> = {
   waiting_for_warmup: "Waiting for node-local DB warmup...",
   staging_db: "Reusing or staging DB shards on node-local SSD...",
   submitting: "Submitting job to AKS cluster...",
+  submitted: "Job accepted by AKS. Waiting for pods to start running...",
   reading_split_query: "Reading the original query from Storage...",
   splitting_queries: "Splitting queries by effective search space...",
   split_children_submitted: "Submitted split child jobs to AKS...",

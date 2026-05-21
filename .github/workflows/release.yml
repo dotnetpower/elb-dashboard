@@ -1,0 +1,68 @@
+name: Publish Release Notes
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish release notes for (e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+          fetch-depth: 0
+
+      - name: Locate release notes
+        id: notes
+        run: |
+          tag="${{ steps.tag.outputs.name }}"
+          path="docs/releases/${tag}.md"
+          if [[ ! -f "$path" ]]; then
+            echo "::error::missing release notes at $path — run scripts/dev/bump-version.sh and push the tag, or add the page manually."
+            exit 1
+          fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Build release body
+        id: body
+        run: |
+          notes="${{ steps.notes.outputs.path }}"
+          {
+            echo "Generated from \`$notes\`. See the [docs site](https://dotnetpower.github.io/elb-dashboard/releases/) for the rendered view."
+            echo
+            # Strip the leading H1 to avoid duplication (GitHub Releases UI already shows the tag name).
+            awk 'NR==1 && /^# /{next} {print}' "$notes"
+          } > release-body.md
+          echo "Built release body ($(wc -l < release-body.md) lines)"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.tag.outputs.name }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --notes-file release-body.md --title "$tag"
+          else
+            gh release create "$tag" --notes-file release-body.md --title "$tag"
+          fi

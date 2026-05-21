@@ -24,9 +24,12 @@ from api.services import storage_public_access as spa
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(spa.ENV_OPT_IN, raising=False)
     monkeypatch.delenv(spa.ENV_CONTAINER_APP, raising=False)
+    monkeypatch.delenv("ELB_LOCAL_CALLER_IP", raising=False)
     # Clear the in-process TTL cache so tests are independent.
     with spa._cache_lock:
         spa._already_open_cache.clear()
+    with spa._caller_ip_lock:
+        spa._caller_ip_cache = None
 
 
 def test_gate_disabled_by_default() -> None:
@@ -187,3 +190,94 @@ def test_ensure_already_open_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     assert second["action"] == "already_open"
     # Cache hit: ARM read only fired once, no IP detection needed.
     assert sc.storage_accounts.get_properties.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Security audit (2026-05-22): #10 caller-IP cache + fallback + env override
+# ---------------------------------------------------------------------------
+def test_detect_caller_ip_uses_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ELB_LOCAL_CALLER_IP` short-circuits the external probe."""
+    monkeypatch.setenv("ELB_LOCAL_CALLER_IP", "203.0.113.7")
+
+    class _ShouldNotCall:
+        def __call__(self, *_a: object, **_kw: object) -> object:
+            raise AssertionError("env override must skip the network")
+
+    monkeypatch.setattr("httpx.get", _ShouldNotCall())
+
+    assert spa._detect_caller_ip() == "203.0.113.7"
+
+
+def test_detect_caller_ip_env_override_rejects_garbage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-IPv4 override is ignored — must not poison the log/UI strings."""
+    monkeypatch.setenv("ELB_LOCAL_CALLER_IP", "not-an-ip")
+
+    calls: list[str] = []
+
+    def fake_get(url: str, **_kw: object) -> SimpleNamespace:
+        calls.append(url)
+        return SimpleNamespace(status_code=200, text="198.51.100.4")
+
+    monkeypatch.setattr("httpx.get", fake_get)
+
+    assert spa._detect_caller_ip() == "198.51.100.4"
+    assert calls, "must have fallen through to the network providers"
+
+
+def test_detect_caller_ip_caches_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Back-to-back polls share a single HTTP call."""
+    n_calls = {"count": 0}
+
+    def fake_get(_url: str, **_kw: object) -> SimpleNamespace:
+        n_calls["count"] += 1
+        return SimpleNamespace(status_code=200, text="198.51.100.4")
+
+    monkeypatch.setattr("httpx.get", fake_get)
+
+    assert spa._detect_caller_ip() == "198.51.100.4"
+    assert spa._detect_caller_ip() == "198.51.100.4"
+    assert spa._detect_caller_ip() == "198.51.100.4"
+    assert n_calls["count"] == 1
+
+
+def test_detect_caller_ip_falls_back_to_second_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 503 / network blip on the first provider rolls over to the second."""
+    seen: list[str] = []
+
+    def fake_get(url: str, **_kw: object) -> SimpleNamespace:
+        seen.append(url)
+        if url == spa._CALLER_IP_LOOKUP_URLS[0]:
+            raise RuntimeError("dns blip")
+        return SimpleNamespace(status_code=200, text="192.0.2.5")
+
+    monkeypatch.setattr("httpx.get", fake_get)
+
+    assert spa._detect_caller_ip() == "192.0.2.5"
+    assert seen == list(spa._CALLER_IP_LOOKUP_URLS)
+
+
+def test_detect_caller_ip_caches_failure_with_short_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All providers down: cache None so the poll cadence does not spam."""
+
+    def fake_get(_url: str, **_kw: object) -> SimpleNamespace:
+        return SimpleNamespace(status_code=503, text="")
+
+    monkeypatch.setattr("httpx.get", fake_get)
+
+    assert spa._detect_caller_ip() is None
+    # Second call must come from the cache (not hit the network again).
+    n_calls = {"count": 0}
+
+    def fake_get_2(_url: str, **_kw: object) -> SimpleNamespace:
+        n_calls["count"] += 1
+        return SimpleNamespace(status_code=200, text="should-not-be-used")
+
+    monkeypatch.setattr("httpx.get", fake_get_2)
+    assert spa._detect_caller_ip() is None
+    assert n_calls["count"] == 0

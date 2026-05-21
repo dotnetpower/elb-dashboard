@@ -33,6 +33,34 @@ _CACHE_TTL_SEC = 60.0
 _cache_lock = threading.Lock()
 _already_open_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 
+# Caller IP lookup configuration. Override via env, fall back to two
+# providers, cache both success and failure so the dashboard's poll
+# cadence does not turn into a steady external probe stream. HTTPS-only
+# enforcement prevents an operator-typo from routing the discovery call
+# through plaintext where a network attacker could supply a forged IP
+# (low impact today because the value is informational, but defence in
+# depth — and the helper must reject in obvious misconfig immediately).
+_CALLER_IP_LOOKUP_URLS: tuple[str, ...] = tuple(
+    u.strip()
+    for u in (
+        os.environ.get("ELB_CALLER_IP_LOOKUP_URLS")
+        or "https://api.ipify.org,https://ifconfig.me/ip"
+    ).split(",")
+    if u.strip()
+)
+# Refuse any non-HTTPS provider upfront — fail loudly instead of silently
+# trusting the operator's typed URL.
+for _provider in _CALLER_IP_LOOKUP_URLS:
+    if not _provider.lower().startswith("https://"):
+        raise RuntimeError(
+            f"ELB_CALLER_IP_LOOKUP_URLS entry {_provider!r} must be https://"
+        )
+_CALLER_IP_CACHE_TTL_SEC = 600.0  # 10 min on success — public IP is stable.
+_CALLER_IP_FAILURE_TTL_SEC = 30.0  # 30 s on failure so we recover fast.
+_caller_ip_lock = threading.Lock()
+# (timestamp_monotonic, ip_or_None, ttl_for_this_entry)
+_caller_ip_cache: tuple[float, str | None, float] | None = None
+
 
 def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -57,21 +85,73 @@ def is_running_locally() -> bool:
 
 
 def _detect_caller_ip() -> str | None:
-    try:
-        import httpx
+    """Look up the host's public IPv4 with a short cache and a fallback.
 
-        resp = httpx.get("https://api.ipify.org", timeout=3.0)
-        if resp.status_code != 200:
-            return None
-        ip = resp.text.strip()
-        ipaddress.IPv4Address(ip)  # validate; raises if not bare IPv4
-    except Exception as exc:
+    The Storage local-debug helper used to call ``api.ipify.org`` on every
+    poll. That created a hard external dependency for a feature that only
+    runs on developer laptops, and the poll cadence (every few seconds for
+    the Databases page) turned into a steady probe stream — both wasteful
+    and a small side-channel.
+
+    Hardening:
+    - In-process TTL cache (``_CALLER_IP_CACHE_TTL_SEC``) so back-to-back
+      polls share one HTTP call.
+    - Two providers tried in order (``CALLER_IP_LOOKUP_URLS``); a
+      503 / network blip on the first does not break the feature.
+    - ``ELB_LOCAL_CALLER_IP`` env override skips the network entirely.
+    - Validate as IPv4 so a hijacked endpoint cannot inject arbitrary
+      text into log/UI strings.
+    """
+    global _caller_ip_cache
+    override = os.environ.get("ELB_LOCAL_CALLER_IP", "").strip()
+    if override:
+        try:
+            ipaddress.IPv4Address(override)
+            return override
+        except ValueError:
+            LOGGER.warning(
+                "storage_public_access: ELB_LOCAL_CALLER_IP=%r is not a bare IPv4; ignoring",
+                override,
+            )
+
+    now = time.monotonic()
+    with _caller_ip_lock:
+        cached = _caller_ip_cache
+    if cached is not None:
+        cached_ts, cached_ip, cached_ttl = cached
+        if now - cached_ts < cached_ttl:
+            return cached_ip
+
+    import httpx
+
+    discovered: str | None = None
+    for url in _CALLER_IP_LOOKUP_URLS:
+        try:
+            resp = httpx.get(url, timeout=3.0)
+            if resp.status_code != 200:
+                continue
+            ip = resp.text.strip()
+            ipaddress.IPv4Address(ip)
+        except Exception as exc:
+            LOGGER.debug(
+                "storage_public_access: caller IP lookup via %s failed: %s",
+                url,
+                type(exc).__name__,
+            )
+            continue
+        discovered = ip
+        break
+
+    if discovered is None:
         LOGGER.warning(
-            "storage_public_access: caller IP detection failed: %s",
-            type(exc).__name__,
+            "storage_public_access: caller IP detection failed via all providers (%s)",
+            ", ".join(_CALLER_IP_LOOKUP_URLS),
         )
-        return None
-    return ip
+
+    ttl = _CALLER_IP_CACHE_TTL_SEC if discovered else _CALLER_IP_FAILURE_TTL_SEC
+    with _caller_ip_lock:
+        _caller_ip_cache = (now, discovered, ttl)
+    return discovered
 
 
 def ensure_local_storage_access(
@@ -149,6 +229,31 @@ def ensure_local_storage_access(
         if network_rule_set is not None
         else ""
     )
+
+    # Hard invariant for the local-debug path: ``defaultAction=Allow`` is
+    # only acceptable WHEN ``allowSharedKeyAccess=false``, because the
+    # Allow disposition leaves AAD as the only enforcement layer. If
+    # shared-key access is enabled, any leaked account key would have
+    # network-unconditional reach. Refuse to open the window in that
+    # case — the operator must first set ``allowSharedKeyAccess: false``
+    # via Bicep / az.
+    allow_shared_key = getattr(account, "allow_shared_key_access", None)
+    if allow_shared_key is True:
+        LOGGER.warning(
+            "ensure_local_storage_access: refusing to open %s — "
+            "allowSharedKeyAccess=true would weaken the Allow disposition "
+            "to network-unconditional shared-key reach",
+            account_name,
+        )
+        return {
+            "action": "failed",
+            "error": "shared_key_access_enabled",
+            "message": (
+                "Set allowSharedKeyAccess=false on the storage account before "
+                "enabling local-debug network access. The Allow disposition is "
+                "only safe with AAD-only data-plane auth."
+            ),
+        }
 
     # For ADLS Gen2 (isHnsEnabled=true) accounts with an approved private
     # endpoint, defaultAction=Deny + ipRule does not reliably propagate to

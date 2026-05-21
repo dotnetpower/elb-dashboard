@@ -16,11 +16,115 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import Any
 
 from api.services import get_credential, storage_data
 
 LOGGER = logging.getLogger(__name__)
+
+# Tokens after which the remainder of a BLAST subject title (`stitle`) is no
+# longer the scientific name. NCBI titles look like
+# "Monkeypox virus isolate 24MPX2634V genome assembly, complete genome",
+# "Homo sapiens chromosome 7, GRCh38 reference",
+# "Escherichia coli strain K-12 complete genome".
+# We cut at the first occurrence (case-insensitive, word-boundary) of any
+# of these so the prefix is the scientific name candidate.
+_STITLE_ORGANISM_STOPWORDS = (
+    "isolate",
+    "strain",
+    "clone",
+    "chromosome",
+    "complete",
+    "partial",
+    "genome",
+    "sequence",
+    "scaffold",
+    "contig",
+    "plasmid",
+    "mitochond",
+    "chloroplast",
+    "segment",
+    "cds",
+    "mRNA",
+    "rRNA",
+    "tRNA",
+    "ncRNA",
+    "gene",
+    "BAC",
+)
+
+# Curator/source qualifier prefixes NCBI prepends to the title. These are
+# stripped first, before we look for the organism cut-off.
+_STITLE_LEADING_QUALIFIERS = (
+    "PREDICTED:",
+    "TPA:",
+    "TPA_inf:",
+    "UNVERIFIED:",
+    "MAG:",
+    "PARTIAL:",
+    "LOW QUALITY PROTEIN:",
+    "RecName:",
+)
+
+_STITLE_STOP_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(token) for token in _STITLE_ORGANISM_STOPWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def extract_organism_from_stitle(stitle: str) -> str:
+    """Best-effort organism name extracted from a BLAST subject title.
+
+    Used as a fallback when the BLAST output lacks `sscinames`/`staxids`
+    columns (default `-outfmt 6` does not include them). Returns "" when no
+    confident candidate exists so callers can keep the `unclassified`
+    bucket they had before.
+    """
+    if not stitle:
+        return ""
+    text = str(stitle).strip()
+    if not text:
+        return ""
+    # Strip leading record-id annotations like "gi|123|gb|X|" or
+    # ">accession ", which sometimes leak into stitle when the parser sees
+    # an unparsed header.
+    if "|" in text and text.startswith(("gi|", "ref|", "gb|", "emb|", "dbj|", "sp|", "tr|")):
+        text = text.split(" ", 1)[1] if " " in text else ""
+    text = text.lstrip(">").strip()
+    # Strip curator qualifier prefixes (case-insensitive). Loop so chained
+    # qualifiers like "TPA_inf: PREDICTED: Foo" are all removed.
+    changed = True
+    while changed and text:
+        changed = False
+        for qualifier in _STITLE_LEADING_QUALIFIERS:
+            if text[: len(qualifier)].upper() == qualifier.upper():
+                text = text[len(qualifier) :].strip()
+                changed = True
+                break
+    if not text:
+        return ""
+    # Cut at the first stop-word; fall back to the first comma. Also drop
+    # any trailing parenthesised qualifier ("(LOC123)").
+    stop_match = _STITLE_STOP_RE.search(text)
+    cutoff = stop_match.start() if stop_match else len(text)
+    comma = text.find(",")
+    if 0 <= comma < cutoff:
+        cutoff = comma
+    paren = text.find("(")
+    if 0 <= paren < cutoff:
+        cutoff = paren
+    candidate = text[:cutoff].strip(" ,.:;-")
+    # Drop overly long candidates — anything past 6 tokens is almost
+    # certainly not a clean scientific name and we'd rather show
+    # "unclassified" than mislabel a row.
+    tokens = candidate.split()
+    if not (1 <= len(tokens) <= 6):
+        return ""
+    # Single-letter or numeric-only first token is junk.
+    if len(tokens[0]) < 2 or tokens[0].isdigit():
+        return ""
+    return " ".join(tokens)
 
 # Caps applied when parsing result blobs in the request thread. Real BLAST
 # tabular files are kilobytes-to-low-megabytes; these caps prevent a
@@ -322,11 +426,24 @@ def rollup_subject_aggregates(hits: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def rollup_taxonomy(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Per-organism rollup `(sscinames|taxid -> {hits, best_evalue, top_bitscore})`."""
+    """Per-organism rollup `(sscinames|taxid -> {hits, best_evalue, top_bitscore})`.
+
+    When `sscinames`/`staxids` are absent (default `-outfmt 6` and most
+    `-outfmt 5` exports do not include them) the rollup falls back to
+    extracting a candidate organism name from `stitle`. The fallback is
+    marked `organism_source: "stitle"` so the API consumer can resolve the
+    name to a taxid (eutils) or display a "best-effort" indicator.
+    """
     bucket: dict[str, dict[str, Any]] = {}
     for hit in hits:
         organism = str(hit.get("sscinames") or "").split(";")[0].strip()
         taxid = str(hit.get("staxids") or "").split(";")[0].strip()
+        organism_source = "sscinames" if organism else ""
+        if not organism and not taxid:
+            fallback = extract_organism_from_stitle(str(hit.get("stitle") or ""))
+            if fallback:
+                organism = fallback
+                organism_source = "stitle"
         key = (organism or taxid or "unclassified").lower()
         evalue = numeric_result_value(hit.get("evalue"))
         bitscore = numeric_result_value(hit.get("bitscore"))
@@ -339,6 +456,7 @@ def rollup_taxonomy(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "count": 1,
                 "best_evalue": evalue,
                 "top_bitscore": bitscore,
+                "organism_source": organism_source,
             }
         else:
             existing["count"] += 1
@@ -350,6 +468,11 @@ def rollup_taxonomy(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 existing["top_bitscore"] is None or bitscore > existing["top_bitscore"]
             ):
                 existing["top_bitscore"] = bitscore
+            # Prefer the strongest source we've seen for this bucket.
+            if organism_source == "sscinames" and existing.get("organism_source") != "sscinames":
+                existing["organism_source"] = "sscinames"
+                if organism:
+                    existing["organism"] = organism
     rows = sorted(
         bucket.values(),
         key=lambda row: (-row["count"], row["organism"] or row["taxid"]),
@@ -360,22 +483,68 @@ def rollup_taxonomy(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def enrich_taxonomy_with_lineage(
     rows: list[dict[str, Any]], *, taxid_limit: int
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Fill in NCBI lineage chains for the top-N taxa, in-place."""
-    from api.services.taxonomy import TaxonomySearchUnavailable, fetch_taxonomy_detail
+    """Fill in NCBI lineage chains for the top-N taxa, in-place.
+
+    For rows that came from the `stitle` fallback (no `staxids` in the
+    BLAST output) we first resolve the organism name to a taxid via
+    `search_taxonomy` so the lineage / blast_name lookup can proceed.
+    Both the name→taxid resolution and the per-taxid detail call are
+    cached in the `taxonomy` service module-level caches.
+
+    Each enriched row gains:
+      * `lineage`     — semicolon-joined NCBI lineage string.
+      * `lineage_ex`  — parsed lineage chain (root → leaf).
+      * `blast_name`  — top-level NCBI group (`Viruses`, `Bacteria`,
+                        `Mammals`, …), matching NCBI's BLAST UI column.
+    """
+    from api.services.taxonomy import (
+        TaxonomySearchUnavailable,
+        fetch_taxonomy_detail,
+        search_taxonomy,
+    )
 
     looked_up = 0
+    name_resolved = 0
     failed = 0
     limit_reached = 0
     for index, row in enumerate(rows):
+        if index >= taxid_limit:
+            limit_reached += 1
+            continue
         taxid_str = str(row.get("taxid") or "").strip()
         if not taxid_str:
-            continue
+            organism = str(row.get("organism") or "").strip()
+            if not organism:
+                continue
+            try:
+                payload = search_taxonomy(organism, limit=1)
+            except TaxonomySearchUnavailable:
+                failed += 1
+                continue
+            except ValueError:
+                # Organism name rejected by validator (blank, too long).
+                continue
+            except Exception as exc:
+                failed += 1
+                LOGGER.warning(
+                    "taxonomy lineage: name->taxid for %r failed: %s",
+                    organism,
+                    type(exc).__name__,
+                )
+                continue
+            candidates = payload.get("results") or []
+            if not candidates:
+                continue
+            resolved = candidates[0].get("taxid")
+            if not isinstance(resolved, int) or resolved <= 0:
+                continue
+            taxid_str = str(resolved)
+            row["taxid"] = taxid_str
+            row["taxid_source"] = "name_lookup"
+            name_resolved += 1
         try:
             taxid_int = int(taxid_str)
         except ValueError:
-            continue
-        if index >= taxid_limit:
-            limit_reached += 1
             continue
         try:
             detail = fetch_taxonomy_detail(taxid_int)
@@ -392,11 +561,72 @@ def enrich_taxonomy_with_lineage(
             continue
         row["lineage"] = str(detail.get("lineage") or "")
         row["lineage_ex"] = list(detail.get("lineage_ex") or [])
+        blast_name = _blast_group_from_lineage(row["lineage"], row["lineage_ex"])
+        if blast_name:
+            row["blast_name"] = blast_name
+        # Fill in the scientific name from NCBI if the heuristic produced
+        # something different (NCBI is authoritative once we have a taxid).
+        scientific = str(detail.get("scientific_name") or "").strip()
+        if scientific and scientific.lower() != "taxid " + str(taxid_int):
+            row["organism"] = scientific
         looked_up += 1
     meta = {
         "requested": True,
         "looked_up": looked_up,
+        "name_resolved": name_resolved,
         "failed": failed,
         "limit_reached": limit_reached,
     }
     return rows, meta
+
+
+# Top-level lineage roots that map to NCBI's BLAST "Name" column. The
+# matcher walks the lineage in NCBI order (root → leaf) and stops at the
+# first one it recognises so deep lineages don't accidentally collapse
+# into "cellular organisms".
+_BLAST_GROUP_BY_ROOT_TOKEN: tuple[tuple[str, str], ...] = (
+    ("Viruses", "viruses"),
+    ("Viroids", "viroids"),
+    ("Bacteria", "bacteria"),
+    ("Archaea", "archaea"),
+    ("Mammalia", "mammals"),
+    ("Aves", "birds"),
+    ("Reptilia", "reptiles"),
+    ("Amphibia", "amphibians"),
+    ("Actinopterygii", "bony fishes"),
+    ("Chondrichthyes", "cartilaginous fishes"),
+    ("Insecta", "insects"),
+    ("Arachnida", "arachnids"),
+    ("Crustacea", "crustaceans"),
+    ("Nematoda", "nematodes"),
+    ("Mollusca", "molluscs"),
+    ("Platyhelminthes", "flatworms"),
+    ("Cnidaria", "cnidarians"),
+    ("Echinodermata", "echinoderms"),
+    ("Embryophyta", "plants"),
+    ("Streptophyta", "plants"),
+    ("Viridiplantae", "plants"),
+    ("Fungi", "fungi"),
+    ("Eukaryota", "eukaryotes"),
+)
+
+
+def _blast_group_from_lineage(
+    lineage_str: str, lineage_ex: list[dict[str, Any]]
+) -> str | None:
+    """Return the NCBI BLAST "Name" group for a lineage chain."""
+    chain_names: list[str] = []
+    for node in lineage_ex or ():
+        name = str(node.get("scientific_name") or "").strip()
+        if name:
+            chain_names.append(name)
+    if not chain_names and lineage_str:
+        chain_names = [token.strip() for token in lineage_str.split(";") if token.strip()]
+    # Iterate markers in specificity order (most specific first) so the
+    # finest matching clade wins — "Mammalia" must beat "Eukaryota" for
+    # Homo sapiens, etc.
+    chain_lower = {name.lower() for name in chain_names}
+    for marker, label in _BLAST_GROUP_BY_ROOT_TOKEN:
+        if marker.lower() in chain_lower:
+            return label
+    return None

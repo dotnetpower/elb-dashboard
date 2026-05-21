@@ -45,7 +45,9 @@ def validate_storage_blob_reference(
     parsed = urlparse(url)
     if parsed.scheme != "https":
         raise ValueError(f"{label} URL must use https")
-    expected_host = f"{storage_account}.blob.core.windows.net"
+    from api.services.storage_endpoint import blob_host_for_account
+
+    expected_host = blob_host_for_account(storage_account)
     if (parsed.hostname or "").lower() != expected_host.lower():
         raise ValueError(f"{label} URL must belong to the selected Storage account")
     if parsed.query or parsed.fragment:

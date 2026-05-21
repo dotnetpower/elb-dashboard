@@ -144,9 +144,26 @@ export function buildStepLog({
       }
       if (state === "error") return `✗ BLAST run failed:\n${failureText}`;
       if (state === "done") {
-        const polls = rd.polls as number;
-        const lo = rd.last_output as string;
-        let msg = `✓ BLAST completed after ${polls ?? "?"} polls (~${(polls ?? 0) * 30}s).`;
+        // Prefer the captured K8s pod log tail if present; show a polls/elapsed
+        // summary only when we actually have those numbers. The previous
+        // `polls ?? "?"` template surfaced "BLAST completed after ? polls
+        // (~0s)" for short runs whose state row never carried a `polls` field
+        // — that was misleading. Fall back to the K8s duration which is
+        // always present once the runtime step is closed.
+        const polls = rd.polls as number | undefined;
+        const durationMs = rd.duration_ms as number | undefined;
+        const elapsedFromPolls =
+          typeof polls === "number" ? polls * 30 : undefined;
+        const elapsedSec =
+          typeof durationMs === "number"
+            ? Math.max(1, Math.round(durationMs / 1000))
+            : elapsedFromPolls;
+        const pollsInfo =
+          typeof polls === "number" && polls > 0 ? ` after ${polls} polls` : "";
+        const elapsedInfo =
+          typeof elapsedSec === "number" ? ` (~${elapsedSec}s)` : "";
+        const lo = (rd.last_output as string | undefined)?.trim();
+        let msg = `✓ BLAST completed${pollsInfo}${elapsedInfo}.`;
         if (lo) msg += `\n\n--- Last Status Output ---\n${lo}`;
         return msg;
       }
@@ -169,8 +186,14 @@ export function buildStepLog({
           : "";
       const verifyInfo = verifyAttempts ? ` (${verifyAttempts} verification polls)` : "";
       if (state === "error") return `✗ Export failed:\n${eo || failureText}`;
-      if (state === "done" && ed.success)
-        return `✓ Results exported.${verifyInfo}\n${outInfo}\n\n--- Export Log ---\n${eo || "(no output)"}`;
+      if (state === "done" && ed.success) {
+        // Only render the "--- Export Log ---" block when there IS actual
+        // export output. Many short runs leave `eo` empty; showing
+        // "--- Export Log ---\n(no output)" looked like a missing capture
+        // instead of "nothing to log".
+        const tail = eo ? `\n\n--- Export Log ---\n${eo}` : "";
+        return `✓ Results exported.${verifyInfo}\n${outInfo}${tail}`;
+      }
       if (state === "done" && ed.auth_failed)
         return `⚠ Export partially failed: VM az login expired.\n${outInfo}\nResults written by AKS pods directly may still be available.\n\n--- Export Log ---\n${eo || ""}`;
       if (state === "done")

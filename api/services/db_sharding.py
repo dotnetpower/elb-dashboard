@@ -573,7 +573,9 @@ def partition_prefix_for(
     """
     _validate_db_name(db_name)
     _validate_shard_count(num_shards)
+    from api.services.storage_endpoint import blob_account_url
+
     return (
-        f"https://{account_name}.blob.core.windows.net/{container}/"
+        f"{blob_account_url(account_name)}/{container}/"
         f"{num_shards}shards/{db_name}_shard_"
     )
