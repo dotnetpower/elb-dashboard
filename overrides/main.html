@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{#-
+  Open Graph, Twitter Card, and JSON-LD structured data for SEO / GEO.
+  Every value falls back to the site-level defaults declared in mkdocs.yml,
+  so per-page YAML frontmatter (`title:`, `description:`) just works.
+-#}
+{% block extrahead %}
+  {% set page_title  = page.meta.title       if page and page.meta and page.meta.title       else (page.title if page and page.title else config.site_name) %}
+  {% set page_descr  = page.meta.description if page and page.meta and page.meta.description else config.site_description %}
+  {% set page_url    = page.canonical_url    if page and page.canonical_url                  else config.site_url %}
+  {% set og_image    = (config.extra.og.image    if config.extra and config.extra.og else 'images/elasticblast-logo.svg') %}
+  {% set og_type     = (config.extra.og.type     if config.extra and config.extra.og else 'website') %}
+  {% set og_locale   = (config.extra.og.locale   if config.extra and config.extra.og else 'en_US') %}
+  {% set og_sitename = (config.extra.og.site_name if config.extra and config.extra.og else config.site_name) %}
+  {% set og_image_url = (config.site_url ~ og_image) if not og_image.startswith('http') else og_image %}
+
+  <meta property="og:site_name"   content="{{ og_sitename }}">
+  <meta property="og:locale"      content="{{ og_locale }}">
+
+  {#- og:type, og:title, og:description, og:url, og:image, twitter:card,
+      twitter:title, twitter:description, twitter:image are all emitted by
+      the mkdocs-material `social` plugin (see mkdocs.yml `plugins.social.cards`).
+      The plugin writes them right before `</head>`, which is what social
+      crawlers consume. Re-emitting any of those here produces duplicate
+      tags that some consumers (Slack, Discord, X) handle inconsistently. -#}
+
+  <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1">
+  <meta name="theme-color" content="#5c4ee5">
+  <meta name="application-name" content="{{ og_sitename }}">
+  <meta name="apple-mobile-web-app-title" content="{{ og_sitename }}">
+
+  {#- Google Search Console ownership verification. Removing this tag
+      drops the property out of Search Console; keep it until ownership
+      is re-verified through another method (e.g. GA4 link). -#}
+  <meta name="google-site-verification" content="jHE9O63_qT7gVGACSA-OA_2d1wzkue6urJ99MGSCzY8">
+
+  {#- Mermaid is self-hosted under javascripts/vendor/ (see mkdocs.yml
+      `extra_javascript`). No external CDN preconnect is needed. -#}
+
+  {#- JSON-LD: WebSite + SoftwareApplication on the landing page only. -#}
+  {% if page and page.is_homepage %}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "@id": "{{ config.site_url }}#website",
+        "url": "{{ config.site_url }}",
+        "name": {{ config.site_name | tojson }},
+        "description": {{ config.site_description | tojson }},
+        "inLanguage": "en",
+        "publisher": { "@id": "{{ config.site_url }}#org" },
+        "potentialAction": {
+          "@type": "SearchAction",
+          "target": "{{ config.site_url }}?q={search_term_string}",
+          "query-input": "required name=search_term_string"
+        }
+      },
+      {
+        "@type": "Organization",
+        "@id": "{{ config.site_url }}#org",
+        "name": {{ config.site_author | tojson }},
+        "url": "{{ config.repo_url }}",
+        "logo": "{{ og_image_url }}"
+      },
+      {
+        "@type": "SoftwareApplication",
+        "name": {{ config.site_name | tojson }},
+        "description": {{ config.site_description | tojson }},
+        "applicationCategory": "Bioinformatics control plane for ElasticBLAST on Microsoft Azure",
+        "operatingSystem": "Web",
+        "url": "{{ config.site_url }}",
+        "codeRepository": "{{ config.repo_url }}",
+        "license": "https://www.apache.org/licenses/LICENSE-2.0",
+        "publisher": { "@id": "{{ config.site_url }}#org" },
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    ]
+  }
+  </script>
+  {% else %}
+  {#- All other pages: TechArticle so AI/search engines pick up the topic + breadcrumb.
+      `| unescape_html | tojson` is mandatory for every page-derived string:
+      MkDocs renders ``page.title`` through the markdown pipeline, which
+      HTML-escapes ``&``/``<``/``>``, so a raw ``| tojson`` would publish
+      ``"headline": "API &amp; Endpoints"`` to crawlers. The custom
+      ``unescape_html`` filter is registered by scripts/docs/llms_hooks.py. -#}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": {{ page_title | unescape_html | tojson }},
+    "description": {{ page_descr | unescape_html | tojson }},
+    "url": "{{ page_url }}",
+    "inLanguage": "en",
+    "isPartOf": { "@id": "{{ config.site_url }}#website" },
+    "publisher": {
+      "@type": "Organization",
+      "name": {{ config.site_author | unescape_html | tojson }},
+      "url": "{{ config.repo_url }}"
+    },
+    "mainEntityOfPage": "{{ page_url }}"
+  }
+  </script>
+  {% endif %}
+
+  {#- BreadcrumbList: Home + every ancestor (Material exposes deepest-first,
+      so reverse to get root-first) + the current page. Skip only on the home. -#}
+  {% if page and not page.is_homepage %}
+  {% set crumbs = [] %}
+  {% set _ = crumbs.append({'name': config.site_name, 'url': config.site_url}) %}
+  {% if page.ancestors %}
+    {% for ancestor in page.ancestors | reverse %}
+      {% set _ = crumbs.append({'name': ancestor.title, 'url': (config.site_url ~ ancestor.url) if ancestor.url else None}) %}
+    {% endfor %}
+  {% endif %}
+  {% set _ = crumbs.append({'name': page.title, 'url': page_url}) %}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {% for c in crumbs %}{
+        "@type": "ListItem",
+        "position": {{ loop.index }},
+        "name": {{ c.name | unescape_html | tojson }}{% if c.url %},
+        "item": "{{ c.url }}"{% endif %}
+      }{% if not loop.last %},{% endif %}
+      {% endfor %}
+    ]
+  }
+  </script>
+  {% endif %}
+
+  {#- Per-page extra JSON-LD blocks (e.g. FAQPage / HowTo) -#}
+  {% if page and page.meta and page.meta.jsonld %}
+  <script type="application/ld+json">{{ page.meta.jsonld | safe }}</script>
+  {% endif %}
+{% endblock %}

@@ -1,3 +1,8 @@
+---
+title: BLAST Search Space Discovery
+description: How ElasticBLAST Control Plane discovers BLAST databases and search-space metadata on Azure Storage, including NCBI compatibility notes.
+---
+
 # BLAST Search Space Discovery
 
 This note records the small-database discovery used to understand whether NCBI

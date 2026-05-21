@@ -1,3 +1,8 @@
+---
+title: Recent Searches (User Guide)
+description: How to find every BLAST job the workspace knows about, jump into results detail, inspect logs, and clean up completed runs.
+---
+
 # Recent Searches
 
 The Recent searches page lists every BLAST job the workspace knows about, grouped by date, and provides the path into result detail, log analytics, and cleanup. It is reached from the sidebar **Recent searches** entry or any `/blast/jobs` link.

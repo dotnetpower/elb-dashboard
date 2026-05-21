@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   ExternalLink,
   Download,
@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import type { BlastHit } from "@/api/endpoints";
+import { TaxonomyDetailModal } from "@/components/taxonomy/TaxonomyDetailModal";
 import {
   formatDecimal,
   formatEvalue,
@@ -19,6 +20,7 @@ import {
   ncbiNuccoreUrl,
   numberValue,
   organismFromStitle,
+  parseLeadingTaxid,
   taxidLabel,
 } from "./helpers";
 import {
@@ -61,6 +63,12 @@ export function BlastHitsTable({
 }: BlastHitsTableProps) {
   const { selectedHits, toggleHit, setSelectionFromKeys, clearSelection, applied, applyImmediate } =
     analytics;
+
+  const [activeTaxon, setActiveTaxon] = useState<{
+    name: string;
+    taxid: number | null;
+    source: "sscinames" | "stitle";
+  } | null>(null);
 
   const allKeys = hits.map((hit) => hitKey(hit));
   const allSelected =
@@ -179,7 +187,6 @@ export function BlastHitsTable({
                 title="Max bit score on this HSP / total bit score summed across every HSP for this subject on the visible page"
               />
               <th style={{ textAlign: "right" }}>Query Range</th>
-              <th style={{ textAlign: "left" }}>Shard</th>
             </tr>
           </thead>
           <tbody>
@@ -232,10 +239,10 @@ export function BlastHitsTable({
                     {hit.stitle || "—"}
                   </td>
                   <td style={{ maxWidth: 180, color: "var(--text-muted)" }}>
-                    {hit.sscinames ||
-                      taxidLabel(hit.staxids) ||
-                      organismFromStitle(hit.stitle) ||
-                      "—"}
+                    <ScientificNameCell
+                      hit={hit}
+                      onOpen={(payload) => setActiveTaxon(payload)}
+                    />
                   </td>
                   <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                     {formatPercent(hit.qcovs)}
@@ -326,7 +333,68 @@ export function BlastHitsTable({
           </tbody>
         </table>
       </div>
+      {activeTaxon && (
+        <TaxonomyDetailModal
+          open
+          scientificName={activeTaxon.name}
+          taxid={activeTaxon.taxid}
+          organismSource={activeTaxon.source}
+          onClose={() => setActiveTaxon(null)}
+        />
+      )}
     </div>
+  );
+}
+
+interface ScientificNameCellProps {
+  hit: BlastHit;
+  onOpen: (payload: {
+    name: string;
+    taxid: number | null;
+    source: "sscinames" | "stitle";
+  }) => void;
+}
+
+function ScientificNameCell({ hit, onOpen }: ScientificNameCellProps) {
+  // Source preference matches the cell's previous fallback chain:
+  // sscinames (trusted) → organism parsed from stitle (heuristic).
+  // The taxid label is shown as plain text only when nothing else is
+  // available because the bare number isn't useful to open the modal.
+  const stitleOrganism = organismFromStitle(hit.stitle);
+  const trustedName = hit.sscinames?.trim() || "";
+  const heuristicName = !trustedName ? stitleOrganism.trim() : "";
+  const displayName = trustedName || heuristicName;
+  const fallbackText = taxidLabel(hit.staxids);
+
+  if (!displayName) {
+    return <>{fallbackText || "—"}</>;
+  }
+
+  const taxid = parseLeadingTaxid(hit.staxids);
+  const source: "sscinames" | "stitle" = trustedName ? "sscinames" : "stitle";
+
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        onOpen({ name: displayName, taxid, source })
+      }
+      title="Open NCBI taxonomy details"
+      style={{
+        background: "transparent",
+        border: 0,
+        padding: 0,
+        cursor: "pointer",
+        color: "var(--accent)",
+        fontFamily: "inherit",
+        fontSize: "inherit",
+        textAlign: "left",
+        textDecoration: "underline dotted",
+        textUnderlineOffset: 3,
+      }}
+    >
+      {displayName}
+    </button>
   );
 }
 

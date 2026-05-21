@@ -1,6 +1,25 @@
+---
+title: Container Apps Architecture
+description: Authoritative reference for the shipped ElasticBLAST Control Plane on Azure Container Apps — the six-sidecar layout, ingress, identity, secrets, and the migration from Azure Functions.
+social:
+  cards_layout_options:
+    title: Container Apps Architecture
+    description: The shipped six-sidecar topology — ingress, identity, secrets, and Azure Functions migration.
+---
+
 # Container Apps Architecture Reference
 
 This document is the authoritative reference for the **shipped** ElasticBLAST
+
+!!! tip "TL;DR"
+
+    The deployed control plane is one Azure Container App
+    (`ca-elb-dashboard`) pinned to `minReplicas: 1`, `maxReplicas: 1` with
+    six sidecars: `frontend` (nginx + React/Vite SPA), `api` (FastAPI on
+    uvicorn at `:8080`), `worker` and `beat` (Celery), `redis` (in-revision
+    broker), and `terminal` (loopback ttyd with the elastic-blast toolchain).
+    The retired Azure Functions tree was deleted from the repository on
+    2026-05-19; new work goes in `api/`.
 control-plane architecture on Azure Container Apps: the bundled
 `ca-elb-dashboard` Container App with six sidecars, the cost model, the storage
 network isolation rules, the browser ↔ storage proxy contract, and the
@@ -28,14 +47,15 @@ Use this target shape:
 - **No managed database.** All durable state (job registry, audit log, schedule
   records, command history) is persisted to **Azure Storage** (blob and table)
   using managed-identity auth.
-- **No separate Redis VM.** Redis runs as an in-revision sidecar with an Azure
-  Files volume mounted at `/data` for AOF persistence so the broker survives
-  revision restarts.
+- **No separate Redis VM.** Redis runs as an in-revision sidecar. It is
+  ephemeral (no AOF, no Azure Files mount); the broker queue is rebuilt from
+  the `jobstate` table by the `beat` reconciler on revision restart.
 - **No separate Remote Terminal VM.** The browser-accessible operator shell is
   a sidecar in the same Container App. The api sidecar terminates the
   WebSocket from the browser (after MSAL + role check) and proxies it to a
-  loopback `ttyd` instance inside the `terminal` sidecar. User home directory
-  (`/home/azureuser`) is persisted on an Azure Files share.
+  loopback `ttyd` instance inside the `terminal` sidecar. `/home/azureuser`
+  is ephemeral; user files stage to workload Storage via `azcopy` rather than
+  to a local mount.
 - Move platform resources behind VNet integration and private endpoints.
 - **Hard requirement, day 1: every Storage account in scope has
   `publicNetworkAccess: Disabled`. The Container App is the only client that
@@ -63,11 +83,13 @@ Trade-offs:
   Redis state must stay co-located. Acceptable for current and projected
   traffic; if scale-out is ever needed, split `beat` (and Redis) into a separate
   app first.
-- In-flight Celery tasks are lost on revision restart. Mitigated by:
-  - AOF on the Redis sidecar persisted to an Azure Files mount, so the queue is
-    restored across restarts.
-  - Storage state rows + the periodic reconciler (run by `beat`) re-dispatch
-    tasks that were observed as `running` but whose worker disappeared.
+- In-flight Celery tasks are lost on revision restart. Mitigated by per-task
+  Storage state rows + the periodic reconciler (run by `beat`), which
+  re-dispatches tasks that were observed as `running` but whose worker
+  disappeared. (Earlier revisions backed the Redis queue with an Azure Files
+  AOF mount; that was dropped because SMB mounts require a Storage account
+  key, which conflicts with `allowSharedKeyAccess: false`. See
+  `infra/modules/storageState.bicep` for the rationale.)
 
 Do not move the control plane into AKS as the first target. AKS is the workload
 plane for ElasticBLAST. Hosting the control plane outside AKS keeps recovery,
@@ -81,7 +103,7 @@ managed.
 | Azure Service Bus | Adds a managed dependency we no longer need once the worker model is Celery-based. | Celery + in-revision Redis sidecar. |
 | Cosmos DB / Azure Database for PostgreSQL | A managed database is over-scoped for the document/append workloads this control plane has. Adds cost and operational surface. | Azure Storage (blob for documents, table for indexed queries). |
 | Azure Cache for Redis (managed) | Cost. Broker is internal-only and does not need geo-replication, AAD, or managed patching. | Redis 7 alpine sidecar inside the Container App. |
-| Self-hosted Redis VM (`vm-elb-redis`) | Adds a VM, NIC, NSG, subnet, MI, and nightly backup job. | Redis sidecar in the same Container App revision; AOF persisted to an Azure Files share. |
+| Self-hosted Redis VM (`vm-elb-redis`) | Adds a VM, NIC, NSG, subnet, MI, and nightly backup job. | Redis sidecar in the same Container App revision; ephemeral, queue rebuilt from the `jobstate` table by the `beat` reconciler on restart. |
 | Container Apps Jobs for scheduled work | Two scheduling systems (jobs + beat) is redundant. | Celery beat sidecar. |
 | Separate `ca-control-api`, `ca-control-worker`, `ca-control-beat` apps | Three Container Apps means three billable revisions and three managed identities. | Single `ca-elb-dashboard` Container App with six sidecars. |
 
@@ -92,18 +114,16 @@ estimates or writing new Bicep modules.
 
 | Resource | Type | Purpose | New / Existing |
 |----------|------|---------|----------------|
-| Container Apps Environment | `Microsoft.App/managedEnvironments` | VNet-integrated runtime; binds the Azure Files volumes for Redis and the terminal home | New |
+| Container Apps Environment | `Microsoft.App/managedEnvironments` | VNet-integrated runtime for the Container App | New |
 | `ca-elb-dashboard` | `Microsoft.App/containerApps` | Single Container App with six sidecar containers: `frontend`, `api`, `worker`, `beat`, `redis`, `terminal`. Pinned to `minReplicas: 1`, `maxReplicas: 1`. Public ingress targets the `api` sidecar on `:8080`. | New |
-| Azure Files share `redis-data` | `Microsoft.Storage/storageAccounts/fileServices/shares` | AOF persistence mount for the Redis sidecar | New (on existing platform storage account) |
-| Azure Files share `terminal-home` | `Microsoft.Storage/storageAccounts/fileServices/shares` | `/home/azureuser` persistence for the terminal sidecar (queries staged locally, az CLI profile, kubeconfig, ssh known_hosts) | New (on existing platform storage account) |
-| Platform Storage account | `Microsoft.Storage/storageAccounts` | Job state (table), audit (append blob), schedules (blob), command history (blob), Redis AOF (file share), terminal home (file share) | Re-purposed existing |
+| Platform Storage account | `Microsoft.Storage/storageAccounts` | Job state (table), audit (append blob), schedules (blob), command history (blob) | Re-purposed existing |
 | Workload Storage account | `Microsoft.Storage/storageAccounts` | ElasticBLAST `blast-db`, `queries`, `results` | Existing |
 | Container Registry | `Microsoft.ContainerRegistry/registries` | App + ElasticBLAST images (including the new `elb-frontend` and `elb-terminal` images) | Existing |
 | Key Vault | `Microsoft.KeyVault/vaults` | Secrets, app configuration references | Existing |
 | AKS cluster | `Microsoft.ContainerService/managedClusters` | ElasticBLAST workload | Existing |
 | Platform VNet | `Microsoft.Network/virtualNetworks` | Subnets: `snet-containerapps`, `snet-private-endpoints`, `snet-aks` | New |
-| Private endpoints | `Microsoft.Network/privateEndpoints` | Key Vault, Storage (blob + table + file), ACR | New |
-| Private DNS zones | `Microsoft.Network/privateDnsZones` | `privatelink.vaultcore.azure.net`, `privatelink.blob.core.windows.net`, `privatelink.table.core.windows.net`, `privatelink.file.core.windows.net`, `privatelink.azurecr.io` | New |
+| Private endpoints | `Microsoft.Network/privateEndpoints` | Key Vault, Storage (blob + table), ACR | New |
+| Private DNS zones | `Microsoft.Network/privateDnsZones` | `privatelink.vaultcore.azure.net`, `privatelink.blob.core.windows.net`, `privatelink.table.core.windows.net`, `privatelink.azurecr.io` | New |
 | User-assigned managed identities | `Microsoft.ManagedIdentity/userAssignedIdentities` | `id-elb-dashboard-*` (shared by all six sidecars), `id-elb-openapi` (AKS Workload Identity) | New |
 | Log Analytics + Application Insights | `Microsoft.OperationalInsights/workspaces` + `Microsoft.Insights/components` | Logs, metrics, traces | Existing |
 
@@ -145,7 +165,7 @@ telemetry; resize is a revision swap with no downtime.
 | `api` (FastAPI) | 0.5 | 1.0 GiB | Handles JSON requests, the WebSocket terminal proxy, and the streaming upload/download proxy (1 MiB chunks, 4 MiB block uploads, semaphore-capped to 4 concurrent transfers). 0.5 vCPU is sized for the proxy bursts; idle steady-state will be much lower. |
 | `worker` (Celery) | 0.5 | 1.0 GiB | Runs Azure SDK pollers, ARM/AKS calls, and `az acr build` orchestration. CPU spikes during ACR build dispatch and AKS provision but is mostly waiting on long-running Azure operations. |
 | `beat` (Celery beat) | 0.25 | 0.5 GiB | Scheduler thread + Storage poller for schedule definitions. Trivial. |
-| `redis` (redis:7-alpine) | 0.25 | 0.5 GiB | Single-node broker for control-plane traffic. AOF write rate is one fsync/second. Memory grows with queue depth; 0.5 GiB is enough for hundreds of thousands of pending tasks. |
+| `redis` (redis:7-alpine) | 0.25 | 0.5 GiB | Single-node broker for control-plane traffic. Ephemeral (no AOF) — queue is rebuilt from the `jobstate` table by the `beat` reconciler on revision restart. Memory grows with queue depth; 0.5 GiB is enough for hundreds of thousands of pending tasks. |
 | `terminal` (Ubuntu + elastic-blast toolchain) | 0.5 | 1.0 GiB | Bash + tmux + `python` + occasional `kubectl`/`az`/`azcopy`. Carries the heaviest image, but at runtime it is mostly idle waiting for the operator to type. |
 | **Replica total** | **2.25** | **4.5 GiB** | Satisfies the 1 vCPU : 2 GiB ratio. Within Consumption-profile per-replica max (4 / 8). |
 
@@ -223,26 +243,22 @@ Consumption profile (no dedicated node).
 |-----------|---------|-------|
 | Per-second usage (5% active scenario) | ~$57 | from the table above |
 | Workload-profile environment fee | $72 | $0.10/hour × 720 hours |
-| Azure Files for `redis-data` (Standard LRS, ~5 GiB used) | ~$0.30 | $0.06/GiB/month |
-| Azure Files for `terminal-home` (Standard LRS, ~20 GiB used) | ~$1.20 | same rate |
 | Platform Storage (table + append blobs for state) | ~$1 | low transactions |
-| **Container-Apps-side total** | **~$132 / month** | excludes ACR ($20, already paid) and workload Storage |
+| **Container-Apps-side total** | **~$130 / month** | excludes ACR ($20, already paid) and workload Storage |
 
 **Option B — Consumption-only plan (no workload-profile fee).**
 Cheaper, but VNet integration support is more limited and does not cover the
 day-1 private-storage requirement on every Azure region. Use only if you
 verify in your subscription that Consumption-only environments can sit in
-the platform VNet AND mount Azure Files privately AND reach Key Vault /
-Storage private endpoints — otherwise you cannot satisfy the Storage Network
-Isolation invariant.
+the platform VNet AND reach Key Vault / Storage private endpoints — otherwise
+you cannot satisfy the Storage Network Isolation invariant.
 
 | Line item | Monthly | Notes |
 |-----------|---------|-------|
 | Per-second usage (5% active scenario) | ~$57 | same math |
 | Environment fee | $0 | Consumption-only has none |
-| Azure Files | ~$1.50 | same |
 | Platform Storage | ~$1 | same |
-| **Container-Apps-side total** | **~$60 / month** | only if VNet + private endpoints actually work in this mode |
+| **Container-Apps-side total** | **~$58 / month** | only if VNet + private endpoints actually work in this mode |
 
 The plan defaults to **Option A** because the Storage Network Isolation rule
 is non-negotiable.
@@ -256,10 +272,6 @@ is non-negotiable.
   proxy headroom. Wait for telemetry before resizing.
 - **Use Front Door for the SPA** (optional, not in the day-1 plan). Adds
   ~$35 / month for Front Door Standard plus per-GB egress; gains a CDN.
-- **Use Premium Files for `redis-data`** (e.g. for a future multi-node
-  Redis). Premium has a 100 GiB minimum at $0.16/GiB → ~$16 / month per
-  share, vs. the ~$0.30 Standard estimate above. Not needed for the
-  single-broker design.
 
 ## Storage Network Isolation (Hard Requirement)
 
@@ -269,14 +281,14 @@ rule in the rest of this document is consistent with it.
 ### Rules
 
 1. **Platform Storage account** (job state table, audit blobs, payload blobs,
-   schedule blob, dead-letter blobs, `redis-data` Azure Files share):
+   schedule blob, dead-letter blobs):
    - `publicNetworkAccess` is `Disabled` from the moment the account is in
      production use.
    - `networkAcls.defaultAction` is `Deny`.
    - `networkAcls.bypass` is `None` (not `AzureServices`).
    - No IP allow-list entries.
-   - Reachable only via three private endpoints in `snet-private-endpoints`:
-     blob, table, and file. Each endpoint is wired into its private DNS zone
+   - Reachable only via two private endpoints in `snet-private-endpoints`:
+     blob and table. Each endpoint is wired into its private DNS zone
      and the zone is linked to the platform VNet.
 2. **Workload Storage account** (ElasticBLAST `blast-db`, `queries`,
    `results`):
@@ -309,7 +321,7 @@ rule in the rest of this document is consistent with it.
   per Microsoft guidance (`/27` for Consumption-only, `/23` for workload
   profile environments). Pick `/23` so the topology can grow without renaming.
 - All private DNS zones (`privatelink.blob.core.windows.net`,
-  `privatelink.table.core.windows.net`, `privatelink.file.core.windows.net`,
+  `privatelink.table.core.windows.net`,
   `privatelink.vaultcore.azure.net`, `privatelink.azurecr.io`) are linked to
   the platform VNet so the Container App resolves storage hostnames to
   private IPs.
@@ -338,8 +350,6 @@ rule in the rest of this document is consistent with it.
 - An external curl to `https://<account>.blob.core.windows.net/` returns
   `403 PublicAccessNotPermitted` (or DNS NXDOMAIN if the public record was
   removed for the account).
-- The Redis sidecar successfully mounts the `redis-data` Azure Files share
-  while the storage account `publicNetworkAccess` is `Disabled`.
 
 ## Browser ↔ Storage Proxy (No SAS to the Browser)
 
@@ -473,13 +483,13 @@ Container Apps Environment, VNet integrated
         +-- container: worker   (Celery worker, no ingress)
         +-- container: beat     (Celery beat, no ingress)
         +-- container: redis    (redis:7-alpine, listens on 127.0.0.1:6379)
-        |     |
-        |     +-- volume mount: /data         -> Azure Files share `redis-data`
+        |     - ephemeral (no AOF, no Azure Files mount)
+        |     - queue rebuilt from `jobstate` table by beat reconciler on restart
         |
         +-- container: terminal (ttyd + bash + elastic-blast toolchain,
-        |                        listens on 127.0.0.1:7681)
-              |
-              +-- volume mount: /home/azureuser -> Azure Files share `terminal-home`
+                                 listens on 127.0.0.1:7681)
+              - /home/azureuser is ephemeral; user files stage to workload
+                Storage via azcopy (no Azure Files mount)
 
 All six sidecars share:
   - the same network namespace
@@ -492,7 +502,7 @@ All six sidecars share:
 Private endpoints and managed identity
   |
   +-- Key Vault
-  +-- Storage accounts (platform + workload, including the redis-data file share)
+  +-- Storage accounts (platform + workload)
   +-- Azure Container Registry
   +-- AKS private or restricted API server
 ```
@@ -506,8 +516,8 @@ Private endpoints and managed identity
 | `api` sidecar | Container in `ca-elb-dashboard` | FastAPI HTTP API on Python 3.12 + reverse proxy for non-`/api/*` to the frontend sidecar | Owns the public `/api/*` contract. Public ingress restricted (Container Apps ingress with optional `allowedCidrs`). Forwards requests that do not match `/api/*` to `127.0.0.1:8081`. Terminates the browser WebSocket and proxies it to the `terminal` sidecar's loopback `ttyd` after MSAL + tenant-role check. |
 | `worker` sidecar | Container in `ca-elb-dashboard` | Celery worker | Pulls from `redis://127.0.0.1:6379/0`. Writes progress to Storage. |
 | `beat` sidecar | Container in `ca-elb-dashboard` | Celery beat scheduler | Reads schedule definitions from Storage. Singleton by construction (one container, one replica). |
-| `redis` sidecar | Container in `ca-elb-dashboard` | Broker + result backend | `redis:7-alpine`. Binds to `127.0.0.1` only. AOF on, RDB off. `/data` mounted from Azure Files share `redis-data`. |
-| `terminal` sidecar | Container in `ca-elb-dashboard` | Browser-accessible operator shell with the `elastic-blast` toolchain | Image based on Ubuntu 24.04 with `azure-cli`, `kubectl`, `azcopy`, `python3.12`, `primer3`, `tmux`, `git`, `jq`, `make`, and the `elastic_blast` package + venv pre-installed. Runs `ttyd -p 7681 -i 127.0.0.1 -W tmux new -A -s elb` so each browser session attaches to the same persistent tmux. `/home/azureuser` mounted from Azure Files share `terminal-home` for file persistence across revision restarts. Authenticates to ARM with `id-elb-dashboard-*` via the env-injected MSI endpoint. |
+| `redis` sidecar | Container in `ca-elb-dashboard` | Broker + result backend | `redis:7-alpine`. Binds to `127.0.0.1` only. Ephemeral (no AOF, no Azure Files mount); the broker queue is rebuilt from the `jobstate` table by the `beat` reconciler on revision restart. |
+| `terminal` sidecar | Container in `ca-elb-dashboard` | Browser-accessible operator shell with the `elastic-blast` toolchain | Image based on Ubuntu 24.04 with `azure-cli`, `kubectl`, `azcopy`, `python3.12`, `primer3`, `tmux`, `git`, `jq`, `make`, and the `elastic_blast` package + venv pre-installed. Runs `ttyd -p 7681 -i 127.0.0.1 -W tmux new -A -s elb` so each browser session attaches to the same persistent tmux. `/home/azureuser` is ephemeral; user files stage to workload Storage via `azcopy` rather than to a local mount. Authenticates to ARM with `id-elb-dashboard-*` via the env-injected MSI endpoint. |
 | Job state | Azure Storage table + blob | Job registry, audit log, command history, schedule records | Table for indexed lookups (`PartitionKey=job_id`); blob (append) for audit trail; blob for large request/response payloads. |
 | Secrets | Azure Key Vault | App configuration references and any future SSH material | Use private endpoint and RBAC. Keep purge protection enabled. No VM admin password is stored anywhere because there is no VM. |
 | Runtime storage | Azure Storage | Query, config, DB, and result blobs | Use private endpoints, HNS where needed, and managed identity auth. |
@@ -611,16 +621,17 @@ Responsibilities:
 
 - `redis:7-alpine` (or pinned digest), no auth required because the listener is
   bound to `127.0.0.1` and is not reachable from outside the replica.
-- `appendonly yes`, `appendfsync everysec`, RDB snapshots disabled.
-- `/data` mounted from Azure Files share `redis-data` so AOF survives revision
-  restart.
-- Resource limits: 0.1 vCPU / 256 MiB initial; revisit after load testing.
+- Runs with `--save ''` and `--appendonly no`. **No AOF, no RDB, no Azure
+  Files mount.** SMB mounts in Container Apps require a Storage account key,
+  which conflicts with the `allowSharedKeyAccess: false` invariant on the
+  platform Storage account; see `infra/modules/storageState.bicep`.
+- Resource limits: 0.25 vCPU / 0.5 GiB; revisit after load testing.
 - No outbound traffic; lifecycle managed entirely by the Container App.
 
 This sidecar is a single point of failure for queued work within one revision.
-Mitigation: tasks in flight are visible in Storage state, the AOF file is
-persisted to Azure Files, and the `beat` reconciler re-dispatches tasks that
-were observed as `running` but whose worker disappeared.
+Mitigation: tasks in flight are visible in Storage state (the `jobstate`
+table), and the `beat` reconciler re-dispatches tasks that were observed as
+`running` but whose worker disappeared.
 
 ### `terminal` sidecar
 
@@ -681,14 +692,18 @@ Azure auth from inside the terminal:
 
 Persistence:
 
-- `/home/azureuser` is mounted from Azure Files share `terminal-home` (SMB).
-- Survives revision restart and image rebuild.
-- Holds: `~/.azure/` profile, `~/.kube/config`, ssh known_hosts (if any),
-  user-staged query files, downloaded result snippets, the cloned
-  `elastic-blast-azure` repo (read-only convenience copy; the venv and
-  pre-installed tooling live inside the image, not the share).
-- The share is on the platform Storage account whose `publicNetworkAccess`
-  is `Disabled`, mounted via the file private endpoint.
+- `/home/azureuser` is **ephemeral**. There is no Azure Files SMB mount,
+  because SMB mounts require a Storage account key and the platform Storage
+  account runs with `allowSharedKeyAccess: false` (see
+  `infra/modules/storageState.bicep`).
+- User query files, downloaded result snippets, and similar artefacts stage
+  to workload Storage via `azcopy` instead of to a local mount.
+- The cloned `elastic-blast-azure` repo, the venv, and the pre-installed
+  toolchain all live inside the container image — they are immutable per
+  revision and do not depend on a writable home directory.
+- `~/.azure/` and `~/.kube/config` are regenerated on each session: the
+  startup script runs `az login --identity` against the MI endpoint and
+  `az aks get-credentials` against the workload cluster.
 
 Lifecycle:
 
@@ -707,7 +722,7 @@ left column is the retired Remote Terminal VM model preserved as a guardrail):
 | Ubuntu 24.04 VM (`vm-elb-terminal`) | `elb-terminal:<tag>` container in `ca-elb-dashboard` |
 | 10-15 min cloud-init bootstrap (apt, pip, clone, venv, defender-onboarding retry) | Image build does this once at CI time. Cold start is whatever the container engine takes (seconds). |
 | `azure-cli`, `kubectl`, `azcopy`, `git`, `make`, `jq`, `python3.12`, `primer3`, `tmux` installed via cloud-init | All baked into the image at build time, with retry / failure handling moved to CI |
-| `~/elastic-blast-azure` clone + venv + `pip install -r requirements/test.txt` + `pip install --no-build-isolation --no-deps elastic_blast` | All baked into the image; venv at `/opt/elb/venv`. The cloned repo is also surfaced under `/home/azureuser/elastic-blast-azure` via Azure Files for user convenience but is not on the critical path. |
+| `~/elastic-blast-azure` clone + venv + `pip install -r requirements/test.txt` + `pip install --no-build-isolation --no-deps elastic_blast` | All baked into the image; venv at `/opt/elb/venv`. |
 | `azure-mgmt-*` SDKs installed via cloud-init | Baked into the image |
 | `/etc/profile.d/elb-env.sh` env vars | Same content baked into the image |
 | `elb-az-login-mi` script that `az login --identity` from IMDS | Same script runs from the image; uses Container Apps' MI endpoint instead of IMDS. The end result (`az account show` works) is identical. |
@@ -721,7 +736,7 @@ left column is the retired Remote Terminal VM model preserved as a guardrail):
 | `/api/terminal/{vm}/destroy` (delete VM, NIC, IP, KV secret) | Replaced by container-image redeploy. There is no per-user resource to delete. |
 | `/api/terminal/{vm}/health` (power state, cloud-init progress, reachability) | Replaced by the Container App revision health and a cheap `/api/terminal/health` ping that checks `tcp://127.0.0.1:7681` from the api sidecar. |
 | `/api/terminal/provision` Durable orchestrator (RG, network, KV, password, VM, RBAC, cloud-init poll) | **Removed.** Provisioning is `azd up` + revision rollout. The first time the platform is deployed there is one-time AKS workload-identity / RBAC setup, but no per-user provisioning. |
-| Persistent `/home/azureuser` on the OS disk | Azure Files share `terminal-home` mounted at `/home/azureuser`. |
+| Persistent `/home/azureuser` on the OS disk | Ephemeral `/home/azureuser`; user files stage to workload Storage via `azcopy`. |
 | Operator runbook step: "wait for cloud-init", "open NSG to your IP", "reveal password", "ssh in" | Operator runbook step: "open the Terminal tab in the dashboard". |
 
 Verification:
@@ -829,18 +844,18 @@ Private DNS zones:
 - `privatelink.vaultcore.azure.net`
 - `privatelink.blob.core.windows.net`
 - `privatelink.table.core.windows.net`
-- `privatelink.file.core.windows.net`
 - `privatelink.azurecr.io`
 
-(No `privatelink.servicebus.windows.net` and no Cosmos/PostgreSQL DNS zones.)
+(No `privatelink.file.core.windows.net` — the control plane does not mount
+Azure Files. No `privatelink.servicebus.windows.net` and no Cosmos/PostgreSQL
+DNS zones.)
 
 Network rules:
 
 - Key Vault `publicNetworkAccess` is `Disabled` from day 1; reachable only via
   its private endpoint.
-- Platform Storage `publicNetworkAccess` is `Disabled` from day 1, including
-  the Azure Files share that backs the Redis AOF mount. Reachable only via
-  blob, table, and file private endpoints in `snet-private-endpoints`.
+- Platform Storage `publicNetworkAccess` is `Disabled` from day 1. Reachable
+  only via blob and table private endpoints in `snet-private-endpoints`.
 - Workload Storage `publicNetworkAccess` is `Disabled` from day 1. AKS reaches
   it through the blob (and dfs, if HNS) private endpoints because AKS nodes
   run in `snet-aks` in the same VNet. The terminal sidecar reaches workload
@@ -862,7 +877,7 @@ can be referenced cleanly from Bicep.
 
 | Identity | Assigned to | Required scopes |
 |----------|-------------|-----------------|
-| `id-elb-dashboard-*` | `ca-elb-dashboard` Container App (shared by all six sidecars including `frontend` and `terminal`) | Contributor plus User Access Administrator on workload RGs; Storage Table Data Contributor + Storage Blob Data Contributor + Storage File Data SMB Share Contributor on platform storage; data-plane roles on workload Storage and ACR; Key Vault Secrets User; AcrPull on the platform ACR; AKS RBAC reader / `Azure Kubernetes Service Cluster User` so the terminal sidecar can run `kubectl` against the cluster. The `frontend` sidecar makes no Azure calls and inherits the MI only because it lives in the same revision. |
+| `id-elb-dashboard-*` | `ca-elb-dashboard` Container App (shared by all six sidecars including `frontend` and `terminal`) | Contributor plus User Access Administrator on workload RGs; Storage Table Data Contributor + Storage Blob Data Contributor on platform storage; data-plane roles on workload Storage and ACR; Key Vault Secrets User; AcrPull on the platform ACR; AKS RBAC reader / `Azure Kubernetes Service Cluster User` so the terminal sidecar can run `kubectl` against the cluster. The `frontend` sidecar makes no Azure calls and inherits the MI only because it lives in the same revision. |
 | `id-elb-openapi` | AKS Workload Identity | Storage Blob Data Contributor, AKS permissions, workload RG permissions needed by ElasticBLAST. |
 
 Because the six sidecars share one MI, the api sidecar technically holds the
@@ -892,27 +907,25 @@ shared managed identity (`id-elb-dashboard-*`) for all Azure operations.
 Storage has three roles:
 
 1. **Platform state storage** for the control plane: job registry table, audit
-   append blobs, schedule definitions, dead-letter records, the `redis-data`
-   Azure Files share that backs the Redis sidecar's AOF, and the
-   `terminal-home` Azure Files share that backs the terminal sidecar's
-   `/home/azureuser`.
+   append blobs, schedule definitions, dead-letter records, and command
+   history. No Azure Files shares — `redis` and `terminal` sidecars are
+   ephemeral and the broker queue is rebuilt from the `jobstate` table by
+   the `beat` reconciler on revision restart.
 2. **ElasticBLAST workload storage** for `blast-db`, `queries`, and `results`.
 3. **Operational artifacts**: container release zips, diagnostic dumps.
 
 Target rules:
 
-- Use managed identity and Azure RBAC; do not use shared keys.
+- Use managed identity and Azure RBAC; do not use shared keys
+  (`allowSharedKeyAccess: false`).
 - **Every Storage account in scope (platform + workload) has
   `publicNetworkAccess: Disabled`, `networkAcls.defaultAction: Deny`, and
   `bypass: None`. This is enforced from creation, not as a later hardening
   step. See the “Storage Network Isolation” section for the full requirement
   set and verification steps.**
 - Keep HNS enabled on workload storage when ElasticBLAST needs it. Platform
-  state storage does **not** need HNS. The `redis-data` and `terminal-home`
-  file shares live on the platform account.
-- Keep containers private. The `redis-data` and `terminal-home` file shares
-  are exposed only via private endpoint and mounted by the Container Apps
-  Environment.
+  state storage does **not** need HNS.
+- Keep containers private.
 - Generate **no** SAS for browser-facing flows. All browser uploads and
   downloads go through the api sidecar as a streaming proxy. See the
   "Browser ↔ Storage Proxy" section for the contract, chunk sizes,

@@ -227,7 +227,7 @@ def test_streaming_upstream_error_detail_is_read_and_sanitised() -> None:
         external_blast._raise_upstream_error(exc)
 
     assert raised.value.status_code == 500
-    assert raised.value.detail["message"] == "failed ?sig=secret-token"
+    assert raised.value.detail["message"] == "failed ?sig=<redacted>"
 
 
 def test_upstream_error_logs_sanitised_response_detail(caplog: pytest.LogCaptureFixture) -> None:

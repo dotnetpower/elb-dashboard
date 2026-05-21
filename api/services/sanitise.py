@@ -15,6 +15,7 @@ import re
 
 # Patterns we mask in any user-facing string.
 _SAS_RE = re.compile(r"\?(?:[A-Za-z0-9_-]+=[^&\s]+&){2,}[^&\s]+")
+_SAS_SIG_RE = re.compile(r"(?i)([?&])sig=[^&\s\"']+")
 _BEARER_RE = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{20,}")
 _AZURE_KEY_RE = re.compile(
     r"(?i)(account[-_]?key|access[-_]?key|client[-_]?secret)[\"'\s:=]+[A-Za-z0-9+/=_-]{20,}"
@@ -48,6 +49,7 @@ def sanitise(text: str | None, *, mask_subscription_ids: bool = True) -> str:
     out = text
     out = _ANSI_CSI_RE.sub("", out)
     out = _SAS_RE.sub("?<sas-redacted>", out)
+    out = _SAS_SIG_RE.sub(r"\1sig=<redacted>", out)
     out = _BEARER_RE.sub("Bearer <redacted>", out)
     out = _AZURE_KEY_RE.sub(r"\1=<redacted>", out)
     out = _CONN_STR_RE.sub("<connection-string-redacted>", out)

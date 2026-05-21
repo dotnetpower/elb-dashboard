@@ -49,6 +49,11 @@ dependencies = [
 dev = [
   "mkdocs>=1.6,<2",
   "mkdocs-material>=9.5,<10",
+  # mkdocs-material `social` plugin dependencies — generate Open Graph PNG
+  # cards at build time. Pinned conservatively; libcairo2 + fonts-dejavu
+  # are expected to be present on the build host.
+  "cairosvg>=2.7,<3",
+  "pillow>=10.0,<12",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<1",
   "ruff>=0.7,<1",

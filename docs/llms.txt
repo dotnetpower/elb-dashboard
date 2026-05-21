@@ -1,0 +1,91 @@
+# llms.txt — ElasticBLAST Control Plane
+# Follows the proposal at https://llmstxt.org/.
+# This file gives generative-engine crawlers a fast, structured map of the
+# project so they can answer questions accurately without scraping every page.
+
+> ElasticBLAST Control Plane is a browser-only control plane for running
+> ElasticBLAST sequence-similarity searches on Microsoft Azure. Researchers
+> submit BLAST jobs, monitor AKS workloads, and retrieve results from a web
+> dashboard without using SSH, local CLIs, or browser-issued SAS tokens.
+> The control plane runs as a single Azure Container App with six sidecars
+> (frontend, api, worker, beat, redis, terminal) and authenticates users
+> through MSAL while talking to Azure services as a user-assigned managed
+> identity.
+
+## Core concepts
+
+- **ElasticBLAST**: NCBI's distributed BLAST runner. This project automates
+  the Azure-specific edition at <https://github.com/dotnetpower/elastic-blast-azure>.
+- **Control plane**: the dashboard, API, workers, and browser terminal that
+  prepare Azure resources, submit jobs, and surface results.
+- **Six-sidecar Container App**: `frontend` (nginx + React/Vite SPA), `api`
+  (FastAPI on uvicorn), `worker` + `beat` (Celery), `redis` (broker), and
+  `terminal` (ttyd loopback with the elastic-blast toolchain).
+- **Storage posture**: every workload Storage account stays
+  `publicNetworkAccess: Disabled`; all browser traffic is proxied through
+  the `api` sidecar. No SAS tokens are issued to the browser.
+- **Identity**: browser users sign in with MSAL.js (Auth Code + PKCE).
+  The backend validates the bearer token and then uses
+  `DefaultAzureCredential` (user-assigned managed identity) for every
+  Azure SDK call.
+
+## Documentation map
+
+### Start here
+
+- [Overview](https://dotnetpower.github.io/elb-dashboard/): what the
+  control plane does and who it is for.
+- [Get Started](https://dotnetpower.github.io/elb-dashboard/get-started/):
+  from a fresh clone to a deployed dashboard with `azd up`.
+- [Deployment Reference](https://dotnetpower.github.io/elb-dashboard/deployment-reference/):
+  prerequisites, parameters, post-provision steps.
+
+### Architecture
+
+- [High Level Architecture](https://dotnetpower.github.io/elb-dashboard/high-level-architecture/):
+  major boundaries and flows for researchers vs operators.
+- [Container Apps Migration](https://dotnetpower.github.io/elb-dashboard/container-apps-migration/):
+  authoritative reference for the shipped six-sidecar topology.
+- [Authentication & Authorization](https://dotnetpower.github.io/elb-dashboard/auth/):
+  MSAL flow, RBAC roles, managed identity scopes.
+- [BLAST Search Space Discovery](https://dotnetpower.github.io/elb-dashboard/blast-searchsp-discovery/):
+  how database discovery is performed on Azure storage.
+- [Web BLAST Compatibility Plan](https://dotnetpower.github.io/elb-dashboard/web-blast-compatibility-implementation-plan/):
+  feature compatibility between Web BLAST and ElasticBLAST.
+
+### User guide
+
+- [User Guide Home](https://dotnetpower.github.io/elb-dashboard/user-guide/)
+- [Dashboard](https://dotnetpower.github.io/elb-dashboard/user-guide/dashboard/)
+- [New Search](https://dotnetpower.github.io/elb-dashboard/user-guide/new-search/)
+- [Jobs](https://dotnetpower.github.io/elb-dashboard/user-guide/jobs/)
+- [Results](https://dotnetpower.github.io/elb-dashboard/user-guide/results/)
+- [API Reference](https://dotnetpower.github.io/elb-dashboard/user-guide/api-reference/)
+- [Browser Terminal](https://dotnetpower.github.io/elb-dashboard/user-guide/terminal/)
+- [UI Preview](https://dotnetpower.github.io/elb-dashboard/user-guide/ui-preview/)
+
+### Contributor guide
+
+- [Screenshot Workflow](https://dotnetpower.github.io/elb-dashboard/contributor-guide/screenshot-workflow/)
+
+### Agent / Copilot reference
+
+- [Repo Layout](https://dotnetpower.github.io/elb-dashboard/copilot/repo-layout/)
+- [Auth Flow](https://dotnetpower.github.io/elb-dashboard/copilot/auth-flow/)
+- [Browser Terminal Internals](https://dotnetpower.github.io/elb-dashboard/copilot/browser-terminal/)
+- [Resource Plane](https://dotnetpower.github.io/elb-dashboard/copilot/resource-plane/)
+- [Monitoring UI](https://dotnetpower.github.io/elb-dashboard/copilot/monitoring-ui/)
+- [Glass UI](https://dotnetpower.github.io/elb-dashboard/copilot/glass-ui/)
+- [Codebase Map](https://dotnetpower.github.io/elb-dashboard/copilot/codebase-map/)
+
+## Releases
+
+- [Releases overview](https://dotnetpower.github.io/elb-dashboard/releases/)
+- [Unreleased](https://dotnetpower.github.io/elb-dashboard/releases/unreleased/)
+- [Change Log](https://dotnetpower.github.io/elb-dashboard/changelog/)
+
+## Optional: full corpus
+
+- [llms-full.txt](https://dotnetpower.github.io/elb-dashboard/llms-full.txt):
+  every published page concatenated as plain markdown for one-shot LLM
+  ingestion.

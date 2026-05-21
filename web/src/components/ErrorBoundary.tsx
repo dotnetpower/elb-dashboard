@@ -1,5 +1,7 @@
 import { Component, type ErrorInfo, type PropsWithChildren } from "react";
 
+import { reportClientError } from "@/api/clientLog";
+
 interface State {
   error: Error | null;
 }
@@ -13,6 +15,13 @@ export class ErrorBoundary extends Component<PropsWithChildren, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error("ErrorBoundary caught:", error, info.componentStack);
+    reportClientError({
+      level: "error",
+      source: "error-boundary",
+      message: error.message || error.name,
+      stack: error.stack ?? null,
+      component_stack: info.componentStack,
+    });
   }
 
   render() {

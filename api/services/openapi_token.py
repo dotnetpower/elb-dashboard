@@ -103,30 +103,104 @@ def _patch_deployment_token(
     deployment_name: str,
     container_name: str,
     token: str,
+    deployment: dict[str, Any],
 ) -> None:
-    patch = {
-        "spec": {
-            "template": {
-                "metadata": {
-                    "annotations": {
-                        "elb-dashboard/openapi-api-token-rotated-at": _now_iso(),
-                    },
-                },
-                "spec": {
-                    "containers": [
-                        {
-                            "name": container_name,
-                            "env": [{"name": OPENAPI_TOKEN_ENV, "value": token}],
-                        }
-                    ]
-                },
+    """Apply a surgical JSON Patch (RFC 6902) to the deployment to set the
+    OpenAPI API token env var.
+
+    Strategic-merge-patch on the ``env`` list cannot be used here: if the
+    existing entry for ``ELB_OPENAPI_API_TOKEN`` carries a stale
+    ``valueFrom`` field (left over from earlier manifest edits or injected
+    by an admission webhook), the strategic merge produces an entry with
+    BOTH ``value`` and ``valueFrom`` set, which K8s rejects with HTTP 422
+    (``env[N].valueFrom`` may not be specified when ``value`` is not
+    empty). JSON Patch replaces the whole entry instead of merging
+    field-by-field, so the bad ``valueFrom`` is cleared in the same call.
+    """
+    containers = (
+        deployment.get("spec", {})
+        .get("template", {})
+        .get("spec", {})
+        .get("containers", [])
+        or []
+    )
+    container_index = -1
+    env_index = -1
+    for idx, container in enumerate(containers):
+        if container.get("name") == container_name:
+            container_index = idx
+            for env_idx, env in enumerate(container.get("env", []) or []):
+                if env.get("name") == OPENAPI_TOKEN_ENV:
+                    env_index = env_idx
+                    break
+            break
+    if container_index < 0:
+        raise OpenApiTokenError(
+            502,
+            "openapi_container_not_found",
+            (
+                f"Container '{container_name}' not found in the elb-openapi "
+                "deployment; cannot patch the API token."
+            ),
+        )
+
+    ops: list[dict[str, Any]] = []
+    # The base template may not carry an `annotations` map; create it first
+    # so the per-key add below cannot 422 with "path not found".
+    template_meta = (
+        deployment.get("spec", {}).get("template", {}).get("metadata", {}) or {}
+    )
+    if "annotations" not in template_meta or template_meta["annotations"] is None:
+        ops.append(
+            {
+                "op": "add",
+                "path": "/spec/template/metadata/annotations",
+                "value": {},
             }
+        )
+    ops.append(
+        {
+            "op": "add",
+            "path": (
+                "/spec/template/metadata/annotations/"
+                "elb-dashboard~1openapi-api-token-rotated-at"
+            ),
+            "value": _now_iso(),
         }
-    }
+    )
+    env_entry = {"name": OPENAPI_TOKEN_ENV, "value": token}
+    if env_index >= 0:
+        ops.append(
+            {
+                "op": "replace",
+                "path": f"/spec/template/spec/containers/{container_index}/env/{env_index}",
+                "value": env_entry,
+            }
+        )
+    else:
+        # Ensure /env exists before appending. K8s rejects "add /env/-" when
+        # the path is missing, so guard with an "add /env []" first.
+        env_list = containers[container_index].get("env")
+        if env_list is None:
+            ops.append(
+                {
+                    "op": "add",
+                    "path": f"/spec/template/spec/containers/{container_index}/env",
+                    "value": [],
+                }
+            )
+        ops.append(
+            {
+                "op": "add",
+                "path": f"/spec/template/spec/containers/{container_index}/env/-",
+                "value": env_entry,
+            }
+        )
+
     response = session.patch(
         _deployment_url(server, namespace, deployment_name),
-        json=patch,
-        headers={"Content-Type": "application/strategic-merge-patch+json"},
+        json=ops,
+        headers={"Content-Type": "application/json-patch+json"},
         timeout=15,
     )
     if response.status_code == 404:
@@ -136,10 +210,18 @@ def _patch_deployment_token(
             "The elb-openapi deployment was not found in AKS.",
         )
     if response.status_code not in {200, 201, 202}:
+        upstream_detail = ""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                upstream_detail = str(payload.get("message") or payload.get("reason") or "")
+        except Exception:
+            upstream_detail = response.text[:300] if response.text else ""
+        suffix = f": {upstream_detail}" if upstream_detail else ""
         raise OpenApiTokenError(
             502,
             "openapi_token_patch_failed",
-            f"Kubernetes returned HTTP {response.status_code} while updating the API token.",
+            f"Kubernetes returned HTTP {response.status_code} while updating the API token{suffix}",
         )
 
 
@@ -240,6 +322,7 @@ def ensure_openapi_api_token(
                 deployment_name=OPENAPI_DEPLOYMENT_NAME,
                 container_name=OPENAPI_CONTAINER_NAME,
                 token=token,
+                deployment=deployment,
             )
             generated = not existing
             rotated = bool(existing)

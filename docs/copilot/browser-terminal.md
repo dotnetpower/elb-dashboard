@@ -1,3 +1,8 @@
+---
+title: Browser Terminal (Agent Detail)
+description: How the browser terminal sidecar works — loopback ttyd, the WebSocket proxy in the api sidecar, the exec-server contract, persistence, and the toolchain shipped in terminal/Dockerfile.
+---
+
 # Browser Terminal — Sidecar Lifecycle (detail)
 
 > Extracted from `.github/copilot-instructions.md` §6 on 2026-05-19.

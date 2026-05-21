@@ -1,3 +1,8 @@
+---
+title: Results (User Guide)
+description: Detail view for a single BLAST search in ElasticBLAST Control Plane — hit table, alignment preview, taxonomy filters, and streamed result downloads.
+---
+
 # Results
 
 The Results page is the detail view for a single BLAST search. It opens when you click a row on [Recent searches](jobs.md) or follow a `/blast/jobs/<jobId>` link from a submit toast.

@@ -1,6 +1,78 @@
+---
+title: ElasticBLAST Control Plane on Azure
+description: Run large ElasticBLAST sequence-similarity searches on Azure from a browser. No SSH, no SAS tokens, no local CLI — a managed-identity control plane on Azure Container Apps and AKS.
+social:
+  cards_layout_options:
+    title: ElasticBLAST on Azure
+    description: Browser-only control plane for ElasticBLAST. Managed identity, private Storage, AKS-backed jobs — no SSH, no SAS tokens, no local CLI.
+jsonld: |
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "What does ElasticBLAST Control Plane do?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "It gives research teams a browser-only workflow for running ElasticBLAST sequence-similarity searches on Microsoft Azure. Researchers submit jobs, monitor AKS workloads, and retrieve results from a web dashboard without using SSH, local CLIs, or browser-issued SAS tokens."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How does it run on Azure?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "The control plane is a single Azure Container App named ca-elb-dashboard with six sidecars: frontend (React/Vite SPA on nginx), api (FastAPI on uvicorn), worker and beat (Celery), redis (in-revision broker), and terminal (loopback ttyd with the elastic-blast toolchain). BLAST jobs themselves run on Azure Kubernetes Service."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How do users sign in, and how does the backend reach Azure?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Browser users sign in with MSAL.js using the Auth Code + PKCE flow. The backend validates the bearer token for identity only; every Azure SDK call is made as the user-assigned managed identity via DefaultAzureCredential. There are no service principal secrets and no on-behalf-of flows."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Are SAS tokens issued to the browser?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "No. Every workload Storage account stays publicNetworkAccess Disabled; uploads and downloads of queries and results stream through the api sidecar in 1 MiB download chunks and 4 MiB block uploads, capped to four concurrent transfers. The browser never receives a SAS URL."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Does it support AWS or GCP?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "No. The upstream ElasticBLAST supports multiple clouds, but this control plane is Azure-only by charter."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "What is the deployment workflow?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "A single azd up from a fresh clone provisions the Bicep stack, builds the container images with az acr build, and swaps the Container App template to the six-sidecar layout via postprovision.sh."
+        }
+      }
+    ]
+  }
+---
+
 # ElasticBLAST Control Plane
 
 Run large BLAST searches on Azure without becoming the cloud operator.
+
+!!! abstract "Key Facts"
+
+    - **What it is**: a browser-only control plane for [ElasticBLAST](https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/) on Microsoft Azure.
+    - **Where it runs**: one Azure Container App named `ca-elb-dashboard` with six sidecars (`frontend`, `api`, `worker`, `beat`, `redis`, `terminal`); BLAST jobs run on Azure Kubernetes Service.
+    - **How users sign in**: MSAL.js (Auth Code + PKCE) in the browser; the backend reaches Azure as a user-assigned managed identity. No client secrets.
+    - **Storage posture**: every workload Storage account stays `publicNetworkAccess: Disabled`; all uploads/downloads stream through the `api` sidecar. No SAS tokens are issued to the browser.
+    - **Open source**: MIT licensed at [github.com/dotnetpower/elb-dashboard](https://github.com/dotnetpower/elb-dashboard).
 
 [ElasticBLAST](https://blast.ncbi.nlm.nih.gov/doc/elastic-blast/) is built for serious sequence search, but the cloud work around it can pull a researcher away from the question they actually care about. Clusters, storage accounts, container images, database preparation, permissions, and job logs all have to line up before a search can run well.
 
@@ -110,3 +182,49 @@ If you are already operating an environment, use these entry points:
 ## Source Repository
 
 The source lives at [dotnetpower/elb-dashboard](https://github.com/dotnetpower/elb-dashboard). Some internal reference pages link to source files in that repository.
+
+## Frequently Asked Questions
+
+### What does ElasticBLAST Control Plane do?
+
+It gives research teams a browser-only workflow for running ElasticBLAST
+sequence-similarity searches on Microsoft Azure. Researchers submit jobs,
+monitor AKS workloads, and retrieve results from a web dashboard without
+using SSH, local CLIs, or browser-issued SAS tokens.
+
+### How does it run on Azure?
+
+The control plane is a single Azure Container App named `ca-elb-dashboard`
+with six sidecars: `frontend` (React/Vite SPA on nginx), `api` (FastAPI on
+uvicorn), `worker` and `beat` (Celery), `redis` (in-revision broker), and
+`terminal` (loopback ttyd with the elastic-blast toolchain). BLAST jobs
+themselves run on Azure Kubernetes Service (AKS).
+
+### How do users sign in, and how does the backend reach Azure?
+
+Browser users sign in with MSAL.js using the Auth Code + PKCE flow. The
+backend validates the bearer token only for identity verification — every
+Azure SDK call is made as the user-assigned managed identity
+`id-elb-dashboard-*` via `DefaultAzureCredential`. There are no service
+principal secrets and no on-behalf-of (OBO) flows.
+
+### Are SAS tokens issued to the browser?
+
+No. Every workload Storage account stays `publicNetworkAccess: Disabled`;
+uploads and downloads of queries and results stream through the `api`
+sidecar (1 MiB chunks, 4 MiB block uploads, semaphore-capped to four
+concurrent transfers). The browser never receives a SAS URL.
+
+### Does it support AWS or GCP?
+
+No. The upstream ElasticBLAST supports multiple clouds, but this control
+plane is Azure-only by charter. See the
+[High Level Architecture](high-level-architecture.md) page for the
+boundaries.
+
+### What is the deployment workflow?
+
+A single `azd up` from a fresh clone provisions the Bicep stack, builds
+the container images with `az acr build`, and swaps the Container App
+template to the six-sidecar layout via `postprovision.sh`. The
+[Get Started](get-started.md) page walks through it end to end.

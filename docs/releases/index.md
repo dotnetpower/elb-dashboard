@@ -1,3 +1,8 @@
+---
+title: Releases
+description: Per-release feature-change notes for ElasticBLAST Control Plane, grouped by SemVer tag.
+---
+
 # Releases
 
 Each release page lists the feature-change notes that landed between two

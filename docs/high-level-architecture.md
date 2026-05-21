@@ -1,6 +1,24 @@
+---
+title: High Level Architecture
+description: Architectural map of ElasticBLAST Control Plane — the six-sidecar Azure Container App (frontend, api, worker, beat, redis, terminal), its AKS BLAST jobs, private-endpoint Storage, and the browser-only workflow that connects them.
+social:
+  cards_layout_options:
+    title: High Level Architecture
+    description: Six-sidecar Container App, private Storage, AKS-backed BLAST jobs — how the pieces fit together.
+---
+
 # High Level Architecture
 
 ElasticBLAST Control Plane separates the research workflow from the cloud operations needed to run it. Researchers stay in the browser; the control plane coordinates Azure identity, storage, images, AKS jobs, terminal access, and result delivery behind the scenes.
+
+!!! tip "TL;DR"
+
+    One Azure Container App (`ca-elb-dashboard`) hosts six sidecars
+    (`frontend`, `api`, `worker`, `beat`, `redis`, `terminal`). The api
+    sidecar fronts every browser request, talks to Azure as a user-assigned
+    managed identity, and dispatches long-running BLAST work to Celery
+    workers. BLAST jobs themselves run on AKS. Storage stays
+    `publicNetworkAccess: Disabled`; no SAS tokens reach the browser.
 
 Use this page as the first architecture map. It explains the major boundaries and flows, then links to the deeper implementation references.
 
@@ -17,7 +35,7 @@ flowchart TB
     api["api sidecar<br/>FastAPI / auth / routes / storage proxy / terminal proxy"]
     worker["worker sidecar<br/>Celery long-running tasks"]
     beat["beat sidecar<br/>schedules / reconciliation"]
-    redis[("redis sidecar<br/>Celery broker / AOF on Azure Files")]
+    redis[("redis sidecar<br/>Celery broker / ephemeral")]
     terminal["terminal sidecar<br/>ttyd / elastic-blast / kubectl / azcopy / az"]
   end
 
@@ -110,7 +128,7 @@ Small read operations return directly from the API. Long-running work is queued 
 
 The browser never receives Storage SAS tokens and never downloads directly from private Storage endpoints. Uploads, downloads, query previews, and result files stream through the `api` sidecar.
 
-In production, Storage public network access stays disabled. The [Container App][azure-container-apps] reaches Storage through [private endpoints][private-endpoints] inside the platform network. This keeps the browser workflow simple while preserving the network boundary around workload data.
+Every workload Storage account stays `publicNetworkAccess: Disabled` from day one. The [Container App][azure-container-apps] reaches Storage through [private endpoints][private-endpoints] inside the platform network. Developers iterating from a laptop use the explicit local-debug helper (`scripts/dev/storage-public-access.sh on|off`) which opens an IP-allowlisted window for the caller and refuses to run inside a deployed Container App. There is no deployed code path that flips public access on.
 
 ## Terminal Model
 
@@ -122,9 +140,20 @@ Advanced operators can still run `az`, `kubectl`, `azcopy`, and `elastic-blast`,
 
 - One bundled Container App keeps the steady-state control-plane cost low.
 - Sidecars share loopback networking, which removes external Redis and terminal hosts.
+- The `api` sidecar reverse-proxies non-`/api/*` requests to the `frontend` sidecar, so the SPA is served same-origin and the browser only ever sees one hostname.
 - Celery handles long-running Azure and BLAST operations without blocking HTTP requests.
 - Azure Storage is enough for job state, audit history, schedules, and result access; no managed database is required.
 - Managed identity keeps downstream Azure access auditable and avoids browser-to-Azure credential forwarding.
+
+What the architecture deliberately does **not** include:
+
+- No managed Cosmos DB / PostgreSQL; state lives in Azure Storage Tables + append blobs.
+- No Azure Service Bus; the in-revision `redis` sidecar is the Celery broker.
+- No Azure Static Web App; the `frontend` sidecar serves the React SPA.
+- No separate Redis VM or managed Redis service.
+- No Remote Terminal VM, no SSH, no admin password; the browser shell is the `terminal` sidecar over a same-origin WebSocket.
+- No Azure Functions or Durable Functions; the migration is complete (see [Container Apps Migration](container-apps-migration.md)).
+- No SAS tokens issued to the browser; data-plane reads/writes go through the `api` sidecar.
 
 ## Go Deeper
 

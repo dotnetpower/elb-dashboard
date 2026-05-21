@@ -1,3 +1,8 @@
+---
+title: Security Audit Follow-up (2026-05-22)
+description: Design notes for the open follow-up items from the ElasticBLAST Control Plane 20-finding security sweep on 2026-05-22.
+---
+
 # Security audit follow-up — design notes (2026-05-22)
 
 These items came out of the 20-finding security sweep on 2026-05-22 but

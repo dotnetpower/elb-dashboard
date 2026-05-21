@@ -17,7 +17,7 @@
 3. **Local bring-up**:
    ```bash
    uv sync --all-groups          # creates .venv on Python 3.12
-   uv run pytest -q api/tests    # 100 passing
+   uv run pytest -q api/tests    # ~980 passing
    scripts/dev/local-run.sh api  # writes .logs/local/latest/api.log
    ```
    When starting local servers directly from a terminal, use

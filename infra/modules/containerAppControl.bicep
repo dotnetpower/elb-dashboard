@@ -183,6 +183,14 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // sidecar.
             { name: 'TERMINAL_SHELL_USER', value: 'azureuser' }
             { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
+            // Default deploy exposes `elb-openapi` as a public LoadBalancer
+            // (see api/tasks/openapi/__init__.py `_build_manifests`). The
+            // proxy guard added by security audit #12 (2026-05-22) would
+            // otherwise refuse every API menu call with 502
+            // `openapi_unsafe_transport`. Opt-in unblocks the dashboard;
+            // flip back to `false` (or remove this entry) once the Service
+            // is moved behind an internal LB or TLS-terminated ingress.
+            { name: 'OPENAPI_ALLOW_PUBLIC_LB', value: 'true' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
           probes: [

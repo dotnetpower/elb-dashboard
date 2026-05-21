@@ -41,6 +41,7 @@ from api.routes import (
     arm,
     audit,
     blast,
+    client_log,
     elastic_blast,
     frontend_proxy,
     health,
@@ -268,7 +269,13 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         response.headers["x-request-id"] = rid
         # Skip noisy /api/health probe logs (they fire every 10s).
         if path != "/api/health":
-            LOGGER.info(
+            log_level = logging.INFO
+            if response.status_code >= 500:
+                log_level = logging.ERROR
+            elif response.status_code >= 400:
+                log_level = logging.WARNING
+            LOGGER.log(
+                log_level,
                 "req rid=%s method=%s path=%s status=%d elapsed=%.0fms",
                 rid,
                 method,
@@ -384,9 +391,6 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
 
-    # Per-request id + timing logging.
-    app.add_middleware(RequestIdMiddleware)
-
     # Body size limit — reject payloads > 10 MiB.  Uvicorn's
     # --limit-concurrency and --limit-max-requests handle connection-level
     # limits; this catches oversized JSON bodies before they hit route
@@ -405,6 +409,10 @@ def create_app() -> FastAPI:
                 status_code=413,
             )
         return await call_next(request)
+
+    # Per-request id + timing logging. Registered after the body-size guard so
+    # it wraps guard-short-circuited 413 responses as well as route responses.
+    app.add_middleware(RequestIdMiddleware)
 
     # CORS — only needed for local dev where SPA (:8090) and API (:8080)
     # run on different origins.  In production both live behind the same
@@ -465,6 +473,7 @@ def create_app() -> FastAPI:
     app.include_router(blast.blast_router)
     app.include_router(warmup.warmup_router)
     app.include_router(audit.audit_router)
+    app.include_router(client_log.router)
 
     # ---- Catch-all reverse proxy to the `frontend` sidecar ----
     app.include_router(frontend_proxy.router)

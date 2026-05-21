@@ -1,5 +1,20 @@
 # elb-dashboard
 
+[![Publish Docs](https://github.com/dotnetpower/elb-dashboard/actions/workflows/docs.yml/badge.svg)](https://github.com/dotnetpower/elb-dashboard/actions/workflows/docs.yml)
+[![Publish Release Notes](https://github.com/dotnetpower/elb-dashboard/actions/workflows/release.yml/badge.svg)](https://github.com/dotnetpower/elb-dashboard/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/github/license/dotnetpower/elb-dashboard)](./LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/dotnetpower/elb-dashboard?include_prereleases&sort=semver)](https://github.com/dotnetpower/elb-dashboard/releases)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776ab?logo=python&logoColor=white)](./pyproject.toml)
+[![Node 20](https://img.shields.io/badge/node-20-339933?logo=node.js&logoColor=white)](./web/package.json)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Celery](https://img.shields.io/badge/Celery-5.4-37814A?logo=celery&logoColor=white)](https://docs.celeryq.dev/)
+[![React](https://img.shields.io/badge/React-18-61dafb?logo=react&logoColor=white)](https://react.dev/)
+[![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Azure Container Apps](https://img.shields.io/badge/Azure-Container%20Apps-0078D4?logo=microsoftazure&logoColor=white)](https://learn.microsoft.com/azure/container-apps/)
+[![Bicep](https://img.shields.io/badge/IaC-Bicep-5C2D91?logo=microsoftazure&logoColor=white)](https://learn.microsoft.com/azure/azure-resource-manager/bicep/)
+[![uv](https://img.shields.io/badge/packaging-uv-DE5FE9?logo=astral&logoColor=white)](https://docs.astral.sh/uv/)
+[![Docs site](https://img.shields.io/badge/docs-mkdocs--material-526CFE?logo=materialformkdocs&logoColor=white)](https://dotnetpower.github.io/elb-dashboard/)
+
 Browser-only control plane for [ElasticBLAST on Azure](https://github.com/dotnetpower/elastic-blast-azure).
 
 A researcher signs in through the browser, opens the embedded **Browser Terminal**
@@ -8,16 +23,31 @@ state from a glassmorphic dashboard. The user never opens a local terminal durin
 steady state; local commands are only for developers or operators bringing up the
 control plane itself.
 
-> Project charter: [.github/copilot-instructions.md](./.github/copilot-instructions.md)
-> · Agent navigation map: [AGENTS.md](./AGENTS.md)
+> Agent navigation map: [AGENTS.md](./AGENTS.md)
+> · Live docs: <https://dotnetpower.github.io/elb-dashboard/>
 
-## Get started
+## Pick your path
 
-New to this repo? Start with the guided setup: [docs/get-started.md](./docs/get-started.md).
+| You are a… | Start here |
+|---|---|
+| **Researcher** running BLAST | <https://dotnetpower.github.io/elb-dashboard/user-guide/> — no checkout required |
+| **Operator** deploying the control plane | [Quick start: deploy to Azure](#quick-start-deploy-to-azure-in-one-command) ↓ |
+| **Contributor** changing the code | [Get started guide](./docs/get-started.md) → [Contributing](#contributing) ↓ |
+| **AI agent** | [AGENTS.md](./AGENTS.md) (route map + tripwires) → [.github/copilot-instructions.md](./.github/copilot-instructions.md) (charter) |
 
-It covers Windows with WSL2, macOS, Linux, exact tool versions, Python 3.12 setup
-with `uv`, Node 20 setup for the SPA, local development commands, first Azure
-deployment with `azd up`, and the post-deploy redirect URI step for browser sign-in.
+## Table of contents
+
+- [Dashboard preview](#dashboard-preview)
+- [Architecture at a glance](#architecture-at-a-glance)
+- [Layout](#layout)
+- [Quick start: deploy to Azure](#quick-start-deploy-to-azure-in-one-command)
+- [Prerequisites](#prerequisites)
+- [Local development](#local-development)
+- [Driving a deployed environment from your laptop](#driving-a-deployed-environment-from-your-laptop)
+- [Roadmap](#roadmap)
+- [Authentication (production path)](#authentication-production-path)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Dashboard preview
 
@@ -30,9 +60,10 @@ A single glance shows every moving part of an ElasticBLAST run on Azure:
   cluster (`16S_ribosomal_RNA 3/3`, `core_nt 0/3`). Start/stop/delete actions
   are inline.
 - **Azure Container Registry** — login server, SKU, and the four pinned
-  ElasticBLAST images (`elb 1.4.0`, `job-submit 4.1.0`, `query-split 0.1.4`,
-  `openapi 3.4`) with build status per image. A one-click **Build** kicks off
-  `az acr build` via a Celery task on the worker sidecar.
+  ElasticBLAST images (`ncbi/elb 1.4.0`, `elasticblast-job-submit 4.1.0`,
+  `elasticblast-query-split 0.1.4`, `elb-openapi 4.14`) with build status per
+  image. A one-click **Build** kicks off `az acr build` via a Celery task on
+  the worker sidecar. Source of truth: [api/services/image_tags.py](./api/services/image_tags.py).
 - **Storage Account** — region, SKU, HNS state, and the read-only
   `publicNetworkAccess` indicator (always **Disabled** in steady state
   — see [docs/container-apps-migration.md §Storage Network Isolation](./docs/container-apps-migration.md#storage-network-isolation-hard-requirement)).
@@ -50,15 +81,57 @@ A single glance shows every moving part of an ElasticBLAST run on Azure:
 > Subscription name and the kubelet object id are masked in this screenshot.
 > The dashboard renders the real values when you sign in.
 
+## Architecture at a glance
+
+One Azure Container App revision (`ca-elb-dashboard`) bundles **six sidecars**.
+The public ingress only targets the `api` sidecar on port 8080; everything else
+talks loopback.
+
+```mermaid
+flowchart LR
+  user([Browser])
+  subgraph CA["Azure Container App · ca-elb-dashboard"]
+    direction LR
+    api["api<br/>FastAPI :8080"]
+    fe["frontend<br/>nginx :8081"]
+    term["terminal<br/>ttyd 127.0.0.1:7681<br/>elastic-blast CLI"]
+    worker["worker<br/>Celery"]
+    beat["beat<br/>Celery scheduler"]
+    redis["redis<br/>broker · ephemeral"]
+  end
+  stg[("Azure Storage<br/>tables + blobs")]
+  arm{{"Azure ARM<br/>AKS · ACR · KV"}}
+
+  user -- HTTPS --> api
+  api -- reverse proxy --> fe
+  api -- WebSocket --> term
+  api -- enqueue --> redis
+  beat -- schedule --> redis
+  redis -- dispatch --> worker
+  worker -- progress --> stg
+  api -- read/write --> stg
+  worker -- ARM via MI --> arm
+  term -- elastic-blast --> arm
+  beat -. reconcile from jobstate .- stg
+  term -. azcopy stage .- stg
+```
+
+**State**: durable rows in Azure Storage Tables, append blobs for command
+history. Sidecars are **ephemeral** — on revision restart, `beat` rebuilds the
+in-flight queue from the `jobstate` table and the `terminal` re-authenticates
+with the Managed Identity (user files stage to workload Storage via `azcopy`,
+not to a local mount). **No managed database, no Service Bus, no Static Web
+App, no Remote Terminal VM, no Azure Files shares.**
+
 ## Layout
 
 ```
-api/    Backend — FastAPI for the api sidecar + Celery worker/beat (also contains shared Azure SDK service wrappers and HTTP boundary helpers)
+api/        Backend — FastAPI for the api sidecar + Celery worker/beat (also shared Azure SDK service wrappers and HTTP boundary helpers)
 web/        React + Vite + TypeScript SPA + Dockerfile + nginx.conf for the frontend sidecar
-terminal/   Dockerfile + entrypoint for the terminal sidecar (ttyd + elastic-blast toolchain)
+terminal/   Dockerfile + entrypoint for the terminal sidecar (ttyd + elastic-blast toolchain + exec_server)
 infra/      Bicep IaC (network, identity, ACR, storage, Key Vault, Container Apps Env, Container App)
-scripts/    Dev helpers + postprovision hook (`postprovision.sh` builds images and swaps the Container App template)
-docs/       Architecture notes + per-feature change log
+scripts/    Dev helpers + `postprovision.sh` (builds images, swaps the Container App template)
+docs/       Architecture notes, per-feature change log, and the published docs site source
 ```
 
 ## Quick start: deploy to Azure in one command
@@ -141,8 +214,8 @@ then marks the active step as `[n/8]` while it runs.
 2. **provision** — runs [infra/main.bicep](./infra/main.bicep) which creates
   the platform RG, VNet (3 subnets), Log Analytics, optional App Insights, the
    shared user-assigned managed identity, the Premium ACR, the
-   Standard_LRS Storage account (with state tables / blob containers / two
-   Azure Files shares), the Key Vault, the Container Apps Environment, and
+   Standard_LRS Storage account (with state tables / blob containers),
+   the Key Vault, the Container Apps Environment, and
    the Container App seeded with a hello-world bootstrap image.
 3. **postprovision** — runs [scripts/dev/postprovision.sh](./scripts/dev/postprovision.sh)
    which builds the three images (`elb-api`, `elb-frontend`, `elb-terminal`)
@@ -151,7 +224,25 @@ then marks the active step as `[n/8]` while it runs.
 
 When it finishes you get an HTTPS URL like
 `https://ca-elb-dashboard.<subdomain>.koreacentral.azurecontainerapps.io`.
-`/api/health` should respond `200 {"status": "ok", ...}`.
+
+Verify the deployment in this order:
+
+```bash
+APP_URL=$(az containerapp show -g rg-elb-dashboard -n ca-elb-dashboard \
+  --query properties.configuration.ingress.fqdn -o tsv)
+curl -s "https://$APP_URL/api/health" | jq .       # api sidecar
+curl -sI "https://$APP_URL/" | head -1             # frontend sidecar serves the SPA
+```
+
+Then open `https://$APP_URL/` in a browser, sign in with the MSAL popup, and
+you should land on the Dashboard. The next things to click:
+
+- **Cluster card → Start** — creates the first AKS node pool (one-time).
+- **Browser Terminal → Open** — should drop you into the `terminal` sidecar with `elastic-blast --version` available.
+- **BLAST → Submit** — walks you through a query against `16S_ribosomal_RNA`.
+
+If any card renders `network_blocked` or `access_denied` from your laptop, see
+[Driving a deployed environment from your laptop](#driving-a-deployed-environment-from-your-laptop) below.
 
 ### 5. (Recommended) Lock down the network on the second deploy
 
@@ -179,23 +270,6 @@ Removes the platform RG and purges Key Vault soft-deletes.
 
 ---
 
-## Architecture Planning
-
-- [Container Apps architecture reference](./docs/container-apps-migration.md) —
-  the **shipped** layout: a single Azure Container App that bundles six sidecars
-  (`frontend` nginx serving the React SPA, `api` FastAPI, Celery `worker`,
-  Celery `beat`, a `redis` broker, and a `terminal` shell with the
-  `elastic-blast` toolchain). State lives in **Azure Storage** (table + append
-  blobs); Redis AOF and the terminal `/home/azureuser` are persisted on Azure
-  Files shares.
-  **Every Storage account is `publicNetworkAccess=Disabled` from day 1** and
-  is reachable only by the Container App over private endpoints in the
-  platform VNet. **All browser uploads and downloads are streamed through the
-  api sidecar — no SAS tokens are issued to the browser.** **The browser
-  shell is the `terminal` sidecar; there is no Remote Terminal VM, no SSH,
-  and no admin password.** No Service Bus, no managed database, no separate
-  Redis VM, no Static Web App, no temporary storage public-access window.
-
 ## Prerequisites
 
 | Tool         | Minimum  | Notes                                                                |
@@ -208,11 +282,15 @@ Removes the platform RG and purges Key Vault soft-deletes.
 | Docker       | 20.x+    | Optional — only needed for `scripts/dev/docker-compose.local.yml`    |
 | jq, curl     | any      | `sudo apt install jq curl`                                           |
 
+Deeper architecture reference: [docs/container-apps-migration.md](./docs/container-apps-migration.md).
+
+## Local development
+
 Local backend bring-up:
 
 ```bash
 uv sync --all-groups        # creates .venv on Python 3.12 + installs runtime + dev tools
-uv run pytest -q api/tests  # 28 tests
+uv run pytest -q api/tests  # ~980 tests
 scripts/dev/local-run.sh api
 ```
 
@@ -227,12 +305,12 @@ or `compose-local`; detached compose runs also create
 `compose-full-containers.log` / `compose-local-containers.log` with container
 stdout/stderr and replay only the newest 200 lines by default.
 
-### Driving a deployed environment from your laptop (one-time RBAC + network)
+## Driving a deployed environment from your laptop
 
-The local api uses `DefaultAzureCredential` → your `az login` identity, which
-starts with **zero** RBAC on the workload Storage / ACR. Without the steps
-below the dashboard will render `network_blocked` / `access_denied` and DB
-downloads will fail with HTTP 403.
+One-time RBAC + network setup. The local api uses `DefaultAzureCredential` →
+your `az login` identity, which starts with **zero** RBAC on the workload
+Storage / ACR. Without the steps below the dashboard will render
+`network_blocked` / `access_denied` and DB downloads will fail with HTTP 403.
 
 ```bash
 # 1. one-shot: grant your az user the minimum roles on the deployed environment.
@@ -260,16 +338,13 @@ Both helpers are idempotent; both refuse to act inside a Container App
 
 ## Roadmap
 
-The following are deliberately **not** in scope for the current milestone
-and would be addressed in a follow-up PR:
+Tracked work that is **not yet shipped**:
 
-- Wire the streaming upload/download proxy through to the SPA's `BlastResults`
-  download/export buttons (the routes today return 503 `streaming_proxy_pending`
-  by design).
-- Implement the remaining Celery tasks for `aks/openapi/deploy`, `acr/build`,
-  `storage/prepare-db`, and `blast/submit|delete|warmup`; today their HTTP
-  surfaces are stubs that return `streaming_proxy_pending`-style 503s.
+- Streaming upload/download proxy backing for the SPA `BlastResults`
+  download/export buttons (charter §9 keeps Storage `publicNetworkAccess` off,
+  so these must stream through the `api` sidecar — no SAS tokens).
 - CI pipeline for `azd up` against an ephemeral subscription.
+- Smaller polish items live in [docs/releases/unreleased.md](./docs/releases/unreleased.md).
 
 ## Authentication (production path)
 
@@ -283,3 +358,36 @@ In production (`AUTH_DEV_BYPASS=false`):
 `AUTH_DEV_BYPASS=true` short-circuits step 2 and lets the API call Azure
 with whatever credential `DefaultAzureCredential` finds (typically your
 local `az login`). **Never enable this in production.**
+
+## Contributing
+
+PRs welcome. Before opening one:
+
+1. **Read the rules.** [.github/copilot-instructions.md](./.github/copilot-instructions.md)
+   is the project charter (Python 3.12 + `uv`, no `pip install`, no
+   `requirements.txt`, no Azure Functions, Storage `publicNetworkAccess`
+   stays `Disabled`, no SAS tokens to the browser, no Azure Run Command).
+   [AGENTS.md](./AGENTS.md) is the route + tripwire map.
+2. **Validate locally.** Every behaviour-changing PR must pass:
+   ```bash
+   uv run pytest -q api/tests   # ~980 tests
+   uv run ruff check api        # lint
+   cd web && npm run build      # SPA compiles cleanly
+   ```
+3. **Write a change note** under
+   `docs/features_change/YYYY-MM/YYYY-MM-DD-<short-name>.md` describing
+   motivation, user-facing change, API/IaC diff, and validation evidence.
+4. **Conventional Commits.** `feat:`, `fix:`, `chore:`, `docs:`, … — English
+   only in source, commits, docs, and UI strings (Korean is fine in PR
+   conversation).
+5. **No new dependency without justification** in the PR description.
+6. **Version bumps** go through [scripts/dev/bump-version.sh](./scripts/dev/bump-version.sh)
+   — do not hand-edit `version` in `web/package.json` or `pyproject.toml`.
+   Full policy: [docs/copilot/version-management.md](./docs/copilot/version-management.md).
+
+## License
+
+[MIT](./LICENSE) © elb-dashboard maintainers. ElasticBLAST itself is
+developed at NCBI under the U.S. Government public-domain notice — see the
+[upstream repo](https://github.com/dotnetpower/elastic-blast-azure) and the
+NCBI ElasticBLAST documentation for the runtime license.

@@ -93,3 +93,48 @@ because it touches the sharded-merge engine and submit pipeline).
   `web/src/pages/blastResults/analytics/helpers.test.ts`
   (11 cases, same fixture as the backend test).
 
+
+## Follow-up — Scientific Name detail modal
+
+The Descriptions table now opens a read-only NCBI Taxonomy detail
+modal when the user clicks a Scientific Name cell. The same eutils
+endpoints already powering the BLAST submit Taxonomy picker
+(`/api/blast/taxonomy/{search, detail, image, tree}`) are reused via
+the existing 24 h server cache plus a 24 h React Query staleTime, so
+re-opening the same taxon costs zero extra NCBI calls.
+
+* **New component**: `web/src/components/taxonomy/TaxonomyDetailModal.tsx`.
+  Centred glass-card modal with a Wikipedia thumbnail (falling back to
+  `TaxonomyDefaultIcon` when no image is available), a key/value facts
+  panel (taxid + NCBI Browser icon link, division, parent, ≤ 5
+  synonyms, last updated), and the reusable `<LineageTree>` for the
+  ancestry chain. Focus trap, Escape-to-close, and `aria-labelledby`
+  are wired through `useFocusTrap`.
+* **Trigger**: `web/src/pages/blastResults/analytics/BlastHitsTable.tsx`
+  Scientific Name cell is now a `<ScientificNameCell>` button that
+  passes `{ name, taxid, source }` to the modal. When the row already
+  carries a numeric `staxids`, the new `parseLeadingTaxid` helper
+  hands it straight to `getTaxonomyDetail` so the modal skips the
+  name lookup. When the name was parsed heuristically from `stitle`
+  (`source: "stitle"`), the modal surfaces a hint on a "not found"
+  result so the user knows the resolution was approximate.
+* **Cleanup**: removed an orphaned `<th>Shard</th>` left over from the
+  earlier column trim — the table header now matches the body cells.
+* **Visual polish**: separated the read-only modal's image styles from
+  the broader Taxonomy picker image column so the thumbnail can no
+  longer overlap the facts area, replaced the cramped definition list
+  with two-column fact cards, hid noisy `no rank` badges, shortened
+  NCBI timestamps to dates, tuned the compact lineage tree scale, and
+  made lineage nodes open their NCBI Taxonomy Browser records in a new
+  tab.
+* **No backend changes**. All four taxonomy routes were already real
+  and cached; only the SPA learned a new entry point into them.
+
+### Validation
+
+* `cd web && npm test` — 29 files / 256 tests pass (11 new
+  `parseLeadingTaxid` cases in
+  `web/src/pages/blastResults/analytics/helpers.test.ts`).
+* `cd web && npm run build` — clean Vite build, no TypeScript errors
+  (existing chunk-size warning only).
+* `npx eslint` on the touched frontend files — clean.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { organismFromStitle } from "./helpers";
+import { organismFromStitle, parseLeadingTaxid } from "./helpers";
 
 /**
  * Mirrors the backend test
@@ -42,5 +42,30 @@ describe("organismFromStitle", () => {
 
   it("returns empty for nullish input", () => {
     expect(organismFromStitle(undefined)).toBe("");
+  });
+});
+
+/**
+ * The Scientific Name modal opens via `parseLeadingTaxid(hit.staxids)` so
+ * that callers can skip the name-→taxid lookup when the BLAST row already
+ * carries a numeric taxid. The parser must be lenient about whitespace and
+ * mixed separators (`;`, `,`) since the upstream BLAST tab-separated output
+ * is not strict about either.
+ */
+describe("parseLeadingTaxid", () => {
+  it.each<[string | null | undefined, number | null]>([
+    ["10244", 10244],
+    ["10244;9606", 10244],
+    ["10244,9606", 10244],
+    [" 10244 ; 9606 ", 10244],
+    ["", null],
+    [null, null],
+    [undefined, null],
+    [";9606", null],
+    ["not-a-number", null],
+    ["0", null],
+    ["-7", null],
+  ])("parses %j → %j", (input, expected) => {
+    expect(parseLeadingTaxid(input)).toBe(expected);
   });
 });

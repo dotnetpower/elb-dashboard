@@ -33,6 +33,15 @@ gap or removes a centralisation gap that could lead to inconsistency:
   `502 {"code": "openapi_unsafe_transport", "message": "..."}` when
   the resolved upstream IP is not in an RFC1918 / loopback / link-local
   range. The admin token is **never** emitted in the response body.
+
+  > **Follow-up (same day):** the gate accepts an explicit opt-in via
+  > `OPENAPI_ALLOW_PUBLIC_LB=true` on the api sidecar. The deployed
+  > Container App ships with the opt-in **on** because
+  > `_build_manifests` creates `elb-openapi` as a public LoadBalancer
+  > by default — see
+  > [2026-05-22-openapi-public-lb-opt-in.md](2026-05-22-openapi-public-lb-opt-in.md)
+  > for the rationale and operator runbook. Local dev keeps the opt-in
+  > unset so the refusal path stays test-covered.
 - **#13** — `POST /api/storage/local-debug/open` (and the implicit
   auto-open path) returns
   `{"action": "failed", "error": "shared_key_access_enabled", ...}`

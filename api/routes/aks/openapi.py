@@ -93,6 +93,23 @@ def _is_private_ipv4(value: str) -> bool:
     return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
+def _public_lb_allowed() -> bool:
+    """Return True when the operator has explicitly opted in to forwarding
+    the admin ``X-ELB-API-Token`` to a non-private (public) LB IP.
+
+    Set ``OPENAPI_ALLOW_PUBLIC_LB=true`` on the api sidecar to enable.
+    Accepted truthy values: ``1``, ``true``, ``yes``, ``on`` (case-insensitive).
+    The default is False — the conservative posture from security audit #12
+    (2026-05-22).
+    """
+    return os.getenv("OPENAPI_ALLOW_PUBLIC_LB", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 class OpenApiTokenRequest(BaseModel):
     subscription_id: str = ""
     resource_group: str
@@ -520,13 +537,14 @@ async def aks_openapi_proxy(
     # any MITM between the sidecar and the LB. The legitimate deployment
     # exposes elb-openapi inside the AKS VNet (Service type LoadBalancer
     # with internal annotation, or ClusterIP), so the IP is RFC1918.
-    # If an operator wires a public LB they must front it with TLS and
-    # call the OpenAPI service directly from the SPA instead of routing
-    # the admin-token-bearing call through this proxy.
-    if not _is_private_ipv4(ip):
+    # Operators that intentionally run elb-openapi behind a public LB
+    # (and accept the plain-HTTP-to-public-IP exposure) can opt in by
+    # setting ``OPENAPI_ALLOW_PUBLIC_LB=true`` on the api sidecar.
+    if not _is_private_ipv4(ip) and not _public_lb_allowed():
         LOGGER.warning(
             "openapi/proxy: refusing to forward admin token to non-private IP %s "
-            "(use an internal LoadBalancer or terminate TLS in front of the service)",
+            "(use an internal LoadBalancer, terminate TLS in front of the service, "
+            "or set OPENAPI_ALLOW_PUBLIC_LB=true to opt in)",
             ip,
         )
         raise HTTPException(
@@ -535,10 +553,18 @@ async def aks_openapi_proxy(
                 "code": "openapi_unsafe_transport",
                 "message": (
                     "Refusing to send the admin token to a non-private IP. "
-                    "Expose elb-openapi via an internal LoadBalancer (RFC1918) "
-                    "or terminate TLS in front of the public endpoint."
+                    "Expose elb-openapi via an internal LoadBalancer (RFC1918), "
+                    "terminate TLS in front of the public endpoint, "
+                    "or set OPENAPI_ALLOW_PUBLIC_LB=true to opt in."
                 ),
             },
+        )
+    if not _is_private_ipv4(ip):
+        LOGGER.warning(
+            "openapi/proxy: forwarding admin token to non-private IP %s "
+            "because OPENAPI_ALLOW_PUBLIC_LB is set; this exposes the token "
+            "over plain HTTP between the api sidecar and the public LB",
+            ip,
         )
 
     headers = {

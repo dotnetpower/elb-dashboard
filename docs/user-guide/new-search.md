@@ -1,3 +1,8 @@
+---
+title: New Search (User Guide)
+description: How researchers define a BLAST run from the browser — query input, database selection, compute shape, preflight checks, and job submission.
+---
+
 # New Search
 
 New Search is where a researcher defines a BLAST run, chooses the database and compute shape, reviews preflight checks, and submits the job. The page is opened from the **New Search** button on the Dashboard or from any `/blast/submit` link.
