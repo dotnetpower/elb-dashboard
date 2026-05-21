@@ -27,6 +27,7 @@ theme:
 nav:
   - Overview: index.md
   - Get Started: get-started.md
+  - Deployment Reference: deployment-reference.md
   - Auth: auth.md
   - Change Log: changelog.md
   - User Guide:
