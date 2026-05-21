@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 
 from azure.core.credentials import TokenCredential
-from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerregistry import ContainerRegistryManagementClient
@@ -27,16 +26,12 @@ from azure.mgmt.storage import StorageManagementClient
 
 LOGGER = logging.getLogger(__name__)
 
-# Singleton MI credential — reused across all calls (safe, thread-safe)
-_MI_CREDENTIAL: DefaultAzureCredential | None = None
 
+def _get_mi_credential() -> TokenCredential:
+    """Return the shared Azure credential (Managed Identity in Azure, az login locally)."""
+    from api.services import get_credential
 
-def _get_mi_credential() -> DefaultAzureCredential:
-    """Return a cached DefaultAzureCredential (Managed Identity in Azure, az login locally)."""
-    global _MI_CREDENTIAL
-    if _MI_CREDENTIAL is None:
-        _MI_CREDENTIAL = DefaultAzureCredential(exclude_interactive_browser_credential=True)
-    return _MI_CREDENTIAL
+    return get_credential()
 
 
 def credential_for_caller(user_assertion: str | None = None) -> TokenCredential:

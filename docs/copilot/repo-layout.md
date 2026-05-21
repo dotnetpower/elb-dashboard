@@ -29,7 +29,7 @@ Create directories on demand; do not scaffold empty folders speculatively.
 │   └── vite.config.ts
 ├── terminal/                    # Dockerfile + entrypoint for the `terminal` sidecar (ttyd + elastic-blast toolchain)
 ├── infra/                       # Bicep modules + main.bicep
-│   ├── main.bicep               # Container Apps Environment + ca-elb-control + private networking
+│   ├── main.bicep               # Container Apps Environment + ca-elb-dashboard + private networking
 │   └── modules/                 # containerApp.bicep, network.bicep, identity.bicep, acr.bicep, storage.bicep, keyVault.bicep, …
 ├── scripts/
 │   └── dev/                     # Local dev helpers + postprovision.sh (runs `az acr build` and swaps the Container App template)

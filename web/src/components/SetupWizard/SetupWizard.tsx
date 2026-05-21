@@ -25,6 +25,23 @@ interface Props {
   onClose?: () => void;
 }
 
+interface RgRow {
+  name: string;
+  location: string;
+  tags?: Record<string, string>;
+}
+
+function findTaggedWorkspace(resourceGroups: RgRow[]): RgRow | undefined {
+  return (
+    resourceGroups.find(
+      (rg) => rg.tags?.["elb-workload-rg"] || rg.tags?.["elb-storage"],
+    ) ??
+    resourceGroups.find(
+      (rg) => rg.tags?.app === "elb-dashboard" && Boolean(rg.tags?.["azd-env-name"]),
+    )
+  );
+}
+
 export function SetupWizard({ onComplete, onClose }: Props) {
   const [step, setStep] = useState<Step>(1);
   const [config, setConfig] = useState<ResourceConfig>(DEFAULTS);
@@ -61,35 +78,64 @@ export function SetupWizard({ onComplete, onClose }: Props) {
   const rgQuery = useQuery({
     queryKey: ["wizard-rgs", config.subscriptionId],
     queryFn: () => armProxyApi.listResourceGroups(config.subscriptionId),
-    enabled:
-      Boolean(config.subscriptionId) && UUID_RE.test(config.subscriptionId),
+    enabled: Boolean(config.subscriptionId) && UUID_RE.test(config.subscriptionId),
     staleTime: 30_000,
     retry: 1,
   });
 
+  useEffect(() => {
+    const workspace = rgQuery.data?.length
+      ? findTaggedWorkspace(rgQuery.data)
+      : undefined;
+    if (!workspace) return;
+    const tags = workspace.tags ?? {};
+    setConfig((current) => {
+      const next = { ...current };
+      let changed = false;
+      const workloadRg = tags["elb-workload-rg"] || workspace.name;
+      const acrRg = tags["elb-acr-rg"] || workloadRg;
+      const region = tags["elb-region"] || workspace.location;
+
+      if (!next.workloadResourceGroup) {
+        next.workloadResourceGroup = workloadRg;
+        changed = true;
+      }
+      if (!next.acrResourceGroup) {
+        next.acrResourceGroup = acrRg;
+        changed = true;
+      }
+      if (!next.storageAccountName && tags["elb-storage"]) {
+        next.storageAccountName = tags["elb-storage"];
+        changed = true;
+      }
+      if (!next.acrName && tags["elb-acr"]) {
+        next.acrName = tags["elb-acr"];
+        changed = true;
+      }
+      if (!next.region || next.region === DEFAULTS.region) {
+        next.region = region;
+        changed = true;
+      }
+
+      return changed ? next : current;
+    });
+  }, [rgQuery.data]);
+
   // ── Step 3: Discovery (direct ARM or backend MI proxy) ──
   const storageQuery = useQuery({
-    queryKey: [
-      "wizard-storage",
-      config.subscriptionId,
-      config.workloadResourceGroup,
-    ],
+    queryKey: ["wizard-storage", config.subscriptionId, config.workloadResourceGroup],
     queryFn: () =>
       armProxyApi.listStorageAccounts(
         config.subscriptionId,
         config.workloadResourceGroup,
       ),
-    enabled:
-      step >= 3 &&
-      Boolean(config.subscriptionId && config.workloadResourceGroup),
+    enabled: step >= 3 && Boolean(config.subscriptionId && config.workloadResourceGroup),
     retry: 1,
   });
   const acrQuery = useQuery({
     queryKey: ["wizard-acr", config.subscriptionId, config.acrResourceGroup],
-    queryFn: () =>
-      armProxyApi.listAcrs(config.subscriptionId, config.acrResourceGroup),
-    enabled:
-      step >= 3 && Boolean(config.subscriptionId && config.acrResourceGroup),
+    queryFn: () => armProxyApi.listAcrs(config.subscriptionId, config.acrResourceGroup),
+    enabled: step >= 3 && Boolean(config.subscriptionId && config.acrResourceGroup),
     retry: 1,
   });
   // vmQuery removed: there is no Terminal VM in the bundled Container Apps

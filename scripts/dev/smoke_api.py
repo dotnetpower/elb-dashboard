@@ -164,7 +164,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument(
         "--url",
-        default="https://ca-elb-control.gentlemeadow-01289e5b.koreacentral.azurecontainerapps.io",
+        default="https://ca-elb-dashboard.gentlemeadow-01289e5b.koreacentral.azurecontainerapps.io",
     )
     args = p.parse_args(argv)
 

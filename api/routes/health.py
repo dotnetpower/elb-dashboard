@@ -291,7 +291,7 @@ def azure_discovery_probe(
             "subscriptions.list() failed. Most likely the user-assigned MI is "
             "not attached to this Container App, or the AZURE_CLIENT_ID env "
             "does not match the MI's clientId. Verify with `az containerapp "
-            "show --name ca-elb-control --query identity` and "
+            "show --name ca-elb-dashboard --query identity` and "
             "`az containerapp show ... --query 'properties.template.containers[0].env'`."
         )
         return out

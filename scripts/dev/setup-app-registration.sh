@@ -23,6 +23,7 @@ set -euo pipefail
 
 APP_NAME="${1:-elastic-blast-control-plane}"
 REDIRECT_URI="${2:-http://localhost:8090}"
+ADDITIONAL_REDIRECT_URIS="${ADDITIONAL_REDIRECT_URIS:-}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -44,6 +45,9 @@ fi
 echo "==> Tenant: $tenant_id"
 echo "==> App name: $APP_NAME"
 echo "==> Redirect URI: $REDIRECT_URI"
+if [[ -n "$ADDITIONAL_REDIRECT_URIS" ]]; then
+  echo "==> Additional redirect URIs: $ADDITIONAL_REDIRECT_URIS"
+fi
 
 # --- 1. Create or reuse the App Registration ---
 app_id="$(az ad app list --display-name "$APP_NAME" --query '[0].appId' -o tsv || true)"
@@ -96,9 +100,18 @@ fi
 
 # --- 4. SPA redirect URI ---
 echo "==> Configuring SPA redirect URI"
+current_redirects_json="$(az ad app show --id "$app_id" --query 'spa.redirectUris' -o json 2>/dev/null || echo '[]')"
+if [[ -z "$current_redirects_json" || "$current_redirects_json" == "null" ]]; then
+  current_redirects_json="[]"
+fi
+redirects_json="$(jq -cn \
+  --arg primary "$REDIRECT_URI" \
+  --arg extra "$ADDITIONAL_REDIRECT_URIS" \
+  --argjson existing "$current_redirects_json" \
+  '$existing + [$primary] + ($extra | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) | unique')"
 spa_payload=$(cat <<JSON
 {
-  "spa": { "redirectUris": ["$REDIRECT_URI"] },
+  "spa": { "redirectUris": $redirects_json },
   "web": { "redirectUris": [] }
 }
 JSON

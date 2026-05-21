@@ -37,7 +37,7 @@
 #   AZURE_RESOURCE_GROUP         e.g. rg-elb-dashboard
 #   ACR_NAME                     short name (no .azurecr.io)
 #   ACR_LOGIN_SERVER             e.g. crelbXYZ.azurecr.io
-#   CONTAINER_APP_NAME           e.g. ca-elb-control
+#   CONTAINER_APP_NAME           e.g. ca-elb-dashboard
 
 set -Eeuo pipefail
 
@@ -119,6 +119,12 @@ esac
 for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME; do
   [[ -n "${!v:-}" ]] || die "$v is unset (try: source /tmp/azd-env.sh)"
 done
+if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
+  az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+  bash "$REPO_ROOT/scripts/dev/register-providers.sh" --subscription "$AZURE_SUBSCRIPTION_ID"
+else
+  bash "$REPO_ROOT/scripts/dev/register-providers.sh"
+fi
 
 NEW_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${TAG}"
 API_CLIENT_ID_VAL="${VITE_AZURE_CLIENT_ID:-${API_CLIENT_ID:-}}"

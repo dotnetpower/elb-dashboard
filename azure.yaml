@@ -18,32 +18,25 @@ infra:
 hooks:
   preprovision:
     shell: sh
-    interactive: false
+    interactive: true
     continueOnError: false
     run: |
       set -eu
-      echo "==> Pre-provision: registering required Azure providers (idempotent)..."
-      if [ -z "${API_CLIENT_ID:-}" ]; then
-        echo "ERROR: API_CLIENT_ID is not set."
-        echo "Run scripts/dev/setup-app-registration.sh after creating/selecting your azd environment, then re-run azd up."
-        exit 1
+      if [ "${ELB_AZD_PROGRESS_PLAN_SHOWN:-}" != "true" ]; then
+        bash ./scripts/dev/azd-progress.sh plan
       fi
-      for ns in \
-        Microsoft.App \
-        Microsoft.OperationalInsights \
-        Microsoft.Insights \
-        Microsoft.ContainerRegistry \
-        Microsoft.KeyVault \
-        Microsoft.Storage \
-        Microsoft.Network \
-        Microsoft.ManagedIdentity; do
-        state=$(az provider show -n "$ns" --query registrationState -o tsv 2>/dev/null || echo "")
-        if [ "$state" != "Registered" ]; then
-          echo "  registering $ns ..."
-          az provider register -n "$ns" --wait --only-show-errors >/dev/null
-        fi
-      done
-      echo "==> Pre-provision OK."
+      bash ./scripts/dev/azd-progress.sh step 1 "Provider registration" "Register required providers before Bicep starts."
+      if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
+        bash ./scripts/dev/register-providers.sh --subscription "$AZURE_SUBSCRIPTION_ID"
+      else
+        bash ./scripts/dev/register-providers.sh
+      fi
+      bash ./scripts/dev/azd-progress.sh done 1 "Provider registration"
+      bash ./scripts/dev/azd-progress.sh step 2 "Bicep provision" "azd runs infra/main.bicep next; this is the main Azure resource creation phase."
+      if [ -z "${API_CLIENT_ID:-}" ]; then
+        bash ./scripts/dev/azd-progress.sh note "API_CLIENT_ID is not set yet. Step 3 will create/reuse the App Registration and persist it."
+      fi
+      bash ./scripts/dev/azd-progress.sh note "Preprovision OK. Handing off to azd provision."
 
   postprovision:
     shell: sh

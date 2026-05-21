@@ -12,7 +12,7 @@
    The retired Azure Functions tree has been removed from the repository
    (see [docs/container-apps-migration.md](./docs/container-apps-migration.md)
    for the target architecture).
-2. **Active deploy target** is one Azure Container App `ca-elb-control` with
+2. **Active deploy target** is one Azure Container App `ca-elb-dashboard` with
    six sidecars. Bicep entry point: [`infra/main.bicep`](./infra/main.bicep).
 3. **Local bring-up**:
    ```bash

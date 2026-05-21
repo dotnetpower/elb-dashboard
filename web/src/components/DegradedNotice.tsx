@@ -40,7 +40,7 @@ const REASON_META: Record<string, ReasonMeta> = {
   unauthorized: {
     label: "Not authorized",
     hint:
-      "The shared managed identity (id-elb-control) is missing an RBAC role for this resource. See docs/auth.md §1 for the required role matrix.",
+      "The shared managed identity (id-elb-dashboard-*) is missing an RBAC role for this resource. See docs/auth.md §1 for the required role matrix.",
     icon: <Lock size={12} />,
   },
   not_found: {

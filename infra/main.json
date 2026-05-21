@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.41.2.15936",
-      "templateHash": "7855198726487531060"
+      "templateHash": "14716838594526966810"
     }
   },
   "parameters": {
@@ -45,6 +45,27 @@
         "description": "Application (client) id of the App Registration used by the SPA + api. Set after the App Registration is created (or re-used from the legacy deployment)."
       }
     },
+    "featureCustomDb": {
+      "type": "string",
+      "defaultValue": "true",
+      "metadata": {
+        "description": "Frontend feature flag for the custom database builder. Set to false for production deployments that should hide this surface."
+      }
+    },
+    "featureLabTools": {
+      "type": "string",
+      "defaultValue": "true",
+      "metadata": {
+        "description": "Frontend feature flag for lab tools. Set to false for production deployments that should hide this surface."
+      }
+    },
+    "featureTerminal": {
+      "type": "string",
+      "defaultValue": "true",
+      "metadata": {
+        "description": "Frontend feature flag for the browser terminal. Set to false for production deployments that should hide this surface."
+      }
+    },
     "allowedOrigins": {
       "type": "string",
       "defaultValue": "",
@@ -64,6 +85,20 @@
       "defaultValue": true,
       "metadata": {
         "description": "If true, grants the shared UAMI subscription-scope Reader so the SPA discovery wizard can list RGs / storage accounts / ACRs / VMs across the subscription. Requires the deployer to have User Access Administrator (or Owner). Set to false in restricted tenants and run the equivalent `az role assignment create` from docs/auth.md by hand."
+      }
+    },
+    "assignControlPlaneRoles": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "If true, grants the shared UAMI resource-group-scope Contributor and User Access Administrator for runtime resource orchestration. Set to false when equivalent roles already exist outside this template."
+      }
+    },
+    "enableApplicationInsights": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "If true, create Application Insights. The default deployment creates only Log Analytics; Application Insights can be enabled later with ENABLE_APPLICATION_INSIGHTS=true."
       }
     },
     "costCenter": {
@@ -93,16 +128,19 @@
       "topology": "container-app-bundle-v1"
     },
     "tags": "[if(empty(parameters('ownerEmail')), variables('baseTags'), union(variables('baseTags'), createObject('owner', parameters('ownerEmail'))))]",
-    "rgName": "[format('rg-{0}', parameters('environmentName'))]",
-    "vnetName": "[format('vnet-{0}', parameters('environmentName'))]",
-    "logAnalyticsName": "[format('log-{0}-{1}', parameters('environmentName'), variables('resourceToken'))]",
-    "appInsightsName": "[format('appi-{0}-{1}', parameters('environmentName'), variables('resourceToken'))]",
-    "identityName": "[format('id-elb-control-{0}', variables('resourceToken'))]",
-    "acrName": "[format('acrelb{0}', variables('resourceToken'))]",
-    "storageAccountName": "[format('stelb{0}', variables('resourceToken'))]",
-    "keyVaultName": "[format('kv-{0}', take(variables('resourceToken'), 18))]",
-    "containerEnvName": "[format('cae-elb-{0}', variables('resourceToken'))]",
-    "controlAppName": "ca-elb-control",
+    "hyphenatedNamePrefix": "elb-dashboard",
+    "compactNamePrefix": "elbdashboard",
+    "rgName": "[format('rg-{0}', variables('hyphenatedNamePrefix'))]",
+    "vnetName": "[format('vnet-{0}', variables('hyphenatedNamePrefix'))]",
+    "logAnalyticsName": "[format('log-{0}-{1}', variables('hyphenatedNamePrefix'), variables('resourceToken'))]",
+    "appInsightsName": "[format('appi-{0}-{1}', variables('hyphenatedNamePrefix'), variables('resourceToken'))]",
+    "identityName": "[format('id-{0}-{1}', variables('hyphenatedNamePrefix'), take(variables('resourceToken'), 8))]",
+    "acrName": "[format('acr{0}{1}', variables('compactNamePrefix'), take(variables('resourceToken'), 10))]",
+    "storageAccountName": "[format('st{0}{1}', variables('compactNamePrefix'), take(variables('resourceToken'), 10))]",
+    "keyVaultName": "[format('kv-{0}-{1}', variables('hyphenatedNamePrefix'), take(variables('resourceToken'), 7))]",
+    "containerEnvName": "[format('cae-{0}-{1}', variables('hyphenatedNamePrefix'), take(variables('resourceToken'), 8))]",
+    "controlAppName": "[format('ca-{0}', variables('hyphenatedNamePrefix'))]",
+    "workspaceTags": "[union(variables('tags'), createObject('elb-workload-rg', variables('rgName'), 'elb-acr-rg', variables('rgName'), 'elb-acr', variables('acrName'), 'elb-storage', variables('storageAccountName'), 'elb-region', parameters('location')))]",
     "allowedOriginsArray": "[if(empty(parameters('allowedOrigins')), createArray(), split(parameters('allowedOrigins'), ','))]"
   },
   "resources": [
@@ -111,7 +149,7 @@
       "apiVersion": "2024-03-01",
       "name": "[variables('rgName')]",
       "location": "[parameters('location')]",
-      "tags": "[variables('tags')]"
+      "tags": "[variables('workspaceTags')]"
     },
     {
       "type": "Microsoft.Resources/deployments",
@@ -131,7 +169,7 @@
             "value": "[variables('vnetName')]"
           },
           "tags": {
-            "value": "[variables('tags')]"
+            "value": "[variables('workspaceTags')]"
           }
         },
         "template": {
@@ -290,8 +328,11 @@
           "applicationInsightsName": {
             "value": "[variables('appInsightsName')]"
           },
+          "enableApplicationInsights": {
+            "value": "[parameters('enableApplicationInsights')]"
+          },
           "tags": {
-            "value": "[variables('tags')]"
+            "value": "[variables('workspaceTags')]"
           }
         },
         "template": {
@@ -301,7 +342,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "6251135243910292168"
+              "templateHash": "16601779515408052725"
             }
           },
           "parameters": {
@@ -321,6 +362,13 @@
               "type": "string",
               "metadata": {
                 "description": "Application Insights name."
+              }
+            },
+            "enableApplicationInsights": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "If true, create Application Insights and emit its connection string. Disabled by default to keep the baseline deployment lean."
               }
             },
             "tags": {
@@ -352,6 +400,7 @@
               }
             },
             {
+              "condition": "[parameters('enableApplicationInsights')]",
               "type": "Microsoft.Insights/components",
               "apiVersion": "2020-02-02",
               "name": "[parameters('applicationInsightsName')]",
@@ -378,7 +427,7 @@
             },
             "appInsightsConnectionString": {
               "type": "string",
-              "value": "[reference(resourceId('Microsoft.Insights/components', parameters('applicationInsightsName')), '2020-02-02').ConnectionString]"
+              "value": "[if(parameters('enableApplicationInsights'), reference(resourceId('Microsoft.Insights/components', parameters('applicationInsightsName')), '2020-02-02').ConnectionString, '')]"
             }
           }
         }
@@ -405,7 +454,7 @@
             "value": "[variables('identityName')]"
           },
           "tags": {
-            "value": "[variables('tags')]"
+            "value": "[variables('workspaceTags')]"
           }
         },
         "template": {
@@ -540,6 +589,85 @@
       ]
     },
     {
+      "condition": "[parameters('assignControlPlaneRoles')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('control-plane-roles-{0}', variables('resourceToken'))]",
+      "resourceGroup": "[variables('rgName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "uamiPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('identity-{0}', variables('resourceToken'))), '2025-04-01').outputs.identityPrincipalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.41.2.15936",
+              "templateHash": "1748652814889504424"
+            }
+          },
+          "parameters": {
+            "uamiPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal id (object id) of the shared UAMI used by the api/worker sidecars."
+              }
+            }
+          },
+          "variables": {
+            "contributorRoleId": "b24988ac-6180-42a0-ab88-20f7382dd24c",
+            "userAccessAdministratorRoleId": "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('uamiPrincipalId'), variables('contributorRoleId'))]",
+              "properties": {
+                "principalId": "[parameters('uamiPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('contributorRoleId'))]",
+                "description": "elb-dashboard shared UAMI — create and manage runtime resources in this RG."
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('uamiPrincipalId'), variables('userAccessAdministratorRoleId'))]",
+              "properties": {
+                "principalId": "[parameters('uamiPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('userAccessAdministratorRoleId'))]",
+                "description": "elb-dashboard shared UAMI — assign runtime RBAC for AKS kubelet/workload identities."
+              }
+            }
+          ],
+          "outputs": {
+            "contributorRoleAssignmentId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Authorization/roleAssignments', guid(resourceGroup().id, parameters('uamiPrincipalId'), variables('contributorRoleId')))]"
+            },
+            "userAccessAdministratorRoleAssignmentId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Authorization/roleAssignments', guid(resourceGroup().id, parameters('uamiPrincipalId'), variables('userAccessAdministratorRoleId')))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('identity-{0}', variables('resourceToken')))]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', variables('rgName'))]"
+      ]
+    },
+    {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
       "name": "[format('acr-{0}', variables('resourceToken'))]",
@@ -569,7 +697,7 @@
             "value": "[not(parameters('lockdownPrivateNetworking'))]"
           },
           "tags": {
-            "value": "[variables('tags')]"
+            "value": "[variables('workspaceTags')]"
           }
         },
         "template": {
@@ -579,7 +707,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "13007493998447369009"
+              "templateHash": "13757773863560156782"
             }
           },
           "parameters": {
@@ -631,7 +759,8 @@
           "variables": {
             "moduleTags": "[union(parameters('tags'), createObject('role', 'registry'))]",
             "acrPullRoleId": "7f951dda-4ed3-4680-a7ca-43fe172d538d",
-            "acrPushRoleId": "8311e382-0749-4cb8-b61a-304f252e45ec"
+            "acrPushRoleId": "8311e382-0749-4cb8-b61a-304f252e45ec",
+            "contributorRoleId": "b24988ac-6180-42a0-ab88-20f7382dd24c"
           },
           "resources": [
             {
@@ -675,6 +804,20 @@
                 "principalId": "[parameters('uamiPrincipalId')]",
                 "principalType": "ServicePrincipal",
                 "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('acrPushRoleId'))]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+              "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), parameters('uamiPrincipalId'), variables('contributorRoleId'))]",
+              "properties": {
+                "principalId": "[parameters('uamiPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('contributorRoleId'))]"
               },
               "dependsOn": [
                 "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]"
@@ -805,7 +948,7 @@
             "value": "[not(parameters('lockdownPrivateNetworking'))]"
           },
           "tags": {
-            "value": "[variables('tags')]"
+            "value": "[variables('workspaceTags')]"
           }
         },
         "template": {
@@ -1080,7 +1223,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "6893267382259103357"
+              "templateHash": "10133005944342634199"
             }
           },
           "parameters": {
@@ -1095,8 +1238,12 @@
             "stateContainers": [
               "audit",
               "dead-letter",
+              "job-artifacts",
               "job-payloads",
-              "schedules"
+              "schedules",
+              "blast-db",
+              "queries",
+              "results"
             ]
           },
           "resources": [
@@ -1117,6 +1264,22 @@
               "type": "Microsoft.Storage/storageAccounts/tableServices/tables",
               "apiVersion": "2023-05-01",
               "name": "[format('{0}/{1}/{2}', parameters('storageAccountName'), 'default', 'jobhistory')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/tableServices', parameters('storageAccountName'), 'default')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/tableServices/tables",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}/{2}', parameters('storageAccountName'), 'default', 'jobartifactstate')]",
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/tableServices', parameters('storageAccountName'), 'default')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/tableServices/tables",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}/{2}', parameters('storageAccountName'), 'default', 'autowarmup')]",
               "dependsOn": [
                 "[resourceId('Microsoft.Storage/storageAccounts/tableServices', parameters('storageAccountName'), 'default')]"
               ]
@@ -1169,6 +1332,7 @@
                           ],
                           "prefixMatch": [
                             "dead-letter/",
+                            "job-artifacts/",
                             "job-payloads/"
                           ]
                         },
@@ -1197,6 +1361,14 @@
             "jobHistoryTableName": {
               "type": "string",
               "value": "jobhistory"
+            },
+            "jobArtifactStateTableName": {
+              "type": "string",
+              "value": "jobartifactstate"
+            },
+            "autoWarmupTableName": {
+              "type": "string",
+              "value": "autowarmup"
             }
           }
         }
@@ -1242,7 +1414,7 @@
             "value": "[not(parameters('lockdownPrivateNetworking'))]"
           },
           "tags": {
-            "value": "[variables('tags')]"
+            "value": "[variables('workspaceTags')]"
           }
         },
         "template": {
@@ -1491,7 +1663,7 @@
             "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('network-{0}', variables('resourceToken'))), '2025-04-01').outputs.containerAppsSubnetId.value]"
           },
           "tags": {
-            "value": "[variables('tags')]"
+            "value": "[variables('workspaceTags')]"
           }
         },
         "template": {
@@ -1640,11 +1812,23 @@
           "apiClientId": {
             "value": "[parameters('apiClientId')]"
           },
+          "featureCustomDb": {
+            "value": "[parameters('featureCustomDb')]"
+          },
+          "featureLabTools": {
+            "value": "[parameters('featureLabTools')]"
+          },
+          "featureTerminal": {
+            "value": "[parameters('featureTerminal')]"
+          },
           "applicationInsightsConnectionString": {
             "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('monitoring-{0}', variables('resourceToken'))), '2025-04-01').outputs.appInsightsConnectionString.value]"
           },
           "platformStorageAccountName": {
             "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('storage-{0}', variables('resourceToken'))), '2025-04-01').outputs.storageAccountName.value]"
+          },
+          "platformPrivateEndpointSubnetId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('network-{0}', variables('resourceToken'))), '2025-04-01').outputs.privateEndpointsSubnetId.value]"
           },
           "subscriptionId": {
             "value": "[subscription().subscriptionId]"
@@ -1656,7 +1840,7 @@
             "value": true
           },
           "tags": {
-            "value": "[variables('tags')]"
+            "value": "[variables('workspaceTags')]"
           }
         },
         "template": {
@@ -1666,7 +1850,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "17126417542562669138"
+              "templateHash": "11639072838693764793"
             }
           },
           "parameters": {
@@ -1679,7 +1863,7 @@
             "appName": {
               "type": "string",
               "metadata": {
-                "description": "Container App name (e.g. ca-elb-control)."
+                "description": "Container App name (e.g. ca-elb-dashboard)."
               }
             },
             "environmentResourceId": {
@@ -1746,6 +1930,27 @@
                 "description": "App Registration client id (audience) for the api."
               }
             },
+            "featureCustomDb": {
+              "type": "string",
+              "defaultValue": "true",
+              "metadata": {
+                "description": "Frontend feature flag for the custom database builder. Set to false to hide menu entries and route access."
+              }
+            },
+            "featureLabTools": {
+              "type": "string",
+              "defaultValue": "true",
+              "metadata": {
+                "description": "Frontend feature flag for lab tools. Set to false to hide menu entries and route access."
+              }
+            },
+            "featureTerminal": {
+              "type": "string",
+              "defaultValue": "true",
+              "metadata": {
+                "description": "Frontend feature flag for the browser terminal. Set to false to hide menu entries, dashboard card, shortcuts, and route access."
+              }
+            },
             "applicationInsightsConnectionString": {
               "type": "string",
               "metadata": {
@@ -1757,6 +1962,13 @@
               "defaultValue": "",
               "metadata": {
                 "description": "Platform Storage account name (used to derive the table endpoint for jobstate / jobhistory access)."
+              }
+            },
+            "platformPrivateEndpointSubnetId": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Resource id of the platform subnet where workload Storage private endpoints are created for api/worker/terminal access."
               }
             },
             "subscriptionId": {
@@ -1796,7 +2008,8 @@
             "terminalImage": "[if(parameters('useBootstrapImage'), variables('bootstrapImage'), format('{0}/elb-terminal:{1}', parameters('acrLoginServer'), parameters('terminalImageTag')))]",
             "storageDnsSuffix": "[environment().suffixes.storage]",
             "tableEndpoint": "[if(empty(parameters('platformStorageAccountName')), '', format('https://{0}.table.{1}', parameters('platformStorageAccountName'), variables('storageDnsSuffix')))]",
-            "blobEndpoint": "[if(empty(parameters('platformStorageAccountName')), '', format('https://{0}.blob.{1}', parameters('platformStorageAccountName'), variables('storageDnsSuffix')))]"
+            "blobEndpoint": "[if(empty(parameters('platformStorageAccountName')), '', format('https://{0}.blob.{1}', parameters('platformStorageAccountName'), variables('storageDnsSuffix')))]",
+            "platformResourceGroupName": "[resourceGroup().name]"
           },
           "resources": [
             {
@@ -1832,7 +2045,7 @@
                   "registries": "[if(parameters('useBootstrapImage'), createArray(), createArray(createObject('server', parameters('acrLoginServer'), 'identity', parameters('sharedIdentityResourceId'))))]"
                 },
                 "template": {
-                  "containers": "[if(parameters('useBootstrapImage'), createArray(createObject('name', 'bootstrap', 'image', variables('bootstrapImage'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'))), createArray(createObject('name', 'api', 'image', variables('apiImage'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'api'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_TABLE_ENDPOINT', 'value', variables('tableEndpoint')), createObject('name', 'AZURE_BLOB_ENDPOINT', 'value', variables('blobEndpoint')), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('applicationInsightsConnectionString')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'FRONTEND_UPSTREAM', 'value', 'http://127.0.0.1:8081'), createObject('name', 'TERMINAL_UPSTREAM', 'value', 'http://127.0.0.1:7681'), createObject('name', 'TERMINAL_EXEC_UPSTREAM', 'value', 'http://127.0.0.1:7682'), createObject('name', 'TERMINAL_SHELL_USER', 'value', 'azureuser'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'LOG_LEVEL', 'value', 'INFO')), 'probes', createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', '/api/health', 'port', 8080, 'scheme', 'HTTP'), 'periodSeconds', 30, 'timeoutSeconds', 5, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', '/api/health', 'port', 8080, 'scheme', 'HTTP'), 'periodSeconds', 10, 'timeoutSeconds', 3, 'failureThreshold', 3))), createObject('name', 'frontend', 'image', variables('frontendImage'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'frontend'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'worker', 'image', variables('apiImage'), 'command', createArray('python3', '/app/api/wait_redis.py'), 'args', createArray('celery', '-A', 'api.celery_app:celery_app', 'worker', '--loglevel=info', '-Q', 'default,acr,azure,blast,storage', '--concurrency=2'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'worker'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_TABLE_ENDPOINT', 'value', variables('tableEndpoint')), createObject('name', 'AZURE_BLOB_ENDPOINT', 'value', variables('blobEndpoint')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'TERMINAL_EXEC_UPSTREAM', 'value', 'http://127.0.0.1:7682'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'beat', 'image', variables('apiImage'), 'command', createArray('python3', '/app/api/wait_redis.py'), 'args', createArray('celery', '-A', 'api.celery_app:celery_app', 'beat', '--loglevel=info', '--schedule=/tmp/celerybeat-schedule', '--pidfile=/tmp/celerybeat.pid'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'beat'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'redis', 'image', 'redis:7-alpine', 'command', createArray('redis-server'), 'args', createArray('--save', '', '--appendonly', 'no', '--bind', '127.0.0.1', '--protected-mode', 'no'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi')), createObject('name', 'terminal', 'image', variables('terminalImage'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'terminal'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'AZCOPY_AUTO_LOGIN_TYPE', 'value', 'MSI'), createObject('name', 'AZCOPY_MSI_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'ELB_SKIP_DB_VERIFY', 'value', 'true'), createObject('name', 'ELB_DISABLE_AUTO_SHUTDOWN', 'value', '1'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'EXEC_MAX_CONCURRENCY', 'value', '4')), 'probes', createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', '/healthz', 'port', 7682, 'scheme', 'HTTP'), 'periodSeconds', 30, 'timeoutSeconds', 5, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', '/healthz', 'port', 7682, 'scheme', 'HTTP'), 'periodSeconds', 10, 'timeoutSeconds', 3, 'failureThreshold', 3)))))]",
+                  "containers": "[if(parameters('useBootstrapImage'), createArray(createObject('name', 'bootstrap', 'image', variables('bootstrapImage'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'))), createArray(createObject('name', 'api', 'image', variables('apiImage'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'api'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'AZURE_TABLE_ENDPOINT', 'value', variables('tableEndpoint')), createObject('name', 'AZURE_BLOB_ENDPOINT', 'value', variables('blobEndpoint')), createObject('name', 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', 'value', parameters('platformPrivateEndpointSubnetId')), createObject('name', 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'APPLICATIONINSIGHTS_CONNECTION_STRING', 'value', parameters('applicationInsightsConnectionString')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'FRONTEND_UPSTREAM', 'value', 'http://127.0.0.1:8081'), createObject('name', 'TERMINAL_UPSTREAM', 'value', 'http://127.0.0.1:7681'), createObject('name', 'TERMINAL_EXEC_UPSTREAM', 'value', 'http://127.0.0.1:7682'), createObject('name', 'TERMINAL_SHELL_USER', 'value', 'azureuser'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'LOG_LEVEL', 'value', 'INFO')), 'probes', createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', '/api/health', 'port', 8080, 'scheme', 'HTTP'), 'periodSeconds', 30, 'timeoutSeconds', 5, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', '/api/health', 'port', 8080, 'scheme', 'HTTP'), 'periodSeconds', 10, 'timeoutSeconds', 3, 'failureThreshold', 3))), createObject('name', 'frontend', 'image', variables('frontendImage'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'frontend'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'VITE_API_BASE_URL', 'value', ''), createObject('name', 'VITE_AUTH_DEV_BYPASS', 'value', 'false'), createObject('name', 'VITE_AZURE_REDIRECT_URI', 'value', '__RUNTIME__'), createObject('name', 'VITE_AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'VITE_AZURE_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'VITE_FEATURE_CUSTOM_DB', 'value', parameters('featureCustomDb')), createObject('name', 'VITE_FEATURE_LAB_TOOLS', 'value', parameters('featureLabTools')), createObject('name', 'VITE_FEATURE_TERMINAL', 'value', parameters('featureTerminal')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'worker', 'image', variables('apiImage'), 'command', createArray('python3', '/app/api/wait_redis.py'), 'args', createArray('python3', '/app/api/run_celery_workers.py'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'worker'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'API_CLIENT_ID', 'value', parameters('apiClientId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'AZURE_SUBSCRIPTION_ID', 'value', parameters('subscriptionId')), createObject('name', 'AZURE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'AZURE_TABLE_ENDPOINT', 'value', variables('tableEndpoint')), createObject('name', 'AZURE_BLOB_ENDPOINT', 'value', variables('blobEndpoint')), createObject('name', 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', 'value', parameters('platformPrivateEndpointSubnetId')), createObject('name', 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', 'value', variables('platformResourceGroupName')), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'TERMINAL_EXEC_UPSTREAM', 'value', 'http://127.0.0.1:7682'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'beat', 'image', variables('apiImage'), 'command', createArray('python3', '/app/api/wait_redis.py'), 'args', createArray('celery', '-A', 'api.celery_app:celery_app', 'beat', '--loglevel=info', '--schedule=/tmp/celerybeat-schedule', '--pidfile=/tmp/celerybeat.pid'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'beat'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'CELERY_BROKER_URL', 'value', 'redis://127.0.0.1:6379/0'), createObject('name', 'CELERY_RESULT_BACKEND', 'value', 'redis://127.0.0.1:6379/1'), createObject('name', 'LOG_LEVEL', 'value', 'INFO'))), createObject('name', 'redis', 'image', 'redis:7-alpine', 'command', createArray('redis-server'), 'args', createArray('--save', '', '--appendonly', 'no', '--bind', '127.0.0.1', '--protected-mode', 'no'), 'resources', createObject('cpu', json('0.25'), 'memory', '0.5Gi')), createObject('name', 'terminal', 'image', variables('terminalImage'), 'resources', createObject('cpu', json('0.5'), 'memory', '1.0Gi'), 'env', createArray(createObject('name', 'SIDECAR_NAME', 'value', 'terminal'), createObject('name', 'OPS_REDIS_URL', 'value', 'redis://127.0.0.1:6379/2'), createObject('name', 'AZURE_TENANT_ID', 'value', parameters('tenantId')), createObject('name', 'AZURE_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'AZCOPY_AUTO_LOGIN_TYPE', 'value', 'MSI'), createObject('name', 'AZCOPY_MSI_CLIENT_ID', 'value', parameters('sharedIdentityClientId')), createObject('name', 'ELB_SKIP_DB_VERIFY', 'value', 'true'), createObject('name', 'ELB_DISABLE_AUTO_SHUTDOWN', 'value', '1'), createObject('name', 'EXEC_TOKEN', 'secretRef', 'exec-token'), createObject('name', 'EXEC_MAX_CONCURRENCY', 'value', '4')), 'probes', createArray(createObject('type', 'Liveness', 'httpGet', createObject('path', '/healthz', 'port', 7682, 'scheme', 'HTTP'), 'periodSeconds', 30, 'timeoutSeconds', 5, 'failureThreshold', 3), createObject('type', 'Readiness', 'httpGet', createObject('path', '/healthz', 'port', 7682, 'scheme', 'HTTP'), 'periodSeconds', 10, 'timeoutSeconds', 3, 'failureThreshold', 3)))))]",
                   "scale": {
                     "minReplicas": 1,
                     "maxReplicas": 1
@@ -1862,6 +2075,7 @@
         "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('cae-{0}', variables('resourceToken')))]",
         "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('identity-{0}', variables('resourceToken')))]",
         "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('monitoring-{0}', variables('resourceToken')))]",
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('network-{0}', variables('resourceToken')))]",
         "[subscriptionResourceId('Microsoft.Resources/resourceGroups', variables('rgName'))]",
         "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('storage-{0}', variables('resourceToken')))]"
       ]

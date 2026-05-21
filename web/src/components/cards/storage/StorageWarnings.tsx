@@ -5,7 +5,7 @@ const HNS_DISMISSED_KEY = "elb-hns-warning-dismissed";
 
 interface StorageWarningsProps {
   isPublic: boolean;
-  isHnsEnabled: boolean;
+  isHnsEnabled: boolean | null;
 }
 
 /**
@@ -45,7 +45,7 @@ export function StorageWarnings({ isPublic, isHnsEnabled }: StorageWarningsProps
         </div>
       )}
 
-      {!isHnsEnabled && !hnsDismissed && (
+      {isHnsEnabled === false && !hnsDismissed && (
         <div
           style={{
             padding: "6px 10px",

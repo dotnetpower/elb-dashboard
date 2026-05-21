@@ -204,17 +204,28 @@ export interface StorageAccountSummary {
   name: string;
   location: string;
   resourceGroup: string;
+  isHnsEnabled: boolean | null;
 }
 
 export async function listStorageAccounts(
   subscriptionId: string,
   resourceGroup: string,
 ): Promise<StorageAccountSummary[]> {
-  const items = await armPagedList<{ name: string; location: string; id: string }>(
+  const items = await armPagedList<{
+    name: string;
+    location: string;
+    id: string;
+    properties?: { isHnsEnabled?: boolean };
+  }>(
     `https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resourceGroups/${encodeURIComponent(resourceGroup)}/providers/Microsoft.Storage/storageAccounts?api-version=2023-05-01`,
   );
   return items
-    .map((s) => ({ name: s.name, location: s.location, resourceGroup }))
+    .map((s) => ({
+      name: s.name,
+      location: s.location,
+      resourceGroup,
+      isHnsEnabled: s.properties?.isHnsEnabled ?? null,
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

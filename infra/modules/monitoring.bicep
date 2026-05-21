@@ -1,4 +1,4 @@
-// Log Analytics workspace + Application Insights.
+// Log Analytics workspace + optional Application Insights.
 //
 // Used by Container Apps Environment for log streaming, and by the api
 // sidecar for structured telemetry.
@@ -11,6 +11,9 @@ param logAnalyticsWorkspaceName string
 
 @description('Application Insights name.')
 param applicationInsightsName string
+
+@description('If true, create Application Insights and emit its connection string. Disabled by default to keep the baseline deployment lean.')
+param enableApplicationInsights bool = false
 
 @description('Tags applied to every resource in this module.')
 param tags object = {}
@@ -36,7 +39,7 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   }
 }
 
-resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (enableApplicationInsights) {
   name: applicationInsightsName
   location: location
   tags: moduleTags
@@ -49,4 +52,4 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 
 output workspaceResourceId string = workspace.id
 output workspaceCustomerId string = workspace.properties.customerId
-output appInsightsConnectionString string = appInsights.properties.ConnectionString
+output appInsightsConnectionString string = enableApplicationInsights ? appInsights!.properties.ConnectionString : ''

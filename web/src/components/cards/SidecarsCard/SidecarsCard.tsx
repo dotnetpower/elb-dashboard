@@ -128,8 +128,8 @@ export function SidecarsCard() {
       title="Control Plane Sidecars"
       subtitle={
         isStale
-          ? `Data flow inside ca-elb-control · stale snapshot · revision ${data?.revision ?? "?"}`
-          : `Data flow inside ca-elb-control · revision ${data?.revision ?? "?"}`
+          ? `Data flow inside ca-elb-dashboard · stale snapshot · revision ${data?.revision ?? "?"}`
+          : `Data flow inside ca-elb-dashboard · revision ${data?.revision ?? "?"}`
       }
       status={isError && !displayData ? "error" : rollupStatus(displayData)}
       lastRefreshed={lastUpdated}

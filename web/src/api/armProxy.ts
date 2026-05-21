@@ -16,6 +16,7 @@ export interface ArmResourceGroup {
 export interface ArmStorageAccount {
   name: string;
   location: string;
+  isHnsEnabled?: boolean | null;
 }
 
 export interface ArmAcr {

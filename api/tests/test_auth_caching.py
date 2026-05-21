@@ -45,7 +45,7 @@ def test_get_credential_returns_singleton() -> None:
 
     a = get_credential()
     b = get_credential()
-    assert a is b, "get_credential() must reuse the cached DefaultAzureCredential"
+    assert a is b, "get_credential() must reuse the cached Azure credential"
 
 
 def test_reset_credential_creates_new_instance() -> None:

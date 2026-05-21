@@ -48,13 +48,13 @@ Provide a **browser-only** control plane for ElasticBLAST on Azure so a research
 
 | Layer            | Choice                                                                       | Reason                                                                |
 | ---------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Hosting          | **Azure Container Apps** — single Container App `ca-elb-control` with six sidecars (`frontend`, `api`, `worker`, `beat`, `redis`, `terminal`); pinned `minReplicas: 1`, `maxReplicas: 1` | One billable revision, private VNet, queue-backed workers, sidecar terminal. No Function App, no Static Web App, no Remote Terminal VM. |
+| Hosting          | **Azure Container Apps** — single Container App `ca-elb-dashboard` with six sidecars (`frontend`, `api`, `worker`, `beat`, `redis`, `terminal`); pinned `minReplicas: 1`, `maxReplicas: 1` | One billable revision, private VNet, queue-backed workers, sidecar terminal. No Function App, no Static Web App, no Remote Terminal VM. |
 | API              | **FastAPI on Python 3.12** (`api/`), served by uvicorn in the `api` sidecar on `:8080` | Long-running operations, WebSocket terminal proxy, streaming upload/download proxy that don't fit the Functions HTTP model. |
 | Long-running     | **Celery 5 worker + beat sidecars**, broker = in-revision `redis:7-alpine` sidecar with AOF on Azure Files | Replaces Durable Functions. BLAST submit/delete, ACR builds, AKS provisioning, DB warmup, scheduled work. |
 | Durable state    | **Azure Storage** — Table for job/audit/schedule rows, append blobs for command history; **no managed database** | Cost-minimised; documents/append workloads only. |
 | Frontend         | **React + Vite + TypeScript** (`web/`), built into `dist/` and served by the `frontend` (nginx:alpine) sidecar at `127.0.0.1:8081`; the `api` sidecar reverse-proxies non-`/api/*` requests to it | Same-origin, no SWA resource. |
 | Browser auth     | **MSAL.js (`@azure/msal-browser`) → Auth Code + PKCE**                       | Mirrors `az login` UX; backend validates the bearer token.            |
-| Backend auth     | **`azure-identity` `DefaultAzureCredential`** using the user-assigned MI `id-elb-control` (shared by all six sidecars) | All Azure SDK calls use MI; bearer token is for identity verification only. |
+| Backend auth     | **`azure-identity` `DefaultAzureCredential`** using the user-assigned MI `id-elb-dashboard-*` (shared by all six sidecars) | All Azure SDK calls use MI; bearer token is for identity verification only. |
 | Browser terminal | **xterm.js + WebSocket → loopback `ttyd` in the `terminal` sidecar** (no SSH, no VM, no admin password) | The `terminal` sidecar carries the `elastic-blast` toolchain; `/home/azureuser` is persisted on an Azure Files share. |
 | Data plane       | **All browser uploads/downloads stream through the `api` sidecar** (1 MiB chunks, 4 MiB block uploads, semaphore-capped to 4 concurrent transfers) — **never issue SAS tokens to the browser** | Storage stays `publicNetworkAccess: Disabled`; only the Container App reaches it (via private endpoints). |
 | IaC              | **Bicep** (`infra/`)                                                         | Idiomatic for Container Apps Environment / private endpoints / Vault. |
@@ -166,7 +166,7 @@ Calm, muted, low-contrast surfaces. **Detail moved to [docs/copilot/glass-ui.md]
 
 * [ ] No secrets in source, `.env`, or fixture files. Use Key Vault references.
 * [ ] Every FastAPI route validates the MSAL bearer token before doing work (and the WebSocket handshake for `/api/terminal/ws` does the same — reject the upgrade if the token is missing/invalid).
-* [ ] ARM and data-plane calls use the shared user-assigned MI `id-elb-control` via `DefaultAzureCredential`. Do not introduce client secrets or OBO flows.
+* [ ] ARM and data-plane calls use the shared user-assigned MI `id-elb-dashboard-*` via `DefaultAzureCredential`. Do not introduce client secrets or OBO flows.
 * [ ] **Every Storage account remains `publicNetworkAccess: Disabled`.** No code path enables it, even temporarily. Browser uploads/downloads stream through the `api` sidecar; no SAS tokens are issued to the browser.
 * [ ] `ttyd` in the `terminal` sidecar binds to **127.0.0.1 only**. The Container App's public ingress targets the `api` sidecar on `:8080`; the terminal must never be reachable directly from the internet.
 * [ ] Output of `az`/`kubectl`/Celery results shown in the UI is sanitised — never echo tokens, subscription IDs, or full SAS URLs.

@@ -17,7 +17,7 @@ Browser (SPA)               api sidecar                     Azure Resources
 ```
 
 **Key design choice**: All Azure SDK calls use the **shared user-assigned
-Managed Identity (MI) `id-elb-control`** mounted on the `ca-elb-control`
+Managed Identity (MI) `id-elb-dashboard-*`** mounted on the `ca-elb-dashboard`
 Container App (visible to the api / worker / beat / terminal sidecars), not
 On-Behalf-Of (OBO). The bearer token from the SPA is used only to verify the
 caller's identity (JWT validation) — it is never exchanged for a downstream
@@ -34,7 +34,7 @@ ARM token.
 
 ## §0 Post-Deploy Permissions Checklist (run after every `azd up`)
 
-> **Important**: When the user-assigned MI `id-elb-control` is recreated
+> **Important**: When the user-assigned MI `id-elb-dashboard-*` is recreated
 > (e.g. after `azd down` followed by a fresh `azd up`) it gets a **new
 > object ID**. Previous role assignments do not carry over. Run this
 > checklist after each fresh provision.
@@ -113,7 +113,7 @@ Expected: 14+ roles covering subscription, platform storage, workload storage, p
 
 ## §1 Container App Managed Identity — Required RBAC Roles
 
-The Container App's **shared user-assigned Managed Identity** `id-elb-control`
+The Container App's **shared user-assigned Managed Identity** `id-elb-dashboard-*`
 is the principal that performs all Azure operations. It must be granted the
 following roles.
 
@@ -252,7 +252,7 @@ All data-plane and mutation operations are performed by the MI.
 | `does not have authorization` on RBAC | MI lacks **User Access Administrator** | Assign at target scope; or run the logged `az` command manually |
 | `Forbidden` on AKS kubeconfig | MI lacks **AKS Cluster User Role** | Assign on the cluster |
 | RBAC assigned but still failing | Propagation delay (typically 1–5 min; observed 403→200 within ~70s on `listClusterUserCredential`) | Wait and retry; verify with `az role assignment list --assignee <MI_OID>` |
-| `No identity found` | MI not enabled | Portal → Container App → Identity → attach `id-elb-control` |
+| `No identity found` | MI not enabled | Portal → Container App → Identity → attach `id-elb-dashboard-*` |
 
 ---
 

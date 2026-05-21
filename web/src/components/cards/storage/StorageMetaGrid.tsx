@@ -1,7 +1,7 @@
 interface StorageMetaGridProps {
   region: string;
   sku: string | null;
-  isHnsEnabled: boolean;
+  isHnsEnabled: boolean | null;
   isPublic: boolean;
 }
 
@@ -31,7 +31,9 @@ export function StorageMetaGrid({
       </div>
       <div className="cell">
         <span className="label">HNS</span>
-        <div className="value">{isHnsEnabled ? "Enabled" : "Disabled"}</div>
+        <div className="value">
+          {isHnsEnabled === null ? "Unknown" : isHnsEnabled ? "Enabled" : "Disabled"}
+        </div>
       </div>
       <div
         className={`cell${isPublic ? " warn" : " success"}`}

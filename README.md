@@ -87,24 +87,20 @@ Verify:
 ./scripts/dev/preflight-check.sh
 ```
 
-### 2. Sign in and create the App Registration
+### 2. Sign in
 
 ```bash
 az login
 az account set --subscription "<your-subscription>"
-
-# Create the App Registration the SPA + api use for MSAL token validation.
-# Idempotent — re-running on an existing AR is safe.
-./scripts/dev/setup-app-registration.sh
-# Capture the printed CLIENT_ID.
 ```
+
+The deployment creates or reuses the App Registration automatically during `azd up`. If your tenant blocks App Registration creation, ask an Entra administrator to create it once and set `API_CLIENT_ID` in the azd environment.
 
 ### 3. Create the azd environment
 
 ```bash
-azd env new elb-prod                        # pick any name
+azd env new elb-dashboard
 azd env set AZURE_LOCATION       koreacentral
-azd env set API_CLIENT_ID        <client-id-from-step-2>
 
 # Optional: same-origin only (recommended once the SPA is served by the
 # frontend sidecar). Leave empty for that.
@@ -118,16 +114,29 @@ azd env set LOCKDOWN_PRIVATE_NETWORKING false
 
 ### 4. Deploy
 
+For the shortest fresh-clone path, run the bootstrap wrapper. It checks `az account show`, starts `az login` if needed, prepares the `elb-dashboard` azd environment so the resource group is `rg-elb-dashboard`, runs `azd up`, and opens the deployed Container App URL:
+
+```bash
+./deploy.sh
+```
+
+If you prefer the raw azd command after preparing/selecting the environment, run:
+
 ```bash
 azd up
 ```
 
 `azd up` runs:
 
-1. **preprovision** — registers required Azure resource providers
-   (`Microsoft.App`, `Microsoft.OperationalInsights`, etc.).
+The command prints an `azd up progress map` before long-running work starts,
+then marks the active step as `[n/7]` while it runs.
+
+1. **preprovision** — registers deployment Azure resource providers
+  (`Microsoft.App`, `Microsoft.Authorization`, `Microsoft.ContainerRegistry`,
+  `Microsoft.Storage`, etc.) and starts first-run workflow provider registration
+  for Compute, ContainerService, and Quota.
 2. **provision** — runs [infra/main.bicep](./infra/main.bicep) which creates
-   the platform RG, VNet (3 subnets), Log Analytics, App Insights, the
+  the platform RG, VNet (3 subnets), Log Analytics, optional App Insights, the
    shared user-assigned managed identity, the Premium ACR, the
    Standard_LRS Storage account (with state tables / blob containers / two
    Azure Files shares), the Key Vault, the Container Apps Environment, and
@@ -138,7 +147,7 @@ azd up
    create` to swap the Container App template to the six-sidecar layout.
 
 When it finishes you get an HTTPS URL like
-`https://ca-elb-control.<subdomain>.koreacentral.azurecontainerapps.io`.
+`https://ca-elb-dashboard.<subdomain>.koreacentral.azurecontainerapps.io`.
 `/api/health` should respond `200 {"status": "ok", ...}`.
 
 ### 5. (Recommended) Lock down the network on the second deploy
@@ -265,7 +274,7 @@ In production (`AUTH_DEV_BYPASS=false`):
 
 1. SPA acquires an MSAL access token for `api://<client-id>/user_impersonation`.
 2. The api sidecar validates the JWT against the tenant's OIDC discovery + JWKS.
-3. Backend uses the shared user-assigned Managed Identity `id-elb-control` (mounted on the Container App, visible to all sidecars) for downstream ARM and data-plane calls. The browser token proves who called; it is not exchanged for Azure resource tokens.
+3. Backend uses the shared user-assigned Managed Identity `id-elb-dashboard-*` (mounted on the Container App, visible to all sidecars) for downstream ARM and data-plane calls. The browser token proves who called; it is not exchanged for Azure resource tokens.
 4. The `terminal` sidecar inherits the same MI — `az login --identity` works out of the box. Device-code login is only needed when a user intentionally wants a personal Azure CLI session.
 
 `AUTH_DEV_BYPASS=true` short-circuits step 2 and lets the API call Azure

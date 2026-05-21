@@ -2,7 +2,7 @@
 
 > Extracted from `.github/copilot-instructions.md` §6 on 2026-05-19.
 
-The Browser Terminal is the `terminal` sidecar in the `ca-elb-control` Container App. It carries the `elastic-blast` toolchain and is reached from the SPA via xterm.js → WebSocket → loopback `ttyd`. **There is no Remote Terminal VM, no SSH, no admin password, no NSG, no public IP.** The previous Function-App + Remote-Terminal-VM model has been deleted from the repository.
+The Browser Terminal is the `terminal` sidecar in the `ca-elb-dashboard` Container App. It carries the `elastic-blast` toolchain and is reached from the SPA via xterm.js → WebSocket → loopback `ttyd`. **There is no Remote Terminal VM, no SSH, no admin password, no NSG, no public IP.** The previous Function-App + Remote-Terminal-VM model has been deleted from the repository.
 
 ## Image (`terminal/Dockerfile`)
 

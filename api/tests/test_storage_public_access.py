@@ -47,7 +47,7 @@ def test_gate_falsy_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
 def test_gate_blocked_in_container_app(monkeypatch: pytest.MonkeyPatch) -> None:
     """Operational guard: even with opt-in, a Container App MUST refuse."""
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
-    monkeypatch.setenv(spa.ENV_CONTAINER_APP, "ca-elb-control")
+    monkeypatch.setenv(spa.ENV_CONTAINER_APP, "ca-elb-dashboard")
     assert spa.is_local_debug_auto_open_enabled() is False
 
 
@@ -59,7 +59,7 @@ def test_ensure_noop_when_gate_disabled() -> None:
 
 def test_ensure_noop_in_container_app(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(spa.ENV_OPT_IN, "true")
-    monkeypatch.setenv(spa.ENV_CONTAINER_APP, "ca-elb-control")
+    monkeypatch.setenv(spa.ENV_CONTAINER_APP, "ca-elb-dashboard")
     cred = MagicMock()
     result = spa.ensure_local_storage_access(cred, "sub", "rg", "elbstg01")
     assert result["action"] == "noop"

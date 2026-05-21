@@ -1,4 +1,4 @@
-// Single bundled Container App `ca-elb-control` with all six sidecars.
+// Single bundled Container App `ca-elb-dashboard` with all six sidecars.
 //
 // minReplicas: 1, maxReplicas: 1  (beat singleton + Redis state locality)
 // Public ingress on :8080 routed to the api sidecar.
@@ -11,7 +11,7 @@
 @description('Azure region.')
 param location string
 
-@description('Container App name (e.g. ca-elb-control).')
+@description('Container App name (e.g. ca-elb-dashboard).')
 param appName string
 
 @description('Resource id of the Container Apps Environment.')

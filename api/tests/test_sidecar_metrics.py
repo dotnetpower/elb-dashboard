@@ -161,7 +161,7 @@ def test_local_probe_fallback_does_not_override_reported_down(monkeypatch) -> No
 
 
 def test_local_probe_fallback_is_disabled_for_deployed_revisions(monkeypatch) -> None:
-    monkeypatch.setenv("CONTAINER_APP_REVISION", "ca-elb-control--0000001")
+    monkeypatch.setenv("CONTAINER_APP_REVISION", "ca-elb-dashboard--0000001")
     sidecars = {
         "frontend": {"name": "frontend", "health": "down", "ts": None, "_error": "missing"},
     }

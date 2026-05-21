@@ -6,7 +6,7 @@
 # Why this exists
 # ---------------
 # In production the api / worker sidecars use the user-assigned MI
-# `id-elb-control` (granted via Bicep + docs/auth.md). When the api runs
+# `id-elb-dashboard-*` (granted via Bicep + docs/auth.md). When the api runs
 # locally under `uv run uvicorn ...`, `DefaultAzureCredential` falls back
 # to your `az login` identity instead — and that identity starts with
 # zero RBAC on the workload Storage / ACR / RG, so the dashboard renders

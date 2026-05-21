@@ -163,6 +163,39 @@ def test_monitor_aks_uses_snapshot_cache(
     monitor_cache.reset_monitor_snapshot_cache()
 
 
+def test_storage_summary_preserves_hns_when_container_list_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services.monitoring import get_storage_summary
+
+    class BrokenBlobContainers:
+        def list(self, _resource_group: str, _account_name: str) -> list[object]:
+            raise RuntimeError("container list unavailable")
+
+    fake_client = SimpleNamespace(
+        storage_accounts=SimpleNamespace(
+            get_properties=lambda _resource_group, account_name: SimpleNamespace(
+                name=account_name,
+                location="eastus",
+                sku=SimpleNamespace(name="Standard_LRS"),
+                kind="StorageV2",
+                public_network_access="Enabled",
+                is_hns_enabled=True,
+            )
+        ),
+        blob_containers=BrokenBlobContainers(),
+    )
+    monkeypatch.setattr("api.services.monitoring.storage_client", lambda *_args: fake_client)
+
+    body = get_storage_summary(object(), "sub", "rg", "stelb")
+
+    assert body["is_hns_enabled"] is True
+    assert body["region"] == "eastus"
+    assert body["containers"] == []
+    assert body["containers_degraded"] is True
+    assert body["containers_degraded_reason"] == "RuntimeError"
+
+
 def test_aks_events_rejects_invalid_namespace(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

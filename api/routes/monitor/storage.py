@@ -43,7 +43,19 @@ def storage_summary(
     except Exception as exc:
         return cast(
             dict[str, Any],
-            _graceful("storage_summary", exc, empty={"name": account_name, "containers": []}),
+            _graceful(
+                "storage_summary",
+                exc,
+                empty={
+                    "name": account_name,
+                    "region": "",
+                    "sku": None,
+                    "kind": None,
+                    "public_network_access": None,
+                    "is_hns_enabled": None,
+                    "containers": [],
+                },
+            ),
         )
 
 

@@ -1,6 +1,9 @@
-import { Loader2 } from "lucide-react";
+import { Loader2, MapPin } from "lucide-react";
 import type { UseQueryResult } from "@tanstack/react-query";
 
+import { AZURE_REGIONS } from "@/constants";
+
+import { ErrorMsg } from "../ErrorMsg";
 import { RgField } from "../RgField";
 import type { ResourceConfig } from "../types";
 import type { ValidationErrors } from "../validation";
@@ -8,6 +11,14 @@ import type { ValidationErrors } from "../validation";
 interface RgRow {
   name: string;
   location: string;
+}
+
+function regionOptionsFor(region: string) {
+  if (!region || AZURE_REGIONS.some((option) => option.value === region)) {
+    return AZURE_REGIONS;
+  }
+
+  return [{ value: region, label: `${region} (current)` }, ...AZURE_REGIONS];
 }
 
 export function Step2ResourceGroups({
@@ -21,6 +32,8 @@ export function Step2ResourceGroups({
   errors: ValidationErrors;
   rgQuery: UseQueryResult<RgRow[]>;
 }) {
+  const regionOptions = regionOptionsFor(config.region);
+
   return (
     <div>
       <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
@@ -39,28 +52,55 @@ export function Step2ResourceGroups({
         registry. We can create them for you if they don't exist yet.
       </p>
 
-      {config.region && (
-        <div
+      <div
+        style={{
+          marginBottom: 14,
+          padding: "10px 12px",
+          background: "rgba(110,159,255,0.06)",
+          border: "1px solid rgba(110,159,255,0.15)",
+          borderRadius: "var(--radius)",
+        }}
+      >
+        <label
+          className="glass-label"
+          htmlFor="wizard-primary-region"
           style={{
-            marginBottom: 14,
-            padding: "8px 12px",
-            background: "rgba(110,159,255,0.06)",
-            border: "1px solid rgba(110,159,255,0.15)",
-            borderRadius: "var(--radius)",
-            fontSize: 12,
-            color: "var(--text-muted)",
             display: "flex",
             alignItems: "center",
             gap: 6,
+            marginBottom: 6,
           }}
         >
-          <span style={{ fontSize: 14 }}>📍</span>
-          Primary region (from Workload RG):{" "}
-          <strong style={{ color: "var(--text-primary)", marginLeft: 4 }}>
-            {config.region}
-          </strong>
+          <MapPin size={13} /> Primary Region
+        </label>
+        <select
+          id="wizard-primary-region"
+          className="glass-input"
+          value={config.region}
+          onChange={(event) =>
+            setConfig((current) => ({ ...current, region: event.target.value }))
+          }
+          style={{ fontSize: 12 }}
+        >
+          {regionOptions.map((region) => (
+            <option key={region.value} value={region.value}>
+              {region.label}
+            </option>
+          ))}
+        </select>
+        <div
+          style={{
+            color: "var(--text-faint)",
+            fontSize: 11,
+            lineHeight: 1.5,
+            marginTop: 6,
+          }}
+        >
+          Used for new Storage and ACR resources. Selecting an existing workload
+          resource group suggests its Azure location.
         </div>
-      )}
+        <ErrorMsg msg={errors.region} />
+      </div>
 
       {rgQuery.isLoading ? (
         <div

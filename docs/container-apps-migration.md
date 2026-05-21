@@ -2,7 +2,7 @@
 
 This document is the authoritative reference for the **shipped** ElasticBLAST
 control-plane architecture on Azure Container Apps: the bundled
-`ca-elb-control` Container App with six sidecars, the cost model, the storage
+`ca-elb-dashboard` Container App with six sidecars, the cost model, the storage
 network isolation rules, the browser ↔ storage proxy contract, and the
 identity / RBAC layout. It replaced the original Azure Functions backend; the
 legacy tree has been deleted from the repository.
@@ -83,7 +83,7 @@ managed.
 | Azure Cache for Redis (managed) | Cost. Broker is internal-only and does not need geo-replication, AAD, or managed patching. | Redis 7 alpine sidecar inside the Container App. |
 | Self-hosted Redis VM (`vm-elb-redis`) | Adds a VM, NIC, NSG, subnet, MI, and nightly backup job. | Redis sidecar in the same Container App revision; AOF persisted to an Azure Files share. |
 | Container Apps Jobs for scheduled work | Two scheduling systems (jobs + beat) is redundant. | Celery beat sidecar. |
-| Separate `ca-control-api`, `ca-control-worker`, `ca-control-beat` apps | Three Container Apps means three billable revisions and three managed identities. | Single `ca-elb-control` Container App with six sidecars. |
+| Separate `ca-control-api`, `ca-control-worker`, `ca-control-beat` apps | Three Container Apps means three billable revisions and three managed identities. | Single `ca-elb-dashboard` Container App with six sidecars. |
 
 ## Resources to Create
 
@@ -93,7 +93,7 @@ estimates or writing new Bicep modules.
 | Resource | Type | Purpose | New / Existing |
 |----------|------|---------|----------------|
 | Container Apps Environment | `Microsoft.App/managedEnvironments` | VNet-integrated runtime; binds the Azure Files volumes for Redis and the terminal home | New |
-| `ca-elb-control` | `Microsoft.App/containerApps` | Single Container App with six sidecar containers: `frontend`, `api`, `worker`, `beat`, `redis`, `terminal`. Pinned to `minReplicas: 1`, `maxReplicas: 1`. Public ingress targets the `api` sidecar on `:8080`. | New |
+| `ca-elb-dashboard` | `Microsoft.App/containerApps` | Single Container App with six sidecar containers: `frontend`, `api`, `worker`, `beat`, `redis`, `terminal`. Pinned to `minReplicas: 1`, `maxReplicas: 1`. Public ingress targets the `api` sidecar on `:8080`. | New |
 | Azure Files share `redis-data` | `Microsoft.Storage/storageAccounts/fileServices/shares` | AOF persistence mount for the Redis sidecar | New (on existing platform storage account) |
 | Azure Files share `terminal-home` | `Microsoft.Storage/storageAccounts/fileServices/shares` | `/home/azureuser` persistence for the terminal sidecar (queries staged locally, az CLI profile, kubeconfig, ssh known_hosts) | New (on existing platform storage account) |
 | Platform Storage account | `Microsoft.Storage/storageAccounts` | Job state (table), audit (append blob), schedules (blob), command history (blob), Redis AOF (file share), terminal home (file share) | Re-purposed existing |
@@ -104,7 +104,7 @@ estimates or writing new Bicep modules.
 | Platform VNet | `Microsoft.Network/virtualNetworks` | Subnets: `snet-containerapps`, `snet-private-endpoints`, `snet-aks` | New |
 | Private endpoints | `Microsoft.Network/privateEndpoints` | Key Vault, Storage (blob + table + file), ACR | New |
 | Private DNS zones | `Microsoft.Network/privateDnsZones` | `privatelink.vaultcore.azure.net`, `privatelink.blob.core.windows.net`, `privatelink.table.core.windows.net`, `privatelink.file.core.windows.net`, `privatelink.azurecr.io` | New |
-| User-assigned managed identities | `Microsoft.ManagedIdentity/userAssignedIdentities` | `id-elb-control` (shared by all six sidecars), `id-elb-openapi` (AKS Workload Identity) | New |
+| User-assigned managed identities | `Microsoft.ManagedIdentity/userAssignedIdentities` | `id-elb-dashboard-*` (shared by all six sidecars), `id-elb-openapi` (AKS Workload Identity) | New |
 | Log Analytics + Application Insights | `Microsoft.OperationalInsights/workspaces` + `Microsoft.Insights/components` | Logs, metrics, traces | Existing |
 
 Not created: Azure Service Bus, Azure Cosmos DB, Azure Database for PostgreSQL,
@@ -460,7 +460,7 @@ Browser
   v
 Container Apps Environment, VNet integrated
   |
-  +-- ca-elb-control  (one Container App, one revision, one replica)
+  +-- ca-elb-dashboard  (one Container App, one revision, one replica)
         |
         +-- container: api      (FastAPI, public ingress on :8080)
         |     - serves /api/* directly
@@ -486,7 +486,7 @@ All six sidecars share:
       - api reverse-proxies non-/api/* requests to frontend at 127.0.0.1:8081
       - api upgrades /api/terminal/ws to terminal's loopback ttyd at 127.0.0.1:7681
       - worker reaches Redis at 127.0.0.1:6379
-  - the same user-assigned managed identity (id-elb-control)
+  - the same user-assigned managed identity (id-elb-dashboard-*)
   - the same lifecycle (start, stop, restart together)
 
 Private endpoints and managed identity
@@ -501,13 +501,13 @@ Private endpoints and managed identity
 
 | Component | Target service | Purpose | Notes |
 |-----------|----------------|---------|-------|
-| `ca-elb-control` | Azure Container Apps | Single Container App, six sidecars | `minReplicas: 1`, `maxReplicas: 1`. Public ingress only on the `api` container. |
-| `frontend` sidecar | Container in `ca-elb-control` | nginx:alpine serving the built React SPA `dist/` | Listens on `127.0.0.1:8081`. SPA navigation fallback to `/index.html`. Security headers (CSP, HSTS, X-Frame-Options, etc.) move from `staticwebapp.config.json` into `nginx.conf`. Image tag matches the SPA build hash so cache-busting is automatic across revisions. |
-| `api` sidecar | Container in `ca-elb-control` | FastAPI HTTP API on Python 3.12 + reverse proxy for non-`/api/*` to the frontend sidecar | Owns the public `/api/*` contract. Public ingress restricted (Container Apps ingress with optional `allowedCidrs`). Forwards requests that do not match `/api/*` to `127.0.0.1:8081`. Terminates the browser WebSocket and proxies it to the `terminal` sidecar's loopback `ttyd` after MSAL + tenant-role check. |
-| `worker` sidecar | Container in `ca-elb-control` | Celery worker | Pulls from `redis://127.0.0.1:6379/0`. Writes progress to Storage. |
-| `beat` sidecar | Container in `ca-elb-control` | Celery beat scheduler | Reads schedule definitions from Storage. Singleton by construction (one container, one replica). |
-| `redis` sidecar | Container in `ca-elb-control` | Broker + result backend | `redis:7-alpine`. Binds to `127.0.0.1` only. AOF on, RDB off. `/data` mounted from Azure Files share `redis-data`. |
-| `terminal` sidecar | Container in `ca-elb-control` | Browser-accessible operator shell with the `elastic-blast` toolchain | Image based on Ubuntu 24.04 with `azure-cli`, `kubectl`, `azcopy`, `python3.12`, `primer3`, `tmux`, `git`, `jq`, `make`, and the `elastic_blast` package + venv pre-installed. Runs `ttyd -p 7681 -i 127.0.0.1 -W tmux new -A -s elb` so each browser session attaches to the same persistent tmux. `/home/azureuser` mounted from Azure Files share `terminal-home` for file persistence across revision restarts. Authenticates to ARM with `id-elb-control` via the env-injected MSI endpoint. |
+| `ca-elb-dashboard` | Azure Container Apps | Single Container App, six sidecars | `minReplicas: 1`, `maxReplicas: 1`. Public ingress only on the `api` container. |
+| `frontend` sidecar | Container in `ca-elb-dashboard` | nginx:alpine serving the built React SPA `dist/` | Listens on `127.0.0.1:8081`. SPA navigation fallback to `/index.html`. Security headers (CSP, HSTS, X-Frame-Options, etc.) move from `staticwebapp.config.json` into `nginx.conf`. Image tag matches the SPA build hash so cache-busting is automatic across revisions. |
+| `api` sidecar | Container in `ca-elb-dashboard` | FastAPI HTTP API on Python 3.12 + reverse proxy for non-`/api/*` to the frontend sidecar | Owns the public `/api/*` contract. Public ingress restricted (Container Apps ingress with optional `allowedCidrs`). Forwards requests that do not match `/api/*` to `127.0.0.1:8081`. Terminates the browser WebSocket and proxies it to the `terminal` sidecar's loopback `ttyd` after MSAL + tenant-role check. |
+| `worker` sidecar | Container in `ca-elb-dashboard` | Celery worker | Pulls from `redis://127.0.0.1:6379/0`. Writes progress to Storage. |
+| `beat` sidecar | Container in `ca-elb-dashboard` | Celery beat scheduler | Reads schedule definitions from Storage. Singleton by construction (one container, one replica). |
+| `redis` sidecar | Container in `ca-elb-dashboard` | Broker + result backend | `redis:7-alpine`. Binds to `127.0.0.1` only. AOF on, RDB off. `/data` mounted from Azure Files share `redis-data`. |
+| `terminal` sidecar | Container in `ca-elb-dashboard` | Browser-accessible operator shell with the `elastic-blast` toolchain | Image based on Ubuntu 24.04 with `azure-cli`, `kubectl`, `azcopy`, `python3.12`, `primer3`, `tmux`, `git`, `jq`, `make`, and the `elastic_blast` package + venv pre-installed. Runs `ttyd -p 7681 -i 127.0.0.1 -W tmux new -A -s elb` so each browser session attaches to the same persistent tmux. `/home/azureuser` mounted from Azure Files share `terminal-home` for file persistence across revision restarts. Authenticates to ARM with `id-elb-dashboard-*` via the env-injected MSI endpoint. |
 | Job state | Azure Storage table + blob | Job registry, audit log, command history, schedule records | Table for indexed lookups (`PartitionKey=job_id`); blob (append) for audit trail; blob for large request/response payloads. |
 | Secrets | Azure Key Vault | App configuration references and any future SSH material | Use private endpoint and RBAC. Keep purge protection enabled. No VM admin password is stored anywhere because there is no VM. |
 | Runtime storage | Azure Storage | Query, config, DB, and result blobs | Use private endpoints, HNS where needed, and managed identity auth. |
@@ -677,7 +677,7 @@ Azure auth from inside the terminal:
 - `AZCOPY_AUTO_LOGIN_TYPE=MSI` means `azcopy` picks up the same identity.
 - `kubectl` uses kubeconfig generated by `az aks get-credentials --admin` (or
   via `aksAadAuth` once the cluster is configured for AAD); the AKS
-  permissions on `id-elb-control` cover this.
+  permissions on `id-elb-dashboard-*` cover this.
 
 Persistence:
 
@@ -704,7 +704,7 @@ left column is the retired Remote Terminal VM model preserved as a guardrail):
 
 | Retired (VM model) | Replacement in the sidecar model |
 |--------------------|----------------------------------|
-| Ubuntu 24.04 VM (`vm-elb-terminal`) | `elb-terminal:<tag>` container in `ca-elb-control` |
+| Ubuntu 24.04 VM (`vm-elb-terminal`) | `elb-terminal:<tag>` container in `ca-elb-dashboard` |
 | 10-15 min cloud-init bootstrap (apt, pip, clone, venv, defender-onboarding retry) | Image build does this once at CI time. Cold start is whatever the container engine takes (seconds). |
 | `azure-cli`, `kubectl`, `azcopy`, `git`, `make`, `jq`, `python3.12`, `primer3`, `tmux` installed via cloud-init | All baked into the image at build time, with retry / failure handling moved to CI |
 | `~/elastic-blast-azure` clone + venv + `pip install -r requirements/test.txt` + `pip install --no-build-isolation --no-deps elastic_blast` | All baked into the image; venv at `/opt/elb/venv`. The cloned repo is also surfaced under `/home/azureuser/elastic-blast-azure` via Azure Files for user convenience but is not on the critical path. |
@@ -733,7 +733,7 @@ Verification:
   closing one tab does not kill the other or kill any process started in
   the shared session.
 - A test that running `az account show` from the terminal sidecar returns
-  the `id-elb-control` identity by default, and that running `az login
+  the `id-elb-dashboard-*` identity by default, and that running `az login
   --use-device-code` lets the user override with their own identity for the
   duration of the session (without leaking back into the shared tmux for
   other users — sessions are per-tmux-window, and the docs make this
@@ -755,7 +755,7 @@ HTTP POST /api/blast/submit
   -> dispatch Celery task: submit_blast.delay(job_id=...)
   -> return 202 + { job_id, task_id }
 
-ca-elb-control / worker sidecar pulls task from Redis sidecar (127.0.0.1:6379)
+ca-elb-dashboard / worker sidecar pulls task from Redis sidecar (127.0.0.1:6379)
   -> update Storage: status=running, phase=checking_vm
   -> execute steps with autoretry_for + exponential backoff
   -> append audit event after each step
@@ -813,7 +813,7 @@ Use one platform VNet with purpose-specific subnets.
 
 | Subnet | Purpose |
 |--------|---------|
-| `snet-containerapps` | Container Apps Environment infrastructure (the single `ca-elb-control` app and its six sidecars). |
+| `snet-containerapps` | Container Apps Environment infrastructure (the single `ca-elb-dashboard` app and its six sidecars). |
 | `snet-private-endpoints` | Private endpoints for Key Vault, Storage (blob + table + file), and ACR. |
 | `snet-aks` | AKS nodes when the workload cluster is created by this platform. |
 
@@ -862,7 +862,7 @@ can be referenced cleanly from Bicep.
 
 | Identity | Assigned to | Required scopes |
 |----------|-------------|-----------------|
-| `id-elb-control` | `ca-elb-control` Container App (shared by all six sidecars including `frontend` and `terminal`) | Contributor plus User Access Administrator on workload RGs; Storage Table Data Contributor + Storage Blob Data Contributor + Storage File Data SMB Share Contributor on platform storage; data-plane roles on workload Storage and ACR; Key Vault Secrets User; AcrPull on the platform ACR; AKS RBAC reader / `Azure Kubernetes Service Cluster User` so the terminal sidecar can run `kubectl` against the cluster. The `frontend` sidecar makes no Azure calls and inherits the MI only because it lives in the same revision. |
+| `id-elb-dashboard-*` | `ca-elb-dashboard` Container App (shared by all six sidecars including `frontend` and `terminal`) | Contributor plus User Access Administrator on workload RGs; Storage Table Data Contributor + Storage Blob Data Contributor + Storage File Data SMB Share Contributor on platform storage; data-plane roles on workload Storage and ACR; Key Vault Secrets User; AcrPull on the platform ACR; AKS RBAC reader / `Azure Kubernetes Service Cluster User` so the terminal sidecar can run `kubectl` against the cluster. The `frontend` sidecar makes no Azure calls and inherits the MI only because it lives in the same revision. |
 | `id-elb-openapi` | AKS Workload Identity | Storage Blob Data Contributor, AKS permissions, workload RG permissions needed by ElasticBLAST. |
 
 Because the six sidecars share one MI, the api sidecar technically holds the
@@ -885,7 +885,7 @@ cost saving.
 Keep the browser token as proof of caller identity. Do not exchange or persist
 the token in Celery task arguments. Store `owner_oid`, `tenant_id`, and approved
 operation parameters in the Storage state row. The worker sidecar uses the
-shared managed identity (`id-elb-control`) for all Azure operations.
+shared managed identity (`id-elb-dashboard-*`) for all Azure operations.
 
 ## Storage Plan
 
@@ -950,7 +950,7 @@ after any change to identity / role assignments.
 
 1. **MI is attached to the Container App.**
    ```bash
-   az containerapp show --name ca-elb-control --resource-group rg-<env> \
+  az containerapp show --name ca-elb-dashboard --resource-group rg-elb-dashboard \
      --query 'identity'
    ```
    Expect `type: UserAssigned` and the UAMI's resource id under
@@ -958,7 +958,7 @@ after any change to identity / role assignments.
 
 2. **`AZURE_CLIENT_ID` env matches the UAMI's clientId on the api sidecar.**
    ```bash
-   az containerapp show --name ca-elb-control --resource-group rg-<env> \
+  az containerapp show --name ca-elb-dashboard --resource-group rg-elb-dashboard \
      --query "properties.template.containers[?name=='api'].env[?name=='AZURE_CLIENT_ID'].value"
    ```
    Should be the UAMI's `clientId` (not the app registration id, not zeros).
@@ -996,7 +996,7 @@ after any change to identity / role assignments.
 5. **Logs.** All `/api/arm/list_*` failures now log the exception type,
    sanitised message, and traceback. Tail the api sidecar:
    ```bash
-   az containerapp logs show --name ca-elb-control --resource-group rg-<env> \
+  az containerapp logs show --name ca-elb-dashboard --resource-group rg-elb-dashboard \
      --container api --follow | grep -iE 'list_(subscriptions|resource_groups|storage|acrs|vms)'
    ```
    A repeated `AuthorizationFailed` line is the smoking gun for missing

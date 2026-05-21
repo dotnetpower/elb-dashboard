@@ -51,6 +51,7 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName, cluste
         : "ok";
   const publicAccess = query.data?.public_network_access ?? null;
   const isPublic = publicAccess === "Enabled";
+  const isHnsEnabled = query.data?.is_hns_enabled ?? null;
 
   return (
     <MonitorCard
@@ -77,12 +78,12 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName, cluste
         <>
           <StorageWarnings
             isPublic={isPublic}
-            isHnsEnabled={Boolean(query.data.is_hns_enabled)}
+            isHnsEnabled={isHnsEnabled}
           />
           <StorageMetaGrid
             region={query.data.region}
             sku={query.data.sku}
-            isHnsEnabled={Boolean(query.data.is_hns_enabled)}
+            isHnsEnabled={isHnsEnabled}
             isPublic={isPublic}
           />
           <StorageContainersTable containers={query.data.containers} />

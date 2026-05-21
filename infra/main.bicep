@@ -3,14 +3,14 @@
 // One azd up provisions:
 //   * Platform RG (rg-${environmentName}) with all platform resources.
 //   * VNet + 3 subnets (snet-containerapps, snet-private-endpoints, snet-aks).
-//   * Log Analytics + Application Insights.
-//   * Shared user-assigned managed identity (id-elb-control).
+//   * Log Analytics, with optional Application Insights.
+//   * Shared user-assigned managed identity (id-elb-dashboard-*).
 //   * Premium ACR (with bootstrap public access; lock down via lockdown=true).
 //   * Standard_LRS Storage account with state tables / blob containers /
 //     two Azure Files shares (redis-data, terminal-home).
 //   * Key Vault (RBAC mode, soft-delete + purge protection).
 //   * Container Apps Environment (workload-profile, VNet-integrated).
-//   * Container App `ca-elb-control` with the six-sidecar template
+//   * Container App `ca-elb-dashboard` with the six-sidecar template
 //     (bootstrapped with hello-world image; postprovision hook builds the
 //      real images and swaps them in).
 
@@ -58,6 +58,9 @@ param assignSubscriptionReader bool = true
 @description('If true, grants the shared UAMI resource-group-scope Contributor and User Access Administrator for runtime resource orchestration. Set to false when equivalent roles already exist outside this template.')
 param assignControlPlaneRoles bool = true
 
+@description('If true, create Application Insights. The default deployment creates only Log Analytics; Application Insights can be enabled later with ENABLE_APPLICATION_INSIGHTS=true.')
+param enableApplicationInsights bool = false
+
 // ---------------------------------------------------------------------------
 // Resource tagging (CAF-aligned)
 // ---------------------------------------------------------------------------
@@ -92,16 +95,25 @@ var tags = empty(ownerEmail) ? baseTags : union(baseTags, {
   owner: ownerEmail
 })
 
-var rgName               = 'rg-${environmentName}'
-var vnetName             = 'vnet-${environmentName}'
-var logAnalyticsName     = 'log-${environmentName}-${resourceToken}'
-var appInsightsName      = 'appi-${environmentName}-${resourceToken}'
-var identityName         = 'id-elb-control-${resourceToken}'
-var acrName              = 'acrelb${resourceToken}'  // 5-50 alphanumeric
-var storageAccountName   = 'stelb${resourceToken}'    // 3-24 lowercase
-var keyVaultName         = 'kv-${take(resourceToken, 18)}'
-var containerEnvName     = 'cae-elb-${resourceToken}'
-var controlAppName       = 'ca-elb-control'
+var hyphenatedNamePrefix = 'elb-dashboard'
+var compactNamePrefix    = 'elbdashboard'
+var rgName               = 'rg-${hyphenatedNamePrefix}'
+var vnetName             = 'vnet-${hyphenatedNamePrefix}'
+var logAnalyticsName     = 'log-${hyphenatedNamePrefix}-${resourceToken}'
+var appInsightsName      = 'appi-${hyphenatedNamePrefix}-${resourceToken}'
+var identityName         = 'id-${hyphenatedNamePrefix}-${take(resourceToken, 8)}'
+var acrName              = 'acr${compactNamePrefix}${take(resourceToken, 10)}'  // 5-50 alphanumeric
+var storageAccountName   = 'st${compactNamePrefix}${take(resourceToken, 10)}'   // 3-24 lowercase
+var keyVaultName         = 'kv-${hyphenatedNamePrefix}-${take(resourceToken, 7)}'
+var containerEnvName     = 'cae-${hyphenatedNamePrefix}-${take(resourceToken, 8)}'
+var controlAppName       = 'ca-${hyphenatedNamePrefix}'
+var workspaceTags = union(tags, {
+  'elb-workload-rg': rgName
+  'elb-acr-rg': rgName
+  'elb-acr': acrName
+  'elb-storage': storageAccountName
+  'elb-region': location
+})
 
 // Allowed-origins as an array (Bicep does not have a native string-split-by-comma;
 // the helper relies on the value not containing commas inside an origin).
@@ -113,7 +125,7 @@ var allowedOriginsArray = empty(allowedOrigins) ? [] : split(allowedOrigins, ','
 resource platformRg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: rgName
   location: location
-  tags: tags
+  tags: workspaceTags
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +137,7 @@ module network 'modules/network.bicep' = {
   params: {
     location: location
     vnetName: vnetName
-    tags: tags
+    tags: workspaceTags
   }
 }
 
@@ -139,7 +151,8 @@ module monitoring 'modules/monitoring.bicep' = {
     location: location
     logAnalyticsWorkspaceName: logAnalyticsName
     applicationInsightsName: appInsightsName
-    tags: tags
+    enableApplicationInsights: enableApplicationInsights
+    tags: workspaceTags
   }
 }
 
@@ -152,7 +165,7 @@ module identity 'modules/identity.bicep' = {
   params: {
     location: location
     identityName: identityName
-    tags: tags
+    tags: workspaceTags
   }
 }
 
@@ -191,7 +204,7 @@ module acr 'modules/acr.bicep' = {
     privateEndpointSubnetId: network.outputs.privateEndpointsSubnetId
     vnetResourceId: network.outputs.vnetResourceId
     allowPublicAccessForBootstrap: !lockdownPrivateNetworking
-    tags: tags
+    tags: workspaceTags
   }
 }
 
@@ -208,7 +221,7 @@ module storage 'modules/storage.bicep' = {
     vnetResourceId: network.outputs.vnetResourceId
     uamiPrincipalId: identity.outputs.identityPrincipalId
     allowPublicAccessForBootstrap: !lockdownPrivateNetworking
-    tags: tags
+    tags: workspaceTags
   }
 }
 
@@ -235,7 +248,7 @@ module keyvault 'modules/keyvault.bicep' = {
     privateEndpointSubnetId: network.outputs.privateEndpointsSubnetId
     vnetResourceId: network.outputs.vnetResourceId
     allowPublicAccessForBootstrap: !lockdownPrivateNetworking
-    tags: tags
+    tags: workspaceTags
   }
 }
 
@@ -251,7 +264,7 @@ module containerEnv 'modules/containerAppsEnvironment.bicep' = {
     logAnalyticsCustomerId: monitoring.outputs.workspaceCustomerId
     logAnalyticsWorkspaceResourceId: monitoring.outputs.workspaceResourceId
     infrastructureSubnetId: network.outputs.containerAppsSubnetId
-    tags: tags
+    tags: workspaceTags
   }
   dependsOn: [
     storageState
@@ -286,7 +299,7 @@ module controlApp 'modules/containerAppControl.bicep' = {
     // images via `az acr build` and runs `az containerapp update` to swap
     // the template to the six-sidecar layout.
     useBootstrapImage: true
-    tags: tags
+    tags: workspaceTags
   }
 }
 

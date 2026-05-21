@@ -64,7 +64,8 @@ If your tenant blocks App Registration creation or admin consent, ask an Entra a
 
 ## Phase 0: Install Tools
 
-### Windows With WSL2
+<details open markdown="1">
+<summary>Windows With WSL2</summary>
 
 Run these commands from PowerShell as an administrator:
 
@@ -101,7 +102,10 @@ git config --global core.autocrlf input
 
 Clone inside the WSL Linux filesystem, for example under `~/dev`, not under `/mnt/c/...`. This avoids slow file watching and line-ending surprises.
 
-### macOS
+</details>
+
+<details markdown="1">
+<summary>macOS</summary>
 
 Using Homebrew:
 
@@ -118,7 +122,10 @@ exec $SHELL -l
 
 Docker Desktop is optional. Install it only if you want local Redis or Docker Compose workflows.
 
-### Ubuntu Or Debian
+</details>
+
+<details markdown="1">
+<summary>Ubuntu Or Debian</summary>
 
 ```bash
 sudo apt-get update
@@ -135,6 +142,8 @@ exec $SHELL -l
 ```
 
 Install Docker only if you want local Redis or Docker Compose workflows.
+
+</details>
 
 ## Phase 1: Clone And Verify The Repository
 
@@ -204,7 +213,7 @@ curl http://127.0.0.1:8085/api/health
 
 Expected result: HTTP `200` with a JSON body containing `"status":"ok"`. The helper writes logs under `.logs/local/latest/`. Start with `.logs/local/latest/api.log` when something fails.
 
-## Phase 2: Sign In And Create The App Registration
+## Phase 2: Sign In
 
 Sign in and select a subscription:
 
@@ -213,15 +222,7 @@ az login
 az account set --subscription "<your-subscription-name-or-id>"
 ```
 
-Create or reuse the App Registration used by the SPA and API:
-
-```bash
-scripts/dev/setup-app-registration.sh
-```
-
-The script is idempotent. It creates or reuses an app named `elastic-blast-control-plane`, exposes the `api://<client-id>/user_impersonation` scope, adds the local SPA redirect URI `http://localhost:8090`, writes `web/.env.local`, and prints the Application (client) ID.
-
-Keep the printed App ID. You will use it as `API_CLIENT_ID` in the next phase.
+The deployment creates or reuses the App Registration automatically during `azd up`. You only need to sign in with an account that can create App Registrations in the tenant, or ask an Entra administrator to create the app once and provide `API_CLIENT_ID`.
 
 ## Phase 3: Deploy The Control Plane With azd
 
@@ -233,25 +234,30 @@ azd auth login --use-device-code --tenant-id "$(az account show --query tenantId
 
 Do not rely on `azd auth login --managed-identity` for the clean-machine deployment path. It can acquire an ARM token, but `azd` may still fail while resolving the deployer principal for Bicep role-assignment parameters. Interactive `azd` login is the supported path for this guide.
 
-Create an Azure Developer CLI environment. Use a short lowercase name because it is used in resource names and tags:
+Create the standard Azure Developer CLI environment. The resource names use the `elb-dashboard` / `elbdashboard` prefix:
 
 ```bash
-azd env new elb-smoke
+azd env new elb-dashboard
 azd env set AZURE_LOCATION koreacentral
-azd env set API_CLIENT_ID <app-id-from-setup-app-registration>
 azd env set ALLOWED_ORIGINS ""
 azd env set LOCKDOWN_PRIVATE_NETWORKING false
 ```
 
 Leave `DEPLOYER_PRINCIPAL_ID` unset unless your administrator explicitly gives you a principal object id to use. The default parameters treat it as optional, which avoids forcing principal lookup in managed-identity-only validation environments.
 
-Run the preflight check:
+Optionally run the preflight check. It validates your tools and Azure context, then idempotently registers the Azure resource providers required by the deployment. It also starts first-run workflow provider registration for VM quota checks and AKS provisioning (`Microsoft.Compute`, `Microsoft.ContainerService`, and `Microsoft.Quota`):
 
 ```bash
 scripts/dev/preflight-check.sh
 ```
 
-Deploy:
+For the shortest fresh-clone path, run the bootstrap wrapper. It checks `az account show`, starts `az login` if needed, prepares the `elb-dashboard` azd environment so the resource group is `rg-elb-dashboard`, runs `azd up`, and opens the deployed Container App URL:
+
+```bash
+./deploy.sh
+```
+
+If you prefer the raw azd command after preparing/selecting the environment, run:
 
 ```bash
 azd up
@@ -259,11 +265,15 @@ azd up
 
 What `azd up` does:
 
-1. Registers required Azure resource providers.
-2. Provisions the platform resources from `infra/main.bicep`.
-3. Builds the API, frontend, and terminal images with `az acr build`.
-4. Swaps the Container App to the six-sidecar layout.
-5. Prints the Container App URL.
+The command prints an `azd up progress map` before long-running work starts, then marks the active step as `[n/7]` while it runs.
+
+1. Registers deployment Azure resource providers and starts first-run workflow provider registration.
+2. Provisions the bootstrap platform resources from `infra/main.bicep`.
+3. Creates or reuses the App Registration if `API_CLIENT_ID` is not set.
+4. Validates the platform Storage account and dashboard discovery tags.
+5. Builds the API, frontend, and terminal images with `az acr build`.
+6. Swaps the Container App to the six-sidecar layout.
+7. Waits for `/api/health` and prints the Container App URL.
 
 Check the health endpoint:
 
@@ -286,7 +296,7 @@ Also confirm the Container App is running the full sidecar layout:
 AZURE_RESOURCE_GROUP=$(azd env get-values | awk -F= '/^AZURE_RESOURCE_GROUP=/{gsub(/"/,"",$2); print $2}')
 az containerapp show \
   --resource-group "$AZURE_RESOURCE_GROUP" \
-  --name ca-elb-control \
+  --name ca-elb-dashboard \
   --query 'properties.template.containers[].name' \
   -o table
 ```
@@ -327,7 +337,7 @@ Portal path:
 3. Open the app created by `scripts/dev/setup-app-registration.sh`.
 4. Authentication.
 5. Single-page application.
-6. Add the deployed Container App origin, for example `https://ca-elb-control.<subdomain>.<region>.azurecontainerapps.io`.
+6. Add the deployed Container App origin, for example `https://ca-elb-dashboard.<subdomain>.<region>.azurecontainerapps.io`.
 7. Save.
 
 Keep `http://localhost:8090` if you also use the local web app.
@@ -337,7 +347,7 @@ Keep `http://localhost:8090` if you also use the local web app.
 Open the deployed URL printed by `azd up`:
 
 ```text
-https://ca-elb-control.<subdomain>.<region>.azurecontainerapps.io
+https://ca-elb-dashboard.<subdomain>.<region>.azurecontainerapps.io
 ```
 
 Sign in with the same tenant that owns the App Registration. The dashboard should load real Azure data from the deployed API sidecar.
@@ -840,7 +850,7 @@ a clean Ubuntu 24.04 VM sized `Standard_D4s_v5`. The clean VM completed
 repository clone/setup, `uv run pytest -q api/tests` with 583 passing tests,
 `cd web && npm test -- --run` with 152 passing tests, `npm run build`,
 `uv run ruff check api`, and `azd up`. The deployed Container App URL was
-`https://ca-elb-control.purplestone-ed1e00cc.koreacentral.azurecontainerapps.io`,
+`https://ca-elb-dashboard.purplestone-ed1e00cc.koreacentral.azurecontainerapps.io`,
 `/api/health` returned `{"status":"ok","version":"0.0.1"}`, and the app
 revision contained the expected six sidecars: `api`, `frontend`, `worker`,
 `beat`, `redis`, and `terminal`.

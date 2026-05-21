@@ -38,7 +38,68 @@ project_root=$(cd -- "$script_dir/../.." && pwd)
 run_with_log="$script_dir/run-with-log.sh"
 compose_with_log="$script_dir/compose-with-log.sh"
 
+load_local_azure_env() {
+  local env_file="$project_root/.env"
+  [[ -f "$env_file" ]] || return 0
+
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key#export }"
+    case "$key" in
+      AZURE_SUBSCRIPTION_ID|AZURE_TENANT_ID|ELB_LOCAL_STORAGE_ACCOUNT|ELB_LOCAL_STORAGE_RG)
+        if [[ -z "${!key:-}" ]]; then
+          if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+            value="${value:1:${#value}-2}"
+          elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+            value="${value:1:${#value}-2}"
+          fi
+          export "$key=$value"
+        fi
+        ;;
+    esac
+  done < "$env_file"
+}
+
+validate_azure_cli_context() {
+  case "${ELB_SKIP_AZURE_CONTEXT_CHECK:-}" in
+    1|true|TRUE|yes|YES)
+      return 0
+      ;;
+  esac
+
+  [[ -n "${AZURE_SUBSCRIPTION_ID:-}" || -n "${AZURE_TENANT_ID:-}" ]] || return 0
+  if ! command -v az >/dev/null 2>&1; then
+    echo "WARNING: az CLI not found; skipping Azure context validation." >&2
+    return 0
+  fi
+
+  local account current_subscription current_tenant
+  if ! account=$(az account show --query '[id,tenantId]' -o tsv 2>/dev/null); then
+    echo "ERROR: az CLI is not signed in. Run: az login --tenant \"${AZURE_TENANT_ID:-<tenant-id>}\"" >&2
+    exit 1
+  fi
+  current_subscription=$(printf '%s\n' "$account" | sed -n '1p')
+  current_tenant=$(printf '%s\n' "$account" | sed -n '2p')
+
+  if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" && "$current_subscription" != "$AZURE_SUBSCRIPTION_ID" ]]; then
+    echo "ERROR: az CLI default subscription is $current_subscription, expected $AZURE_SUBSCRIPTION_ID." >&2
+    echo "Run: az account set --subscription \"$AZURE_SUBSCRIPTION_ID\"" >&2
+    exit 1
+  fi
+  if [[ -n "${AZURE_TENANT_ID:-}" && "$current_tenant" != "$AZURE_TENANT_ID" ]]; then
+    echo "ERROR: az CLI tenant is $current_tenant, expected $AZURE_TENANT_ID." >&2
+    echo "Run: az login --tenant \"$AZURE_TENANT_ID\" && az account set --subscription \"${AZURE_SUBSCRIPTION_ID:-<subscription-id>}\"" >&2
+    exit 1
+  fi
+}
+
 with_common_env() {
+  load_local_azure_env
+  validate_azure_cli_context
   export PYTHONPATH="$project_root${PYTHONPATH:+:$PYTHONPATH}"
   export LOG_LEVEL=${LOG_LEVEL:-INFO}
 }
@@ -226,8 +287,10 @@ case "$service" in
     exec "$run_with_log" beat -- uv run celery -A api.celery_app beat -l info --schedule=/tmp/elb-celerybeat-schedule --pidfile=/tmp/elb-celerybeat.pid "$@"
     ;;
   web)
+    with_common_env
     export VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8085}
     export VITE_AUTH_DEV_BYPASS=${VITE_AUTH_DEV_BYPASS:-true}
+    export VITE_AZURE_TENANT_ID=${VITE_AZURE_TENANT_ID:-${AZURE_TENANT_ID:-common}}
     cd "$project_root/web"
     exec "$run_with_log" web -- npm run dev "$@"
     ;;

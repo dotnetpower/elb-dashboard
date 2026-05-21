@@ -3,7 +3,7 @@ import type { ResourceConfig } from "../types";
 export function Step4Confirm({ config }: { config: ResourceConfig }) {
   const rows: ReadonlyArray<readonly [string, string]> = [
     ["Subscription", config.subscriptionId],
-    ["Primary Region", config.region || "— (auto-detected)"],
+    ["Primary Region", config.region || "—"],
     ["Workload RG", config.workloadResourceGroup],
     ["Storage", config.storageAccountName || "— (skip)"],
     ["ACR RG", config.acrResourceGroup],

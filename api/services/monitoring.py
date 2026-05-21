@@ -140,23 +140,46 @@ def get_storage_summary(
 ) -> dict[str, Any]:
     client = storage_client(credential, subscription_id)
     account = client.storage_accounts.get_properties(resource_group, account_name)
-    containers = list(client.blob_containers.list(resource_group, account_name))
-    return {
+    out = {
         "name": account.name,
         "region": account.location,
         "sku": account.sku.name if account.sku else None,
         "kind": account.kind,
         "public_network_access": account.public_network_access,
         "is_hns_enabled": account.is_hns_enabled,
-        "containers": [
-            {
-                "name": container.name,
-                "public_access": container.public_access,
-                "last_modified_time": container.last_modified_time,
-            }
-            for container in containers
-        ],
+        "containers": [],
     }
+    try:
+        containers = list(client.blob_containers.list(resource_group, account_name))
+    except Exception as exc:
+        LOGGER.warning(
+            "storage container list failed account=%s rg=%s: %s",
+            account_name,
+            resource_group,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        out["containers_degraded"] = True
+        out["containers_degraded_reason"] = type(exc).__name__
+        return out
+
+    out["containers"] = [
+        {
+            "name": container.name,
+            "public_access": container.public_access,
+            "last_modified_time": _iso_or_none(container.last_modified_time),
+        }
+        for container in containers
+    ]
+    return out
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return str(value.isoformat())
+    return str(value)
 
 
 def set_storage_public_access(

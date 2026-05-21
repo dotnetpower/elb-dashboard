@@ -30,6 +30,7 @@ export function validateStep2(c: ResourceConfig): ValidationErrors {
       "Invalid name. Use letters, numbers, hyphens, underscores.";
   if (!c.acrResourceGroup) e.acrResourceGroup = "ACR RG is required";
   else if (!RG_RE.test(c.acrResourceGroup)) e.acrResourceGroup = "Invalid name";
+  if (!c.region) e.region = "Primary region is required";
   // Terminal RG no longer required — the browser terminal is the in-process
   // `terminal` sidecar in the Container App, not a Linux VM. The legacy field
   // is kept on the config object only so old saved configs do not crash.

@@ -153,7 +153,11 @@ def list_storage_accounts(
     try:
         client = storage_client(cred, subscription_id)
         accounts = [
-            {"name": a.name, "location": a.location}
+            {
+                "name": a.name,
+                "location": a.location,
+                "isHnsEnabled": getattr(a, "is_hns_enabled", None),
+            }
             for a in client.storage_accounts.list_by_resource_group(rg)
         ]
         accounts.sort(key=lambda x: x["name"])

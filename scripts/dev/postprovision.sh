@@ -32,6 +32,7 @@ REQUIRED_VARS=(
   SHARED_IDENTITY_CLIENT_ID
   AZURE_TENANT_ID
   AZURE_SUBSCRIPTION_ID
+  STORAGE_ACCOUNT_NAME
 )
 for v in "${REQUIRED_VARS[@]}"; do
   if [ -z "${!v:-}" ]; then
@@ -40,30 +41,49 @@ for v in "${REQUIRED_VARS[@]}"; do
   fi
 done
 
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+progress() {
+  bash "$REPO_ROOT/scripts/dev/azd-progress.sh" "$@"
+}
+
+# Ensure az CLI uses the correct subscription for all subsequent calls
+# (including App Registration setup and sourced helper scripts). This matters
+# when the script is run directly after a failed azd hook rather than through
+# `azd up`.
+if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
+  az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+fi
+progress note "Refreshing provider registration state before postprovision work."
+bash "$REPO_ROOT/scripts/dev/register-providers.sh" --subscription "$AZURE_SUBSCRIPTION_ID"
+
+progress step 3 "App registration" "Create/reuse the Entra App Registration if API_CLIENT_ID is empty."
 API_CLIENT_ID_VAL="${API_CLIENT_ID:-}"
 if [ -z "$API_CLIENT_ID_VAL" ]; then
-  cat >&2 <<'EOF'
-FATAL: API_CLIENT_ID is not set. The frontend cannot initialize MSAL without it.
+  echo "==> API_CLIENT_ID is not set; creating or reusing the Entra App Registration..."
+  ADDITIONAL_REDIRECT_URIS="https://$CONTAINER_APP_FQDN" \
+    bash "$REPO_ROOT/scripts/dev/setup-app-registration.sh" "${APP_REGISTRATION_NAME:-elastic-blast-control-plane}"
+  if command -v azd >/dev/null 2>&1; then
+    API_CLIENT_ID_VAL="$(azd env get-values 2>/dev/null | awk -F= '/^API_CLIENT_ID=/{gsub(/"/, "", $2); print $2; exit}')"
+  fi
+  API_CLIENT_ID_VAL="${API_CLIENT_ID_VAL:-}"
+  if [ -z "$API_CLIENT_ID_VAL" ]; then
+    cat >&2 <<'EOF'
+FATAL: App Registration setup finished, but API_CLIENT_ID is still unset.
 
-Run the App Registration setup script before azd up/postprovision, for example:
-  scripts/dev/setup-app-registration.sh
-  azd up
+Run scripts/dev/setup-app-registration.sh manually and re-run azd up.
 EOF
-  exit 1
+    exit 1
+  fi
+  export API_CLIENT_ID="$API_CLIENT_ID_VAL"
+else
+  progress note "API_CLIENT_ID is already set; reusing the configured App Registration."
 fi
+progress done 3 "App registration"
 APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="${APPLICATIONINSIGHTS_CONNECTION_STRING:-}"
 VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
 VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
 VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
-
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-
-# Ensure az CLI uses the correct subscription for all subsequent calls
-# (including those in sourced helper scripts). This matters when the script is
-# run directly (e.g. after a failed azd hook) rather than through `azd up`.
-if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
-  az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-fi
 
 . "$REPO_ROOT/scripts/dev/acr-build-access.sh"
 . "$REPO_ROOT/scripts/dev/terminal-base-image.sh"
@@ -93,10 +113,67 @@ ts "==> Postprovision starting"
 ts "    RG:        $AZURE_RESOURCE_GROUP"
 ts "    ACR:       $ACR_NAME ($ACR_LOGIN_SERVER)"
 ts "    App:       $CONTAINER_APP_NAME ($CONTAINER_APP_FQDN)"
+ts "    Storage:   $STORAGE_ACCOUNT_NAME"
 ts "    Image tag: $TAG"
 ts "    Logs:      $LOG_DIR/*.log"
 ts "    Tip:       follow in another terminal:"
 ts "                 tail -f $LOG_DIR/build-*.log"
+
+validate_storage_account() {
+  local hns kind public_network_access
+
+  ts "==> Validating platform Storage account ARM properties"
+  kind="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$STORAGE_ACCOUNT_NAME" --query kind -o tsv --only-show-errors 2>/dev/null || true)"
+  hns="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$STORAGE_ACCOUNT_NAME" --query isHnsEnabled -o tsv --only-show-errors 2>/dev/null || true)"
+  public_network_access="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$STORAGE_ACCOUNT_NAME" --query publicNetworkAccess -o tsv --only-show-errors 2>/dev/null || true)"
+  if [ -z "$kind" ] || [ -z "$hns" ]; then
+    cat >&2 <<EOF
+FATAL: cannot read Storage account ARM properties for '$STORAGE_ACCOUNT_NAME' in '$AZURE_RESOURCE_GROUP'.
+
+This is an ARM/provider/RBAC lookup failure, not a data-plane or browser issue.
+Confirm Microsoft.Storage is registered and the deployer can read Microsoft.Storage/storageAccounts/read.
+EOF
+    exit 1
+  fi
+  if [ "$(printf '%s' "$hns" | tr '[:upper:]' '[:lower:]')" != "true" ]; then
+    cat >&2 <<EOF
+FATAL: Storage account '$STORAGE_ACCOUNT_NAME' was created with isHnsEnabled=$hns.
+
+The Bicep contract requires ADLS Gen2 / HNS for ElasticBLAST workload containers.
+Delete the failed environment or use a new azd environment name so azd up can recreate storage with HNS enabled.
+EOF
+    exit 1
+  fi
+  ts "    ✓ Storage kind=$kind HNS=$hns publicNetworkAccess=${public_network_access:-unknown}"
+}
+
+progress step 4 "Resource validation" "Validate Storage HNS and merge dashboard discovery tags."
+validate_storage_account
+
+tag_workspace_resource_group() {
+  local rg_id
+
+  ts "==> Ensuring dashboard workspace tags on resource group"
+  rg_id="$(az group show -n "$AZURE_RESOURCE_GROUP" --query id -o tsv --only-show-errors 2>/dev/null || true)"
+  if [ -z "$rg_id" ]; then
+    echo "FATAL: cannot resolve resource group id for '$AZURE_RESOURCE_GROUP'." >&2
+    exit 1
+  fi
+  az tag update \
+    --resource-id "$rg_id" \
+    --operation Merge \
+    --tags \
+      "elb-workload-rg=$AZURE_RESOURCE_GROUP" \
+      "elb-acr-rg=$AZURE_RESOURCE_GROUP" \
+      "elb-acr=$ACR_NAME" \
+      "elb-storage=$STORAGE_ACCOUNT_NAME" \
+      "elb-region=$AZURE_LOCATION" \
+    --only-show-errors >/dev/null
+  ts "    ✓ RG tags include workload=$AZURE_RESOURCE_GROUP acr=$ACR_NAME storage=$STORAGE_ACCOUNT_NAME"
+}
+
+tag_workspace_resource_group
+progress done 4 "Resource validation"
 
 # ---------------------------------------------------------------------------
 # 1. Parallel image builds. Each build writes to its own log file; the
@@ -147,6 +224,7 @@ build_image() {
   printf -v "$pid_var" '%s' "$!"
 }
 
+progress step 5 "Image builds" "Build api, frontend, and terminal images in parallel via az acr build."
 ts "==> Building 3 images in parallel via az acr build (no local Docker needed)"
 acr_ensure_build_access "$ACR_NAME"
 ensure_terminal_base_image
@@ -204,12 +282,14 @@ if [ "$fail" = "1" ]; then
   exit 1
 fi
 ts "==> All 3 images built and pushed"
+progress done 5 "Image builds"
 
 # ---------------------------------------------------------------------------
 # 2. Swap the Container App template to the six-sidecar layout.
 #    `az containerapp update --yaml` is much faster than redeploying the
 #    Bicep module because it skips template compilation and what-if.
 # ---------------------------------------------------------------------------
+progress step 6 "Sidecar swap" "Deploy the six-sidecar Container App template over the bootstrap app."
 ts "==> Building Container App yaml"
 
 ALLOWED_ORIGINS_VAL="${ALLOWED_ORIGINS:-}"
@@ -224,7 +304,7 @@ fi
 ts "==> Deploying six-sidecar layout via Bicep (one shot)"
 DEPLOY_NAME="ca-swap-$TAG"
 SUB_ID=$(az account show --query id -o tsv)
-ENV_RID="/subscriptions/$SUB_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/${CONTAINER_ENV_NAME:-cae-elb}"
+ENV_RID="/subscriptions/$SUB_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/${CONTAINER_ENV_NAME:-cae-elb-dashboard}"
 
 az deployment group create \
   --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -267,10 +347,12 @@ if [ "$SWAP_RC" != "0" ]; then
   exit "$SWAP_RC"
 fi
 ts "==> Container App updated to six-sidecar layout"
+progress done 6 "Sidecar swap"
 
 # ---------------------------------------------------------------------------
 # 3. Wait for /api/health on the new revision and print URL.
 # ---------------------------------------------------------------------------
+progress step 7 "Health check" "Poll /api/health so the final URL is not printed before the app is ready."
 ts "==> Waiting up to 180s for /api/health on the new revision..."
 URL="https://$CONTAINER_APP_FQDN/api/health"
 ok=0
@@ -291,8 +373,10 @@ echo
 echo "============================================================"
 if [ "$ok" = "1" ]; then
   ts "✓ Deployment OK."
+  progress done 7 "Health check"
 else
   ts "⚠ Container App deployed but /api/health did not respond 200 within 180s."
+  progress note "Step 7 completed with warning: /api/health was not ready within 180s."
   ts "  Check container logs:"
   ts "    az containerapp logs show -n $CONTAINER_APP_NAME -g $AZURE_RESOURCE_GROUP --container api --tail 100"
   ts "  Check system events:"

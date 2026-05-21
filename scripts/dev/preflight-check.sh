@@ -6,16 +6,30 @@
 
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 red()    { printf '\033[31m%s\033[0m\n' "$*"; }
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 
 fail=0
 
+tool_version() {
+  local cmd="$1"
+  local raw=""
+
+  if [ "$cmd" = "azd" ]; then
+    raw="$(azd version 2>/dev/null || true)"
+  else
+    raw="$($cmd --version 2>/dev/null || true)"
+  fi
+  printf '%s' "${raw%%$'\n'*}"
+}
+
 echo "==> Tool versions"
 for cmd in az azd jq curl uv; do
   if command -v "$cmd" >/dev/null 2>&1; then
-    v=$($cmd --version 2>/dev/null | head -1)
+    v="$(tool_version "$cmd")"
     green "  ✓ $cmd: $v"
   else
     red "  ✗ $cmd: not installed"
@@ -33,7 +47,8 @@ fi
 
 # azd ≥ 1.10
 if command -v azd >/dev/null 2>&1; then
-  azd_ver=$(azd version 2>/dev/null | head -1 | awk '{print $NF}' | tr -d 'v' || echo "0.0.0")
+  azd_raw="$(azd version 2>/dev/null || true)"
+  azd_ver=$(printf '%s\n' "$azd_raw" | awk 'NR == 1 { print $NF; exit }' | tr -d 'v' || echo "0.0.0")
   echo "    azd: $azd_ver"
 fi
 
@@ -53,6 +68,19 @@ else
 fi
 
 echo
+echo "==> Azure resource providers"
+if az account show -o none >/dev/null 2>&1; then
+  if bash "$repo_root/scripts/dev/register-providers.sh" --subscription "$sub_id"; then
+    green "  ✓ Required providers are registered"
+  else
+    red "  ✗ Failed to register required providers"
+    fail=1
+  fi
+else
+  yellow "  ! Skipped because Azure CLI is not signed in"
+fi
+
+echo
 echo "==> azd environment"
 if azd env get-values >/dev/null 2>&1; then
   env_name=$(azd env get-values | grep '^AZURE_ENV_NAME' | head -1 | cut -d= -f2- | tr -d '"' || echo "")
@@ -60,9 +88,7 @@ if azd env get-values >/dev/null 2>&1; then
   api_cid=$(azd env get-values | grep '^API_CLIENT_ID' | head -1 | cut -d= -f2- | tr -d '"' || echo "")
   green "  ✓ Active env: $env_name (location=$loc)"
   if [ -z "$api_cid" ]; then
-    yellow "  ! API_CLIENT_ID not set yet — set it before azd up:"
-    yellow "      azd env set API_CLIENT_ID <your-app-registration-client-id>"
-    yellow "    (Run scripts/dev/setup-app-registration.sh to create one if you don't have one.)"
+    yellow "  ! API_CLIENT_ID not set yet — azd up will create/reuse the App Registration during postprovision."
   else
     green "  ✓ API_CLIENT_ID: $api_cid"
   fi

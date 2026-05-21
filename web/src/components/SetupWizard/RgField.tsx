@@ -185,27 +185,6 @@ export function RgField({
             }
             spellCheck={false}
           />
-          {isPrimary && (
-            <div style={{ marginTop: 8 }}>
-              <span className="glass-label" style={{ fontSize: 11 }}>
-                Region (for new resources)
-              </span>
-              <select
-                className="glass-input"
-                value={config.region}
-                onChange={(e) =>
-                  setConfig((c) => ({ ...c, region: e.target.value }))
-                }
-                style={{ fontSize: 12 }}
-              >
-                {REGIONS.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
         </div>
       ) : (
         /* ── Select from existing + Create new button ── */

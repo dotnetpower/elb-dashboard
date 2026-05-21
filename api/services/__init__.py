@@ -11,27 +11,37 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from azure.identity import DefaultAzureCredential
+    from azure.core.credentials import TokenCredential
 
-# Module-level singleton credential. DefaultAzureCredential is thread-safe and
-# does its own internal token caching across the chain (managed identity →
-# environment → az CLI → …) so creating multiple instances wastes both the
-# instantiation cost and the per-instance token caches.
-_CREDENTIAL: DefaultAzureCredential | None = None
+# Module-level singleton credential. Azure credential implementations are
+# thread-safe and keep per-instance token caches, so creating multiple instances
+# wastes both the instantiation cost and those token caches.
+_CREDENTIAL: TokenCredential | None = None
 _CREDENTIAL_LOCK = threading.Lock()
 
 
-def get_credential() -> DefaultAzureCredential:
-    """Return the singleton DefaultAzureCredential.
+def _has_managed_identity_environment() -> bool:
+    return bool(
+        os.environ.get("CONTAINER_APP_NAME")
+        or os.environ.get("IDENTITY_ENDPOINT")
+        or os.environ.get("MSI_ENDPOINT")
+        or os.environ.get("AZURE_FEDERATED_TOKEN_FILE")
+    )
+
+
+def get_credential() -> TokenCredential:
+    """Return the singleton Azure credential.
 
     In Container Apps this resolves to the shared user-assigned MI
-    `id-elb-control` because Container Apps injects MSI_ENDPOINT /
-    IDENTITY_ENDPOINT / AZURE_CLIENT_ID. Locally it picks whatever
-    `DefaultAzureCredential` finds (typically `az login`).
+    `id-elb-dashboard-*` because Container Apps injects MSI_ENDPOINT /
+    IDENTITY_ENDPOINT / AZURE_CLIENT_ID. Locally, when `AZURE_TENANT_ID` is set,
+    it uses `AzureCliCredential(tenant_id=...)` so stale Azure Developer CLI
+    tokens from another tenant cannot satisfy ARM or Storage requests.
 
     The credential is created lazily on first use and reused for the lifetime
     of the process. Token refresh is handled internally by the credential
@@ -41,11 +51,18 @@ def get_credential() -> DefaultAzureCredential:
     if _CREDENTIAL is None:
         with _CREDENTIAL_LOCK:
             if _CREDENTIAL is None:
-                from azure.identity import DefaultAzureCredential
+                tenant_id = os.environ.get("AZURE_TENANT_ID", "").strip()
+                if tenant_id and not _has_managed_identity_environment():
+                    from azure.identity import AzureCliCredential
 
-                _CREDENTIAL = DefaultAzureCredential(
-                    exclude_interactive_browser_credential=True,
-                )
+                    _CREDENTIAL = AzureCliCredential(tenant_id=tenant_id)
+                else:
+                    from azure.identity import DefaultAzureCredential
+
+                    _CREDENTIAL = DefaultAzureCredential(
+                        exclude_developer_cli_credential=True,
+                        exclude_interactive_browser_credential=True,
+                    )
     return _CREDENTIAL
 
 
