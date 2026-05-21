@@ -314,7 +314,8 @@ case "$service" in
     local_elb_root=${LOCAL_ELASTIC_BLAST_AZURE_ROOT:-$HOME/dev/elastic-blast-azure}
     if [[ -x "$local_elb_root/venv/bin/elastic-blast" ]]; then
       export PATH="$local_elb_root/venv/bin:$PATH"
-      export PYTHONPATH="$local_elb_root/src${PYTHONPATH:+:$PYTHONPATH}"
+      export PYTHONPATH="$project_root/terminal/runtime_overrides:$local_elb_root/src${PYTHONPATH:+:$PYTHONPATH}"
+      export ELB_DASHBOARD_FAST_JSON_SUBMIT_CLEANUP=${ELB_DASHBOARD_FAST_JSON_SUBMIT_CLEANUP:-1}
     fi
     export AZCOPY_AUTO_LOGIN_TYPE=${AZCOPY_AUTO_LOGIN_TYPE:-AZCLI}
     for bin in az kubectl azcopy; do

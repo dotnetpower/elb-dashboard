@@ -422,9 +422,10 @@ async def aks_openapi_proxy(
         ) from exc
 
     response_headers: dict[str, str] = {}
-    content_type = upstream.headers.get("content-type")
-    if content_type:
-        response_headers["content-type"] = content_type
+    for header_name in ("content-type", "content-disposition"):
+        value = upstream.headers.get(header_name)
+        if value:
+            response_headers[header_name] = value
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,

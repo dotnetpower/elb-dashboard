@@ -5,8 +5,8 @@ Responsibility: Patch the vendored elastic-blast-azure clone for dashboard shard
 Edit boundaries: Keep terminal-side behavior here; api/worker callers should use service
 wrappers.
 Key entry points: `_replace_once`, `_replace_once_unless_present`,
-`_replace_all_unless_present`, `patch_azure_py`, `patch_finalizer_template`,
-`patch_finalizer_script`
+`_replace_all_unless_present`, `patch_azure_py`, `patch_azure_cli_glue`,
+`patch_finalizer_template`, `patch_finalizer_script`
 Risky contracts: Do not expose terminal services directly to the internet or log secrets.
 Validation: `uv run pytest -q api/tests/test_terminal_toolchain.py
 api/tests/test_terminal_command_guard.py`.
@@ -97,6 +97,27 @@ def patch_azure_py(root: Path) -> None:
             "            'ELB_RESULTS': self._results_path(),\n"
         ),
         "'ELB_FINALIZER_DOCKER_IMAGE': cfg.azure.cjs_docker_image",
+    )
+
+
+def patch_azure_cli_glue(root: Path) -> None:
+    path = root / "src/elastic_blast/azure_cli_glue.py"
+    _replace_once_unless_present(
+        path,
+        (
+            "    # Phase 3: success -> structured ACCEPTED.\n"
+            "    if json_mode and rc == 0:\n"
+        ),
+        (
+            "    # Phase 3: success -> structured ACCEPTED.\n"
+            "    if json_mode and rc == 0:\n"
+            "        # Dashboard JSON submit has its own log/state collectors.\n"
+            "        # Avoid running ElasticBLAST's post-submit cleanup hook here,\n"
+            "        # because it can keep the submit process open while K8s work\n"
+            "        # is already running or even completed.\n"
+            "        clean_up_stack.clear()\n"
+        ),
+        "Dashboard JSON submit has its own log/state collectors",
     )
 
 
@@ -630,6 +651,7 @@ def main() -> int:
         return 2
 
     patch_azure_py(root)
+    patch_azure_cli_glue(root)
     patch_finalizer_template(root)
     patch_finalizer_script(root, merge_script_source)
     patch_init_shard_script(root)

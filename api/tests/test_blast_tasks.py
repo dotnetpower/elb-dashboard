@@ -19,6 +19,7 @@ import gzip
 import io
 import json
 import xml.etree.ElementTree as ET
+from datetime import UTC
 
 import pytest
 from api._http_utils import BlastSubmitRequest
@@ -3616,5 +3617,135 @@ def test_update_state_duplicate_terminal_checkpoint_still_finalizes_artifacts(
     assert enqueued == [("job-1", "completed", "completed")]
 
 
-# Local import to keep the file's existing imports section unchanged.
-from datetime import UTC  # noqa: E402
+# ---------------------------------------------------------------------------
+# poll_running_status — per-job poller that closes the K8s → dashboard gap
+# ---------------------------------------------------------------------------
+
+
+def test_poll_running_status_returns_missing_when_row_absent(monkeypatch):
+    class Repo:
+        def get(self, job_id):
+            assert job_id == "missing"
+            return None
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    result = blast.poll_running_status.run(job_id="missing")
+    assert result["status"] == "missing"
+    assert result["rescheduled"] is False
+
+
+def test_poll_running_status_returns_without_reschedule_on_terminal_status(monkeypatch):
+    state_obj = type(
+        "S",
+        (),
+        {
+            "job_id": "job-done",
+            "type": "blast",
+            "status": "completed",
+            "phase": "completed",
+            "payload": {},
+        },
+    )()
+
+    class Repo:
+        def get(self, job_id):
+            return state_obj
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr(
+        "api.services.blast_job_state._refresh_running_blast_state",
+        lambda *_args, **_kwargs: state_obj,
+    )
+
+    calls: list[dict] = []
+
+    def fake_apply_async(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(blast.poll_running_status, "apply_async", fake_apply_async)
+
+    result = blast.poll_running_status.run(job_id="job-done")
+
+    assert result["status"] == "completed"
+    assert result["rescheduled"] is False
+    assert calls == []
+
+
+def test_poll_running_status_reschedules_when_still_active(monkeypatch):
+    state_obj = type(
+        "S",
+        (),
+        {
+            "job_id": "job-live",
+            "type": "blast",
+            "status": "running",
+            "phase": "running",
+            "payload": {},
+        },
+    )()
+
+    class Repo:
+        def get(self, job_id):
+            return state_obj
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr(
+        "api.services.blast_job_state._refresh_running_blast_state",
+        lambda *_args, **_kwargs: state_obj,
+    )
+
+    calls: list[dict] = []
+
+    def fake_apply_async(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(blast.poll_running_status, "apply_async", fake_apply_async)
+
+    result = blast.poll_running_status.run(job_id="job-live", iteration=0)
+
+    assert result["rescheduled"] is True
+    assert calls and calls[0]["kwargs"]["iteration"] == 1
+    assert calls[0]["countdown"] == blast.POLL_RUNNING_INTERVAL
+    assert calls[0]["queue"] == "blast"
+
+
+def test_poll_running_status_stops_at_max_iterations(monkeypatch):
+    state_obj = type(
+        "S",
+        (),
+        {
+            "job_id": "job-cap",
+            "type": "blast",
+            "status": "running",
+            "phase": "running",
+            "payload": {},
+        },
+    )()
+
+    class Repo:
+        def get(self, job_id):
+            return state_obj
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+    monkeypatch.setattr(
+        "api.services.blast_job_state._refresh_running_blast_state",
+        lambda *_args, **_kwargs: state_obj,
+    )
+
+    calls: list[dict] = []
+
+    def fake_apply_async(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(blast.poll_running_status, "apply_async", fake_apply_async)
+
+    result = blast.poll_running_status.run(
+        job_id="job-cap",
+        iteration=blast.POLL_RUNNING_MAX_ITERATIONS - 1,
+    )
+
+    assert result["rescheduled"] is False
+    assert calls == []

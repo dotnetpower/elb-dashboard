@@ -2326,6 +2326,23 @@ def submit(
             elastic_blast_submit_duration_ms=result.get("duration_ms"),
             timed_out=result.get("timed_out"),
         )
+        # Kick off the per-job poller so the dashboard catches the K8s →
+        # completed transition within ~10 s instead of waiting up to 60 s
+        # for the next beat reconcile tick. The poller self-throttles via
+        # the shared K8s refresh interval and self-stops on terminal phases.
+        if status == "running" and phase in _POLL_RUNNING_ELIGIBLE_PHASES:
+            try:
+                poll_running_status.apply_async(
+                    kwargs={"job_id": job_id, "iteration": 0},
+                    countdown=POLL_RUNNING_START_DELAY,
+                    queue="blast",
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "submit: poll_running_status enqueue failed job_id=%s: %s",
+                    job_id,
+                    type(exc).__name__,
+                )
         return {
             "job_id": job_id,
             "status": status,
@@ -2537,6 +2554,120 @@ def check_status(
     }.get(status, "running")
     _update_state(job_id, status, status=state_status, k8s=result)
     return {"job_id": job_id, "status": state_status, "phase": status, "k8s": result}
+
+
+# Per-job poller cadence and cap.
+#
+# A submit task enqueues ``poll_running_status`` with countdown=POLL_RUNNING_START_DELAY,
+# and each iteration that observes a still-active row self-reschedules with
+# countdown=POLL_RUNNING_INTERVAL. The cap (POLL_RUNNING_MAX_ITERATIONS) bounds
+# a single submit's poll chain to ~30 minutes so we never leave a runaway
+# polling chain behind if something goes sideways. The 60 s beat reconcile is
+# still the safety net for any row whose poll chain ended early.
+POLL_RUNNING_START_DELAY = 10
+POLL_RUNNING_INTERVAL = 10
+POLL_RUNNING_MAX_ITERATIONS = 180
+_POLL_RUNNING_ELIGIBLE_PHASES = frozenset({"submitted", "running", "results_pending"})
+
+
+@shared_task(name="api.tasks.blast.poll_running_status", bind=True)
+def poll_running_status(
+    self: Any,
+    *,
+    job_id: str,
+    iteration: int = 0,
+) -> dict[str, Any]:
+    """Per-job poller that closes the K8s → dashboard latency gap after submit.
+
+    The ``submit`` task enqueues this with a short countdown so the dashboard
+    flips a row to ``completed`` within ~10 s of the K8s job finishing, instead
+    of waiting up to 60 s for the next beat tick of ``reconcile_stale_jobs``.
+    This task is idempotent: it reads the current row, asks
+    ``_refresh_running_blast_state`` to do one K8s check (subject to the same
+    per-job throttle the detail/list endpoints use), and self-reschedules only
+    while the row is still active.
+    """
+    del self
+    summary: dict[str, Any] = {
+        "job_id": job_id,
+        "iteration": iteration,
+        "status": "unknown",
+        "phase": "unknown",
+        "rescheduled": False,
+    }
+
+    try:
+        from api.services.blast_job_state import (
+            _K8S_REFRESH_PHASES,
+            _refresh_running_blast_state,
+        )
+        from api.services.state_repo import JobStateRepository
+    except Exception as exc:
+        LOGGER.warning("poll_running_status: dependency unavailable: %s", exc)
+        return {**summary, "error": type(exc).__name__}
+
+    try:
+        repo = JobStateRepository()
+        row = repo.get(job_id)
+    except Exception as exc:
+        LOGGER.info("poll_running_status: state lookup failed job_id=%s: %s", job_id, exc)
+        return {**summary, "error": type(exc).__name__}
+
+    if row is None:
+        return {**summary, "status": "missing"}
+
+    current_status = str(getattr(row, "status", "") or "").strip().casefold()
+    current_phase = str(getattr(row, "phase", "") or "").strip().casefold()
+    summary["status"] = current_status
+    summary["phase"] = current_phase
+
+    if current_status not in {"running", "pending", "queued"}:
+        return summary
+    if current_phase not in _K8S_REFRESH_PHASES:
+        return summary
+
+    try:
+        refreshed = _refresh_running_blast_state(repo, row)
+    except Exception as exc:
+        LOGGER.info(
+            "poll_running_status: refresh failed job_id=%s iteration=%d: %s",
+            job_id,
+            iteration,
+            type(exc).__name__,
+        )
+        refreshed = row
+
+    refreshed_status = str(getattr(refreshed, "status", "") or "").strip().casefold()
+    refreshed_phase = str(getattr(refreshed, "phase", "") or "").strip().casefold()
+    summary["status"] = refreshed_status
+    summary["phase"] = refreshed_phase
+
+    if refreshed_status not in {"running", "pending", "queued"}:
+        return summary
+    if refreshed_phase not in _K8S_REFRESH_PHASES:
+        return summary
+    if iteration + 1 >= POLL_RUNNING_MAX_ITERATIONS:
+        LOGGER.info(
+            "poll_running_status: max iterations reached job_id=%s — beat reconcile takes over",
+            job_id,
+        )
+        return summary
+
+    try:
+        poll_running_status.apply_async(
+            kwargs={"job_id": job_id, "iteration": iteration + 1},
+            countdown=POLL_RUNNING_INTERVAL,
+            queue="blast",
+        )
+        summary["rescheduled"] = True
+    except Exception as exc:
+        LOGGER.warning(
+            "poll_running_status: reschedule failed job_id=%s iteration=%d: %s",
+            job_id,
+            iteration,
+            type(exc).__name__,
+        )
+    return summary
 
 
 @shared_task(name="api.tasks.blast.reconcile_stale_jobs", bind=True)

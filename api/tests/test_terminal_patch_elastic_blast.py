@@ -6,7 +6,8 @@ Azure calls.
 Key entry points: `_load_patch_module`,
 `test_patch_init_shard_script_writes_hardened_cache_skip`,
 `test_patch_init_shard_script_is_idempotent`,
-`test_patch_init_shard_script_updates_installed_package_copy`
+`test_patch_init_shard_script_updates_installed_package_copy`,
+`test_patch_azure_cli_glue_clears_cleanup_stack_for_json_submit_success`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_terminal_patch_elastic_blast.py`.
@@ -100,3 +101,34 @@ def test_patch_init_shard_script_updates_installed_package_copy(tmp_path: Path) 
         assert "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}" in text
         assert "source legacy" not in text
         assert "installed legacy" not in text
+
+
+def test_patch_azure_cli_glue_clears_cleanup_stack_for_json_submit_success(
+    tmp_path: Path,
+) -> None:
+    patch_module = _load_patch_module()
+    target_dir = tmp_path / "src" / "elastic_blast"
+    target_dir.mkdir(parents=True)
+    target = target_dir / "azure_cli_glue.py"
+    target.write_text(
+        "def submit_command(args, cfg, clean_up_stack, *, default_submit):\n"
+        "    rc = default_submit(args, cfg, clean_up_stack)\n"
+        "    # Phase 3: success -> structured ACCEPTED.\n"
+        "    if json_mode and rc == 0:\n"
+        "        result = SubmitResult(\n"
+        "            decision=SubmitDecision.ACCEPTED,\n"
+        "            correlation_id=correlation_id,\n"
+        "            cluster_name=cfg.cluster.name,\n"
+        "            message='submission accepted')\n"
+        "        emit_json(_wrap_submit_result(result))\n"
+        "    return rc\n"
+    )
+
+    patch_module.patch_azure_cli_glue(tmp_path)
+    once = target.read_text()
+    patch_module.patch_azure_cli_glue(tmp_path)
+
+    assert target.read_text() == once
+    assert "Dashboard JSON submit has its own log/state collectors" in once
+    assert "clean_up_stack.clear()" in once
+    assert once.index("clean_up_stack.clear()") < once.index("result = SubmitResult(")

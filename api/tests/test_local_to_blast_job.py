@@ -399,3 +399,115 @@ def test_refresh_running_blast_state_skips_without_runtime_job_id(monkeypatch):
 
     assert refreshed is state
     assert called is False
+
+
+def test_refresh_running_blast_state_running_phase_uses_short_throttle(monkeypatch):
+    """`running` and `results_pending` use the 5 s throttle, not 20 s."""
+    state = _state(
+        job_id="job-running-throttle",
+        status="running",
+        phase="running",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+            "elastic_blast_job_id": "job-elastic",
+        },
+    )
+    calls = 0
+    # First call at t=100 → k8s_check_blast_status fires once.
+    # Second call at t=106 → 6 s > 5 s short floor → k8s fires again.
+    # Third call at t=109 → 3 s < 5 s → throttled.
+    times = iter([100.0, 106.0, 109.0])
+
+    def fake_k8s(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": "running", "job_id": "job-elastic"}
+
+    blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
+    monkeypatch.setattr(blast_job_state, "monotonic", lambda: next(times))
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    blast_job_state._refresh_running_blast_state(object(), state)
+    blast_job_state._refresh_running_blast_state(object(), state)
+    blast_job_state._refresh_running_blast_state(object(), state)
+
+    assert calls == 2
+
+
+def test_refresh_running_blast_state_reads_top_level_columns(monkeypatch):
+    """Refresh works when payload was omitted (list endpoint path).
+
+    `list_for_owner(..., include_payload=False)` returns rows without
+    `payload`. The function must read scope from top-level columns
+    (`state.subscription_id`, etc.) and reload the full payload only
+    when it actually needs to mutate the row.
+    """
+    state = _state(
+        job_id="job-list",
+        status="running",
+        phase="running",
+        payload={},  # empty — simulates include_payload=False
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="stelb",
+    )
+    full_state = _state(
+        job_id="job-list",
+        status="running",
+        phase="running",
+        payload={
+            "_progress": {
+                "phase": "running",
+                "status": "running",
+                "steps": {"running": {"phase": "running", "started_at": "2026-05-21T00:00:00Z"}},
+            },
+            "elastic_blast_job_id": "job-elastic",
+        },
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="stelb",
+    )
+
+    class Repo:
+        def __init__(self) -> None:
+            self.updated = None
+            self.history = []
+
+        def get(self, job_id):
+            assert job_id == "job-list"
+            return full_state
+
+        def update(self, job_id, **kwargs):
+            self.updated = (job_id, kwargs)
+            return _state(**{**full_state.__dict__, **kwargs})
+
+        def append_history(self, *args, **_kwargs):
+            self.history.append(args)
+
+    repo = Repo()
+    blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
+    monkeypatch.setattr(blast_job_state, "_discover_elastic_blast_job_id", lambda *_: "job-elastic")
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {"status": "completed", "job_id": "job-elastic"},
+    )
+    monkeypatch.setattr(blast_job_state, "_state_has_parseable_result_artifact", lambda *_: True)
+
+    refreshed = blast_job_state._refresh_running_blast_state(repo, state)
+
+    # Reloaded full payload existed and was used to merge progress.
+    assert repo.updated is not None
+    assert repo.updated[0] == "job-list"
+    progress = repo.updated[1]["payload"]["_progress"]
+    # The existing running step from the reloaded payload must survive
+    # the merge — otherwise the list endpoint would erase step history.
+    assert "started_at" in progress["steps"]["running"]
+    assert refreshed.status == "completed"
+

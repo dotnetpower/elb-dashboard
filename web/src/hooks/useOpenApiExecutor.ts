@@ -20,6 +20,11 @@ export interface OpenApiExecutionResponse {
   status: number;
   body: string;
   time: number;
+  download?: {
+    filename: string;
+    bytes: number;
+    contentType: string;
+  };
 }
 
 export function useOpenApiExecutor({
@@ -67,11 +72,22 @@ export function useOpenApiExecutor({
     const isCurrent = () => mountedRef.current && requestSeqRef.current === requestSeq;
     try {
       const resp = proxyInfo
-        ? await executeViaProxy(endpoint, proxyInfo, targetPath, bodyText, controller.signal)
+        ? await executeViaProxy(
+            endpoint,
+            proxyInfo,
+            targetPath,
+            bodyText,
+            controller.signal,
+          )
         : await executeDirect(endpoint, baseUrl, targetPath, bodyText, controller.signal);
-      const text = await resp.text();
+      const rendered = await readResponseForViewer(resp, targetPath);
       if (isCurrent()) {
-        setResponse({ status: resp.status, body: formatResponseBody(text), time: Date.now() - start });
+        setResponse({
+          status: resp.status,
+          body: rendered.body,
+          time: Date.now() - start,
+          ...(rendered.download ? { download: rendered.download } : {}),
+        });
       }
     } catch (e) {
       if (isCurrent() && !isAbortError(e)) {
@@ -157,6 +173,135 @@ function formatResponseBody(text: string): string {
   } catch {
     return text;
   }
+}
+
+async function readResponseForViewer(
+  resp: Response,
+  targetPath: string,
+): Promise<{
+  body: string;
+  download?: { filename: string; bytes: number; contentType: string };
+}> {
+  const contentType = resp.headers.get("content-type") ?? "";
+  if (resp.ok && isBinaryContentType(contentType)) {
+    const blob = await resp.blob();
+    const filename = pickDownloadFilename(
+      resp.headers.get("content-disposition"),
+      contentType,
+      targetPath,
+    );
+    triggerBrowserDownload(blob, filename);
+    return {
+      body: formatBinarySummary(filename, blob.size, contentType || blob.type),
+      download: {
+        filename,
+        bytes: blob.size,
+        contentType: contentType || blob.type || "application/octet-stream",
+      },
+    };
+  }
+  const text = await resp.text();
+  return { body: formatResponseBody(text) };
+}
+
+export function isBinaryContentType(contentType: string): boolean {
+  const ct = contentType.split(";")[0].trim().toLowerCase();
+  if (!ct) return false;
+  if (ct.startsWith("text/")) return false;
+  if (ct === "application/json" || ct === "application/problem+json") return false;
+  if (ct.endsWith("+json") || ct.endsWith("+xml")) return false;
+  if (
+    ct === "application/xml" ||
+    ct === "application/javascript" ||
+    ct === "application/x-www-form-urlencoded"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function pickDownloadFilename(
+  contentDisposition: string | null,
+  contentType: string,
+  targetPath: string,
+): string {
+  const fromHeader = parseContentDispositionFilename(contentDisposition);
+  if (fromHeader) return fromHeader;
+  const tail = targetPath.split("?")[0].split("/").filter(Boolean).pop() ?? "";
+  const base = tail && /\.[A-Za-z0-9]{1,8}$/.test(tail) ? tail : "";
+  if (base) return base;
+  const ext = guessExtensionFromContentType(contentType);
+  const stem = tail || "download";
+  return ext ? `${stem}.${ext}` : `${stem}.bin`;
+}
+
+function parseContentDispositionFilename(disposition: string | null): string | null {
+  if (!disposition) return null;
+  const star = /filename\*\s*=\s*([^;]+)/i.exec(disposition);
+  if (star) {
+    const raw = star[1].trim();
+    const m = /^[\w-]+'[^']*'(.+)$/.exec(raw);
+    if (m) {
+      try {
+        return decodeURIComponent(m[1].replace(/^"|"$/g, ""));
+      } catch {
+        // fall through to plain
+      }
+    }
+  }
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(disposition);
+  return plain ? plain[1].trim() : null;
+}
+
+function guessExtensionFromContentType(contentType: string): string {
+  const ct = contentType.split(";")[0].trim().toLowerCase();
+  if (ct === "application/zip") return "zip";
+  if (ct === "application/gzip" || ct === "application/x-gzip") return "gz";
+  if (ct === "application/x-tar") return "tar";
+  if (ct === "application/pdf") return "pdf";
+  if (ct === "application/x-fasta" || ct === "application/fasta") return "fa";
+  return "";
+}
+
+export function formatBinarySummary(
+  filename: string,
+  bytes: number,
+  contentType: string,
+): string {
+  const lines = [
+    "// Binary response downloaded automatically.",
+    `// file:         ${filename}`,
+    `// size:         ${formatBytes(bytes)}`,
+    `// content-type: ${contentType || "application/octet-stream"}`,
+  ];
+  return lines.join("\n");
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "unknown";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const decimals = unit === 0 ? 0 : value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(decimals)} ${units[unit]}`;
+}
+
+function triggerBrowserDownload(blob: Blob, filename: string): void {
+  if (typeof document === "undefined" || typeof URL === "undefined") return;
+  if (typeof URL.createObjectURL !== "function") return;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
 function isAbortError(value: unknown): boolean {

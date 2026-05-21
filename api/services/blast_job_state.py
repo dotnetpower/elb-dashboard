@@ -195,8 +195,49 @@ _K8S_REFRESH_PHASES = frozenset(
         "results_pending",
     }
 )
+# Per-phase throttle. `submitted` keeps the original 20 s floor because the K8s
+# job may not exist yet immediately after `elastic-blast submit` returns and
+# repeated misses are wasteful. `running` and `results_pending` are the hot
+# phases where the BLAST container is either close to or already finished, so
+# we tighten the floor to 5 s — that turns the perceived "K8s finished →
+# dashboard catches up" latency from ~20 s (or 60 s via beat) into ~5 s.
 _K8S_REFRESH_MIN_INTERVAL_SECONDS = 20.0
+_K8S_REFRESH_FAST_INTERVAL_SECONDS = 5.0
+_K8S_REFRESH_FAST_PHASES = frozenset({"running", "results_pending"})
 _K8S_REFRESH_LAST_CHECK: dict[tuple[str, str, str, str], float] = {}
+
+
+def _refresh_min_interval_seconds(phase: str) -> float:
+    if phase in _K8S_REFRESH_FAST_PHASES:
+        return _K8S_REFRESH_FAST_INTERVAL_SECONDS
+    return _K8S_REFRESH_MIN_INTERVAL_SECONDS
+
+
+def _maybe_reload_with_payload(repo: Any, state: Any) -> Any:
+    """Reload a row from the repo when its payload was omitted (list path).
+
+    The list endpoint pulls rows with ``include_payload=False`` to keep the
+    response small, but mutating the row (transitioning to results_pending /
+    completed / failed) needs the existing ``_progress`` to merge step history
+    rather than clobber it. This helper returns the original state on any
+    error — tests use simplified Repo doubles without ``.get()``.
+    """
+    payload = getattr(state, "payload", None)
+    if isinstance(payload, dict) and payload:
+        return state
+    get = getattr(repo, "get", None)
+    if get is None:
+        return state
+    try:
+        full = get(state.job_id)
+    except Exception as exc:
+        LOGGER.debug(
+            "blast refresh payload reload skipped job_id=%s: %s",
+            getattr(state, "job_id", ""),
+            type(exc).__name__,
+        )
+        return state
+    return full if full is not None else state
 
 
 def _split_child_summary_from_repo(repo: Any, parent_job_id: str) -> dict[str, Any] | None:
@@ -432,9 +473,24 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     if phase not in _K8S_REFRESH_PHASES:
         return state
     payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
-    subscription_id = str(_payload_value(payload, "subscription_id") or "")
-    resource_group = str(_payload_value(payload, "resource_group") or "")
-    cluster_name = str(_payload_value(payload, "cluster_name", "aks_cluster_name") or "")
+    # Prefer the indexed top-level columns so the refresh works for rows
+    # returned by `list_for_owner(include_payload=False)` (the list endpoint
+    # avoids the payload column to keep responses small).
+    subscription_id = str(
+        getattr(state, "subscription_id", None)
+        or _payload_value(payload, "subscription_id")
+        or ""
+    )
+    resource_group = str(
+        getattr(state, "resource_group", None)
+        or _payload_value(payload, "resource_group")
+        or ""
+    )
+    cluster_name = str(
+        getattr(state, "cluster_name", None)
+        or _payload_value(payload, "cluster_name", "aks_cluster_name")
+        or ""
+    )
     storage_account = str(
         getattr(state, "storage_account", None) or _payload_value(payload, "storage_account") or ""
     )
@@ -449,7 +505,7 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     refresh_key = (str(state.job_id), subscription_id, resource_group, cluster_name)
     now = monotonic()
     last_check = _K8S_REFRESH_LAST_CHECK.get(refresh_key)
-    if last_check is not None and now - last_check < _K8S_REFRESH_MIN_INTERVAL_SECONDS:
+    if last_check is not None and now - last_check < _refresh_min_interval_seconds(phase):
         return state
     try:
         from api.services import get_credential
@@ -472,6 +528,11 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
         _K8S_REFRESH_LAST_CHECK[refresh_key] = now
         return state
     _K8S_REFRESH_LAST_CHECK.pop(refresh_key, None)
+    # We are about to rewrite `_progress` in the Table — if this row was
+    # fetched without its payload (list endpoint uses include_payload=False),
+    # pulling the full row first preserves the existing step history.
+    state = _maybe_reload_with_payload(repo, state)
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
     if k8s_status == "completed" and not _state_has_parseable_result_artifact(state, payload):
         try:
             updated = repo.update(
