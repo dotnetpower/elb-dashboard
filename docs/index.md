@@ -29,6 +29,7 @@ The goal is not to hide Azure. It is to keep Azure in the background until it ma
 ## Start Here
 
 - [Get Started](get-started.md) walks through setup, deployment, sign-in, and a first BLAST smoke test.
+- [Deployment Reference](deployment-reference.md) keeps the detailed deployment, validation, and troubleshooting notes for maintainers.
 - [User Guide](user-guide/index.md) shows how to operate the control plane from the browser.
 - [Dashboard](user-guide/dashboard.md) explains the readiness view and the signals to check before submitting work.
 - [Change Log](changelog.md) lists recent feature notes and keeps the implementation history searchable.
@@ -36,6 +37,7 @@ The goal is not to hide Azure. It is to keep Azure in the background until it ma
 ## For Platform Maintainers
 
 - [Container Apps Migration](container-apps-migration.md) describes the six-sidecar deployment architecture.
+- [Deployment Reference](deployment-reference.md) covers manual `azd` deployment, redirect URI setup, smoke testing, network lockdown, and cleanup.
 - [Auth](auth.md) explains browser sign-in and backend token validation.
 - [BLAST SearchSP Discovery](blast-searchsp-discovery.md) tracks SearchSP compatibility work.
 - [Web BLAST Compatibility Plan](web-blast-compatibility-implementation-plan.md) describes the web compatibility implementation plan.
