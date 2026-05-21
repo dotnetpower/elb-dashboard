@@ -4,6 +4,7 @@ This page links the most recent feature-change notes. The complete archive under
 
 ## 2026-05
 
+- [Overview researcher copy](features_change/2026-05/2026-05-21-overview-researcher-copy.md) - Reframe the home page around researcher pain points.
 - [Dashboard guide screenshots](features_change/2026-05/2026-05-21-dashboard-guide-screenshots.md) - Add captured Dashboard screenshots to the user guide.
 - [MkDocs changelog navigation](features_change/2026-05/2026-05-21-mkdocs-changelog-nav.md) - Expose feature-change notes in the public docs site.
 - [Wizard region selection](features_change/2026-05/2026-05-21-wizard-region-selection.md) - Setup wizard region selection.
