@@ -57,6 +57,7 @@ export function ResourcePicker({
 
   const knownValues = new Set(query.data?.map((i) => i.value) ?? []);
   const showCustomInput = allowCustom && value && !knownValues.has(value);
+  const showCustomSelectValue = showCustomInput && value !== "__custom__";
 
   if (compact) {
     return (
@@ -69,6 +70,7 @@ export function ResourcePicker({
         >
           {!enabled && <option value="">{disabledPlaceholder}</option>}
           {enabled && query.isLoading && <option value="">Loading…</option>}
+          {showCustomSelectValue && <option value={value}>{value} · Custom</option>}
           {query.data?.map((item) => (
             <option key={item.value} value={item.value} disabled={item.disabled}>
               {item.label}

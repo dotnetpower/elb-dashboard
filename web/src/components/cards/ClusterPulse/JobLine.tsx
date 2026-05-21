@@ -10,8 +10,8 @@
  */
 
 import { useNavigate } from "react-router-dom";
+import { AlertTriangle, Loader2 } from "lucide-react";
 
-import { BlastJobIdentity } from "@/components/cards/BlastJobIdentity";
 import { isActiveJobState } from "@/components/cards/ClusterBento/jobMapping";
 import type {
   DisplayJobState,
@@ -20,23 +20,27 @@ import type {
 import { statusColor } from "@/constants";
 import { timeAgo } from "@/pages/BlastJobs/dateGroup";
 
-import { jobStateTone, ownerLabel, summariseNote } from "./helpers";
+import { ownerLabel, prettifyQueryLabel, summariseNote } from "./helpers";
 
 interface Props {
   job: JobRowView;
   ownerUpn?: string | null;
   /** Parent-owned "now" — re-rendered once a second for active jobs. */
   nowMs: number;
+  /** When false, the User column is collapsed because no job in this
+   *  roster has an owner. Lets the row reclaim 76 px for the title. */
+  showUser: boolean;
 }
 
-export function JobLine({ job, ownerUpn, nowMs }: Props) {
+export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
   const navigate = useNavigate();
-  const tone = jobStateTone(job.state);
   const phaseColor = statusColor(job.state.toLowerCase());
   const elapsedSec = computeElapsedSec(job, nowMs);
   const submitter = describeSubmitter(ownerUpn);
   const noteText = summariseNote(job.note);
   const active = isActiveJobState(job.state);
+  const isFailed = job.state === "Failed";
+  const noteTone = noteSeverity(noteText, isFailed);
 
   const createdAt = job.createdAt;
   const timeAgoLabel = createdAt ? timeAgo(createdAt) : "—";
@@ -47,6 +51,12 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
   const fullHoverText = job.note
     ? `${job.state} · ${job.jobId} · ${job.note}`
     : `${job.state} · ${job.jobId}`;
+
+  const titleText = job.title || job.jobId;
+  const queryLabel = job.query ? prettifyQueryLabel(job.query) : null;
+  const gridTemplate = showUser
+    ? "minmax(0, 1fr) 76px 76px 92px"
+    : "minmax(0, 1fr) 76px 92px";
 
   return (
     <div
@@ -59,80 +69,140 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
           goToJob();
         }
       }}
+      className={active ? "pulse-job-row pulse-job-row--active" : "pulse-job-row"}
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) 76px 76px 92px",
+        gridTemplateColumns: gridTemplate,
         alignItems: "center",
         gap: 8,
         padding: "5px 8px",
         borderRadius: 6,
         background: "var(--pulse-row-bg)",
         border: "1px solid var(--border-weak)",
+        borderLeft: `3px solid ${phaseColor}`,
         cursor: "pointer",
       }}
       title={fullHoverText}
-      aria-label={`Open job ${job.title || job.jobId} (${job.state}).`}
+      aria-label={`Open job ${titleText} (${job.state}).`}
     >
       <div
+        className="pulse-job-identity"
         style={{
           display: "flex",
-          alignItems: "center",
+          alignItems: "flex-start",
           gap: 6,
           minWidth: 0,
         }}
       >
         <span
-          aria-hidden="true"
+          className="pulse-job-bullet"
           style={{
-            width: 7,
-            height: 7,
-            borderRadius: 999,
-            background: phaseColor,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 12,
+            height: 16,
             flexShrink: 0,
           }}
-        />
-        <BlastJobIdentity
-          title={job.title}
-          fallbackTitle={job.jobId}
-          program={job.program}
-          db={job.db}
-          query={job.query}
-          note={noteText}
-          noteTone={tone}
-          compact
-        />
+        >
+          {active ? (
+            <Loader2
+              size={11}
+              className="spin"
+              color={phaseColor}
+              strokeWidth={2.5}
+              aria-hidden="true"
+            />
+          ) : (
+            <span
+              aria-hidden="true"
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: 999,
+                background: phaseColor,
+              }}
+            />
+          )}
+        </span>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            minWidth: 0,
+            flex: 1,
+          }}
+        >
+          <span
+            className="pulse-job-title"
+            style={{
+              fontSize: 11.5,
+              fontWeight: 600,
+              color: "var(--text-primary)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              lineHeight: 1.25,
+            }}
+          >
+            {titleText}
+          </span>
+          <span
+            className="pulse-job-chip-row"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              flexWrap: "wrap",
+              minWidth: 0,
+            }}
+          >
+            <ChipMono>{job.program}</ChipMono>
+            <ChipMono tone="db">{job.db}</ChipMono>
+            {queryLabel && queryLabel !== titleText && (
+              <ChipMono tone="query">{queryLabel}</ChipMono>
+            )}
+          </span>
+        </div>
       </div>
-      <span
-        title={submitter.title}
-        style={{
-          fontSize: 10,
-          color: "var(--text-muted)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {submitter.label}
-      </span>
-      <span style={{ textAlign: "center" }}>
+      {showUser && (
         <span
+          title={submitter.title}
+          className="pulse-job-user"
+          style={{
+            fontSize: 10,
+            color: "var(--text-muted)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {submitter.label}
+        </span>
+      )}
+      <span className="pulse-job-status-cell" style={{ textAlign: "center" }}>
+        <span
+          className="pulse-job-status-pill"
           style={{
             display: "inline-block",
             fontSize: 9,
             textTransform: "uppercase",
-            letterSpacing: "0.03em",
-            padding: "1px 5px",
-            borderRadius: 4,
-            background: `${phaseColor}18`,
-            color: phaseColor,
-            fontWeight: 600,
+            letterSpacing: "0.04em",
+            padding: "2px 7px",
+            borderRadius: 999,
+            background: `color-mix(in srgb, ${phaseColor} 75%, transparent)`,
+            color: "#0b1220",
+            fontWeight: 700,
             whiteSpace: "nowrap",
+            boxShadow: `0 0 0 1px color-mix(in srgb, ${phaseColor} 35%, transparent)`,
           }}
         >
           {job.state}
         </span>
       </span>
       <div
+        className="pulse-job-timeblock"
         style={{
           display: "flex",
           flexDirection: "column",
@@ -142,15 +212,131 @@ export function JobLine({ job, ownerUpn, nowMs }: Props) {
         }}
         title={createdAt ? new Date(createdAt).toLocaleString() : ""}
       >
-        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{timeAgoLabel}</span>
+        <span
+          className="pulse-job-timeago"
+          style={{ fontSize: 10, color: "var(--text-muted)" }}
+        >
+          {timeAgoLabel}
+        </span>
         {createdAt && (
-          <span style={{ fontSize: 9, color: "var(--text-faint)" }}>
+          <span
+            className="pulse-job-duration"
+            style={{ fontSize: 9, color: "var(--text-faint)" }}
+          >
             {durationCaption} {durationLabel}
           </span>
         )}
       </div>
+      {noteText && (
+        <div
+          className={`pulse-job-stripe pulse-job-stripe--${noteTone}`}
+          style={{
+            gridColumn: "1 / -1",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            marginTop: 4,
+            padding: "3px 7px",
+            borderRadius: 4,
+            fontSize: 10,
+            fontWeight: 500,
+            background:
+              noteTone === "danger"
+                ? "color-mix(in srgb, var(--danger) 14%, transparent)"
+                : noteTone === "warning"
+                  ? "color-mix(in srgb, var(--warning) 14%, transparent)"
+                  : "var(--glass-bg-strong)",
+            color:
+              noteTone === "danger"
+                ? "var(--danger)"
+                : noteTone === "warning"
+                  ? "var(--warning)"
+                  : "var(--text-muted)",
+          }}
+        >
+          <AlertTriangle size={11} strokeWidth={2} aria-hidden="true" />
+          <span
+            style={{
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              flex: 1,
+              minWidth: 0,
+            }}
+          >
+            {noteText}
+          </span>
+        </div>
+      )}
     </div>
   );
+}
+
+type ChipTone = "program" | "db" | "query";
+
+function ChipMono({
+  children,
+  tone = "program",
+}: {
+  children: React.ReactNode;
+  tone?: ChipTone;
+}) {
+  return (
+    <span
+      className={`pulse-job-chip pulse-job-chip--${tone}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "1px 5px",
+        borderRadius: 3,
+        fontSize: 9.5,
+        fontWeight: 600,
+        lineHeight: 1.35,
+        letterSpacing: "0.01em",
+        background: "var(--glass-bg-strong)",
+        border: "1px solid var(--border-weak)",
+        color:
+          tone === "db"
+            ? "var(--text-primary)"
+            : tone === "query"
+              ? "var(--text-muted)"
+              : "var(--accent)",
+        fontFamily:
+          tone === "query"
+            ? "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+            : "inherit",
+        maxWidth: tone === "query" ? 120 : 90,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function noteSeverity(
+  note: string | null | undefined,
+  isFailed: boolean,
+): "danger" | "warning" | "info" {
+  if (!note) return "info";
+  if (isFailed) return "danger";
+  const low = note.toLowerCase();
+  if (
+    low.includes("oomkilled") ||
+    low.includes("unschedulable") ||
+    low.includes("error") ||
+    low.includes("failed")
+  )
+    return "danger";
+  if (
+    low.startsWith("slow") ||
+    low.startsWith("stalled") ||
+    low.includes("warn")
+  )
+    return "warning";
+  return "info";
 }
 
 export function jobHasLiveTick(state: DisplayJobState): boolean {

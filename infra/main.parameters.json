@@ -31,6 +31,9 @@
     },
     "enableApplicationInsights": {
       "value": "${ENABLE_APPLICATION_INSIGHTS=false}"
+    },
+    "resourceNameSlot": {
+      "value": "${ELB_RESOURCE_NAME_SLOT=}"
     }
   }
 }

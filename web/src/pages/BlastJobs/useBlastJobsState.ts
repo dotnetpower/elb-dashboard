@@ -76,12 +76,10 @@ export function useBlastJobsState() {
     mutationFn: (jobId: string) => blastApi.deleteJob(jobId),
     onSuccess: (_data, jobId) => {
       // Drop the row from every cache that lists jobs. Both keys exist:
-      //   - ["blast-jobs", ...]              → Dashboard JobCard, Jobs page
-      //   - ["blast-jobs-for-pulse", ...]    → AKS card pulse row
-      // Without both, a freshly-deleted row reappears on the next
-      // 20-60s poll because one cache still serves the stale list.
+      //   - ["blast-jobs", ...]              → Dashboard cards, Jobs page
+      // Without this, a freshly-deleted row can reappear on the next
+      // poll because a cache still serves the stale list.
       queryClient.invalidateQueries({ queryKey: ["blast-jobs"] });
-      queryClient.invalidateQueries({ queryKey: ["blast-jobs-for-pulse"] });
       // Detail caches that reference the deleted id should also be
       // dropped so a navigation back to the job hits 404 instead of
       // showing a stale "deleted" row from cache.

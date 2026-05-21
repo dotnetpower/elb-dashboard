@@ -46,7 +46,7 @@ export function AcrImageRow({
       <div className="td repo" title={img}>
         <strong>{shortName}</strong>
         {!isCore && (
-          <span className="muted" style={{ fontSize: 11, marginLeft: 4 }}>
+          <span className="muted acr-optional-tag" style={{ fontSize: 11, marginLeft: 4 }}>
             (optional)
           </span>
         )}
@@ -97,7 +97,7 @@ export function AcrImageRow({
           </span>
         ) : (
           <button
-            className="glass-button glass-button--primary"
+            className="glass-button glass-button--primary dashboard-hide-mobile"
             style={{ fontSize: 11, padding: "3px 9px", gap: 4 }}
             onClick={() => onBuildSingle(img)}
             disabled={

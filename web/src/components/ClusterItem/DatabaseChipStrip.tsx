@@ -56,7 +56,7 @@ export function DatabaseChipStrip({
           Databases
         </span>
         <span
-          className="muted"
+          className="muted cluster-db-legend"
           style={{
             fontSize: 10,
             display: "inline-flex",

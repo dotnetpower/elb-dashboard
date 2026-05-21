@@ -15,7 +15,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from api.auth import CallerIdentity, require_caller
-from api.routes._blast_shared import _stub_log
 from api.services.aks_skus import SkuListResponse, sku_list_response
 
 router = APIRouter()
@@ -26,7 +25,6 @@ def aks_skus(
     location: str = Query(default="koreacentral"),
     caller: CallerIdentity = Depends(require_caller),
 ) -> SkuListResponse:
-    _stub_log("aks/skus", location=location)
     # Source-of-truth lives in api.services.aks_skus, which mirrors the
     # sibling repo's elastic_blast.azure_traits.AZURE_HPC_MACHINES allow-list.
     # Picking anything outside this list makes elastic-blast raise

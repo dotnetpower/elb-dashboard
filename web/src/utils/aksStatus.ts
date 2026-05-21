@@ -8,7 +8,13 @@ export function isAksProvisioned(cluster: AksLifecycle | null | undefined): bool
 
 export function isAksProvisioning(cluster: AksLifecycle | null | undefined): boolean {
   const state = cluster?.provisioning_state;
-  return state === "Creating" || state === "Updating" || state === "Deleting";
+  return (
+    state === "Creating" ||
+    state === "Starting" ||
+    state === "Stopping" ||
+    state === "Updating" ||
+    state === "Deleting"
+  );
 }
 
 export function isAksProvisioningFailed(cluster: AksLifecycle | null | undefined): boolean {

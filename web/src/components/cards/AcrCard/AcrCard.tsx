@@ -72,7 +72,7 @@ export function AcrCard({
       collapsible
       rightSlot={
         enabled && (
-          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <div className="dashboard-hide-mobile" style={{ display: "flex", gap: 4, alignItems: "center" }}>
             {buildStatus !== "building" && !hasServerBuilding && (
               <button
                 className="glass-button glass-button--primary"

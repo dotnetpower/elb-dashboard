@@ -75,7 +75,7 @@
       "path": "/docs",
       "viewport": "desktop",
       "waitForSelector": "main",
-      "output": "docs/images/screenshots/api-reference-desktop.png",
+      "output": "docs/images/screenshots/api-reference.png",
       "guide": "docs/user-guide/api-reference.md",
       "notes": "Capture the endpoint list and a representative request panel."
     },

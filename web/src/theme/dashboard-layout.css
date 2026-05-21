@@ -160,6 +160,10 @@
 }
 
 @media (max-width: 760px) {
+  .dashboard-hide-mobile {
+    display: none !important;
+  }
+
   .dashboard-hero {
     padding: 4px 2px 0;
     overflow: hidden;
@@ -197,5 +201,260 @@
     width: 34px;
     min-height: 30px;
     justify-content: center;
+  }
+
+  /* Cluster pulse — mobile compaction.
+     Keeps the desktop bento layout intact; only narrow viewports
+     drop the labels, hide the empty USER column, stack each job
+     row into two lines, and force the meta grid to 2 columns so
+     the values stay readable. */
+  .pulse-stat-label {
+    display: none;
+  }
+
+  .pulse-stat {
+    min-width: 0 !important;
+  }
+
+  /* Header row: the 3-stat strip (Submits/Active/Pressure) and the
+     "API p95 …" subline both duplicate values already shown in the
+     PulseMetaGrid below, so hide them on phones to keep the row name
+     legible. */
+  .pulse-row-stats,
+  .pulse-row-subline {
+    display: none !important;
+  }
+
+  .pulse-meta-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+  }
+
+  /* DATABASES legend (warming · ready · failed) — the chip strip below
+     already shows the same colours next to each db name. */
+  .cluster-db-legend {
+    display: none !important;
+  }
+
+  .pulse-jobs-header {
+    display: none !important;
+  }
+
+  /* Jobs section — bump fonts and emphasize signals on phones.
+     The smallest text in the desktop layout (status pill 9 px, time-ago
+     10 px) is the answer to "what happened to this job?" — we promote
+     them so a glance is enough. */
+  .pulse-jobs-label {
+    font-size: 12px !important;
+    letter-spacing: 0.08em !important;
+    gap: 6px !important;
+  }
+  .pulse-jobs-caption {
+    font-size: 11.5px !important;
+    display: inline-flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    align-items: center !important;
+  }
+  .pulse-jobs-chip {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-weight: 700 !important;
+    font-size: 11px !important;
+    letter-spacing: 0.02em;
+    line-height: 1.4;
+  }
+  .pulse-jobs-chip--warn {
+    background: color-mix(in srgb, var(--warning) 18%, transparent);
+  }
+  .pulse-jobs-chip--danger {
+    background: color-mix(in srgb, var(--danger) 18%, transparent);
+  }
+  .pulse-job-status-pill {
+    font-size: 11px !important;
+    padding: 3px 8px !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.04em !important;
+    border-radius: 999px !important;
+  }
+  .blast-job-identity--compact .blast-job-identity__title {
+    font-size: 13px !important;
+  }
+  .blast-job-identity__meta {
+    font-size: 11px !important;
+    gap: 8px !important;
+  }
+  .pulse-job-timeago {
+    font-size: 11.5px !important;
+    font-weight: 600 !important;
+  }
+  .pulse-job-duration {
+    font-size: 10.5px !important;
+  }
+  .pulse-jobs-more-btn {
+    align-self: stretch !important;
+    justify-content: center !important;
+    padding: 8px 12px !important;
+    font-size: 12.5px !important;
+    margin-top: 6px !important;
+  }
+
+  .pulse-job-row {
+    display: flex !important;
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 4px !important;
+  }
+
+  .pulse-job-row > .pulse-job-identity {
+    /* Identity (title + program / db / query chips) gets the first line. */
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .pulse-job-row > .pulse-job-status-cell {
+    /* Status pill sits on the right of the second line. */
+    align-self: flex-end;
+    text-align: right !important;
+  }
+
+  .pulse-job-row > .pulse-job-timeblock {
+    /* Time block left-aligns under the identity to read naturally. */
+    align-items: flex-start !important;
+    flex-direction: row !important;
+    gap: 6px !important;
+  }
+
+  .pulse-job-row .pulse-job-user,
+  .pulse-job-skeleton > *:nth-child(2) {
+    display: none !important;
+  }
+
+  /* Resource plane (ACR + Storage) — mobile compaction.
+     Terminal sidecar is already hidden, so only ACR + Storage cards
+     remain. We force a single column at the project's canonical mobile
+     breakpoint (the legacy 768px rule on .dashboard-grid uses a slightly
+     different cutoff and is kept for backwards-compat). */
+  .dashboard-grid--resources {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+
+  /* Section label dot+text — tighter at phone width. */
+  .dashboard-section-label {
+    font-size: 11px;
+    margin-bottom: 4px;
+    gap: 6px;
+  }
+
+  /* Storage card subtitle: hide the ` · resourceGroup` suffix on mobile
+     so the account name doesn't get truncated by the right-hand controls. */
+  .storage-subtitle-rg {
+    display: none !important;
+  }
+
+  /* Storage / ACR / Jobs cell grids: 4-col and 3-col are unreadable on
+     phones. Reflow to 2 columns. Specific exceptions (e.g. AcrSummaryCells'
+     long Login Server) get their own full-width override below. */
+  .dv3-cell-grid--4,
+  .dv3-cell-grid--3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  /* ACR summary: Login Server (first cell) is long — span the full row
+     so SKU + Images built share the second row equally. */
+  .dashboard-grid--resources .dv3-cell-grid--3 > .cell:first-child {
+    grid-column: 1 / -1;
+  }
+
+  /* Container rows: allow the relative-time meta line to wrap to its own
+     line so the pill on the right has room. */
+  .dv3-container-row {
+    flex-wrap: wrap;
+    row-gap: 2px;
+    padding: 8px 10px;
+  }
+  .dv3-container-row .meta {
+    order: 3;
+    flex-basis: 100%;
+    font-size: 11px;
+  }
+  .dv3-container-row .right {
+    margin-left: auto;
+  }
+
+  /* BLAST Databases header: spinner + access-blocked + downloaded +
+     updates + catalog count + maximize were all on one line. Allow
+     wrapping and hide the redundant "N/M catalog" text (the
+     "N downloaded" pill already conveys count). */
+  .dv3-db-section-head {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .dv3-db-section-head .counts {
+    display: none !important;
+  }
+
+  /* Storage warning banners (public endpoint, HNS disabled) — smaller
+     padding + font so they stop dominating the card. */
+  .storage-warning {
+    padding: 5px 8px !important;
+    font-size: 10.5px !important;
+    gap: 5px !important;
+  }
+  .storage-warning svg {
+    flex-shrink: 0;
+  }
+
+  /* ACR image rows: hide the "(optional)" suffix; rows already render
+     at opacity 0.65 so the distinction is preserved without taking a
+     full text column. */
+  .acr-optional-tag {
+    display: none !important;
+  }
+
+  /* Generous bottom gutter on the dashboard workspace so the last card
+     (StorageCard → BlastDbSection, which fetches its chip list async)
+     never butts against the visible viewport edge. Without this, when
+     BlastDbSection arrives after the user has scrolled to bottom, the
+     newly-grown last row appears cut off behind the mobile browser’s
+     retractable chrome (and on narrow desktop windows, behind the OS
+     taskbar). `env(safe-area-inset-bottom)` covers the iOS home bar. */
+  .dashboard-workspace {
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Cluster detail modal — phones get the full viewport so the long
+     diagnostics body is not pinched between the backdrop padding and
+     the modal's own maxHeight. The close button is bumped to a
+     touch-friendly 44px target so it stays reachable even when the
+     browser chrome eats vertical space. The inline styles in
+     DetailsModal/ModalHeader define the desktop sizing; the `!important`
+     here is intentional to override those without prop-drilling a
+     viewport hook. */
+  .cluster-detail-backdrop {
+    padding: 0 !important;
+    align-items: stretch !important;
+    justify-items: stretch !important;
+  }
+  .cluster-detail-dialog {
+    max-width: 100vw !important;
+    width: 100vw !important;
+    min-width: 0 !important;
+    max-height: 100dvh !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+  }
+  .cluster-detail-close {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 10px 12px !important;
+    justify-content: center;
+  }
+  .cluster-detail-close svg {
+    width: 22px !important;
+    height: 22px !important;
   }
 }

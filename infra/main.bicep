@@ -61,6 +61,10 @@ param assignControlPlaneRoles bool = true
 @description('If true, create Application Insights. The default deployment creates only Log Analytics; Application Insights can be enabled later with ENABLE_APPLICATION_INSIGHTS=true.')
 param enableApplicationInsights bool = false
 
+@maxLength(6)
+@description('Optional generated resource name slot, for example slot01 when rg-elb-dashboard already exists and should be preserved. Bicep converts slot01 to the visible -01 resource-name suffix.')
+param resourceNameSlot string = ''
+
 // ---------------------------------------------------------------------------
 // Resource tagging (CAF-aligned)
 // ---------------------------------------------------------------------------
@@ -95,16 +99,20 @@ var tags = empty(ownerEmail) ? baseTags : union(baseTags, {
   owner: ownerEmail
 })
 
-var hyphenatedNamePrefix = 'elb-dashboard'
-var compactNamePrefix    = 'elbdashboard'
+var resourceNameSuffix = empty(resourceNameSlot) ? '' : '-${replace(resourceNameSlot, 'slot', '')}'
+var compactResourceNameSuffix = replace(resourceNameSlot, 'slot', '')
+var compactResourceTokenLength = 10 - length(compactResourceNameSuffix)
+var keyVaultTokenLength = 7 - length(resourceNameSuffix)
+var hyphenatedNamePrefix = 'elb-dashboard${resourceNameSuffix}'
+var compactNamePrefix    = 'elbdashboard${compactResourceNameSuffix}'
 var rgName               = 'rg-${hyphenatedNamePrefix}'
 var vnetName             = 'vnet-${hyphenatedNamePrefix}'
 var logAnalyticsName     = 'log-${hyphenatedNamePrefix}-${resourceToken}'
 var appInsightsName      = 'appi-${hyphenatedNamePrefix}-${resourceToken}'
 var identityName         = 'id-${hyphenatedNamePrefix}-${take(resourceToken, 8)}'
-var acrName              = 'acr${compactNamePrefix}${take(resourceToken, 10)}'  // 5-50 alphanumeric
-var storageAccountName   = 'st${compactNamePrefix}${take(resourceToken, 10)}'   // 3-24 lowercase
-var keyVaultName         = 'kv-${hyphenatedNamePrefix}-${take(resourceToken, 7)}'
+var acrName              = 'acr${compactNamePrefix}${take(resourceToken, compactResourceTokenLength)}'  // 5-50 alphanumeric
+var storageAccountName   = 'st${compactNamePrefix}${take(resourceToken, compactResourceTokenLength)}'   // 3-24 lowercase
+var keyVaultName         = 'kv-${hyphenatedNamePrefix}-${take(resourceToken, keyVaultTokenLength)}'
 var containerEnvName     = 'cae-${hyphenatedNamePrefix}-${take(resourceToken, 8)}'
 var controlAppName       = 'ca-${hyphenatedNamePrefix}'
 var workspaceTags = union(tags, {

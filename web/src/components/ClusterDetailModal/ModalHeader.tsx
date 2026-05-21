@@ -126,7 +126,7 @@ export function ModalHeader({
           </div>
         </div>
         <button
-          className="glass-button"
+          className="glass-button cluster-detail-close"
           onClick={onClose}
           style={{
             padding: "6px 8px",
@@ -134,6 +134,7 @@ export function ModalHeader({
             background: "var(--modal-surface-soft)",
           }}
           title="Close (Esc)"
+          aria-label="Close cluster detail"
         >
           <X size={16} strokeWidth={1.5} />
         </button>

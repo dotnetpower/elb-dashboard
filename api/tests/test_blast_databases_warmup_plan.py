@@ -14,7 +14,6 @@ Validation: `uv run pytest -q api/tests/test_blast_databases_warmup_plan.py`.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import pytest
@@ -24,8 +23,8 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
-    os.environ.setdefault("AZURE_TENANT_ID", "common")
-    os.environ.setdefault("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.setenv("AZURE_TENANT_ID", "common")
+    monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
     from api.main import app
 
     return TestClient(app)

@@ -16,6 +16,7 @@ export function AddClusterButton({
       <button
         type="button"
         onClick={onClick}
+        className="dashboard-hide-mobile"
         style={{
           display: "inline-flex",
           alignItems: "center",
@@ -46,6 +47,7 @@ export function AddClusterButton({
     <button
       type="button"
       onClick={onClick}
+      className="dashboard-hide-mobile"
       style={{
         display: "flex",
         alignItems: "center",

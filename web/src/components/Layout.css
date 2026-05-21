@@ -3,6 +3,11 @@
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  /* Use dynamic viewport height where supported so the bottom of the
+     page is reachable on mobile browsers with retractable address bars
+     (iOS Safari, Chrome Android). `100vh` resolves to the large viewport
+     and would push the last cards behind the browser chrome. */
+  min-height: 100dvh;
 }
 
 .layout__topbar {
@@ -173,8 +178,10 @@
     left: 0;
     right: 0;
     bottom: 0;
+    margin-left: 0;
     background: var(--bg-primary);
-    border-top: 1px solid var(--border-weak);
+    border-top: 1px solid var(--border-medium);
+    box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.18);
     flex-direction: column;
     padding: var(--space-4);
     gap: var(--space-2);
@@ -191,5 +198,20 @@
   .layout__nav-item {
     padding: 10px 14px;
     font-size: 14px;
+    /* Hug content so the active highlight pill matches desktop instead
+       of stretching the full drawer width (which made the active row
+       look "wider" than the inactive ones). */
+    align-self: flex-start;
+    max-width: 100%;
+  }
+
+  /* When the mobile nav drawer is open, hide everything else in the
+     topbar (cluster status pill, Live indicator, theme/help/account
+     buttons) so the user focuses on navigation. The hamburger and the
+     ElasticBLAST logo stay visible so the user knows where they are. */
+  .layout--mobile-nav-open
+    .layout__topbar
+    > *:not(.layout__hamburger):not(.layout__logo):not(.layout__nav) {
+    display: none !important;
   }
 }

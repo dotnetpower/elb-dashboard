@@ -230,6 +230,32 @@ def test_streaming_upstream_error_detail_is_read_and_sanitised() -> None:
     assert raised.value.detail["message"] == "failed ?sig=secret-token"
 
 
+def test_upstream_error_logs_sanitised_response_detail(caplog: pytest.LogCaptureFixture) -> None:
+    from api.services import external_blast
+
+    caplog.set_level("WARNING", logger="api.services.external_blast")
+    request = httpx.Request("GET", "https://example.test/api/v1/elastic-blast/jobs/job-1")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={
+            "message": "bad request Bearer abcdefghijklmnopqrstuvwxyz1234567890",
+        },
+    )
+    exc = httpx.HTTPStatusError("boom", request=request, response=response)
+
+    with pytest.raises(HTTPException):
+        external_blast._raise_upstream_error(exc)
+
+    text = caplog.text
+    assert "OpenAPI upstream request failed" in text
+    assert "status=400" in text
+    assert "https://example.test/api/v1/elastic-blast/jobs/job-1" in text
+    assert "bad request" in text
+    assert "abcdefghijklmnopqrstuvwxyz" not in text
+    assert "Bearer <redacted>" in text
+
+
 def test_upstream_filename_is_sanitised() -> None:
     from api.services import external_blast
 

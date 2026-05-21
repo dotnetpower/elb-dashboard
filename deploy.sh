@@ -16,6 +16,9 @@ Environment overrides:
   LOCKDOWN_PRIVATE_NETWORKING  Default: false
   ALLOWED_ORIGINS              Default: empty / same-origin
   ENABLE_APPLICATION_INSIGHTS  Default: false
+  ELB_EXISTING_RG_ACTION       delete | number | abort when rg-elb-dashboard has resources
+  ELB_RESOURCE_NAME_SUFFIX     Optional suffix such as -01 for numbered deployments
+  ELB_RESOURCE_NAME_SLOT       Optional azd-safe slot such as slot01 for numbered deployments
 
 USAGE
 }
@@ -110,10 +113,25 @@ azd env set --environment "$env_name" ALLOWED_ORIGINS "$allowed_origins" >/dev/n
 azd env set --environment "$env_name" LOCKDOWN_PRIVATE_NETWORKING "$lockdown" >/dev/null
 azd env set --environment "$env_name" ENABLE_APPLICATION_INSIGHTS "$enable_application_insights" >/dev/null
 
+existing_resource_slot="$(azd env get-values --environment "$env_name" 2>/dev/null | awk -F= '/^ELB_RESOURCE_NAME_SLOT=/{gsub(/"/, "", $2); print $2; exit}')"
+if [[ -v ELB_RESOURCE_NAME_SUFFIX ]]; then
+  export ELB_RESOURCE_NAME_SUFFIX
+elif [[ -v ELB_RESOURCE_NAME_SLOT ]]; then
+  export ELB_RESOURCE_NAME_SLOT
+else
+  export ELB_RESOURCE_NAME_SLOT="$existing_resource_slot"
+fi
+
 echo "==> Pre-flight provider check (azd up verifies providers again in step 1)"
 bash "$repo_root/scripts/dev/register-providers.sh" --subscription "$subscription_id"
 
-echo "==> Target resource group: rg-elb-dashboard"
+bash "$repo_root/scripts/dev/resolve-resource-group.sh" --subscription "$subscription_id" --environment "$env_name"
+resource_slot="$(azd env get-values --environment "$env_name" 2>/dev/null | awk -F= '/^ELB_RESOURCE_NAME_SLOT=/{gsub(/"/, "", $2); print $2; exit}')"
+resource_suffix="${resource_slot#slot}"
+if [[ -n "$resource_slot" ]]; then
+  resource_suffix="-${resource_suffix}"
+fi
+echo "==> Target resource group: rg-elb-dashboard${resource_suffix}"
 if [[ "$prepare_only" == "true" ]]; then
   bash "$repo_root/scripts/dev/azd-progress.sh" done 0 "Local bootstrap"
   echo "==> Prepare-only mode complete. Run azd up to deploy."

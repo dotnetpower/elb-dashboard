@@ -129,12 +129,15 @@ azd up
 `azd up` runs:
 
 The command prints an `azd up progress map` before long-running work starts,
-then marks the active step as `[n/7]` while it runs.
+then marks the active step as `[n/8]` while it runs.
 
 1. **preprovision** — registers deployment Azure resource providers
   (`Microsoft.App`, `Microsoft.Authorization`, `Microsoft.ContainerRegistry`,
   `Microsoft.Storage`, etc.) and starts first-run workflow provider registration
-  for Compute, ContainerService, and Quota.
+  for Compute, ContainerService, and Quota. If `rg-elb-dashboard` already
+  contains resources, the hook asks whether to delete it and continue, keep it
+  and deploy to the next numbered group such as `rg-elb-dashboard-01`, or abort.
+  Non-interactive runs can set `ELB_EXISTING_RG_ACTION=delete|number|abort`.
 2. **provision** — runs [infra/main.bicep](./infra/main.bicep) which creates
   the platform RG, VNet (3 subnets), Log Analytics, optional App Insights, the
    shared user-assigned managed identity, the Premium ACR, the

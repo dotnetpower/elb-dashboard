@@ -120,6 +120,17 @@ def _snippet(value: object, limit: int = ERROR_SNIPPET_CHARS) -> str:
     return _blast_task_config.snippet(value, limit)
 
 
+def _exception_detail_snippet(exc: Exception, *, limit: int = ERROR_SNIPPET_CHARS) -> str:
+    detail = getattr(exc, "detail", None)
+    if detail not in (None, ""):
+        try:
+            text = json.dumps(detail, ensure_ascii=False, sort_keys=True, default=str)
+            return _snippet(text, limit)
+        except Exception:
+            return _snippet(detail, limit)
+    return _snippet(str(exc) or type(exc).__name__, limit)
+
+
 def _ensure_terminal_azure_cli_login(terminal_run: Any) -> None:
     """Ensure shell-only ElasticBLAST calls have an Azure CLI account.
 
@@ -1423,6 +1434,16 @@ def _update_state(
         merged_payload: dict[str, Any] | None = None
         try:
             state = repo.get(job_id)
+            if (
+                event is None
+                and not details
+                and state is not None
+                and str(getattr(state, "status", "") or "") == status
+                and str(getattr(state, "phase", "") or "") == phase
+                and str(getattr(state, "error_code", "") or "") == stored_error_code
+            ):
+                _enqueue_artifact_finalizer(job_id, phase, status)
+                return
             existing_payload = state.payload if state is not None else None
             merged_payload = _merge_progress_payload(
                 existing_payload if isinstance(existing_payload, Mapping) else None,
@@ -1455,6 +1476,20 @@ def _update_state(
         _enqueue_artifact_finalizer(job_id, phase, status)
     except Exception as exc:
         LOGGER.warning("blast state update failed job_id=%s phase=%s: %s", job_id, phase, exc)
+
+
+def _external_reconcile_job_id(row: Any) -> str:
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
+    for value in (
+        payload.get("elastic_blast_job_id"),
+        payload.get("k8s_job_id"),
+        getattr(row, "elastic_blast_job_id", ""),
+        getattr(row, "k8s_job_id", ""),
+    ):
+        job_id = str(value or "").strip()
+        if job_id.startswith("job-"):
+            return job_id
+    return ""
 
 
 def _stream_submit_command(
@@ -1799,6 +1834,8 @@ def submit(
             options=effective_options,
         )
         if warmup_ready is not None:
+            effective_options = dict(effective_options or {})
+            effective_options["skip_warmed_ssd_init"] = True
             _progress(
                 self,
                 "warmup_ready",
@@ -2401,7 +2438,8 @@ def reconcile_stale_jobs(
                 or ""
             )
             refreshed = False
-            if sub and rg and cluster:
+            external_job_id = _external_reconcile_job_id(row)
+            if sub and rg and cluster and external_job_id:
                 try:
                     from api.routes._blast_shared import (
                         _external_to_blast_job,
@@ -2411,7 +2449,7 @@ def reconcile_stale_jobs(
 
                     kwargs = _openapi_client_kwargs_from_cluster(sub, rg, cluster)
                     if kwargs:
-                        detail = external_blast.get_job(row.job_id, **kwargs)
+                        detail = external_blast.get_job(external_job_id, **kwargs)
                         converted = _external_to_blast_job(detail)
                         ext_status = str(converted.get("status") or "")
                         ext_phase = str(converted.get("phase") or ext_status)
@@ -2429,10 +2467,17 @@ def reconcile_stale_jobs(
                                 # double-count under completed/failed.
                                 pass
                 except Exception as exc:
-                    LOGGER.debug(
-                        "reconcile_stale_jobs: external refresh failed job_id=%s: %s",
+                    LOGGER.warning(
+                        "reconcile_stale_jobs: external refresh failed job_id=%s "
+                        "subscription_id=%s resource_group=%s cluster=%s error_type=%s "
+                        "status_code=%s detail=%s",
                         row.job_id,
+                        sub,
+                        rg,
+                        cluster,
                         type(exc).__name__,
+                        getattr(exc, "status_code", ""),
+                        _exception_detail_snippet(exc),
                     )
             if refreshed:
                 continue

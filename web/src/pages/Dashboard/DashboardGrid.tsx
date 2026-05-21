@@ -1,6 +1,5 @@
 import { AcrCard } from "@/components/cards/AcrCard";
 import { ClusterCard } from "@/components/cards/ClusterCard";
-import { JobCard } from "@/components/cards/JobCard";
 import { SidecarsCard } from "@/components/cards/SidecarsCard";
 import { StorageCard } from "@/components/cards/StorageCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
@@ -63,24 +62,23 @@ export function DashboardGrid({ config }: DashboardGridProps) {
             clusterName="elb-cluster"
             acrName={config.acrName}
           />
-          {terminalEnabled && <TerminalCard />}
+          {terminalEnabled && (
+            <div className="dashboard-hide-mobile">
+              <TerminalCard />
+            </div>
+          )}
         </div>
       </section>
 
-      <section className="dashboard-workspace__section" aria-label="Sidecar runtime">
+      <section
+        className="dashboard-workspace__section dashboard-hide-mobile"
+        aria-label="Sidecar runtime"
+      >
         <div className="dashboard-section-label">
           <span className="dashboard-section-label__dot dashboard-section-label__dot--runtime" />
           Sidecar runtime
         </div>
         <SidecarsCard />
-      </section>
-
-      <section className="dashboard-workspace__section" aria-label="BLAST jobs">
-        <div className="dashboard-section-label">
-          <span className="dashboard-section-label__dot dashboard-section-label__dot--jobs" />
-          BLAST jobs
-        </div>
-        <JobCard />
       </section>
     </div>
   );

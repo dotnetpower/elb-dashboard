@@ -37,6 +37,7 @@ export function PulseMetaGrid({
 }: Props) {
   return (
     <div
+      className="pulse-meta-grid"
       style={{
         padding: "7px 10px 8px 10px",
         display: "grid",

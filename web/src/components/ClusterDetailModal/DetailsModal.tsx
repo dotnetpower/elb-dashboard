@@ -83,7 +83,7 @@ export function DetailsModal({
 
   return createPortal(
     <div
-      className="glass-dialog-backdrop"
+      className="glass-dialog-backdrop cluster-detail-backdrop"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -92,7 +92,7 @@ export function DetailsModal({
       aria-label={`${clusterName} Details`}
     >
       <div
-        className="glass-card glass-card--strong glass-dialog"
+        className="glass-card glass-card--strong glass-dialog cluster-detail-dialog"
         onClick={(e) => e.stopPropagation()}
         style={{
           maxWidth: 1180,

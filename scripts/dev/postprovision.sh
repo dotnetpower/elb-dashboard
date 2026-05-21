@@ -57,7 +57,7 @@ fi
 progress note "Refreshing provider registration state before postprovision work."
 bash "$REPO_ROOT/scripts/dev/register-providers.sh" --subscription "$AZURE_SUBSCRIPTION_ID"
 
-progress step 3 "App registration" "Create/reuse the Entra App Registration if API_CLIENT_ID is empty."
+progress step 4 "App registration" "Create/reuse the Entra App Registration if API_CLIENT_ID is empty."
 API_CLIENT_ID_VAL="${API_CLIENT_ID:-}"
 if [ -z "$API_CLIENT_ID_VAL" ]; then
   echo "==> API_CLIENT_ID is not set; creating or reusing the Entra App Registration..."
@@ -79,7 +79,7 @@ EOF
 else
   progress note "API_CLIENT_ID is already set; reusing the configured App Registration."
 fi
-progress done 3 "App registration"
+progress done 4 "App registration"
 APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="${APPLICATIONINSIGHTS_CONNECTION_STRING:-}"
 VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
 VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
@@ -147,7 +147,7 @@ EOF
   ts "    ✓ Storage kind=$kind HNS=$hns publicNetworkAccess=${public_network_access:-unknown}"
 }
 
-progress step 4 "Resource validation" "Validate Storage HNS and merge dashboard discovery tags."
+progress step 5 "Resource validation" "Validate Storage HNS and merge dashboard discovery tags."
 validate_storage_account
 
 tag_workspace_resource_group() {
@@ -173,7 +173,7 @@ tag_workspace_resource_group() {
 }
 
 tag_workspace_resource_group
-progress done 4 "Resource validation"
+progress done 5 "Resource validation"
 
 # ---------------------------------------------------------------------------
 # 1. Parallel image builds. Each build writes to its own log file; the
@@ -224,7 +224,7 @@ build_image() {
   printf -v "$pid_var" '%s' "$!"
 }
 
-progress step 5 "Image builds" "Build api, frontend, and terminal images in parallel via az acr build."
+progress step 6 "Image builds" "Build api, frontend, and terminal images in parallel via az acr build."
 ts "==> Building 3 images in parallel via az acr build (no local Docker needed)"
 acr_ensure_build_access "$ACR_NAME"
 ensure_terminal_base_image
@@ -282,14 +282,14 @@ if [ "$fail" = "1" ]; then
   exit 1
 fi
 ts "==> All 3 images built and pushed"
-progress done 5 "Image builds"
+progress done 6 "Image builds"
 
 # ---------------------------------------------------------------------------
 # 2. Swap the Container App template to the six-sidecar layout.
 #    `az containerapp update --yaml` is much faster than redeploying the
 #    Bicep module because it skips template compilation and what-if.
 # ---------------------------------------------------------------------------
-progress step 6 "Sidecar swap" "Deploy the six-sidecar Container App template over the bootstrap app."
+progress step 7 "Sidecar swap" "Deploy the six-sidecar Container App template over the bootstrap app."
 ts "==> Building Container App yaml"
 
 ALLOWED_ORIGINS_VAL="${ALLOWED_ORIGINS:-}"
@@ -347,12 +347,12 @@ if [ "$SWAP_RC" != "0" ]; then
   exit "$SWAP_RC"
 fi
 ts "==> Container App updated to six-sidecar layout"
-progress done 6 "Sidecar swap"
+progress done 7 "Sidecar swap"
 
 # ---------------------------------------------------------------------------
 # 3. Wait for /api/health on the new revision and print URL.
 # ---------------------------------------------------------------------------
-progress step 7 "Health check" "Poll /api/health so the final URL is not printed before the app is ready."
+progress step 8 "Health check" "Poll /api/health so the final URL is not printed before the app is ready."
 ts "==> Waiting up to 180s for /api/health on the new revision..."
 URL="https://$CONTAINER_APP_FQDN/api/health"
 ok=0
@@ -373,10 +373,10 @@ echo
 echo "============================================================"
 if [ "$ok" = "1" ]; then
   ts "✓ Deployment OK."
-  progress done 7 "Health check"
+  progress done 8 "Health check"
 else
   ts "⚠ Container App deployed but /api/health did not respond 200 within 180s."
-  progress note "Step 7 completed with warning: /api/health was not ready within 180s."
+  progress note "Step 8 completed with warning: /api/health was not ready within 180s."
   ts "  Check container logs:"
   ts "    az containerapp logs show -n $CONTAINER_APP_NAME -g $AZURE_RESOURCE_GROUP --container api --tail 100"
   ts "  Check system events:"

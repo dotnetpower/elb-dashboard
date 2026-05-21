@@ -5,6 +5,7 @@ Edit boundaries: Keep assertions focused on the behavior under test; prefer fake
 Azure calls.
 Key entry points: `_parse`, `_base_params`,
 `test_auto_sharding_is_off_but_local_ssd_is_on_by_default`,
+`test_warmup_skip_option_is_opt_in`,
 `test_local_ssd_cannot_be_disabled_while_pv_path_is_paused`,
 `test_approximate_sharding_opt_in_injects_partitions_and_prefix`,
 `test_approximate_sharding_uses_full_dbsize_when_available`
@@ -53,6 +54,16 @@ def test_auto_sharding_is_off_but_local_ssd_is_on_by_default() -> None:
     assert not cfg.has_option("blast", "db-partitions")
     assert not cfg.has_option("blast", "db-partition-prefix")
     assert cfg.get("cluster", "exp-use-local-ssd") == "true"
+    assert not cfg.has_option("cluster", "exp-skip-warmed-ssd-init")
+
+
+def test_warmup_skip_option_is_opt_in() -> None:
+    params = _base_params()
+    params["skip_warmed_ssd_init"] = True
+
+    cfg = _parse(generate_config(params))
+
+    assert cfg.get("cluster", "exp-skip-warmed-ssd-init") == "true"
 
 
 def test_generate_config_rejects_storage_account_mismatch() -> None:

@@ -26,6 +26,7 @@ export function StorageWarnings({ isPublic, isHnsEnabled }: StorageWarningsProps
     <>
       {isPublic && (
         <div
+          className="storage-warning"
           style={{
             padding: "6px 10px",
             marginBottom: "var(--space-3)",
@@ -47,6 +48,7 @@ export function StorageWarnings({ isPublic, isHnsEnabled }: StorageWarningsProps
 
       {isHnsEnabled === false && !hnsDismissed && (
         <div
+          className="storage-warning"
           style={{
             padding: "6px 10px",
             marginBottom: "var(--space-3)",

@@ -68,6 +68,7 @@ export function PulseStat({
   return (
     <div
       title={tooltip}
+      className="pulse-stat"
       style={{
         display: "flex",
         flexDirection: "column",
@@ -90,7 +91,7 @@ export function PulseStat({
         }}
       >
         {icon}
-        {label}
+        <span className="pulse-stat-label">{label}</span>
       </span>
       <span
         style={{

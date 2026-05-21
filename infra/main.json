@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.41.2.15936",
-      "templateHash": "14716838594526966810"
+      "templateHash": "10725229627258778226"
     }
   },
   "parameters": {
@@ -101,6 +101,14 @@
         "description": "If true, create Application Insights. The default deployment creates only Log Analytics; Application Insights can be enabled later with ENABLE_APPLICATION_INSIGHTS=true."
       }
     },
+    "resourceNameSlot": {
+      "type": "string",
+      "defaultValue": "",
+      "maxLength": 6,
+      "metadata": {
+        "description": "Optional generated resource name slot, for example slot01 when rg-elb-dashboard already exists and should be preserved. Bicep converts slot01 to the visible -01 resource-name suffix."
+      }
+    },
     "costCenter": {
       "type": "string",
       "defaultValue": "elasticblast",
@@ -128,16 +136,20 @@
       "topology": "container-app-bundle-v1"
     },
     "tags": "[if(empty(parameters('ownerEmail')), variables('baseTags'), union(variables('baseTags'), createObject('owner', parameters('ownerEmail'))))]",
-    "hyphenatedNamePrefix": "elb-dashboard",
-    "compactNamePrefix": "elbdashboard",
+    "resourceNameSuffix": "[if(empty(parameters('resourceNameSlot')), '', format('-{0}', replace(parameters('resourceNameSlot'), 'slot', '')))]",
+    "compactResourceNameSuffix": "[replace(parameters('resourceNameSlot'), 'slot', '')]",
+    "compactResourceTokenLength": "[sub(10, length(variables('compactResourceNameSuffix')))]",
+    "keyVaultTokenLength": "[sub(7, length(variables('resourceNameSuffix')))]",
+    "hyphenatedNamePrefix": "[format('elb-dashboard{0}', variables('resourceNameSuffix'))]",
+    "compactNamePrefix": "[format('elbdashboard{0}', variables('compactResourceNameSuffix'))]",
     "rgName": "[format('rg-{0}', variables('hyphenatedNamePrefix'))]",
     "vnetName": "[format('vnet-{0}', variables('hyphenatedNamePrefix'))]",
     "logAnalyticsName": "[format('log-{0}-{1}', variables('hyphenatedNamePrefix'), variables('resourceToken'))]",
     "appInsightsName": "[format('appi-{0}-{1}', variables('hyphenatedNamePrefix'), variables('resourceToken'))]",
     "identityName": "[format('id-{0}-{1}', variables('hyphenatedNamePrefix'), take(variables('resourceToken'), 8))]",
-    "acrName": "[format('acr{0}{1}', variables('compactNamePrefix'), take(variables('resourceToken'), 10))]",
-    "storageAccountName": "[format('st{0}{1}', variables('compactNamePrefix'), take(variables('resourceToken'), 10))]",
-    "keyVaultName": "[format('kv-{0}-{1}', variables('hyphenatedNamePrefix'), take(variables('resourceToken'), 7))]",
+    "acrName": "[format('acr{0}{1}', variables('compactNamePrefix'), take(variables('resourceToken'), variables('compactResourceTokenLength')))]",
+    "storageAccountName": "[format('st{0}{1}', variables('compactNamePrefix'), take(variables('resourceToken'), variables('compactResourceTokenLength')))]",
+    "keyVaultName": "[format('kv-{0}-{1}', variables('hyphenatedNamePrefix'), take(variables('resourceToken'), variables('keyVaultTokenLength')))]",
     "containerEnvName": "[format('cae-{0}-{1}', variables('hyphenatedNamePrefix'), take(variables('resourceToken'), 8))]",
     "controlAppName": "[format('ca-{0}', variables('hyphenatedNamePrefix'))]",
     "workspaceTags": "[union(variables('tags'), createObject('elb-workload-rg', variables('rgName'), 'elb-acr-rg', variables('rgName'), 'elb-acr', variables('acrName'), 'elb-storage', variables('storageAccountName'), 'elb-region', parameters('location')))]",

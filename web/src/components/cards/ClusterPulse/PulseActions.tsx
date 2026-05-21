@@ -51,6 +51,7 @@ export function PulseActions({
         </ActionBtn>
       </span>
       <div
+        className="dashboard-hide-mobile"
         style={{
           display: "flex",
           gap: 6,

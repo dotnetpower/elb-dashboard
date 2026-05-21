@@ -65,7 +65,7 @@ export function PulseRowSummary({
         border: "none",
         padding: "8px 10px",
         display: "grid",
-        gridTemplateColumns: "auto minmax(0, 1fr) auto auto auto 14px",
+        gridTemplateColumns: "auto minmax(0, 1fr) auto 14px",
         alignItems: "center",
         gap: 10,
         cursor: "pointer",
@@ -98,6 +98,7 @@ export function PulseRowSummary({
         </span>
         <span
           title={statusLine}
+          className="pulse-row-subline"
           style={{
             fontSize: 11,
             lineHeight: 1.2,
@@ -110,26 +111,28 @@ export function PulseRowSummary({
           {statusLine}
         </span>
       </div>
-      <PulseStat
-        label="Submits 15m"
-        value={submits15m}
-        icon={<Send size={11} aria-hidden="true" />}
-        tooltip="Jobs created in the last 15 minutes"
-      />
-      <PulseStat
-        label="Active"
-        value={activeCount}
-        icon={<Activity size={11} aria-hidden="true" />}
-        tone={activeTone}
-        tooltip="Jobs currently Pending, Running or Reducing"
-      />
-      <PulseStat
-        label="Pressure"
-        value={pressureLabel}
-        icon={<Flame size={11} aria-hidden="true" />}
-        tone={pressureTone}
-        tooltip="Higher of CPU peak and Mem peak across user-pool nodes"
-      />
+      <div className="pulse-row-stats" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <PulseStat
+          label="Submits 15m"
+          value={submits15m}
+          icon={<Send size={11} aria-hidden="true" />}
+          tooltip="Jobs created in the last 15 minutes"
+        />
+        <PulseStat
+          label="Active"
+          value={activeCount}
+          icon={<Activity size={11} aria-hidden="true" />}
+          tone={activeTone}
+          tooltip="Jobs currently Pending, Running or Reducing"
+        />
+        <PulseStat
+          label="Pressure"
+          value={pressureLabel}
+          icon={<Flame size={11} aria-hidden="true" />}
+          tone={pressureTone}
+          tooltip="Higher of CPU peak and Mem peak across user-pool nodes"
+        />
+      </div>
       {open ? (
         <ChevronDown size={14} color="var(--text-faint)" aria-hidden="true" />
       ) : (

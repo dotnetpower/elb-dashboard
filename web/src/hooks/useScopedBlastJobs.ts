@@ -15,11 +15,12 @@ export function useScopedBlastJobs(options: ScopedBlastJobsOptions = {}) {
   const subscriptionId = savedConfig?.subscriptionId ?? "";
   const resourceGroup = savedConfig?.workloadResourceGroup ?? "";
   const hasWorkspaceContext = Boolean(subscriptionId && resourceGroup);
+  const needsClusterDiscovery = !options.clusterName;
 
   const clustersQuery = useQuery({
     queryKey: ["aks", subscriptionId, resourceGroup],
     queryFn: () => monitoringApi.aks(subscriptionId, resourceGroup),
-    enabled: enabled && hasWorkspaceContext,
+    enabled: enabled && hasWorkspaceContext && needsClusterDiscovery,
     staleTime: 30_000,
   });
 

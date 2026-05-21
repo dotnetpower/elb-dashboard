@@ -1,36 +1,54 @@
 # API Reference
 
-The API Reference page exposes the backend OpenAPI surface and request tools used by operators and developers.
+The API Reference page is for developers and platform maintainers who need to inspect or test the ElasticBLAST OpenAPI surface directly. Most researchers should keep using the Dashboard, New Search, Jobs, and Results pages for day-to-day work.
 
-## What To Explain
+![API Reference page with endpoint groups and API menu selected](../images/screenshots/api-reference.png)
 
-- Endpoint grouping.
-- Request parameters and response preview.
-- Authentication expectations.
-- When to use the API Reference instead of the primary UI.
+## When To Use It
 
-## Screenshot Targets
+Use the API Reference when you need to:
 
-Screenshots for this page are defined by this manifest target:
+- Confirm which endpoints are available in the deployed OpenAPI service.
+- Check request and response shapes before wiring an external workflow.
+- Run a safe read-only `Try` request such as health, config, cluster status, or job listing.
+- Open Swagger UI for a fuller OpenAPI explorer.
 
-- `api-reference-desktop`
+For submitting production BLAST searches, prefer the New Search page unless you are validating an integration path.
 
-Capture a representative endpoint panel without tokens or tenant-specific identifiers.# API Reference
+## Finding Endpoints
 
-The API Reference page exposes the backend OpenAPI surface and helper controls for operator workflows.
+The left sidebar groups endpoints by method and tag. Use it to move quickly between system checks, cluster status, job submission, job monitoring, and result download routes.
 
-## Screenshot Slot
+The main panel shows each endpoint as a compact row with:
 
-Capture target: `docs/images/screenshots/api-reference.png`
+- HTTP method and path.
+- A short operation summary.
+- A `Try` action when the route can be exercised from the browser.
+- A disclosure control for request and response details.
 
-Recommended state before capture:
+## Authentication
 
-- The OpenAPI document has loaded.
-- A representative endpoint card is expanded.
-- Any API token or authorization value is hidden or masked.
+The API token panel shows whether the `X-ELB-API-Token` value is configured for the sibling OpenAPI service. External clients must send this token in the request header when calling the OpenAPI endpoint directly.
 
-## Notes To Cover
+Use **Copy** in the token panel, then add the copied value as an HTTP header:
 
-- Finding endpoints by route or operation.
-- Reading request and response examples.
-- Using API helper controls only with non-sensitive values in screenshots.
+```http
+X-ELB-API-Token: <copied-token>
+```
+
+For example:
+
+```bash
+curl -H "X-ELB-API-Token: <copied-token>" \
+	"https://api.example.internal/v1/jobs"
+```
+
+The API Reference page's `Try` buttons use the same token internally. When you click `Try` from the browser, the dashboard forwards the request with the configured `X-ELB-API-Token`; you do not need to paste the token into the `Try` request manually.
+
+Keep the token hidden in screenshots, demos, and shared notes. Regenerate it only when rotating integration credentials or recovering from a suspected exposure.
+
+The dashboard itself still uses the signed-in Azure identity for access. The OpenAPI token is for calls forwarded to the AKS-hosted OpenAPI execution service.
+
+## Safe Screenshot Practice
+
+Before publishing API Reference screenshots, make sure the page does not expose subscription IDs, tenant-specific hostnames, raw API tokens, or private resource names. The screenshot above uses a masked example API endpoint and does not reveal a token value.

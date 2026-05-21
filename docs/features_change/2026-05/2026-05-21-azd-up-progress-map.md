@@ -7,8 +7,8 @@ Fresh deployments spend time in provider registration, Bicep provisioning, image
 ## User-facing change
 
 - `azd up` now prints an `azd up progress map` before long-running work starts.
-- Preprovision prints `[1/7] Provider registration` and hands off to `[2/7] Bicep provision`.
-- Postprovision marks `[3/7] App registration`, `[4/7] Resource validation`, `[5/7] Image builds`, `[6/7] Sidecar swap`, and `[7/7] Health check`.
+- Preprovision prints `[1/8] Provider registration`, `[2/8] Resource group choice`, and hands off to `[3/8] Bicep provision`.
+- Postprovision marks `[4/8] App registration`, `[5/8] Resource validation`, `[6/8] Image builds`, `[7/8] Sidecar swap`, and `[8/8] Health check`.
 - Provider registration now shows per-provider counters within deployment and first-run workflow provider groups.
 
 ## API / IaC diff summary

@@ -54,6 +54,10 @@ export function JobsSection({
   const anyActive = jobs.some((j) => jobHasLiveTick(j.state));
   const nowMs = useTickWhenActive(anyActive);
   const showEmptyJobsInline = !jobsDegraded && !jobsLoading && jobs.length === 0;
+  const hasOwners = jobs.some((j) => {
+    const upn = jobIndex.get(j.jobId)?.owner_upn;
+    return typeof upn === "string" && upn.trim().length > 0;
+  });
 
   const goToJobsPage = () =>
     navigate(`/blast/jobs?cluster=${encodeURIComponent(clusterName)}`);
@@ -68,8 +72,9 @@ export function JobsSection({
         gap: 6,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span
+          className="pulse-jobs-label"
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -82,8 +87,20 @@ export function JobsSection({
           }}
         >
           <Activity size={10} aria-hidden="true" /> Jobs
+          {!jobsDegraded && !jobsLoading && jobs.length > 0 && (
+            <span
+              style={{
+                color: "var(--text-muted)",
+                fontVariantNumeric: "tabular-nums",
+                letterSpacing: "normal",
+              }}
+            >
+              · {jobs.length}
+            </span>
+          )}
         </span>
         <span
+          className="pulse-jobs-caption"
           style={{
             fontSize: 10,
             color: "var(--text-faint)",
@@ -97,8 +114,9 @@ export function JobsSection({
               : `${activeCount} active · ${completedToday} done in 24h`}
           {!jobsDegraded && !jobsLoading && unknownCount > 0 && (
             <>
-              {" · "}
+              {" "}
               <span
+                className="pulse-jobs-chip pulse-jobs-chip--warn"
                 style={{ color: "var(--warning)" }}
                 title="Jobs whose phase/status the dashboard could not classify"
               >
@@ -108,8 +126,13 @@ export function JobsSection({
           )}
           {!jobsDegraded && !jobsLoading && failed15m > 0 && (
             <>
-              {" · "}
-              <span style={{ color: "var(--danger)" }}>{failed15m} failed / 15m</span>
+              {" "}
+              <span
+                className="pulse-jobs-chip pulse-jobs-chip--danger"
+                style={{ color: "var(--danger)" }}
+              >
+                {failed15m} failed / 15m
+              </span>
             </>
           )}
         </span>
@@ -151,46 +174,57 @@ export function JobsSection({
         <JobsSkeleton />
       ) : jobs.length > 0 ? (
         <div
+          className="pulse-jobs-list"
           style={{
             display: "flex",
             flexDirection: "column",
             gap: 3,
-            maxHeight: 150,
-            overflowY: "auto",
-            paddingRight: 2,
           }}
         >
-          <JobsTableHeader />
+          <JobsTableHeader showUser={hasOwners} />
           {jobs.map((j) => (
             <JobLine
               key={j.jobId}
               job={j}
               ownerUpn={jobIndex.get(j.jobId)?.owner_upn}
               nowMs={nowMs}
+              showUser={hasOwners}
             />
           ))}
           {moreCount > 0 && (
             <button
               type="button"
               onClick={goToJobsPage}
+              className="pulse-jobs-more-btn"
               title={`Open the full Jobs page filtered to ${clusterName}`}
               style={{
-                marginTop: 0,
-                alignSelf: "flex-start",
-                background: "transparent",
-                border: "none",
+                marginTop: 4,
+                alignSelf: "flex-end",
+                background: "rgba(122, 167, 255, 0.12)",
+                border: "1px solid color-mix(in srgb, var(--accent) 58%, transparent)",
+                borderRadius: 999,
                 color: "var(--accent)",
                 fontSize: 11,
-                fontWeight: 500,
+                fontWeight: 700,
                 cursor: "pointer",
-                padding: "1px 0",
+                padding: "4px 9px",
                 display: "inline-flex",
                 alignItems: "center",
-                gap: 4,
+                gap: 5,
+                boxShadow: "0 0 0 1px rgba(122, 167, 255, 0.08) inset",
               }}
             >
-              +{moreCount} more job{moreCount === 1 ? "" : "s"}
-              <ChevronRight size={11} aria-hidden="true" />
+              More jobs
+              <span
+                style={{
+                  color: "var(--text-muted)",
+                  fontWeight: 600,
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                +{moreCount}
+              </span>
+              <ChevronRight size={13} aria-hidden="true" />
             </button>
           )}
         </div>
@@ -227,7 +261,7 @@ function JobsSkeleton() {
       {[0, 1, 2].map((i) => (
         <div
           key={i}
-          className="pulse-soft"
+          className="pulse-soft pulse-job-row pulse-job-skeleton"
           style={{
             display: "grid",
             gridTemplateColumns: "minmax(0, 1fr) 76px 76px 92px",
@@ -265,13 +299,19 @@ function SkeletonBar({ width, height }: { width: string | number; height: number
 }
 
 /** Column headers for the jobs roster — mirrors the Recent searches
- *  table header so the AKS card's preview reads the same way. */
-function JobsTableHeader() {
+ *  table header so the AKS card's preview reads the same way. The
+ *  `User` column is suppressed when no job in the visible roster has
+ *  an owner, freeing the row width for the title + chips. */
+function JobsTableHeader({ showUser }: { showUser: boolean }) {
+  const gridTemplate = showUser
+    ? "minmax(0, 1fr) 76px 76px 92px"
+    : "minmax(0, 1fr) 76px 92px";
   return (
     <div
+      className="pulse-jobs-header"
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) 76px 76px 92px",
+        gridTemplateColumns: gridTemplate,
         alignItems: "center",
         gap: 8,
         padding: "1px 8px",
@@ -284,7 +324,7 @@ function JobsTableHeader() {
       }}
     >
       <span>Job</span>
-      <span>User</span>
+      {showUser && <span className="pulse-job-user">User</span>}
       <span style={{ textAlign: "center" }}>Status</span>
       <span style={{ textAlign: "right" }}>Time</span>
     </div>

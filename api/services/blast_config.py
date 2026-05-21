@@ -152,6 +152,9 @@ def generate_config(params: dict[str, Any]) -> str:
     # init path before that mode is deliberately productized here.
     cfg.set("cluster", "exp-use-local-ssd", "true")
 
+    if params.get("skip_warmed_ssd_init"):
+        cfg.set("cluster", "exp-skip-warmed-ssd-init", "true")
+
     # Warm cluster reuse mode
     if params.get("reuse"):
         cfg.set("cluster", "reuse", "true")

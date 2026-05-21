@@ -7,6 +7,23 @@ import { useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import { usePrefetchApiReference } from "@/hooks/usePrefetchApiReference";
 import { isFeatureEnabled } from "@/config/runtime";
 
+const MOBILE_MEDIA_QUERY = "(max-width: 760px)";
+
+function useIsMobileViewport(): boolean {
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return false;
+    return window.matchMedia(MOBILE_MEDIA_QUERY).matches;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia(MOBILE_MEDIA_QUERY);
+    const onChange = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return isMobile;
+}
+
 export interface UseGettingStartedReadinessArgs {
   config: ResourceConfig;
   showWizard: boolean;
@@ -25,6 +42,7 @@ export function useGettingStartedReadiness({
   const [gettingStartedDismissed, setGettingStartedDismissed] = useState(
     () => sessionStorage.getItem("elb-getting-started-dismissed") === "true",
   );
+  const isMobile = useIsMobileViewport();
 
   const hasConfig = Boolean(
     config.subscriptionId &&
@@ -88,10 +106,17 @@ export function useGettingStartedReadiness({
     (!terminalEnabled || !terminalSidecar.isLoading);
 
   useEffect(() => {
+    if (isMobile) return;
     if (queriesLoaded && needsSetup && !showGettingStarted && !showWizard) {
       setShowGettingStarted(true);
     }
-  }, [queriesLoaded, needsSetup, showGettingStarted, showWizard]);
+  }, [isMobile, queriesLoaded, needsSetup, showGettingStarted, showWizard]);
+
+  useEffect(() => {
+    if (isMobile && showGettingStarted) {
+      setShowGettingStarted(false);
+    }
+  }, [isMobile, showGettingStarted]);
 
   const handleDismissGettingStarted = useCallback(() => {
     setShowGettingStarted(false);
@@ -100,6 +125,10 @@ export function useGettingStartedReadiness({
   }, []);
 
   const reopenGettingStarted = useCallback(() => {
+    if (typeof window !== "undefined" && window.matchMedia &&
+        window.matchMedia(MOBILE_MEDIA_QUERY).matches) {
+      return;
+    }
     sessionStorage.removeItem("elb-getting-started-dismissed");
     setGettingStartedDismissed(false);
     setShowGettingStarted(true);

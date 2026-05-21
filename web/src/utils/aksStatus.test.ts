@@ -16,6 +16,22 @@ describe("aksStatus", () => {
     expect(getAksProvisioningLabel(cluster)).toBe("Creating");
   });
 
+  it("treats AKS start lifecycle as transitioning even when power is already Running", () => {
+    const cluster = { power_state: "Running", provisioning_state: "Starting" };
+
+    expect(isAksWorkloadReady(cluster)).toBe(false);
+    expect(isAksProvisioning(cluster)).toBe(true);
+    expect(getAksProvisioningLabel(cluster)).toBe("Starting");
+  });
+
+  it("treats AKS stop lifecycle as transitioning before the power state settles", () => {
+    const cluster = { power_state: "Running", provisioning_state: "Stopping" };
+
+    expect(isAksWorkloadReady(cluster)).toBe(false);
+    expect(isAksProvisioning(cluster)).toBe(true);
+    expect(getAksProvisioningLabel(cluster)).toBe("Stopping");
+  });
+
   it("treats Running plus Succeeded as workload-ready", () => {
     expect(
       isAksWorkloadReady({ power_state: "Running", provisioning_state: "Succeeded" }),

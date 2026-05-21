@@ -14,18 +14,17 @@ Validation: `uv run pytest -q api/tests/test_smoke.py`.
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 
-@pytest.fixture(scope="module")
-def client() -> TestClient:
+@pytest.fixture()
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # Make sure no env state leaks between tests.
-    os.environ.setdefault("AZURE_TENANT_ID", "common")
-    os.environ.setdefault("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    monkeypatch.setenv("AZURE_TENANT_ID", "common")
+    monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
     from api.main import app
 
     return TestClient(app)

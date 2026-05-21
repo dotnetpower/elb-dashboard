@@ -4,6 +4,7 @@ import { armProxyApi } from "@/api/endpoints";
 import { ResourcePicker } from "@/components/ResourcePicker";
 import { saveConfig, type ResourceConfig } from "@/components/SetupWizard";
 import { SubscriptionPicker } from "@/components/SubscriptionPicker";
+import { isAksManagedResourceGroup } from "@/lib/aksManagedRg";
 
 import { AutoRefreshChip } from "./AutoRefreshChip";
 
@@ -82,12 +83,25 @@ export function DashboardHeader({
                     );
                     const items = groups.map((g) => {
                       const tags = g.tags ?? {};
+                      const isAksManaged = isAksManagedResourceGroup({
+                        name: g.name,
+                        tags,
+                      });
                       const isElb = Object.keys(tags).some((k) => k.startsWith("elb-"));
+                      let description = g.location;
+                      let disabled = false;
+                      if (isAksManaged) {
+                        description = `${g.location} · AKS-managed (node RG)`;
+                        disabled = true;
+                      } else if (!isElb) {
+                        description = `${g.location} · no elb-* tag`;
+                        disabled = true;
+                      }
                       return {
                         value: g.name,
                         label: g.name,
-                        description: isElb ? g.location : `${g.location} · no elb-* tag`,
-                        disabled: !isElb,
+                        description,
+                        disabled,
                       };
                     });
                     items.sort((a, b) => {
@@ -106,7 +120,7 @@ export function DashboardHeader({
           {gettingStartedDismissed && (
             <button
               type="button"
-              className="cfg-gear"
+              className="cfg-gear dashboard-hide-mobile"
               onClick={onReopenGettingStarted}
               title="Re-open the Getting Started checklist"
               aria-label="Open Getting Started checklist"
@@ -117,7 +131,7 @@ export function DashboardHeader({
           )}
           <button
             type="button"
-            className="cfg-gear"
+            className="cfg-gear dashboard-hide-mobile"
             onClick={onOpenSettings}
             title="Workspace settings"
             aria-label="Open workspace settings"

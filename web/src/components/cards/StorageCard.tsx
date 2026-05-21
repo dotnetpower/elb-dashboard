@@ -56,7 +56,16 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName, cluste
   return (
     <MonitorCard
       title="Storage Account"
-      subtitle={enabled ? `${accountName} · ${resourceGroup}` : "Configure account name"}
+      subtitle={
+        enabled ? (
+          <>
+            {accountName}
+            <span className="storage-subtitle-rg"> · {resourceGroup}</span>
+          </>
+        ) : (
+          "Configure account name"
+        )
+      }
       status={status}
       fetching={query.isFetching || dbDownloading !== null}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}

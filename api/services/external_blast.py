@@ -12,6 +12,8 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 from collections.abc import Iterator
@@ -29,6 +31,7 @@ _INTERNAL_AUTH_ENV = "ELB_OPENAPI_INTERNAL_TOKEN"
 _API_AUTH_ENV = "ELB_OPENAPI_API_TOKEN"
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=300.0)
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,21 @@ def _sanitise_detail(value: Any) -> Any:
     return value
 
 
+def _compact_log_detail(value: Any, *, limit: int = 2000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        text = str(value)
+    return sanitise(text[:limit])
+
+
+def _upstream_request_url(exc: httpx.HTTPStatusError) -> str:
+    try:
+        return sanitise(str(exc.request.url))
+    except Exception:
+        return ""
+
+
 def _raise_upstream_error(exc: httpx.HTTPStatusError) -> None:
     try:
         exc.response.read()
@@ -107,6 +125,25 @@ def _raise_upstream_error(exc: httpx.HTTPStatusError) -> None:
         detail: Any = _sanitise_detail(exc.response.json())
     except Exception:
         detail = {"code": "openapi_error", "message": sanitise(exc.response.text[:500])}
+    if isinstance(detail, dict):
+        detail = dict(detail)
+        detail.setdefault("code", f"openapi_http_{exc.response.status_code}")
+        detail.setdefault("upstream_status", exc.response.status_code)
+        detail.setdefault("upstream_url", _upstream_request_url(exc))
+    LOGGER.warning(
+        "OpenAPI upstream request failed method=%s url=%s status=%s reason=%s "
+        "content_type=%s request_id=%s detail=%s",
+        exc.request.method,
+        _upstream_request_url(exc),
+        exc.response.status_code,
+        exc.response.reason_phrase,
+        exc.response.headers.get("content-type", ""),
+        exc.response.headers.get("x-request-id")
+        or exc.response.headers.get("x-ms-request-id")
+        or exc.response.headers.get("x-correlation-id")
+        or "",
+        _compact_log_detail(detail),
+    )
     raise HTTPException(exc.response.status_code, detail=detail) from exc
 
 

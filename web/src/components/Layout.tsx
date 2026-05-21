@@ -205,7 +205,7 @@ export function Layout({ children }: PropsWithChildren) {
   };
 
   return (
-    <div className="layout">
+    <div className={`layout${mobileNavOpen ? " layout--mobile-nav-open" : ""}`}>
       <header className="layout__topbar">
         {/* #13 Hamburger for mobile */}
         <button

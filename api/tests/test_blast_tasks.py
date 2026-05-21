@@ -26,6 +26,7 @@ from api.services.query_grouping import build_query_split_execution_plan
 from api.services.query_metadata import parse_fasta_metadata
 from api.tasks import blast
 from azure.core.exceptions import ResourceNotFoundError
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 
@@ -2859,6 +2860,213 @@ def test_reconcile_marks_old_quiet_row_worker_lost(monkeypatch: pytest.MonkeyPat
     assert summary["worker_lost"] == 1
     assert repo.updates[0][1]["error_code"] == "worker_lost"
     assert repo.updates[0][1]["phase"] == "worker_lost"
+
+
+def test_reconcile_logs_external_refresh_http_detail(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recent = "2026-05-20T00:00:00+00:00"
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j5",
+                task_id="task-5",
+                updated_at=recent,
+                created_at=recent,
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "elastic_blast_job_id": "job-j5",
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    def fail_get_job(job_id: str, **_kwargs: object) -> dict[str, object]:
+        assert job_id == "job-j5"
+        raise HTTPException(
+            400,
+            detail={
+                "code": "openapi_http_400",
+                "message": "job id is not known yet",
+                "upstream_status": 400,
+            },
+        )
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr(
+        "api.routes._blast_shared._openapi_client_kwargs_from_cluster",
+        lambda *_args: {"base_url": "http://openapi.test"},
+    )
+    monkeypatch.setattr("api.services.external_blast.get_job", fail_get_job)
+    caplog.set_level("WARNING", logger="api.tasks.blast")
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
+
+    assert summary["untouched"] == 1
+    assert "external refresh failed job_id=j5" in caplog.text
+    assert "status_code=400" in caplog.text
+    assert "job id is not known yet" in caplog.text
+
+
+def test_reconcile_skips_external_refresh_without_elastic_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recent = "2026-05-20T00:00:00+00:00"
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="dashboard-uuid",
+                task_id="task-dashboard",
+                updated_at=recent,
+                created_at=recent,
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    def fail_get_job(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("external refresh should require an ElasticBLAST job id")
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr(
+        "api.routes._blast_shared._openapi_client_kwargs_from_cluster",
+        lambda *_args: {"base_url": "http://openapi.test"},
+    )
+    monkeypatch.setattr("api.services.external_blast.get_job", fail_get_job)
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
+
+    assert summary["untouched"] == 1
+    assert summary["external_refreshed"] == 0
+    assert repo.updates == []
+
+
+def test_reconcile_does_not_treat_dashboard_job_id_as_external(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recent = "2026-05-20T00:00:00+00:00"
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="job-dashboard-only",
+                task_id="task-dashboard",
+                updated_at=recent,
+                created_at=recent,
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    def fail_get_job(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("dashboard job ids must not be external ids")
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr(
+        "api.routes._blast_shared._openapi_client_kwargs_from_cluster",
+        lambda *_args: {"base_url": "http://openapi.test"},
+    )
+    monkeypatch.setattr("api.services.external_blast.get_job", fail_get_job)
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
+
+    assert summary["untouched"] == 1
+    assert summary["external_refreshed"] == 0
+    assert repo.updates == []
+
+
+def test_update_state_skips_identical_empty_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExistingState:
+        def __init__(self) -> None:
+            self.status = "running"
+            self.phase = "submitting"
+            self.error_code = ""
+            self.payload: dict[str, object] = {}
+
+    class FakeRepo:
+        def __init__(self) -> None:
+            self.updated = False
+            self.history_appended = False
+
+        def get(self, _job_id: str) -> ExistingState:
+            return ExistingState()
+
+        def update(self, *_args: object, **_kwargs: object) -> None:
+            self.updated = True
+
+        def append_history(self, *_args: object, **_kwargs: object) -> None:
+            self.history_appended = True
+
+    repo = FakeRepo()
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: repo)
+
+    blast._update_state("job-1", "submitting")
+
+    assert repo.updated is False
+    assert repo.history_appended is False
+
+
+def test_update_state_duplicate_terminal_checkpoint_still_finalizes_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExistingState:
+        def __init__(self) -> None:
+            self.status = "completed"
+            self.phase = "completed"
+            self.error_code = ""
+            self.payload: dict[str, object] = {}
+
+    class FakeRepo:
+        def get(self, _job_id: str) -> ExistingState:
+            return ExistingState()
+
+        def update(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("duplicate terminal checkpoint should not rewrite state")
+
+        def append_history(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("duplicate terminal checkpoint should not append history")
+
+    enqueued: list[tuple[str, str, str]] = []
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr(
+        blast,
+        "_enqueue_artifact_finalizer",
+        lambda job_id, phase, status: enqueued.append((job_id, phase, status)),
+    )
+
+    blast._update_state("job-1", "completed", status="completed")
+
+    assert enqueued == [("job-1", "completed", "completed")]
 
 
 # Local import to keep the file's existing imports section unchanged.

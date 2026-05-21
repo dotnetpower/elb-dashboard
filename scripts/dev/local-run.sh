@@ -222,7 +222,7 @@ run_api() {
   if api_port_is_listening "$api_port"; then
     if api_health_ready "$api_base_url"; then
       echo "api already running at $api_base_url (health OK)." >&2
-      echo "Stop the existing api task/process first if you need a fresh uvicorn reloader." >&2
+      echo "Stop the existing api task/process first if you need a fresh api process." >&2
       exit 0
     fi
     describe_api_port_owner "$api_port"
@@ -230,7 +230,7 @@ run_api() {
   fi
 
   cd "$project_root/api"
-  exec "$run_with_log" api -- uv run uvicorn api.main:app --reload --reload-dir . --reload-exclude 'tests/*' --host "$api_host" --port "$api_port" "$@"
+  exec "$run_with_log" api -- uv run uvicorn api.main:app --host "$api_host" --port "$api_port" "$@"
 }
 
 run_redis() {

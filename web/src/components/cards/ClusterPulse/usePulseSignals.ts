@@ -22,7 +22,7 @@ import {
 } from "@/components/cards/ClusterBento/jobMapping";
 import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/jobTypes";
 
-export const JOB_PREVIEW = 4;
+export const JOB_PREVIEW = 3;
 const REQUEST_METRICS_WINDOW_SEC = 900; // 15 min
 
 const JOB_STATE_ORDER: Record<DisplayJobState, number> = {
@@ -90,7 +90,7 @@ export function usePulseSignals(args: {
   });
 
   const jobsQuery = useQuery({
-    queryKey: ["blast-jobs-for-pulse", subscriptionId, resourceGroup, clusterName],
+    queryKey: ["blast-jobs", subscriptionId, resourceGroup, clusterName],
     queryFn: () =>
       blastApi.listJobs({
         subscriptionId,
@@ -109,7 +109,7 @@ export function usePulseSignals(args: {
   const jobsDegraded = (jobsQuery.data as JobsDegraded | undefined)?.degraded === true;
 
   const metricsQuery = useQuery({
-    queryKey: ["request-metrics-blast-pulse", REQUEST_METRICS_WINDOW_SEC],
+    queryKey: ["request-metrics-blast", REQUEST_METRICS_WINDOW_SEC],
     queryFn: () =>
       monitoringApi.requestMetrics({
         windowSeconds: REQUEST_METRICS_WINDOW_SEC,
@@ -145,12 +145,12 @@ export function usePulseSignals(args: {
 
   const sortedPreview = useMemo<JobRowView[]>(() => {
     const cmp = (a: JobRowView, b: JobRowView) => {
-      const oa = JOB_STATE_ORDER[a.state] ?? 99;
-      const ob = JOB_STATE_ORDER[b.state] ?? 99;
-      if (oa !== ob) return oa - ob;
       const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
       const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
-      return tb - ta;
+      if (ta !== tb) return tb - ta;
+      const oa = JOB_STATE_ORDER[a.state] ?? 99;
+      const ob = JOB_STATE_ORDER[b.state] ?? 99;
+      return oa - ob;
     };
     return [...jobRows].sort(cmp).slice(0, JOB_PREVIEW);
   }, [jobRows]);
