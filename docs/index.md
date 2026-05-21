@@ -6,6 +6,7 @@ ElasticBLAST Control Plane is a browser-only dashboard for running ElasticBLAST 
 
 - [Get Started](get-started.md) covers local prerequisites, first deployment, sign-in, and the optional end-to-end BLAST smoke test.
 - [Auth](auth.md) explains the browser sign-in and backend token validation model.
+- [Change Log](changelog.md) lists the recent feature notes and keeps the full archive searchable.
 - [Container Apps Migration](container-apps-migration.md) is the architecture reference for the six-sidecar deployment target.
 - [User Guide](user-guide/index.md) is the public walkthrough for operating the control plane from the browser.
 

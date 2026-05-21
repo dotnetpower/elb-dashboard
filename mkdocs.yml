@@ -28,6 +28,7 @@ nav:
   - Overview: index.md
   - Get Started: get-started.md
   - Auth: auth.md
+  - Change Log: changelog.md
   - User Guide:
       - Guide Home: user-guide/index.md
       - Dashboard: user-guide/dashboard.md
@@ -52,8 +53,10 @@ nav:
       - Codebase Map: copilot/codebase-map.md
 
 exclude_docs: |
-  features_change/**
   temp/**
+
+not_in_nav: |
+  features_change/**/*.md
 
 markdown_extensions:
   - admonition
