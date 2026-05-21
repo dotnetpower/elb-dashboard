@@ -148,6 +148,7 @@ COPY tmux.conf     /etc/tmux.conf
 COPY banner.sh /usr/local/bin/elb-banner
 COPY tool-versions.sh /usr/local/bin/elb-tool-versions
 COPY motd          /etc/motd
+COPY runtime_overrides /opt/elb/runtime_overrides
 COPY entrypoint.sh /usr/local/bin/elb-entrypoint
 COPY exec_server.py /usr/local/bin/elb-exec-server
 COPY cgroup_reporter.py /usr/local/bin/elb-cgroup-reporter

@@ -210,6 +210,17 @@ When you do redeploy, state the reason in the change note (which sidecar, which 
 ### Cross-repo consistency
 When `dotnetpower/elastic-blast-azure` updates `src/elastic_blast/constants.py` image tags or the `azure-prereq.md` step structure, open a tracking issue here and bump `IMAGE_TAGS` / cloud-init in the same PR.
 
+### Version stamp & SemVer bump
+The SPA header carries `v<MAJOR>.<MINOR>.<PATCH> · <short-sha>` next to "Control Plane". The version comes from [web/package.json](../web/package.json) (single source of truth — [pyproject.toml](../pyproject.toml) is kept in sync); the short SHA comes from `git rev-parse --short HEAD`. Both are injected at build time via `vite.config.ts` `define`, and [scripts/dev/quick-deploy.sh](../scripts/dev/quick-deploy.sh) `frontend` resolves them on the host and passes them to `az acr build` as `--build-arg` (the ACR context has no `.git`).
+
+Bump SemVer with [scripts/dev/bump-version.sh](../scripts/dev/bump-version.sh):
+
+* **MAJOR** — manual only (`--major`). Breaking change you decide to ship.
+* **MINOR** — auto when any commit since the last `vX.Y.Z` tag starts with `feat:` / `feat(scope):`.
+* **PATCH** — auto when no `feat:` but at least one `fix:` / `fix(scope):` landed.
+
+The script refuses to auto-bump if a `BREAKING CHANGE` footer or `feat!:` / `fix!:` marker is detected — pass `--major` to acknowledge. It rewrites `web/package.json` + `pyproject.toml`, creates `chore(release): vX.Y.Z` + annotated tag, and does **not** push. Maintainer pushes with `git push origin <branch> --follow-tags`. Do not edit `version` in either file by hand — go through the script so the release commit and tag stay consistent. Full workflow + troubleshooting: [docs/copilot/version-management.md](../docs/copilot/version-management.md).
+
 ---
 
 ## 14. Out of Scope (explicit)

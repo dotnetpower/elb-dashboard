@@ -52,6 +52,19 @@
   text-transform: uppercase;
   letter-spacing: 0.1em;
   white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.layout__logo-version {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  opacity: 0.6;
+  cursor: help;
+  white-space: pre;
 }
 
 .layout__nav {

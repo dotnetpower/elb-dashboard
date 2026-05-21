@@ -160,6 +160,10 @@ if [[ "$SIDECAR" == "frontend" ]]; then
      [[ "$VITE_API_BASE_URL_VAL" =~ ^https?://(localhost|127\.|0\.0\.0\.0|\[::1\]) ]]; then
     die "VITE_API_BASE_URL='$VITE_API_BASE_URL_VAL' points at the local host — refusing to bake that into the cloud frontend. Run 'unset VITE_API_BASE_URL' (or export VITE_API_BASE_URL='') and retry."
   fi
+  # Version stamp: ACR builds run without .git in context, so resolve on host.
+  APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"
+  GIT_COMMIT_VAL="${GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)}"
+  BUILD_TIME_VAL="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   BUILD_ARGS=(
     --build-arg "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL"
     --build-arg "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL"
@@ -169,6 +173,9 @@ if [[ "$SIDECAR" == "frontend" ]]; then
     --build-arg "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL"
     --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
     --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
+    --build-arg "APP_VERSION=$APP_VERSION_VAL"
+    --build-arg "GIT_COMMIT=$GIT_COMMIT_VAL"
+    --build-arg "BUILD_TIME=$BUILD_TIME_VAL"
   )
 elif [[ "$SIDECAR" == "terminal" ]]; then
   BUILD_ARGS=(

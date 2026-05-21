@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from collections.abc import Iterable
 from typing import Any, cast
 
@@ -76,6 +78,86 @@ __all__ = [
 
 def reset_k8s_credential_cache() -> None:
     _k8s_client.reset_k8s_credential_cache()
+    _reset_blast_status_cache()
+
+
+# ---------------------------------------------------------------------------
+# Short-TTL cache for cluster-wide app=blast pods/jobs lookups.
+# ---------------------------------------------------------------------------
+# ``k8s_check_blast_status`` performs two cluster-wide HTTP roundtrips
+# (``GET .../pods?labelSelector=app=blast`` and ``.../jobs?labelSelector=app=blast``)
+# before doing in-memory filtering for a specific ``job_id``. The BLAST jobs
+# list endpoint calls this helper once per active row, so each browser poll
+# pays N × 2 round-trips. A 3 s TTL memoisation reduces this to ~2 round-trips
+# per browser poll regardless of how many active rows the user has, while
+# keeping the freshness budget well under the frontend polling cadence.
+
+_BLAST_STATUS_CACHE_TTL_SECONDS = 3.0
+_BLAST_STATUS_CACHE: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
+_BLAST_STATUS_CACHE_LOCK = threading.Lock()
+
+
+def _reset_blast_status_cache() -> None:
+    with _BLAST_STATUS_CACHE_LOCK:
+        _BLAST_STATUS_CACHE.clear()
+
+
+def _fetch_blast_pods_and_jobs(
+    session: Any,
+    server: str,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str,
+) -> dict[str, Any]:
+    """Return ``{target_ns, all_pods, all_jobs}`` or ``{error: ...}`` for the cluster.
+
+    Short-TTL memoised (~3 s) keyed by the cluster + namespace so multiple
+    per-row calls during one ``/api/blast/jobs`` request share one set of
+    HTTP roundtrips.
+    """
+
+    key = (subscription_id, resource_group, cluster_name, namespace)
+    now = time.monotonic()
+    with _BLAST_STATUS_CACHE_LOCK:
+        cached = _BLAST_STATUS_CACHE.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+    target_ns = _namespace_or_default(session, server, namespace)
+    pods_response = session.get(
+        f"{server}/api/v1/namespaces/{target_ns}/pods",
+        params={"labelSelector": "app=blast"},
+        timeout=10,
+    )
+    if pods_response.status_code != 200:
+        return {
+            "error": f"pods API error: {pods_response.status_code}",
+            "target_ns": target_ns,
+        }
+    all_pods = pods_response.json().get("items", [])
+
+    jobs_response = session.get(
+        f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs",
+        params={"labelSelector": "app=blast"},
+        timeout=10,
+    )
+    if jobs_response.status_code != 200:
+        return {
+            "error": f"jobs API error: {jobs_response.status_code}",
+            "target_ns": target_ns,
+            "all_pods": all_pods,
+        }
+    all_jobs = jobs_response.json().get("items", [])
+
+    result: dict[str, Any] = {
+        "target_ns": target_ns,
+        "all_pods": all_pods,
+        "all_jobs": all_jobs,
+    }
+    with _BLAST_STATUS_CACHE_LOCK:
+        _BLAST_STATUS_CACHE[key] = (now + _BLAST_STATUS_CACHE_TTL_SECONDS, result)
+    return result
 
 
 def _container_terminated_state(container_status: dict[str, Any]) -> dict[str, Any] | None:
@@ -298,39 +380,30 @@ def k8s_check_blast_status(
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
-        target_ns = _namespace_or_default(session, server, namespace)
-        pods_response = session.get(
-            f"{server}/api/v1/namespaces/{target_ns}/pods",
-            params={"labelSelector": "app=blast"},
-            timeout=10,
+        snapshot = _fetch_blast_pods_and_jobs(
+            session,
+            server,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            namespace,
         )
-        if pods_response.status_code != 200:
+        target_ns = snapshot.get("target_ns") or namespace
+        if "error" in snapshot:
+            error = str(snapshot["error"])
             return {
                 "status": "unknown",
-                "pods": 0,
-                "detail": f"pods API error: {pods_response.status_code}",
+                "pods": len(snapshot.get("all_pods") or []),
+                "detail": error,
             }
-
-        all_pods = pods_response.json().get("items", [])
+        all_pods = snapshot.get("all_pods") or []
         blast_pods = (
             [pod for pod in all_pods if _pod_has_env_value(pod, "BLAST_ELB_JOB_ID", job_id)]
             if job_id
             else all_pods
         )
 
-        jobs_response = session.get(
-            f"{server}/apis/batch/v1/namespaces/{target_ns}/jobs",
-            params={"labelSelector": "app=blast"},
-            timeout=10,
-        )
-        if jobs_response.status_code != 200:
-            return {
-                "status": "unknown",
-                "pods": len(blast_pods),
-                "detail": f"jobs API error: {jobs_response.status_code}",
-            }
-
-        all_jobs = jobs_response.json().get("items", [])
+        all_jobs = snapshot.get("all_jobs") or []
         if job_id:
             scoped_names = _owned_job_names(blast_pods)
             jobs = [

@@ -31,9 +31,9 @@ def audit_log(
 ) -> dict[str, Any]:
     """Return recent audit events from the jobhistory table."""
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         # List recent jobs for the caller, then collect their history
         jobs = repo.list_for_owner(caller.object_id, limit=50)
         events: list[dict[str, Any]] = []

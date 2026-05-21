@@ -288,10 +288,10 @@ def blast_submit(
     try:
         from datetime import datetime
 
-        from api.services.state_repo import JobState, JobStateRepository
+        from api.services.state_repo import JobState, get_state_repo
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
-        repo = JobStateRepository()
+        repo = get_state_repo()
         if normalised_body.get("idempotency_key"):
             existing = repo.get(job_id)
             if existing is not None:
