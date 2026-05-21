@@ -41,7 +41,7 @@ export function StepRow({
           ? "var(--danger)"
           : "var(--text-faint)";
 
-  const isInteractive = state !== "pending" && state !== "skipped";
+  const isInteractive = state !== "pending";
 
   return (
     <div

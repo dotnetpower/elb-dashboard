@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
@@ -67,6 +68,71 @@ __all__ = [
 
 def reset_k8s_credential_cache() -> None:
     _k8s_client.reset_k8s_credential_cache()
+
+
+def _parse_k8s_timestamp(value: str) -> datetime:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _min_k8s_timestamp(values: list[str]) -> str | None:
+    parsed = _parseable_k8s_timestamps(values)
+    if not parsed:
+        return None
+    return min(parsed, key=lambda item: item[1])[0]
+
+
+def _max_k8s_timestamp(values: list[str]) -> str | None:
+    parsed = _parseable_k8s_timestamps(values)
+    if not parsed:
+        return None
+    return max(parsed, key=lambda item: item[1])[0]
+
+
+def _parseable_k8s_timestamps(values: list[str]) -> list[tuple[str, datetime]]:
+    parsed: list[tuple[str, datetime]] = []
+    for value in values:
+        try:
+            parsed.append((value, _parse_k8s_timestamp(value)))
+        except ValueError:
+            LOGGER.debug("ignoring unparseable Kubernetes timestamp: %r", value)
+    return parsed
+
+
+def _k8s_timestamp_span_payload(
+    prefix: str,
+    started_values: list[str],
+    completed_values: list[str],
+) -> dict[str, Any]:
+    started = _parseable_k8s_timestamps(started_values)
+    completed = _parseable_k8s_timestamps(completed_values)
+    if not started or not completed:
+        return {}
+    start_value, start_time = min(started, key=lambda item: item[1])
+    completed_value, completed_time = max(completed, key=lambda item: item[1])
+    payload: dict[str, Any] = {
+        f"{prefix}_started_at": start_value,
+        f"{prefix}_completed_at": completed_value,
+    }
+    if completed_time >= start_time:
+        payload[f"{prefix}_duration_ms"] = int((completed_time - start_time).total_seconds() * 1000)
+    return payload
+
+
+def _container_terminated_state(container_status: dict[str, Any]) -> dict[str, Any] | None:
+    for state_key in ("state", "lastState"):
+        state = container_status.get(state_key, {})
+        if not isinstance(state, dict):
+            continue
+        terminated = state.get("terminated")
+        if isinstance(terminated, dict):
+            return terminated
+    return None
 
 
 def _get_k8s_session(
@@ -334,11 +400,55 @@ def k8s_check_blast_status(
         succeeded = 0
         failed = 0
         active = 0
+        started_at_values: list[str] = []
+        completed_at_values: list[str] = []
+        blast_container_started_at_values: list[str] = []
+        blast_container_completed_at_values: list[str] = []
+        results_export_container_started_at_values: list[str] = []
+        results_export_container_completed_at_values: list[str] = []
+        blast_container_count = 0
+        results_export_container_count = 0
         for job in jobs:
             job_status = job.get("status", {})
             succeeded += job_status.get("succeeded", 0)
             failed += job_status.get("failed", 0)
             active += job_status.get("active", 0)
+            if job_status.get("startTime"):
+                started_at_values.append(str(job_status["startTime"]))
+            if job_status.get("completionTime"):
+                completed_at_values.append(str(job_status["completionTime"]))
+
+        for pod in blast_pods:
+            pod_status = pod.get("status", {})
+            if pod_status.get("startTime"):
+                started_at_values.append(str(pod_status["startTime"]))
+            for container_status in pod_status.get("containerStatuses", []) or []:
+                if not isinstance(container_status, dict):
+                    continue
+                terminated = _container_terminated_state(container_status)
+                if terminated is None:
+                    continue
+                container_name = str(container_status.get("name") or "")
+                if terminated.get("startedAt"):
+                    started_at_values.append(str(terminated["startedAt"]))
+                if terminated.get("finishedAt"):
+                    completed_at_values.append(str(terminated["finishedAt"]))
+                if container_name == "blast":
+                    blast_container_count += 1
+                    if terminated.get("startedAt"):
+                        blast_container_started_at_values.append(str(terminated["startedAt"]))
+                    if terminated.get("finishedAt"):
+                        blast_container_completed_at_values.append(str(terminated["finishedAt"]))
+                elif container_name == "results-export":
+                    results_export_container_count += 1
+                    if terminated.get("startedAt"):
+                        results_export_container_started_at_values.append(
+                            str(terminated["startedAt"])
+                        )
+                    if terminated.get("finishedAt"):
+                        results_export_container_completed_at_values.append(
+                            str(terminated["finishedAt"])
+                        )
 
         if failed > 0:
             blast_status = "failed"
@@ -349,7 +459,9 @@ def k8s_check_blast_status(
         else:
             blast_status = "creating"
 
-        return {
+        started_at = _min_k8s_timestamp(started_at_values)
+        completed_at = _max_k8s_timestamp(completed_at_values)
+        result = {
             "status": blast_status,
             "job_id": job_id,
             "pods": len(blast_pods),
@@ -359,7 +471,28 @@ def k8s_check_blast_status(
             "active": active,
             "namespace": target_ns,
             "scoped_by_job_id": bool(job_id),
+            "blast_container_count": blast_container_count,
+            "results_export_container_count": results_export_container_count,
         }
+        if started_at:
+            result["started_at"] = started_at
+        if completed_at:
+            result["completed_at"] = completed_at
+        result.update(
+            _k8s_timestamp_span_payload(
+                "blast_container",
+                blast_container_started_at_values,
+                blast_container_completed_at_values,
+            )
+        )
+        result.update(
+            _k8s_timestamp_span_payload(
+                "results_export_container",
+                results_export_container_started_at_values,
+                results_export_container_completed_at_values,
+            )
+        )
+        return result
     except Exception as exc:
         return {"status": "unknown", "pods": 0, "detail": str(exc)[:200]}
     finally:

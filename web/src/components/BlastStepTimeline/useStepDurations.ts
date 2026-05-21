@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { PHASE_STEPS, PHASE_TO_STEP, type StepState } from "./constants";
 
 function formatDuration(ms: number): string {
+  if (ms > 0 && ms < 1000) return "<1s";
   const s = Math.round(ms / 1000);
   if (s >= 3600)
     return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
@@ -74,6 +75,16 @@ export function useStepDurations(args: {
         new Date(sd.started_at as string).getTime();
       if (ms >= 0) return formatDuration(ms);
     }
+    const serverDurationMs = numberValue(sd?.duration_ms);
+    const durationSource = stringValue(sd?.duration_source);
+    if (
+      serverDurationMs !== null &&
+      ["k8s_runtime", "timestamps", "server_checkpoint", "result_artifact_verification"].includes(
+        durationSource,
+      )
+    ) {
+      return formatDuration(serverDurationMs);
+    }
     // Server-side started_at but no completed_at → live elapsed from
     // server start.
     if (sd?.started_at && state === "active") {
@@ -90,8 +101,17 @@ export function useStepDurations(args: {
       const start = phaseTimestamps.current[key];
       if (start) return formatDuration(Date.now() - start);
     }
+    if (state === "done") return "not measured";
     return null;
   };
 
   return { getStepDuration };
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }

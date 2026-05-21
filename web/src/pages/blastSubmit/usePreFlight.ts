@@ -3,6 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 
 import { formatApiError } from "@/api/client";
 import { blastApi } from "@/api/endpoints";
+import type { ApiAdmission, ApiResponseMeta } from "@/api/blast";
 
 import type { ToastFn } from "./types";
 
@@ -19,10 +20,14 @@ export interface PreFlightCheck {
 }
 
 export interface PreFlightResult {
+  status?: string;
   ready: boolean;
+  decision?: string;
   checks: PreFlightCheck[];
   critical_blockers: number;
   summary: string;
+  admission?: ApiAdmission;
+  meta?: ApiResponseMeta;
 }
 
 export interface UsePreFlightArgs {

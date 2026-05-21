@@ -738,9 +738,9 @@
 }
 [data-theme="light"] .bsl-grid .blast-cmd-preview__code {
   margin: 0;
-  background: #1f1f23;
+  background: #1b1b1b;
   border-left: 3px solid var(--accent);
-  color: #f7f7f8;
+  color: #e8e6df;
   font-size: 11.5px;
   line-height: 1.6;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
@@ -753,10 +753,17 @@
   color: #79c0ff;
 }
 [data-theme="light"] .bsl-grid .blast-cmd-token--value {
-  color: #f2d58a;
+  color: #ffd485;
 }
 [data-theme="light"] .bsl-grid .blast-cmd-token--number {
   color: #a7f3d0;
+}
+[data-theme="light"] .bsl-grid .blast-cmd-token--comment {
+  color: var(--text-faint);
+  font-style: italic;
+}
+[data-theme="light"] .bsl-grid .blast-cmd-token--continuation {
+  color: #8b949e;
 }
 [data-theme="light"] .bsl-grid .blast-cmd-copy {
   background: #ffffff;

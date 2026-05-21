@@ -5,17 +5,18 @@ Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data
 services or tasks.
 Key entry points: `aks_openapi_deploy`, `aks_openapi_deploy_status`,
 `aks_openapi_deployment`, `aks_openapi_token`, `aks_openapi_token_generate`,
-`aks_openapi_spec`, `aks_openapi_proxy`
+`aks_openapi_spec`, `_reject_dashboard_uuid_job_path`, `aks_openapi_proxy`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
-api/tests/test_route_contracts.py`.
+api/tests/test_openapi_proxy_route.py api/tests/test_route_contracts.py`.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
@@ -27,6 +28,11 @@ from api.routes._blast_shared import _OPENAPI_PROXY_ALLOWED_HEADERS, _safe_delay
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_DASHBOARD_UUID_JOB_PATH_RE = re.compile(
+    r"^/v1/jobs/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:/|\?|$)",
+    re.IGNORECASE,
+)
 
 
 class OpenApiTokenRequest(BaseModel):
@@ -52,6 +58,22 @@ def _raise_openapi_route_error(exc: Exception) -> None:
             "message": "The OpenAPI API token could not be read or updated.",
         },
     ) from exc
+
+
+def _reject_dashboard_uuid_job_path(target_path: str) -> None:
+    if not _DASHBOARD_UUID_JOB_PATH_RE.match(target_path):
+        return
+    raise HTTPException(
+        status_code=400,
+        detail={
+            "code": "dashboard_job_id_not_openapi_job_id",
+            "message": (
+                "OpenAPI job endpoints expect the short job_id returned by POST /v1/jobs. "
+                "Dashboard job UUIDs are local control-plane IDs; use "
+                "/api/blast/jobs/{job_id} or the Jobs page for those IDs."
+            ),
+        },
+    )
 
 
 @router.post("/openapi/deploy")
@@ -334,6 +356,7 @@ async def aks_openapi_proxy(
             status_code=400,
             detail={"code": "invalid_openapi_path", "message": "path contains invalid characters"},
         )
+    _reject_dashboard_uuid_job_path(target_path)
 
     sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
     cred = get_credential()

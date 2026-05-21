@@ -23,6 +23,16 @@ const TERMINAL_PHASES = new Set([
   "cancelled",
 ]);
 
+const RESULTS_READY_PHASES = new Set([
+  "completed",
+  "results_pending",
+  "failed",
+  "error",
+  "submit_failed",
+  "warmup_failed",
+  "cancelled",
+]);
+
 export interface UseBlastResultsStateArgs {
   jobId: string | undefined;
   searchParams: URLSearchParams;
@@ -43,18 +53,15 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
 
   const jobQuery = useQuery({
     queryKey: ["blast-job", jobId],
-    queryFn: () => blastApi.getJob(jobId!),
+    queryFn: () => blastApi.getJob(jobId!, { includeDatabaseMetadata: false }),
     enabled: Boolean(jobId),
     refetchInterval: (q) => {
       const d = q.state.data;
       if (!d) return 3_000;
-      if (
-        d.status === "completed" ||
-        d.status === "failed" ||
-        d.runtime_status === "Completed" ||
-        d.runtime_status === "Failed"
-      )
+      const resolved = resolveBlastJobPhase(d);
+      if (TERMINAL_PHASES.has(resolved.phase) || FAILURE_PHASES.has(resolved.phase)) {
         return false;
+      }
       return 5_000;
     },
   });
@@ -86,11 +93,15 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
   const clusterName =
     searchParams.get("cluster_name") || payloadClusterName || "elb-cluster";
 
+  const phaseInfo = resolveBlastJobPhase(job);
+
   const resultsQuery = useQuery({
     queryKey: ["blast-results", jobId, subscriptionId, storageAccount, resourceGroup],
     queryFn: () =>
       blastApi.listResults(jobId!, subscriptionId, storageAccount, resourceGroup),
-    enabled: Boolean(jobId && subscriptionId && storageAccount),
+    enabled: Boolean(
+      jobId && subscriptionId && storageAccount && RESULTS_READY_PHASES.has(phaseInfo.phase),
+    ),
     refetchInterval: (q) => {
       if (q.state.data?.files && q.state.data.files.length > 0) return false;
       if (q.state.data?.public_access_disabled) return false;
@@ -101,8 +112,6 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
   const allFiles = resultsQuery.data?.files ?? [];
   const split = splitBlastResultFiles(allFiles);
   const publicAccessDisabled = resultsQuery.data?.public_access_disabled === true;
-
-  const phaseInfo = resolveBlastJobPhase(job);
   const resultState = resolveBlastResultState({
     job,
     phase: phaseInfo.phase,
@@ -119,7 +128,9 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     staleTime: 10_000,
     refetchInterval: (q) => {
       const state = q.state.data?.artifact_state;
-      if (!state || state === "ready" || state === "inline_fallback") return false;
+      if (!state || state === "ready" || state === "inline_fallback" || state === "missing") {
+        return false;
+      }
       return 5_000;
     },
     retry: 3,

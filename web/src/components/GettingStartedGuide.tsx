@@ -45,13 +45,13 @@ export function GettingStartedGuide({
     {
       id: "cluster",
       title: "Create an AKS cluster",
-      description: "Provision an Azure Kubernetes Service cluster to run BLAST searches. Takes 5–10 minutes.",
+      description: "Provision an Azure Kubernetes Service cluster that can stage, warm, and run BLAST workloads. Takes 5–10 minutes.",
       icon: <Server size={18} />,
       done: hasCluster,
       action: hasCluster ? null : { label: "Go to Dashboard → AKS card → Add Cluster", to: "/" },
       detail: hasCluster
         ? clusterRunning ? "Cluster is ready" : "Cluster exists but is not ready yet. Wait for provisioning to finish, or start it from the Dashboard if it is stopped."
-        : 'Click "+ Add Cluster" on the AKS card. Default: Standard_E16s_v5, 10 nodes for standard workloads. For large databases (nt, nr), use Standard_E32s_v5 or higher.',
+        : 'Click "+ Add Cluster" on the AKS card. Default: Standard_E16s_v5, 10 nodes for standard workloads. For large databases (nt, nr), use Standard_E32s_v5 or higher. Warmup works best when the cluster has enough memory for the selected database shards.',
     },
     ...(terminalEnabled
       ? [
@@ -70,12 +70,12 @@ export function GettingStartedGuide({
       : []),
     {
       id: "database",
-      title: "Download a BLAST database",
-      description: "Download a reference database from NCBI to your storage account. Size varies by database.",
+      title: "Prepare and warm a BLAST database",
+      description: "Copy a reference database from NCBI, prepare shard layouts, then warm it on AKS before the first search.",
       icon: <Database size={18} />,
       done: false, // Always shown as a recommendation
-      action: { label: "Go to Dashboard → Storage card → Download DB", to: "/" },
-      detail: 'Recommended databases:\n• 16S_ribosomal_RNA (~18 MB) — fastest, good for testing\n• core_nt (~250 GB) — core nucleotide, most common\n• nt (~400 GB) — full nucleotide collection\n• nr (~300 GB) — non-redundant protein\n\nOpen the Storage card, click "Download from NCBI" and select a database.',
+      action: { label: "Go to Dashboard → Storage card → Prepare DB", to: "/" },
+      detail: 'Recommended databases:\n• 16S_ribosomal_RNA (~18 MB) — fastest, good for testing\n• core_nt (~250 GB) — core nucleotide, most common\n• nt (~400 GB) — full nucleotide collection\n• nr (~300 GB) — non-redundant protein\n\nOpen the Storage card, prepare the database from NCBI, and let the prepare flow create the available shard layouts. After AKS is ready, use warmup for the database you plan to search so New Search can run against warmed data instead of cold staging.',
     },
   ];
 

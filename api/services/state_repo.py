@@ -363,6 +363,7 @@ class JobStateRepository:
         task_id: str | None = None,
         error_code: str | None = None,
         payload: dict[str, Any] | None = None,
+        updated_at: str | None = None,
     ) -> JobState:
         with self._state_client() as t:
             try:
@@ -389,7 +390,7 @@ class JobStateRepository:
                 )
                 e["schema_version"] = _JOB_SCHEMA_VERSION
                 e.update(canonical)
-            e["updated_at"] = _now_iso()
+            e["updated_at"] = updated_at or _now_iso()
             t.update_entity(e, mode=UpdateMode.MERGE)
         updated = JobState.from_entity(e)
         self.append_history(
@@ -493,6 +494,28 @@ class JobStateRepository:
                         break
             except ResourceNotFoundError:
                 self._ensure_table("jobstate")
+        return rows
+
+    def list_completed(
+        self,
+        *,
+        job_type: str = "blast",
+        limit: int = 100,
+    ) -> list[JobState]:
+        """Return recently stored completed jobs for background backfill tasks."""
+        safe_type = _sanitise_odata_value(job_type)
+        filter_expr = f"type eq '{safe_type}' and status eq 'completed'"
+        rows: list[JobState] = []
+        with self._state_client() as t:
+            try:
+                entities = t.query_entities(filter_expr, results_per_page=limit)
+                for e in entities:
+                    rows.append(JobState.from_entity(dict(e)))
+                    if len(rows) >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+        rows.sort(key=lambda r: r.updated_at or r.created_at or "", reverse=True)
         return rows
 
     def list_children_for_owner(

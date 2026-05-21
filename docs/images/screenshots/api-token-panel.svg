@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1252" height="145" viewBox="0 0 1252 145" role="img" aria-labelledby="title desc">
+  <title id="title">API token panel</title>
+  <desc id="desc">A dark API token panel showing X-ELB-API-Token configured, a masked token value, and Refresh, Regenerate, Reveal, and Copy buttons.</desc>
+  <rect width="1252" height="145" fill="#0b0f17"/>
+  <rect x="4" y="8" width="1244" height="129" rx="8" fill="#151a21" stroke="#2a303a"/>
+  <rect x="20" y="27" width="27" height="27" rx="7" fill="#13251f"/>
+  <path d="M32 44c-2.2 2.2-5.8 2.2-8 0s-2.2-5.8 0-8l2.7-2.7c1.7-1.7 4.2-2.1 6.3-1.1" fill="none" stroke="#68d391" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M35 32c2.2-2.2 5.8-2.2 8 0s2.2 5.8 0 8l-2.7 2.7c-1.7 1.7-4.2 2.1-6.3 1.1" fill="none" stroke="#68d391" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M30 39l8-8" fill="none" stroke="#68d391" stroke-width="1.8" stroke-linecap="round"/>
+  <text x="56" y="37" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700">API Token</text>
+  <text x="56" y="57" fill="#9fb1c7" font-family="Inter, Arial, sans-serif" font-size="13">X-ELB-API-Token · configured</text>
+
+  <rect x="1016" y="25" width="91" height="31" rx="7" fill="#171c24" stroke="#374151"/>
+  <text x="1046" y="45" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Refresh</text>
+  <path d="M1033 36a5 5 0 1 1-1 7" fill="none" stroke="#d7e0ea" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M1031 36h4v4" fill="none" stroke="#d7e0ea" stroke-width="1.5" stroke-linecap="round"/>
+
+  <rect x="1116" y="25" width="114" height="31" rx="7" fill="#171c24" stroke="#374151"/>
+  <text x="1147" y="45" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Regenerate</text>
+  <path d="M1133 36a5 5 0 1 1-1 7" fill="none" stroke="#d7e0ea" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M1131 36h4v4" fill="none" stroke="#d7e0ea" stroke-width="1.5" stroke-linecap="round"/>
+
+  <rect x="20" y="72" width="1210" height="52" rx="7" fill="#1b2028" stroke="#2c3440"/>
+  <text x="32" y="103" fill="#f8fafc" font-family="JetBrains Mono, Consolas, monospace" font-size="13" font-weight="700">tok_************_masked</text>
+
+  <rect x="1049" y="83" width="84" height="30" rx="7" fill="#171c24" stroke="#374151"/>
+  <text x="1077" y="103" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Reveal</text>
+  <path d="M1060 98c3-4 8-4 11 0-3 4-8 4-11 0z" fill="none" stroke="#d7e0ea" stroke-width="1.4"/>
+  <circle cx="1065.5" cy="98" r="1.5" fill="#d7e0ea"/>
+
+  <rect x="1143" y="83" width="77" height="30" rx="7" fill="#171c24" stroke="#374151"/>
+  <text x="1173" y="103" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Copy</text>
+  <rect x="1157" y="92" width="9" height="9" rx="1.5" fill="none" stroke="#d7e0ea" stroke-width="1.3"/>
+  <rect x="1161" y="96" width="9" height="9" rx="1.5" fill="none" stroke="#d7e0ea" stroke-width="1.3"/>
+</svg>

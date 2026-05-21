@@ -2481,6 +2481,243 @@ def test_merge_progress_payload_tracks_staging_db_before_submit() -> None:
     assert steps["staging_db"]["last_output"] == "init-ssd progress"
 
 
+def test_merge_progress_payload_keeps_warmed_ssd_reuse_as_skipped_step() -> None:
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "warmup_ready",
+                "status": "running",
+                "steps": {
+                    "warming_up": {
+                        "phase": "warmup_ready",
+                        "status": "completed",
+                        "started_at": "2026-05-21T03:03:18+00:00",
+                        "completed_at": "2026-05-21T03:03:22+00:00",
+                    },
+                },
+            }
+        },
+        phase="staging_db",
+        status="completed",
+        error_code="",
+        details={
+            "skipped": True,
+            "decision": "warmed_ssd_reused",
+            "skip_reason": "node_local_ssd_warmup_ready",
+            "output": "Node-local DB warmup is ready; skipping SSD init.",
+        },
+    )
+
+    step = payload["_progress"]["steps"]["staging_db"]
+    assert step["status"] == "skipped"
+    assert step["success"] is True
+    assert step["decision"] == "warmed_ssd_reused"
+    assert step["skip_reason"] == "node_local_ssd_warmup_ready"
+    assert step["duration_ms"] == 0
+
+
+def test_merge_progress_payload_preserves_skipped_step_when_late_terminal_details_arrive() -> None:
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "staging_db",
+                "status": "running",
+                "steps": {
+                    "staging_db": {
+                        "phase": "staging_db",
+                        "status": "skipped",
+                        "skipped": True,
+                        "success": True,
+                        "started_at": "2026-05-21T03:03:22+00:00",
+                        "completed_at": "2026-05-21T03:03:22+00:00",
+                        "duration_ms": 0,
+                        "duration_source": "timestamps",
+                        "output": "Node-local DB warmup is ready; skipping SSD init.",
+                    },
+                },
+            }
+        },
+        phase="staging_db",
+        status="completed",
+        error_code="",
+        details={
+            "output": "elastic-blast submit output",
+            "last_output": "elastic-blast submit output",
+            "terminal_duration_ms": 129_289,
+            "exit_code": 0,
+        },
+    )
+
+    step = payload["_progress"]["steps"]["staging_db"]
+    assert step["status"] == "skipped"
+    assert step["skipped"] is True
+    assert step["duration_ms"] == 0
+    assert step["output"] == "Node-local DB warmup is ready; skipping SSD init."
+    assert "terminal_duration_ms" not in step
+    assert "last_output" not in step
+
+
+def test_merge_progress_payload_failed_update_overrides_existing_skipped_step() -> None:
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "staging_db",
+                "status": "running",
+                "steps": {
+                    "staging_db": {
+                        "phase": "staging_db",
+                        "status": "skipped",
+                        "skipped": True,
+                        "success": True,
+                        "started_at": "2026-05-21T03:03:22+00:00",
+                        "completed_at": "2026-05-21T03:03:22+00:00",
+                        "duration_ms": 0,
+                    },
+                },
+            }
+        },
+        phase="staging_db",
+        status="failed",
+        error_code="stage_db_failed",
+        details={"output": "staging failed after skip decision was revoked"},
+    )
+
+    step = payload["_progress"]["steps"]["staging_db"]
+    assert step["status"] == "failed"
+    assert step["success"] is False
+    assert step["error"] == "stage_db_failed"
+    assert step["output"] == "staging failed after skip decision was revoked"
+
+
+def test_merge_progress_payload_keeps_submit_log_out_of_completed_step() -> None:
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "submitting",
+                "status": "running",
+                "steps": {
+                    "submitting": {
+                        "phase": "submitting",
+                        "status": "completed",
+                        "started_at": "2026-05-21T03:04:14+00:00",
+                        "completed_at": "2026-05-21T03:04:30+00:00",
+                        "output": "submit log belongs here",
+                    }
+                },
+            }
+        },
+        phase="completed",
+        status="completed",
+        error_code="",
+        details={
+            "elastic_blast_submit_duration_ms": 125_157,
+            "output": "submit log should not be copied to completed",
+            "last_output": "submit log should not be copied to completed",
+            "log_line_count": 42,
+        },
+    )
+
+    completed = payload["_progress"]["steps"]["completed"]
+    assert completed["elastic_blast_submit_duration_ms"] == 125_157
+    assert "output" not in completed
+    assert "last_output" not in completed
+    assert "log_line_count" not in completed
+
+
+def test_merge_progress_payload_splits_submit_runtime_and_export_timing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.blast import progress as blast_progress
+
+    monkeypatch.setattr(blast_progress, "_now_iso", lambda: "2026-05-21T03:06:43+00:00")
+
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "submitting",
+                "status": "running",
+                "steps": {
+                    "submitting": {
+                        "phase": "submitting",
+                        "status": "running",
+                        "started_at": "2026-05-21T03:04:14+00:00",
+                        "updated_at": "2026-05-21T03:06:32+00:00",
+                    }
+                },
+            }
+        },
+        phase="completed",
+        status="completed",
+        error_code="",
+        details={
+            "k8s": {
+                "status": "completed",
+                "job_id": "job-runtime",
+                "started_at": "2026-05-21T03:04:30+00:00",
+                "completed_at": "2026-05-21T03:06:35+00:00",
+                "succeeded": 10,
+                "failed": 0,
+            },
+            "elastic_blast_submit_duration_ms": 125157,
+        },
+    )
+
+    steps = payload["_progress"]["steps"]
+    assert steps["submitting"]["completed_at"] == "2026-05-21T03:04:30+00:00"
+    assert steps["submitting"]["duration_ms"] == 16_000
+    assert steps["running"]["started_at"] == "2026-05-21T03:04:30+00:00"
+    assert steps["running"]["completed_at"] == "2026-05-21T03:06:35+00:00"
+    assert steps["running"]["duration_ms"] == 125_000
+    assert steps["running"]["duration_source"] == "k8s_runtime"
+    assert steps["exporting_results"]["started_at"] == "2026-05-21T03:06:35+00:00"
+    assert steps["exporting_results"]["completed_at"] == "2026-05-21T03:06:43+00:00"
+    assert steps["exporting_results"]["duration_ms"] == 8_000
+    assert steps["completed"]["elastic_blast_submit_duration_ms"] == 125157
+
+
+def test_merge_progress_payload_closes_runtime_while_results_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.blast import progress as blast_progress
+
+    monkeypatch.setattr(blast_progress, "_now_iso", lambda: "2026-05-21T03:06:43+00:00")
+
+    payload = blast._merge_progress_payload(
+        {
+            "_progress": {
+                "phase": "submitting",
+                "status": "running",
+                "steps": {
+                    "submitting": {
+                        "phase": "submitting",
+                        "status": "running",
+                        "started_at": "2026-05-21T03:04:14+00:00",
+                    }
+                },
+            }
+        },
+        phase="results_pending",
+        status="running",
+        error_code="",
+        details={
+            "k8s": {
+                "status": "completed",
+                "job_id": "job-runtime",
+                "started_at": "2026-05-21T03:04:30+00:00",
+                "completed_at": "2026-05-21T03:06:35+00:00",
+            },
+        },
+    )
+
+    steps = payload["_progress"]["steps"]
+    assert steps["running"]["status"] == "completed"
+    assert steps["running"]["duration_source"] == "k8s_runtime"
+    assert steps["exporting_results"]["status"] == "running"
+    assert steps["exporting_results"]["started_at"] == "2026-05-21T03:06:35+00:00"
+    assert "completed_at" not in steps["exporting_results"]
+    assert "duration_ms" not in steps["exporting_results"]
+
+
 def test_split_parent_storage_submit_to_finalize_e2e(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2707,16 +2944,42 @@ class _FakeReconcileRepo:
     def __init__(self, active: list[_StaleRow]) -> None:
         self._active = active
         self.updates: list[tuple[str, dict[str, object]]] = []
+        self.history: list[tuple[str, str, dict[str, object] | None]] = []
 
     def list_active(self, *, job_type: str = "blast", limit: int = 500) -> list[_StaleRow]:
         return list(self._active)
 
+    def list_completed(self, *, job_type: str = "blast", limit: int = 100) -> list[_StaleRow]:
+        return [row for row in self._active if row.status == "completed"][:limit]
+
+    def get(self, job_id: str) -> _StaleRow | None:
+        for row in self._active:
+            if row.job_id == job_id:
+                return row
+        return None
+
     def update(self, job_id: str, **kwargs: object) -> None:
         self.updates.append((job_id, kwargs))
+
+    def append_history(
+        self,
+        job_id: str,
+        event: str,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        self.history.append((job_id, event, payload))
 
 
 def _install_repo(monkeypatch: pytest.MonkeyPatch, repo: _FakeReconcileRepo) -> None:
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", lambda: repo)
+
+
+def _disable_k8s_reconcile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {"status": "unknown"},
+    )
 
 
 def test_reconcile_celery_failure_marks_row_failed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2806,6 +3069,289 @@ def test_reconcile_submit_completed_waits_for_result_artifacts(
     assert summary["completed"] == 0
     assert summary["untouched"] == 1
     assert repo.updates[0][1] == {"status": "running", "phase": "results_pending"}
+
+
+def test_reconcile_k8s_completed_waits_for_result_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j-k8s",
+                task_id="task-k8s",
+                status="running",
+                phase="submitted",
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "storage_account": "stelb",
+                    "elastic_blast_job_id": "job-k8s",
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "job_id": "job-k8s",
+            "started_at": "2026-05-21T03:04:30+00:00",
+            "completed_at": "2026-05-21T03:06:35+00:00",
+        },
+    )
+    monkeypatch.setattr(blast, "_has_parseable_result_artifact", lambda *_args: False)
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
+
+    assert summary["k8s_refreshed"] == 1
+    assert summary["results_pending"] == 1
+    assert repo.updates[0][1]["status"] == "running"
+    assert repo.updates[0][1]["phase"] == "results_pending"
+    steps = repo.updates[0][1]["payload"]["_progress"]["steps"]
+    assert steps["running"]["status"] == "completed"
+    assert steps["exporting_results"]["status"] == "running"
+
+
+def test_reconcile_k8s_completed_marks_completed_when_results_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j-ready",
+                task_id="task-ready",
+                status="running",
+                phase="results_pending",
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "storage_account": "stelb",
+                    "elastic_blast_job_id": "job-ready",
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    enqueued: list[tuple[str, str, str]] = []
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "job_id": "job-ready",
+            "started_at": "2026-05-21T03:04:30+00:00",
+            "completed_at": "2026-05-21T03:06:35+00:00",
+        },
+    )
+    monkeypatch.setattr(blast, "_has_parseable_result_artifact", lambda *_args: True)
+    monkeypatch.setattr(
+        blast,
+        "_enqueue_artifact_finalizer",
+        lambda job_id, phase, status: enqueued.append((job_id, phase, status)),
+    )
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=99999999)
+
+    assert summary["k8s_refreshed"] == 1
+    assert summary["completed"] == 1
+    assert repo.updates[0][1]["status"] == "completed"
+    assert repo.updates[0][1]["phase"] == "completed"
+    assert enqueued == [("j-ready", "completed", "completed")]
+
+
+def test_backfill_completed_runtime_metrics_updates_missing_container_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j-backfill",
+                status="completed",
+                phase="completed",
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "elastic_blast_job_id": "job-backfill",
+                    "_progress": {
+                        "phase": "completed",
+                        "status": "completed",
+                        "steps": {
+                            "running": {
+                                "phase": "running",
+                                "status": "completed",
+                                "started_at": "2026-05-21T03:04:30+00:00",
+                                "completed_at": "2026-05-21T03:06:35+00:00",
+                            }
+                        },
+                    },
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "job_id": "job-backfill",
+            "started_at": "2026-05-21T03:04:30+00:00",
+            "completed_at": "2026-05-21T03:06:35+00:00",
+            "blast_container_duration_ms": 7_000,
+            "results_export_container_duration_ms": 14_000,
+        },
+    )
+
+    summary = blast.backfill_completed_runtime_metrics.run(limit=1)
+
+    assert summary == {"scanned": 1, "backfilled": 1, "skipped": 0, "errors": 0}
+    assert repo.updates[0][1]["status"] == "completed"
+    assert repo.updates[0][1]["phase"] == "completed"
+    assert repo.updates[0][1]["updated_at"] == "2026-05-20T00:00:00+00:00"
+    k8s = repo.updates[0][1]["payload"]["_progress"]["steps"]["running"]["k8s"]
+    assert k8s["blast_container_duration_ms"] == 7_000
+    assert k8s["results_export_container_duration_ms"] == 14_000
+    assert repo.history[0][1] == "k8s_completed_runtime_backfilled"
+
+
+def test_backfill_completed_runtime_metrics_can_target_one_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(job_id="other", status="completed", phase="completed"),
+            _StaleRow(
+                job_id="target",
+                status="completed",
+                phase="completed",
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "elastic_blast_job_id": "job-target",
+                },
+            ),
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "job_id": "job-target",
+            "started_at": "2026-05-21T03:04:30+00:00",
+            "completed_at": "2026-05-21T03:06:35+00:00",
+            "blast_container_duration_ms": 7_000,
+        },
+    )
+
+    summary = blast.backfill_completed_runtime_metrics.run(job_id="target", limit=100)
+
+    assert summary["scanned"] == 1
+    assert summary["backfilled"] == 1
+    assert repo.updates[0][0] == "target"
+
+
+def test_backfill_completed_runtime_metrics_uses_nested_k8s_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="nested",
+                status="completed",
+                phase="completed",
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "_progress": {
+                        "steps": {"running": {"k8s": {"job_id": "job-nested"}}}
+                    },
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    def fake_k8s(*_args: object, **kwargs: object) -> dict[str, object]:
+        assert kwargs["job_id"] == "job-nested"
+        return {
+            "status": "completed",
+            "job_id": "job-nested",
+            "started_at": "2026-05-21T03:04:30+00:00",
+            "completed_at": "2026-05-21T03:06:35+00:00",
+            "blast_container_duration_ms": 7_000,
+        }
+
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    summary = blast.backfill_completed_runtime_metrics.run(job_id="nested", limit=1)
+
+    assert summary["backfilled"] == 1
+    assert repo.updates[0][0] == "nested"
+
+
+def test_backfill_completed_runtime_metrics_skips_existing_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j-has-metrics",
+                status="completed",
+                phase="completed",
+                payload={
+                    "subscription_id": "sub-1",
+                    "resource_group": "rg-elb",
+                    "cluster_name": "elb-cluster",
+                    "elastic_blast_job_id": "job-has-metrics",
+                    "_progress": {
+                        "steps": {
+                            "running": {
+                                "k8s": {
+                                    "status": "completed",
+                                    "blast_container_duration_ms": 7_000,
+                                }
+                            }
+                        }
+                    },
+                },
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    def fail_k8s(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("existing container metrics should skip K8s lookup")
+
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fail_k8s)
+
+    summary = blast.backfill_completed_runtime_metrics.run(limit=1)
+
+    assert summary == {"scanned": 1, "backfilled": 0, "skipped": 1, "errors": 0}
+    assert repo.updates == []
 
 
 def test_reconcile_skips_recently_updated_unknown_task(
@@ -2902,6 +3448,7 @@ def test_reconcile_logs_external_refresh_http_detail(
         )
 
     monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    _disable_k8s_reconcile(monkeypatch)
     monkeypatch.setattr(
         "api.routes._blast_shared._openapi_client_kwargs_from_cluster",
         lambda *_args: {"base_url": "http://openapi.test"},

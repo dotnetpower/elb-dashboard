@@ -74,6 +74,7 @@ export function BlastResults() {
         jobId={jobId!}
         jobTitle={job?.job_title ?? null}
         createdAt={job?.created_at ?? null}
+        updatedAt={job?.updated_at ?? null}
         isRunning={isRunning}
         canCancel={canRequestCancel}
         cancelDisabled={actions.cancelMutation.isPending}
@@ -81,6 +82,7 @@ export function BlastResults() {
         jobPayload={job?.payload}
         program={job?.program ?? null}
         database={job?.db ?? null}
+        customStatus={job?.custom_status}
         databaseMetadata={job?.database_metadata ?? null}
         configSnapshot={job?.config_snapshot as Record<string, unknown> | undefined}
         infrastructure={job?.infrastructure as Record<string, unknown> | undefined}

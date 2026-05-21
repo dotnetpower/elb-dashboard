@@ -125,7 +125,10 @@ export function K8sPodsSection({
         )}
       </button>
       {!collapsed && (
-        <div style={{ borderTop: "1px solid var(--border-weak)", overflowX: "auto" }}>
+        <div
+          className="k8s-pods-table-wrap"
+          style={{ borderTop: "1px solid var(--border-weak)", overflowX: "auto" }}
+        >
           {query.isLoading && (
             <div style={{ padding: 16, textAlign: "center" }} className="muted">
               <Loader2 size={14} className="spin" /> Loading...
@@ -210,14 +213,15 @@ export function K8sPodsSection({
                     </td>
                     <td style={{ padding: "4px 8px" }}>
                       <button
-                        className="glass-button"
+                        className="glass-button k8s-pods-logs-button"
                         onClick={() => fetchLogs(p.namespace, p.name)}
                         style={{
                           fontSize: 9,
                           padding: "2px 6px",
-                          display: "flex",
+                          display: "inline-flex",
                           alignItems: "center",
                           gap: 3,
+                          whiteSpace: "nowrap",
                         }}
                         title={`Logs: ${p.name}`}
                       >

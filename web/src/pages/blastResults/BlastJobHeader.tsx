@@ -31,6 +31,7 @@ interface BlastJobHeaderProps {
   jobId: string;
   jobTitle: string | null;
   createdAt: string | null;
+  updatedAt?: string | null;
   isRunning: boolean;
   canCancel: boolean;
   cancelDisabled: boolean;
@@ -40,6 +41,7 @@ interface BlastJobHeaderProps {
   /** NCBI-style metadata surfaced in the new 7-line header. */
   program?: string | null;
   database?: string | null;
+  customStatus?: unknown;
   databaseMetadata?: BlastDatabaseMetadata | null;
   configSnapshot?: Record<string, unknown> | undefined;
   infrastructure?: Record<string, unknown> | undefined;
@@ -66,6 +68,7 @@ export function BlastJobHeader({
   jobId,
   jobTitle,
   createdAt,
+  updatedAt,
   isRunning,
   canCancel,
   cancelDisabled,
@@ -73,6 +76,7 @@ export function BlastJobHeader({
   jobPayload,
   program,
   database,
+  customStatus,
   databaseMetadata,
   configSnapshot,
   infrastructure,
@@ -101,6 +105,7 @@ export function BlastJobHeader({
   const maxTargets = pickString(configSnapshot, ["max_target_seqs"]);
   const dbSequenceCount = formatCount(databaseMetadata?.number_of_sequences);
   const dbLetterCount = formatCount(databaseMetadata?.number_of_letters);
+  const timingMetrics = buildTimingMetrics({ createdAt, updatedAt, customStatus });
 
   const handleCopyId = async () => {
     try {
@@ -162,7 +167,7 @@ export function BlastJobHeader({
   const closeDownloadMenu = () => setShowDownloadMenu(false);
 
   return (
-    <header style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    <header className="blast-job-header" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div
         style={{
           display: "flex",
@@ -186,6 +191,7 @@ export function BlastJobHeader({
       </div>
 
       <div
+        className="blast-job-header__title-row"
         style={{
           display: "flex",
           alignItems: "center",
@@ -266,6 +272,7 @@ export function BlastJobHeader({
       {/* The NCBI metadata grid — keep label widths consistent so the
           values line up visually no matter which fields are populated. */}
       <dl
+        className="blast-job-header__meta-grid"
         style={{
           display: "grid",
           gridTemplateColumns: "min-content max-content min-content 1fr",
@@ -316,6 +323,44 @@ export function BlastJobHeader({
         <Detail>
           <span style={{ wordBreak: "break-all" }}>{database ?? "—"}</span>
         </Detail>
+
+        {timingMetrics.length > 0 && (
+          <>
+            <Term label="Runtime" />
+            <Detail span={3}>
+              <span
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  flexWrap: "wrap",
+                }}
+              >
+                {timingMetrics.map((metric) => (
+                  <span
+                    key={metric.label}
+                    title={metric.title}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "baseline",
+                      gap: 5,
+                      padding: "2px 7px",
+                      borderRadius: 6,
+                      background: "color-mix(in srgb, var(--accent) 8%, transparent)",
+                      border: "1px solid color-mix(in srgb, var(--accent) 16%, transparent)",
+                      fontSize: 12,
+                    }}
+                  >
+                    <span className="muted">{metric.label}</span>
+                    <strong style={{ fontVariantNumeric: "tabular-nums" }}>
+                      {metric.value}
+                    </strong>
+                  </span>
+                ))}
+              </span>
+            </Detail>
+          </>
+        )}
 
         {databaseMetadata?.title && (
           <>
@@ -609,6 +654,117 @@ function deriveMolecule(program: string | null | undefined): string | null {
     default:
       return null;
   }
+}
+
+export interface TimingMetric {
+  label: string;
+  value: string;
+  title: string;
+}
+
+export function buildTimingMetrics({
+  createdAt,
+  updatedAt,
+  customStatus,
+}: {
+  createdAt: string | null;
+  updatedAt?: string | null;
+  customStatus?: unknown;
+}): TimingMetric[] {
+  const metrics: TimingMetric[] = [];
+  const workflowMs = durationBetweenMs(createdAt, updatedAt ?? null);
+  if (workflowMs !== null) {
+    metrics.push({
+      label: "Workflow",
+      value: formatDurationMs(workflowMs),
+      title: "Dashboard elapsed time from submit acceptance to the latest recorded update.",
+    });
+  }
+
+  const steps = recordValue(recordValue(customStatus)?.steps);
+  const running = recordValue(steps?.running);
+  const submitting = recordValue(steps?.submitting);
+  const exporting = recordValue(steps?.exporting_results);
+  const k8s = recordValue(running?.k8s);
+
+  const computeMs = numberValue(k8s?.blast_container_duration_ms);
+  if (computeMs !== null) {
+    metrics.push({
+      label: "Compute",
+      value: formatDurationMs(computeMs),
+      title: "Wall-clock span of the BLAST containers across all shards.",
+    });
+  }
+
+  const k8sRuntimeMs =
+    numberValue(running?.duration_ms) ??
+    durationBetweenMs(stringValue(k8s?.started_at), stringValue(k8s?.completed_at));
+  if (k8sRuntimeMs !== null) {
+    metrics.push({
+      label: "K8s runtime",
+      value: formatDurationMs(k8sRuntimeMs),
+      title: "Kubernetes Job lifetime for the BLAST shard jobs.",
+    });
+  }
+
+  const submitMs = numberValue(submitting?.duration_ms);
+  if (submitMs !== null) {
+    metrics.push({
+      label: "Submit path",
+      value: formatDurationMs(submitMs),
+      title: "Dashboard and ElasticBLAST orchestration before K8s BLAST runtime starts.",
+    });
+  }
+
+  const exportContainerMs = numberValue(k8s?.results_export_container_duration_ms);
+  const exportWorkflowMs = numberValue(exporting?.duration_ms);
+  if (exportContainerMs !== null || exportWorkflowMs !== null) {
+    const value = exportContainerMs !== null
+      ? formatDurationMs(exportContainerMs)
+      : formatDurationMs(exportWorkflowMs ?? 0);
+    metrics.push({
+      label: exportContainerMs !== null ? "Export containers" : "Export path",
+      value,
+      title: exportContainerMs !== null && exportWorkflowMs !== null
+        ? `Result export containers ran for ${value}; dashboard export/finalize path was ${formatDurationMs(exportWorkflowMs)}.`
+        : exportContainerMs !== null
+          ? "Wall-clock span of the result export containers."
+          : "Dashboard export/finalize path after the K8s BLAST runtime completed.",
+    });
+  }
+
+  return metrics;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function durationBetweenMs(start: string | null, end: string | null): number | null {
+  if (!start || !end) return null;
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return null;
+  return endMs - startMs;
+}
+
+function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const seconds = Math.round(ms / 1000);
+  if (seconds <= 0) return "<1s";
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  if (remainder === 0) return `${minutes}m`;
+  return `${minutes}m ${remainder}s`;
 }
 
 // Re-exported so the parent doesn't need a second import line just to

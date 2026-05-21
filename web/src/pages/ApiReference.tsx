@@ -9,6 +9,7 @@ import { OpenApiDeployPanel } from "@/components/OpenApiDeployPanel";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { ApiHero } from "@/pages/apiReference/ApiHero";
 import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
+import { ApiResponseContractPanel } from "@/pages/apiReference/ApiResponseContractPanel";
 import { ApiTokenPanel } from "@/pages/apiReference/ApiTokenPanel";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { parseSpec } from "@/pages/apiReference/spec";
@@ -78,6 +79,14 @@ export function ApiReference() {
     return parseSpec(specQuery.data, baseUrl);
   }, [specQuery.data, baseUrl]);
 
+  const contractLoading =
+    enabled &&
+    !clusterStopped &&
+    (clustersQuery.isLoading ||
+      acrQuery.isLoading ||
+      svcQuery.isLoading ||
+      (Boolean(baseUrl) && specQuery.isLoading));
+
   const grouped = useMemo(() => {
     if (!spec) return [];
     const byTag = spec.tags
@@ -140,44 +149,60 @@ export function ApiReference() {
         />
       )}
 
-      {baseUrl && hasOpenApiImage && (() => {
-        // Only render the update panel when the actual deployed container
-        // image tag differs from the dashboard-pinned tag. The OpenAPI
-        // document's `info.version` is the API app version, not the image
-        // tag, so it is not a reliable update signal.
-        const pinnedTag = acrQuery.data?.expected_image_tags?.["elb-openapi"];
-        const deployedTag = deploymentQuery.data?.image_tag;
-        if (!pinnedTag || !deployedTag || normaliseImageTag(pinnedTag) === normaliseImageTag(deployedTag)) {
-          return null;
-        }
-        return (
-          <OpenApiDeployPanel
-            variant="update"
-            subscriptionId={sub}
-            resourceGroup={rg}
-            clusterName={clusterName}
-            acrName={acrName}
-            storageAccount={savedConfig?.storageAccountName ?? ""}
-            imageBuilt={hasOpenApiImage}
-            onRetry={() => {
-              svcQuery.refetch();
-              specQuery.refetch();
-              deploymentQuery.refetch();
-            }}
-            retrying={svcQuery.isFetching || specQuery.isFetching || deploymentQuery.isFetching}
-            pinnedTag={pinnedTag}
-            currentTag={deployedTag}
-          />
-        );
-      })()}
+      {baseUrl &&
+        hasOpenApiImage &&
+        (() => {
+          // Only render the update panel when the actual deployed container
+          // image tag differs from the dashboard-pinned tag. The OpenAPI
+          // document's `info.version` is the API app version, not the image
+          // tag, so it is not a reliable update signal.
+          const pinnedTag = acrQuery.data?.expected_image_tags?.["elb-openapi"];
+          const deployedTag = deploymentQuery.data?.image_tag;
+          if (
+            !pinnedTag ||
+            !deployedTag ||
+            normaliseImageTag(pinnedTag) === normaliseImageTag(deployedTag)
+          ) {
+            return null;
+          }
+          return (
+            <OpenApiDeployPanel
+              variant="update"
+              subscriptionId={sub}
+              resourceGroup={rg}
+              clusterName={clusterName}
+              acrName={acrName}
+              storageAccount={savedConfig?.storageAccountName ?? ""}
+              imageBuilt={hasOpenApiImage}
+              onRetry={() => {
+                svcQuery.refetch();
+                specQuery.refetch();
+                deploymentQuery.refetch();
+              }}
+              retrying={
+                svcQuery.isFetching || specQuery.isFetching || deploymentQuery.isFetching
+              }
+              pinnedTag={pinnedTag}
+              currentTag={deployedTag}
+            />
+          );
+        })()}
 
       {baseUrl && specQuery.isLoading && <SpecLoadingState />}
 
-      {specQuery.isError && <SpecErrorState message={(specQuery.error as Error).message} />}
+      {specQuery.isError && (
+        <SpecErrorState message={(specQuery.error as Error).message} />
+      )}
 
       {baseUrl && hasOpenApiImage && clusterName && (
-        <ApiTokenPanel subscriptionId={sub} resourceGroup={rg} clusterName={clusterName} />
+        <ApiTokenPanel
+          subscriptionId={sub}
+          resourceGroup={rg}
+          clusterName={clusterName}
+        />
       )}
+
+      <ApiResponseContractPanel loading={contractLoading} />
 
       {spec && grouped.length > 0 && (
         // A1: two-column layout — sticky sidebar (tag list + endpoint search +
@@ -212,14 +237,7 @@ export function ApiReference() {
 }
 
 function OpenApiLoadingState() {
-  return (
-    <CenteredState>
-      <Loader2 size={24} className="spin" style={{ color: "var(--accent)" }} />
-      <p style={{ color: "var(--text-faint)", fontSize: 12 }}>
-        Discovering OpenAPI service on AKS...
-      </p>
-    </CenteredState>
-  );
+  return <ApiReferenceSkeleton label="Discovering OpenAPI service on AKS" />;
 }
 
 function MissingConfigState() {
@@ -255,7 +273,8 @@ function ClusterStoppedState({
         <div>
           <div style={{ fontWeight: 600, fontSize: 14 }}>AKS cluster is stopped</div>
           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            The OpenAPI service runs inside the AKS cluster. Start the cluster to access the API.
+            The OpenAPI service runs inside the AKS cluster. Start the cluster to access
+            the API.
           </div>
         </div>
       </div>
@@ -288,7 +307,12 @@ function ClusterStoppedState({
         >
           <Power size={12} /> Go to Dashboard to start cluster
         </Link>
-        <button className="glass-button" onClick={onRefresh} disabled={refreshing} style={{ fontSize: 12 }}>
+        <button
+          className="glass-button"
+          onClick={onRefresh}
+          disabled={refreshing}
+          style={{ fontSize: 12 }}
+        >
           <RefreshCw size={12} className={refreshing ? "spin" : ""} /> Refresh
         </button>
       </div>
@@ -306,7 +330,8 @@ function MissingOpenApiImageState() {
         <div>
           <div style={{ fontWeight: 600, fontSize: 14 }}>OpenAPI image not built</div>
           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            The <InlineCode>elb-openapi</InlineCode> container image needs to be built in your ACR before deploying the API service.
+            The <InlineCode>elb-openapi</InlineCode> container image needs to be built in
+            your ACR before deploying the API service.
           </div>
         </div>
       </div>
@@ -322,36 +347,176 @@ function MissingOpenApiImageState() {
 }
 
 function SpecLoadingState() {
+  return <ApiReferenceSkeleton compact label="Loading API specification" />;
+}
+
+function ApiReferenceSkeleton({
+  label,
+  compact = false,
+}: {
+  label: string;
+  compact?: boolean;
+}) {
   return (
-    <CenteredState compact>
-      <Loader2 size={20} className="spin" style={{ color: "var(--accent)" }} />
-      <p style={{ color: "var(--text-faint)", fontSize: 12 }}>Loading API specification...</p>
-    </CenteredState>
+    <section
+      className="api-reference-skeleton"
+      aria-label={label}
+      aria-busy="true"
+      style={{
+        display: "grid",
+        gridTemplateColumns: compact
+          ? "minmax(180px, 240px) 1fr"
+          : "minmax(220px, 280px) 1fr",
+        gap: 16,
+        alignItems: "start",
+      }}
+    >
+      <div
+        className="glass-card"
+        style={{
+          padding: 14,
+          display: "grid",
+          gap: 12,
+          position: "sticky",
+          top: 16,
+        }}
+      >
+        <SkeletonLine width="58%" height={12} />
+        <SkeletonLine width="92%" height={30} radius={7} />
+        <div style={{ display: "flex", gap: 6 }}>
+          <SkeletonLine width="44px" height={20} radius={5} />
+          <SkeletonLine width="54px" height={20} radius={5} />
+          <SkeletonLine width="48px" height={20} radius={5} />
+        </div>
+        {[0, 1, 2, 3].map((index) => (
+          <div
+            key={index}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "44px 1fr",
+              gap: 8,
+              alignItems: "center",
+            }}
+          >
+            <SkeletonLine width="40px" height={18} radius={5} />
+            <SkeletonLine width={index % 2 === 0 ? "86%" : "68%"} height={11} />
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gap: 14, minWidth: 0 }}>
+        <div className="glass-card" style={{ padding: 16, display: "grid", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Loader2 size={15} className="spin" style={{ color: "var(--accent)" }} />
+            <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{label}</span>
+          </div>
+          <SkeletonLine width="46%" height={14} />
+          <SkeletonLine width="72%" height={11} />
+        </div>
+
+        {[0, 1, 2].map((index) => (
+          <ApiEndpointSkeleton key={index} index={index} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ApiEndpointSkeleton({ index }: { index: number }) {
+  const methodWidths = [44, 50, 42];
+  return (
+    <div
+      className="endpoint-card"
+      style={{
+        background: "var(--bg-primary)",
+        border: "1px solid var(--border-weak)",
+        borderRadius: 10,
+        overflow: "hidden",
+        boxShadow: "var(--shadow-panel)",
+      }}
+    >
+      <div
+        className="endpoint-card__header"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "12px 16px",
+        }}
+      >
+        <SkeletonLine width={`${methodWidths[index] ?? 44}px`} height={25} radius={5} />
+        <SkeletonLine width={index === 0 ? "190px" : "260px"} height={13} />
+        <SkeletonLine width="140px" height={12} />
+        <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
+          <SkeletonLine width="96px" height={20} radius={5} />
+          <SkeletonLine width="86px" height={20} radius={5} />
+        </div>
+      </div>
+      {index === 0 && (
+        <div
+          className="endpoint-card__body"
+          style={{
+            borderTop: "1px solid var(--border-weak)",
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+          }}
+        >
+          <div style={{ padding: "16px 20px", display: "grid", gap: 12 }}>
+            <SkeletonLine width="72%" height={12} />
+            <SkeletonLine width="28%" height={10} />
+            <SkeletonLine width="100%" height={38} radius={7} />
+            <SkeletonLine width="28%" height={10} />
+            <SkeletonLine width="100%" height={54} radius={7} />
+          </div>
+          <div
+            style={{
+              padding: "16px 20px",
+              borderLeft: "1px solid var(--border-weak)",
+              background: "var(--bg-secondary)",
+              display: "grid",
+              gap: 12,
+            }}
+          >
+            <SkeletonLine width="24%" height={10} />
+            <SkeletonLine width="100%" height={130} radius={8} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SkeletonLine({
+  width,
+  height,
+  radius = 999,
+}: {
+  width: string;
+  height: number;
+  radius?: number;
+}) {
+  return (
+    <span
+      className="skeleton"
+      style={{
+        display: "block",
+        width,
+        height,
+        borderRadius: radius,
+      }}
+    />
   );
 }
 
 function SpecErrorState({ message }: { message: string }) {
   return (
     <PanelState border="1px solid rgba(242,114,111,0.2)" padding="16px 20px">
-      <AlertTriangle size={14} style={{ color: "var(--danger)", verticalAlign: "middle", marginRight: 6 }} />
+      <AlertTriangle
+        size={14}
+        style={{ color: "var(--danger)", verticalAlign: "middle", marginRight: 6 }}
+      />
       <span style={{ fontSize: 12 }}>Failed to load openapi.json: {message}</span>
     </PanelState>
-  );
-}
-
-function CenteredState({ children, compact = false }: { children: ReactNode; compact?: boolean }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        padding: compact ? "32px 0" : "48px 0",
-        gap: compact ? 8 : 12,
-      }}
-    >
-      {children}
-    </div>
   );
 }
 
@@ -381,7 +546,13 @@ function PanelState({
   );
 }
 
-function StateIcon({ children, background }: { children: ReactNode; background: string }) {
+function StateIcon({
+  children,
+  background,
+}: {
+  children: ReactNode;
+  background: string;
+}) {
   return (
     <div
       style={{

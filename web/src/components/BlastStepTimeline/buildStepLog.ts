@@ -28,7 +28,19 @@ export function buildStepLog({
   jobId: string;
 }): string | null {
   if (state === "pending") return null;
-  if (state === "skipped") return "⊘ Skipped — previous step failed.";
+  if (state === "skipped") {
+    const decision = stringValue(sd.decision);
+    const reason = stringValue(sd.skip_reason);
+    const outputText = stringValue(sd.output) || stringValue(sd.last_output);
+    if (decision === "warmed_ssd_reused") {
+      return `Stage skipped: node-local SSD warmup is already ready.${
+        outputText ? `\n\n--- Decision ---\n${outputText}` : ""
+      }`;
+    }
+    return `Skipped${reason ? `: ${reason}` : ""}.${
+      outputText ? `\n\n--- Details ---\n${outputText}` : ""
+    }`;
+  }
 
   const failureText =
     state === "error" ? getFailureText(sd, output, customStatus, job) : "";

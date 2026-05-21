@@ -3,7 +3,8 @@
 Responsibility: BLAST job projection, file preview, and refresh helpers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
-Key entry points: `_payload_value`, `_queries_blob_path`, `_job_query_blob_path`
+Key entry points: `_payload_value`, `_queries_blob_path`, `_job_query_blob_path`,
+`_refresh_running_blast_state`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
@@ -14,12 +15,14 @@ from __future__ import annotations
 
 import logging
 import os
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
 from api.auth import CallerIdentity
+from api.services.response_contracts import build_target
 
 LOGGER = logging.getLogger(__name__)
 
@@ -185,6 +188,16 @@ _PROGRESS_STEP_ORDER = (
     "completed",
 )
 
+_K8S_REFRESH_PHASES = frozenset(
+    {
+        "submitted",
+        "running",
+        "results_pending",
+    }
+)
+_K8S_REFRESH_MIN_INTERVAL_SECONDS = 20.0
+_K8S_REFRESH_LAST_CHECK: dict[tuple[str, str, str, str], float] = {}
+
 
 def _split_child_summary_from_repo(repo: Any, parent_job_id: str) -> dict[str, Any] | None:
     try:
@@ -287,6 +300,9 @@ def _local_to_blast_job(
     }
     out = {
         "job_id": state.job_id,
+        "job_id_kind": "dashboard",
+        "dashboard_job_id": state.job_id,
+        "openapi_job_id": _payload_value(payload, "openapi_job_id"),
         "instance_id": state.task_id,
         "job_title": str(getattr(state, "job_title", None) or state.job_id),
         "program": program,
@@ -303,6 +319,18 @@ def _local_to_blast_job(
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
         "source": "dashboard",
     }
+    out["target"] = build_target(
+        resource_type="blast_job",
+        job_id=str(state.job_id),
+        job_id_kind="dashboard",
+        dashboard_job_id=str(state.job_id),
+        openapi_job_id=_payload_value(payload, "openapi_job_id"),
+        links={
+            "dashboard_status": f"/api/blast/jobs/{state.job_id}",
+            "events": f"/api/blast/jobs/{state.job_id}/events",
+            "results": f"/api/blast/jobs/{state.job_id}/results",
+        },
+    )
     if progress is not None:
         out["custom_status"] = progress
         out["output"] = {
@@ -400,6 +428,9 @@ def _local_state_matches_job_scope(
 def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     if getattr(state, "type", "") != "blast" or getattr(state, "status", "") != "running":
         return state
+    phase = str(getattr(state, "phase", "") or "").strip().casefold()
+    if phase not in _K8S_REFRESH_PHASES:
+        return state
     payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
     subscription_id = str(_payload_value(payload, "subscription_id") or "")
     resource_group = str(_payload_value(payload, "resource_group") or "")
@@ -412,8 +443,14 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     k8s_job_id = str(
         _payload_value(payload, "elastic_blast_job_id", "k8s_job_id")
         or _discover_elastic_blast_job_id(storage_account, str(state.job_id))
-        or state.job_id
     )
+    if not k8s_job_id:
+        return state
+    refresh_key = (str(state.job_id), subscription_id, resource_group, cluster_name)
+    now = monotonic()
+    last_check = _K8S_REFRESH_LAST_CHECK.get(refresh_key)
+    if last_check is not None and now - last_check < _K8S_REFRESH_MIN_INTERVAL_SECONDS:
+        return state
     try:
         from api.services import get_credential
         from api.services.monitoring import k8s_check_blast_status
@@ -428,10 +465,13 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
         )
     except Exception as exc:
         LOGGER.debug("blast k8s refresh skipped job_id=%s: %s", state.job_id, type(exc).__name__)
+        _K8S_REFRESH_LAST_CHECK[refresh_key] = now
         return state
     k8s_status = str(k8s.get("status") or "")
     if k8s_status not in {"completed", "failed"}:
+        _K8S_REFRESH_LAST_CHECK[refresh_key] = now
         return state
+    _K8S_REFRESH_LAST_CHECK.pop(refresh_key, None)
     if k8s_status == "completed" and not _state_has_parseable_result_artifact(state, payload):
         try:
             updated = repo.update(

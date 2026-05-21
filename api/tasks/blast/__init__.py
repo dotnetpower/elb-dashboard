@@ -17,6 +17,7 @@ import os
 import re
 import time
 from collections.abc import Iterator, Mapping
+from copy import deepcopy
 from datetime import UTC
 from typing import Any, cast
 
@@ -1492,6 +1493,197 @@ def _external_reconcile_job_id(row: Any) -> str:
     return ""
 
 
+def _reconcile_row_k8s_status(
+    repo: Any,
+    row: Any,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    elastic_blast_job_id: str,
+) -> str:
+    if not (subscription_id and resource_group and cluster_name and elastic_blast_job_id):
+        return ""
+    try:
+        from api.services import get_credential
+        from api.services.monitoring import k8s_check_blast_status
+
+        k8s = k8s_check_blast_status(
+            get_credential(),
+            subscription_id,
+            resource_group,
+            cluster_name,
+            namespace="default",
+            job_id=elastic_blast_job_id,
+        )
+    except Exception as exc:
+        LOGGER.info(
+            "reconcile_stale_jobs: k8s refresh skipped job_id=%s elastic_blast_job_id=%s: %s",
+            row.job_id,
+            elastic_blast_job_id,
+            type(exc).__name__,
+        )
+        return ""
+
+    k8s_status = str(k8s.get("status") or "")
+    if k8s_status == "completed":
+        if _has_parseable_result_artifact(_storage_account_from_row(row), str(row.job_id)):
+            status, phase, outcome = "completed", "completed", "completed"
+        else:
+            status, phase, outcome = "running", "results_pending", "results_pending"
+    elif k8s_status == "failed":
+        status, phase, outcome = "failed", "failed", "failed"
+    elif k8s_status == "running":
+        status, phase, outcome = "running", "running", "running"
+    elif k8s_status == "creating":
+        status, phase, outcome = "running", "submitted", "running"
+    else:
+        return ""
+
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else None
+    merged_payload = _merge_progress_payload(
+        payload,
+        phase=phase,
+        status=status,
+        error_code="",
+        details={"k8s": k8s, "source": "k8s_reconcile"},
+    )
+    repo.update(row.job_id, status=status, phase=phase, payload=merged_payload)
+    if status in {"completed", "failed"}:
+        _enqueue_artifact_finalizer(row.job_id, phase, status)
+    return outcome
+
+
+def _row_has_container_runtime_metrics(row: Any) -> bool:
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
+    progress = payload.get("_progress") if isinstance(payload, Mapping) else None
+    steps = progress.get("steps") if isinstance(progress, Mapping) else None
+    running = steps.get("running") if isinstance(steps, Mapping) else None
+    k8s = running.get("k8s") if isinstance(running, Mapping) else None
+    return isinstance(k8s, Mapping) and any(
+        k8s.get(key) not in (None, "")
+        for key in ("blast_container_duration_ms", "results_export_container_duration_ms")
+    )
+
+
+def _completed_row_runtime_job_id(row: Any) -> str:
+    root_job_id = _external_reconcile_job_id(row)
+    if root_job_id:
+        return root_job_id
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
+    progress = payload.get("_progress") if isinstance(payload, Mapping) else None
+    steps = progress.get("steps") if isinstance(progress, Mapping) else None
+    running = steps.get("running") if isinstance(steps, Mapping) else None
+    k8s = running.get("k8s") if isinstance(running, Mapping) else None
+    if isinstance(k8s, Mapping):
+        runtime_job_id = str(k8s.get("job_id") or "").strip()
+        if runtime_job_id.startswith("job-"):
+            return runtime_job_id
+    return _discover_elastic_blast_job_id(_storage_account_from_row(row), str(row.job_id))
+
+
+def _completed_row_runtime_scope(row: Any) -> tuple[str, str, str, str]:
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else {}
+    subscription_id = str(
+        payload.get("subscription_id") or getattr(row, "subscription_id", "") or ""
+    )
+    resource_group = str(
+        payload.get("resource_group") or getattr(row, "resource_group", "") or ""
+    )
+    cluster_name = str(
+        payload.get("cluster_name")
+        or payload.get("aks_cluster_name")
+        or getattr(row, "cluster_name", "")
+        or ""
+    )
+    return subscription_id, resource_group, cluster_name, _completed_row_runtime_job_id(row)
+
+
+def _backfill_completed_row_runtime_metrics(repo: Any, row: Any) -> str:
+    if _row_has_container_runtime_metrics(row):
+        return "skipped"
+    subscription_id, resource_group, cluster_name, elastic_blast_job_id = (
+        _completed_row_runtime_scope(row)
+    )
+    if not (subscription_id and resource_group and cluster_name and elastic_blast_job_id):
+        return "skipped"
+    try:
+        from api.services import get_credential
+        from api.services.monitoring import k8s_check_blast_status
+
+        k8s = k8s_check_blast_status(
+            get_credential(),
+            subscription_id,
+            resource_group,
+            cluster_name,
+            namespace="default",
+            job_id=elastic_blast_job_id,
+        )
+    except Exception as exc:
+        LOGGER.info(
+            "completed runtime backfill skipped job_id=%s elastic_blast_job_id=%s: %s",
+            row.job_id,
+            elastic_blast_job_id,
+            type(exc).__name__,
+        )
+        return "error"
+    if str(k8s.get("status") or "") != "completed":
+        return "skipped"
+    if not any(
+        k8s.get(key) not in (None, "")
+        for key in ("blast_container_duration_ms", "results_export_container_duration_ms")
+    ):
+        return "skipped"
+    payload = row.payload if isinstance(getattr(row, "payload", None), Mapping) else None
+    merged_payload = _payload_with_backfilled_runtime_metrics(payload, k8s)
+    repo.update(
+        row.job_id,
+        status="completed",
+        phase="completed",
+        payload=merged_payload,
+        updated_at=getattr(row, "updated_at", None),
+    )
+    try:
+        repo.append_history(
+            row.job_id,
+            "k8s_completed_runtime_backfilled",
+            {"status": "completed", "phase": "completed", "k8s": k8s},
+        )
+    except Exception as exc:
+        LOGGER.debug(
+            "completed runtime backfill history skipped job_id=%s: %s",
+            row.job_id,
+            type(exc).__name__,
+        )
+    return "backfilled"
+
+
+def _payload_with_backfilled_runtime_metrics(
+    payload: Mapping[str, Any] | None,
+    k8s: Mapping[str, Any],
+) -> dict[str, Any]:
+    out = deepcopy(dict(payload or {}))
+    progress = out.get("_progress") if isinstance(out.get("_progress"), dict) else {}
+    steps = progress.get("steps") if isinstance(progress.get("steps"), dict) else {}
+    running = steps.get("running") if isinstance(steps.get("running"), dict) else {}
+    existing_k8s = running.get("k8s") if isinstance(running.get("k8s"), dict) else {}
+    running["k8s"] = {**existing_k8s, **dict(k8s)}
+    running.setdefault("phase", "running")
+    running.setdefault("status", "completed")
+    if not running.get("started_at") and k8s.get("started_at"):
+        running["started_at"] = k8s["started_at"]
+    if not running.get("completed_at") and k8s.get("completed_at"):
+        running["completed_at"] = k8s["completed_at"]
+    if k8s.get("started_at") and k8s.get("completed_at"):
+        running.setdefault("duration_source", "k8s_runtime")
+    steps["running"] = running
+    progress["steps"] = steps
+    progress.setdefault("phase", "completed")
+    progress.setdefault("status", "completed")
+    out["_progress"] = progress
+    return out
+
+
 def _stream_submit_command(
     *,
     job_id: str,
@@ -1825,6 +2017,8 @@ def submit(
     effective_options = _expand_strict_tie_order_candidate_pool(effective_options)
 
     try:
+        _progress(self, "warming_up", database=extract_db_name(database))
+        _update_state(job_id, "warming_up", database=extract_db_name(database))
         warmup_ready = _ensure_node_warmup_ready_for_submit(
             subscription_id=subscription_id,
             resource_group=resource_group,
@@ -1978,9 +2172,31 @@ def submit(
         return {"job_id": job_id, "status": "failed", "phase": "config_invalid", "error": error}
 
     requires_node_warmup = _submit_requires_node_warmup(effective_options)
+    reuses_warmed_ssd = requires_node_warmup and bool(
+        (effective_options or {}).get("skip_warmed_ssd_init")
+    )
     if requires_node_warmup:
-        _progress(self, "staging_db")
-        _update_state(job_id, "staging_db")
+        if reuses_warmed_ssd:
+            _progress(
+                self,
+                "staging_db",
+                skipped=True,
+                decision="warmed_ssd_reused",
+            )
+            _update_state(
+                job_id,
+                "staging_db",
+                status="completed",
+                skipped=True,
+                decision="warmed_ssd_reused",
+                skip_reason="node_local_ssd_warmup_ready",
+                output="Node-local DB warmup is ready; ElasticBLAST SSD initialization is skipped.",
+            )
+            _progress(self, "submitting")
+            _update_state(job_id, "submitting")
+        else:
+            _progress(self, "staging_db")
+            _update_state(job_id, "staging_db")
     else:
         _progress(self, "submitting")
         _update_state(job_id, "submitting")
@@ -2057,7 +2273,7 @@ def submit(
         job_id,
     )
     if exit_code == 0:
-        if requires_node_warmup:
+        if requires_node_warmup and not reuses_warmed_ssd:
             _update_state(
                 job_id,
                 "staging_db",
@@ -2066,7 +2282,7 @@ def submit(
                 last_output=_snippet(submit_output, LIVE_OUTPUT_SNIPPET_CHARS),
                 log_line_count=result.get("log_line_count"),
                 exit_code=exit_code,
-                duration_ms=result.get("duration_ms"),
+                terminal_duration_ms=result.get("duration_ms"),
                 timed_out=result.get("timed_out"),
             )
         _update_state(
@@ -2077,7 +2293,7 @@ def submit(
             last_output=_snippet(submit_output, LIVE_OUTPUT_SNIPPET_CHARS),
             log_line_count=result.get("log_line_count"),
             exit_code=exit_code,
-            duration_ms=result.get("duration_ms"),
+            terminal_duration_ms=result.get("duration_ms"),
             timed_out=result.get("timed_out"),
         )
         phase, status = _submit_success_status(payload)
@@ -2107,7 +2323,7 @@ def submit(
             k8s=k8s_status,
             output=_snippet(submit_output, STDOUT_SNIPPET_CHARS),
             exit_code=exit_code,
-            duration_ms=result.get("duration_ms"),
+            elastic_blast_submit_duration_ms=result.get("duration_ms"),
             timed_out=result.get("timed_out"),
         )
         return {
@@ -2335,11 +2551,15 @@ def reconcile_stale_jobs(
     Scans all jobstate rows with an active status (``queued`` / ``pending``
     / ``running`` / ``reducing``) and refreshes them by:
 
-    1. Asking Celery for the task result. ``FAILURE`` or revoked tasks
-       become ``failed``; ``SUCCESS`` becomes ``completed``.
-    2. Falling back to the external OpenAPI plane when Celery has no
-       record (worker died, broker lost the message, etc.).
-    3. Marking rows ``failed`` with ``error_code=worker_lost`` when no
+     1. Asking Celery for the task result. ``FAILURE`` or revoked tasks
+         become ``failed``; completed submit tasks continue into runtime
+         reconciliation while terminal task results become ``completed``.
+     2. Refreshing the Kubernetes runtime status for accepted ElasticBLAST
+         jobs and waiting in ``results_pending`` until parseable result
+         artifacts exist.
+     3. Falling back to the external OpenAPI plane when Celery has no
+         record (worker died, broker lost the message, etc.).
+     4. Marking rows ``failed`` with ``error_code=worker_lost`` when no
        upstream still knows about the job and the row has been quiet for
        longer than ``stale_threshold_seconds``.
 
@@ -2360,6 +2580,8 @@ def reconcile_stale_jobs(
         "completed": 0,
         "failed": 0,
         "worker_lost": 0,
+        "k8s_refreshed": 0,
+        "results_pending": 0,
         "external_refreshed": 0,
         "untouched": 0,
         "errors": 0,
@@ -2402,17 +2624,22 @@ def reconcile_stale_jobs(
                         type(exc).__name__,
                     )
 
-            # 1) Celery reports a terminal state — trust it.
+            submit_task_completed_active = False
+
+            # 1) Celery reports a terminal state. A completed submit task can
+            # still leave an active runtime job in AKS, so active rows continue
+            # into the K8s/OpenAPI reconciliation path below.
             if celery_status == "SUCCESS":
                 status, phase = _celery_success_row_status(row, celery_result)
+                if status == "completed":
+                    if row.status != status or row.phase != phase:
+                        repo.update(row.job_id, status=status, phase=phase)
+                    _enqueue_artifact_finalizer(row.job_id, phase, status)
+                    summary["completed"] += 1
+                    continue
                 if row.status != status or row.phase != phase:
                     repo.update(row.job_id, status=status, phase=phase)
-                _enqueue_artifact_finalizer(row.job_id, phase, status)
-                if status == "completed":
-                    summary["completed"] += 1
-                else:
-                    summary["untouched"] += 1
-                continue
+                submit_task_completed_active = True
             if celery_status in {"FAILURE", "REVOKED"}:
                 err = _snippet(celery_result) if celery_result is not None else "task_failed"
                 repo.update(
@@ -2439,6 +2666,25 @@ def reconcile_stale_jobs(
             )
             refreshed = False
             external_job_id = _external_reconcile_job_id(row)
+            k8s_outcome = _reconcile_row_k8s_status(
+                repo,
+                row,
+                subscription_id=str(sub),
+                resource_group=str(rg),
+                cluster_name=str(cluster),
+                elastic_blast_job_id=external_job_id,
+            )
+            if k8s_outcome:
+                summary["k8s_refreshed"] += 1
+                if k8s_outcome == "completed":
+                    summary["completed"] += 1
+                elif k8s_outcome == "failed":
+                    summary["failed"] += 1
+                elif k8s_outcome == "results_pending":
+                    summary["results_pending"] += 1
+                else:
+                    summary["untouched"] += 1
+                continue
             if sub and rg and cluster and external_job_id:
                 try:
                     from api.routes._blast_shared import (
@@ -2482,6 +2728,10 @@ def reconcile_stale_jobs(
             if refreshed:
                 continue
 
+            if submit_task_completed_active:
+                summary["untouched"] += 1
+                continue
+
             # 3) Nobody knows the job and it has been quiet for a while.
             try:
                 updated_at = datetime.fromisoformat(
@@ -2513,13 +2763,75 @@ def reconcile_stale_jobs(
         summary["completed"]
         or summary["failed"]
         or summary["worker_lost"]
+        or summary["k8s_refreshed"]
         or summary["external_refreshed"]
     )
     if progress_made:
         LOGGER.info(
             "reconcile_stale_jobs: scanned=%(scanned)d completed=%(completed)d "
-            "failed=%(failed)d worker_lost=%(worker_lost)d "
-            "external_refreshed=%(external_refreshed)d errors=%(errors)d",
+            "failed=%(failed)d worker_lost=%(worker_lost)d k8s_refreshed=%(k8s_refreshed)d "
+            "results_pending=%(results_pending)d external_refreshed=%(external_refreshed)d "
+            "errors=%(errors)d",
+            summary,
+        )
+    return summary
+
+
+@shared_task(name="api.tasks.blast.backfill_completed_runtime_metrics", bind=True)
+def backfill_completed_runtime_metrics(
+    self: Any,
+    *,
+    job_id: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Backfill K8s container runtime metrics for completed BLAST jobs.
+
+    Side effects: updates completed dashboard job payloads when the K8s job
+    still exposes container termination timestamps. Idempotent: rows that
+    already carry container runtime metrics are skipped before any K8s call.
+    """
+    del self
+    summary: dict[str, Any] = {
+        "scanned": 0,
+        "backfilled": 0,
+        "skipped": 0,
+        "errors": 0,
+    }
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        repo = JobStateRepository()
+        if job_id:
+            row = repo.get(job_id)
+            rows = [row] if row is not None and row.status == "completed" else []
+        else:
+            rows = repo.list_completed(job_type="blast", limit=limit)
+    except Exception as exc:
+        LOGGER.warning("backfill_completed_runtime_metrics: list failed: %s", exc)
+        summary["errors"] = 1
+        return summary
+
+    summary["scanned"] = len(rows)
+    for row in rows:
+        try:
+            outcome = _backfill_completed_row_runtime_metrics(repo, row)
+            if outcome == "backfilled":
+                summary["backfilled"] += 1
+            elif outcome == "error":
+                summary["errors"] += 1
+            else:
+                summary["skipped"] += 1
+        except Exception as exc:
+            LOGGER.warning(
+                "backfill_completed_runtime_metrics: row failed job_id=%s: %s",
+                row.job_id,
+                type(exc).__name__,
+            )
+            summary["errors"] += 1
+    if summary["backfilled"] or summary["errors"]:
+        LOGGER.info(
+            "backfill_completed_runtime_metrics: scanned=%(scanned)d "
+            "backfilled=%(backfilled)d skipped=%(skipped)d errors=%(errors)d",
             summary,
         )
     return summary

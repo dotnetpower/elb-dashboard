@@ -20,7 +20,7 @@ export function ApiHero({
   return (
     <div className="mono-header api-hero">
 
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+      <div className="api-hero__row" style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
         <div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
             <BookOpen size={18} style={{ color: "var(--accent)" }} />
@@ -56,7 +56,7 @@ export function ApiHero({
           </p>
 
           {spec && (
-            <div style={{ display: "flex", gap: 16, marginTop: 14 }}>
+            <div className="api-hero__stats" style={{ display: "flex", gap: 16, marginTop: 14 }}>
               <Stat icon={<Hash size={11} />} label="Endpoints" value={totalEndpoints} />
               <Stat icon={<Server size={11} />} label="Groups" value={spec.tags.length} />
               <Stat icon={<Zap size={11} />} label="Methods" value={methods.map((method) => method.toUpperCase()).join(", ")} />
@@ -64,10 +64,11 @@ export function ApiHero({
           )}
         </div>
 
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+        <div className="api-hero__actions" style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
           {baseUrl && (
             <>
               <span
+                className="api-hero__base-url"
                 style={{
                   fontSize: 10,
                   fontFamily: "var(--font-mono)",
@@ -83,7 +84,7 @@ export function ApiHero({
                 href={`${baseUrl}/docs`}
                 target="_blank"
                 rel="noreferrer"
-                className="glass-button"
+                className="glass-button api-hero__swagger"
                 style={{ fontSize: 11, textDecoration: "none" }}
               >
                 <ExternalLink size={11} /> Swagger UI

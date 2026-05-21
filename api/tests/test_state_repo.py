@@ -386,3 +386,30 @@ def test_list_active_filters_to_in_flight_states(monkeypatch) -> None:
     assert "type eq 'blast'" in filter_expr
     for active in ("queued", "pending", "running", "reducing"):
         assert f"status eq '{active}'" in filter_expr
+
+
+def test_list_completed_filters_to_completed_state(monkeypatch) -> None:
+    captured: list[str] = []
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, *, results_per_page: int):
+            captured.append(query_filter)
+            return []
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+    repo.list_completed(job_type="blast")
+
+    assert captured == ["type eq 'blast' and status eq 'completed'"]

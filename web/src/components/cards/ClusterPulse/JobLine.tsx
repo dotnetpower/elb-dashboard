@@ -22,13 +22,22 @@ import { timeAgo } from "@/pages/BlastJobs/dateGroup";
 
 import { ownerLabel, prettifyQueryLabel, summariseNote } from "./helpers";
 
+export const JOB_ROW_GRID_GAP = 10;
+
+const JOB_ROW_GRID_WITH_USER = "minmax(0, 1fr) 72px 92px 104px";
+const JOB_ROW_GRID_WITHOUT_USER = "minmax(0, 1fr) 92px 104px";
+
+export function jobRowGridTemplate(showUser: boolean): string {
+  return showUser ? JOB_ROW_GRID_WITH_USER : JOB_ROW_GRID_WITHOUT_USER;
+}
+
 interface Props {
   job: JobRowView;
   ownerUpn?: string | null;
   /** Parent-owned "now" — re-rendered once a second for active jobs. */
   nowMs: number;
   /** When false, the User column is collapsed because no job in this
-   *  roster has an owner. Lets the row reclaim 76 px for the title. */
+   *  roster has an owner. Lets the row reclaim space for the title. */
   showUser: boolean;
 }
 
@@ -54,9 +63,7 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
 
   const titleText = job.title || job.jobId;
   const queryLabel = job.query ? prettifyQueryLabel(job.query) : null;
-  const gridTemplate = showUser
-    ? "minmax(0, 1fr) 76px 76px 92px"
-    : "minmax(0, 1fr) 76px 92px";
+  const gridTemplate = jobRowGridTemplate(showUser);
 
   return (
     <div
@@ -74,7 +81,7 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
         display: "grid",
         gridTemplateColumns: gridTemplate,
         alignItems: "center",
-        gap: 8,
+        gap: JOB_ROW_GRID_GAP,
         padding: "5px 8px",
         borderRadius: 6,
         background: "var(--pulse-row-bg)",

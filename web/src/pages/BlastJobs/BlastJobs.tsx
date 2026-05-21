@@ -2,11 +2,11 @@ import { AlertTriangle } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { RowSkeleton } from "@/components/RowSkeleton";
 
 import { DateGroupSection } from "./DateGroupSection";
 import { JobsFilterBar } from "./JobsFilterBar";
 import { JobsHeader } from "./JobsHeader";
+import { JobsLoadingSkeleton } from "./JobsLoadingSkeleton";
 import { NoFilteredEmpty, NoJobsEmpty } from "./JobsEmptyState";
 import { useBlastJobsState } from "./useBlastJobsState";
 
@@ -39,9 +39,7 @@ export function BlastJobs() {
         jobsQuery={jobsQuery}
       />
 
-      {jobsQuery.isLoading && (
-        <RowSkeleton count={3} height={40} label="Loading BLAST searches…" />
-      )}
+      {jobsQuery.isLoading && <JobsLoadingSkeleton />}
 
       {allJobs.length > 0 && (
         <JobsFilterBar
@@ -64,10 +62,7 @@ export function BlastJobs() {
             color: "var(--danger)",
           }}
         >
-          <AlertTriangle
-            size={12}
-            style={{ verticalAlign: "middle", marginRight: 4 }}
-          />
+          <AlertTriangle size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />
           Delete failed: {formatApiError(deleteMutation.error, "blast")}
         </div>
       )}
@@ -75,11 +70,9 @@ export function BlastJobs() {
       {allJobs.length === 0 && !jobsQuery.isLoading && (
         <NoJobsEmpty cluster={cluster} degradedNotice={degradedNotice} />
       )}
-      {filtered.length === 0 &&
-        allJobs.length > 0 &&
-        !jobsQuery.isLoading && (
-          <NoFilteredEmpty search={search} filter={filter} />
-        )}
+      {filtered.length === 0 && allJobs.length > 0 && !jobsQuery.isLoading && (
+        <NoFilteredEmpty search={search} filter={filter} />
+      )}
 
       {grouped.map(({ label, jobs: groupJobs }) => (
         <DateGroupSection

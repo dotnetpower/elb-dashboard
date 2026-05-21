@@ -4,6 +4,7 @@ This page links the most recent feature-change notes. The complete archive under
 
 ## 2026-05
 
+- [High Level Architecture](features_change/2026-05/2026-05-21-high-level-architecture.md) - Add a Mermaid architecture map for the browser, Container App sidecars, Azure resource plane, and AKS workload plane.
 - [API Reference screenshot guide](features_change/2026-05/2026-05-21-api-reference-screenshot-guide.md) - Add a captured API Reference screenshot and usage notes to the user guide.
 - [Get Started audience split](features_change/2026-05/2026-05-21-get-started-audience-split.md) - Split the quick researcher path from deployment reference details.
 - [Overview researcher copy](features_change/2026-05/2026-05-21-overview-researcher-copy.md) - Reframe the home page around researcher pain points.

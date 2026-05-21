@@ -41,6 +41,7 @@ nav:
   - Contributor Guide:
       - Screenshot Workflow: contributor-guide/screenshot-workflow.md
   - Architecture:
+      - High Level Architecture: high-level-architecture.md
       - Container Apps Migration: container-apps-migration.md
       - BLAST SearchSP Discovery: blast-searchsp-discovery.md
       - Web BLAST Compatibility Plan: web-blast-compatibility-implementation-plan.md
@@ -52,6 +53,16 @@ nav:
       - Monitoring UI: copilot/monitoring-ui.md
       - Glass UI: copilot/glass-ui.md
       - Codebase Map: copilot/codebase-map.md
+
+extra_javascript:
+  - javascripts/external-links.js
+  - javascripts/image-viewer.js
+  - https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js
+  - javascripts/mermaid-init.js
+
+extra_css:
+  - stylesheets/image-viewer.css
+  - stylesheets/mermaid.css
 
 exclude_docs: |
   temp/**
@@ -67,7 +78,11 @@ markdown_extensions:
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.highlight
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_div_format
   - tables
   - toc:
       permalink: true

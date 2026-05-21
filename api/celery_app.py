@@ -74,6 +74,11 @@ celery_app.conf.update(
             "schedule": 60.0,
             "options": {"queue": "blast"},
         },
+        "blast-backfill-completed-runtime-metrics": {
+            "task": "api.tasks.blast.backfill_completed_runtime_metrics",
+            "schedule": 300.0,
+            "options": {"queue": "blast"},
+        },
     },
     timezone="UTC",
     enable_utc=True,

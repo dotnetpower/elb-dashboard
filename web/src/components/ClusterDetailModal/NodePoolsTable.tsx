@@ -25,6 +25,7 @@ export function NodePoolsTable({ agentPools }: { agentPools: AksAgentPool[] }) {
         Node Pools
       </div>
       <div
+        className="cluster-detail-pools-wrap"
         style={{
           borderRadius: 8,
           border: "1px solid var(--border-weak)",

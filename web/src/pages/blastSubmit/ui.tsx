@@ -4,32 +4,71 @@ import { Check, Copy, HelpCircle, Terminal } from "lucide-react";
 import { buildCommandString, type FormState, PROGRAMS } from "@/pages/blastSubmitModel";
 import type { ToastFn } from "@/pages/blastSubmit/types";
 
-type CommandTokenKind = "command" | "flag" | "number" | "value";
+type CommandTokenKind = "command" | "flag" | "number" | "value" | "comment" | "continuation";
+
+function commandTokens(command: string): string[] {
+  return command.match(/\S+/g) ?? [];
+}
+
+function formatCommandPreview(command: string): string {
+  const tokens = commandTokens(command);
+  if (tokens.length === 0) return "# BLAST command preview";
+
+  const lines = [`# BLAST command preview`, tokens[0]];
+  let currentLine = "";
+
+  for (const token of tokens.slice(1)) {
+    if (token.startsWith("-")) {
+      if (currentLine) lines.push(currentLine);
+      currentLine = `  ${token}`;
+      continue;
+    }
+
+    currentLine = currentLine ? `${currentLine} ${token}` : `  ${token}`;
+  }
+
+  if (currentLine) lines.push(currentLine);
+
+  return lines
+    .map((line, index) => {
+      if (index === 0 || index === lines.length - 1) return line;
+      return `${line} \\`;
+    })
+    .join("\n");
+}
 
 function classifyCommandToken(token: string, index: number): CommandTokenKind {
+  if (token === "\\") return "continuation";
+  if (token.startsWith("#")) return "comment";
   if (index === 0) return "command";
   if (token.startsWith("-")) return "flag";
-  if (/^[0-9.]+$/.test(token)) return "number";
+  if (/^(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(token)) return "number";
   return "value";
 }
 
 function renderCommandPreview(command: string) {
   let tokenIndex = 0;
 
-  return command.split(/(\s+)/).map((token, index) => {
-    if (/^\s+$/.test(token)) return token;
+  return command.split("\n").flatMap((line, lineIndex) => {
+    const linePrefix = lineIndex === 0 ? [] : ["\n"];
+    const isCommentLine = line.trimStart().startsWith("#");
+    const renderedLine = line.split(/(\s+)/).map((token, tokenPartIndex) => {
+      if (/^\s+$/.test(token)) return token;
 
-    const kind = classifyCommandToken(token, tokenIndex);
-    tokenIndex += 1;
+      const kind = isCommentLine ? "comment" : classifyCommandToken(token, tokenIndex);
+      if (kind !== "comment" && kind !== "continuation") tokenIndex += 1;
 
-    return (
-      <span
-        key={`${token}-${index}`}
-        className={`blast-cmd-token blast-cmd-token--${kind}`}
-      >
-        {token}
-      </span>
-    );
+      return (
+        <span
+          key={`${lineIndex}-${tokenPartIndex}-${token}`}
+          className={`blast-cmd-token blast-cmd-token--${kind}`}
+        >
+          {token}
+        </span>
+      );
+    });
+
+    return [...linePrefix, ...renderedLine];
   });
 }
 
@@ -85,6 +124,7 @@ export function BlastCommandPreview({
 }) {
   const [copied, setCopied] = useState(false);
   const cmd = buildCommandString(form, programMeta, { effectiveSearchSpace });
+  const previewCommand = formatCommandPreview(cmd);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(cmd).then(() => {
@@ -108,7 +148,7 @@ export function BlastCommandPreview({
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <code className="blast-cmd-preview__code">{renderCommandPreview(cmd)}</code>
+      <code className="blast-cmd-preview__code">{renderCommandPreview(previewCommand)}</code>
     </div>
   );
 }

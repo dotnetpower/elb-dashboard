@@ -85,6 +85,7 @@ def test_api_routes_registered_before_frontend_catchall() -> None:
         ("GET", "/api/aks/openapi/token"),
         ("POST", "/api/aks/openapi/token"),
         ("GET", "/api/aks/openapi/proxy"),
+        ("GET", "/api/operations/{operation_id}"),
         ("POST", "/api/storage/prepare-db"),
         ("GET", "/api/storage/local-debug"),
         ("POST", "/api/storage/local-debug/open"),

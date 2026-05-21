@@ -2,12 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Link2, Loader2, Play, Zap } from "lucide-react";
 
 import { METHOD_META } from "@/pages/apiReference/constants";
+import { JsonHighlight } from "@/pages/apiReference/JsonHighlight";
 import { MethodBadge } from "@/pages/apiReference/MethodBadge";
 import { ResponseViewer } from "@/pages/apiReference/ResponseViewer";
 import { SectionLabel } from "@/pages/apiReference/SectionLabel";
-import { isSimpleEndpoint } from "@/pages/apiReference/spec";
+import { getDefaultRequestExampleKey, isSimpleEndpoint } from "@/pages/apiReference/spec";
 import type { OpenApiProxyInfo, SpecEndpoint } from "@/pages/apiReference/types";
 import { useOpenApiExecutor } from "@/hooks/useOpenApiExecutor";
+
+type ResponseEntry = [string, NonNullable<SpecEndpoint["responses"]>[string]];
 
 export function EndpointCard({
   ep,
@@ -49,14 +52,26 @@ export function EndpointCard({
     [ep.parameters],
   );
   const simple = isSimpleEndpoint(ep);
+  const responseEntries = useMemo(
+    () => sortResponses(Object.entries(ep.responses || {})),
+    [ep.responses],
+  );
+  const responseHighlights = useMemo(
+    () => buildResponseHighlights(responseEntries),
+    [responseEntries],
+  );
+  const pathIdHint = getPathIdHint(ep.path);
+  const defaultExampleKey = useMemo(
+    () => getDefaultRequestExampleKey(ep, exampleKeys),
+    [ep, exampleKeys],
+  );
 
   const initBody = useCallback(() => {
-    if (exampleKeys.length > 0 && !bodyText) {
-      const first = exampleKeys[0];
-      setSelectedExample(first);
-      setBodyText(JSON.stringify(examples[first].value, null, 2));
+    if (defaultExampleKey && !bodyText) {
+      setSelectedExample(defaultExampleKey);
+      setBodyText(JSON.stringify(examples[defaultExampleKey].value, null, 2));
     }
-  }, [bodyText, exampleKeys, examples]);
+  }, [bodyText, defaultExampleKey, examples]);
 
   const handleExampleChange = (key: string) => {
     setSelectedExample(key);
@@ -118,6 +133,7 @@ export function EndpointCard({
     <div
       ref={rootRef}
       id={id}
+      className="endpoint-card"
       style={{
         background: "var(--bg-primary)",
         border: `1px solid var(--border-weak)`,
@@ -130,6 +146,7 @@ export function EndpointCard({
       }}
     >
       <div
+        className="endpoint-card__header"
         onClick={() => {
           setExpanded((open) => !open);
           if (!expanded) initBody();
@@ -157,7 +174,28 @@ export function EndpointCard({
         >
           {ep.path}
         </code>
+        {pathIdHint && (
+          <span
+            title={pathIdHint.title}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              padding: "2px 6px",
+              borderRadius: 5,
+              border: "1px solid var(--border-weak)",
+              background: "var(--bg-tertiary)",
+              color: "var(--text-faint)",
+              fontSize: 10,
+              fontFamily: "var(--font-mono)",
+              fontWeight: 700,
+              flexShrink: 0,
+            }}
+          >
+            {pathIdHint.label}
+          </span>
+        )}
         <span
+          className="endpoint-card__summary"
           style={{
             fontSize: 12,
             color: "var(--text-faint)",
@@ -169,12 +207,49 @@ export function EndpointCard({
         >
           {ep.summary}
         </span>
+        {responseHighlights.length > 0 && (
+          <div
+            className="endpoint-card__response-codes"
+            aria-label="Response shapes"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              flexWrap: "wrap",
+              flexShrink: 0,
+              maxWidth: 220,
+            }}
+          >
+            {responseHighlights.map((highlight) => (
+              <span
+                key={highlight.key}
+                title={highlight.title}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  padding: "2px 6px",
+                  borderRadius: 5,
+                  border: `1px solid ${responseBorder(highlight.code)}`,
+                  background: responseBackground(highlight.code),
+                  color: responseTone(highlight.code),
+                  fontSize: 10,
+                  fontFamily: "var(--font-mono)",
+                  fontWeight: 700,
+                  lineHeight: 1.3,
+                }}
+              >
+                {highlight.label}
+              </span>
+            ))}
+          </div>
+        )}
         {/* A2: copy a shareable deep-link to this endpoint */}
         <button
           type="button"
           onClick={handleCopyLink}
           title={copiedAnchor ? "Link copied" : "Copy link to this endpoint"}
           aria-label="Copy link to this endpoint"
+          className="endpoint-card__copylink"
           style={{
             background: "none",
             border: "none",
@@ -215,6 +290,7 @@ export function EndpointCard({
 
       {expanded && (
         <div
+          className="endpoint-card__body"
           style={{
             borderTop: `1px solid var(--border-weak)`,
             display: "grid",
@@ -222,7 +298,9 @@ export function EndpointCard({
             gap: 0,
           }}
         >
-          <div style={{ padding: "16px 20px", borderRight: "1px solid var(--border-weak)" }}>
+          <div
+            style={{ padding: "16px 20px", borderRight: "1px solid var(--border-weak)" }}
+          >
             {ep.description && (
               <p
                 style={{
@@ -244,6 +322,7 @@ export function EndpointCard({
                   {ep.parameters.map((param) => (
                     <div
                       key={param.name}
+                      className="endpoint-card__param-row"
                       style={{
                         display: "grid",
                         gridTemplateColumns: "120px 60px 1fr",
@@ -261,8 +340,19 @@ export function EndpointCard({
                             fontFamily: "var(--font-mono)",
                           }}
                         >
-                          {param.name}
+                          {param.displayName || param.name}
                         </code>
+                        {param.displayName && (
+                          <code
+                            style={{
+                              fontSize: 9,
+                              color: "var(--text-faint)",
+                              fontFamily: "var(--font-mono)",
+                            }}
+                          >
+                            {param.name}
+                          </code>
+                        )}
                         {param.required && (
                           <span
                             style={{
@@ -291,7 +381,7 @@ export function EndpointCard({
                         {param.schema?.type || "string"}
                       </span>
                       <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                        {param.description || ""}
+                        {param.usageHint || param.description || ""}
                       </span>
                     </div>
                   ))}
@@ -302,44 +392,203 @@ export function EndpointCard({
             {ep.responses && (
               <div>
                 <SectionLabel>Responses</SectionLabel>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {Object.entries(ep.responses).map(([code, info]) => (
-                    <span
-                      key={code}
-                      style={{
-                        fontSize: 11,
-                        padding: "3px 10px",
-                        borderRadius: 5,
-                        fontFamily: "var(--font-mono)",
-                        fontWeight: 600,
-                        background: code.startsWith("2")
-                          ? "rgba(115,191,105,0.08)"
-                          : code.startsWith("4")
-                            ? "rgba(242,114,111,0.08)"
-                            : "var(--bg-tertiary)",
-                        color: code.startsWith("2")
-                          ? "var(--success)"
-                          : code.startsWith("4")
-                            ? "var(--danger)"
-                            : "var(--text-muted)",
-                        border: `1px solid ${
-                          code.startsWith("2")
-                            ? "rgba(115,191,105,0.15)"
-                            : code.startsWith("4")
-                              ? "rgba(242,114,111,0.15)"
-                              : "var(--border-weak)"
-                        }`,
-                      }}
-                    >
-                      {code} <span style={{ fontWeight: 400 }}>{info.description}</span>
-                    </span>
-                  ))}
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {responseEntries.map(([code, info]) => {
+                    const exampleText =
+                      info.example === undefined
+                        ? ""
+                        : JSON.stringify(info.example, null, 2);
+                    return (
+                      <details
+                        key={code}
+                        open={code.startsWith("2")}
+                        className="endpoint-card__response-shape"
+                        style={{
+                          border: `1px solid ${responseBorder(code)}`,
+                          borderRadius: 8,
+                          background: responseBackground(code),
+                          overflow: "hidden",
+                        }}
+                      >
+                        <summary
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            padding: "8px 10px",
+                            cursor: "pointer",
+                            listStyle: "none",
+                          }}
+                        >
+                          <code
+                            style={{
+                              color: responseTone(code),
+                              fontSize: 11,
+                              fontFamily: "var(--font-mono)",
+                              fontWeight: 800,
+                            }}
+                          >
+                            {code}
+                          </code>
+                          <strong
+                            style={{
+                              color: "var(--text-primary)",
+                              fontSize: 11,
+                              fontFamily: "var(--font-mono)",
+                            }}
+                          >
+                            {info.shapeName || responseTitle(code, info.description)}
+                          </strong>
+                          {info.description && (
+                            <span
+                              style={{
+                                color: "var(--text-muted)",
+                                fontSize: 11,
+                                lineHeight: 1.4,
+                              }}
+                            >
+                              {info.description}
+                            </span>
+                          )}
+                        </summary>
+                        <div
+                          style={{
+                            borderTop: `1px solid ${responseBorder(code)}`,
+                            padding: "9px 10px 10px",
+                            background: "rgba(7, 12, 22, 0.22)",
+                          }}
+                        >
+                          {info.nextAction && (
+                            <div
+                              style={{
+                                color: "var(--text-muted)",
+                                fontSize: 11,
+                                lineHeight: 1.5,
+                                marginBottom: 8,
+                              }}
+                            >
+                              <strong style={{ color: "var(--text-primary)" }}>
+                                Next:
+                              </strong>{" "}
+                              {info.nextAction}
+                            </div>
+                          )}
+                          {info.idUsage && info.idUsage.length > 0 && (
+                            <div
+                              style={{
+                                display: "grid",
+                                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                                gap: 6,
+                                marginBottom: 8,
+                              }}
+                            >
+                              {info.idUsage.map((item) => (
+                                <div
+                                  key={item.label}
+                                  style={{
+                                    padding: "7px 8px",
+                                    borderRadius: 6,
+                                    border: "1px solid var(--border-weak)",
+                                    background: "rgba(255,255,255,0.03)",
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      color: "var(--text-primary)",
+                                      fontSize: 10,
+                                      fontWeight: 700,
+                                      marginBottom: 3,
+                                    }}
+                                  >
+                                    {item.label}
+                                  </div>
+                                  <code
+                                    style={{
+                                      display: "block",
+                                      color: "var(--text-muted)",
+                                      fontSize: 10,
+                                      fontFamily: "var(--font-mono)",
+                                      overflowWrap: "anywhere",
+                                      marginBottom: 4,
+                                    }}
+                                  >
+                                    {item.value}
+                                  </code>
+                                  <div
+                                    style={{
+                                      color: "var(--text-faint)",
+                                      fontSize: 10,
+                                      lineHeight: 1.45,
+                                    }}
+                                  >
+                                    Use with <code>{item.useWith}</code>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {info.fields && info.fields.length > 0 && (
+                            <div
+                              style={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: 5,
+                                marginBottom: exampleText ? 8 : 0,
+                              }}
+                            >
+                              {info.fields.map((field) => (
+                                <code
+                                  key={field}
+                                  style={{
+                                    padding: "2px 6px",
+                                    borderRadius: 4,
+                                    background: "var(--bg-tertiary)",
+                                    color: "var(--text-faint)",
+                                    fontSize: 10,
+                                    fontFamily: "var(--font-mono)",
+                                  }}
+                                >
+                                  {field}
+                                </code>
+                              ))}
+                            </div>
+                          )}
+                          {exampleText && (
+                            <pre
+                              style={{
+                                margin: 0,
+                                padding: "10px 11px",
+                                maxHeight: 320,
+                                overflow: "auto",
+                                borderRadius: 7,
+                                border: "1px solid var(--border-weak)",
+                                background: "var(--bg-primary)",
+                                color: "var(--text-primary)",
+                                fontSize: 10,
+                                lineHeight: 1.55,
+                                fontFamily: "var(--font-mono)",
+                                whiteSpace: "pre-wrap",
+                              }}
+                            >
+                              <JsonHighlight text={exampleText} />
+                            </pre>
+                          )}
+                        </div>
+                      </details>
+                    );
+                  })}
                 </div>
               </div>
             )}
           </div>
 
-          <div style={{ padding: "16px 20px", background: "var(--bg-secondary)", minHeight: 120 }}>
+          <div
+            style={{
+              padding: "16px 20px",
+              background: "var(--bg-secondary)",
+              minHeight: 120,
+            }}
+          >
             <div
               style={{
                 display: "flex",
@@ -384,7 +633,12 @@ export function EndpointCard({
                 {pathParameters.map((param) => (
                   <div
                     key={param.name}
-                    style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginBottom: 6,
+                    }}
                   >
                     <label
                       style={{
@@ -394,34 +648,67 @@ export function EndpointCard({
                         fontFamily: "var(--font-mono)",
                       }}
                     >
-                      {param.name}
+                      {param.displayName || param.name}
                     </label>
-                    <input
-                      type="text"
-                      placeholder={param.schema?.default != null ? String(param.schema.default) : param.name}
-                      value={paramValues[param.name] || ""}
-                      onChange={(event) =>
-                        setParamValues((prev) => ({ ...prev, [param.name]: event.target.value }))
-                      }
+                    <div
                       style={{
                         flex: 1,
-                        padding: "6px 10px",
-                        fontSize: 12,
-                        background: "var(--bg-primary)",
-                        border: "1px solid var(--border-weak)",
-                        borderRadius: 6,
-                        color: "var(--text-primary)",
-                        outline: "none",
-                        fontFamily: "var(--font-mono)",
-                        transition: "border-color var(--motion-fast)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
                       }}
-                      onFocus={(event) => {
-                        event.target.style.borderColor = "var(--border-focus)";
-                      }}
-                      onBlur={(event) => {
-                        event.target.style.borderColor = "var(--border-weak)";
-                      }}
-                    />
+                    >
+                      <input
+                        type="text"
+                        placeholder={
+                          param.schema?.default != null
+                            ? String(param.schema.default)
+                            : param.name
+                        }
+                        value={paramValues[param.name] || ""}
+                        onChange={(event) =>
+                          setParamValues((prev) => ({
+                            ...prev,
+                            [param.name]: event.target.value,
+                          }))
+                        }
+                        style={{
+                          width: "100%",
+                          padding: "6px 10px",
+                          fontSize: 12,
+                          background: "var(--bg-primary)",
+                          border: "1px solid var(--border-weak)",
+                          borderRadius: 6,
+                          color: "var(--text-primary)",
+                          outline: "none",
+                          fontFamily: "var(--font-mono)",
+                          transition: "border-color var(--motion-fast)",
+                        }}
+                        onFocus={(event) => {
+                          event.target.style.borderColor = "var(--border-focus)";
+                        }}
+                        onBlur={(event) => {
+                          event.target.style.borderColor = "var(--border-weak)";
+                        }}
+                      />
+                      {(param.usageHint || param.description) && (
+                        <div
+                          style={{
+                            fontSize: 10,
+                            color: "var(--text-faint)",
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          {param.usageHint || param.description}
+                          {param.displayName && (
+                            <>
+                              {" "}
+                              Path variable: <code>{param.name}</code>.
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -443,7 +730,12 @@ export function EndpointCard({
                 {queryParameters.map((param) => (
                   <div
                     key={param.name}
-                    style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginBottom: 6,
+                    }}
                   >
                     <label
                       style={{
@@ -457,10 +749,17 @@ export function EndpointCard({
                     </label>
                     <input
                       type="text"
-                      placeholder={param.schema?.default != null ? String(param.schema.default) : param.name}
+                      placeholder={
+                        param.schema?.default != null
+                          ? String(param.schema.default)
+                          : param.name
+                      }
                       value={paramValues[param.name] || ""}
                       onChange={(event) =>
-                        setParamValues((prev) => ({ ...prev, [param.name]: event.target.value }))
+                        setParamValues((prev) => ({
+                          ...prev,
+                          [param.name]: event.target.value,
+                        }))
                       }
                       style={{
                         flex: 1,
@@ -488,7 +787,14 @@ export function EndpointCard({
 
             {ep.requestBody && (
               <div style={{ marginBottom: 12 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 6,
+                  }}
+                >
                   <span
                     style={{
                       fontSize: 10,
@@ -522,7 +828,14 @@ export function EndpointCard({
                   )}
                 </div>
                 {selectedExample && examples[selectedExample]?.description && (
-                  <p style={{ fontSize: 10, color: "var(--text-faint)", margin: "0 0 6px", fontStyle: "italic" }}>
+                  <p
+                    style={{
+                      fontSize: 10,
+                      color: "var(--text-faint)",
+                      margin: "0 0 6px",
+                      fontStyle: "italic",
+                    }}
+                  >
                     {examples[selectedExample].description}
                   </p>
                 )}
@@ -577,4 +890,116 @@ export function EndpointCard({
       )}
     </div>
   );
+}
+
+function sortResponses(entries: ResponseEntry[]): ResponseEntry[] {
+  return [...entries].sort(([left], [right]) => {
+    const leftNumber = Number(left);
+    const rightNumber = Number(right);
+    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+      return leftNumber - rightNumber;
+    }
+    if (Number.isFinite(leftNumber)) return -1;
+    if (Number.isFinite(rightNumber)) return 1;
+    return left.localeCompare(right);
+  });
+}
+
+function buildResponseHighlights(entries: ResponseEntry[]): {
+  key: string;
+  code: string;
+  label: string;
+  title: string;
+}[] {
+  const success = entries.find(([code]) => code.startsWith("2"));
+  const clientErrors = entries.filter(([code]) => code.startsWith("4"));
+  const serverErrors = entries.filter(([code]) => code.startsWith("5"));
+  const highlights: { key: string; code: string; label: string; title: string }[] = [];
+
+  if (success) {
+    const [code, info] = success;
+    const shape = info.shapeName || responseTitle(code, info.description);
+    highlights.push({
+      key: code,
+      code,
+      label: `${code} ${shape}`,
+      title: info.description || `HTTP ${code}`,
+    });
+  }
+
+  if (clientErrors.length > 0) {
+    highlights.push({
+      key: "4xx",
+      code: clientErrors[0][0],
+      label: "4xx ErrorResponse",
+      title: clientErrors
+        .map(
+          ([code, info]) =>
+            `${code} ${info.shapeName || responseTitle(code, info.description)}`,
+        )
+        .join("; "),
+    });
+  }
+
+  if (serverErrors.length > 0) {
+    const [code, info] = serverErrors[0];
+    highlights.push({
+      key: "5xx",
+      code,
+      label: `5xx ${info.shapeName || "RuntimeFailure"}`,
+      title: serverErrors
+        .map(
+          ([statusCode, response]) =>
+            `${statusCode} ${response.shapeName || responseTitle(statusCode, response.description)}`,
+        )
+        .join("; "),
+    });
+  }
+
+  if (highlights.length > 0) return highlights;
+
+  return entries.slice(0, 3).map(([code, info]) => ({
+    key: code,
+    code,
+    label: `${code} ${info.shapeName || responseTitle(code, info.description)}`,
+    title: info.description || `HTTP ${code}`,
+  }));
+}
+
+function getPathIdHint(path: string): { label: string; title: string } | undefined {
+  if (!path.includes("{job_id}")) return undefined;
+  return {
+    label: "job_id = OpenAPI id",
+    title:
+      "Use the short OpenAPI job id returned by POST /v1/jobs, not the Dashboard UUID.",
+  };
+}
+
+function responseTitle(code: string, description?: string): string {
+  if (description && description !== "Successful Response") return description;
+  if (code.startsWith("2")) return "SuccessResponse";
+  if (code.startsWith("4")) return "ErrorResponse";
+  if (code.startsWith("5")) return "RuntimeFailure";
+  return `HTTP${code}`;
+}
+
+function responseTone(code: string): string {
+  if (code.startsWith("2")) return "var(--success)";
+  if (code === "409" || code === "429") return "var(--warning)";
+  if (code.startsWith("4") || code.startsWith("5")) return "var(--danger)";
+  return "var(--text-faint)";
+}
+
+function responseBackground(code: string): string {
+  if (code.startsWith("2")) return "rgba(115,191,105,0.08)";
+  if (code === "409" || code === "429") return "rgba(245,166,35,0.08)";
+  if (code.startsWith("4") || code.startsWith("5")) return "rgba(242,114,111,0.08)";
+  return "var(--bg-tertiary)";
+}
+
+function responseBorder(code: string): string {
+  if (code.startsWith("2")) return "rgba(115,191,105,0.16)";
+  if (code === "409" || code === "429") return "rgba(245,166,35,0.18)";
+  if (code.startsWith("4") || code.startsWith("5")) return "rgba(242,114,111,0.18)";
+  return "var(--border-weak)";
 }

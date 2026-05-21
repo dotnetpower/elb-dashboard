@@ -14,20 +14,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Request
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _apply_web_blast_searchsp_default
+from api.services.response_contracts import build_admission, build_meta, request_id_from_scope
 
 router = APIRouter()
 
 
 @router.post("/pre-flight")
 def blast_pre_flight(
+    request: Request,
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    """Run pre-flight checks before BLAST submit."""
+    """Run pre-flight checks before BLAST submit.
+
+    Pre-flight is a read-only admission simulation: HTTP 200 means the
+    simulation completed, while `decision` tells the caller whether a matching
+    submit would be accepted at this point-in-time snapshot.
+    """
 
     checks: list[dict[str, Any]] = []
     critical = 0
@@ -250,10 +257,22 @@ def blast_pre_flight(
         critical += 1
 
     ready = critical == 0
+    warnings = [check for check in checks if check.get("status") == "warn"]
+    decision = "would_accept" if ready else "would_reject"
     return {
+        "status": "ok",
         "ready": ready,
+        "decision": decision,
         "checks": checks,
         "compatibility": compatibility_contract,
         "critical_blockers": critical,
         "summary": "All checks passed" if ready else f"{critical} critical issue(s) found",
+        "admission": build_admission(
+            decision=decision,
+            reason="preflight_checks_passed" if ready else "preflight_checks_blocked_submit",
+            queue={"state": decision, "depth_bucket": "unknown"},
+            capacity={"classification": "not_evaluated"},
+            warnings=warnings,
+        ),
+        "meta": build_meta(request_id=request_id_from_scope(request), warnings=warnings),
     }
