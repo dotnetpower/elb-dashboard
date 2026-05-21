@@ -24,7 +24,7 @@ export function PodLogsDialog({
 }: PodLogsDialogProps) {
   return createPortal(
     <div
-      className="glass-dialog-backdrop"
+      className="glass-dialog-backdrop pod-logs-backdrop"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -33,7 +33,7 @@ export function PodLogsDialog({
       aria-label={`Logs: ${target.pod}`}
     >
       <div
-        className="glass-card glass-card--strong glass-dialog"
+        className="glass-card glass-card--strong glass-dialog pod-logs-dialog"
         onClick={(e) => e.stopPropagation()}
         style={{
           maxWidth: 1100,

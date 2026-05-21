@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560" role="img" aria-labelledby="title desc">
+  <title id="title">Poll BLAST job status from the API Reference page</title>
+  <desc id="desc">A documentation illustration showing GET /v1/jobs/{job_id}/status using a copied job_id and returning a running job status response.</desc>
+  <rect width="980" height="560" fill="#0b0f17"/>
+  <rect x="12" y="12" width="956" height="536" rx="10" fill="#151a21" stroke="#2f3743"/>
+
+  <rect x="24" y="28" width="65" height="30" rx="4" fill="#142747" stroke="#4772b8"/>
+  <text x="46" y="48" fill="#65a3ff" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">GET</text>
+  <text x="105" y="49" fill="#f8fafc" font-family="JetBrains Mono, Consolas, monospace" font-size="16" font-weight="700">/v1/jobs/{job_id}/status</text>
+  <text x="804" y="49" fill="#9fb1c7" font-family="Inter, Arial, sans-serif" font-size="13">Get job status</text>
+
+  <line x1="24" y1="78" x2="956" y2="78" stroke="#29313c"/>
+  <line x1="492" y1="78" x2="492" y2="536" stroke="#29313c"/>
+
+  <text x="38" y="116" fill="#b9c8da" font-family="Inter, Arial, sans-serif" font-size="13">Poll Kubernetes jobs and blob storage markers for detailed status.</text>
+  <text x="38" y="158" fill="#aab8cc" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2">PARAMETERS</text>
+  <text x="38" y="192" fill="#65a3ff" font-family="JetBrains Mono, Consolas, monospace" font-size="13">job_id</text>
+  <text x="88" y="192" fill="#ff6978" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">REQ</text>
+  <rect x="158" y="175" width="64" height="22" rx="4" fill="#252b35"/>
+  <text x="176" y="190" fill="#b9c8da" font-family="Inter, Arial, sans-serif" font-size="12">string</text>
+  <line x1="38" y1="214" x2="475" y2="214" stroke="#29313c"/>
+  <text x="38" y="244" fill="#65a3ff" font-family="JetBrains Mono, Consolas, monospace" font-size="13">X-ELB-API-Token</text>
+  <rect x="158" y="227" width="64" height="22" rx="4" fill="#252b35"/>
+  <text x="176" y="242" fill="#b9c8da" font-family="Inter, Arial, sans-serif" font-size="12">string</text>
+
+  <text x="38" y="306" fill="#aab8cc" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2">RESPONSES</text>
+  <rect x="38" y="327" width="170" height="28" rx="5" fill="#132a1b" stroke="#2f8f46"/>
+  <text x="50" y="346" fill="#65e47b" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">200 Successful Response</text>
+  <rect x="218" y="327" width="132" height="28" rx="5" fill="#2a171a" stroke="#8f3340"/>
+  <text x="230" y="346" fill="#ff6978" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">422 Validation Error</text>
+
+  <text x="512" y="114" fill="#aab8cc" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2">TRY IT</text>
+  <rect x="815" y="90" width="124" height="34" rx="7" fill="#1b2a45" stroke="#4772b8"/>
+  <text x="842" y="112" fill="#65a3ff" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Send Request</text>
+
+  <text x="512" y="154" fill="#aab8cc" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">PATH PARAMETERS</text>
+  <text x="512" y="198" fill="#b9c8da" font-family="JetBrains Mono, Consolas, monospace" font-size="13">job_id</text>
+  <rect x="590" y="177" width="330" height="32" rx="6" fill="#0f131a" stroke="#29313c"/>
+  <text x="608" y="198" fill="#f8fafc" font-family="JetBrains Mono, Consolas, monospace" font-size="13">17dfd2825089</text>
+
+  <rect x="512" y="238" width="427" height="244" rx="8" fill="#17221c" stroke="#2f8f46"/>
+  <text x="532" y="264" fill="#65e47b" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="700">200</text>
+  <text x="570" y="264" fill="#7f8da3" font-family="Inter, Arial, sans-serif" font-size="12">Response</text>
+  <text x="532" y="298" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">{</text>
+  <text x="552" y="322" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"job_id": "17dfd2825089",</text>
+  <text x="552" y="346" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"status": "running",</text>
+  <text x="552" y="370" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"phase": "submitting",</text>
+  <text x="552" y="394" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"program": "blastn",</text>
+  <text x="552" y="418" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"db": "16S_ribosomal_RNA",</text>
+  <text x="552" y="442" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"db_version": "2026-05-09-01-05-02"</text>
+  <text x="532" y="466" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">}</text>
+</svg>

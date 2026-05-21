@@ -213,3 +213,36 @@ def test_openapi_proxy_rejects_non_service_path(client: TestClient) -> None:
 
     assert response.status_code == 400
     assert response.json()["code"] == "invalid_openapi_path"
+
+
+def test_openapi_proxy_rejects_dashboard_uuid_for_openapi_status(client: TestClient) -> None:
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "path": "/v1/jobs/9b45dbfe-1c63-433e-a650-609e2d43bbd8/status",
+        },
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["code"] == "dashboard_job_id_not_openapi_job_id"
+    assert "POST /v1/jobs" in body["message"]
+    assert "/api/blast/jobs/{job_id}" in body["message"]
+
+
+def test_openapi_proxy_rejects_dashboard_uuid_for_openapi_job_resource(
+    client: TestClient,
+) -> None:
+    response = client.delete(
+        "/api/aks/openapi/proxy",
+        params={
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "path": "/v1/jobs/9b45dbfe-1c63-433e-a650-609e2d43bbd8",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "dashboard_job_id_not_openapi_job_id"

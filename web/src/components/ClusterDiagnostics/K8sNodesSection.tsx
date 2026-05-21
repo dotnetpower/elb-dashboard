@@ -73,7 +73,10 @@ export function K8sNodesSection({ query }: { query: K8sNodesQuery }) {
         )}
       </button>
       {!collapsed && (
-        <div style={{ borderTop: "1px solid var(--border-weak)", overflowX: "auto" }}>
+        <div
+          className="k8s-nodes-table-wrap"
+          style={{ borderTop: "1px solid var(--border-weak)", overflowX: "auto" }}
+        >
           {query.isLoading && (
             <div style={{ padding: 16, textAlign: "center" }} className="muted">
               <Loader2 size={14} className="spin" /> Loading...

@@ -7,8 +7,8 @@ the API hands to the browser is useless: the SAS-bearing URL points at a
 storage hostname that resolves to a private IP the browser cannot reach. The
 user asked for the consequence of that fact to be made explicit:
 
-> 사용자가 파일을 다운로드 받을때는 SAS 토큰 대신 컨테이너앱이 프록시 역할을
-> 해서 받게 할수 있을까? 업로드도 마찬가지로해서?
+> Can the Container App act as the proxy for file downloads instead of issuing
+> SAS tokens to the browser? Can uploads work the same way?
 
 Yes — and it is the only design that is consistent with the day-1
 private-storage invariant. The migration plan now states it as the contract,

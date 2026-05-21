@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" viewBox="0 0 980 560" role="img" aria-labelledby="title desc">
+  <title id="title">Submit a BLAST job from the API Reference page</title>
+  <desc id="desc">A documentation illustration showing POST /v1/jobs with query_fasta, Send Request, and a response containing job_id.</desc>
+  <rect width="980" height="560" fill="#0b0f17"/>
+  <rect x="12" y="12" width="956" height="536" rx="10" fill="#151a21" stroke="#2f3743"/>
+
+  <rect x="24" y="28" width="65" height="30" rx="4" fill="#12351f" stroke="#2f8f46"/>
+  <text x="43" y="48" fill="#65e47b" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">POST</text>
+  <text x="105" y="49" fill="#f8fafc" font-family="JetBrains Mono, Consolas, monospace" font-size="16" font-weight="700">/v1/jobs</text>
+  <text x="780" y="49" fill="#9fb1c7" font-family="Inter, Arial, sans-serif" font-size="13">Submit a BLAST search</text>
+
+  <line x1="24" y1="78" x2="956" y2="78" stroke="#29313c"/>
+  <line x1="492" y1="78" x2="492" y2="536" stroke="#29313c"/>
+
+  <text x="38" y="112" fill="#b9c8da" font-family="Inter, Arial, sans-serif" font-size="13">Submit a BLAST search job. Mode is auto-detected.</text>
+  <text x="38" y="153" fill="#aab8cc" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2">PARAMETERS</text>
+  <text x="38" y="187" fill="#65e47b" font-family="JetBrains Mono, Consolas, monospace" font-size="13">X-ELB-API-Token</text>
+  <rect x="158" y="170" width="64" height="22" rx="4" fill="#252b35"/>
+  <text x="176" y="185" fill="#b9c8da" font-family="Inter, Arial, sans-serif" font-size="12">string</text>
+
+  <text x="38" y="245" fill="#aab8cc" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2">RESPONSES</text>
+  <rect x="38" y="266" width="170" height="28" rx="5" fill="#132a1b" stroke="#2f8f46"/>
+  <text x="50" y="285" fill="#65e47b" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">202 Successful Response</text>
+  <rect x="218" y="266" width="132" height="28" rx="5" fill="#2a171a" stroke="#8f3340"/>
+  <text x="230" y="285" fill="#ff6978" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">422 Validation Error</text>
+
+  <text x="512" y="114" fill="#aab8cc" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2">TRY IT</text>
+  <rect x="815" y="90" width="124" height="34" rx="7" fill="#1b2a45" stroke="#4772b8"/>
+  <text x="842" y="112" fill="#65a3ff" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Send Request</text>
+
+  <text x="512" y="153" fill="#aab8cc" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">REQUEST BODY</text>
+  <rect x="615" y="135" width="252" height="29" rx="6" fill="#0f131a" stroke="#29313c"/>
+  <text x="628" y="154" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Mode B - Inline FASTA (simple)</text>
+  <text x="512" y="184" fill="#9fb1c7" font-family="Inter, Arial, sans-serif" font-size="12" font-style="italic">Provide FASTA text inline. The server resolves DB/results URLs.</text>
+
+  <rect x="512" y="202" width="427" height="190" rx="8" fill="#10151c" stroke="#29313c"/>
+  <text x="528" y="232" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">{</text>
+  <text x="548" y="257" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"program": "blastn",</text>
+  <text x="548" y="282" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"db": "core_nt",</text>
+  <text x="548" y="307" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"query_fasta": "&gt;NC_003310.1:c48509-48048...</text>
+  <text x="548" y="332" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">ATGGAGAAGCGAGAAGTTAA...\n",</text>
+  <text x="548" y="357" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"blast_options": { "extra": "-evalue 0.05 ...</text>
+  <text x="548" y="382" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">-outfmt 5 -searchsp 32156241807668" }</text>
+  <text x="528" y="407" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">}</text>
+
+  <rect x="512" y="418" width="427" height="80" rx="8" fill="#17221c" stroke="#2f8f46"/>
+  <text x="532" y="441" fill="#65e47b" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="700">202</text>
+  <text x="570" y="441" fill="#7f8da3" font-family="Inter, Arial, sans-serif" font-size="12">Response</text>
+  <text x="532" y="469" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">{ "job_id": "17dfd2825089",</text>
+  <text x="552" y="491" fill="#d7e0ea" font-family="JetBrains Mono, Consolas, monospace" font-size="13">"status": "dispatching" }</text>
+
+  <rect x="645" y="512" width="260" height="24" rx="12" fill="#10151c" stroke="#3b4654"/>
+  <text x="663" y="529" fill="#b9c8da" font-family="Inter, Arial, sans-serif" font-size="12">Copy job_id for the status request</text>
+</svg>

@@ -114,7 +114,10 @@ export function DetailsModal({
         />
 
         {/* Scrollable body */}
-        <div style={{ overflowY: "auto", flex: 1, padding: "16px 24px 24px" }}>
+        <div
+          className="cluster-detail-modal-body"
+          style={{ overflowY: "auto", flex: 1, padding: "16px 24px 24px" }}
+        >
           {kubeletObjectId && <IdentitySection kubeletObjectId={kubeletObjectId} />}
 
           {agentPools && agentPools.length > 0 && (

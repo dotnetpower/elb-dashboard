@@ -7,7 +7,9 @@ Key entry points: `_state`, `test_local_to_blast_job_minimum_shape`,
 `test_local_to_blast_job_query_label_extracted`,
 `test_local_to_blast_job_can_include_database_metadata`,
 `test_local_to_blast_job_exposes_error_for_frontend`,
-`test_local_to_blast_job_exposes_progress_steps`
+`test_local_to_blast_job_exposes_progress_steps`,
+`test_refresh_running_blast_state_skips_pre_runtime_phases`,
+`test_refresh_running_blast_state_skips_without_runtime_job_id`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_local_to_blast_job.py`.
@@ -41,6 +43,9 @@ def _state(**kw):
 def test_local_to_blast_job_minimum_shape():
     out = _local_to_blast_job(_state())
     assert out["job_id"] == "job-1"
+    assert out["job_id_kind"] == "dashboard"
+    assert out["dashboard_job_id"] == "job-1"
+    assert out["target"]["links"]["dashboard_status"] == "/api/blast/jobs/job-1"
     assert out["status"] == "running"
     assert out["source"] == "dashboard"
     assert "splits_done" not in out  # no split children supplied
@@ -180,6 +185,7 @@ def test_refresh_running_blast_state_waits_for_result_artifacts(monkeypatch):
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
+            "elastic_blast_job_id": "job-elastic",
         },
     )
 
@@ -219,12 +225,13 @@ def test_refresh_running_blast_state_waits_for_result_artifacts(monkeypatch):
 def test_refresh_running_blast_state_completes_prior_running_steps(monkeypatch):
     state = _state(
         status="running",
-        phase="submitting",
+        phase="submitted",
         payload={
             "subscription_id": "sub-1",
             "resource_group": "rg-elb",
             "cluster_name": "elb-cluster",
             "storage_account": "stelb",
+            "elastic_blast_job_id": "job-elastic",
             "_progress": {
                 "phase": "submitting",
                 "status": "running",
@@ -305,3 +312,90 @@ def test_refresh_running_blast_state_uses_discovered_elastic_blast_job_id(monkey
 
     assert refreshed is state
     assert seen["job_id"] == "job-elastic"
+
+
+def test_refresh_running_blast_state_throttles_repeated_k8s_checks(monkeypatch):
+    state = _state(
+        job_id="job-throttle",
+        status="running",
+        phase="submitted",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+            "elastic_blast_job_id": "job-elastic",
+        },
+    )
+    calls = 0
+    times = iter([100.0, 105.0])
+
+    def fake_k8s(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": "running", "job_id": "job-elastic"}
+
+    blast_job_state._K8S_REFRESH_LAST_CHECK.clear()
+    monkeypatch.setattr(blast_job_state, "monotonic", lambda: next(times))
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    first = blast_job_state._refresh_running_blast_state(object(), state)
+    second = blast_job_state._refresh_running_blast_state(object(), state)
+
+    assert first is state
+    assert second is state
+    assert calls == 1
+
+
+def test_refresh_running_blast_state_skips_pre_runtime_phases(monkeypatch):
+    state = _state(
+        status="running",
+        phase="staging_db",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+        },
+    )
+    called = False
+
+    def fake_k8s(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"status": "running"}
+
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    refreshed = blast_job_state._refresh_running_blast_state(object(), state)
+
+    assert refreshed is state
+    assert called is False
+
+
+def test_refresh_running_blast_state_skips_without_runtime_job_id(monkeypatch):
+    state = _state(
+        status="running",
+        phase="submitted",
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "storage_account": "stelb",
+        },
+    )
+    called = False
+
+    def fake_k8s(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"status": "running"}
+
+    monkeypatch.setattr(blast_job_state, "_discover_elastic_blast_job_id", lambda *_: "")
+    monkeypatch.setattr("api.services.monitoring.k8s_check_blast_status", fake_k8s)
+
+    refreshed = blast_job_state._refresh_running_blast_state(object(), state)
+
+    assert refreshed is state
+    assert called is False

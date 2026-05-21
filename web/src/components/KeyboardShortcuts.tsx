@@ -108,6 +108,7 @@ export function ShortcutOverlay({ onClose }: { onClose: () => void }) {
   return (
     <div className="shortcut-overlay" onClick={onClose}>
       <div
+        className="shortcut-dialog-card"
         onClick={(e) => e.stopPropagation()}
         style={{
           background: "var(--bg-primary)",

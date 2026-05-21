@@ -355,6 +355,7 @@ def _external_to_blast_job(
     *,
     include_database_metadata: bool = False,
 ) -> dict[str, Any]:
+    from api.services.response_contracts import build_target
     from api.services.state_repo import canonical_job_metadata
 
     external_status = str(job.get("status") or "unknown")
@@ -383,9 +384,14 @@ def _external_to_blast_job(
         or created_at
     )
     source = str(job.get("submission_source") or "external_api")
+    openapi_job_id = str(job.get("job_id") or "")
+    dashboard_job_id = str(job.get("external_correlation_id") or "")
     error_code, error_message = _external_error_message(job.get("error"))
     out: dict[str, Any] = {
         "job_id": job.get("job_id"),
+        "job_id_kind": "openapi",
+        "dashboard_job_id": dashboard_job_id or None,
+        "openapi_job_id": openapi_job_id or None,
         "job_title": metadata["job_title"],
         "program": program,
         "db": db,
@@ -411,6 +417,19 @@ def _external_to_blast_job(
         },
         "payload": {"external": job},
     }
+    out["target"] = build_target(
+        resource_type="blast_job",
+        job_id=dashboard_job_id or openapi_job_id,
+        job_id_kind="dashboard" if dashboard_job_id else "openapi",
+        dashboard_job_id=dashboard_job_id or None,
+        openapi_job_id=openapi_job_id or None,
+        links={
+            "dashboard_status": f"/api/blast/jobs/{dashboard_job_id}"
+            if dashboard_job_id
+            else "",
+            "openapi_status": f"/v1/jobs/{openapi_job_id}/status" if openapi_job_id else "",
+        },
+    )
     out.update(_external_execution_summary(job))
     infrastructure = {
         "subscription_id": metadata["subscription_id"],

@@ -4639,15 +4639,38 @@ button.blast-db-table__row:focus-visible {
 .blast-cmd-preview__code {
   display: block;
   padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  background: #1b1b1b;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   line-height: 1.6;
-  color: var(--accent);
+  color: #e8e6df;
   overflow-x: auto;
   word-break: normal;
   white-space: pre;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   -webkit-user-select: all;
   user-select: all;
+}
+.blast-cmd-token--command {
+  color: #ffffff;
+  font-weight: 700;
+}
+.blast-cmd-token--flag {
+  color: #79c0ff;
+}
+.blast-cmd-token--value {
+  color: #ffd485;
+}
+.blast-cmd-token--number {
+  color: #a7f3d0;
+}
+.blast-cmd-token--comment {
+  color: var(--text-faint);
+  font-style: italic;
+}
+.blast-cmd-token--continuation {
+  color: #8b949e;
 }
 .blast-submit-bar {
   display: flex;
@@ -5678,6 +5701,16 @@ button.blast-db-table__row:focus-visible {
   font-family: var(--font-mono);
   font-size: 13px;
   letter-spacing: 0;
+  /* The page sits inside a flex column (.page-stack), whose default
+     min-width: auto lets nowrap table content (long job titles,
+     status / time cells) push the whole page past the viewport on
+     narrow screens. Anchor the row + its direct children to
+     min-width: 0 so .table-scroll keeps its horizontal scroll
+     contained instead of escaping. */
+  min-width: 0;
+}
+.jobs-page > * {
+  min-width: 0;
 }
 .jobs-page .page-header__title,
 .jobs-page .page-header__desc,

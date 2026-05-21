@@ -81,6 +81,7 @@ export function ProvisionModal({
 
   return createPortal(
     <div
+      className="provision-modal-backdrop"
       style={{
         position: "fixed",
         inset: 0,
@@ -96,6 +97,7 @@ export function ProvisionModal({
       }}
     >
       <div
+        className="provision-modal-card"
         style={{
           background: "var(--bg-primary)",
           border: "1px solid var(--border-medium)",

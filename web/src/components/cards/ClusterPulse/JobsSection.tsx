@@ -12,7 +12,12 @@ import { useNavigate } from "react-router-dom";
 import type { BlastJobSummary } from "@/api/endpoints";
 import type { JobRowView } from "@/components/cards/ClusterBento/jobTypes";
 
-import { JobLine, jobHasLiveTick } from "./JobLine";
+import {
+  JOB_ROW_GRID_GAP,
+  JobLine,
+  jobHasLiveTick,
+  jobRowGridTemplate,
+} from "./JobLine";
 
 interface Props {
   jobs: JobRowView[];
@@ -248,8 +253,7 @@ function useTickWhenActive(enabled: boolean): number {
 
 /** Skeleton roster shown during the first /api/blast/jobs fetch so the
  *  row doesn't briefly flash the "No jobs yet" empty state. Mirrors
- *  the JobLine row geometry (flex identity · 90px user · 88px status ·
- *  110px time) so the layout doesn't jump once real rows arrive. */
+ *  the JobLine row geometry so the layout doesn't jump once real rows arrive. */
 function JobsSkeleton() {
   return (
     <div
@@ -264,9 +268,9 @@ function JobsSkeleton() {
           className="pulse-soft pulse-job-row pulse-job-skeleton"
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) 76px 76px 92px",
+            gridTemplateColumns: jobRowGridTemplate(true),
             alignItems: "center",
-            gap: 8,
+            gap: JOB_ROW_GRID_GAP,
             padding: "5px 8px",
             borderRadius: 6,
             background: "var(--pulse-row-bg)",
@@ -303,9 +307,7 @@ function SkeletonBar({ width, height }: { width: string | number; height: number
  *  `User` column is suppressed when no job in the visible roster has
  *  an owner, freeing the row width for the title + chips. */
 function JobsTableHeader({ showUser }: { showUser: boolean }) {
-  const gridTemplate = showUser
-    ? "minmax(0, 1fr) 76px 76px 92px"
-    : "minmax(0, 1fr) 76px 92px";
+  const gridTemplate = jobRowGridTemplate(showUser);
   return (
     <div
       className="pulse-jobs-header"
@@ -313,7 +315,7 @@ function JobsTableHeader({ showUser }: { showUser: boolean }) {
         display: "grid",
         gridTemplateColumns: gridTemplate,
         alignItems: "center",
-        gap: 8,
+        gap: JOB_ROW_GRID_GAP,
         padding: "1px 8px",
         fontSize: 9,
         fontWeight: 500,

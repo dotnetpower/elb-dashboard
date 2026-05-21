@@ -70,14 +70,59 @@ export interface BlastSubmitRequest {
 export interface BlastSubmitResponse {
   id?: string;
   job_id: string;
+  job_id_kind?: "dashboard" | "openapi" | string;
+  dashboard_job_id?: string;
+  openapi_job_id?: string | null;
   instance_id: string;
   task_id?: string;
   status?: string;
   statusQueryGetUri?: string;
+  operation_status_url?: string;
+  operation?: ApiOperation;
+  target?: ApiTarget;
+  admission?: ApiAdmission;
+  meta?: ApiResponseMeta;
+}
+
+export interface ApiResponseMeta {
+  request_id?: string;
+  generated_at?: string;
+  warnings?: Array<Record<string, unknown>>;
+}
+
+export interface ApiOperation {
+  operation_id: string;
+  operation_type: string;
+  state: string;
+  accepted_at?: string;
+  poll_after_seconds?: number;
+  links?: Record<string, string>;
+}
+
+export interface ApiTarget {
+  resource_type: string;
+  job_id: string;
+  job_id_kind: string;
+  dashboard_job_id?: string;
+  openapi_job_id?: string | null;
+  links?: Record<string, string>;
+}
+
+export interface ApiAdmission {
+  decision: "accepted" | "would_accept" | "would_reject" | "rejected" | string;
+  reason: string;
+  basis: string;
+  snapshot_at: string;
+  queue?: Record<string, unknown>;
+  capacity?: Record<string, unknown>;
+  warnings?: Array<Record<string, unknown>>;
 }
 
 export interface BlastJobSummary {
   job_id: string;
+  job_id_kind?: "dashboard" | "openapi" | string;
+  dashboard_job_id?: string | null;
+  openapi_job_id?: string | null;
   instance_id?: string;
   job_title: string;
   program: string;
@@ -96,6 +141,8 @@ export interface BlastJobSummary {
    * pre-date payload persistence; callers must null-check.
    */
   payload?: Record<string, unknown>;
+  target?: ApiTarget;
+  meta?: ApiResponseMeta;
   provenance?: BlastProvenanceBundle;
   config_snapshot?: Record<string, unknown>;
   infrastructure?: {
@@ -484,7 +531,9 @@ export const blastApi = {
     word_size?: number;
   }) =>
     api.post<{
+      status?: "ok" | string;
       ready: boolean;
+      decision?: "would_accept" | "would_reject" | string;
       checks: Array<{
         id: string;
         status: "pass" | "fail" | "warn" | "skip";
@@ -509,6 +558,8 @@ export const blastApi = {
       critical_blockers: number;
       summary: string;
       compatibility?: BlastCompatibilityContract | null;
+      admission?: ApiAdmission;
+      meta?: ApiResponseMeta;
     }>("/blast/pre-flight", req),
 
   submit: (req: BlastSubmitRequest) => api.post<BlastSubmitResponse>("/blast/jobs", req),
@@ -560,10 +611,20 @@ export const blastApi = {
     return api.get<{ jobs: BlastJobSummary[] }>(`/blast/jobs${qs ? `?${qs}` : ""}`);
   },
 
-  getJob: (jobId: string, history = false) =>
-    api.get<BlastJobSummary>(
-      `/blast/jobs/${encodeURIComponent(jobId)}${history ? "?history=1" : ""}`,
-    ),
+  getJob: (
+    jobId: string,
+    options?: { history?: boolean; includeDatabaseMetadata?: boolean },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.history) params.set("history", "1");
+    if (options?.includeDatabaseMetadata === false) {
+      params.set("include_database_metadata", "false");
+    }
+    const qs = params.toString();
+    return api.get<BlastJobSummary>(
+      `/blast/jobs/${encodeURIComponent(jobId)}${qs ? `?${qs}` : ""}`,
+    );
+  },
 
   getExecutionSteps: (jobId: string) =>
     api.get<BlastExecutionStepsSnapshot>(

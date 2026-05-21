@@ -19,7 +19,7 @@ import uuid
 from datetime import UTC
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request, Response
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _normalise_blast_submit_body, _stub_log
@@ -28,6 +28,13 @@ from api.services.blast_submit_payload import (
     canonical_submit_metadata,
     canonical_submit_snapshot,
     submit_contracts,
+)
+from api.services.response_contracts import (
+    build_admission,
+    build_meta,
+    build_operation,
+    build_target,
+    request_id_from_scope,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -49,15 +56,58 @@ def _submit_job_id(body: dict[str, Any], caller: CallerIdentity) -> str:
     return str(uuid.uuid4())
 
 
-def _submit_response(job_id: str, task_id: str | None, *, status: str = "queued") -> dict[str, Any]:
+def _submit_response(
+    job_id: str,
+    task_id: str | None,
+    *,
+    status: str = "queued",
+    operation_type: str = "blast.submit",
+    request_id: str | None = None,
+    openapi_job_id: str | None = None,
+    admission_reason: str = "request_accepted",
+) -> dict[str, Any]:
     instance_id = task_id or job_id
+    operation_id = instance_id
+    dashboard_status_url = f"/api/blast/jobs/{job_id}"
+    operation_status_url = f"/api/operations/{operation_id}"
     return {
         "id": job_id,
         "job_id": job_id,
+        "job_id_kind": "dashboard",
+        "dashboard_job_id": job_id,
+        "openapi_job_id": openapi_job_id,
         "task_id": task_id,
         "instance_id": instance_id,
         "statusQueryGetUri": f"/api/tasks/{instance_id}",
+        "operation_status_url": operation_status_url,
         "status": status,
+        "operation": build_operation(
+            operation_id=operation_id,
+            operation_type=operation_type,
+            state=status,
+            links={
+                "self": operation_status_url,
+                "target": dashboard_status_url,
+                "events": f"{dashboard_status_url}/events",
+            },
+        ),
+        "target": build_target(
+            resource_type="blast_job",
+            job_id=job_id,
+            job_id_kind="dashboard",
+            dashboard_job_id=job_id,
+            openapi_job_id=openapi_job_id,
+            links={
+                "dashboard_status": dashboard_status_url,
+                "events": f"{dashboard_status_url}/events",
+            },
+        ),
+        "admission": build_admission(
+            decision="accepted",
+            reason=admission_reason,
+            queue={"state": "accepted", "depth_bucket": "unknown", "poll_after_seconds": 5},
+        ),
+        "meta": build_meta(request_id=request_id),
     }
 
 
@@ -109,6 +159,8 @@ def _reset_jobs_list_cache() -> None:
 
 @router.post("/submit")
 def blast_submit(
+    request: Request,
+    response: Response,
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
@@ -243,10 +295,15 @@ def blast_submit(
         if normalised_body.get("idempotency_key"):
             existing = repo.get(job_id)
             if existing is not None:
+                operation_id = existing.task_id or job_id
+                response.headers["Location"] = f"/api/operations/{operation_id}"
+                response.headers["Retry-After"] = "5"
                 return _submit_response(
                     job_id,
                     existing.task_id,
                     status=existing.status or "queued",
+                    request_id=request_id_from_scope(request),
+                    admission_reason="idempotent_replay_returned_existing_job",
                 )
         state = JobState(
             job_id=job_id,
@@ -314,11 +371,20 @@ def blast_submit(
                     type(cleanup_exc).__name__,
                 )
         raise exc
-    return _submit_response(job_id, result.id)
+    response.headers["Location"] = f"/api/operations/{task_id or job_id}"
+    response.headers["Retry-After"] = "5"
+    return _submit_response(
+        job_id,
+        task_id,
+        request_id=request_id_from_scope(request),
+        admission_reason="queued_for_blast_execution",
+    )
 
 
 @router.post("/jobs", status_code=202)
 def blast_job_submit(
+    request: Request,
+    response: Response,
     body: dict[str, Any] = Body(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
@@ -329,9 +395,14 @@ def blast_job_submit(
     the same `/api/blast/jobs` domain so clients do not need a second jobs API.
     """
     if "query_fasta" not in body:
+        import inspect
+
         from api.routes import blast as blast_package
 
-        return blast_package.blast_submit(body, caller)
+        delegate = blast_package.blast_submit
+        if len(inspect.signature(delegate).parameters) <= 2:
+            return delegate(body, caller)
+        return delegate(request, response, body, caller)
 
     from api.routes.elastic_blast import ExternalBlastSubmitRequest
     from api.services import external_blast
@@ -359,7 +430,45 @@ def blast_job_submit(
         request.db,
         request.program,
     )
-    return external_blast.submit_job(payload)
+    upstream = external_blast.submit_job(payload)
+    openapi_job_id = str(upstream.get("job_id") or "")
+    dashboard_job_id = str(payload["external_correlation_id"])
+    response.headers["Location"] = f"/api/blast/jobs/{dashboard_job_id}"
+    response.headers["Retry-After"] = "5"
+    return {
+        **upstream,
+        "status": upstream.get("status") or "accepted",
+        "job_id_kind": "openapi",
+        "dashboard_job_id": dashboard_job_id,
+        "openapi_job_id": openapi_job_id or None,
+        "operation": build_operation(
+            operation_id=openapi_job_id or dashboard_job_id,
+            operation_type="blast.submit.openapi",
+            state=str(upstream.get("status") or "accepted"),
+            links={
+                "self": f"/api/operations/{openapi_job_id or dashboard_job_id}",
+                "target": f"/api/blast/jobs/{dashboard_job_id}",
+                "openapi_status": f"/v1/jobs/{openapi_job_id}/status" if openapi_job_id else "",
+            },
+        ),
+        "target": build_target(
+            resource_type="blast_job",
+            job_id=dashboard_job_id,
+            job_id_kind="dashboard",
+            dashboard_job_id=dashboard_job_id,
+            openapi_job_id=openapi_job_id or None,
+            links={
+                "dashboard_status": f"/api/blast/jobs/{dashboard_job_id}",
+                "openapi_status": f"/v1/jobs/{openapi_job_id}/status" if openapi_job_id else "",
+            },
+        ),
+        "admission": build_admission(
+            decision="accepted",
+            reason="accepted_by_openapi_execution_plane",
+            queue={"state": "accepted", "depth_bucket": "unknown", "poll_after_seconds": 5},
+        ),
+        "meta": build_meta(request_id=request_id_from_scope(request)),
+    }
 
 
 @router.get("/submit/{instance_id}/status")

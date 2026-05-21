@@ -7,17 +7,15 @@ import { buildStepLog } from "./buildStepLog";
 import {
   FAILURE_PHASES,
   PHASE_STEPS,
-  PHASE_TO_STEP,
   SHIMMER_STYLE,
   type StepState,
 } from "./constants";
 import {
   inferFailedStepKey,
   isRecord,
-  stepHasEvidence,
-  stepHasFailure,
 } from "./predicates";
 import { StepRow } from "./StepRow";
+import { getTimelineStepState } from "./stepState";
 import { useStepDurations } from "./useStepDurations";
 
 export function StepLogSection({
@@ -74,30 +72,10 @@ export function StepLogSection({
 
   const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
 
-  const effectivePhaseKey = PHASE_TO_STEP[phase] ?? phase;
-  const currentPhaseIdx = PHASE_STEPS.findIndex((s) => s.key === effectivePhaseKey);
   const failedStepKey = inferFailedStepKey(phase, stepsData, output, customStatus);
   const failedStepIdx = failedStepKey
     ? PHASE_STEPS.findIndex((s) => s.key === failedStepKey)
     : -1;
-
-  const getStepState = (idx: number, key: string): StepState => {
-    if (phase === "completed") return "done";
-    if (FAILURE_PHASES.has(phase)) {
-      if (failedStepIdx >= 0) {
-        if (idx < failedStepIdx) return "done";
-        if (idx === failedStepIdx) return "error";
-        return "skipped";
-      }
-      if (stepHasFailure(stepsData[key])) return "error";
-      if (stepHasEvidence(stepsData[key])) return "done";
-      return "skipped";
-    }
-    if (currentPhaseIdx < 0) return "pending";
-    if (idx < currentPhaseIdx) return "done";
-    if (idx === currentPhaseIdx) return "active";
-    return "pending";
-  };
 
   const renderStepExtra = (key: string, state: StepState, isOpen: boolean) => {
     if (!isOpen || state === "pending") return null;
@@ -150,7 +128,13 @@ export function StepLogSection({
       <style>{SHIMMER_STYLE}</style>
       <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
         {PHASE_STEPS.map((step, i) => {
-          const state = getStepState(i, step.key);
+          const state = getTimelineStepState({
+            phase,
+            idx: i,
+            key: step.key,
+            stepsData,
+            failedStepIdx,
+          });
           const isOpen = expanded[step.key] ?? (state === "active" || state === "error");
           const log = buildStepLog({
             key: step.key,

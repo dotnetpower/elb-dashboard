@@ -20,6 +20,7 @@ export function ModalHeader({
 }) {
   return (
     <div
+      className="cluster-detail-modal-header"
       style={{
         padding: "20px 24px 16px",
         background: "var(--modal-header-bg)",
@@ -142,6 +143,7 @@ export function ModalHeader({
 
       {/* Stat cards row */}
       <div
+        className="cluster-detail-modal-stats"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))",

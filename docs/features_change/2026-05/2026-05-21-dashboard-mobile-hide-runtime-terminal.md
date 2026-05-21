@@ -198,31 +198,415 @@ None — pure frontend layout change.
 - Cluster detail modal becomes a full-screen sheet on mobile and gets a
   larger close button:
   - `web/src/components/ClusterDetailModal/DetailsModal.tsx` —
-    tag the backdrop with `cluster-detail-backdrop` and the modal
-    root with `cluster-detail-dialog` (desktop sizing is unchanged;
-    it stays inline-styled at `maxWidth: 1180,
-    width: calc(100vw - 48px), maxHeight: 92vh`).
-  - `web/src/components/ClusterDetailModal/ModalHeader.tsx` — tag the
-    X button with `cluster-detail-close` and add `aria-label="Close
-    cluster detail"` so the touch-target promotion below has an
-    accessible name.
+    tag the backdrop with `cluster-detail-backdrop`, the modal
+    root with `cluster-detail-dialog`, and the body scroll wrapper
+    with `cluster-detail-modal-body` (desktop sizing is unchanged;
+    the modal stays inline-styled at `maxWidth: 1180,
+    width: calc(100vw - 48px), maxHeight: 92vh` with an inner
+    `overflow-y: auto` body).
+  - `web/src/components/ClusterDetailModal/ModalHeader.tsx` — tag
+    the outer header with `cluster-detail-modal-header`, the stat
+    cards grid (NODES / K8S / POOLS / OS) with
+    `cluster-detail-modal-stats`, the X button with
+    `cluster-detail-close`, and add `aria-label="Close cluster
+    detail"`.
+  - `web/src/components/ClusterDetailModal/NodePoolsTable.tsx` —
+    tag the table wrapper with `cluster-detail-pools-wrap` so it
+    can scroll horizontally on phones (7 columns don't fit).
+  - `web/src/components/WarmupSection.tsx` — tag the DbRow grid
+    with `warmup-db-card` and its action group with
+    `warmup-db-card__actions`. The 3-column grid (name | status |
+    actions) was overflowing on phones, leaving the Warm / Release
+    buttons partially visible at the right edge. On mobile the grid
+    collapses to a single column and the action group is hidden —
+    those destructive operations stay on desktop where the user has
+    a proper pointer.
+  - `web/src/components/ClusterDiagnostics/K8sNodesSection.tsx` and
+    `K8sPodsSection.tsx` — tag the scrollable table wrappers with
+    `k8s-nodes-table-wrap` / `k8s-pods-table-wrap`. On mobile the
+    horizontal scroll is dropped and non-essential columns are
+    hidden so the rest fits without a scrollbar: Nodes keeps NAME +
+    STATUS (drops VERSION / IP / OS / RUNTIME); Pods keeps NAME +
+    READY + STATUS + Logs button (drops NS / RESTARTS / NODE).
+    The hidden columns remain in the DOM for desktop and screen
+    readers.
+  - `K8sPodsSection.tsx` — Logs button now uses `inline-flex` and
+    `white-space: nowrap` (plus a `k8s-pods-logs-button` class with
+    slightly larger mobile padding / 28px min-height) so the label
+    no longer wraps to "Lo / gs" inside the narrow action column.
+  - `PodLogsDialog.tsx` + CSS — tag the backdrop / dialog with
+    `pod-logs-backdrop` / `pod-logs-dialog` and apply the same
+    mobile fullscreen treatment as the cluster detail modal
+    (`position: fixed; inset: 0`, 100vw × 100dvh, no border-radius,
+    `overscroll-behavior: contain`). Previously the Pod Logs modal
+    opened as a narrow centered card pushed up against the cluster
+    detail modal's scroll position, leaving header / close button
+    clipped.
+  - `dashboard-layout.css` — generalized the fullscreen-on-mobile
+    rule to all glass dialogs via
+    `.glass-dialog-backdrop > .glass-card` (covers BlastDbModal,
+    ConfirmDialog, PodLogsDialog, ClusterDetail DetailsModal,
+    TaxonomyModal, QuerySection example dialog, and any future
+    modal that follows the same backdrop-then-card structure).
+    Per-modal classes (`cluster-detail-dialog`, `pod-logs-dialog`,
+    …) now only carry behavior extras (e.g. whole-modal scrolling
+    for the cluster detail). Desktop styling is untouched — the
+    rules live inside the existing `@media (max-width: 760px)`
+    block.
+  - The same generic rule now also adds
+    `padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 16px)`
+    to the card so the last row of any modal's scrollable body
+    isn't hidden behind mobile browser chrome (URL bar) or OS
+    bottom strip (iOS home indicator, Windows taskbar overlapping
+    the DevTools mobile preview). Inline `padding: 0` on each card
+    is overridden because `!important` in the stylesheet trumps
+    non-important inline styles. For cluster-detail-dialog this
+    composes with the existing 72px body padding so users can
+    scroll well clear of any browser/OS chrome.
+  - Promoted the page-level bottom safe-area gutter from
+    `.dashboard-workspace` to the universal `.layout__main` wrapper
+    (still inside `@media (max-width: 760px)`). This fixes "last
+    element hidden behind chrome" on every page — including the Run
+    BLAST button at the bottom of the New Search form which was
+    being covered by the Windows taskbar in DevTools mobile preview.
+    The dashboard-specific rule was removed because `.layout__main`
+    already wraps `.dashboard-workspace` and applying the same value
+    twice would double-pad.
+  - `cluster-detail-modal-body` now carries a `padding-bottom:
+    calc(72px + env(safe-area-inset-bottom, 0px))` so the last DB /
+    diagnostic card can scroll fully into view above the mobile
+    browser chrome and the iOS / Android home-bar safe area —
+    previously the bottom card was cut off by the OS / browser
+    bottom strip.
   - `web/src/theme/dashboard-layout.css` (`@media (max-width: 760px)`):
     `.cluster-detail-backdrop { padding: 0 !important; align-items /
-    justify-items: stretch !important; }` (the explicit class avoids a
-    `:has()` dependency and the stretch overrides the parent's
-    `place-items: center` which otherwise lets the grid item shrink
-    back to its natural width), `.cluster-detail-dialog { width: 100vw
+    justify-items: stretch !important; }`, `.cluster-detail-dialog
+    { position: fixed !important; inset: 0 !important; width: 100vw
     !important; height: 100dvh !important; max-width / max-height:
     100vw / 100dvh !important; min-width: 0 !important; margin: 0
-    !important; border-radius: 0 !important; }`, and
-    `.cluster-detail-close { min-width: 44px; min-height: 44px;
-    padding: 10px 12px !important; }` with a 22px icon override. The
-    `!important` is intentional because the desktop sizing lives on
-    inline `style={…}` and we did not want to thread a viewport hook
-    just for this. The selectors are scoped to this modal only.
+    !important; border-radius: 0 !important; overflow-y: auto
+    !important; overflow-x: hidden !important; overscroll-behavior:
+    contain !important; }` — the `position: fixed; inset: 0` pins
+    the dialog directly to the viewport so the underlying dashboard
+    can never peek through even when the scroll content is shorter
+    than the viewport, and `overscroll-behavior: contain` blocks the
+    rubber-band that was exposing the dashboard at the bottom edge.
+    Then `.cluster-detail-modal-body { overflow: visible !important;
+    flex: initial !important; padding: 12px !important; }` so the
+    body is no longer the inner scroll container,
+    `.cluster-detail-modal-header { padding: 10px 12px 12px
+    !important; }` to compress the header, and
+    `.cluster-detail-modal-stats { display: none !important; }` to
+    drop the redundant NODES / K8S / POOLS / OS cards (those values
+    still live in the Node Pools table inside the body, and in the
+    cluster card's PulseMetaGrid). Plus `.cluster-detail-pools-wrap
+    { overflow-x: auto !important; }`, the touch-target promotion
+    of `.cluster-detail-close` (44×44 with a 22px icon), and
+    `.warmup-db-card { grid-template-columns: 1fr !important; }`
+    with `.warmup-db-card__actions { display: none !important; }`
+    so the Warm / Release buttons no longer leak past the right
+    edge on phones. The `!important` is intentional because the
+    desktop sizing lives on inline `style={…}` and we did not want
+    to thread a viewport hook just for this. The selectors are
+    scoped to this modal only.
 
 ## Validation
 - `cd web && npm run build` (Vite type-check + bundle).
 - Visual: open `http://127.0.0.1:8090/` in DevTools mobile preview ≤ 760px
   → Terminal card and Sidecar runtime section are gone; desktop view at
   ≥ 761px still shows both.
+
+## Hardening pass (critical review)
+
+After the universal `.layout__main` safe-area promotion landed, a follow-up
+critical review surfaced three regressions / gaps that the generic modal
+rule missed:
+
+1. **Double bottom padding inside the cluster-detail dialog.** Once the
+   dialog itself became the scroll container (via
+   `.cluster-detail-dialog { overflow-y: auto !important }`) and the
+   generic `.glass-dialog-backdrop > .glass-card` rule started reserving
+   `env(safe-area-inset-bottom) + 16px`, the body's pre-existing
+   `padding-bottom: calc(72px + env(safe-area-inset-bottom))` stacked
+   on top of that, producing roughly 88px + 2× safe-area of dead space
+   after the last card. Reduced the body to `padding-bottom: 24px
+   !important` so the only safe-area calc lives on the dialog (the
+   scroll container) and the inner gutter stays a sensible 24 px.
+2. **`KeyboardShortcuts` (`?` overlay) overflowed phones horizontally.**
+   The inner dialog had an inline `width: 480` (no `min()` wrapper),
+   so on any viewport narrower than 480 CSS pixels the modal scrolled
+   the whole page sideways. Tagged the inner div with
+   `className="shortcut-dialog-card"` and added a mobile rule that
+   forces 100vw / 100dvh with the same safe-area gutter as
+   `.glass-dialog-backdrop > .glass-card`. The backdrop already has
+   `.shortcut-overlay`, so the only source change is a single new
+   className on the inner card.
+3. **`ProvisionModal` ("Create AKS Cluster") was a pinched centered
+   card on phones.** It's an inline-styled portal so it never
+   participated in the `.glass-dialog-backdrop` cascade. Added
+   `className="provision-modal-backdrop"` and `className="provision-modal-card"`
+   to its two divs and gave them the same fullscreen + safe-area
+   treatment under the 760 px media query. Desktop styling is
+   untouched because the inline `width: "min(760px, calc(100vw - 32px))"`
+   still wins outside the media query.
+
+Modals deliberately left as-is:
+- `SettingsPanel` is a side drawer (`top: 0; right: 0; bottom: 0;
+  width: min(520px, calc(100vw - 24px))`) with its own visual language,
+  not a centered modal. On phones the 24 px gutter is intentional
+  affordance, not a bug.
+- `SidecarsCard` HTTP inspector is a dev/inspect tool surfaced behind
+  an internal toggle and not part of the daily user surface; deferred.
+
+## Hardening validation
+- `cd web && npm run build` → `✓ built in 7.34s`, no type errors.
+- Targets exercised in DevTools mobile preview (375 × 812):
+  - `?` keyboard shortcut overlay now spans 100vw / 100dvh; the
+    bottom of the "Resources" tab clears the OS strip.
+  - Create AKS Cluster modal spans full width; the SKU group lists
+    no longer require horizontal scroll inside a 760 px-wide cell.
+  - Cluster detail dialog: scrolling to the bottom of the warmup
+    list lands ~24 px above the last DB card instead of leaving an
+    88 px empty band.
+
+## Recent searches detail header (`BlastJobHeader`)
+
+User reported the Recent searches detail page (`/blast/jobs/{id}`) was
+visibly broken on phones: the long search title overlapped the action
+buttons and the metadata grid's right-hand column (Submitted / Molecule
+type / Region) was clipped past the viewport edge.
+
+Root causes:
+1. The action row was `flexWrap: "wrap"` with an unconstrained
+   `<h1>{jobTitle}</h1>`. Long titles like
+   `20260521-1200 MPXV F3L - NC_003310.1` never wrapped inside the h1,
+   so the h1 forced its parent wider than the viewport and the
+   `flex: 1` made the buttons share whatever was left over — they ended
+   up drawn on top of the title.
+2. The metadata `<dl>` used a 4-column grid
+   (`min-content max-content min-content 1fr`). On a 360 px-wide screen
+   the four tracks summed to more than the viewport, so every
+   right-column value was clipped (only the labels "SUBMITTED",
+   "MOLECULE", "REGION", "DATE" rendered with no value behind them).
+
+Hardening:
+- Added `className="blast-job-header"` to the header, plus
+  `blast-job-header__title-row` and `blast-job-header__meta-grid` to
+  the two affected wrappers (source change is three className adds —
+  no inline-style edits, desktop layout untouched).
+- New mobile rules in `dashboard-layout.css` inside
+  `@media (max-width: 760px)`:
+  - h1 → 18 px font, `overflow-wrap: anywhere`, `word-break: break-word`
+    so the search title wraps cleanly instead of overflowing.
+  - title row → stacks `flex-direction: column`, action buttons go
+    full-width and centered so Cancel / Edit search / Save settings
+    don't fight for inline space.
+  - meta grid collapses to two columns (`max-content 1fr`); the
+    spanning rows (DB title / description / snapshot, query
+    description) use an attribute selector
+    `dd[style*="span 3"] { grid-column: 1 / -1 !important }` so the
+    inline `span 3` doesn't blow the grid out to 3 implicit tracks.
+  - code values get `word-break: break-all` so the Search ID and
+    cluster name wrap rather than push the grid wider.
+
+Validation:
+- `cd web && npm run build` → `✓ built in 11.11s`.
+- DevTools mobile preview at 375 × 812 on
+  `/blast/jobs/{id}?tab=descriptions`: title now wraps to ≤ 2 lines
+  inside the visible width, buttons stack below it full-width, and
+  every metadata field (Search ID / Submitted / Program / Database /
+  Molecule type / Cluster / Region) renders its value without
+  clipping.
+
+## API Reference page (`/docs`) mobile optimization
+
+### Motivation
+The API Reference page (`web/src/pages/ApiReference.tsx`) was built
+desktop-first: a sticky 240-280 px sidebar plus a fluid endpoint
+column, a hero row with title + 3-stat chips + baseUrl pill + Swagger
+UI button + Refresh button, endpoint cards with a 6-item header (method
+badge + path + summary + copy-link + Try + chevron) and an expanded
+body split into a `1fr 1fr` grid (description/params | try-it). On a
+phone the sidebar squeezed the content column to ~80 px, the hero row
+overflowed horizontally, endpoint paths wrapped onto the chevron, and
+the expanded body became unreadable. User explicitly granted
+permission to hide non-essential controls on mobile
+("불필요한거는 안보여도될것 같아").
+
+### User-facing change
+On viewports ≤ 760 px the `/docs` page now:
+
+- hides the sticky `ApiReferenceSidebar` (users scroll the tag
+  sections instead);
+- stacks `ApiHero` vertically: title block on top, action buttons
+  below, with the long baseUrl pill and Swagger-UI external link
+  hidden (only Refresh remains useful on a phone);
+- hides the 3-stat row (Endpoints / Groups / Methods) — redundant
+  vertical noise on small screens;
+- collapses each `EndpointCard` header so the path occupies its own
+  full-width line under the method badge, and drops the truncated
+  summary preview and the rarely-used copy-link button;
+- collapses the expanded body grid from `1fr 1fr` to a single column
+  (description + parameters first, try-it form below);
+- collapses each parameter row from `120 px / 60 px / 1fr` to a
+  single column (name + description stacked), and hides the dedicated
+  "type" cell (the `req` badge in the name cell still marks required
+  params).
+
+Desktop layout is untouched — all rules sit inside
+`@media (max-width: 760px)` in
+`web/src/theme/dashboard-layout.css`, and the only `.tsx` changes are
+new anchor `className`s on existing wrappers (no inline styles
+removed).
+
+### Files changed
+- `web/src/pages/ApiReference.tsx` — no edits (already had
+  `api-reference-page` + `api-reference-layout` classes).
+- `web/src/pages/apiReference/ApiHero.tsx` — added
+  `api-hero__row`, `api-hero__actions`, `api-hero__stats`,
+  `api-hero__base-url`, `api-hero__swagger`.
+- `web/src/pages/apiReference/EndpointCard.tsx` — added
+  `endpoint-card`, `endpoint-card__header`, `endpoint-card__summary`,
+  `endpoint-card__copylink`, `endpoint-card__body`,
+  `endpoint-card__param-row`.
+- `web/src/theme/dashboard-layout.css` — new mobile block under
+  the `BlastJobHeader` rules (~80 lines, all inside the existing
+  `@media (max-width: 760px)`).
+
+### Validation
+- `cd web && npm run build` → `✓ built in 7.23s` (clean).
+- Manually inspected the new CSS: every selector is scoped under
+  `@media (max-width: 760px)` and uses `!important` only to beat
+  inline desktop `style={...}` props; no rule leaks to desktop.
+
+## Recent searches list page — table no longer pushes page out of viewport
+
+### Motivation
+On mobile widths the `/blast/jobs` (Recent BLAST searches) page was
+extending past the viewport: the desktop-sized 5-column table inside
+each `DateGroupSection` (`Job / User / Status / Time / Delete`) used
+`whiteSpace: nowrap` on the User / Status / Time / Delete cells, so
+the table's intrinsic min-content exceeded the phone viewport and
+pushed the whole page wider than 100 vw, producing horizontal page
+scroll and clipping the right edge of the content.
+
+The table already lives inside a `.table-scroll` wrapper with
+`overflow-x: auto`, which *should* have contained the overflow as
+internal horizontal scroll. It didn't, because `.page-stack.jobs-page`
+is a flex column and flex children default to `min-width: auto`
+(content-based). That let each `DateGroupSection`'s root `<div>`
+inflate to its table's intrinsic width, dragging the page with it.
+
+### User-facing change
+On `/blast/jobs` at any width, the per-group table now scrolls
+horizontally **inside** its `.table-scroll` container instead of
+expanding the page. On phones the page no longer scrolls sideways;
+swiping the table reveals the User / Status / Time / Delete columns.
+Desktop layout is unchanged because at wider widths the table
+naturally fits inside the row and never needs to scroll.
+
+### Files changed
+- `web/src/theme/glass.css` — added `min-width: 0` to `.jobs-page`
+  and `.jobs-page > *` so flex children can shrink and let
+  `.table-scroll`'s existing horizontal scroll contain the table.
+  Two lines of CSS, no new selectors, no inline-style edits.
+
+### Validation
+- `cd web && npm run build` → `✓ built in 11.32s` (clean).
+- Live check at `http://127.0.0.1:8090/blast/jobs` with
+  `.layout__main { max-width: 390px }` injected: `documentElement.scrollWidth`
+  no longer exceeds the viewport width; `.table-scroll` reports
+  `clientWidth ≈ 364 px`, `scrollWidth ≈ 602 px` (correctly contained
+  with internal horizontal scroll); table bounding rect (578 px)
+  stays clipped inside `.table-scroll`.
+
+### Follow-up: table content was still clipped behind the internal scroll
+
+The first pass only stopped the *page* from extending — it left the
+table itself ~578 px wide inside the now-contained `.table-scroll`,
+so on a phone the Status / Time / Delete columns were hidden behind
+the (mostly invisible) internal horizontal scroll. User screenshot
+confirmed "COMP…" was clipped at the right edge of the card.
+
+Tightened the table so all visible columns actually fit at 360 px
+container width (in `dashboard-layout.css` `@media (max-width: 760px)`,
+`.jobs-page` block):
+
+- hide the `User` column entirely (header + cells via `nth-child(2)`)
+  — single-user workspaces always show `—` here anyway;
+- shrink TD padding to `4 px`, font-size to `11 px`, drop the
+  first/last cell side padding;
+- override the inline `white-space: nowrap` on Status (`nth-child(3)`)
+  and Time (`nth-child(4)`) TDs, and on the Job-title anchor, so cells
+  can shrink — the title now wraps into 2 short lines instead of
+  forcing the column to its intrinsic width;
+- hide the Time TD's second sub-line ("Duration N m N s"); the
+  headline "X ago" is enough on a phone;
+- change `.jobs-page .table-scroll` to `overflow-x: hidden` on mobile
+  (no longer needed since the table now fits) and tighten its inner
+  padding to `8 px`.
+
+Verified via DOM: at injected 390 px viewport, table now 348 px wide
+(< 364 px container), `scrollWidth === clientWidth` on
+`.table-scroll`, every row shows Job + Status + Time + Delete in
+view. Build clean (`✓ built in 8.04s`). Desktop layout unchanged
+(rules scoped to `@media (max-width: 760px)`).
+
+### Follow-up #2: Today fit but Yesterday/older sections still overflowed
+
+User reported Today rendered correctly but Yesterday (and older
+sections) still clipped on mobile. Reproduced by injecting
+`.layout__main { max-width: 390px }`: Today + This Week tables fit
+at 348 px (< 364 px container) but Yesterday's table was 502 px.
+
+Root cause: every Yesterday row has a long unbreakable title token
+(`20260520-2309 MPXV F3L - NC_003310.1`) plus the `worker_lost` /
+`elb-cluster` inline-flex badges in the meta line. Under
+`table-layout: auto` the column's `min-content` was the widest of
+those badges (which themselves are inline-flex single-token boxes
+that don't honor `word-break`), so the Job column refused to shrink
+below ~340 px and the whole table inflated to 502 px regardless of
+`white-space: normal`. Today's rows happened to have shorter
+titles so they squeezed under the limit by luck.
+
+Switched the table to `table-layout: fixed; width: 100%` on mobile
+and pinned the right-side columns to explicit widths
+(`Status 78 px`, `Time 72 px`, `Delete 32 px`). The Job column now
+absorbs the remaining ~178 px and the inline-flex badges wrap or
+clip inside that column instead of dictating table width.
+
+Verified: all three sections (`Today`, `Yesterday`, `This Week`)
+report `tableW = 348 px`, `scrollWidth === clientWidth = 364 px`,
+no horizontal scroll. Build clean (`✓ built in 10.32s`). Desktop
+layout untouched.
+
+### Follow-up #3: BLAST Databases modal leaked the dashboard behind it on mobile
+
+User reported that on mobile, opening the BLAST Databases modal from
+the dashboard and scrolling exposed the dashboard's Storage card
+(`results` container row, the inline BlastDbSection summary) **below**
+the modal, as if the modal didn't fully cover the viewport.
+
+Root cause: the mobile fullscreen rule used `height: 100dvh !important`
+(plus matching `max-height`/`min-height`). On engines that don't
+understand the dynamic-viewport unit (`dvh`), the entire declaration
+becomes invalid and is dropped — leaving the card on its inline
+`maxHeight: 86vh` with `height: auto`, so the card shrinks to its
+content and the body behind the backdrop becomes visible underneath.
+
+Fix: drop the explicit height entirely and rely on `position: fixed`
++ `inset: 0` to pin all four edges to the viewport (which gives a
+fully-covering box on every engine, no `dvh` needed), and override
+the inline `maxHeight` with `max-height: none !important`. The same
+treatment is applied to the bespoke modal cards
+(`.shortcut-dialog-card`, `.provision-modal-card`), where `inset: 0`
+isn't available because they're inline-styled portals, so they get a
+`100vh` fallback declared *before* `100dvh` (older engines apply
+`100vh`, modern engines override with `100dvh`).
+
+Verified by injecting the new rule outside `@media` on the desktop
+viewport (1914 × 897): with `inset: 0` + `max-height: none`, the
+BlastDb modal card resolves to `0,0 1914×897` — `coversFullViewport:
+true`, dashboard cards no longer leak through. Build clean
+(`✓ built in 10.85s`). Desktop layout unchanged (all rules scoped
+to `@media (max-width: 760px)`).

@@ -46,6 +46,7 @@ from api.routes import (
     health,
     me,
     monitor,
+    operations,
     resources,
     storage,
     tasks,
@@ -409,6 +410,7 @@ def create_app() -> FastAPI:
     app.include_router(terminal_ws.router)  # WebSocket + ticket + health
     app.include_router(terminal_legacy.router)  # /api/terminal/{vm}/* → 410 Gone
     app.include_router(tasks.router)  # GET /api/tasks/{id} — Celery task status
+    app.include_router(operations.router)  # GET /api/operations/{id} — operation status
     app.include_router(aks.aks_router)
     app.include_router(acr.acr_build_router)
     app.include_router(blast.blast_router)

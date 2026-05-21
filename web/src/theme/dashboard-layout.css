@@ -413,14 +413,16 @@
     display: none !important;
   }
 
-  /* Generous bottom gutter on the dashboard workspace so the last card
-     (StorageCard → BlastDbSection, which fetches its chip list async)
-     never butts against the visible viewport edge. Without this, when
-     BlastDbSection arrives after the user has scrolled to bottom, the
-     newly-grown last row appears cut off behind the mobile browser’s
-     retractable chrome (and on narrow desktop windows, behind the OS
-     taskbar). `env(safe-area-inset-bottom)` covers the iOS home bar. */
-  .dashboard-workspace {
+  /* Generous bottom gutter applied to the universal page wrapper so
+     every page (Dashboard, New Search, Jobs, Tools, …) leaves room
+     for the mobile browser's retractable chrome and the OS bottom
+     strip (iOS home indicator, Windows taskbar overlapping the
+     browser window in DevTools mobile preview). Without this, the
+     last interactive element of long pages — e.g. the "Run BLAST"
+     button on the New Search page, or the BlastDbSection chips on
+     the Dashboard — appeared cut off when the user scrolled to the
+     end. `env(safe-area-inset-bottom)` covers the iOS home bar. */
+  .layout__main {
     padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
   }
 
@@ -438,14 +440,55 @@
     justify-items: stretch !important;
   }
   .cluster-detail-dialog {
-    max-width: 100vw !important;
-    width: 100vw !important;
-    min-width: 0 !important;
-    max-height: 100dvh !important;
-    height: 100dvh !important;
-    min-height: 100dvh !important;
-    border-radius: 0 !important;
-    margin: 0 !important;
+    /* Whole modal scrolls instead of a sticky header + inner-scrolling
+       body — the modal header is informational, not a toolbar, so it
+       can scroll off-screen to give the body more vertical room. The
+       fullscreen geometry is provided by the generic
+       `.glass-dialog-backdrop > .glass-card` rule below. */
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+  }
+  .cluster-detail-modal-body {
+    /* Stop being the scroll container; let content flow inside the
+       modal's own scroller. The dialog (parent) already reserves
+       `env(safe-area-inset-bottom) + 16px` via the generic
+       `.glass-dialog-backdrop > .glass-card` rule, so we only add a
+       small inner gutter here. Previously this was 72px + safe-area,
+       which stacked on top of the dialog's gutter and produced ~88px
+       of dead space below the last card after scrolling. */
+    overflow: visible !important;
+    flex: initial !important;
+    padding: 12px !important;
+    padding-bottom: 24px !important;
+  }
+  .cluster-detail-modal-header {
+    /* Smaller padding so the header takes ~half its previous height. */
+    padding: 10px 12px 12px !important;
+  }
+  .cluster-detail-modal-stats {
+    /* The 4 stat cards (NODES / K8S / POOLS / OS) duplicate the cluster
+       card's PulseMetaGrid; hide on phones to reclaim vertical space.
+       The Pools / Nodes / Network values still surface in the Node Pools
+       table inside the body. */
+    display: none !important;
+  }
+  .cluster-detail-pools-wrap {
+    /* 7-column Node Pools table doesn't fit on phones; let it scroll
+       horizontally inside its own surface rather than clipping. */
+    overflow-x: auto !important;
+  }
+  .warmup-db-card {
+    /* The DbRow uses a 3-column grid (name | status | actions) sized
+       at minmax(160px) + minmax(220px) + auto, which doesn't fit on
+       phones and leaves the action buttons clipped at the right edge.
+       Drop the actions column entirely (mobile is read-only for these
+       destructive operations — Warm / Release stay on desktop) and let
+       name + status stack into a single column. */
+    grid-template-columns: 1fr !important;
+    gap: 6px !important;
+  }
+  .warmup-db-card__actions {
+    display: none !important;
   }
   .cluster-detail-close {
     min-width: 44px;
@@ -456,5 +499,366 @@
   .cluster-detail-close svg {
     width: 22px !important;
     height: 22px !important;
+  }
+
+  /* Cluster diagnostics tables — drop horizontal scroll and hide
+     non-essential columns so the visible columns fit at phone width.
+     Nodes table keeps NAME + STATUS; Pods table keeps NAME + READY +
+     STATUS + Logs button. The hidden columns are still in the DOM for
+     desktop, screen-reader users, and copy-paste. */
+  .k8s-nodes-table-wrap,
+  .k8s-pods-table-wrap {
+    overflow-x: visible !important;
+  }
+  .k8s-nodes-table-wrap table th:nth-child(n + 3),
+  .k8s-nodes-table-wrap table td:nth-child(n + 3) {
+    display: none !important;
+  }
+  .k8s-pods-table-wrap table th:nth-child(1),
+  .k8s-pods-table-wrap table td:nth-child(1),
+  .k8s-pods-table-wrap table th:nth-child(5),
+  .k8s-pods-table-wrap table td:nth-child(5),
+  .k8s-pods-table-wrap table th:nth-child(6),
+  .k8s-pods-table-wrap table td:nth-child(6) {
+    display: none !important;
+  }
+  .k8s-pods-table-wrap table td,
+  .k8s-nodes-table-wrap table td {
+    word-break: break-all;
+  }
+  /* Logs button should not wrap to two lines at any width. */
+  .k8s-pods-logs-button {
+    white-space: nowrap !important;
+    padding: 4px 8px !important;
+    min-height: 28px;
+  }
+
+  /* Pod Logs dialog — same full-screen treatment as the cluster
+     detail modal so it isn't constrained to a narrow column on
+     phones. (Covered by the generic `.glass-dialog-backdrop > .glass-card`
+     rule below; classes kept for future per-modal extras.) */
+
+  /* Every glass dialog (PodLogs, BlastDb, Confirm, Taxonomy, Query
+     example, …) goes full-screen on phones so users aren't pinched
+     into a narrow centered card. Desktop is untouched — these rules
+     only apply inside the `max-width: 760px` media query.
+     The selector targets any `.glass-card` rendered directly inside
+     a `.glass-dialog-backdrop`, which covers both `.glass-dialog` and
+     bespoke modal classes like `.taxonomy-modal`. */
+  .glass-dialog-backdrop {
+    padding: 0 !important;
+    align-items: stretch !important;
+    justify-items: stretch !important;
+  }
+  .glass-dialog-backdrop > .glass-card {
+    position: fixed !important;
+    inset: 0 !important;
+    max-width: 100vw !important;
+    width: 100vw !important;
+    min-width: 0 !important;
+    /* `inset: 0` already pins all four edges to the viewport, so the
+       fixed card fills the visible area without needing an explicit
+       `height`. Setting `height: 100dvh` would be a no-op on engines
+       that understand it AND silently invalidate the whole rule on
+       engines that don't (then the modal falls back to the inline
+       `maxHeight: 86vh` + `height: auto` and the dashboard behind
+       leaks through below the modal). Instead, neutralise the inline
+       max-height so the card actually stretches to the inset box. */
+    max-height: none !important;
+    min-height: 0 !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    overscroll-behavior: contain !important;
+    /* Reserve safe-area + a small visual gutter so the last line of
+       scrollable content isn't hidden behind mobile browser chrome
+       (URL/tab bar) or OS bottom strip (iOS home indicator, Windows
+       taskbar that may overlap the browser window in DevTools mobile
+       preview). Inline `padding: 0` is overridden because !important
+       in the stylesheet trumps non-important inline styles. */
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 16px) !important;
+  }
+
+  /* Bespoke modals that don't share the `.glass-dialog-backdrop`
+     class hierarchy (inline-styled portals) but still need the same
+     mobile-fullscreen treatment. Each one carries an anchor class on
+     both the backdrop and the inner card so we can override the
+     inline width / maxHeight without touching desktop styles. */
+  .shortcut-overlay {
+    padding: 0 !important;
+  }
+  .shortcut-dialog-card,
+  .provision-modal-card {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    min-width: 0 !important;
+    /* Engines without `dvh` ignore the rule; the `vh` lines below
+       keep the modal fullscreen there. `dvh` lines override on
+       modern browsers so the URL bar resize doesn't punch through. */
+    height: 100vh !important;
+    max-height: 100vh !important;
+    min-height: 100vh !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    min-height: 100dvh !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    overscroll-behavior: contain !important;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 16px) !important;
+  }
+  .provision-modal-backdrop {
+    padding: 0 !important;
+    align-items: stretch !important;
+    justify-content: stretch !important;
+  }
+
+  /* ---- BlastResults header (Recent searches detail page) ----
+     The default desktop layout uses a wrap-flex row of (h1 + Cancel +
+     Edit search + Save settings) and a 4-column metadata grid
+     (label | value | label | value). On phones both of these
+     overflow: the long search title (e.g.
+     "20260521-1200 MPXV F3L - NC_003310.1") doesn't wrap inside h1's
+     default font-size, and the 4-col grid clips Submitted / Molecule /
+     Region values past the right edge. */
+  .blast-job-header h1 {
+    font-size: 18px !important;
+    line-height: 1.25 !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+  }
+  .blast-job-header__title-row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+  .blast-job-header__title-row > h1 {
+    flex: initial !important;
+  }
+  .blast-job-header__title-row > button {
+    width: 100% !important;
+    justify-content: center !important;
+  }
+  .blast-job-header__meta-grid {
+    /* Collapse to a single label | value pair so values aren't clipped.
+       Inline `style="grid-column: span 3"` on the wider rows (DB title,
+       DB description, etc.) is rewritten to full-width via the
+       attribute selector below — CSS attribute selectors match the
+       literal inline style string. */
+    grid-template-columns: max-content 1fr !important;
+    column-gap: 10px !important;
+    padding: 10px 12px !important;
+    font-size: 12px !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+  }
+  .blast-job-header__meta-grid dd[style*="span 3"] {
+    grid-column: 1 / -1 !important;
+  }
+  .blast-job-header__meta-grid code {
+    word-break: break-all !important;
+  }
+
+  /* ---- API Reference page (/docs) ----
+     Desktop uses a 2-column layout (sticky sidebar | endpoint groups),
+     a row of "Endpoints / Groups / Methods" stats, a baseUrl chip plus
+     Swagger UI button in the hero, an endpoint header with method +
+     path + summary + copy-link + Try + chevron, an expanded body
+     split 1fr/1fr (description | try-it), and parameter rows using a
+     120/60/1fr grid. None of those fit on a phone, so we collapse or
+     hide the non-essential pieces. */
+  .api-reference-page {
+    min-width: 0 !important;
+  }
+  .api-reference-layout {
+    grid-template-columns: 1fr !important;
+  }
+  .api-reference-skeleton {
+    grid-template-columns: 1fr !important;
+  }
+  .api-reference-skeleton > .glass-card {
+    position: static !important;
+  }
+  .api-reference-skeleton .endpoint-card__body {
+    grid-template-columns: 1fr !important;
+  }
+  .api-reference-skeleton .endpoint-card__body > div + div {
+    border-left: 0 !important;
+    border-top: 1px solid var(--border-weak) !important;
+  }
+  /* The sticky sidebar is a navigation aid; on phones the user can
+     scroll the tag sections directly. Hiding reclaims ~280 px of
+     horizontal real estate. */
+  .api-reference-sidebar {
+    display: none !important;
+  }
+  .api-hero__row {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+  }
+  .api-hero__row > div:first-child h1 {
+    font-size: 16px !important;
+    line-height: 1.25 !important;
+  }
+  /* Stat chips are redundant on phones (endpoint count is already
+     visible by scrolling); free up vertical space. */
+  .api-hero__stats {
+    display: none !important;
+  }
+  .api-hero__actions {
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+  }
+  /* Long baseUrl + Swagger external link don't belong on a phone
+     where users won't paste URLs or open desktop docs. Keep refresh
+     only. */
+  .api-hero__base-url,
+  .api-hero__swagger {
+    display: none !important;
+  }
+
+  .api-response-contract {
+    padding: 14px !important;
+  }
+  .api-response-contract__version {
+    align-self: flex-start !important;
+  }
+  .api-response-contract__grid,
+  .api-response-contract__details {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Endpoint card header: keep method badge + path + chevron, drop
+     the summary preview and the copy-link button. The summary is
+     visible inside the expanded body. */
+  .endpoint-card__header {
+    gap: 8px !important;
+    padding: 10px 12px !important;
+    flex-wrap: wrap !important;
+  }
+  .endpoint-card__header > code {
+    font-size: 12px !important;
+    word-break: break-all !important;
+    min-width: 0 !important;
+    flex: 1 1 100% !important;
+    order: 2 !important;
+  }
+  .endpoint-card__response-codes {
+    order: 3 !important;
+    flex: 1 1 100% !important;
+    max-width: none !important;
+  }
+  .endpoint-card__summary,
+  .endpoint-card__copylink {
+    display: none !important;
+  }
+
+  /* Expanded body collapses to one column so the description / params
+     / try-it stack vertically. The right column (try-it form) keeps
+     its own background distinction via border-top. */
+  .endpoint-card__body {
+    grid-template-columns: 1fr !important;
+  }
+  .endpoint-card__body > div {
+    border-right: none !important;
+    padding: 12px 14px !important;
+  }
+  .endpoint-card__body > div + div {
+    border-top: 1px solid var(--border-weak) !important;
+  }
+
+  /* Parameter rows: drop the dedicated "type" column (the type is
+     niche detail; required is still shown via the "req" badge in the
+     name cell). Stack name above description. */
+  .endpoint-card__param-row {
+    grid-template-columns: 1fr !important;
+    gap: 2px !important;
+  }
+  .endpoint-card__param-row > span:nth-child(2) {
+    display: none !important;
+  }
+
+  /* ---- Recent searches list (/blast/jobs) ----
+     The 5-column desktop table (Job / User / Status / Time / Delete)
+     still clips at phone widths even after .table-scroll contains
+     the overflow — Status badges and the Time column get pushed out
+     of the visible card. The User column is almost always empty in
+     single-user workspaces, so hide it on mobile and tighten the
+     remaining columns so the table fits without horizontal scroll. */
+  .jobs-page table {
+    /* `auto` layout lets row content (long titles like
+       `20260520-2309 MPXV F3L - NC_003310.1` or the `elb-cluster`
+       badge) push the Job column past the viewport even after
+       `white-space: normal` because the min-content of the badges
+       inside the meta row isn't breakable. Pin the layout so the
+       Job column absorbs whatever space remains after the fixed
+       right-side columns. */
+    table-layout: fixed !important;
+    width: 100% !important;
+  }
+  /* Hide the User column (header + cells); nth-child(2) of every row. */
+  .jobs-page thead th:nth-child(2),
+  .jobs-page tbody td:nth-child(2) {
+    display: none !important;
+  }
+  /* Pin the right-side columns to fixed widths so the Job column
+     gets the remaining space under `table-layout: fixed`. */
+  .jobs-page thead th:nth-child(3),
+  .jobs-page tbody td:nth-child(3) {
+    width: 78px !important;
+  }
+  .jobs-page thead th:nth-child(4),
+  .jobs-page tbody td:nth-child(4) {
+    width: 72px !important;
+  }
+  .jobs-page thead th:nth-child(5),
+  .jobs-page tbody td:nth-child(5) {
+    width: 32px !important;
+  }
+  /* Compact remaining cells: smaller font, tighter padding, allow
+     status badge / time to wrap into two lines if necessary. */
+  .jobs-page thead th,
+  .jobs-page tbody td {
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    font-size: 11px !important;
+  }
+  .jobs-page tbody td:first-child {
+    padding-left: 0 !important;
+  }
+  .jobs-page tbody td:last-child {
+    padding-right: 0 !important;
+  }
+  /* The Job title link is `white-space: nowrap` for desktop so it
+     ellipsises in a wide row; on mobile that forces the column to
+     the title's intrinsic width and pushes Time/Delete off-screen.
+     Let the title wrap into 2 lines instead. */
+  .jobs-page tbody td:first-child a {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    font-size: 12px !important;
+    line-height: 1.25 !important;
+  }
+  /* Status / Time TDs hard-set `whitespace: nowrap` inline; override
+     so the cells can shrink. Hide the "Duration N" sub-line on mobile
+     — the headline "X ago" is enough at a glance. */
+  .jobs-page tbody td:nth-child(3),
+  .jobs-page tbody td:nth-child(4) {
+    white-space: normal !important;
+  }
+  .jobs-page tbody td:nth-child(4) > div + div {
+    display: none !important;
+  }
+  .jobs-page tbody td:nth-child(4) > div {
+    font-size: 10px !important;
+  }
+  /* Hide the table's own internal scroll affordance — content now
+     fits without it. */
+  .jobs-page .table-scroll {
+    overflow-x: hidden !important;
+    padding-left: 8px !important;
+    padding-right: 8px !important;
   }
 }

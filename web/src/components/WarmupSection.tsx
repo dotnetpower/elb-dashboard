@@ -827,6 +827,7 @@ function WarmupDbRow({
   const releaseDisabled = actionsDisabled || !row.canRelease || starting || releasing;
   return (
     <div
+      className="warmup-db-card"
       style={{
         display: "grid",
         gridTemplateColumns: "minmax(160px, 1.1fr) minmax(220px, 1.5fr) auto",
@@ -877,6 +878,7 @@ function WarmupDbRow({
         {row.warm?.status === "Loading" && <WarmupProgressBar warm={row.warm} />}
       </div>
       <div
+        className="warmup-db-card__actions"
         style={{ display: "flex", gap: 6, justifyContent: "flex-end", flexWrap: "wrap" }}
       >
         {showWarm && (

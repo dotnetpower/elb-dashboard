@@ -3,7 +3,15 @@ export interface SpecParam {
   in: string;
   required?: boolean;
   description?: string;
-  schema?: { type?: string; default?: unknown };
+  displayName?: string;
+  usageHint?: string;
+  schema?: { type?: string; default?: unknown; pattern?: string };
+}
+
+export interface ResponseIdUsageItem {
+  label: string;
+  value: string;
+  useWith: string;
 }
 
 export interface SpecEndpoint {
@@ -26,7 +34,17 @@ export interface SpecEndpoint {
       }
     >;
   };
-  responses?: Record<string, { description?: string }>;
+  responses?: Record<
+    string,
+    {
+      description?: string;
+      shapeName?: string;
+      nextAction?: string;
+      fields?: string[];
+      idUsage?: ResponseIdUsageItem[];
+      example?: unknown;
+    }
+  >;
 }
 
 export interface ParsedSpec {

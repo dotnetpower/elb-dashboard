@@ -176,6 +176,11 @@ Calm, muted, low-contrast surfaces. **Detail moved to [docs/copilot/glass-ui.md]
 
 ## 13. Process Discipline
 
+### Documentation terminology links
+When adding or updating documentation under `docs/`, link important external technical terms on first meaningful use in the document. Use this for platform/framework/product concepts a researcher or maintainer may want to look up, such as Azure Container Apps, AKS, Azure Storage, MSAL, managed identity, Redis, Celery, WebSocket, and ttyd.
+
+Do not link every repeated occurrence. Prefer one first-use link per document section or page so the prose stays readable. Use authoritative sources: Microsoft Learn for Azure services and identity, official project documentation for open-source tools, and MDN for browser platform APIs. Keep internal documentation links same-tab; external documentation links are handled globally by `docs/javascripts/external-links.js` and should open in a new tab with `rel="noopener noreferrer"`.
+
 ### Per-feature change notes
 Before each commit that adds or alters user-visible behaviour, create:
 

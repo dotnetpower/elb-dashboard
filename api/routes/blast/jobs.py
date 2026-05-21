@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import (
@@ -39,6 +39,7 @@ from api.routes._blast_shared import (
     _split_child_summary_from_repo,
     _sync_external_jobs_to_table,
 )
+from api.services.response_contracts import build_meta, request_id_from_scope
 
 LOGGER = logging.getLogger(__name__)
 
@@ -157,6 +158,7 @@ def _external_row_with_scope_defaults(
 
 @router.get("/jobs")
 def blast_jobs_list(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
@@ -303,7 +305,10 @@ def blast_jobs_list(
             }
 
     jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
-    response: dict[str, Any] = {"jobs": jobs[:limit]}
+    response: dict[str, Any] = {
+        "jobs": jobs[:limit],
+        "meta": build_meta(request_id=request_id_from_scope(request)),
+    }
     if degraded and not jobs:
         response.update(degraded)
     if external_degraded:
@@ -370,8 +375,10 @@ def blast_job_execution_steps(
 
 @router.get("/jobs/{job_id}")
 def blast_job_get(
+    request: Request,
     job_id: str = Path(...),
     history: int = Query(default=0),
+    include_database_metadata: bool = Query(default=True),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     local_unavailable: Exception | None = None
@@ -384,13 +391,17 @@ def blast_job_get(
             if state.owner_oid and state.owner_oid != caller.object_id:
                 raise HTTPException(403, "not owner")
             state = _refresh_running_blast_state(repo, state)
+            split_children = None
+            if _local_list_row_may_have_split_children(state):
+                split_children = _split_child_summary_from_repo(repo, state.job_id)
             out = _local_to_blast_job(
                 state,
-                split_children=_split_child_summary_from_repo(repo, state.job_id),
-                include_database_metadata=True,
+                split_children=split_children,
+                include_database_metadata=include_database_metadata,
             )
             if history:
                 out["history"] = repo.get_history(job_id, limit=200)
+            out["meta"] = build_meta(request_id=request_id_from_scope(request))
             return out
     except HTTPException:
         raise
@@ -401,10 +412,12 @@ def blast_job_get(
     try:
         from api.services import external_blast
 
-        return _external_to_blast_job(
+        out = _external_to_blast_job(
             external_blast.get_job(job_id),
             include_database_metadata=True,
         )
+        out["meta"] = build_meta(request_id=request_id_from_scope(request))
+        return out
     except HTTPException as exc:
         if exc.status_code == 404 and local_unavailable is not None:
             raise HTTPException(
