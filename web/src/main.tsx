@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, HashRouter } from "react-router-dom";
 
 import { msalInstance } from "@/auth/msal";
+import { installClientErrorHandlers, reportUnknownClientError } from "@/api/clientLog";
 import { App } from "@/App";
 import { ToastProvider } from "@/components/Toast";
 import { AutoRefreshProvider } from "@/hooks/useAutoRefresh";
@@ -29,6 +30,7 @@ const DOCS_MOCK_PREVIEW = import.meta.env.VITE_DOCS_MOCK_PREVIEW === "true";
 const Router = DOCS_MOCK_PREVIEW ? HashRouter : BrowserRouter;
 
 initDocsMockPreview();
+installClientErrorHandlers();
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -49,6 +51,7 @@ async function bootstrap() {
     await msalInstance.initialize();
   } catch (err) {
     console.warn("MSAL initialize failed:", err);
+    reportUnknownClientError("msal.initialize", err);
   }
 
   if (!devBypass) {
@@ -80,6 +83,7 @@ async function bootstrap() {
       }
     } catch (err) {
       console.warn("MSAL redirect handling failed:", err);
+      reportUnknownClientError("msal.redirect", err);
     }
   }
 

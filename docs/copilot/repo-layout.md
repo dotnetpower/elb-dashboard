@@ -1,3 +1,8 @@
+---
+title: Repository Layout (Agent Detail)
+description: Full directory tree for elb-dashboard plus a where-to-edit map for AI coding agents and human contributors. Covers api/, web/, infra/, terminal/, and scripts/.
+---
+
 # Repository Layout (detail)
 
 > Extracted from `.github/copilot-instructions.md` §4 on 2026-05-19 to keep the

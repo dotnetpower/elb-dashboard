@@ -158,6 +158,12 @@ interface LineageTreeProps {
   /** Siblings keyed by parent taxid (from GET /blast/taxonomy/tree). */
   siblings?: Record<string, TaxonomyLineageNode[]>;
   siblingsLoading?: boolean;
+  /** Optional external target for each node; used by read-only detail views. */
+  nodeHref?: (taxid: number) => string;
+  /** Initial zoom level; the full picker keeps 135%, compact read-only views use 100%. */
+  defaultZoom?: number;
+  /** Minimum SVG viewBox width; larger values make compact containers less zoomed-in. */
+  minSvgWidth?: number;
 }
 
 export function LineageTree({
@@ -166,10 +172,13 @@ export function LineageTree({
   lineageText,
   siblings,
   siblingsLoading,
+  nodeHref,
+  defaultZoom = ZOOM_DEFAULT,
+  minSvgWidth = 360,
 }: LineageTreeProps) {
   const [expanded, setExpanded] = useState(false);
   const [showSiblings, setShowSiblings] = useState(true);
-  const [zoom, setZoom] = useState(ZOOM_DEFAULT);
+  const [zoom, setZoom] = useState(() => clampZoom(defaultZoom));
 
   const majorCount = useMemo(
     () => nodes.filter((n) => MAJOR_RANKS.has(n.rank.toLowerCase())).length,
@@ -203,7 +212,7 @@ export function LineageTree({
   const svgHeight = lastNode.y + RANK_Y_OFFSET + 10;
   // Reserve enough horizontal room for the deepest label (longest name ~16 chars).
   const maxX = laid.reduce((m, l) => Math.max(m, l.x), 0);
-  const svgWidth = Math.max(360, maxX + 180);
+  const svgWidth = Math.max(minSvgWidth, maxX + 180);
   const zoomPercent = Math.round(zoom * 100);
   const zoomStyle = {
     width: `${zoomPercent}%`,
@@ -290,8 +299,8 @@ export function LineageTree({
           <button
             type="button"
             className="lineage-tree__zoom-button"
-            onClick={() => setZoom(ZOOM_DEFAULT)}
-            disabled={zoom === ZOOM_DEFAULT}
+            onClick={() => setZoom(clampZoom(defaultZoom))}
+            disabled={zoom === clampZoom(defaultZoom)}
             aria-label="Reset lineage tree zoom"
             title="Reset zoom"
           >
@@ -330,8 +339,15 @@ export function LineageTree({
           })}
 
           {/* Nodes and labels */}
-          {laid.map((item, i) => (
-            <g key={`n-${i}-${item.node.taxid}`} role="treeitem">
+          {laid.map((item, i) => {
+            const content = (
+              <g
+                className={nodeHref ? "lineage-tree__node-link" : undefined}
+                role="treeitem"
+              >
+                {nodeHref && (
+                  <title>{`Open ${item.node.scientific_name} on NCBI Taxonomy`}</title>
+                )}
               <circle
                 cx={item.x}
                 cy={item.y}
@@ -382,8 +398,23 @@ export function LineageTree({
                   {item.node.rank}
                 </text>
               )}
-            </g>
-          ))}
+              </g>
+            );
+
+            return nodeHref ? (
+              <a
+                key={`n-${i}-${item.node.taxid}`}
+                href={nodeHref(item.node.taxid)}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={`Open ${item.node.scientific_name} on NCBI Taxonomy`}
+              >
+                {content}
+              </a>
+            ) : (
+              <g key={`n-${i}-${item.node.taxid}`}>{content}</g>
+            );
+          })}
         </svg>
       </div>
     </div>

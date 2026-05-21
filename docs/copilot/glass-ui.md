@@ -1,3 +1,8 @@
+---
+title: Glassmorphic UI Rules
+description: Design tokens, glass-card CSS, motion budget, and WCAG AA accessibility rules for the ElasticBLAST Control Plane SPA.
+---
+
 # Glassmorphic UI — Design Rules (detail)
 
 > Extracted from `.github/copilot-instructions.md` §10 on 2026-05-19.

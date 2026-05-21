@@ -1,3 +1,8 @@
+---
+title: Screenshot Workflow
+description: Repeatable, publish-safe screenshot workflow for the ElasticBLAST Control Plane documentation, including the capture manifest and refresh process.
+---
+
 # Screenshot Workflow
 
 This workflow keeps product screenshots repeatable, safe to publish, and easy to refresh when the UI changes.

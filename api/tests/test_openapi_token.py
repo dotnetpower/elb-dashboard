@@ -36,7 +36,7 @@ class FakeSession:
         self,
         _url: str,
         *,
-        json: dict[str, Any],
+        json: Any,
         headers: dict[str, str],
         timeout: int,
     ) -> FakeResponse:
@@ -131,13 +131,30 @@ def test_generate_openapi_token_patches_deployment_and_runtime_cache(monkeypatch
     assert result["generated"] is True
     assert result["rotated"] is False
     assert saved == ["generated-token"]
-    assert session.patches[0]["headers"] == {
-        "Content-Type": "application/strategic-merge-patch+json"
+    # The patch is now an RFC 6902 JSON Patch (see openapi_token._patch_deployment_token
+    # docstring for the strategic-merge → JSON Patch migration rationale).
+    assert session.patches[0]["headers"] == {"Content-Type": "application/json-patch+json"}
+    ops = session.patches[0]["json"]
+    assert isinstance(ops, list)
+    # The base fake deployment has no template annotations map, so the patch
+    # creates one before adding the rotated-at key.
+    assert ops[0] == {
+        "op": "add",
+        "path": "/spec/template/metadata/annotations",
+        "value": {},
     }
-    patch = session.patches[0]["json"]
-    container = patch["spec"]["template"]["spec"]["containers"][0]
-    assert container == {
-        "name": "openapi",
-        "env": [{"name": "ELB_OPENAPI_API_TOKEN", "value": "generated-token"}],
+    assert ops[1]["op"] == "add"
+    # `~1` is the JSON Pointer escape for `/` inside the annotation key
+    # `elb-dashboard/openapi-api-token-rotated-at`.
+    assert ops[1]["path"] == (
+        "/spec/template/metadata/annotations/elb-dashboard~1openapi-api-token-rotated-at"
+    )
+    # The token env entry is new (existing env list only has ELB_CLUSTER_NAME),
+    # so the op appends with the "-" path segment.
+    token_op = ops[-1]
+    assert token_op == {
+        "op": "add",
+        "path": "/spec/template/spec/containers/0/env/-",
+        "value": {"name": "ELB_OPENAPI_API_TOKEN", "value": "generated-token"},
     }
     assert session.closed is True

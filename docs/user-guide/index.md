@@ -1,6 +1,23 @@
+---
+title: User Guide
+description: End-to-end browser workflow for researchers using ElasticBLAST Control Plane — Dashboard, New Search, Jobs, Results, API Reference, and the in-browser terminal.
+social:
+  cards_layout_options:
+    title: User Guide
+    description: End-to-end browser workflow for researchers — Dashboard, New Search, Jobs, Results, and Terminal.
+---
+
 # User Guide
 
 This guide explains how to operate the ElasticBLAST Control Plane from the browser. It is organised around the main product surfaces researchers use during a BLAST workflow.
+
+!!! tip "TL;DR"
+
+    Researchers move through five surfaces: **Dashboard** (readiness),
+    **New Search** (submit), **Recent searches** (track), **Results**
+    (inspect + download), and **Terminal** (advanced shell). The
+    **API Reference** page is for developers who want to drive the
+    backend directly.
 
 ## Workflow
 

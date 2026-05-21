@@ -1,3 +1,8 @@
+---
+title: Version Management
+description: How the ElasticBLAST Control Plane SemVer policy is enforced — scripts/dev/bump-version.sh, the conventional-commit triggers for MAJOR / MINOR / PATCH bumps, and the SPA header version stamp.
+---
+
 # Version Management
 
 > Extracted from `.github/copilot-instructions.md` §13 on 2026-05-22 to keep

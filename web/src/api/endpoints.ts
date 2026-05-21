@@ -7,3 +7,4 @@ export * from "@/api/resources";
 export * from "@/api/armProxy";
 export * from "@/api/blastTools";
 export * from "@/api/storage";
+export * from "@/api/clientLog";

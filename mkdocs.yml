@@ -1,17 +1,21 @@
 site_name: ElasticBLAST Control Plane
-site_description: Browser-only control plane for ElasticBLAST on Azure.
+site_description: Browser-only control plane for ElasticBLAST on Azure. Run large BLAST sequence searches on AKS from a browser — no SSH, no SAS tokens, no local CLI.
+site_author: dotnetpower
 site_url: https://dotnetpower.github.io/elb-dashboard/
 repo_url: https://github.com/dotnetpower/elb-dashboard
 repo_name: dotnetpower/elb-dashboard
 edit_uri: edit/main/docs/
+copyright: Copyright &copy; dotnetpower — ElasticBLAST Control Plane. Documentation released under CC BY 4.0.
 
 docs_dir: docs
 site_dir: site
 
 theme:
   name: material
+  custom_dir: overrides
   language: en
   logo: images/elasticblast-logo.svg
+  favicon: images/elasticblast-logo.svg
   palette:
     scheme: default
     primary: white
@@ -20,9 +24,36 @@ theme:
   features:
     - navigation.sections
     - navigation.top
+    - navigation.indexes
     - search.highlight
     - search.suggest
+    - search.share
     - toc.follow
+    - content.action.edit
+    - content.tooltips
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  generator: false
+  # Google Analytics 4. Material injects the standard gtag.js snippet
+  # (async loader + dataLayer + config call) when both fields are set.
+  analytics:
+    provider: google
+    property: G-B4Z6EK09NP
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/dotnetpower/elb-dashboard
+      name: ElasticBLAST Control Plane on GitHub
+  # Open Graph / GEO defaults consumed by docs/overrides/partials/meta.html.
+  og:
+    image: images/elasticblast-logo.svg
+    type: website
+    locale: en_US
+    site_name: ElasticBLAST Control Plane
+  llms:
+    txt: llms.txt
+    full: llms-full.txt
 
 nav:
   - Overview: index.md
@@ -62,7 +93,7 @@ nav:
 extra_javascript:
   - javascripts/external-links.js
   - javascripts/image-viewer.js
-  - https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js
+  - javascripts/vendor/mermaid.min.js
   - javascripts/mermaid-init.js
 
 extra_css:
@@ -74,6 +105,19 @@ exclude_docs: |
 
 not_in_nav: |
   features_change/**/*.md
+
+plugins:
+  - search:
+      lang: en
+  - social:
+      cards: true
+      cards_layout_options:
+        background_color: "#1f1d3a"
+        color: "#f5f4ff"
+        font_family: Roboto
+
+hooks:
+  - scripts/docs/llms_hooks.py
 
 markdown_extensions:
   - admonition

@@ -1,27 +1,81 @@
+---
+title: Auth — MSAL + Managed Identity
+description: How ElasticBLAST Control Plane authenticates browser users with MSAL Auth Code + PKCE and uses a user-assigned managed identity for every Azure SDK call, plus the full RBAC role matrix.
+social:
+  cards_layout_options:
+    title: Authentication & Authorization
+    description: MSAL Auth Code + PKCE for users, user-assigned managed identity for Azure — plus the full RBAC role matrix.
+---
+
 # Authentication & Authorization
 
 This document describes the authentication flow and every RBAC role
 required by the ElasticBLAST control plane.
 
+!!! tip "TL;DR"
+
+    Browser users sign in with MSAL.js (Auth Code + PKCE). The backend
+    validates the bearer token for identity only — every Azure SDK call is
+    made as the user-assigned managed identity `id-elb-dashboard-*` via
+    `DefaultAzureCredential`. No service principal secrets, no on-behalf-of
+    (OBO) flow, no SAS tokens to the browser.
+
 ---
 
 ## Architecture Overview
 
-```
-Browser (SPA)               api sidecar                     Azure Resources
-┌──────────┐  Bearer JWT    ┌──────────────┐  Managed ID    ┌──────────────┐
-│ MSAL.js  │───────────────>│ Validate JWT │───────────────>│ ARM / Data   │
-│ Auth Code│                │ (who called) │  DefaultAzure  │ Plane APIs   │
-│ + PKCE   │                │              │  Credential()  │              │
-└──────────┘                └──────────────┘                └──────────────┘
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, ui-sans-serif, system-ui, sans-serif"}, "flowchart": {"curve": "basis", "padding": 18}}}%%
+flowchart LR
+  browser(["Browser SPA<br/>MSAL.js · Auth Code + PKCE"])
+  subgraph app["Azure Container App · ca-elb-dashboard"]
+    api["api sidecar<br/>JWT validation (who called)"]
+    sidecars["worker / beat / terminal sidecars"]
+  end
+  mi{{"User-assigned MI<br/>id-elb-dashboard-*"}}
+  azure[("Azure ARM + data-plane APIs")]
+
+  browser -- Bearer JWT --> api
+  api -. DefaultAzureCredential .-> mi
+  sidecars -. DefaultAzureCredential .-> mi
+  mi -- token issued by Entra ID --> azure
+  api -- Azure SDK call --> azure
+  sidecars -- Azure SDK call --> azure
 ```
 
-**Key design choice**: All Azure SDK calls use the **shared user-assigned
-Managed Identity (MI) `id-elb-dashboard-*`** mounted on the `ca-elb-dashboard`
-Container App (visible to the api / worker / beat / terminal sidecars), not
-On-Behalf-Of (OBO). The bearer token from the SPA is used only to verify the
-caller's identity (JWT validation) — it is never exchanged for a downstream
-ARM token.
+The browser token proves **who** called. Azure SDK calls use the **shared
+user-assigned Managed Identity (MI) `id-elb-dashboard-*`** mounted on the
+`ca-elb-dashboard` Container App (the api, worker, beat, and terminal sidecars
+all pick it up via `DefaultAzureCredential`). On-Behalf-Of (OBO) is
+deliberately not used.
+
+### Sign-in handshake
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as Researcher
+  participant SPA as Browser SPA (MSAL.js)
+  participant Entra as Microsoft Entra ID
+  participant API as api sidecar (FastAPI)
+  participant Az as Azure resource
+
+  U->>SPA: Open dashboard
+  SPA->>Entra: Auth Code + PKCE redirect (scope: api://<client-id>/user_impersonation)
+  Entra-->>SPA: Authorization code
+  SPA->>Entra: Exchange code + PKCE verifier for access_token + id_token
+  Entra-->>SPA: access_token (JWT, aud = api://<client-id>)
+  SPA->>API: GET /api/me  (Authorization: Bearer <JWT>)
+  API->>Entra: Fetch JWKS / OIDC discovery (cached)
+  Entra-->>API: Signing keys
+  API->>API: Validate signature, issuer, audience, expiry
+  API-->>SPA: 200 OK { caller }
+
+  Note over API,Az: Azure SDK calls use the Managed Identity, not the browser token
+  API->>Az: Azure SDK call via DefaultAzureCredential (MI)
+  Az-->>API: Response
+  API-->>SPA: Rendered payload
+```
 
 **Why MI instead of OBO?**
 - OBO requires `API_CLIENT_SECRET` and multi-resource consent, which are
@@ -130,11 +184,21 @@ following roles.
 
 | Role | Scope | Purpose |
 |------|-------|---------|
-| Key Vault Secrets User | Platform Key Vault | Read App Registration values |
+| Key Vault Secrets User | Platform Key Vault | Read App Registration values (see [infra/modules/keyvault.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/keyvault.bicep)) |
 | Storage Blob Data Contributor | Platform Storage Account | Append-blob audit / payload blobs |
 | Storage Table Data Contributor | Platform Storage Account | Job / schedule state in Table Storage |
-| Storage File Data SMB Share Contributor | Platform Storage Account | Mount `redis-data` and `terminal-home` Azure Files shares |
 | AcrPull + AcrPush | Platform ACR | Pull sidecar images + build new images |
+
+> **No Azure Files SMB shares.** Earlier revisions mounted `redis-data` and
+> `terminal-home` shares for sidecar persistence, but SMB mounts in Container
+> Apps require a storage account key, which conflicts with the
+> publicNetworkAccess=Disabled posture. Today the `redis` sidecar runs with
+> `--save '' --appendonly no` (queue rebuilt from Storage state by the beat
+> reconciler on revision restart) and the `terminal` sidecar's
+> `/home/azureuser` is ephemeral — user files stage to workload Storage via
+> `azcopy`. `Storage File Data SMB Share Contributor` is therefore no longer
+> assigned. See [infra/modules/containerAppControl.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/containerAppControl.bicep) and
+> [infra/modules/containerAppsEnvironment.bicep](https://github.com/dotnetpower/elb-dashboard/blob/main/infra/modules/containerAppsEnvironment.bicep).
 
 ### Workload Resources (manual after first `azd up`)
 

@@ -76,6 +76,7 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
         ("POST", "/api/aks/provision"),
         ("POST", "/api/warmup/start"),
         ("GET", "/api/audit/log"),
+        ("POST", "/api/client-log"),
         ("POST", "/api/terminal/ticket"),
         # Diagnostic endpoint references subscription ids — must be auth-gated
         # so the ingress does not leak tenant topology to anonymous callers.

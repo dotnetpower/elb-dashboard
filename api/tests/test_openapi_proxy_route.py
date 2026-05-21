@@ -25,6 +25,12 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.setenv("AZURE_TENANT_ID", "common")
     monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
+    # Lock the public-LB opt-in OFF by default so the refusal tests are
+    # not silently turned green by a developer who exported the env var
+    # in their shell (the deployed Container App sets it to 'true' via
+    # Bicep — see security audit #12 follow-up 2026-05-22). The single
+    # opt-in test re-enables it explicitly via monkeypatch.setenv.
+    monkeypatch.delenv("OPENAPI_ALLOW_PUBLIC_LB", raising=False)
     from api.main import app
 
     return TestClient(app)
@@ -580,3 +586,51 @@ def test_openapi_proxy_refuses_public_ipv6(
     assert r.status_code == 502
     assert r.json()["code"] == "openapi_unsafe_transport"
     assert "ipv6-public-token" not in r.text
+
+
+def test_openapi_proxy_allows_public_ip_when_opt_in_env_set(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operators that intentionally expose elb-openapi via a public LB
+    (and accept the plain-HTTP token exposure between the api sidecar
+    and the LB) can opt in by setting ``OPENAPI_ALLOW_PUBLIC_LB=true``.
+    With the opt-in, the proxy forwards normally to the public IP."""
+    _patch_service_ip(monkeypatch, "20.30.40.50")
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "api-token")
+    monkeypatch.setenv("OPENAPI_ALLOW_PUBLIC_LB", "true")
+    calls: list[dict[str, Any]] = []
+
+    class StubAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> StubAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        async def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str],
+            content: bytes | None,
+        ) -> httpx.Response:
+            calls.append({"method": method, "url": url, "headers": headers, "content": content})
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubAsyncClient)
+
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={"resource_group": "rg-elb", "cluster_name": "aks-elb", "path": "/healthz"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert len(calls) == 1
+    assert calls[0]["url"] == "http://20.30.40.50/healthz"
+    assert calls[0]["headers"].get("X-ELB-API-Token") == "api-token"

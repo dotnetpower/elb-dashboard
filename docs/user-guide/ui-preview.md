@@ -1,3 +1,8 @@
+---
+title: UI Preview (User Guide)
+description: Static, fixture-backed build of the ElasticBLAST Control Plane SPA embedded in the documentation site — explore the UI without provisioning Azure resources.
+---
+
 # UI Preview
 
 The UI Preview is a static, mock-backed build of the real Control Plane React app. It runs inside the documentation site and uses fixture data instead of Azure, AKS, Storage, ACR, Redis, or the FastAPI backend.

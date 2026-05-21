@@ -1,3 +1,8 @@
+---
+title: Change Log
+description: Recent feature-change notes for ElasticBLAST Control Plane, with links to the full per-feature archive under docs/features_change/.
+---
+
 # Change Log
 
 This page links the most recent feature-change notes. The complete archive under `docs/features_change/` is included in the MkDocs build and search index, so older notes can be found through site search without expanding hundreds of entries in the navigation sidebar.

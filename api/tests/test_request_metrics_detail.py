@@ -212,3 +212,34 @@ def test_sidecar_requests_route_returns_redacted_payload(monkeypatch):
     assert posts
     headers = {h["name"].lower(): h["value"] for h in posts[0]["request_headers"]}
     assert headers.get("authorization") == rm.DETAIL_REDACT_PLACEHOLDER
+
+
+def test_middleware_captures_body_size_guard_413(monkeypatch):
+    rm.reset_details_for_tests()
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("REQUEST_DETAIL_CAPTURE_ENABLED", "true")
+    monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", "8")
+    monkeypatch.setenv("SIDECAR_REPORTER_DISABLED", "true")
+    from api import main as _main
+
+    app = _main.create_app()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/resources/_too_large",
+        content=b'{"too":"large"}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert response.headers.get("x-request-id")
+    items = rm.details().list_recent(limit=10)
+    matches = [
+        sample
+        for sample in items
+        if sample["method"] == "POST" and sample["path"] == "/api/resources/_too_large"
+    ]
+    assert matches
+    assert matches[0]["status"] == 413
+    assert matches[0]["response_body"] is not None
+    assert "payload_too_large" in str(matches[0]["response_body"])

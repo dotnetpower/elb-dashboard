@@ -1,0 +1,53 @@
+# robots.txt for ElasticBLAST Control Plane documentation.
+# Public documentation site — every crawler, including AI / generative-engine
+# crawlers, is welcome to index the published guidance.
+
+User-agent: *
+Allow: /
+
+# Generative-engine crawlers are listed explicitly so that an operator who
+# tightens the wildcard rule above does not accidentally close the door to
+# AI search ingestion.
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+User-agent: Amazonbot
+Allow: /
+
+Sitemap: https://dotnetpower.github.io/elb-dashboard/sitemap.xml

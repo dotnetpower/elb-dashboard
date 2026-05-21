@@ -1,3 +1,8 @@
+---
+title: Dashboard (User Guide)
+description: Operator's pre-flight view for ElasticBLAST Control Plane — cluster, registry, storage, terminal, and sidecar readiness signals before submitting a BLAST search.
+---
+
 # Dashboard
 
 The Dashboard is the landing page of the ElasticBLAST control plane. It is built for **operators** — the person who keeps the workspace ready so researchers can submit BLAST searches without leaving the browser. Before you open New Search, this page should show every plane (cluster, registry, storage, terminal, sidecars) in a healthy state.

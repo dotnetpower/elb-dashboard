@@ -1,3 +1,8 @@
+---
+title: Resource Plane (Agent Detail)
+description: Celery task surface that mirrors azure-prereq.md — AKS provisioning, ACR build, BLAST submit / status / delete, database warmup, and scheduled reconciliation tasks.
+---
+
 # ElasticBLAST Resource Plane (detail)
 
 > Extracted from `.github/copilot-instructions.md` §7 on 2026-05-19.

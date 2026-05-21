@@ -6,8 +6,11 @@
 //   * Log Analytics, with optional Application Insights.
 //   * Shared user-assigned managed identity (id-elb-dashboard-*).
 //   * Premium ACR (with bootstrap public access; lock down via lockdown=true).
-//   * Standard_LRS Storage account with state tables / blob containers /
-//     two Azure Files shares (redis-data, terminal-home).
+//   * Standard_LRS Storage account with state tables / blob containers.
+//     (No Azure Files shares — `redis` and `terminal` sidecars are
+//      ephemeral; the broker queue is rebuilt from the `jobstate` table by
+//      the beat reconciler on revision restart. See
+//      `infra/modules/storageState.bicep` for the rationale.)
 //   * Key Vault (RBAC mode, soft-delete + purge protection).
 //   * Container Apps Environment (workload-profile, VNet-integrated).
 //   * Container App `ca-elb-dashboard` with the six-sidecar template

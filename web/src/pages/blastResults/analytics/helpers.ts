@@ -153,6 +153,23 @@ export function taxidLabel(value: string | undefined): string {
     .join(", ");
 }
 
+/**
+ * Extract the first numeric taxid from a BLAST `staxids` field.
+ *
+ * BLAST may emit one or more taxids separated by `;` (and occasionally `,`)
+ * when the alignment hits a sequence with multiple Taxonomy mappings. We
+ * pick the leading entry so the Scientific Name modal can resolve a single
+ * NCBI record directly instead of doing a name search. Returns `null` when
+ * the field is empty or malformed.
+ */
+export function parseLeadingTaxid(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const first = value.split(/[;,]/)[0]?.trim();
+  if (!first) return null;
+  const parsed = Number.parseInt(first, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 // Boundary tokens after which the remainder of a BLAST subject title is no
 // longer the scientific name (NCBI titles look like "Monkeypox virus isolate
 // 24MPX2634V genome assembly, complete genome"). Mirrors

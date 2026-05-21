@@ -1,3 +1,8 @@
+---
+title: Auth Flow (Agent Detail)
+description: Implementation-level walkthrough of the ElasticBLAST Control Plane authentication flow — MSAL Auth Code + PKCE in the browser, bearer-token validation in FastAPI, and DefaultAzureCredential on the api / worker / beat sidecars.
+---
+
 # Authentication Flow (detail)
 
 > Extracted from `.github/copilot-instructions.md` §5 on 2026-05-19.

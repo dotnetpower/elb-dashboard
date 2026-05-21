@@ -1,3 +1,8 @@
+---
+title: Browser Terminal (User Guide)
+description: Operator shell that runs inside the ElasticBLAST Control Plane Container App with the same network and identity boundary — no laptop install required.
+---
+
 # Browser Terminal
 
 The Browser Terminal puts a shell inside the same network and identity boundary as the control plane, so operators never need to install Azure tools on a laptop. It is reached from the sidebar **Terminal** entry or any `/terminal` link.

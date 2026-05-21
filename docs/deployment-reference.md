@@ -1,6 +1,22 @@
+---
+title: Deployment Reference
+description: Operator reference for deploying ElasticBLAST Control Plane on Azure — Bicep modules, azd workflow, post-provision steps, AKS sizing, and the six-sidecar Container App template.
+social:
+  cards_layout_options:
+    title: Deployment Reference
+    description: Bicep modules, azd workflow, post-provision steps, AKS sizing, and the Container App template.
+---
+
 # Deployment Reference
 
 This reference is for platform maintainers, administrators, and developers who need the details behind the quick-start deployment path.
+
+!!! tip "TL;DR"
+
+    Single source of truth for Bicep modules under `infra/`, the `azd`
+    workflow, `postprovision.sh` template swap, network lockdown, AKS
+    sizing, redirect-URI setup, and cleanup. Use this when the
+    [Get Started](get-started.md) helper is not enough.
 
 Researchers who only need to deploy and open the dashboard should start with [Get Started](get-started.md).
 
@@ -229,7 +245,7 @@ Required runtime image tags:
 - `ncbi/elb:1.4.0`
 - `ncbi/elasticblast-job-submit:4.1.0`
 - `ncbi/elasticblast-query-split:0.1.4`
-- `elb-openapi:4.9`
+- `elb-openapi:4.14`
 
 Tiny query for the first smoke run:
 
