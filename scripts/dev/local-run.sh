@@ -316,6 +316,7 @@ case "$service" in
       export PATH="$local_elb_root/venv/bin:$PATH"
       export PYTHONPATH="$project_root/terminal/runtime_overrides:$local_elb_root/src${PYTHONPATH:+:$PYTHONPATH}"
       export ELB_DASHBOARD_FAST_JSON_SUBMIT_CLEANUP=${ELB_DASHBOARD_FAST_JSON_SUBMIT_CLEANUP:-1}
+      export ELB_DASHBOARD_FAST_AZURE_IO=${ELB_DASHBOARD_FAST_AZURE_IO:-1}
     fi
     export AZCOPY_AUTO_LOGIN_TYPE=${AZCOPY_AUTO_LOGIN_TYPE:-AZCLI}
     for bin in az kubectl azcopy; do

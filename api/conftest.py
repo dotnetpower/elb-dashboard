@@ -28,9 +28,15 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     """
     from api.routes._blast_shared import _reset_external_jobs_cache as _reset
     from api.routes.blast.jobs import _reset_blast_jobs_list_cache
+    from api.services.k8s_monitoring import _reset_blast_status_cache
+    from api.services.state_repo import reset_state_repo_cache
 
     _reset()
     _reset_blast_jobs_list_cache()
+    _reset_blast_status_cache()
+    reset_state_repo_cache()
     yield
     _reset()
     _reset_blast_jobs_list_cache()
+    _reset_blast_status_cache()
+    reset_state_repo_cache()

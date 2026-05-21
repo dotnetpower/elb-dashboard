@@ -222,7 +222,15 @@ export function Layout({ children }: PropsWithChildren) {
           </div>
           <div>
             <div className="layout__logo-text">ElasticBLAST</div>
-            <div className="layout__logo-sub">Control Plane</div>
+            <div className="layout__logo-sub">
+              <span>Control Plane</span>
+              <span
+                className="layout__logo-version"
+                title={`Version: v${__APP_VERSION__}\nCommit: ${__APP_COMMIT__}\nBuilt: ${__APP_BUILD_TIME__}`}
+              >
+                v{__APP_VERSION__} · {__APP_COMMIT__}
+              </span>
+            </div>
           </div>
         </div>
 

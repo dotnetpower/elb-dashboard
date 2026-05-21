@@ -40,6 +40,7 @@
 | Change SPA dashboard cards | [web/src/pages/Dashboard.tsx](./web/src/pages/Dashboard.tsx) + [web/src/api/endpoints.ts](./web/src/api/endpoints.ts) | Add the matching backend route under [api/routes/monitor/](./api/routes/monitor/) |
 | Update browser terminal | [terminal/Dockerfile](./terminal/Dockerfile) + [terminal/entrypoint.sh](./terminal/entrypoint.sh) (ttyd loopback `127.0.0.1:7681`) | WebSocket proxy in [api/routes/terminal_ws.py](./api/routes/terminal_ws.py) |
 | Change auth/JWT validation | [api/auth.py](./api/auth.py) | Tests in [api/tests/test_smoke.py](./api/tests/test_smoke.py) |
+| Bump the release version / change the header stamp | [scripts/dev/bump-version.sh](./scripts/dev/bump-version.sh) (`--dry-run` first) | Full policy + pipeline in [docs/copilot/version-management.md](./docs/copilot/version-management.md) |
 
 ---
 
@@ -132,6 +133,12 @@ where the failure was found, but knowing them up front saves a lot of time.
     Container App template, `terminal/Dockerfile*` / `exec_server.py`, or
     `infra/*.bicep`, AND the bug cannot be reproduced in Tier 1/2a. State the
     reason in the change note. Charter §13 calls this out explicitly.
+11. **Do not hand-edit `version` in `web/package.json` or `pyproject.toml`.**
+    Always go through [scripts/dev/bump-version.sh](./scripts/dev/bump-version.sh)
+    so the release commit + tag stay consistent and SPA header / backend
+    image carry the same SemVer. Policy in
+    [.github/copilot-instructions.md §13](./.github/copilot-instructions.md);
+    full workflow in [docs/copilot/version-management.md](./docs/copilot/version-management.md).
 
 ---
 

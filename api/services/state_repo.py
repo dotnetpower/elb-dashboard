@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -30,6 +31,36 @@ LOGGER = logging.getLogger(__name__)
 
 _TABLE_ENDPOINT_ENV = "AZURE_TABLE_ENDPOINT"  # eg https://stelb*.table.core.windows.net
 _ENSURED_TABLES: set[tuple[str, str]] = set()
+
+
+class _PooledTableClient:
+    """Reusable wrapper that lets a single TableClient survive multiple ``with`` blocks.
+
+    The Azure Tables SDK closes the underlying HTTP transport on ``__exit__``;
+    that would defeat connection pooling for repositories whose methods each
+    open a fresh ``with self._state_client() as t:`` block. This wrapper keeps
+    the inner client alive across enters so the TLS session and request
+    pipeline are reused across calls.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __enter__(self) -> Any:
+        return self._inner
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def close(self) -> None:
+        inner_close = getattr(self._inner, "close", None)
+        if callable(inner_close):
+            inner_close()
 _JOB_SCHEMA_VERSION = 2
 _JOBSTATE_SUMMARY_SELECT = [
     "PartitionKey",
@@ -248,12 +279,45 @@ class JobStateRepository:
             )
         self._endpoint = endpoint
         self._cred = get_credential()
+        # Cached pooled clients — lazily constructed on first use so a route
+        # that only touches one table never pays for the other's pipeline.
+        # Reused across all ``with self._state_client() as t:`` calls on this
+        # instance so the TLS session and HTTP pipeline are shared per-repo.
+        self._state_pool: _PooledTableClient | None = None
+        self._history_pool: _PooledTableClient | None = None
+        self._pool_lock = threading.Lock()
 
-    def _state_client(self) -> TableClient:
-        return TableClient(endpoint=self._endpoint, table_name="jobstate", credential=self._cred)
+    def _state_client(self) -> _PooledTableClient:
+        pool = self._state_pool
+        if pool is None:
+            with self._pool_lock:
+                pool = self._state_pool
+                if pool is None:
+                    pool = _PooledTableClient(
+                        TableClient(
+                            endpoint=self._endpoint,
+                            table_name="jobstate",
+                            credential=self._cred,
+                        )
+                    )
+                    self._state_pool = pool
+        return pool
 
-    def _history_client(self) -> TableClient:
-        return TableClient(endpoint=self._endpoint, table_name="jobhistory", credential=self._cred)
+    def _history_client(self) -> _PooledTableClient:
+        pool = self._history_pool
+        if pool is None:
+            with self._pool_lock:
+                pool = self._history_pool
+                if pool is None:
+                    pool = _PooledTableClient(
+                        TableClient(
+                            endpoint=self._endpoint,
+                            table_name="jobhistory",
+                            credential=self._cred,
+                        )
+                    )
+                    self._history_pool = pool
+        return pool
 
     def _ensure_table(self, table_name: str) -> None:
         key = (self._endpoint, table_name)
@@ -596,3 +660,47 @@ class JobStateRepository:
                 self._ensure_table("jobhistory")
         rows.sort(key=lambda r: r["RowKey"])
         return rows
+
+
+# ---------------------------------------------------------------------------
+# Module-level repository singleton
+# ---------------------------------------------------------------------------
+# Every request handler that touches job state currently does
+# ``repo = JobStateRepository()`` which (a) re-resolves the managed-identity
+# credential chain and (b) on first method call constructs a brand new
+# ``TableClient`` (TLS handshake + pipeline setup) per route invocation.
+# In the local dev profile the dashboard polls ``/api/blast/jobs`` every ~14s
+# and each call enters several of these methods — multiplied by Korean→Azure
+# RTT this dominates the endpoint's wall clock. The pooled-client wrapper
+# above already keeps the HTTP pipeline alive across method calls on a single
+# instance; this getter ensures hot routes actually reuse the same instance.
+
+_DEFAULT_REPO: JobStateRepository | None = None
+_DEFAULT_REPO_LOCK = threading.Lock()
+
+
+def get_state_repo() -> JobStateRepository:
+    """Return a process-wide :class:`JobStateRepository` singleton.
+
+    Safe to call from any thread. Tests that rely on monkeypatching
+    :data:`TableClient` or :data:`get_credential` should keep instantiating
+    :class:`JobStateRepository` directly, or call :func:`reset_state_repo_cache`
+    in a fixture to clear any cached instance.
+    """
+
+    global _DEFAULT_REPO
+    repo = _DEFAULT_REPO
+    if repo is not None:
+        return repo
+    with _DEFAULT_REPO_LOCK:
+        if _DEFAULT_REPO is None:
+            _DEFAULT_REPO = JobStateRepository()
+        return _DEFAULT_REPO
+
+
+def reset_state_repo_cache() -> None:
+    """Drop the cached singleton repository. Intended for tests."""
+
+    global _DEFAULT_REPO
+    with _DEFAULT_REPO_LOCK:
+        _DEFAULT_REPO = None

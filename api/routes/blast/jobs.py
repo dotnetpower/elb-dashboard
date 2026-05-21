@@ -46,7 +46,10 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_JOBS_LIST_CACHE_TTL_SECONDS = 5.0
+# The frontend polls ``/api/blast/jobs`` every ~14 s. A 10 s TTL keeps the
+# common case (single user staring at the Jobs page) as a cache hit while
+# tab-switching or page reloads still see fresh data within one cycle.
+_JOBS_LIST_CACHE_TTL_SECONDS = 10.0
 _JOBS_LIST_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _JOBS_LIST_CACHE_LOCK = threading.Lock()
 
@@ -186,9 +189,9 @@ def blast_jobs_list(
     jobs: list[dict[str, Any]] = []
     degraded: dict[str, Any] = {}
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         rows = [
             row
             for row in repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
@@ -349,9 +352,9 @@ def blast_job_execution_steps(
             build_execution_steps_snapshot,
             read_execution_steps_snapshot,
         )
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         summary = repo.get_summary(job_id)
         if summary is None:
             raise HTTPException(404, "job not found")
@@ -403,9 +406,9 @@ def blast_job_get(
 ) -> dict[str, Any]:
     local_unavailable: Exception | None = None
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         state = repo.get(job_id)
         if state is not None:
             if state.owner_oid and state.owner_oid != caller.object_id:
@@ -464,9 +467,9 @@ def blast_job_events(
 ) -> dict[str, Any]:
     try:
         from api.services.blast_events import canonical_job_events
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")
@@ -496,9 +499,9 @@ def blast_job_queue(
 ) -> dict[str, Any]:
     try:
         from api.services.blast_queue import queue_snapshot
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")
@@ -528,9 +531,9 @@ def blast_job_cancel(
 
     request_body = dict(body or {})
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        state = JobStateRepository().get(job_id)
+        state = get_state_repo().get(job_id)
         if state is not None:
             if state.owner_oid and state.owner_oid != caller.object_id:
                 raise HTTPException(403, "not owner")
@@ -574,9 +577,9 @@ def blast_job_delete(
 ) -> dict[str, Any]:
     """Delete a job record from the state repository."""
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")

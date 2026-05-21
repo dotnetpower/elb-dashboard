@@ -43,6 +43,10 @@ MAX_TIMEOUT = 1800  # hard 30-min cap; longer tasks must be split
 SIGTERM_GRACE_SECONDS = 5
 EXEC_TMP_ROOT = "/tmp/exec"  # noqa: S108 - intentional; cleaned per-request
 EXEC_AZURE_CONFIG_DIR = os.environ.get("EXEC_AZURE_CONFIG_DIR", "")
+ELB_RUNTIME_OVERRIDES_DIR = os.environ.get(
+    "ELB_RUNTIME_OVERRIDES_DIR", "/opt/elb/runtime_overrides"
+)
+ELB_SOURCE_DIR = os.environ.get("ELB_SOURCE_DIR", "/opt/elb/elastic-blast-azure/src")
 
 LOGGER = logging.getLogger("exec_server")
 _semaphore = threading.BoundedSemaphore(MAX_CONCURRENCY)
@@ -157,6 +161,16 @@ def _child_env() -> dict[str, str]:
     if EXEC_AZURE_CONFIG_DIR and not env.get("AZURE_CONFIG_DIR"):
         env["AZURE_CONFIG_DIR"] = EXEC_AZURE_CONFIG_DIR
     env.setdefault("AZCOPY_AUTO_LOGIN_TYPE", "AZCLI")
+    python_path_prefix = [
+        path for path in (ELB_RUNTIME_OVERRIDES_DIR, ELB_SOURCE_DIR) if os.path.isdir(path)
+    ]
+    if python_path_prefix:
+        existing = env.get("PYTHONPATH")
+        existing_parts = existing.split(os.pathsep) if existing else []
+        merged = [*python_path_prefix, *existing_parts]
+        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(part for part in merged if part))
+    env.setdefault("ELB_DASHBOARD_FAST_JSON_SUBMIT_CLEANUP", "1")
+    env.setdefault("ELB_DASHBOARD_FAST_AZURE_IO", "1")
     return env
 
 

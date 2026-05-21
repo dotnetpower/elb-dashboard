@@ -28,9 +28,9 @@ def list_jobs(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         rows = repo.list_for_owner(caller.object_id, limit=limit)
         return {
             "jobs": [
@@ -57,9 +57,9 @@ def get_job(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        repo = JobStateRepository()
+        repo = get_state_repo()
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")

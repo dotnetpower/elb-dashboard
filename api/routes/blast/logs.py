@@ -79,9 +79,9 @@ async def blast_job_logs_ticket(
 ) -> dict[str, object]:
     """Validate job access and issue a short-lived single-use SSE ticket."""
 
-    from api.services.state_repo import JobStateRepository
+    from api.services.state_repo import get_state_repo
 
-    repo = JobStateRepository()
+    repo = get_state_repo()
     state = repo.get_summary(job_id)
     if state is None:
         raise HTTPException(404, "job not found")
@@ -159,9 +159,9 @@ async def blast_job_logs_events(
 
     async def emit_snapshot() -> None:
         try:
-            from api.services.state_repo import JobStateRepository
+            from api.services.state_repo import get_state_repo
 
-            state = await asyncio.to_thread(JobStateRepository().get, job_id)
+            state = await asyncio.to_thread(get_state_repo().get, job_id)
             if state is not None:
                 await enqueue("snapshot", build_execution_steps_snapshot(state))
         except Exception as exc:
@@ -273,9 +273,9 @@ def _sse_frame(event_name: str, payload: dict[str, Any], *, event_id: str = "") 
 
 async def _load_state(job_id: str) -> Any | None:
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        return await asyncio.to_thread(JobStateRepository().get, job_id)
+        return await asyncio.to_thread(get_state_repo().get, job_id)
     except Exception as exc:
         LOGGER.info("log stream state lookup skipped job_id=%s: %s", job_id, type(exc).__name__)
         return None

@@ -86,10 +86,10 @@ def warmup_start(
     try:
         from datetime import datetime
 
-        from api.services.state_repo import JobState, JobStateRepository
+        from api.services.state_repo import JobState, get_state_repo
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
-        repo = JobStateRepository()
+        repo = get_state_repo()
         state = JobState(
             job_id=job_id,
             type="warmup",
@@ -127,9 +127,9 @@ def warmup_start(
         caller_oid=caller.object_id,
     )
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state_repo import get_state_repo
 
-        JobStateRepository().update(job_id, task_id=result.id)
+        get_state_repo().update(job_id, task_id=result.id)
     except Exception as exc:
         LOGGER.warning("failed to attach warmup task id: %s", exc)
     # The SPA's WarmupSection polls `/warmup/{instance_id}/status`, where
