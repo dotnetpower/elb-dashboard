@@ -59,9 +59,14 @@ strip_quotes() {
 load_simple_env_file() {
   local file="${1:-}"
   [[ -f "$file" ]] || return 0
+  shift || true
+  local -A SKIP=()
+  local k
+  for k in "$@"; do SKIP["$k"]=1; done
   while IFS='=' read -r key value; do
     [[ -n "${key:-}" ]] || continue
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    [[ -z "${SKIP[$key]:-}" ]] || continue
     value="$(strip_quotes "${value:-}")"
     if [[ -z "${!key:-}" ]]; then
       export "$key=$value"
@@ -87,7 +92,11 @@ load_azd_env() {
 load_simple_env_file "$REPO_ROOT/.env"
 load_simple_env_file "$REPO_ROOT/.env.local"
 load_simple_env_file "$REPO_ROOT/web/.env.production"
-load_simple_env_file "$REPO_ROOT/web/.env.local"
+# web/.env.local exists for local-dev (vite dev server + local-run.sh web)
+# and pins VITE_API_BASE_URL=http://localhost:8085. That value must NEVER
+# end up in a cloud frontend's runtime-config.js — see the guard below and
+# docs/features_change/2026-05/2026-05-21-frontend-api-base-url-guard.md.
+load_simple_env_file "$REPO_ROOT/web/.env.local" VITE_API_BASE_URL
 if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${ACR_NAME:-}" || -z "${ACR_LOGIN_SERVER:-}" || -z "${CONTAINER_APP_NAME:-}" ]]; then
   load_azd_env
 fi

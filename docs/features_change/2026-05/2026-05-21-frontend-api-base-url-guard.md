@@ -43,19 +43,38 @@ the same shell carried that export into the build args + the
   > VITE_API_BASE_URL='http://localhost:8085' points at the local host —
   > refusing to bake that into the cloud frontend. Run
   > 'unset VITE_API_BASE_URL' (or export VITE_API_BASE_URL='') and retry.
+* `quick-deploy.sh` no longer inherits `VITE_API_BASE_URL` from
+  `web/.env.local`. That file is the local-dev convention for the Vite
+  dev server (`vite dev` + `local-run.sh web`) and pins the value to
+  `http://localhost:8085`. The loader for `web/.env.local` now accepts
+  a skip-list, and `quick-deploy.sh` passes `VITE_API_BASE_URL` to it.
+* `web/nginx.conf` now serves `/runtime-config.js` with
+  `Cache-Control: no-store, must-revalidate`. Previously the file went
+  out with no `Cache-Control`, so browsers applied heuristic disk
+  caching and kept the poisoned config even after the cloud env had
+  been fixed.
 
 ## API / IaC diff
 
 * No API surface change.
 * No Bicep change.
-* `scripts/dev/quick-deploy.sh`: added a regex guard in the
-  `SIDECAR == "frontend"` branch.
-* Cloud env patched out-of-band:
+* `scripts/dev/quick-deploy.sh`:
+  * Regex guard in the `SIDECAR == "frontend"` branch rejects loopback
+    values for `VITE_API_BASE_URL`.
+  * `load_simple_env_file` now accepts a skip-list of variable names;
+    `web/.env.local` is loaded with `VITE_API_BASE_URL` in the skip-list
+    so the cloud build never inherits the dev-loopback value.
+* `web/nginx.conf`: dedicated `location = /runtime-config.js` block adds
+  `Cache-Control: no-store, must-revalidate` and `expires off`.
+* Cloud env patched out-of-band (already shipped earlier in the same
+  session, before the image rebuild):
 
   ```sh
   az containerapp update -n ca-elb-control -g rg-elb-ca \
     --container-name frontend --set-env-vars VITE_API_BASE_URL=
   ```
+* Rebuilt frontend image `acrelbnm5virmqrdi5c.azurecr.io/elb-frontend:20260521231605`
+  rolled out as `ca-elb-control--0000112`.
 
 ## Validation
 
@@ -64,20 +83,35 @@ the same shell carried that export into the build args + the
 2. **`az containerapp update` issued at 14:01 UTC**, revision
    `ca-elb-control--0000111` reported `latestReadyRevisionName` within
    ~12 s.
-3. **runtime-config.js (after)**:
+3. **runtime-config.js (after env patch, revision --0000111)**:
    `{"VITE_API_BASE_URL":"","VITE_AUTH_DEV_BYPASS":"false",...}` — same-origin restored.
 4. **Guard smoke test**:
    ```
    VITE_API_BASE_URL=http://localhost:8085 ... → REJECTED: http://localhost:8085, exit 11
    ```
 5. **`bash -n scripts/dev/quick-deploy.sh`**: syntax OK.
+6. **`load_simple_env_file` skip-list smoke test**: after the cleanup,
+   running `quick-deploy.sh frontend` with `VITE_API_BASE_URL` unset in
+   the shell no longer reintroduces `http://localhost:8085` from
+   `web/.env.local` — the guard does not trip, build proceeds.
+7. **Frontend image rebuild + rollout**: tag `20260521231605`, revision
+   `ca-elb-control--0000112` became `latestReadyRevisionName` within
+   ~10 s.
+8. **runtime-config.js (after rebuild, revision --0000112)**:
+   ```
+   HTTP/2 200
+   content-type: application/javascript
+   cache-control: no-store, must-revalidate
+   ```
+   Body still reports `VITE_API_BASE_URL=""` (same-origin).
+9. **/index.html headers** unchanged: `cache-control: no-cache`
+   (matches the existing `location = /index.html` block).
 
 ## Follow-up
 
-* User refreshes the browser tab (hard reload to invalidate cached
-  `runtime-config.js`) — dashboard cards should populate against the
-  real `rg-elb-ca` / `acrelbnm5virmqrdi5c` / `stelbnm5virmqrdi5c`
-  resources.
+* Existing user tabs that still hold the cached `runtime-config.js`
+  body need a hard reload once. From the next deploy onwards, the
+  `no-store` header prevents this class of staleness.
 * If a similar poisoned env slipped into the `api`/`worker`/`beat`
   containers, future deploys would also propagate it. Those containers
   do not read `VITE_*`, so the immediate blast radius is limited to the
