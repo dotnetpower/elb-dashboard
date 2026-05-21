@@ -209,6 +209,13 @@ export interface BlastDatabaseMetadata {
   database: string;
   title?: string;
   description?: string;
+  /**
+   * Human label such as "mixed DNA" / "protein" — populated by the
+   * dashboard's `api/services/blast_db_metadata.py`. Do NOT swap this
+   * source for elb-openapi's `/v1/databases/{name}.molecule_type` field
+   * (which carries the lowercase token `dna` / `protein`); use the
+   * `molecule_label` field from that schema instead.
+   */
   molecule_type?: string;
   update_date?: string;
   number_of_sequences?: number;
