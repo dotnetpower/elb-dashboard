@@ -101,9 +101,11 @@ RUN python3.12 -m venv /opt/elb/venv \
 # into the venv. The upstream uses NCBI's `packit` / `pbr` which fights pip's
 # PEP 517 build isolation, so install with --no-build-isolation --no-deps
 # (matches the legacy cloud-init behavior).
+ARG ELASTIC_BLAST_REPO=https://github.com/dotnetpower/elastic-blast-azure.git
+ARG ELASTIC_BLAST_REF=master
 COPY patch_elastic_blast.py /tmp/patch_elastic_blast.py
 COPY merge-sharded-results.sh /tmp/merge-sharded-results.sh
-RUN git clone --depth 1 https://github.com/dotnetpower/elastic-blast-azure.git /opt/elb/elastic-blast-azure \
+RUN git clone --depth 1 --branch "${ELASTIC_BLAST_REF}" "${ELASTIC_BLAST_REPO}" /opt/elb/elastic-blast-azure \
     && python3.12 /tmp/patch_elastic_blast.py /opt/elb/elastic-blast-azure /tmp/merge-sharded-results.sh \
     && /opt/elb/venv/bin/pip install --no-cache-dir -r /opt/elb/elastic-blast-azure/requirements/base.txt packit glob2 \
     && /opt/elb/venv/bin/pip install --no-build-isolation --no-deps /opt/elb/elastic-blast-azure

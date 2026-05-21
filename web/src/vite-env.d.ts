@@ -9,6 +9,7 @@ interface ImportMetaEnv {
   readonly VITE_FEATURE_CUSTOM_DB?: string;
   readonly VITE_FEATURE_LAB_TOOLS?: string;
   readonly VITE_FEATURE_TERMINAL?: string;
+  readonly VITE_DOCS_MOCK_PREVIEW?: string;
 }
 
 interface ImportMeta {

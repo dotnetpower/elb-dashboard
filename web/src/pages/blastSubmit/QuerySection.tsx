@@ -145,7 +145,6 @@ export function QuerySection({
     set("program", "blastn");
     if (!form.job_title.trim()) set("job_title", buildGeneratedJobTitle(example.label));
     setExampleModalOpen(false);
-    toast(`Example loaded — ${example.label}`, "info");
   };
 
   return (

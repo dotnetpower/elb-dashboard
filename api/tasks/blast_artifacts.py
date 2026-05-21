@@ -54,6 +54,22 @@ def finalize_job_artifacts(self: Any, *, job_id: str) -> dict[str, Any]:
                 error_code="missing",
             )
             return {**summary, "status": "missing"}
+        try:
+            from api.services import get_credential
+            from api.services.job_logs.persist import persist_completed_job_pod_logs
+
+            persisted = persist_completed_job_pod_logs(get_credential(), state)
+            if persisted:
+                summary["pod_logs"] = persisted
+                # Re-read so the execution-steps snapshot picks up the merged
+                # last_output blobs we just wrote.
+                state = repo.get(job_id) or state
+        except Exception as exc:
+            LOGGER.info(
+                "finalize_job_artifacts: pod log persistence skipped job_id=%s: %s",
+                job_id,
+                type(exc).__name__,
+            )
         step_state = write_execution_steps_snapshot(state)
         if step_state is not None:
             summary["execution_steps"] = "ready"

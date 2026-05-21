@@ -245,4 +245,5 @@ Thumbs.db
 .azurite/
 
 docs/temp/
+docs/mock-app/
 .logs/

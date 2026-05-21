@@ -53,6 +53,11 @@ export function StepLogSection({
     clusterName,
   });
   const liveLogsByPhase = useMemo(() => {
+    // GA-style: keep generous per-phase history (2000 lines) and surface a
+    // single "older lines trimmed" head marker only when we actually clip.
+    // The previous 80-line cap looked like a tiny scroll-tail mid-page and
+    // hid most of the run output.
+    const LIVE_LOG_CAP = 2000;
     const grouped: Record<string, string[]> = {};
     for (const event of liveStream.events) {
       const key = event.phase || "running";
@@ -61,7 +66,17 @@ export function StepLogSection({
         : event.stream === "stderr"
           ? "[stderr] "
           : "";
-      grouped[key] = [...(grouped[key] ?? []), `${prefix}${event.line}`].slice(-80);
+      grouped[key] = [...(grouped[key] ?? []), `${prefix}${event.line}`];
+    }
+    for (const key of Object.keys(grouped)) {
+      const lines = grouped[key];
+      if (lines.length > LIVE_LOG_CAP) {
+        const dropped = lines.length - LIVE_LOG_CAP;
+        grouped[key] = [
+          `[… ${dropped.toLocaleString()} older line${dropped === 1 ? "" : "s"} trimmed]`,
+          ...lines.slice(-LIVE_LOG_CAP),
+        ];
+      }
     }
     return grouped;
   }, [liveStream.events]);
@@ -152,6 +167,7 @@ export function StepLogSection({
             : log;
           const duration = getStepDuration(step.key, state);
           const extra = renderStepExtra(step.key, state, isOpen);
+          const subProgress = resolveStepSubProgress(stepsData[step.key]);
           return (
             <StepRow
               key={step.key}
@@ -161,6 +177,7 @@ export function StepLogSection({
               log={combinedLog}
               duration={duration}
               extra={extra}
+              subProgress={subProgress}
               onToggle={() => toggle(step.key)}
             />
           );
@@ -195,4 +212,18 @@ function resolveConfigBlobName(
 
 function stringValue(value: unknown): string {
   return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function resolveStepSubProgress(
+  stepData: Record<string, unknown> | undefined,
+): { index: number; total: number; label?: string } | null {
+  if (!stepData) return null;
+  const raw = stepData.submit_progress;
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const index = typeof obj.index === "number" ? obj.index : Number(obj.index);
+  const total = typeof obj.total === "number" ? obj.total : Number(obj.total);
+  if (!Number.isFinite(index) || !Number.isFinite(total) || total <= 0) return null;
+  const label = typeof obj.label === "string" ? obj.label : undefined;
+  return { index, total, label };
 }

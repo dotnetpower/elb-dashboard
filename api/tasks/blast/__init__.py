@@ -37,6 +37,34 @@ from api.tasks.blast.progress import (
     _phase_is_terminal_for_artifacts,
     _tail_text,
 )
+from api.tasks.blast.split_constants import (
+    QUERY_FASTA_READ_MAX_BYTES,
+    SPLIT_CHILD_CANCELLED_STATUSES,
+    SPLIT_CHILD_KNOWN_STATUSES,
+    SPLIT_CHILD_MERGE_REPORT_BLOB,
+    SPLIT_CHILD_MERGED_RESULT_BLOB,
+    SPLIT_CHILD_OPTION_ALLOWLIST,
+    SPLIT_MERGE_REPORT_MAX_BYTES,
+    SPLIT_PARENT_MANIFEST_BLOB,
+    SPLIT_UPLOAD_VERIFY_BYTES,
+    STRICT_TIE_ORDER_MIN_TARGET_SEQS,
+)
+from api.tasks.blast.submit_lock import (
+    BLAST_SUBMIT_LOCK_KEY_PREFIX,
+    BLAST_SUBMIT_LOCK_TTL_SECONDS,
+    acquire_submit_lock,
+    release_submit_lock,
+    submit_lock_key,
+)
+from api.tasks.blast.submit_logs import (
+    SUBMIT_LOG_CHUNK_EVENT_COUNT,
+    persist_submit_log_events,
+)
+from api.tasks.blast.substeps import (
+    SUBMIT_SUBSTEP_PATTERNS,
+    SUBMIT_SUBSTEP_TOTAL,
+    detect_submit_substep,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,65 +73,30 @@ ERROR_SNIPPET_CHARS = 500
 LIVE_OUTPUT_SNIPPET_CHARS = 8000
 RETRYABLE_ERROR_CATEGORIES = {"transient", "capacity", "conflict"}
 RETRYABLE_EXIT_CODES = {8, 10}
-BLAST_SUBMIT_LOCK_KEY = "elb:blast:elastic-blast-submit"
-BLAST_SUBMIT_LOCK_TTL_SECONDS = 900
 SUBMIT_LIVE_STATE_UPDATE_INTERVAL_SECONDS = 15.0
-SUBMIT_LOG_CHUNK_EVENT_COUNT = 100
 ELASTIC_BLAST_JOB_ID_RE = re.compile(r"/results/[^/]+/(job-[A-Za-z0-9_-]+)")
-PROGRESS_STEP_ORDER = (
-    "preparing",
-    "warming_up",
-    "configuring",
-    "staging_db",
-    "submitting",
-    "running",
-    "exporting_results",
-    "completed",
-)
-STRICT_TIE_ORDER_MIN_TARGET_SEQS = 5000
-QUERY_FASTA_READ_MAX_BYTES = 100 * 1024 * 1024
-SPLIT_UPLOAD_VERIFY_BYTES = 1024
-SPLIT_CHILD_KNOWN_STATUSES = frozenset(
-    {"queued", "running", "completed", "failed", "cancelled", "deleted"}
-)
-SPLIT_CHILD_CANCELLED_STATUSES = frozenset({"cancelled", "deleted"})
-SPLIT_CHILD_MERGED_RESULT_BLOB = "merged_results.out.gz"
-SPLIT_CHILD_MERGE_REPORT_BLOB = "merge-report.json"
-SPLIT_PARENT_MANIFEST_BLOB = "split-results-manifest.json"
-SPLIT_MERGE_REPORT_MAX_BYTES = 1024 * 1024
-SPLIT_CHILD_OPTION_ALLOWLIST = frozenset(
-    {
-        "additional_options",
-        "allow_approximate_sharding",
-        "batch_len",
-        "db_auto_partition",
-        "db_effective_search_space",
-        "db_partition_prefix",
-        "db_partitions",
-        "db_sharded",
-        "db_total_bytes",
-        "db_total_letters",
-        "gap_extend",
-        "gap_open",
-        "is_inclusive",
-        "machine_type",
-        "max_target_seqs",
-        "mem_limit",
-        "mem_request",
-        "num_nodes",
-        "outfmt",
-        "pd_size",
-        "query_count",
-        "query_effective_search_spaces",
-        "shard_sets",
-        "sharding_mode",
-        "taxid",
-        "tie_order_oracle_accessions",
-        "tie_order_oracle_strict",
-        "tie_order_oracle_text",
-        "use_db_order_oracle",
-        "word_size",
-    }
+
+# Backwards-compatible private aliases so callers inside this module that still
+# use the underscore-prefixed names continue to work. The canonical home for
+# these symbols is now ``api.tasks.blast.submit_lock`` / ``submit_logs`` /
+# ``substeps``.
+_submit_lock_key = submit_lock_key
+_acquire_submit_lock = acquire_submit_lock
+_release_submit_lock = release_submit_lock
+_persist_submit_log_events = persist_submit_log_events
+_detect_submit_substep = detect_submit_substep
+
+__all__ = (
+    "BLAST_SUBMIT_LOCK_KEY_PREFIX",
+    "BLAST_SUBMIT_LOCK_TTL_SECONDS",
+    "SUBMIT_LOG_CHUNK_EVENT_COUNT",
+    "SUBMIT_SUBSTEP_PATTERNS",
+    "SUBMIT_SUBSTEP_TOTAL",
+    "acquire_submit_lock",
+    "detect_submit_substep",
+    "persist_submit_log_events",
+    "release_submit_lock",
+    "submit_lock_key",
 )
 
 
@@ -1700,6 +1693,8 @@ def _stream_submit_command(
     last_update = 0.0
     log_line_count = 0
     log_events: list[dict[str, Any]] = []
+    current_substep: dict[str, Any] | None = None
+    pending_substep: dict[str, Any] | None = None
 
     for item in terminal_stream(
         argv=_elastic_blast_argv("submit", job_id),
@@ -1728,15 +1723,26 @@ def _stream_submit_command(
                 LOGGER.debug("submit live log publish skipped job_id=%s: %s", job_id, exc)
             log_line_count += 1
             log_events.append({"stream": stream_name, "line": line, "index": log_line_count})
+            substep_candidate = detect_submit_substep(line)
+            if substep_candidate is not None and (
+                current_substep is None
+                or substep_candidate["index"] > int(current_substep.get("index") or 0)
+            ):
+                current_substep = substep_candidate
+                pending_substep = substep_candidate
             now = time.monotonic()
-            if now - last_update >= SUBMIT_LIVE_STATE_UPDATE_INTERVAL_SECONDS:
+            interval_elapsed = (
+                now - last_update >= SUBMIT_LIVE_STATE_UPDATE_INTERVAL_SECONDS
+            )
+            if pending_substep is not None or interval_elapsed:
                 live_output = _tail_text(stdout_lines + stderr_lines)
-                _progress(
-                    task,
-                    progress_phase,
-                    last_output=live_output,
-                    log_line_count=log_line_count,
-                )
+                progress_kwargs: dict[str, Any] = {
+                    "last_output": live_output,
+                    "log_line_count": log_line_count,
+                }
+                if current_substep is not None:
+                    progress_kwargs["submit_progress"] = dict(current_substep)
+                _progress(task, progress_phase, **progress_kwargs)
                 _update_state(
                     job_id,
                     progress_phase,
@@ -1744,8 +1750,10 @@ def _stream_submit_command(
                     event="submit_log",
                     last_output=live_output,
                     log_line_count=log_line_count,
+                    submit_progress=dict(current_substep) if current_substep is not None else None,
                 )
                 last_update = now
+                pending_substep = None
             continue
         summary = dict(item)
 
@@ -1757,65 +1765,8 @@ def _stream_submit_command(
         "stderr": stderr,
         "log_line_count": log_line_count,
         "_log_events": log_events,
+        "_submit_progress": dict(current_substep) if current_substep is not None else None,
     }
-
-
-def _persist_submit_log_events(
-    *,
-    job_id: str,
-    progress_phase: str,
-    events: list[dict[str, Any]],
-) -> None:
-    if not events:
-        return
-    try:
-        from api.services.job_artifacts import write_execution_log_chunk
-
-        for chunk_sequence, start in enumerate(range(0, len(events), SUBMIT_LOG_CHUNK_EVENT_COUNT)):
-            write_execution_log_chunk(
-                job_id,
-                progress_phase,
-                chunk_sequence,
-                events[start : start + SUBMIT_LOG_CHUNK_EVENT_COUNT],
-            )
-    except Exception as exc:
-        LOGGER.debug(
-            "submit log chunk persistence skipped job_id=%s: %s",
-            job_id,
-            type(exc).__name__,
-        )
-
-
-def _acquire_submit_lock(job_id: str) -> tuple[Any, str] | None:
-    import redis
-
-    broker_url = os.environ.get("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
-    client = redis.Redis.from_url(broker_url)
-    token = f"{job_id}:{time.time_ns()}"
-    acquired = client.set(
-        BLAST_SUBMIT_LOCK_KEY,
-        token,
-        nx=True,
-        ex=BLAST_SUBMIT_LOCK_TTL_SECONDS,
-    )
-    return (client, token) if acquired else None
-
-
-def _release_submit_lock(client: Any, token: str) -> None:
-    try:
-        client.eval(
-            """
-            if redis.call('get', KEYS[1]) == ARGV[1] then
-                return redis.call('del', KEYS[1])
-            end
-            return 0
-            """,
-            1,
-            BLAST_SUBMIT_LOCK_KEY,
-            token,
-        )
-    except Exception as exc:
-        LOGGER.info("blast submit lock release skipped: %s", type(exc).__name__)
 
 
 def _refresh_submit_terminal_status(
@@ -2016,10 +1967,27 @@ def submit(
     )
     effective_options = _expand_strict_tie_order_candidate_pool(effective_options)
 
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    from api.services.terminal_exec import run as terminal_run
+
+    db_name_for_warmup = extract_db_name(database)
+    will_split_parent = _requires_split_parent_submission(effective_options)
+
+    _progress(self, "warming_up", database=db_name_for_warmup)
+    _update_state(job_id, "warming_up", database=db_name_for_warmup)
+
+    # Run the ~8s K8s warmup poll alongside the small Azure-side prep work
+    # (Azure CLI login warmup + best-effort oracle blob uploads). The warmup
+    # result is required to finalise effective_options, but the prep tasks
+    # are independent — fan them out so warming_up wall time is the cap.
+    warmup_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="blast-submit-prep")
+    warmup_ready: dict[str, Any] | None = None
+    tie_order_oracle: dict[str, Any] | None = None
+    db_order_oracle: dict[str, Any] | None = None
     try:
-        _progress(self, "warming_up", database=extract_db_name(database))
-        _update_state(job_id, "warming_up", database=extract_db_name(database))
-        warmup_ready = _ensure_node_warmup_ready_for_submit(
+        warmup_future = warmup_pool.submit(
+            _ensure_node_warmup_ready_for_submit,
             subscription_id=subscription_id,
             resource_group=resource_group,
             cluster_name=cluster_name,
@@ -2027,13 +1995,49 @@ def submit(
             storage_account=storage_account,
             options=effective_options,
         )
+        az_login_future = warmup_pool.submit(_ensure_terminal_azure_cli_login, terminal_run)
+        tie_oracle_future: Future[Any] | None = None
+        db_oracle_future: Future[Any] | None = None
+        if not will_split_parent:
+            tie_oracle_future = warmup_pool.submit(
+                upload_tie_order_oracle_if_present,
+                storage_account=storage_account,
+                job_id=job_id,
+                options=effective_options,
+            )
+            db_oracle_future = warmup_pool.submit(
+                upload_db_order_oracle_pointer_if_available,
+                storage_account=storage_account,
+                job_id=job_id,
+                database=database,
+                options=effective_options,
+            )
+
+        try:
+            warmup_ready = warmup_future.result()
+        except WarmupNotReadyError as exc:
+            error = _snippet(exc)
+            _update_state(
+                job_id,
+                "warmup_not_ready",
+                status="failed",
+                error_code="node_warmup_not_ready",
+                last_output=error,
+            )
+            return {
+                "job_id": job_id,
+                "status": "failed",
+                "phase": "warmup_not_ready",
+                "error": error,
+            }
+
         if warmup_ready is not None:
             effective_options = dict(effective_options or {})
             effective_options["skip_warmed_ssd_init"] = True
             _progress(
                 self,
                 "warmup_ready",
-                database=extract_db_name(database),
+                database=db_name_for_warmup,
                 warmup=warmup_ready,
             )
             _update_state(
@@ -2042,23 +2046,50 @@ def submit(
                 status="running",
                 warmup=warmup_ready,
             )
-    except WarmupNotReadyError as exc:
-        error = _snippet(exc)
-        _update_state(
-            job_id,
-            "warmup_not_ready",
-            status="failed",
-            error_code="node_warmup_not_ready",
-            last_output=error,
-        )
-        return {
-            "job_id": job_id,
-            "status": "failed",
-            "phase": "warmup_not_ready",
-            "error": error,
-        }
 
-    if _requires_split_parent_submission(effective_options):
+        try:
+            az_login_future.result()
+        except TerminalAzureLoginError as exc:
+            return _retry_or_fail(
+                self,
+                job_id=job_id,
+                phase="terminal_az_login_failed",
+                exc=exc,
+                error_code="terminal_az_login_failed",
+            )
+        except TerminalExecError as exc:
+            return _retry_or_fail(
+                self,
+                job_id=job_id,
+                phase="terminal_unavailable",
+                exc=exc,
+                error_code="terminal_exec_unavailable",
+            )
+
+        if tie_oracle_future is not None:
+            try:
+                tie_order_oracle = tie_oracle_future.result()
+            except Exception as exc:
+                LOGGER.warning(
+                    "tie_order_oracle upload failed job_id=%s: %s",
+                    job_id,
+                    type(exc).__name__,
+                )
+                tie_order_oracle = None
+        if db_oracle_future is not None:
+            try:
+                db_order_oracle = db_oracle_future.result()
+            except Exception as exc:
+                LOGGER.warning(
+                    "db_order_oracle upload failed job_id=%s: %s",
+                    job_id,
+                    type(exc).__name__,
+                )
+                db_order_oracle = None
+    finally:
+        warmup_pool.shutdown(wait=False, cancel_futures=False)
+
+    if will_split_parent:
         _progress(self, "splitting_queries")
         try:
             return _run_storage_query_split_parent_submission(
@@ -2094,34 +2125,24 @@ def submit(
                 error_code="split_submit_unavailable",
             )
 
+    if tie_order_oracle is not None:
+        _progress(self, "tie_order_oracle_uploaded", tie_order_oracle=tie_order_oracle)
+        _update_state(
+            job_id,
+            "tie_order_oracle_uploaded",
+            status="running",
+            tie_order_oracle=tie_order_oracle,
+        )
+    if db_order_oracle is not None:
+        _progress(self, "db_order_oracle_attached", db_order_oracle=db_order_oracle)
+        _update_state(
+            job_id,
+            "db_order_oracle_attached",
+            status="running",
+            db_order_oracle=db_order_oracle,
+        )
+
     try:
-        tie_order_oracle = upload_tie_order_oracle_if_present(
-            storage_account=storage_account,
-            job_id=job_id,
-            options=effective_options,
-        )
-        if tie_order_oracle is not None:
-            _progress(self, "tie_order_oracle_uploaded", tie_order_oracle=tie_order_oracle)
-            _update_state(
-                job_id,
-                "tie_order_oracle_uploaded",
-                status="running",
-                tie_order_oracle=tie_order_oracle,
-            )
-        db_order_oracle = upload_db_order_oracle_pointer_if_available(
-            storage_account=storage_account,
-            job_id=job_id,
-            database=database,
-            options=effective_options,
-        )
-        if db_order_oracle is not None:
-            _progress(self, "db_order_oracle_attached", db_order_oracle=db_order_oracle)
-            _update_state(
-                job_id,
-                "db_order_oracle_attached",
-                status="running",
-                db_order_oracle=db_order_oracle,
-            )
         config_content = _build_config_content(
             job_id=job_id,
             resource_group=resource_group,
@@ -2202,20 +2223,24 @@ def submit(
         _update_state(job_id, "submitting")
 
     try:
-        from api.services.terminal_exec import run as terminal_run
-
-        submit_lock = _acquire_submit_lock(job_id)
+        lock_key = submit_lock_key(cluster_name, "default")
+        submit_lock = acquire_submit_lock(job_id, lock_key=lock_key)
         if submit_lock is None:
             return _retry_or_fail(
                 self,
                 job_id=job_id,
                 phase="waiting_for_submit_slot",
-                exc=RuntimeError("another ElasticBLAST submit is configuring Kubernetes resources"),
+                exc=RuntimeError(
+                    "another ElasticBLAST submit is configuring Kubernetes resources "
+                    f"on cluster={cluster_name} namespace=default"
+                ),
                 error_code="blast_submit_lock_busy",
                 retry_after_seconds=30,
             )
         lock_client, lock_token = submit_lock
         try:
+            # Azure CLI login was warmed up alongside the warmup poll; retry
+            # here only if the cached identity expired between then and now.
             _ensure_terminal_azure_cli_login(terminal_run)
             result = _stream_submit_command(
                 job_id=job_id,
@@ -2224,7 +2249,7 @@ def submit(
                 progress_phase="submitting",
             )
         finally:
-            _release_submit_lock(lock_client, lock_token)
+            release_submit_lock(lock_client, lock_token, lock_key=lock_key)
     except TerminalExecError as exc:
         return _retry_or_fail(
             self,
@@ -2244,7 +2269,7 @@ def submit(
 
     submit_log_events = result.pop("_log_events", [])
     if isinstance(submit_log_events, list):
-        _persist_submit_log_events(
+        persist_submit_log_events(
             job_id=job_id,
             progress_phase="submitting",
             events=submit_log_events,

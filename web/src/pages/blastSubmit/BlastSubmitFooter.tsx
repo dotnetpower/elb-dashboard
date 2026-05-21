@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   Loader2,
@@ -84,6 +84,31 @@ export function BlastSubmitFooter({
     : !canSubmit
       ? "Fill in the required fields above"
       : undefined;
+
+  // Focus + pulse the Run BLAST button on the first transition into ready
+  // state, skipping focus while the user is still typing in a text field.
+  const runBtnRef = useRef<HTMLButtonElement | null>(null);
+  const wasReadyRef = useRef(false);
+  const [readyPulse, setReadyPulse] = useState(false);
+  useEffect(() => {
+    const ready = canSubmit && !preFlightBlocked && !submitPending;
+    const wasReady = wasReadyRef.current;
+    wasReadyRef.current = ready;
+    if (!ready || wasReady) return;
+    const ae = document.activeElement as HTMLElement | null;
+    const tag = ae?.tagName;
+    const inTextField =
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      (ae?.isContentEditable ?? false);
+    if (!inTextField && runBtnRef.current && runBtnRef.current.offsetParent !== null) {
+      runBtnRef.current.focus({ preventScroll: false });
+    }
+    setReadyPulse(true);
+    const t = window.setTimeout(() => setReadyPulse(false), 1500);
+    return () => window.clearTimeout(t);
+  }, [canSubmit, preFlightBlocked, submitPending]);
 
   return (
     <div className="blast-submit-footer">
@@ -171,7 +196,8 @@ export function BlastSubmitFooter({
             </button>
           )}
           <button
-            className="blast-submit-btn"
+            ref={runBtnRef}
+            className={`blast-submit-btn${readyPulse ? " blast-submit-btn--ready-pulse" : ""}`}
             onClick={onSubmit}
             disabled={runDisabled}
             title={runTitle}

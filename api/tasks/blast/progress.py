@@ -87,6 +87,7 @@ def _compact_progress_details(details: Mapping[str, Any]) -> dict[str, Any]:
         "skipped",
         "source",
         "started_at",
+        "submit_progress",
         "terminal_duration_ms",
         "timed_out",
     }

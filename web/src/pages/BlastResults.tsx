@@ -83,7 +83,7 @@ export function BlastResults() {
         program={job?.program ?? null}
         database={job?.db ?? null}
         customStatus={job?.custom_status}
-        databaseMetadata={job?.database_metadata ?? null}
+        databaseMetadata={state.databaseMetadata}
         configSnapshot={job?.config_snapshot as Record<string, unknown> | undefined}
         infrastructure={job?.infrastructure as Record<string, unknown> | undefined}
         exportingFormat={actions.exportingFormat}

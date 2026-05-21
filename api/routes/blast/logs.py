@@ -33,6 +33,7 @@ from api.services.job_logs.event_bus import read_job_log_events
 from api.services.job_logs.k8s import (
     K8sLogTarget,
     discover_k8s_log_targets,
+    resolve_elastic_blast_job_id,
     stream_k8s_log_lines,
 )
 
@@ -190,7 +191,7 @@ async def blast_job_logs_events(
                 await asyncio.sleep(_DISCOVERY_INTERVAL_SEC)
                 continue
             payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
-            elastic_job_id = str(payload.get("elastic_blast_job_id") or "")
+            elastic_job_id = resolve_elastic_blast_job_id(payload)
             targets = await _discover_targets(entry, job_id, elastic_job_id)
             for target in targets:
                 if target.key in followed:

@@ -32,6 +32,9 @@ export function formatBytes(bytes: number): string {
 }
 
 // --- Syntax-highlighted file previews ---
+// GA-style: no inner scroll. Backend already caps the byte payload via
+// `maxBytes` (1000 chars for input.fa, 10000 for elastic-blast.ini) so the
+// rendered height stays bounded; the page scroll carries the rest.
 export function HighlightedINI({ text }: { text: string }) {
   return (
     <pre
@@ -42,8 +45,6 @@ export function HighlightedINI({ text }: { text: string }) {
         background: "rgba(0,0,0,0.25)",
         fontSize: 11,
         lineHeight: 1.6,
-        maxHeight: 220,
-        overflowY: "auto",
         whiteSpace: "pre-wrap",
         wordBreak: "break-all",
       }}
@@ -92,8 +93,6 @@ export function HighlightedFASTA({ text }: { text: string }) {
         background: "rgba(0,0,0,0.25)",
         fontSize: 11,
         lineHeight: 1.6,
-        maxHeight: 180,
-        overflowY: "auto",
         whiteSpace: "pre-wrap",
         wordBreak: "break-all",
       }}
@@ -217,8 +216,6 @@ export function FilePreview({
             background: "rgba(0,0,0,0.25)",
             fontSize: 11,
             lineHeight: 1.5,
-            maxHeight: 200,
-            overflowY: "auto",
             whiteSpace: "pre-wrap",
             color: "var(--text-muted)",
           }}

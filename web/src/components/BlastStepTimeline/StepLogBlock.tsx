@@ -3,8 +3,78 @@ import { Check, Copy } from "lucide-react";
 
 import type { StepState } from "./constants";
 
-// Premium log block with summary + collapsible detail, line numbers,
-// per-line styling, and a copy button.
+const ANSI_PATTERN = /\x1B\[[0-9;?]*[ -/]*[@-~]/g;
+const TIMESTAMP_PATTERN =
+  /^(\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]?)\s*/;
+
+type LineToken = { kind: "ts" | "text"; value: string; className?: string };
+
+function stripAnsi(value: string): string {
+  return value.replace(ANSI_PATTERN, "");
+}
+
+function classifyLineKind(raw: string): string {
+  const line = raw.trimStart();
+  if (!line) return "step-log-text";
+  if (
+    line.startsWith("ERROR") ||
+    line.startsWith("FATAL") ||
+    line.startsWith("✗") ||
+    /\b(Traceback|panic:|Exception:|ContainerNotFound)\b/.test(line) ||
+    /ErrorCode:|<Error>/.test(line)
+  ) {
+    return "step-log-text step-log-text--error";
+  }
+  if (
+    line.startsWith("WARNING") ||
+    line.startsWith("WARN") ||
+    line.startsWith("⚠") ||
+    /\b(deprecated|skipped)\b/i.test(line)
+  ) {
+    return "step-log-text step-log-text--warn";
+  }
+  if (
+    line.startsWith("✓") ||
+    line.includes("EXIT_CODE=0") ||
+    /\b(SUCCESS|Completed|completed successfully)\b/.test(line)
+  ) {
+    return "step-log-text step-log-text--ok";
+  }
+  if (line.startsWith("---") || line.startsWith("===") || line.startsWith("###")) {
+    return "step-log-text step-log-text--header";
+  }
+  if (line.startsWith("$ ") || line.startsWith("> ") || line.startsWith("# ")) {
+    return "step-log-text step-log-text--cmd";
+  }
+  if (/^(INFO|DEBUG|TRACE|NOTE)[: ]/i.test(line)) {
+    return "step-log-text step-log-text--info";
+  }
+  if (
+    /\b(BLAST RUNTIME|RUN END|Database:|Posted date:|Database size:|Number of sequences|Number of letters)\b/.test(
+      line,
+    ) ||
+    /^(elastic-blast|kubectl|az |azcopy|blastn|blastp|blastx|tblastn|tblastx)\b/.test(line)
+  ) {
+    return "step-log-text step-log-text--blast";
+  }
+  return "step-log-text";
+}
+
+function tokeniseLine(raw: string): LineToken[] {
+  const cleaned = stripAnsi(raw);
+  const tokens: LineToken[] = [];
+  let body = cleaned;
+  const match = body.match(TIMESTAMP_PATTERN);
+  if (match) {
+    tokens.push({ kind: "ts", value: match[1] });
+    body = body.slice(match[0].length);
+  }
+  tokens.push({ kind: "text", value: body, className: classifyLineKind(body) });
+  return tokens;
+}
+
+// Premium log block with summary + full detail (no scrollbar, no fold),
+// per-line CI-style syntax highlighting, line numbers, and a copy button.
 export function StepLogBlock({
   log,
   state,
@@ -15,28 +85,21 @@ export function StepLogBlock({
   stepKey: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const [isExpanded, setIsExpanded] = useState(false);
 
-  // Split into summary (first line) and detail (rest with line numbers).
   const delimIdx = log.indexOf("---");
   const hasSections = delimIdx > 0;
   const allLines = log.split("\n");
-  // Summary = text before the first "---" section, or first line if
-  // multi-line without "---".
   const summary = hasSections
     ? log.slice(0, delimIdx).trim()
     : allLines.length <= 2
       ? log
       : allLines[0];
-  // Detail = everything from "---" onward, or lines 2+ if no "---" but
-  // multi-line.
   const detail = hasSections
     ? log.slice(delimIdx).trim()
     : allLines.length > 2
       ? allLines.slice(1).join("\n")
       : null;
   const detailLines = detail?.split("\n") ?? [];
-  const isLong = detailLines.length > 40;
 
   const copyLog = () => {
     navigator.clipboard.writeText(log).catch(() => {});
@@ -59,52 +122,36 @@ export function StepLogBlock({
       </div>
 
       {detail && (
-        <div
-          className={`step-log-detail${
-            isLong && !isExpanded ? " step-log-detail--collapsed" : ""
-          }`}
-        >
+        <div className="step-log-detail">
           <div className="step-log-lines">
-            {(isLong && !isExpanded ? detailLines.slice(0, 40) : detailLines).map(
-              (line, i) => {
-                let lineClass = "step-log-text";
-                if (line.startsWith("WARNING") || line.startsWith("⚠"))
-                  lineClass += " step-log-text--warn";
-                else if (
-                  line.startsWith("ERROR") ||
-                  line.startsWith("✗") ||
-                  /ErrorCode:|<Error>|ContainerNotFound|FATAL/.test(line)
-                )
-                  lineClass += " step-log-text--error";
-                else if (
-                  line.startsWith("✓") ||
-                  line.includes("=ok") ||
-                  line.includes("EXIT_CODE=0")
-                )
-                  lineClass += " step-log-text--ok";
-                else if (line.startsWith("---"))
-                  lineClass += " step-log-text--header";
-                else if (line.startsWith("INFO:"))
-                  lineClass += " step-log-text--info";
-                return (
-                  <div key={`${stepKey}-${i}`} className="step-log-line">
-                    <span className="step-log-ln">{i + 1}</span>
-                    <span className={lineClass}>{line || "\u00A0"}</span>
-                  </div>
-                );
-              },
-            )}
+            {detailLines.map((line, i) => {
+              const tokens = tokeniseLine(line);
+              return (
+                <div key={`${stepKey}-${i}`} className="step-log-line">
+                  <span className="step-log-ln">{i + 1}</span>
+                  <span className="step-log-row">
+                    {tokens.map((tok, j) =>
+                      tok.kind === "ts" ? (
+                        <span
+                          key={`${stepKey}-${i}-ts-${j}`}
+                          className="step-log-ts"
+                        >
+                          {tok.value}
+                        </span>
+                      ) : (
+                        <span
+                          key={`${stepKey}-${i}-tx-${j}`}
+                          className={tok.className}
+                        >
+                          {tok.value || "\u00A0"}
+                        </span>
+                      ),
+                    )}
+                  </span>
+                </div>
+              );
+            })}
           </div>
-          {isLong && !isExpanded && (
-            <button className="step-log-expand" onClick={() => setIsExpanded(true)}>
-              Show all {detailLines.length} lines
-            </button>
-          )}
-          {isLong && isExpanded && (
-            <button className="step-log-expand" onClick={() => setIsExpanded(false)}>
-              Collapse
-            </button>
-          )}
         </div>
       )}
     </div>

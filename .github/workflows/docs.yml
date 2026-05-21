@@ -7,6 +7,8 @@ on:
     paths:
       - mkdocs.yml
       - docs/**
+      - web/**
+      - scripts/docs/**
       - pyproject.toml
       - uv.lock
       - .github/workflows/docs.yml
@@ -40,6 +42,18 @@ jobs:
 
       - name: Install docs dependencies
         run: uv sync --group dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm install --no-package-lock
+
+      - name: Build mock UI preview
+        run: bash scripts/docs/build-mock-preview.sh
 
       - name: Build docs
         run: uv run mkdocs build

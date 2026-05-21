@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { Save, CheckCircle2, Loader2, Play, ShieldAlert } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -75,6 +76,31 @@ export function SubmitSummaryRail({
     : !canSubmit
       ? "Fill in the required fields above"
       : undefined;
+
+  // Focus + pulse the Run BLAST button when validation transitions to ready,
+  // but never steal focus from an active text input the user is still typing in.
+  const runBtnRef = useRef<HTMLButtonElement | null>(null);
+  const wasReadyRef = useRef(false);
+  const [readyPulse, setReadyPulse] = useState(false);
+  useEffect(() => {
+    const ready = canSubmit && !preFlightBlocked && !submitPending;
+    const wasReady = wasReadyRef.current;
+    wasReadyRef.current = ready;
+    if (!ready || wasReady) return;
+    const ae = document.activeElement as HTMLElement | null;
+    const tag = ae?.tagName;
+    const inTextField =
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT" ||
+      (ae?.isContentEditable ?? false);
+    if (!inTextField && runBtnRef.current && runBtnRef.current.offsetParent !== null) {
+      runBtnRef.current.focus({ preventScroll: false });
+    }
+    setReadyPulse(true);
+    const t = window.setTimeout(() => setReadyPulse(false), 1500);
+    return () => window.clearTimeout(t);
+  }, [canSubmit, preFlightBlocked, submitPending]);
 
   const dbName = form.db ? form.db.split("/").pop() || form.db : "—";
   const optimizeLabel =
@@ -233,7 +259,8 @@ export function SubmitSummaryRail({
         )}
 
         <button
-          className="blast-submit-btn"
+          ref={runBtnRef}
+          className={`blast-submit-btn${readyPulse ? " blast-submit-btn--ready-pulse" : ""}`}
           onClick={onSubmit}
           disabled={runDisabled}
           title={runTitle}

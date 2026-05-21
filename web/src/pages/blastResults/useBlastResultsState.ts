@@ -23,6 +23,24 @@ const TERMINAL_PHASES = new Set([
   "cancelled",
 ]);
 
+// Sub-second visual feedback matters for the early pipeline because some
+// phases (`staging_db`) finish in 0 ms and others (`configuring`) in 2–3 s.
+// A 5 s poll cadence used to hide both transitions behind a single tick, so
+// users perceived a stall right after Warmup Check. Poll these fast-moving
+// phases at 1 s; once the workload is doing real work (BLAST run / export)
+// the cadence relaxes to 3 s to keep ARM/Storage load reasonable.
+const FAST_POLL_PHASES = new Set([
+  "preparing",
+  "warming_up",
+  "configuring",
+  "staging_db",
+  "submitting",
+  "waiting_for_submit_slot",
+]);
+
+const FAST_POLL_INTERVAL_MS = 1_000;
+const STEADY_POLL_INTERVAL_MS = 3_000;
+
 const RESULTS_READY_PHASES = new Set([
   "completed",
   "results_pending",
@@ -57,16 +75,37 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     enabled: Boolean(jobId),
     refetchInterval: (q) => {
       const d = q.state.data;
-      if (!d) return 3_000;
+      if (!d) return FAST_POLL_INTERVAL_MS;
       const resolved = resolveBlastJobPhase(d);
       if (TERMINAL_PHASES.has(resolved.phase) || FAILURE_PHASES.has(resolved.phase)) {
         return false;
       }
-      return 5_000;
+      return FAST_POLL_PHASES.has(resolved.phase)
+        ? FAST_POLL_INTERVAL_MS
+        : STEADY_POLL_INTERVAL_MS;
     },
   });
 
+  // BlastJobHeader renders "DB title / DB sequences / DB letters / DB snapshot".
+  // The polling jobQuery above intentionally omits database_metadata to keep the
+  // 3-5s refetch cheap (resolving it hits Azure Storage for the .njs/.metadata
+  // blobs). Fetch it once with a long staleTime so the header rows stay
+  // populated for the lifetime of the page without paying that cost on every
+  // poll tick.
+  const databaseMetadataQuery = useQuery({
+    queryKey: ["blast-job-metadata", jobId],
+    queryFn: () => blastApi.getJob(jobId!, { includeDatabaseMetadata: true }),
+    enabled: Boolean(jobId),
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: 60 * 60 * 1000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: false,
+  });
+
   const job = jobQuery.data;
+  const databaseMetadata =
+    databaseMetadataQuery.data?.database_metadata ?? job?.database_metadata ?? null;
   const payload = job?.payload;
   const payloadSubscriptionId = stringFromPayload(payload, "subscription_id");
   const payloadStorageAccount = stringFromPayload(payload, "storage_account");
@@ -193,9 +232,11 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     clusterName,
     // queries
     jobQuery,
+    databaseMetadataQuery,
     resultsQuery,
     executionStepsQuery,
     job,
+    databaseMetadata,
     executionStepsJob,
     // derived
     ...split,

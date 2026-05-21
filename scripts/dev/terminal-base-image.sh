@@ -23,6 +23,7 @@ terminal_base_hash() {
     sha256sum "$REPO_ROOT/terminal/patch_elastic_blast.py"
     printf '\n-- merge-sharded-results.sh --\n'
     sha256sum "$REPO_ROOT/terminal/merge-sharded-results.sh"
+    printf '\n-- ELASTIC_BLAST_REF=%s\n' "${ELASTIC_BLAST_REF:-master}"
   } | sha256sum | awk '{print substr($1, 1, 16)}'
 }
 
@@ -57,11 +58,13 @@ ensure_terminal_base_image() {
 
   terminal_base_log "==> Building terminal toolchain base: $image"
   terminal_base_log "    log: $log"
+  terminal_base_log "    ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF:-master}"
   az acr build \
     --registry "$ACR_NAME" \
     --image "elb-terminal-base:$tag" \
     --image "elb-terminal-base:latest" \
     --file "$REPO_ROOT/terminal/Dockerfile.base" \
+    --build-arg "ELASTIC_BLAST_REF=${ELASTIC_BLAST_REF:-master}" \
     "$REPO_ROOT/terminal" \
     --output none \
     > "$log" 2>&1

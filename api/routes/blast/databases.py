@@ -603,12 +603,68 @@ def blast_databases_versions(
     resource_group: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    _stub_log("blast/databases/versions", sa=storage_account)
-    return {
-        "versions": {},
-        "degraded": True,
-        "degraded_reason": "blast_db_listing_not_yet_implemented",
-    }
+    """Return a flat per-DB version listing for the "DB Versions" tab.
+
+    This is a focused projection over ``list_databases()`` — same data
+    source as ``GET /api/blast/databases`` but reshaped to match the
+    ``DbVersionMeta`` contract the SPA expects
+    (``web/src/api/blastTools.ts``). The route is read-only and
+    intentionally keeps the response small (no shard/warmup/oracle
+    fields) so the tab can render quickly.
+    """
+    if not storage_account or not resource_group:
+        return {"versions": [], "total": 0}
+
+    from api.services import get_credential
+    from api.services.storage_data import classify_storage_failure, list_databases
+
+    cred = get_credential()
+    _maybe_open_local_storage_access(
+        cred,
+        subscription_id,
+        resource_group,
+        storage_account,
+        context="blast_databases_versions",
+    )
+    try:
+        databases = list_databases(cred, storage_account)
+    except Exception as exc:
+        LOGGER.warning("blast_databases_versions failed: %s", type(exc).__name__)
+        return {
+            "versions": [],
+            "total": 0,
+            **classify_storage_failure(
+                cred, subscription_id, resource_group, storage_account, exc
+            ),
+        }
+
+    versions: list[dict[str, Any]] = []
+    for db in databases:
+        if not isinstance(db, dict):
+            continue
+        name = str(db.get("name") or "").strip()
+        if not name:
+            continue
+        entry: dict[str, Any] = {
+            "db_name": name,
+            "source": db.get("source"),
+            "source_version": db.get("source_version"),
+            "created_at": db.get("downloaded_at"),
+            "_last_modified": db.get("last_modified"),
+        }
+        # Optional enrichments — only emit when the underlying .njs /
+        # metadata blob actually carried the field, so the SPA badge
+        # logic ("—" for missing) stays honest.
+        if isinstance(db.get("molecule_type"), str):
+            entry["db_type"] = db["molecule_type"]
+        if isinstance(db.get("title"), str):
+            entry["title"] = db["title"]
+        if isinstance(db.get("update_date"), str):
+            entry["version_tag"] = db["update_date"]
+        versions.append(entry)
+
+    versions.sort(key=lambda v: str(v.get("db_name") or ""))
+    return {"versions": versions, "total": len(versions)}
 
 
 # --- Lab Tools: pre-flight estimators and sidecar-dependent utilities ---

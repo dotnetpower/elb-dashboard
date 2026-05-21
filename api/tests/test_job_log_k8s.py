@@ -4,7 +4,8 @@ Responsibility: Tests for Job Log Kubernetes behavior
 Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
 Azure calls.
 Key entry points: `test_discover_k8s_log_targets_filters_to_job_and_maps_phases`,
-`test_stream_k8s_log_lines_uses_following_pod_log_api`
+`test_stream_k8s_log_lines_uses_following_pod_log_api`,
+`test_resolve_elastic_blast_job_id_*`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_job_log_k8s.py`.
@@ -147,3 +148,47 @@ def test_stream_k8s_log_lines_uses_following_pod_log_api(monkeypatch) -> None:
     )
 
     assert lines == ["2026-05-20T00:00:00Z first", "second"]
+
+
+def test_resolve_elastic_blast_job_id_prefers_top_level() -> None:
+    assert (
+        k8s.resolve_elastic_blast_job_id(
+            {
+                "elastic_blast_job_id": "job-aaa111",
+                "_progress": {"steps": {"running": {"k8s": {"job_id": "job-bbb222"}}}},
+            }
+        )
+        == "job-aaa111"
+    )
+
+
+def test_resolve_elastic_blast_job_id_falls_back_to_progress_steps() -> None:
+    payload = {
+        "elastic_blast_job_id": None,
+        "_progress": {
+            "steps": {
+                "running": {"k8s": {"job_id": "job-ccc333"}},
+                "exporting_results": {"k8s": {"job_id": "job-ddd444"}},
+            }
+        },
+    }
+    assert k8s.resolve_elastic_blast_job_id(payload) == "job-ccc333"
+
+
+def test_resolve_elastic_blast_job_id_falls_back_to_external_k8s() -> None:
+    payload = {
+        "k8s_job_id": "",
+        "external": {"k8s": {"job_id": "job-eee555"}},
+    }
+    assert k8s.resolve_elastic_blast_job_id(payload) == "job-eee555"
+
+
+def test_resolve_elastic_blast_job_id_returns_empty_when_missing() -> None:
+    assert k8s.resolve_elastic_blast_job_id(None) == ""
+    assert k8s.resolve_elastic_blast_job_id({}) == ""
+    assert (
+        k8s.resolve_elastic_blast_job_id(
+            {"elastic_blast_job_id": "not-a-job-id", "_progress": "string"}
+        )
+        == ""
+    )

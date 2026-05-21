@@ -4746,6 +4746,33 @@ button.blast-db-table__row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+/* One-shot pulse when the Run BLAST button transitions to ready. Subtle
+   accent-tinted ring that fades out — respects prefers-reduced-motion. */
+@keyframes blast-submit-ready-pulse {
+  0% {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent),
+      0 0 0 0 color-mix(in srgb, var(--accent) 38%, transparent);
+  }
+  60% {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent),
+      0 0 0 10px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+  100% {
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent),
+      0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+.blast-submit-btn--ready-pulse:not(:disabled) {
+  animation: blast-submit-ready-pulse 700ms ease-out 2;
+}
+@media (prefers-reduced-motion: reduce) {
+  .blast-submit-btn--ready-pulse:not(:disabled) {
+    animation: none;
+  }
+}
 [data-theme="light"] .blast-program-tabs {
   background: var(--bg-secondary);
 }
@@ -4828,23 +4855,6 @@ button.blast-db-table__row:focus-visible {
 .step-log-detail {
   position: relative;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
-  max-height: 600px;
-  overflow-y: auto;
-}
-.step-log-detail--collapsed {
-  max-height: none;
-  overflow: visible;
-}
-.step-log-detail--collapsed::after {
-  content: "";
-  display: block;
-  position: sticky;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 40px;
-  background: linear-gradient(transparent, rgba(0, 0, 0, 0.3));
-  pointer-events: none;
 }
 .step-log-lines {
   padding: 6px 0;
@@ -4870,21 +4880,28 @@ button.blast-db-table__row:focus-visible {
   user-select: none;
   font-size: 10px;
 }
-.step-log-text {
+.step-log-row {
   flex: 1;
   padding: 0 14px 0 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.05);
+  display: inline;
+}
+.step-log-ts {
+  color: var(--text-faint);
+  opacity: 0.7;
+  margin-right: 8px;
+}
+.step-log-text {
   color: var(--text-muted);
   white-space: pre-wrap;
   word-break: break-word;
-  border-left: 1px solid rgba(255, 255, 255, 0.05);
 }
 .step-log-text--warn {
   color: var(--warning);
 }
 .step-log-text--error {
   color: var(--danger);
-  background: rgba(224, 123, 138, 0.08);
-  border-left-color: var(--danger) !important;
+  background: rgba(224, 123, 138, 0.10);
 }
 .step-log-text--ok {
   color: var(--success);
@@ -4897,21 +4914,12 @@ button.blast-db-table__row:focus-visible {
   font-weight: 600;
   letter-spacing: 0.3px;
 }
-.step-log-expand {
-  display: block;
-  width: 100%;
-  padding: 6px 0;
-  border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
-  background: rgba(0, 120, 212, 0.03);
-  color: var(--accent);
-  font-size: 11px;
-  cursor: pointer;
-  text-align: center;
-  transition: background 0.15s;
+.step-log-text--cmd {
+  color: #8ed1ff;
+  font-weight: 500;
 }
-.step-log-expand:hover {
-  background: rgba(0, 120, 212, 0.06);
+.step-log-text--blast {
+  color: #c3a6ff;
 }
 [data-theme="light"] .step-log-block {
   background: rgba(0, 0, 0, 0.03);
@@ -4919,11 +4927,17 @@ button.blast-db-table__row:focus-visible {
 [data-theme="light"] .step-log-line:hover {
   background: rgba(0, 0, 0, 0.03);
 }
-[data-theme="light"] .step-log-text {
+[data-theme="light"] .step-log-row {
   border-left-color: rgba(0, 0, 0, 0.06);
 }
-[data-theme="light"] .step-log-detail--collapsed::after {
-  background: linear-gradient(transparent, rgba(255, 255, 255, 0.6));
+[data-theme="light"] .step-log-text--cmd {
+  color: #1565c0;
+}
+[data-theme="light"] .step-log-text--blast {
+  color: #6a4ec9;
+}
+[data-theme="light"] .step-log-text--error {
+  background: rgba(196, 60, 79, 0.10);
 }
 
 /* ══════════════════════════════════════════════════════════════════════

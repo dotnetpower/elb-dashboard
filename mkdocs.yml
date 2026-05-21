@@ -37,6 +37,7 @@ nav:
       - Jobs: user-guide/jobs.md
       - Results: user-guide/results.md
       - API Reference: user-guide/api-reference.md
+      - UI Preview: user-guide/ui-preview.md
       - Terminal: user-guide/terminal.md
   - Contributor Guide:
       - Screenshot Workflow: contributor-guide/screenshot-workflow.md

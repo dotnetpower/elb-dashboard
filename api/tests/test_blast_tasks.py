@@ -3749,3 +3749,90 @@ def test_poll_running_status_stops_at_max_iterations(monkeypatch):
 
     assert result["rescheduled"] is False
     assert calls == []
+
+
+def test_detect_submit_substep_matches_yellow_progress_markers() -> None:
+    cases = [
+        ("\x1b[33m[1/5] Writing configuration to ...\x1b[0m", 1, "Writing configuration"),
+        (
+            "\x1b[33m get_query_mode: fsize=528 min_fsize_to_split_on_client=20000000\x1b[0m",
+            2,
+            "Analysing query mode",
+        ),
+        ("\x1b[33m Splitting queries into batches\x1b[0m", 3, "Splitting queries"),
+        ("\x1b[33m Upload workfiles\x1b[0m", 4, "Uploading workfiles"),
+        ("Submitting 10 partitioned jobs", 5, "Submitting K8s jobs"),
+        ("Submitted import-queries job for warm cluster reuse", 5, "Submitting K8s jobs"),
+    ]
+    for line, expected_index, expected_label in cases:
+        result = blast._detect_submit_substep(line)
+        assert result is not None, line
+        assert result["index"] == expected_index, line
+        assert result["label"] == expected_label
+        assert result["total"] == blast.SUBMIT_SUBSTEP_TOTAL
+
+
+def test_detect_submit_substep_returns_none_for_unrelated_lines() -> None:
+    for line in ("", "INFO: Login with AzCliCreds succeeded", "100.0 %, 1 Done"):
+        assert blast._detect_submit_substep(line) is None
+
+
+def test_stream_submit_command_emits_submit_progress_state_update(monkeypatch) -> None:
+    def fake_stream(**_kwargs: object):
+        yield {"stream": "stdout", "line": "INFO: Scanning..."}
+        yield {"stream": "stdout", "line": "\x1b[33m[1/5] Writing configuration to dst\x1b[0m"}
+        yield {"stream": "stdout", "line": "\x1b[33m Splitting queries into batches\x1b[0m"}
+        yield {"exit_code": 0, "duration_ms": 7, "timed_out": False}
+
+    class FakeTask:
+        def __init__(self) -> None:
+            self.states: list[dict[str, object]] = []
+
+        def update_state(self, *, state: str, meta: dict[str, object]) -> None:
+            self.states.append({"state": state, "meta": meta})
+
+    state_updates: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr("api.services.terminal_exec.stream", fake_stream)
+    monkeypatch.setattr(
+        "api.services.job_logs.event_bus.publish_job_log_event",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        blast,
+        "_update_state",
+        lambda *args, **kwargs: state_updates.append((args, kwargs)),
+    )
+
+    result = blast._stream_submit_command(
+        job_id="job-sub",
+        task=FakeTask(),
+        config_content="[cluster]\n",
+    )
+
+    assert result["_submit_progress"] == {
+        "index": 3,
+        "label": "Splitting queries",
+        "total": blast.SUBMIT_SUBSTEP_TOTAL,
+    }
+    progress_updates = [kwargs for _args, kwargs in state_updates if kwargs.get("submit_progress")]
+    assert len(progress_updates) >= 2
+    assert progress_updates[0]["submit_progress"]["index"] == 1
+    assert progress_updates[-1]["submit_progress"]["index"] == 3
+
+
+def test_merge_progress_payload_keeps_submit_progress_field() -> None:
+    from api.tasks.blast.progress import _merge_progress_payload
+
+    payload = _merge_progress_payload(
+        existing_payload={},
+        phase="submitting",
+        status="running",
+        error_code="",
+        details={"submit_progress": {"index": 2, "total": 5, "label": "Analysing query mode"}},
+    )
+    step = payload["_progress"]["steps"]["submitting"]
+    assert step["submit_progress"] == {
+        "index": 2,
+        "total": 5,
+        "label": "Analysing query mode",
+    }

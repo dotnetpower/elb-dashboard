@@ -20,6 +20,16 @@ import { TopoArrow } from "./TopoArrow";
 import { TopoNode } from "./TopoNode";
 import { useEventParticles } from "./useEventParticles";
 
+function shouldOpenInspectorFromUrl(): boolean {
+  if (import.meta.env.VITE_DOCS_MOCK_PREVIEW !== "true" || typeof window === "undefined") {
+    return false;
+  }
+  const search = new URLSearchParams(window.location.search);
+  if (search.get("inspector") === "http") return true;
+  const hashQuery = window.location.hash.split("?")[1] || "";
+  return new URLSearchParams(hashQuery).get("inspector") === "http";
+}
+
 /**
  * Control Plane Sidecars card — topology view of the in-revision sidecars
  * (frontend, api, worker, beat, redis, terminal) with near-real-time
@@ -36,7 +46,7 @@ export function SidecarsCard() {
   const loaded = (id: string): boolean => Boolean(sidecars[id]);
   const get = (id: string): SidecarMetric =>
     sidecars[id] ?? { ...PLACEHOLDER, name: id };
-  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(shouldOpenInspectorFromUrl);
 
   useEffect(() => {
     if (!inspectorOpen) return;

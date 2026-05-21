@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterable
-from datetime import UTC, datetime
 from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
@@ -29,6 +28,15 @@ from api.services.k8s_nodes import (
     k8s_ready_warmup_node_names,
 )
 from api.services.k8s_observability import k8s_list_events, k8s_pod_logs
+from api.services.k8s_timestamps import (
+    k8s_timestamp_span_payload as _k8s_timestamp_span_payload,
+)
+from api.services.k8s_timestamps import (
+    max_k8s_timestamp as _max_k8s_timestamp,
+)
+from api.services.k8s_timestamps import (
+    min_k8s_timestamp as _min_k8s_timestamp,
+)
 from api.services.warmup_jobs import (
     DEFAULT_WARMUP_APP_LABEL,
     attach_pod_progress_to_database_status,
@@ -68,60 +76,6 @@ __all__ = [
 
 def reset_k8s_credential_cache() -> None:
     _k8s_client.reset_k8s_credential_cache()
-
-
-def _parse_k8s_timestamp(value: str) -> datetime:
-    text = value.strip()
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    parsed = datetime.fromisoformat(text)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def _min_k8s_timestamp(values: list[str]) -> str | None:
-    parsed = _parseable_k8s_timestamps(values)
-    if not parsed:
-        return None
-    return min(parsed, key=lambda item: item[1])[0]
-
-
-def _max_k8s_timestamp(values: list[str]) -> str | None:
-    parsed = _parseable_k8s_timestamps(values)
-    if not parsed:
-        return None
-    return max(parsed, key=lambda item: item[1])[0]
-
-
-def _parseable_k8s_timestamps(values: list[str]) -> list[tuple[str, datetime]]:
-    parsed: list[tuple[str, datetime]] = []
-    for value in values:
-        try:
-            parsed.append((value, _parse_k8s_timestamp(value)))
-        except ValueError:
-            LOGGER.debug("ignoring unparseable Kubernetes timestamp: %r", value)
-    return parsed
-
-
-def _k8s_timestamp_span_payload(
-    prefix: str,
-    started_values: list[str],
-    completed_values: list[str],
-) -> dict[str, Any]:
-    started = _parseable_k8s_timestamps(started_values)
-    completed = _parseable_k8s_timestamps(completed_values)
-    if not started or not completed:
-        return {}
-    start_value, start_time = min(started, key=lambda item: item[1])
-    completed_value, completed_time = max(completed, key=lambda item: item[1])
-    payload: dict[str, Any] = {
-        f"{prefix}_started_at": start_value,
-        f"{prefix}_completed_at": completed_value,
-    }
-    if completed_time >= start_time:
-        payload[f"{prefix}_duration_ms"] = int((completed_time - start_time).total_seconds() * 1000)
-    return payload
 
 
 def _container_terminated_state(container_status: dict[str, Any]) -> dict[str, Any] | None:

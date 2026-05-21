@@ -9,6 +9,12 @@ import {
 import type { PhaseStep, StepState } from "./constants";
 import { StepLogBlock } from "./StepLogBlock";
 
+export type StepSubProgress = {
+  index: number;
+  total: number;
+  label?: string;
+};
+
 /**
  * Renders a single orchestrator step row: chevron + status icon + label +
  * duration + state badge + (optional) log block + (optional) "extra"
@@ -21,6 +27,7 @@ export function StepRow({
   log,
   duration,
   extra,
+  subProgress,
   onToggle,
 }: {
   step: PhaseStep;
@@ -29,6 +36,7 @@ export function StepRow({
   log: string | null;
   duration: string | null;
   extra: React.ReactNode;
+  subProgress?: StepSubProgress | null;
   onToggle: () => void;
 }) {
   const Icon = step.icon;
@@ -142,6 +150,26 @@ export function StepRow({
           >
             {state === "skipped" ? "Skipped" : step.desc}
           </span>
+          {state === "active" && subProgress && subProgress.total > 0 && (
+            <span
+              title={subProgress.label}
+              style={{
+                fontSize: 10,
+                marginLeft: 8,
+                padding: "1px 6px",
+                color: "var(--warning, #d8a657)",
+                background: "rgba(216,166,103,0.08)",
+                border: "1px solid rgba(216,166,103,0.18)",
+                borderRadius: 3,
+                fontVariantNumeric: "tabular-nums",
+                fontWeight: 500,
+                letterSpacing: 0.2,
+              }}
+            >
+              {subProgress.index}/{subProgress.total}
+              {subProgress.label ? ` · ${subProgress.label}` : ""}
+            </span>
+          )}
         </span>
         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
           {duration && (

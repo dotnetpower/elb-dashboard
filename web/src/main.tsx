@@ -3,13 +3,14 @@ import { createRoot } from "react-dom/client";
 import { EventType, type AuthenticationResult } from "@azure/msal-browser";
 import { MsalProvider } from "@azure/msal-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter } from "react-router-dom";
+import { BrowserRouter, HashRouter } from "react-router-dom";
 
 import { msalInstance } from "@/auth/msal";
 import { App } from "@/App";
 import { ToastProvider } from "@/components/Toast";
 import { AutoRefreshProvider } from "@/hooks/useAutoRefresh";
 import { isDevBypassEnabled } from "@/config/runtime";
+import { initDocsMockPreview } from "@/mocks/docsPreview";
 import "@/theme/glass.css";
 import "@/theme/blast-submit-layout.css";
 import "@/theme/dashboard-layout.css";
@@ -23,6 +24,11 @@ import "@fontsource/inter/700-italic.css";
 // JetBrains Mono — used only by the browser terminal (xterm.js fontFamily).
 import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/700.css";
+
+const DOCS_MOCK_PREVIEW = import.meta.env.VITE_DOCS_MOCK_PREVIEW === "true";
+const Router = DOCS_MOCK_PREVIEW ? HashRouter : BrowserRouter;
+
+initDocsMockPreview();
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -83,11 +89,11 @@ async function bootstrap() {
       <MsalProvider instance={msalInstance}>
         <QueryClientProvider client={queryClient}>
           <AutoRefreshProvider>
-            <BrowserRouter>
+            <Router>
               <ToastProvider>
                 <App />
               </ToastProvider>
-            </BrowserRouter>
+            </Router>
           </AutoRefreshProvider>
         </QueryClientProvider>
       </MsalProvider>
