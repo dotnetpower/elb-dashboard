@@ -143,6 +143,14 @@ trap 'acr_restore_build_access "$ACR_NAME"' EXIT
 declare -a BUILD_ARGS=()
 if [[ "$SIDECAR" == "frontend" ]]; then
   [[ -n "$API_CLIENT_ID_VAL" ]] || die "API_CLIENT_ID/VITE_AZURE_CLIENT_ID is unset; set .env, web/.env.local, or azd env before deploying frontend"
+  # Guard: a stale local-dev export (e.g. local-run.sh web) leaking
+  # VITE_API_BASE_URL=http://localhost:... into this shell would bake the
+  # loopback URL into the cloud frontend's runtime-config.js and break every
+  # /api/* call from the browser. Force the operator to unset it first.
+  if [[ -n "$VITE_API_BASE_URL_VAL" ]] && \
+     [[ "$VITE_API_BASE_URL_VAL" =~ ^https?://(localhost|127\.|0\.0\.0\.0|\[::1\]) ]]; then
+    die "VITE_API_BASE_URL='$VITE_API_BASE_URL_VAL' points at the local host — refusing to bake that into the cloud frontend. Run 'unset VITE_API_BASE_URL' (or export VITE_API_BASE_URL='') and retry."
+  fi
   BUILD_ARGS=(
     --build-arg "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL"
     --build-arg "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL"
