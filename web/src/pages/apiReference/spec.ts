@@ -13,18 +13,23 @@ const CORE_NT_NC_003310_FASTA =
   ].join("\n") + "\n";
 
 const CORE_NT_BLAST_OPTIONS =
-  "-evalue 0.05 -word_size 28 -max_target_seqs 100 -outfmt 5 -dust yes -soft_masking false -searchsp 32156241807668";
+  "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668";
 
 const CORE_NT_JOB_EXAMPLE = {
-  summary: "Mode B - Inline FASTA with core_nt",
-  description: "Search core_nt with the NC_003310.1 FASTA example and XML output.",
+  summary: "Mode B - Web BLAST-equivalent core_nt",
+  description:
+    "Search core_nt with the same BLAST options used by New Search: blastn -db core_nt -evalue 0.05 -word_size 28 -max_target_seqs 100 -outfmt 5 -dust yes -soft_masking false -searchsp 32156241807668.",
   value: {
     program: "blastn",
     db: "core_nt",
     query_fasta: CORE_NT_NC_003310_FASTA,
     blast_options: {
+      evalue: 0.05,
+      max_target_seqs: 100,
+      outfmt: "5",
       extra: CORE_NT_BLAST_OPTIONS,
     },
+    resource_profile: "core_nt_safe",
   },
 };
 

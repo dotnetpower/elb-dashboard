@@ -36,16 +36,26 @@ describe("API Reference spec parser", () => {
     const firstExample = examples[firstKey].value as {
       db: string;
       query_fasta: string;
-      blast_options: { extra: string };
+      blast_options: {
+        evalue: number;
+        max_target_seqs: number;
+        outfmt: string;
+        extra: string;
+      };
+      resource_profile: string;
     };
 
     expect(firstKey).toBe("mode_b_core_nt");
     expect(firstExample.db).toBe("core_nt");
     expect(firstExample.query_fasta).toContain(">NC_003310.1:c48509-48048");
     expect(firstExample.query_fasta).toContain("\nATGGAGAAGCGAGAAGTTAA");
-    expect(firstExample.blast_options.extra).toBe(
-      "-evalue 0.05 -word_size 28 -max_target_seqs 100 -outfmt 5 -dust yes -soft_masking false -searchsp 32156241807668",
-    );
+    expect(firstExample.blast_options).toEqual({
+      evalue: 0.05,
+      max_target_seqs: 100,
+      outfmt: "5",
+      extra: "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668",
+    });
+    expect(firstExample.resource_profile).toBe("core_nt_safe");
   });
 
   it("selects Mode B as the default request body example for POST /v1/jobs", () => {

@@ -14,14 +14,14 @@ import { JsonHighlight } from "@/pages/apiReference/JsonHighlight";
 
 const RESPONSE_EXAMPLE = JSON.stringify(
   {
-    job_id: "bb61858a-8cb6-4590-a2e3-c144662851f7",
-    job_id_kind: "dashboard",
-    status: "queued",
+    job_id: "17dfd2825089",
+    job_id_kind: "openapi",
+    status: "dispatching",
     operation_status_url: "/api/operations/task-123",
     operation: {
       operation_id: "task-123",
-      operation_type: "blast.submit",
-      state: "queued",
+      operation_type: "blast.submit.openapi",
+      state: "accepted",
       poll_after_seconds: 5,
       links: {
         self: "/api/operations/task-123",
@@ -30,7 +30,7 @@ const RESPONSE_EXAMPLE = JSON.stringify(
     },
     target: {
       resource_type: "blast_job",
-      job_id_kind: "dashboard",
+      job_id_kind: "openapi",
       dashboard_job_id: "bb61858a-8cb6-4590-a2e3-c144662851f7",
       openapi_job_id: "17dfd2825089",
     },
@@ -307,7 +307,7 @@ export function ApiResponseContractPanel({ loading = false }: { loading?: boolea
                   textTransform: "uppercase",
                 }}
               >
-                Dashboard response extension
+                Response id contract
               </div>
               <pre
                 style={{

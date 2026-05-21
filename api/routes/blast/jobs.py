@@ -39,6 +39,7 @@ from api.routes._blast_shared import (
     _split_child_summary_from_repo,
     _sync_external_jobs_to_table,
 )
+from api.services.blast_job_state import _K8S_REFRESH_PHASES
 from api.services.response_contracts import build_meta, request_id_from_scope
 
 LOGGER = logging.getLogger(__name__)
@@ -199,6 +200,25 @@ def blast_jobs_list(
                 cluster_name=cluster_name,
             )
         ]
+        # Refresh active rows against K8s before responding so the list page
+        # doesn't have to wait for the 60 s beat reconcile to flip a finished
+        # job to "completed". The refresh helper already early-returns for
+        # non-active rows and shares a per-job throttle (5 s for hot phases,
+        # 20 s for `submitted`) with the detail endpoint.
+        for idx, row in enumerate(rows):
+            if str(getattr(row, "phase", "") or "").strip().casefold() not in _K8S_REFRESH_PHASES:
+                continue
+            try:
+                refreshed = _refresh_running_blast_state(repo, row)
+            except Exception as exc:
+                LOGGER.debug(
+                    "blast_jobs_list refresh skipped job_id=%s: %s",
+                    row.job_id,
+                    type(exc).__name__,
+                )
+                continue
+            if refreshed is not row:
+                rows[idx] = refreshed
         parent_ids = [row.job_id for row in rows if _local_list_row_may_have_split_children(row)]
         split_summaries = _split_child_summaries_from_repo(
             repo,

@@ -246,3 +246,58 @@ def test_openapi_proxy_rejects_dashboard_uuid_for_openapi_job_resource(
 
     assert response.status_code == 400
     assert response.json()["code"] == "dashboard_job_id_not_openapi_job_id"
+
+
+def test_openapi_proxy_forwards_zip_download_headers(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_service_ip(monkeypatch, "20.30.40.50")
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "api-token")
+    zip_bytes = b"PK\x03\x04zip-bytes"
+
+    class StubAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> StubAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        async def request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str],
+            content: bytes | None,
+        ) -> httpx.Response:
+            del method, url, headers, content
+            return httpx.Response(
+                200,
+                content=zip_bytes,
+                headers={
+                    "content-type": "application/zip",
+                    "content-disposition": 'attachment; filename="merged_results.zip"',
+                    "set-cookie": "should=not-leak",
+                },
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubAsyncClient)
+
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "path": "/v1/jobs/abc123/results",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.content == zip_bytes
+    assert response.headers["content-type"] == "application/zip"
+    assert response.headers["content-disposition"] == 'attachment; filename="merged_results.zip"'
+    assert "set-cookie" not in response.headers

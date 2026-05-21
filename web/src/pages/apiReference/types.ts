@@ -5,7 +5,12 @@ export interface SpecParam {
   description?: string;
   displayName?: string;
   usageHint?: string;
-  schema?: { type?: string; default?: unknown; pattern?: string };
+  schema?: {
+    type?: string;
+    default?: unknown;
+    pattern?: string;
+    enum?: unknown[];
+  };
 }
 
 export interface ResponseIdUsageItem {

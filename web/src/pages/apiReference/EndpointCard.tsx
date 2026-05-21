@@ -727,61 +727,100 @@ export function EndpointCard({
                 >
                   Query Parameters
                 </div>
-                {queryParameters.map((param) => (
-                  <div
-                    key={param.name}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      marginBottom: 6,
-                    }}
-                  >
-                    <label
+                {queryParameters.map((param) => {
+                  const enumValues = Array.isArray(param.schema?.enum)
+                    ? (param.schema?.enum as unknown[])
+                        .filter((v): v is string | number =>
+                          typeof v === "string" || typeof v === "number",
+                        )
+                        .map(String)
+                    : [];
+                  const defaultValue =
+                    param.schema?.default != null
+                      ? String(param.schema.default)
+                      : "";
+                  const currentValue = paramValues[param.name] ?? "";
+                  const sharedInputStyle: React.CSSProperties = {
+                    flex: 1,
+                    padding: "6px 10px",
+                    fontSize: 12,
+                    background: "var(--bg-primary)",
+                    border: "1px solid var(--border-weak)",
+                    borderRadius: 6,
+                    color: "var(--text-primary)",
+                    outline: "none",
+                    fontFamily: "var(--font-mono)",
+                    transition: "border-color var(--motion-fast)",
+                  };
+                  return (
+                    <div
+                      key={param.name}
                       style={{
-                        fontSize: 11,
-                        color: "var(--text-muted)",
-                        minWidth: 80,
-                        fontFamily: "var(--font-mono)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        marginBottom: 6,
                       }}
                     >
-                      {param.name}
-                    </label>
-                    <input
-                      type="text"
-                      placeholder={
-                        param.schema?.default != null
-                          ? String(param.schema.default)
-                          : param.name
-                      }
-                      value={paramValues[param.name] || ""}
-                      onChange={(event) =>
-                        setParamValues((prev) => ({
-                          ...prev,
-                          [param.name]: event.target.value,
-                        }))
-                      }
-                      style={{
-                        flex: 1,
-                        padding: "6px 10px",
-                        fontSize: 12,
-                        background: "var(--bg-primary)",
-                        border: "1px solid var(--border-weak)",
-                        borderRadius: 6,
-                        color: "var(--text-primary)",
-                        outline: "none",
-                        fontFamily: "var(--font-mono)",
-                        transition: "border-color var(--motion-fast)",
-                      }}
-                      onFocus={(event) => {
-                        event.target.style.borderColor = "var(--border-focus)";
-                      }}
-                      onBlur={(event) => {
-                        event.target.style.borderColor = "var(--border-weak)";
-                      }}
-                    />
-                  </div>
-                ))}
+                      <label
+                        style={{
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                          minWidth: 80,
+                          fontFamily: "var(--font-mono)",
+                        }}
+                      >
+                        {param.name}
+                      </label>
+                      {enumValues.length > 0 ? (
+                        <select
+                          value={currentValue}
+                          onChange={(event) =>
+                            setParamValues((prev) => ({
+                              ...prev,
+                              [param.name]: event.target.value,
+                            }))
+                          }
+                          style={sharedInputStyle}
+                          onFocus={(event) => {
+                            event.target.style.borderColor = "var(--border-focus)";
+                          }}
+                          onBlur={(event) => {
+                            event.target.style.borderColor = "var(--border-weak)";
+                          }}
+                        >
+                          <option value="">
+                            {defaultValue ? `${defaultValue} (default)` : "—"}
+                          </option>
+                          {enumValues.map((value) => (
+                            <option key={value} value={value}>
+                              {value}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          placeholder={defaultValue || param.name}
+                          value={currentValue}
+                          onChange={(event) =>
+                            setParamValues((prev) => ({
+                              ...prev,
+                              [param.name]: event.target.value,
+                            }))
+                          }
+                          style={sharedInputStyle}
+                          onFocus={(event) => {
+                            event.target.style.borderColor = "var(--border-focus)";
+                          }}
+                          onBlur={(event) => {
+                            event.target.style.borderColor = "var(--border-weak)";
+                          }}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
 

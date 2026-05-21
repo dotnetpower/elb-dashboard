@@ -1173,3 +1173,74 @@ def test_sync_skips_tombstoned_deleted_rows(monkeypatch):
     )
 
     assert result == (0, 0, {"zzz999"})
+
+
+def test_canonical_jobs_list_refreshes_active_local_rows(monkeypatch):
+    """List endpoint must refresh active rows so the dashboard doesn't wait
+    up to 60 s for the next beat reconcile to flip a finished job."""
+
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.routes.blast import jobs as jobs_route
+    from api.services import external_blast, state_repo
+
+    active_row = SimpleNamespace(
+        job_id="active-row",
+        task_id=None,
+        type="blast",
+        status="running",
+        phase="running",
+        created_at="2026-05-21T00:00:00Z",
+        updated_at="2026-05-21T00:01:00Z",
+        error_code=None,
+        parent_job_id=None,
+        subscription_id="sub-1",
+        resource_group="rg-elb-01",
+        cluster_name="elb-cluster",
+        storage_account="stelb",
+        payload={},
+    )
+    terminal_row = SimpleNamespace(
+        job_id="terminal-row",
+        task_id=None,
+        type="blast",
+        status="completed",
+        phase="completed",
+        created_at="2026-05-21T00:00:00Z",
+        updated_at="2026-05-21T00:01:30Z",
+        error_code=None,
+        parent_job_id=None,
+        subscription_id="sub-1",
+        resource_group="rg-elb-01",
+        cluster_name="elb-cluster",
+        storage_account="stelb",
+        payload={},
+    )
+
+    class ListRepo:
+        def list_for_owner(self, *_args, **_kwargs):
+            return [active_row, terminal_row]
+
+        def list_children_for_owner(self, *_args, **_kwargs):
+            return {}
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", ListRepo)
+    monkeypatch.setattr(external_blast, "list_jobs", lambda **_kwargs: {"jobs": []})
+
+    refreshed_ids: list[str] = []
+
+    def fake_refresh(repo, state):
+        refreshed_ids.append(state.job_id)
+        return state
+
+    monkeypatch.setattr(jobs_route, "_refresh_running_blast_state", fake_refresh)
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs"
+        "?subscription_id=sub-1&resource_group=rg-elb-01&cluster_name=elb-cluster"
+    )
+
+    assert response.status_code == 200
+    # Only the active row's phase ∈ _K8S_REFRESH_PHASES → refresh called once.
+    assert refreshed_ids == ["active-row"]
