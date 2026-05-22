@@ -121,6 +121,42 @@ def test_fetch_release_tags_rejects_loopback_and_metadata() -> None:
             remote_tags.fetch_release_tags(url)
 
 
+def test_fetch_release_tags_does_not_follow_redirects() -> None:
+    """SECURITY: a hostile upstream could redirect us at the Azure IMDS;
+    the SSRF guard validates only the initial URL, so we must not follow
+    redirects. With follow disabled, httpx surfaces the 3xx as an error;
+    the key invariant is that no second request is ever sent.
+    """
+    follow_attempted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host == "good.test":
+            return httpx.Response(
+                302, headers={"Location": "http://169.254.169.254/info/refs"}
+            )
+        follow_attempted.append(host)
+        return httpx.Response(200, content=b"should-never-be-reached")
+
+    class _Stub(httpx.Client):
+        def __init__(self, *args, **kwargs) -> None:  # type: ignore[override]
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    # Either an empty list (httpx tolerates the 3xx) or a RemoteTagsError
+    # (httpx surfaces the redirect as an error). Both outcomes are safe;
+    # what matters is that the IMDS host was never contacted.
+    try:
+        remote_tags.fetch_release_tags(
+            "https://good.test/repo.git", http_client_factory=_Stub
+        )
+    except remote_tags.RemoteTagsError:
+        pass
+    assert follow_attempted == [], (
+        f"redirect followed to {follow_attempted!r}; SSRF guard was bypassed"
+    )
+
+
 def test_fetch_release_tags_caps_response_body() -> None:
     payload = b"x" * 100
 

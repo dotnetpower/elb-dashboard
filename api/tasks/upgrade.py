@@ -503,7 +503,9 @@ def reconcile_rolling_out_inline(
         if elapsed > PATCH_NEVER_LANDED_GRACE_SECONDS:
             try:
                 deployed = aca_mod.read_current_images()
-                target_in_template = f":v{row.target_version}" in deployed.api
+                target_in_template = _image_matches_version(
+                    deployed.api, row.target_version
+                )
             except aca_template.TemplateError:
                 target_in_template = True  # don't escalate on a transient SDK glitch
             if not target_in_template:
@@ -547,6 +549,26 @@ ROLLING_OUT_TIMEOUT_SECONDS = 15 * 60
 # at least appear in the latest_revision_name by then). 120 s is generous
 # vs the typical begin_update -> revision-created lag of < 30 s.
 PATCH_NEVER_LANDED_GRACE_SECONDS = 120
+
+
+def _image_matches_version(image_ref: str, target_version: str) -> bool:
+    """True iff ``image_ref`` is tagged exactly ``v<target_version>``.
+
+    Compares the parsed tag for equality so `0.3` does NOT match
+    `0.3.0-alpha` via substring search — that was a real fragility in
+    the reconciler's fast-fail check. Digest-pinned refs
+    (`…:v0.3.0@sha256:…`) are not produced by the in-app build pipeline
+    and are not supported here.
+    """
+    if not image_ref or not target_version:
+        return False
+    try:
+        from api.services.upgrade.acr_inventory import parse_image_ref
+
+        _endpoint, _repo, tag = parse_image_ref(image_ref)
+    except ValueError:
+        return False
+    return tag == f"v{target_version}"
 
 
 @shared_task(name="api.tasks.upgrade.reconcile_rolling_out")

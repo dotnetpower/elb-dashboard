@@ -151,7 +151,13 @@ def fetch_release_tags(
     }
     masked = mask_remote_url(url)
     try:
-        with http_client_factory(timeout=timeout_seconds, follow_redirects=True) as client:
+        # SECURITY: follow_redirects MUST stay False. The URL is allow-listed
+        # by `_validate_url`, but redirects are not — a malicious upstream
+        # could redirect us at the Azure IMDS (169.254.169.254) and bypass
+        # the SSRF guard. Git's smart-protocol `/info/refs` does not rely
+        # on redirects for any legitimate hosting (GitHub / GitLab / gitea
+        # all serve the endpoint directly).
+        with http_client_factory(timeout=timeout_seconds, follow_redirects=False) as client:
             resp = client.get(endpoint, params=params, headers=headers)
             resp.raise_for_status()
     except httpx.HTTPError as exc:

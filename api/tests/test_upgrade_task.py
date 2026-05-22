@@ -390,3 +390,20 @@ def test_reconciler_idle_branch_returns_post_update_snapshot(
     assert result.running_version == "0.7.0"
     # Persisted as well.
     assert state.get_state().running_version == "0.7.0"
+
+
+def test_image_matches_version_requires_exact_tag() -> None:
+    """The reconciler's fast-fail check must use exact tag equality.
+
+    The previous substring-based check (`f":v{ver}" in image`) treated
+    `:v0.3.0` as matching `:v0.3.0-alpha`, falsely concluding the PATCH
+    had landed.
+    """
+    fn = upgrade_task._image_matches_version
+    assert fn("myacr.azurecr.io/elb-api:v0.3.0", "0.3.0") is True
+    assert fn("myacr.azurecr.io/elb-api:v0.3.0-alpha", "0.3.0") is False
+    assert fn("myacr.azurecr.io/elb-api:v0.30", "0.3") is False
+    assert fn("", "0.3.0") is False
+    assert fn("myacr.azurecr.io/elb-api:v0.3.0", "") is False
+    # Malformed ref → False, not crash
+    assert fn("not-a-ref", "0.3.0") is False

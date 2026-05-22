@@ -33,8 +33,8 @@ os.environ.setdefault("ELB_ALLOW_INMEMORY_UPGRADE_HISTORY", "true")
 os.environ.pop("AZURE_TABLE_ENDPOINT", None)
 os.environ.pop("AZURE_BLOB_ENDPOINT", None)
 
-import uvicorn  # noqa: E402
-from api.services.upgrade import build_logs, history, state  # noqa: E402
+import uvicorn
+from api.services.upgrade import build_logs, history, state
 
 state.set_backend(state.InMemoryBackend())
 build_logs.set_backend(build_logs.InMemoryBuildLogBackend())
