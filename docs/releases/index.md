@@ -24,6 +24,7 @@ the [Change Log](../changelog.md) and use site search.
 
 ## Versions
 
+- [v0.4.0](v0.4.0.md) — see release page for the feature-change notes shipped in this version.
 - [v0.3.0](v0.3.0.md) — see release page for the feature-change notes shipped in this version.
 - [v0.2.0](v0.2.0.md) — see release page for the feature-change notes shipped in this version.
 - [v0.1.0 — Initial baseline](v0.1.0.md) — every change note that landed
