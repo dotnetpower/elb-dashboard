@@ -334,15 +334,38 @@ def _shard_set_already_present(cc: Any, db_name: str, num_shards: int) -> bool:
 
     Checking only shard 00 would produce false positives if a previous run
     failed midway. Checking every shard catches partial uploads.
+
+    Uses one ``list_blobs(name_starts_with=...)`` call instead of N
+    sequential ``get_blob_properties`` HEAD round-trips. For a 100-shard
+    layout the previous version paid 100 RTT every ``prepare-db`` run.
     """
-    for i in range(num_shards):
-        _, nal_path = _shard_blob_paths(db_name, num_shards, i)
-        bc = cc.get_blob_client(nal_path)
-        try:
-            bc.get_blob_properties()
-        except ResourceNotFoundError:
-            return False
-    return True
+    base_prefix = f"{num_shards}shards/"
+    expected = {
+        _shard_blob_paths(db_name, num_shards, i)[1] for i in range(num_shards)
+    }
+    present: set[str] = set()
+    try:
+        for blob in cc.list_blobs(name_starts_with=base_prefix):
+            name = getattr(blob, "name", "") or ""
+            if name in expected:
+                present.add(name)
+                if len(present) >= len(expected):
+                    return True
+    except Exception:
+        # Fall back to per-blob HEAD probes if list_blobs fails (unlikely
+        # but the Azure SDK has historically raised on some auth edge
+        # cases that GET succeeds on). Preserves the original strict
+        # behaviour without re-introducing the N-RTT cost in the common
+        # path.
+        for i in range(num_shards):
+            _, nal_path = _shard_blob_paths(db_name, num_shards, i)
+            bc = cc.get_blob_client(nal_path)
+            try:
+                bc.get_blob_properties()
+            except ResourceNotFoundError:
+                return False
+        return True
+    return present >= expected
 
 
 def upload_shard_set(

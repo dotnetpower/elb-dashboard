@@ -71,9 +71,19 @@ class _FakeContainerClient:
             self._store.setdefault(b.name, b"x" * (b.size if b.size > 0 else 0))
 
     def list_blobs(self, *, name_starts_with: str = "") -> Iterator[_FakeBlob]:
+        # Surface both the explicit blobs list (used by NCBI-volume tests)
+        # AND every name currently in ``_store`` so ``_shard_set_already_present``'s
+        # new batched ``list_blobs`` probe matches the per-blob HEAD path
+        # the old idempotency probe relied on.
+        seen: set[str] = set()
         for b in self._blobs:
             if b.name.startswith(name_starts_with):
+                seen.add(b.name)
                 yield b
+        for name in self._store:
+            if name in seen or not name.startswith(name_starts_with):
+                continue
+            yield _FakeBlob(name=name, size=len(self._store[name]))
 
     def get_blob_client(self, blob_name: str) -> _FakeBlobClient:
         return _FakeBlobClient(blob_name, self._store)
