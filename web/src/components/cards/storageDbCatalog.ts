@@ -1,3 +1,26 @@
+/**
+ * Marks a catalog entry that NCBI does NOT publish in the current S3 mirror
+ * (`ncbi-blast-databases` bucket) and that cannot be `elastic-blast`-pulled
+ * in the BLAST+ 2.17 (v5) pipeline. The dashboard surfaces a clear badge
+ * pointing at the real source instead of showing the generic
+ * "Not in current NCBI snapshot" warning and a Download button that will
+ * 404. Verified 2026-05-23 against `latest-dir` `2026-05-09-01-05-02`.
+ *
+ * - `no-prebuilt` — NCBI ships no pre-built BLAST DB anywhere (S3 nor
+ *   FTP/blast/db); only raw GenBank / repository files. User must run
+ *   `makeblastdb` locally on the FASTA.
+ * - `v4-only` — Removed from BLAST v5; only legacy v4 tarballs remain in
+ *   `/blast/db/v4/`. Not consumable by the elastic-blast 2.17 pipeline
+ *   without a v4→v5 conversion step.
+ * - `too-large` — NCBI does not bulk-distribute (e.g. WGS, SRA); use
+ *   Entrez / online BLAST / the SRA Toolkit instead.
+ */
+export interface BlastDbUnsupported {
+  reason: "no-prebuilt" | "v4-only" | "too-large";
+  hint: string;
+  sourceUrl: string;
+}
+
 export interface BlastDbCatalogItem {
   value: string;
   label: string;
@@ -7,6 +30,8 @@ export interface BlastDbCatalogItem {
   estMinutes: string;
   category: "Small / Test" | "Medium" | "Large";
   type: "nucl" | "prot";
+  /** When set, this DB is not consumable by elastic-blast — see type doc. */
+  unsupported?: BlastDbUnsupported;
 }
 
 export const DB_CATALOG: BlastDbCatalogItem[] = [
@@ -135,6 +160,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~30-60 min",
     category: "Large",
     type: "nucl",
+    unsupported: {
+      reason: "no-prebuilt",
+      hint: "NCBI does not publish a pre-built BLAST DB under this name. Use refseq_select / refseq_rna, or build from RefSeq genome assemblies with makeblastdb.",
+      sourceUrl: "https://ftp.ncbi.nlm.nih.gov/refseq/release/",
+    },
   },
   {
     value: "refseq_genomes",
@@ -145,6 +175,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~6-12 hours",
     category: "Large",
     type: "nucl",
+    unsupported: {
+      reason: "no-prebuilt",
+      hint: "Not published as a monolithic BLAST DB. Pull per-organism RefSeq genome assemblies and build with makeblastdb.",
+      sourceUrl: "https://ftp.ncbi.nlm.nih.gov/genomes/refseq/",
+    },
   },
   {
     value: "wgs",
@@ -155,6 +190,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: ">12 hours",
     category: "Large",
     type: "nucl",
+    unsupported: {
+      reason: "too-large",
+      hint: "NCBI does not bulk-distribute WGS as a single BLAST DB. Use Entrez / NCBI WGS BLAST online, or fetch a per-project WGS tarball and build with makeblastdb.",
+      sourceUrl: "https://www.ncbi.nlm.nih.gov/Traces/wgs/",
+    },
   },
   {
     value: "est",
@@ -165,6 +205,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~2-4 hours",
     category: "Large",
     type: "nucl",
+    unsupported: {
+      reason: "v4-only",
+      hint: "Removed from BLAST v5; only legacy v4 tarballs remain. Not consumable by elastic-blast 2.17 (v5).",
+      sourceUrl: "https://ftp.ncbi.nlm.nih.gov/blast/db/v4/",
+    },
   },
   {
     value: "sra",
@@ -175,6 +220,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: ">24 hours",
     category: "Large",
     type: "nucl",
+    unsupported: {
+      reason: "too-large",
+      hint: "SRA is not distributed as a BLAST DB. Use the SRA Toolkit (prefetch/fasterq-dump) and BLAST per-run, or use NCBI's online SRA BLAST.",
+      sourceUrl: "https://github.com/ncbi/sra-tools",
+    },
   },
   {
     value: "tsa",
@@ -195,6 +245,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~15 min",
     category: "Medium",
     type: "nucl",
+    unsupported: {
+      reason: "no-prebuilt",
+      hint: "NCBI does not publish a pre-built BLAST DB for TLS. Download the raw GenBank flat files and build with makeblastdb -dbtype nucl.",
+      sourceUrl: "https://ftp.ncbi.nlm.nih.gov/genbank/tls/",
+    },
   },
   {
     value: "htgs",
@@ -205,6 +260,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~1-2 hours",
     category: "Large",
     type: "nucl",
+    unsupported: {
+      reason: "v4-only",
+      hint: "Removed from BLAST v5; only legacy v4 tarballs remain (htgs_v4.*.tar.gz). Not consumable by elastic-blast 2.17 (v5).",
+      sourceUrl: "https://ftp.ncbi.nlm.nih.gov/blast/db/v4/",
+    },
   },
   {
     value: "pat",
@@ -225,6 +285,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~5 min",
     category: "Small / Test",
     type: "nucl",
+    unsupported: {
+      reason: "v4-only",
+      hint: "Removed from BLAST v5; only refseqgene_v4.tar.gz remains. Not consumable by elastic-blast 2.17 (v5).",
+      sourceUrl: "https://ftp.ncbi.nlm.nih.gov/blast/db/v4/",
+    },
   },
   {
     value: "gss",
@@ -235,6 +300,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~1 hour",
     category: "Large",
     type: "nucl",
+    unsupported: {
+      reason: "v4-only",
+      hint: "Removed from BLAST v5; only legacy v4 tarballs remain (gss_v4.*.tar.gz). Not consumable by elastic-blast 2.17 (v5).",
+      sourceUrl: "https://ftp.ncbi.nlm.nih.gov/blast/db/v4/",
+    },
   },
   {
     value: "dbsts",
@@ -245,6 +315,11 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~15 min",
     category: "Medium",
     type: "nucl",
+    unsupported: {
+      reason: "no-prebuilt",
+      hint: "dbSTS is retired by NCBI and has no pre-built BLAST DB. Download UniSTS / Daily.FASTA and build with makeblastdb -dbtype nucl.",
+      sourceUrl: "https://ftp.ncbi.nlm.nih.gov/repository/dbSTS/",
+    },
   },
   {
     value: "pdb",

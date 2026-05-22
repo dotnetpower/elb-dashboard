@@ -151,7 +151,7 @@ def list_locations(
     Returns an empty array on failure so the SPA can fall back to its
     bundled `AZURE_REGIONS` list.
     """
-    from azure.mgmt.subscription import SubscriptionClient
+    from azure.mgmt.resource import SubscriptionClient
 
     cred = get_credential()
     try:

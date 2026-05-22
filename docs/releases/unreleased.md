@@ -1,3 +1,10 @@
+---
+title: Unreleased
+description: Feature-change notes added since the latest vA.B.0 release tag. Auto-regenerated on every push to main and refreshed locally by scripts/dev/bump-version.sh.
+tags:
+  - release
+---
+
 # Unreleased
 
 Feature-change notes added in `v0.3.0..HEAD`.

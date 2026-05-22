@@ -1,6 +1,9 @@
 ---
 title: Results (User Guide)
 description: Detail view for a single BLAST search in ElasticBLAST Control Plane — hit table, alignment preview, taxonomy filters, and streamed result downloads.
+tags:
+  - user-guide
+  - blast
 ---
 
 # Results

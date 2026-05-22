@@ -10,7 +10,7 @@ full-database BLAST+ run, not from a fixed Web BLAST assumption.
 ## User-Facing Change
 
 - Added a `Large DB / core_nt Calibration Strategy` section to
-  [docs/blast-searchsp-discovery.md](../../blast-searchsp-discovery.md).
+  [docs/research/blast-searchsp-discovery.md](../../research/blast-searchsp-discovery.md).
 - Added [scripts/dev/core-nt-searchsp-calibration.sh](../../../scripts/dev/core-nt-searchsp-calibration.sh),
   a guarded helper for planning, creating, remotely running, fetching results
   from, inspecting, and deleting a temporary Azure VM used for the one-off full

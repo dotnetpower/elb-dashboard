@@ -79,7 +79,7 @@ audit #12 behaviour is exercised by tests.
 
 Long-term, the documented target state remains an **internal**
 LoadBalancer (`service.beta.kubernetes.io/azure-load-balancer-internal: "true"`)
-— see [docs/container-apps-migration.md](../../container-apps-migration.md)
+— see [docs/architecture/container-apps.md](../../architecture/container-apps.md)
 L952. The opt-in is an escape hatch, not the recommended posture, and
 the Bicep default should flip back to `false` (or be removed) once
 `_build_manifests` is updated to create the Service as internal.

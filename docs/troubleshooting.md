@@ -1,3 +1,10 @@
+---
+title: Troubleshooting
+description: Symptom-first guide to the most common sign-in, RBAC, Storage network, and upgrade errors when running the ElasticBLAST Control Plane.
+tags:
+  - setup
+---
+
 # Troubleshooting
 
 Symptom-first index for the errors most teams hit while signing in to or driving the dashboard. Each section is self-contained — start with the heading that matches what you see on screen or in a log.
@@ -57,7 +64,7 @@ source <(azd env get-values -e <YOUR_ENV> | sed 's/^/export /')
 # Then re-run the role assignments from docs/auth.md §0.
 ```
 
-Full checklist: [Auth → §0 Post-Deploy Permissions Checklist](auth.md#0-post-deploy-permissions-checklist-run-after-every-azd-up).
+Full checklist: [Auth → §0 Post-Deploy Permissions Checklist](architecture/authentication.md#0-post-deploy-permissions-checklist-run-after-every-azd-up).
 
 **Fix — local backend (your account has no roles)**
 
@@ -174,6 +181,59 @@ azd env get-values | grep '^API_CLIENT_ID='
 
 Then restart `scripts/dev/local-run.sh web`. The log line `[local-run] Picked up VITE_AZURE_CLIENT_ID from azd env (...)` on stderr confirms the auto-pull fired.
 
+## Local debug as your real az-login identity (one-shot)
+
+**Symptom**
+
+You want the local dashboard caller chip to show your real UPN instead of `anonymous`, and you want the BLAST Databases / Storage cards to actually load data (not `degraded access_denied`) — without running four scripts by hand every session.
+
+**Cause**
+
+The default local dev mode flips `AUTH_DEV_BYPASS=true` (anonymous caller) and the workload Storage account starts with `publicNetworkAccess: Disabled` plus zero RBAC on your `az login` identity. Three things have to flip together for real auth to work end-to-end:
+
+1. **RBAC** — your account needs `Storage Blob/Table Data Contributor` (+ `Reader` on the RG, `AcrPull` on ACR).
+2. **Storage network** — the account must be reachable from your laptop (the explicit local-debug allowlist, never `defaultAction: Allow` in production).
+3. **Bypass off** — `AUTH_DEV_BYPASS=false` in `.env` and `VITE_AUTH_DEV_BYPASS=false` in `web/.env.local`, plus a restart of `api` + `vite`.
+
+**Fix — single command**
+
+```bash
+# Enable real MSAL login + ensure RBAC + open storage + restart api/web.
+scripts/dev/local-debug-auth.sh on
+# or:
+scripts/dev/local-run.sh auth-on
+
+# When you finish: revert to anonymous bypass + close storage network.
+# RBAC is intentionally NOT revoked (cheap to keep).
+scripts/dev/local-run.sh auth-off
+
+# Print current state without mutating anything.
+scripts/dev/local-run.sh auth-status
+```
+
+The script is idempotent and re-runnable. It auto-detects the workload storage account, ACR, and `API_CLIENT_ID` from `azd env get-values`; pass `--storage NAME --storage-rg RG` to target a specific deployment when multiple `stelbdashboard*` accounts exist in your subscription.
+
+Useful flags:
+
+| Flag | Effect |
+|------|--------|
+| `--storage NAME --storage-rg RG` | Target a specific deployment (when azd env default ≠ the one your SPA uses). |
+| `--acr NAME --acr-rg RG` | Override the ACR used for the `AcrPull` role assignment. |
+| `--skip-rbac` | Skip the role-assignment step (if RBAC is already verified). |
+| `--skip-storage` | Skip the storage network toggle (if you already opened it). |
+| `--skip-restart` | Apply env changes only; restart `api` + `vite` yourself. |
+| `--no-close-storage` | (`off` only) leave storage open; only flip the bypass flags. |
+
+Permission requirements:
+
+* `az login` as a user with **Storage Blob Data Contributor** and **User Access Administrator** (or **Owner**) on the workload Storage account scope. The script pre-checks `az role assignment list` and fails fast if you cannot read assignments at that scope.
+* `Microsoft.Storage/storageAccounts/write` on the account (for the network toggle).
+* `jq` and `curl` on `PATH` (already required by sibling dev scripts).
+
+After `auth-on` succeeds, open <http://localhost:8090>, complete the MSAL sign-in, and the caller chip should now show your UPN. `/api/me` will return your real `oid` / `upn` instead of the synthetic `00000000-…` dev-bypass identity.
+
+**Charter §9 reminder — close the network when done.** `publicNetworkAccess: Enabled` is a transient local-debug state. Running `auth-off` is enough; if you only want to close the network, `scripts/dev/local-run.sh storage-off` works.
+
 ## In-app upgrade flow
 
 ### The header badge never appears
@@ -273,5 +333,5 @@ azd env refresh -e elb-dashboard
 ## Where to go next
 
 - [Joining An Existing Deployment](joining-existing-deployment.md) — happy path for the same workflow.
-- [Auth](auth.md) — full RBAC matrix for the managed identity, and the post-deploy permissions checklist.
+- [Auth](architecture/authentication.md) — full RBAC matrix for the managed identity, and the post-deploy permissions checklist.
 - [Deployment Reference](deployment-reference.md) — manual `azd` flow, redirect URI setup, lockdown.

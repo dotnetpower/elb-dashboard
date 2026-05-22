@@ -1,6 +1,8 @@
 ---
 title: Codebase Map (Agent Detail)
 description: Pre-computed which-file-owns-X lookup for agents working on elb-dashboard — replaces several grep / semantic_search calls per session.
+tags:
+  - agent
 ---
 
 # Codebase Map — fast lookup for agents

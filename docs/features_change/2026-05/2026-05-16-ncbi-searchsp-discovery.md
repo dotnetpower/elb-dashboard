@@ -8,7 +8,7 @@ fixed hidden `searchsp` for custom subject databases.
 
 ## User-Facing Change
 
-- Added [docs/blast-searchsp-discovery.md](../../blast-searchsp-discovery.md), a
+- Added [docs/research/blast-searchsp-discovery.md](../../research/blast-searchsp-discovery.md), a
   reproducible discovery note explaining how Web/default `searchsp` was inferred.
 - Added [scripts/dev/ncbi-searchsp-discovery.py](../../../scripts/dev/ncbi-searchsp-discovery.py),
   a manual dev probe that submits small NCBI Web BLASTAlign jobs and compares

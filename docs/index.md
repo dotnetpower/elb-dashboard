@@ -60,6 +60,8 @@ jsonld: |
       }
     ]
   }
+tags:
+  - overview
 ---
 
 # ElasticBLAST Control Plane
@@ -83,7 +85,7 @@ Use it when a query has outgrown a local workstation, but the team still needs a
 For example, a researcher can bring a FASTA query to the dashboard, confirm that the Azure workspace is ready, submit the search, and return to results without learning the underlying cluster, Storage, image, and job-control commands first.
 
 [Start with Get Started](get-started.md){ .md-button .md-button--primary }
-[See the Architecture](high-level-architecture.md){ .md-button }
+[See the Architecture](architecture/high-level.md){ .md-button }
 
 !!! note "ElasticBLAST on Azure"
 	[ElasticBLAST on Azure](https://github.com/dotnetpower/elastic-blast-azure) is the Azure-portable runtime this dashboard automates. It adapts ElasticBLAST execution to Azure infrastructure; ElasticBLAST Control Plane adds the browser workflow for preparing, running, monitoring, and retrieving those jobs.
@@ -167,12 +169,12 @@ If you are already operating an environment, use these entry points:
 
 ## For Platform Maintainers
 
-- [High Level Architecture](high-level-architecture.md) gives the first-pass system map: browser, Container App sidecars, Azure resource plane, AKS workload plane, storage, identity, and job flow.
-- [Container Apps Migration](container-apps-migration.md) describes the six-sidecar deployment architecture.
+- [High Level Architecture](architecture/high-level.md) gives the first-pass system map: browser, Container App sidecars, Azure resource plane, AKS workload plane, storage, identity, and job flow.
+- [Container Apps Migration](architecture/container-apps.md) describes the six-sidecar deployment architecture.
 - [Deployment Reference](deployment-reference.md) covers manual `azd` deployment, redirect URI setup, smoke testing, network lockdown, and cleanup.
-- [Auth](auth.md) explains browser sign-in and backend token validation.
-- [BLAST SearchSP Discovery](blast-searchsp-discovery.md) tracks SearchSP compatibility work.
-- [Web BLAST Compatibility Plan](web-blast-compatibility-implementation-plan.md) describes the web compatibility implementation plan.
+- [Auth](architecture/authentication.md) explains browser sign-in and backend token validation.
+- [BLAST SearchSP Discovery](research/blast-searchsp-discovery.md) tracks SearchSP compatibility work.
+- [Web BLAST Compatibility Plan](research/web-blast-compatibility-plan.md) describes the web compatibility implementation plan.
 - The Agent Reference section documents the repository layout, browser terminal, resource plane, monitoring UI, and glass UI conventions.
 
 ## Documentation Capture
@@ -219,7 +221,7 @@ concurrent transfers). The browser never receives a SAS URL.
 
 No. The upstream ElasticBLAST supports multiple clouds, but this control
 plane is Azure-only by charter. See the
-[High Level Architecture](high-level-architecture.md) page for the
+[High Level Architecture](architecture/high-level.md) page for the
 boundaries.
 
 ### What is the deployment workflow?

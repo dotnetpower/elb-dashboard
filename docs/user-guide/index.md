@@ -5,6 +5,8 @@ social:
   cards_layout_options:
     title: User Guide
     description: End-to-end browser workflow for researchers — Dashboard, New Search, Jobs, Results, and Terminal.
+tags:
+  - user-guide
 ---
 
 # User Guide

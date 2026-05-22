@@ -5,6 +5,9 @@ social:
   cards_layout_options:
     title: Deployment Reference
     description: Bicep modules, azd workflow, post-provision steps, AKS sizing, and the Container App template.
+tags:
+  - operate
+  - infra
 ---
 
 # Deployment Reference
@@ -354,7 +357,7 @@ git config --global core.autocrlf input
 
 Then reclone the repository.
 
-If `azd up` fails on a role assignment, confirm your account has `Owner` or `User Access Administrator` on the subscription. In restricted tenants, ask an Azure administrator to perform the role assignment step described in [Auth](auth.md).
+If `azd up` fails on a role assignment, confirm your account has `Owner` or `User Access Administrator` on the subscription. In restricted tenants, ask an Azure administrator to perform the role assignment step described in [Auth](architecture/authentication.md).
 
 If the deployed app signs in locally but not in Azure, confirm the deployed Container App origin was added as a SPA redirect URI in the App Registration.
 

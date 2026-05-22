@@ -1,6 +1,9 @@
 ---
 title: Web BLAST Compatibility Plan
 description: Implementation plan and feature compatibility matrix between NCBI Web BLAST and the ElasticBLAST Control Plane browser workflow.
+tags:
+  - research
+  - blast
 ---
 
 # Web BLAST Compatibility Implementation Plan

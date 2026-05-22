@@ -96,12 +96,23 @@ scripts/dev/local-run.sh storage-off      # same via local-run
 
 This is intentionally an explicit local-debug action, not a production dashboard control — the friction is the safety mechanism. RBAC (`Storage Blob Data Reader` / `Contributor`) is unchanged and still enforced; the script only opens the network surface to the caller's public IP. The local backend may also call `api.services.storage_public_access.ensure_local_storage_access()` when `LOCAL_DEBUG_AUTO_OPEN_STORAGE=true` and a route has full Storage ARM scope; that helper must keep the `CONTAINER_APP_NAME` guard so deployed Container Apps can never flip Storage open. Do not check in any wrapper that calls this outside local debugging, and do not leave the surface open after debugging.
 
+**One-shot local-debug session toggle.** When a developer wants the local dashboard caller to be their real `az login` identity (not the synthetic `anonymous` dev-bypass) — required to exercise data-plane routes such as `/api/blast/databases` — use the bundled session toggle instead of running each piece by hand:
+
+```
+scripts/dev/local-run.sh auth-on      # ensure RBAC + open storage + AUTH_DEV_BYPASS=false + restart api/web
+# ... debug as real identity ...
+scripts/dev/local-run.sh auth-off     # bypass=true + close storage + restart api/web (RBAC kept)
+scripts/dev/local-run.sh auth-status  # show current state, no mutations
+```
+
+[scripts/dev/local-debug-auth.sh](../scripts/dev/local-debug-auth.sh) (also exposed as the `auth-on / auth-off / auth-status` subcommands above) is the canonical entry point: it composes `grant-local-rbac.sh` + `storage-public-access.sh` + env upsert + service restart in one idempotent flow, pre-checks that the caller can list role assignments at the storage scope (= can also create them), auto-detects `STORAGE_ACCOUNT_NAME` / `AZURE_RESOURCE_GROUP` / `ACR_NAME` / `API_CLIENT_ID` from `azd env get-values`, and on `off` reverts the bypass plus closes the network surface (RBAC is intentionally kept — cheap and removing it would re-trigger the 1-5 min propagation wait next session). It is a local-debug helper only: it must never gain a production code path, a dashboard control, or a Container App caller, and must keep the same `CONTAINER_APP_NAME` guards as the storage toggle it wraps.
+
 Consequences for the code:
 
 * All browser uploads/downloads of queries/results are **streamed through the `api` sidecar** (1 MiB chunks for download, 4 MiB block uploads, semaphore-capped to 4 concurrent transfers). This stays true regardless of the local-debug toggle state.
 * **Never** issue SAS tokens to the browser. Never return a Storage URL the browser is expected to fetch directly.
 * `elastic-blast` itself runs inside the `terminal` sidecar (same VNet) and reaches Storage via the same private endpoint, so the historical `publicNetworkAccess=Enabled` requirement during `submit/status/delete` does **not** apply here.
-* The dashboard's Storage card surfaces the `publicNetworkAccess` value. **Enabled with `defaultAction=Deny` + a non-empty `ipRules` is an acceptable local-debug state**, but `Enabled` with `defaultAction=Allow`, or `Enabled` left over after debugging in a deployed environment, is an incident — remediate by running `storage-public-access.sh off`.
+* The dashboard's Storage card surfaces the `publicNetworkAccess` value. **Enabled with `defaultAction=Deny` + a non-empty `ipRules` is an acceptable local-debug state**, but `Enabled` with `defaultAction=Allow`, or `Enabled` left over after debugging in a deployed environment, is an incident — remediate by running `storage-public-access.sh off` (or `scripts/dev/local-run.sh auth-off`, which closes the network *and* re-enables the bypass).
 
 ---
 

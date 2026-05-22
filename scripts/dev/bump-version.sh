@@ -213,12 +213,30 @@ import pathlib, re, sys
 new, path = sys.argv[1], sys.argv[2]
 p = pathlib.Path(path)
 text = p.read_text(encoding="utf-8")
-# Find the Releases block and insert a new entry right after "Overview: releases/index.md".
-pattern = re.compile(r"(\s{6}- Overview: releases/index\.md\n)")
-if pattern.search(text):
-    addition = f"      - v{new}: releases/v{new}.md\n"
+# Insert the new release entry right after `- releases/index.md` (the section
+# landing page; this is the post-2026-05 nav shape using navigation.indexes).
+# Fall back to the historical `- Overview: releases/index.md` shape for older
+# clones.
+patterns = [
+    re.compile(r"(\s{10}- releases/index\.md\n)"),
+    re.compile(r"(\s{6}- Overview: releases/index\.md\n)"),
+]
+added = False
+for pattern in patterns:
+    m = pattern.search(text)
+    if not m:
+        continue
+    indent = len(m.group(0)) - len(m.group(0).lstrip("\n"))
+    indent_str = m.group(0)[: m.group(0).index("- ")]
+    addition = f"{indent_str}- v{new}: releases/v{new}.md\n"
     text = pattern.sub(r"\1" + addition, text, count=1)
     p.write_text(text, encoding="utf-8")
+    added = True
+    break
+if not added:
+    sys.stderr.write(
+        f"[bump-version] WARNING: could not find releases section in {path}; add v{new} entry manually.\n"
+    )
 PY
 fi
 

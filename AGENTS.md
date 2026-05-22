@@ -111,9 +111,19 @@ where the failure was found, but knowing them up front saves a lot of time.
 8. **Storage `publicNetworkAccess` is `Disabled` in production.** Do not add
    a production code path, dashboard button, or deployed-environment toggle
    that flips it on. The sanctioned exceptions are the explicit local-debug
-   helper [scripts/dev/storage-public-access.sh](./scripts/dev/storage-public-access.sh)
-   and the equivalent `scripts/dev/local-run.sh storage-on|storage-off|storage-status`
-   commands (`on` opens an IP-allowlisted window for the caller, `off` restores).
+   helpers:
+   * [scripts/dev/storage-public-access.sh](./scripts/dev/storage-public-access.sh)
+     (and `scripts/dev/local-run.sh storage-on|storage-off|storage-status`)
+     — opens / closes the network surface only.
+   * [scripts/dev/local-debug-auth.sh](./scripts/dev/local-debug-auth.sh)
+     (and `scripts/dev/local-run.sh auth-on|auth-off|auth-status`) — the
+     **enable / disable session toggle** for real MSAL login locally. It
+     composes `grant-local-rbac.sh` + `storage-public-access.sh` + flips
+     `AUTH_DEV_BYPASS` + restarts api/web in one idempotent shot, and on
+     `auth-off` closes the storage surface again. Use this instead of
+     hand-running the three helpers when an agent or developer needs to
+     debug as their real `az login` identity.
+
    Local backend auto-open must go through `api.services.storage_public_access`
    and keep the `CONTAINER_APP_NAME` guard. Do not bypass the script with
    `--default-action Allow`, `bypass: AzureServices`, or a wider IP range — see
@@ -159,6 +169,7 @@ where the failure was found, but knowing them up front saves a lot of time.
 | Frontend build | `cd web && npm run build` |
 | Infra preview | `azd provision --preview` |
 | Local 2-sidecar Compose | `docker compose -f scripts/dev/docker-compose.local.yml up --build` |
+| Local debug as real az identity | `scripts/dev/local-run.sh auth-on` (RBAC + storage open + bypass=false + restart) → debug → `scripts/dev/local-run.sh auth-off` |
 
 ---
 

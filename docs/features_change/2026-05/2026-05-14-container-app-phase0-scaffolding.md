@@ -2,7 +2,7 @@
 
 ## Motivation
 
-The migration plan in [docs/container-apps-migration.md](../../container-apps-migration.md)
+The migration plan in [docs/architecture/container-apps.md](../../architecture/container-apps.md)
 defines a five-phase rollout from the current Function App + SWA setup to a
 single bundled Container App with six sidecars. This change lands **Phase 0**:
 all the source code and infrastructure-as-code that the bundled topology

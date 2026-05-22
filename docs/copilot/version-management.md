@@ -1,6 +1,8 @@
 ---
 title: Version Management
 description: How the ElasticBLAST Control Plane release-version policy is enforced — scripts/dev/bump-version.sh, release train bumps, build numbers, and the SPA header version stamp.
+tags:
+  - agent
 ---
 
 # Version Management

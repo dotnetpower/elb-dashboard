@@ -10,7 +10,7 @@ any other person can `git clone` and deploy in one shot:
 
 This change lands the **deployment-ready** code and infrastructure for the
 six-sidecar bundled Container App architecture defined in
-[docs/container-apps-migration.md](../../container-apps-migration.md).
+[docs/architecture/container-apps.md](../../architecture/container-apps.md).
 Any operator can now run:
 
 ```bash

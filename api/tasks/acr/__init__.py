@@ -18,6 +18,7 @@ from typing import Any
 from celery import shared_task
 
 from api.services import get_credential
+from api.services.acr_build_state import record_pending_build
 from api.services.image_tags import IMAGE_BUILD_INFO, IMAGE_TAGS, SOURCE_REPO
 
 LOGGER = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ def build_images(
             continue
 
         try:
-            _schedule_acr_build(
+            run_id = _schedule_acr_build(
                 mgmt,
                 resource_group,
                 registry_name,
@@ -99,7 +100,24 @@ def build_images(
                 tag,
                 build_info,
             )
-            results.append({"image": full_image, "status": "scheduled"})
+            result_row: dict[str, str] = {"image": full_image, "status": "scheduled"}
+            if run_id:
+                result_row["run_id"] = run_id
+                # Persist run_id -> image:tag so the ACR card can show
+                # "Building" rows after a browser refresh, even before ACR
+                # populates Run.output_images (which only fills in after
+                # the push step succeeds — Queued/Started/Running runs
+                # usually have an empty output_images list).
+                try:
+                    record_pending_build(registry_name, run_id, image_name, tag)
+                except Exception as exc:
+                    LOGGER.debug(
+                        "record_pending_build skipped for %s run_id=%s (%s)",
+                        full_image,
+                        run_id,
+                        type(exc).__name__,
+                    )
+            results.append(result_row)
             LOGGER.info("ACR build scheduled: %s in %s", full_image, registry_name)
         except Exception as exc:
             error_msg = str(exc)[:500]
@@ -116,7 +134,7 @@ def _schedule_acr_build(
     image_name: str,
     tag: str,
     build_info: dict[str, str],
-) -> None:
+) -> str | None:
     """Schedule a build run on ACR.
 
     Every NCBI / dotnetpower Dockerfile in the sibling repo assumes its
@@ -177,8 +195,24 @@ def _schedule_acr_build(
         timeout=3600,
     )
 
-    mgmt.registries.begin_schedule_run(
+    poller = mgmt.registries.begin_schedule_run(
         resource_group,
         registry_name,
         request,
     )
+
+    # ACR's scheduleRun POST returns the queued Run body in the initial
+    # 200 response, so the LRO polling method has the Run available
+    # without waiting for the build itself to finish. Reading via
+    # ``polling_method().resource()`` keeps this non-blocking — calling
+    # ``.result()`` would wait until the build reaches a terminal status
+    # (potentially minutes), defeating the point of a background task.
+    if poller is None:
+        return None
+    try:
+        method = poller.polling_method() if hasattr(poller, "polling_method") else None
+        resource = method.resource() if method is not None else None
+        run_id = getattr(resource, "run_id", None) if resource is not None else None
+        return str(run_id) if run_id else None
+    except Exception:
+        return None

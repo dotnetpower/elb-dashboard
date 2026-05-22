@@ -40,7 +40,7 @@ class _FakeHttpxClient:
     def __init__(self, head_map: dict[str, _FakeHead]) -> None:
         self._head_map = head_map
 
-    def __enter__(self) -> "_FakeHttpxClient":
+    def __enter__(self) -> _FakeHttpxClient:
         return self
 
     def __exit__(self, *_args: Any) -> bool:

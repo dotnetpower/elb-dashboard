@@ -5,6 +5,8 @@ social:
   cards_layout_options:
     title: High Level Architecture
     description: Six-sidecar Container App, private Storage, AKS-backed BLAST jobs — how the pieces fit together.
+tags:
+  - architecture
 ---
 
 # High Level Architecture
@@ -152,16 +154,16 @@ What the architecture deliberately does **not** include:
 - No Azure Static Web App; the `frontend` sidecar serves the React SPA.
 - No separate Redis VM or managed Redis service.
 - No Remote Terminal VM, no SSH, no admin password; the browser shell is the `terminal` sidecar over a same-origin WebSocket.
-- No Azure Functions or Durable Functions; the migration is complete (see [Container Apps Migration](container-apps-migration.md)).
+- No Azure Functions or Durable Functions; the migration is complete (see [Container Apps Migration](container-apps.md)).
 - No SAS tokens issued to the browser; data-plane reads/writes go through the `api` sidecar.
 
 ## Go Deeper
 
-- [Container Apps Migration](container-apps-migration.md) explains the six-sidecar target architecture, resource list, sizing, and cost reasoning.
-- [Auth](auth.md) covers browser sign-in, backend token validation, managed identity, and RBAC.
-- [Browser Terminal](copilot/browser-terminal.md) describes the terminal sidecar lifecycle and loopback WebSocket model.
-- [Resource Plane](copilot/resource-plane.md) maps Azure preparation and monitoring work to Celery tasks.
-- [API Reference](user-guide/api-reference.md) explains how to call the OpenAPI execution surface from the browser or an external client.
+- [Container Apps Migration](container-apps.md) explains the six-sidecar target architecture, resource list, sizing, and cost reasoning.
+- [Auth](authentication.md) covers browser sign-in, backend token validation, managed identity, and RBAC.
+- [Browser Terminal](../copilot/browser-terminal.md) describes the terminal sidecar lifecycle and loopback WebSocket model.
+- [Resource Plane](../copilot/resource-plane.md) maps Azure preparation and monitoring work to Celery tasks.
+- [API Reference](../user-guide/api-reference.md) explains how to call the OpenAPI execution surface from the browser or an external client.
 
 [aks]: https://learn.microsoft.com/azure/aks/what-is-aks
 [azure-container-apps]: https://learn.microsoft.com/azure/container-apps/overview

@@ -1,11 +1,19 @@
 ---
 title: API Reference (User Guide)
 description: Browser-side OpenAPI explorer for the ElasticBLAST Control Plane FastAPI backend — inspect routes, try requests, and integrate with the control plane API.
+tags:
+  - user-guide
 ---
 
 # API Reference
 
 The API Reference page is for developers and platform maintainers who need to inspect, test, or integrate with the ElasticBLAST [OpenAPI](https://www.openapis.org/) surface directly. Most researchers should keep using the Dashboard, New Search, Jobs, and Results pages for day-to-day work.
+
+!!! tip "Quick jumps"
+
+    - **[When To Use It](#when-to-use-it)** · **[Setup checklist](#before-the-api-page-works)** · **[Auth + token](#authentication)**
+    - **[Submit example](#submit-example-post-v1jobs)** · **[Status example](#status-example-get-v1jobsjob_idstatus)** · **[Result example](#result-example-get-v1jobsjob_idresults)**
+    - **[External façade](#external-elasticblast-facade)** · **[Response contract](#response-contract)** · **[Troubleshooting](#troubleshooting)**
 
 ![API Reference page with endpoint groups and API menu selected](../images/screenshots/api-reference.png)
 

@@ -1,6 +1,9 @@
 ---
 title: Dashboard (User Guide)
 description: Operator's pre-flight view for ElasticBLAST Control Plane — cluster, registry, storage, terminal, and sidecar readiness signals before submitting a BLAST search.
+tags:
+  - user-guide
+  - ui
 ---
 
 # Dashboard

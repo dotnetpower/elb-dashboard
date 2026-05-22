@@ -18,19 +18,42 @@ from api.services.image_tags import IMAGE_BUILD_INFO
 from api.tasks.acr import _schedule_acr_build
 
 
+class _FakeRun:
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+
+
+class _FakePollingMethod:
+    def __init__(self, run: _FakeRun | None) -> None:
+        self._run = run
+
+    def resource(self) -> _FakeRun | None:
+        return self._run
+
+
+class _FakePoller:
+    def __init__(self, run: _FakeRun | None) -> None:
+        self._method = _FakePollingMethod(run)
+
+    def polling_method(self) -> _FakePollingMethod:
+        return self._method
+
+
 class _FakeRegistries:
-    def __init__(self) -> None:
+    def __init__(self, run_id: str | None = "ca42") -> None:
         self.request = None
+        self._run_id = run_id
 
     def begin_schedule_run(
         self, _resource_group: str, _registry_name: str, request: object
-    ) -> None:
+    ) -> _FakePoller:
         self.request = request
+        return _FakePoller(_FakeRun(self._run_id) if self._run_id else None)
 
 
 class _FakeManagementClient:
-    def __init__(self) -> None:
-        self.registries = _FakeRegistries()
+    def __init__(self, run_id: str | None = "ca42") -> None:
+        self.registries = _FakeRegistries(run_id=run_id)
 
 
 def _scheduled_task_yaml() -> str:
@@ -61,3 +84,36 @@ def test_pre_build_command_is_shell_quoted() -> None:
 
     assert "bash -lc '" in task_yaml
     assert "'\"'\"'s|COPY templates" in task_yaml
+
+
+def test_schedule_returns_run_id_from_initial_response() -> None:
+    """`_schedule_acr_build` must surface the queued Run's run_id without
+    blocking on the LRO — callers persist it for the ACR card's "Building"
+    state mapping.
+    """
+    mgmt = _FakeManagementClient(run_id="ca123")
+    run_id = _schedule_acr_build(
+        mgmt,
+        "rg-acr",
+        "acr1",
+        "elb-openapi",
+        "4.14",
+        IMAGE_BUILD_INFO["elb-openapi"],
+    )
+    assert run_id == "ca123"
+
+
+def test_schedule_tolerates_missing_run_id() -> None:
+    """When the poller doesn't expose a Run yet (older SDK shapes), the
+    helper returns None and the caller skips the persistence write.
+    """
+    mgmt = _FakeManagementClient(run_id=None)
+    run_id = _schedule_acr_build(
+        mgmt,
+        "rg-acr",
+        "acr1",
+        "elb-openapi",
+        "4.14",
+        IMAGE_BUILD_INFO["elb-openapi"],
+    )
+    assert run_id is None

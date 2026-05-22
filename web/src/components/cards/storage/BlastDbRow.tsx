@@ -94,10 +94,25 @@ export function BlastDbRow({
   const isUpdating = Boolean(meta?.update_in_progress);
   const copyPhase = meta?.copy_status?.phase;
   const isPartial = copyPhase === "partial" || copyPhase === "init_failed";
-  const previewUnavailable = preview ? preview.available === false : false;
+  const unsupported = db.unsupported;
+  const isUnsupported = Boolean(unsupported);
+  // Suppress the generic "Not in current NCBI snapshot" warning for DBs we
+  // already know NCBI never publishes via the S3 mirror — the dedicated
+  // unsupported badge carries clearer wording + the real source URL.
+  const previewUnavailable =
+    !isUnsupported && preview ? preview.available === false : false;
   const downloadBlocked =
+    isUnsupported ||
     (downloadDisabled && !isPartial) ||
     (previewUnavailable && !isDownloaded);
+  const unsupportedReasonLabel: Record<
+    NonNullable<typeof unsupported>["reason"],
+    string
+  > = {
+    "no-prebuilt": "Not provided as BLAST DB",
+    "v4-only": "BLAST v4 only (incompatible)",
+    "too-large": "Not bulk-distributed",
+  };
 
   return (
     <div
@@ -150,7 +165,11 @@ export function BlastDbRow({
         ) : isDownloading || isCopying ? (
           <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
         ) : (
-          <Circle size={14} style={{ color: "var(--text-faint)", opacity: 0.35 }} />
+          <Circle
+            size={14}
+            fill="currentColor"
+            style={{ color: "var(--text-faint)", opacity: 0.45 }}
+          />
         )}
       </div>
       <div style={{ minWidth: 0 }}>
@@ -221,7 +240,31 @@ export function BlastDbRow({
           </code>
           {!isDownloaded && !isDownloading && !isCopying && (
             <>
-              {preview?.available ? (
+              {unsupported ? (
+                <a
+                  href={unsupported.sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={unsupported.hint}
+                  style={{
+                    fontSize: 10,
+                    padding: "1px 6px",
+                    borderRadius: 3,
+                    color: "var(--warning)",
+                    background: "rgba(240,198,116,0.08)",
+                    border: "1px solid rgba(240,198,116,0.24)",
+                    textDecoration: "none",
+                    whiteSpace: "nowrap",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <AlertCircle size={10} />{" "}
+                  {unsupportedReasonLabel[unsupported.reason]} → source
+                </a>
+              ) : preview?.available ? (
                 <>
                   <span title="Live NCBI snapshot info — fetched before download">
                     NCBI: {preview.file_count} files
@@ -614,12 +657,14 @@ export function BlastDbRow({
             }}
             disabled={downloadBlocked}
             title={
-              previewUnavailable
-                ? (preview?.message ??
-                  "Not in current NCBI S3 snapshot. Retry once the snapshot rotates.")
-                : downloadDisabled
-                  ? "Another download is in progress"
-                  : `Download ${db.value}`
+              isUnsupported && unsupported
+                ? unsupported.hint
+                : previewUnavailable
+                  ? (preview?.message ??
+                    "Not in current NCBI S3 snapshot. Retry once the snapshot rotates.")
+                  : downloadDisabled
+                    ? "Another download is in progress"
+                    : `Download ${db.value}`
             }
           >
             <Download size={11} /> {isPartial ? "Retry" : "Get"}

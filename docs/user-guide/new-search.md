@@ -1,6 +1,9 @@
 ---
 title: New Search (User Guide)
 description: How researchers define a BLAST run from the browser — query input, database selection, compute shape, preflight checks, and job submission.
+tags:
+  - user-guide
+  - blast
 ---
 
 # New Search

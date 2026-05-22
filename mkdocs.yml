@@ -10,6 +10,8 @@ copyright: Copyright &copy; dotnetpower — ElasticBLAST Control Plane. Document
 docs_dir: docs
 site_dir: site
 
+dev_addr: 127.0.0.1:8012
+
 theme:
   name: material
   custom_dir: overrides
@@ -17,20 +19,50 @@ theme:
   logo: images/elasticblast-logo.svg
   favicon: images/elasticblast-logo.svg
   palette:
-    scheme: default
-    primary: white
-    accent: deep purple
-  font: false
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: deep purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    # NOTE: `text` and `code` are Google Fonts that mkdocs-material loads
+    # asynchronously at runtime. This is the default Material behaviour and
+    # is the simplest path to a consistent typography across OS. If your
+    # deployment has stricter privacy / GDPR requirements (no third-party
+    # font fetches), download the Inter and JetBrains Mono webfont files
+    # into docs/stylesheets/fonts/ and override `font: false` with a custom
+    # @font-face block in docs/stylesheets/fonts.css. Tracked in the
+    # privacy follow-up for the docs site.
+    text: Inter
+    code: JetBrains Mono
   features:
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.top
     - navigation.indexes
+    - navigation.path
+    - navigation.tracking
+    - navigation.footer
+    - navigation.prune
     - search.highlight
     - search.suggest
     - search.share
     - toc.follow
     - content.action.edit
     - content.tooltips
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
   icon:
     repo: fontawesome/brands/github
 
@@ -56,22 +88,22 @@ extra:
     full: llms-full.txt
 
 nav:
-  - Overview: index.md
-  - Get Started: get-started.md
-  - Joining An Existing Deployment: joining-existing-deployment.md
-  - Troubleshooting: troubleshooting.md
-  - Deployment Reference: deployment-reference.md
-  - Auth: auth.md
-  - Change Log: changelog.md
-  - Releases:
-      - Overview: releases/index.md
-      - v0.4.0: releases/v0.4.0.md
-      - v0.3.0: releases/v0.3.0.md
-      - v0.2.0: releases/v0.2.0.md
-      - Unreleased: releases/unreleased.md
-      - v0.1.0: releases/v0.1.0.md
+  - Overview:
+      - index.md
+      - Get Started: get-started.md
+      - Join Existing Deployment: joining-existing-deployment.md
+      - Troubleshooting: troubleshooting.md
+      - Change Log: changelog.md
+      - Tags: tags.md
+      - Releases:
+          - releases/index.md
+          - v0.4.0: releases/v0.4.0.md
+          - v0.3.0: releases/v0.3.0.md
+          - v0.2.0: releases/v0.2.0.md
+          - v0.1.0: releases/v0.1.0.md
+          - Unreleased: releases/unreleased.md
   - User Guide:
-      - Guide Home: user-guide/index.md
+      - user-guide/index.md
       - Dashboard: user-guide/dashboard.md
       - New Search: user-guide/new-search.md
       - Jobs: user-guide/jobs.md
@@ -80,21 +112,35 @@ nav:
       - UI Preview: user-guide/ui-preview.md
       - Terminal: user-guide/terminal.md
       - In-app Upgrades: user-guide/upgrades.md
-  - Contributor Guide:
+  - Operate:
+      - operate/index.md
+      - Deployment Reference: deployment-reference.md
+      - CLI Rolling Update: operate/cli-upgrade.md
+      - Architecture:
+          - architecture/index.md
+          - High Level Architecture: architecture/high-level.md
+          - Container Apps: architecture/container-apps.md
+          - Runtime Plan: architecture/runtime-plan.md
+          - Storage Isolation & Proxy: architecture/storage-contract.md
+          - Authentication: architecture/authentication.md
+      - Research Notes:
+          - BLAST SearchSP Discovery: research/blast-searchsp-discovery.md
+          - Web BLAST Compatibility Plan: research/web-blast-compatibility-plan.md
+  - Contributor:
+      - contributor-guide/index.md
       - Screenshot Workflow: contributor-guide/screenshot-workflow.md
-  - Architecture:
-      - High Level Architecture: high-level-architecture.md
-      - Container Apps Migration: container-apps-migration.md
-      - BLAST SearchSP Discovery: blast-searchsp-discovery.md
-      - Web BLAST Compatibility Plan: web-blast-compatibility-implementation-plan.md
-  - Agent Reference:
-      - Repo Layout: copilot/repo-layout.md
-      - Auth Flow: copilot/auth-flow.md
-      - Browser Terminal: copilot/browser-terminal.md
-      - Resource Plane: copilot/resource-plane.md
-      - Monitoring UI: copilot/monitoring-ui.md
-      - Glass UI: copilot/glass-ui.md
-      - Codebase Map: copilot/codebase-map.md
+      - Archive Policy: contributor-guide/archive-policy.md
+      - Agent Reference:
+          - copilot/index.md
+          - Codebase Map: copilot/codebase-map.md
+          - Repo Layout: copilot/repo-layout.md
+          - Auth Flow: copilot/auth-flow.md
+          - Browser Terminal: copilot/browser-terminal.md
+          - Resource Plane: copilot/resource-plane.md
+          - Monitoring UI: copilot/monitoring-ui.md
+          - Glass UI: copilot/glass-ui.md
+          - Version Management: copilot/version-management.md
+          - Security Audit Follow-up: copilot/security-audit-followup.md
 
 extra_javascript:
   - javascripts/external-links.js
@@ -115,6 +161,23 @@ not_in_nav: |
 plugins:
   - search:
       lang: en
+  - tags
+  - git-revision-date-localized:
+      enable_creation_date: false
+      type: date
+      fallback_to_build_date: true
+      exclude:
+        - features_change/**
+        - temp/**
+  - redirects:
+      # IA continuity (#17): the 2026-05-22 docs reorg moved several pages
+      # under architecture/ and research/. Keep the old URLs working.
+      redirect_maps:
+        high-level-architecture.md: architecture/high-level.md
+        container-apps-migration.md: architecture/container-apps.md
+        auth.md: architecture/authentication.md
+        blast-searchsp-discovery.md: research/blast-searchsp-discovery.md
+        web-blast-compatibility-implementation-plan.md: research/web-blast-compatibility-plan.md
   - social:
       cards: true
       cards_layout_options:
@@ -124,15 +187,36 @@ plugins:
 
 hooks:
   - scripts/docs/llms_hooks.py
+  - scripts/docs/tags_index_hook.py
+  - scripts/docs/changelog_index_hook.py
 
 markdown_extensions:
+  - abbr
   - admonition
   - attr_list
+  - footnotes
   - md_in_html
+  - def_list
+  - pymdownx.caret
+  - pymdownx.tilde
+  - pymdownx.mark
   - pymdownx.details
+  - pymdownx.keys
+  - pymdownx.smartsymbols
+  - pymdownx.tasklist:
+      custom_checkbox: true
   - pymdownx.tabbed:
       alternate_style: true
-  - pymdownx.highlight
+  - pymdownx.snippets:
+      check_paths: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -141,8 +225,21 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
+      toc_depth: 3
+
+watch:
+  - overrides
+  - scripts/docs
 
 validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
   links:
+    # cross-repo source-code references (../../api/foo.py from copilot/codebase-map.md
+    # and features_change/*) are intentional and resolve on GitHub, not in the docs tree.
     not_found: ignore
+    absolute_links: ignore
     unrecognized_links: ignore
+    anchors: warn

@@ -66,8 +66,13 @@ jobs:
       - name: Build mock UI preview
         run: bash scripts/docs/build-mock-preview.sh
 
+      - name: Check frontmatter (title/description/tags canon)
+        run: uv run python scripts/docs/check_frontmatter.py
+
       - name: Build docs
-        run: uv run mkdocs build
+        env:
+          DISABLE_MKDOCS_2_WARNING: "true"
+        run: uv run mkdocs build --strict
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

@@ -1,6 +1,8 @@
 ---
 title: Repository Layout (Agent Detail)
 description: Full directory tree for elb-dashboard plus a where-to-edit map for AI coding agents and human contributors. Covers api/, web/, infra/, terminal/, and scripts/.
+tags:
+  - agent
 ---
 
 # Repository Layout (detail)

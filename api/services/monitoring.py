@@ -309,6 +309,25 @@ def list_acr_repositories(
     actual_tags: dict[str, list[str]] = {}
     building_images: list[str] = []
     build_details: list[dict[str, str]] = []
+    # Persisted run_id -> {image, tag} mapping recorded at build submission
+    # time. ACR's Run.output_images only populates after the push step
+    # succeeds, so Queued/Started/Running runs typically have an empty
+    # output_images list — without this mapping, the per-image rows in the
+    # ACR card show a "Build" button after a browser refresh instead of
+    # the correct "Building" state.
+    pending_by_run_id: dict[str, dict[str, str]] = {}
+    pruner = None
+    try:
+        from api.services import acr_build_state
+
+        pending_by_run_id = acr_build_state.load_pending_builds(registry_name)
+        pruner = acr_build_state.prune_terminal_builds
+    except Exception as exc:
+        LOGGER.debug(
+            "acr_build_state load skipped (%s)", type(exc).__name__
+        )
+
+    terminal_run_ids: set[str] = set()
     try:
         from azure.mgmt.containerregistry import ContainerRegistryManagementClient
 
@@ -316,18 +335,50 @@ def list_acr_repositories(
             credential, subscription_id, api_version="2019-06-01-preview"
         )
         for run in preview.runs.list(resource_group, registry_name):
-            if run.status == "Succeeded" and run.output_images:
-                _collect_succeeded_acr_images(actual_tags, run.output_images)
-            elif run.status in ("Queued", "Started", "Running") and run.output_images:
-                _collect_building_acr_images(
-                    building_images,
-                    build_details,
-                    run.status or "Unknown",
-                    run.run_id or "",
-                    run.output_images,
-                )
+            status = run.status or ""
+            run_id = run.run_id or ""
+            if status == "Succeeded":
+                if run.output_images:
+                    _collect_succeeded_acr_images(actual_tags, run.output_images)
+                if run_id:
+                    terminal_run_ids.add(run_id)
+            elif status in ("Queued", "Started", "Running"):
+                if run.output_images:
+                    _collect_building_acr_images(
+                        building_images,
+                        build_details,
+                        status or "Unknown",
+                        run_id,
+                        run.output_images,
+                    )
+                elif run_id and run_id in pending_by_run_id:
+                    # ACR hasn't filled output_images yet — fall back to
+                    # the persisted submission record so the row shows the
+                    # correct "Building" state.
+                    mapping = pending_by_run_id[run_id]
+                    full = f"{mapping['image']}:{mapping['tag']}"
+                    if full not in building_images:
+                        building_images.append(full)
+                        build_details.append(
+                            {"image": full, "status": status, "run_id": run_id}
+                        )
+            elif status in ("Failed", "Canceled", "Error", "Timeout"):
+                if run_id:
+                    terminal_run_ids.add(run_id)
     except Exception as exc:
         LOGGER.warning("ACR runs query failed (non-fatal): %s", type(exc).__name__)
+
+    # Best-effort cleanup so the pending table doesn't grow without bound.
+    # Only prune rows whose run we just observed reach a terminal status.
+    if pruner is not None and pending_by_run_id:
+        stale_run_ids = terminal_run_ids & set(pending_by_run_id.keys())
+        if stale_run_ids:
+            try:
+                pruner(registry_name, stale_run_ids)
+            except Exception as exc:
+                LOGGER.debug(
+                    "acr_build_state prune skipped (%s)", type(exc).__name__
+                )
 
     return {
         "name": registry.name,

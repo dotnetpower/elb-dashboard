@@ -1,3 +1,10 @@
+---
+title: In-app Upgrades
+description: How operators run the browser-driven self-upgrade flow for ElasticBLAST Control Plane — discovery, target selection, rollout, rollback, and recovery commands.
+tags:
+  - user-guide
+---
+
 # In-app self-upgrade
 
 Once the dashboard is deployed, an operator can upgrade the control
@@ -21,6 +28,14 @@ plane from the browser without touching their workstation:
 
 The flow is opt-in. Until an operator sets `UPGRADE_GIT_REMOTE`, the
 header badge stays hidden and every mutating endpoint refuses.
+
+!!! info "CLI alternative when this is not available"
+
+    When the in-browser upgrade is disabled, the SPA is down, or sidecar
+    layout / Bicep changed (which the in-app upgrade does not handle), use
+    the workstation-driven [CLI Rolling Update](../operate/cli-upgrade.md)
+    instead. It wraps `quick-deploy.sh` / `postprovision.sh` with the same
+    snapshot + health-check + auto-rollback envelope.
 
 ## Required environment variables
 

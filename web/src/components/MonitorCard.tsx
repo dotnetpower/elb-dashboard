@@ -1,5 +1,6 @@
 import { type PropsWithChildren, type ReactNode, useState, useCallback } from "react";
 import { ChevronDown, RefreshCw } from "lucide-react";
+import { useMinDuration } from "@/hooks/useMinDuration";
 import { useRelativeTime } from "@/hooks/useRelativeTime";
 
 interface Props {
@@ -101,6 +102,11 @@ export function MonitorCard({
   }, [title]);
 
   const showShimmer = status === "loading" || fetching;
+  // Hold the shimmer bar visible for at least ~800 ms (a little over one
+  // half of the 1.5 s sweep animation) so a fast refetch — backend often
+  // returns in 50–200 ms — still produces a perceptible visual hint that
+  // the card was refreshed.
+  const visibleShimmer = useMinDuration(showShimmer, 800);
   const panelCls = ["panel", accentColor ? `panel--accent-${accentColor}` : ""]
     .filter(Boolean)
     .join(" ");
@@ -110,7 +116,7 @@ export function MonitorCard({
 
   return (
     <section className={panelCls}>
-      {showShimmer && (
+      {visibleShimmer && (
         <div
           style={{
             position: "absolute",

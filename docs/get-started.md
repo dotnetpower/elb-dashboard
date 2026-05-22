@@ -67,6 +67,8 @@ jsonld: |
       }
     ]
   }
+tags:
+  - setup
 ---
 
 # Get Started
@@ -98,7 +100,7 @@ After deployment, researchers work in the browser: choose the Azure workspace, c
 | Deploy the dashboard for the first time with the default path | This page |
 | Install tools manually, control every `azd` value, or debug deployment failures | [Deployment Reference](deployment-reference.md) |
 | Use an already deployed dashboard | [User Guide](user-guide/index.md) |
-| Understand the sidecars, network path, and job flow before deploying | [High Level Architecture](high-level-architecture.md) |
+| Understand the sidecars, network path, and job flow before deploying | [High Level Architecture](architecture/high-level.md) |
 
 You are ready to hand the dashboard to researchers when sign-in succeeds, the Dashboard loads workspace readiness, Storage holds at least one prepared BLAST database, AKS is ready for jobs, and the browser can see ACR, terminal, warmup, and recent-search status from the deployed API.
 

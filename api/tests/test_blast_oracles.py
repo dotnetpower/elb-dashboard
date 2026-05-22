@@ -168,7 +168,9 @@ def test_db_order_oracle_part_urls_rejects_source_version_mismatch(monkeypatch) 
             ).encode("utf-8")
 
     class FakeBlobClient:
-        def download_blob(self, *, offset: int = 0, length: int | None = None) -> FakeStatusDownload:
+        def download_blob(
+            self, *, offset: int = 0, length: int | None = None
+        ) -> FakeStatusDownload:
             del offset, length
             return FakeStatusDownload()
 

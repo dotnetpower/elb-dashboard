@@ -1,6 +1,9 @@
 ---
 title: Glassmorphic UI Rules
 description: Design tokens, glass-card CSS, motion budget, and WCAG AA accessibility rules for the ElasticBLAST Control Plane SPA.
+tags:
+  - agent
+  - ui
 ---
 
 # Glassmorphic UI — Design Rules (detail)

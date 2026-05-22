@@ -1,6 +1,9 @@
 ---
 title: UI Preview (User Guide)
 description: Static, fixture-backed build of the ElasticBLAST Control Plane SPA embedded in the documentation site — explore the UI without provisioning Azure resources.
+tags:
+  - user-guide
+  - ui
 ---
 
 # UI Preview

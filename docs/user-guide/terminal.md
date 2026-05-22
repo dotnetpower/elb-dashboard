@@ -1,6 +1,9 @@
 ---
 title: Browser Terminal (User Guide)
 description: Operator shell that runs inside the ElasticBLAST Control Plane Container App with the same network and identity boundary — no laptop install required.
+tags:
+  - user-guide
+  - terminal
 ---
 
 # Browser Terminal

@@ -6,6 +6,7 @@
 | [`docker-compose.full.yml`](./docker-compose.full.yml) | **Full 6-sidecar mirror of the bundled Container App.** Use this for any debugging that touches Celery, Redis, the terminal exec channel, or cross-sidecar wiring. |
 | [`compose-with-log.sh`](./compose-with-log.sh) | Docker Compose wrapper used by `local-run.sh compose-full/compose-local`; captures compose output and detached container logs. |
 | [`quick-deploy.sh`](./quick-deploy.sh) | One-sidecar image bump on the live Azure Container App. ~30-90 s per cycle vs. 5-10 min for a full Bicep redeploy. Terminal deploys reuse a content-hashed `elb-terminal-base` toolchain image. |
+| [`cli-upgrade.sh`](./cli-upgrade.sh) | Safe `git pull` + build + rolling-update **envelope** around `quick-deploy.sh` / `postprovision.sh`. Snapshots the current revision's image refs before any PATCH, polls `/api/health`, and auto-rolls back on failure. Also has a `rollback` mode for emergency recovery. Full guide: [docs/operate/cli-upgrade.md](../../docs/operate/cli-upgrade.md). |
 | [`postprovision.sh`](./postprovision.sh) | Full first-time / structural deploy — sidecar layout, env vars, secrets, probes, scale rules. Run via `azd up` or directly after sourcing `/tmp/azd-env.sh`. |
 | [`smoke_api.py`](./smoke_api.py) | HTTP smoke test against a running api sidecar. |
 | [`preflight-check.sh`](./preflight-check.sh) | Pre-`azd up` sanity. |

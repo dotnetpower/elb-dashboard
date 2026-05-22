@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: scripts/dev/local-run.sh <api|worker|beat|web|redis|terminal-exec|smoke|storage-on|storage-off|storage-status|compose-full|compose-local> [-- extra args]
+usage: scripts/dev/local-run.sh <api|worker|beat|web|redis|terminal-exec|smoke|storage-on|storage-off|storage-status|auth-on|auth-off|auth-status|compose-full|compose-local> [-- extra args]
 
 Starts one local development process through run-with-log.sh so direct terminal
 runs and VS Code tasks both write to .logs/local/latest/.
@@ -15,6 +15,9 @@ Examples:
   scripts/dev/local-run.sh terminal-exec   # exec_server.py on 127.0.0.1:7682 so api/worker can run kubectl/az locally
   scripts/dev/local-run.sh storage-on      # open workload Storage to this caller IP for local debugging
   scripts/dev/local-run.sh storage-off     # restore workload Storage to publicNetworkAccess=Disabled
+  scripts/dev/local-run.sh auth-on         # one-shot: RBAC + storage-on + AUTH_DEV_BYPASS=false + restart api/web
+  scripts/dev/local-run.sh auth-off        # revert: bypass=true + storage-off + restart api/web
+  scripts/dev/local-run.sh auth-status     # show current local MSAL/Storage/RBAC state
   scripts/dev/local-run.sh smoke -- --url http://127.0.0.1:8085
   scripts/dev/local-run.sh compose-full -- up -d --build
 
@@ -50,7 +53,7 @@ load_local_azure_env() {
     value="${line#*=}"
     key="${key#export }"
     case "$key" in
-      AZURE_SUBSCRIPTION_ID|AZURE_TENANT_ID|ELB_LOCAL_STORAGE_ACCOUNT|ELB_LOCAL_STORAGE_RG)
+      AZURE_SUBSCRIPTION_ID|AZURE_TENANT_ID|ELB_LOCAL_STORAGE_ACCOUNT|ELB_LOCAL_STORAGE_RG|API_CLIENT_ID|AUTH_DEV_BYPASS|VITE_AUTH_DEV_BYPASS)
         if [[ -z "${!key:-}" ]]; then
           if [[ "$value" == \"*\" && "$value" == *\" ]]; then
             value="${value:1:${#value}-2}"
@@ -334,6 +337,15 @@ case "$service" in
     ;;
   storage-status)
     run_storage_public_access status "$@"
+    ;;
+  auth-on)
+    exec "$script_dir/local-debug-auth.sh" on "$@"
+    ;;
+  auth-off)
+    exec "$script_dir/local-debug-auth.sh" off "$@"
+    ;;
+  auth-status)
+    exec "$script_dir/local-debug-auth.sh" status "$@"
     ;;
   terminal-exec)
     # Run terminal/exec_server.py on the host so `local-run.sh api`/`worker`

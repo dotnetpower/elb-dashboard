@@ -5,6 +5,10 @@ social:
   cards_layout_options:
     title: Authentication & Authorization
     description: MSAL Auth Code + PKCE for users, user-assigned managed identity for Azure — plus the full RBAC role matrix.
+tags:
+  - architecture
+  - auth
+  - security
 ---
 
 # Authentication & Authorization

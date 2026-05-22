@@ -1,3 +1,10 @@
+---
+title: Joining an Existing Deployment
+description: Bind a fresh clone to an existing ElasticBLAST Control Plane deployment so you can sign in, run the SPA locally, or call the backend without creating a new App Registration or redeploying.
+tags:
+  - setup
+---
+
 # Joining An Existing Deployment From Another Machine
 
 This page is for a developer who is **not the original deployer**. A teammate has already run `azd up` for this dashboard, and you only need to:

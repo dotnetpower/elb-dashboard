@@ -96,7 +96,12 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
   // already carries everything we need (file_count, total_bytes,
   // source_version). For a deployment whose catalog is mostly downloaded
   // this saves N HEAD round trips per modal open against NCBI.
-  const previewNames = useMemo(() => DB_CATALOG.map((d) => d.value), []);
+  // Catalog entries flagged as ``unsupported`` are skipped entirely — the
+  // dedicated badge already explains why and points at the real source.
+  const previewNames = useMemo(
+    () => DB_CATALOG.filter((d) => !d.unsupported).map((d) => d.value),
+    [],
+  );
   const skipReady = useMemo(() => {
     const skip = new Set<string>();
     for (const item of DB_CATALOG) {

@@ -1,6 +1,8 @@
 ---
 title: Releases
 description: Per-release feature-change notes for ElasticBLAST Control Plane, grouped by release tag.
+tags:
+  - release
 ---
 
 # Releases

@@ -5,6 +5,9 @@ social:
   cards_layout_options:
     title: Container Apps Architecture
     description: The shipped six-sidecar topology — ingress, identity, secrets, and Azure Functions migration.
+tags:
+  - architecture
+  - infra
 ---
 
 # Container Apps Architecture Reference
@@ -273,192 +276,24 @@ is non-negotiable.
 - **Use Front Door for the SPA** (optional, not in the day-1 plan). Adds
   ~$35 / month for Front Door Standard plus per-GB egress; gains a CDN.
 
-## Storage Network Isolation (Hard Requirement)
+## Storage Network Isolation & Browser ↔ Storage Proxy
 
-This is the most important non-functional requirement of the control plane. Every
-rule in the rest of this document is consistent with it.
+!!! abstract "Extracted to its own page"
 
-### Rules
+    The Storage network-isolation requirements and the Browser ↔ Storage proxy
+    contract are the load-bearing security spec of the control plane. They
+    moved into a standalone reference so they can be cited and audited
+    without scrolling through the rest of this document.
 
-1. **Platform Storage account** (job state table, audit blobs, payload blobs,
-   schedule blob, dead-letter blobs):
-   - `publicNetworkAccess` is `Disabled` from the moment the account is in
-     production use.
-   - `networkAcls.defaultAction` is `Deny`.
-   - `networkAcls.bypass` is `None` (not `AzureServices`).
-   - No IP allow-list entries.
-   - Reachable only via two private endpoints in `snet-private-endpoints`:
-     blob and table. Each endpoint is wired into its private DNS zone
-     and the zone is linked to the platform VNet.
-2. **Workload Storage account** (ElasticBLAST `blast-db`, `queries`,
-   `results`):
-   - Same rules. `publicNetworkAccess: Disabled`, `defaultAction: Deny`,
-     `bypass: None`.
-   - Reachable via blob (and dfs, if HNS) private endpoints in
-     `snet-private-endpoints`.
-   - AKS nodes live in `snet-aks` in the same VNet, so they reach workload
-     storage privately. The terminal sidecar reaches workload storage from
-     `snet-containerapps` over the same private endpoint.
-   - There is **no temporary public-access window**, no `auto-keep-enabled`
-     toggle, and no `bypass: AzureServices` workaround. Anything that needs to
-     reach Storage must do so via private endpoint from inside the VNet.
-3. **Browser ↔ storage**: the SPA never talks to Storage directly. **All
-   browser downloads and uploads are proxied by the api sidecar.** No SAS
-   tokens (user delegation or otherwise) are ever issued to the browser. See
-   the next section for the full proxy contract.
+    Read it next: **[Storage Network Isolation & Browser ↔ Storage Proxy](storage-contract.md)**.
 
-### Container Apps Environment requirements that make rule 1 enforceable
+The 30-second summary that the rest of this document depends on:
 
-- The Container Apps Environment **must** be VNet-integrated. Use the
-  workload-profile environment with an `infrastructureSubnetId` pointing at
-  `snet-containerapps`.
-- `internal: true` is recommended (the SPA reaches the API through Front Door
-  or via the Container App's external ingress). External ingress is acceptable
-  *if and only if* the egress path to Storage still goes through the VNet.
-  Egress through the VNet is the property that lets Storage stay private,
-  not the ingress mode.
-- `snet-containerapps` is delegated to `Microsoft.App/environments` and sized
-  per Microsoft guidance (`/27` for Consumption-only, `/23` for workload
-  profile environments). Pick `/23` so the topology can grow without renaming.
-- All private DNS zones (`privatelink.blob.core.windows.net`,
-  `privatelink.table.core.windows.net`,
-  `privatelink.vaultcore.azure.net`, `privatelink.azurecr.io`) are linked to
-  the platform VNet so the Container App resolves storage hostnames to
-  private IPs.
-- The Container App's outbound DNS must be the Azure-provided 168.63.129.16
-  (default for Container Apps). Do **not** override `dnsConfig` in a way that
-  bypasses the linked private DNS zones.
-
-### What this forbids
-
-- No code path enables Storage public access “just for a moment.” The previous
-  `auto-keep-enabled` storage-window orchestrator and the
-  `bypass: AzureServices` shortcut both go away.
-- **No SAS token of any kind is issued to the browser.** Not user delegation
-  SAS, not account SAS, not service SAS. The api sidecar is the sole client
-  the browser sees.
-- No `kubectl` / `azcopy` step in the operator runbook that assumes the
-  storage endpoint is publicly resolvable.
-
-### Verification (must be part of CI / smoke tests)
-
-- `az storage account show -n <plat> --query "{p:publicNetworkAccess, a:networkAcls.defaultAction, b:networkAcls.bypass, ips:networkAcls.ipRules}"`
-  returns `Disabled / Deny / None / []` for both platform and workload accounts.
-- From inside the Container App (`az containerapp exec ... -- nslookup
-  <account>.blob.core.windows.net`), the resolved address is a `10.x.x.x`
-  private IP.
-- An external curl to `https://<account>.blob.core.windows.net/` returns
-  `403 PublicAccessNotPermitted` (or DNS NXDOMAIN if the public record was
-  removed for the account).
-
-## Browser ↔ Storage Proxy (No SAS to the Browser)
-
-This is the contract that lets `publicNetworkAccess: Disabled` hold on day 1
-without breaking the existing user workflows (uploading queries, downloading
-results).
-
-### Rules
-
-- The api sidecar is the **only** Storage client the browser sees.
-- All transfers are **streamed** in chunks. The api sidecar must never buffer a
-  full blob in memory or to local disk.
-- Authentication: every byte the browser sends or receives is on a request
-  that carries a valid MSAL access token and passes the standard authorization
-  check (caller is `owner_oid` of the job, or has the right tenant role).
-- Authorization: the api sidecar resolves browser-supplied logical names
-  (`job_id`, `result_filename`) to the concrete container/path internally.
-  The browser never names a Storage account, container, or blob path
-  directly.
-- The api sidecar uses its managed identity + the private endpoint to talk to
-  Storage. No SAS is ever generated, even server-side, for browser-facing
-  flows.
-- Concurrency: a per-replica semaphore caps simultaneous proxy transfers
-  (initial: 4 concurrent transfers). Excess requests get `429 Too Many Requests`
-  with `Retry-After`. This protects the api sidecar's modest CPU/memory
-  budget inside the bundled Container App.
-
-### Download contract (`GET /api/blast/jobs/{job_id}/results/{name}`)
-
-Behaviour:
-
-- Validate token + `owner_oid`; resolve `(job_id, name)` to a workload-storage
-  blob path; refuse if the job's `status` is not in a terminal-success state.
-- Open a streaming download from Storage with a small chunk size (1 MiB).
-- Pass through `ETag`, `Content-Type`, `Content-Length`, and
-  `Last-Modified` headers from the Storage response.
-- Honor `Range` requests by passing the same `Range` header to Storage and
-  returning `206 Partial Content` with the storage response's
-  `Content-Range`. This is required to keep large result downloads resumable
-  inside the Container Apps 240-second per-request timeout.
-- For results larger than what fits inside one 240-second window at the
-  user's link speed, the SPA must use range requests. The proxy advertises
-  `Accept-Ranges: bytes` so browsers and `curl --range` work.
-- Use Python `httpx` (or the Azure Storage SDK's streaming download) with
-  `chunk_size=1 MiB` and async iteration so the FastAPI worker is not
-  blocked.
-- Never decompress on the proxy. Pass the Storage `Content-Encoding`
-  through.
-
-### Upload contract (`POST /api/blast/jobs/{job_id}/queries`)
-
-Behaviour:
-
-- Validate token + `owner_oid`; resolve `(job_id, filename)` to a
-  workload-storage blob path inside the `queries` container; refuse if the
-  job's `status` does not allow new uploads.
-- Accept the request body as a stream (`request.stream()` in FastAPI), not
-  via `multipart` form parsing into memory.
-- Use the Azure Storage SDK's **block-blob staged upload**: call
-  `stage_block` for each chunk (initial chunk size: 4 MiB) as it arrives,
-  then `commit_block_list` once the request body ends. This caps proxy
-  memory use at one chunk plus internal SDK overhead, regardless of total
-  upload size.
-- Set a per-blob upload size limit (initial: 256 MiB) at the API layer and
-  reject larger requests with `413 Payload Too Large`. This keeps a single
-  upload inside the 240-second Container Apps request timeout at a typical
-  upload speed.
-- For the rare case of larger uploads (NCBI database imports, multi-GB
-  reference inputs): those are not browser-driven. The Celery worker
-  performs them server-side over the private endpoint, with progress
-  written to the Storage state row. The browser monitors progress via
-  `GET /api/storage/jobs/{import_id}`.
-- Do not generate a SAS. The browser PUT goes to the api sidecar; the api
-  sidecar PUTs to Storage with managed identity.
-
-### Why not user delegation SAS?
-
-User delegation SAS would let the browser hit Storage directly and bypass
-the proxy's CPU/memory cost. It does not work in this design because:
-
-1. The Storage endpoint is unreachable from the public internet
-   (`publicNetworkAccess: Disabled`). A SAS to `<account>.blob.core.windows.net`
-   resolves to a private IP that the browser cannot route to.
-2. Issuing a SAS to a public hostname (some bypass that re-exposes the
-   account) violates rule 1 of Storage Network Isolation.
-3. Removing SAS from the browser surface also removes a class of token-leak
-   incidents (logs, browser history, screenshots, support tickets).
-
-The trade-off is real: the api sidecar pays CPU and bandwidth for every
-download. The bundled Container App has a single replica, so a sustained
-many-user download workload would saturate it. This is acceptable for the
-project's expected scale (operator-driven, low concurrency). If future scale
-breaks the assumption, the escalation path is to split the api sidecar into
-its own Container App with `maxReplicas` > 1, **not** to re-introduce SAS.
-
-### Verification
-
-- A test that uploads a 32 MiB random file via the proxy, downloads it back
-  via the proxy, and verifies SHA-256 round-trip integrity.
-- A test that the api sidecar's RSS does not exceed `chunk_size + small
-  overhead` while a 256 MiB upload is in flight.
-- A test that 5 concurrent downloads of a 64 MiB blob complete and that the
-  6th request gets `429 Too Many Requests`.
-- A test that a `Range: bytes=10485760-` request returns `206 Partial
-  Content` with the correct `Content-Range`.
-- A SAST/grep check in CI: any code path that calls
-  `generate_blob_sas`, `generate_container_sas`, or
-  `BlobClient.url` for a browser-bound response fails the build. There is no
-  permitted browser-bound SAS use.
+- Every workload Storage account stays `publicNetworkAccess: Disabled` in
+  production. No code path enables it, even temporarily.
+- The browser never receives a SAS token. The `api` sidecar is the only
+  Storage client the browser sees; uploads/downloads stream through it
+  (1 MiB download chunks, 4 MiB block uploads, max 4 concurrent transfers).
 
 ## Target Architecture
 
@@ -822,199 +657,14 @@ artifact.
 - A future move to Cosmos DB or PostgreSQL is straightforward because the
   repository layer hides the storage shape.
 
-## Networking Plan
+## Runtime Plan (Networking · Identity · Storage · AKS · Smoke)
 
-Use one platform VNet with purpose-specific subnets.
+!!! abstract "Extracted to its own page"
 
-| Subnet | Purpose |
-|--------|---------|
-| `snet-containerapps` | Container Apps Environment infrastructure (the single `ca-elb-dashboard` app and its six sidecars). |
-| `snet-private-endpoints` | Private endpoints for Key Vault, Storage (blob + table + file), and ACR. |
-| `snet-aks` | AKS nodes when the workload cluster is created by this platform. |
+    The networking subnets / private DNS, the shared user-assigned managed
+    identity + RBAC matrix, the Storage account rules, the AKS plan, and
+    the post-deploy smoke checklist used to live at the end of this page.
+    They are now a standalone operator reference so they can be cited and
+    audited independently of the Container Apps topology.
 
-No `snet-redis` subnet: Redis runs as a sidecar inside the Container App and
-is bound to `127.0.0.1` only.
-
-No `snet-terminal` and no `snet-bastion` subnet: there is no Remote Terminal
-VM and no Bastion. The browser shell is the `terminal` sidecar, reached via
-the api sidecar's authenticated WebSocket proxy.
-
-Private DNS zones:
-
-- `privatelink.vaultcore.azure.net`
-- `privatelink.blob.core.windows.net`
-- `privatelink.table.core.windows.net`
-- `privatelink.azurecr.io`
-
-(No `privatelink.file.core.windows.net` — the control plane does not mount
-Azure Files. No `privatelink.servicebus.windows.net` and no Cosmos/PostgreSQL
-DNS zones.)
-
-Network rules:
-
-- Key Vault `publicNetworkAccess` is `Disabled` from day 1; reachable only via
-  its private endpoint.
-- Platform Storage `publicNetworkAccess` is `Disabled` from day 1. Reachable
-  only via blob and table private endpoints in `snet-private-endpoints`.
-- Workload Storage `publicNetworkAccess` is `Disabled` from day 1. AKS reaches
-  it through the blob (and dfs, if HNS) private endpoints because AKS nodes
-  run in `snet-aks` in the same VNet. The terminal sidecar reaches workload
-  storage from `snet-containerapps` over the same private endpoint.
-- The previous temporary-public-access window for ElasticBLAST (auto-enable
-  -> wait -> auto-disable) is **removed**. There is no operational state in
-  which any in-scope storage account is publicly reachable.
-- ACR `publicNetworkAccess` is `Disabled` once private endpoint is verified
-  from the Container App and AKS.
-- No public SSH path exists in the final design because there is no Remote
-  Terminal VM. The browser shell is reached only through the api sidecar's
-  authenticated WebSocket proxy.
-- Restrict AKS API access with private cluster or authorized IP ranges.
-
-## Identity and RBAC Plan
-
-Use user-assigned managed identities so identities survive app recreation and
-can be referenced cleanly from Bicep.
-
-| Identity | Assigned to | Required scopes |
-|----------|-------------|-----------------|
-| `id-elb-dashboard-*` | `ca-elb-dashboard` Container App (shared by all six sidecars including `frontend` and `terminal`) | Contributor plus User Access Administrator on workload RGs; Storage Table Data Contributor + Storage Blob Data Contributor on platform storage; data-plane roles on workload Storage and ACR; Key Vault Secrets User; AcrPull on the platform ACR; AKS RBAC reader / `Azure Kubernetes Service Cluster User` so the terminal sidecar can run `kubectl` against the cluster. The `frontend` sidecar makes no Azure calls and inherits the MI only because it lives in the same revision. |
-| `id-elb-openapi` | AKS Workload Identity | Storage Blob Data Contributor, AKS permissions, workload RG permissions needed by ElasticBLAST. |
-
-Because the six sidecars share one MI, the api sidecar technically holds the
-same ARM Contributor rights as the worker, the terminal, and the frontend.
-Scope abuse is mitigated by:
-
-- Mutating ARM operations only run inside Celery task handlers (in the
-  worker process) or as user-typed shell commands inside the terminal sidecar
-  (which is gated by MSAL + tenant role at the WebSocket upgrade).
-- The api sidecar's request handlers do not call ARM mutation methods; this
-  is enforced by static analysis (allow-list of Azure SDK call sites per
-  sidecar package).
-- The frontend sidecar is `nginx:alpine` with no Azure SDK and no shell; it
-  cannot use the MI even if it wanted to.
-
-A future split into separate Container Apps would re-introduce per-process
-identities; this is an explicit, documented compromise in exchange for the
-cost saving.
-
-Keep the browser token as proof of caller identity. Do not exchange or persist
-the token in Celery task arguments. Store `owner_oid`, `tenant_id`, and approved
-operation parameters in the Storage state row. The worker sidecar uses the
-shared managed identity (`id-elb-dashboard-*`) for all Azure operations.
-
-## Storage Plan
-
-Storage has three roles:
-
-1. **Platform state storage** for the control plane: job registry table, audit
-   append blobs, schedule definitions, dead-letter records, and command
-   history. No Azure Files shares — `redis` and `terminal` sidecars are
-   ephemeral and the broker queue is rebuilt from the `jobstate` table by
-   the `beat` reconciler on revision restart.
-2. **ElasticBLAST workload storage** for `blast-db`, `queries`, and `results`.
-3. **Operational artifacts**: container release zips, diagnostic dumps.
-
-Target rules:
-
-- Use managed identity and Azure RBAC; do not use shared keys
-  (`allowSharedKeyAccess: false`).
-- **Every Storage account in scope (platform + workload) has
-  `publicNetworkAccess: Disabled`, `networkAcls.defaultAction: Deny`, and
-  `bypass: None`. This is enforced from creation, not as a later hardening
-  step. See the “Storage Network Isolation” section for the full requirement
-  set and verification steps.**
-- Keep HNS enabled on workload storage when ElasticBLAST needs it. Platform
-  state storage does **not** need HNS.
-- Keep containers private.
-- Generate **no** SAS for browser-facing flows. All browser uploads and
-  downloads go through the api sidecar as a streaming proxy. See the
-  "Browser ↔ Storage Proxy" section for the contract, chunk sizes,
-  concurrency limits, and verification tests.
-- Store DB preparation progress in the platform state table, not background
-  threads.
-- For large NCBI database imports, the worker downloads through the private
-  Storage endpoint. Server-side copy is not relied upon if the source forces
-  public-only access.
-- Apply lifecycle policies on `dead-letter` and `audit` blobs (e.g. cool tier
-  after 30 days, delete after 365 days) to bound cost.
-
-## AKS Plan
-
-AKS remains the compute plane for ElasticBLAST.
-
-Target rules:
-
-- Keep OIDC issuer and Workload Identity enabled.
-- Keep Blob CSI driver enabled if BLAST DB access depends on it.
-- Prefer private cluster for production environments.
-- If a private cluster is not feasible, configure authorized IP
-  ranges and audit the exception.
-- Replace public `elb-openapi` LoadBalancer with an internal service or ingress
-  once the Container Apps Environment and AKS can communicate privately.
-- Continue to surface AKS node, pod, warmup, and job state through API routes;
-  do not make the browser talk to AKS directly.
-
-## Post-deploy Smoke Checklist (RBAC + discovery)
-
-The single most common production regression is the SPA's discovery
-wizard rendering an empty list because the shared UAMI cannot reach ARM
-control-plane LIST operations. Run this after every `azd provision` or
-after any change to identity / role assignments.
-
-1. **MI is attached to the Container App.**
-   ```bash
-  az containerapp show --name ca-elb-dashboard --resource-group rg-elb-dashboard \
-     --query 'identity'
-   ```
-   Expect `type: UserAssigned` and the UAMI's resource id under
-   `userAssignedIdentities`.
-
-2. **`AZURE_CLIENT_ID` env matches the UAMI's clientId on the api sidecar.**
-   ```bash
-  az containerapp show --name ca-elb-dashboard --resource-group rg-elb-dashboard \
-     --query "properties.template.containers[?name=='api'].env[?name=='AZURE_CLIENT_ID'].value"
-   ```
-   Should be the UAMI's `clientId` (not the app registration id, not zeros).
-
-3. **One-shot end-to-end probe.** Curl the api ingress (auth-gated —
-   the response references subscription ids so it is hidden behind
-   the standard MSAL bearer):
-   ```bash
-   TOKEN=$(az account get-access-token --resource api://<api-app-client-id> \
-     --query accessToken -o tsv)
-   curl -fsS -H "Authorization: Bearer $TOKEN" \
-     https://<ingress-fqdn>/api/health/azure-discovery | jq
-   ```
-   All three steps (`credential`, `subscriptions_list`,
-   `resource_groups_list`) must report `status: ok`. If any step is
-   `error` or `subscriptions_list.count_capped_at_5` is `0`, the
-   `hint` field tells you exactly which `az role assignment create`
-   to run. Subscription ids in the response are masked (`b0523…`)
-   and display names are dropped. The probe is read-only; do not
-   poll it from a dashboard.
-
-4. **Subscription-scope Reader is in place.** Bicep
-   ([infra/modules/subscriptionRoles.bicep](../infra/modules/subscriptionRoles.bicep))
-   does this automatically when `assignSubscriptionReader=true`
-   (the default). If the deployer lacks `User Access Administrator`,
-   the deployment fails the role assignment with a 403; recover by:
-   ```bash
-   az role assignment create --role Reader \
-     --scope /subscriptions/<sub> \
-     --assignee-object-id <uami-objectId> \
-     --assignee-principal-type ServicePrincipal
-   ```
-   then re-run `azd provision` (the bicep is idempotent).
-
-5. **Logs.** All `/api/arm/list_*` failures now log the exception type,
-   sanitised message, and traceback. Tail the api sidecar:
-   ```bash
-  az containerapp logs show --name ca-elb-dashboard --resource-group rg-elb-dashboard \
-     --container api --follow | grep -iE 'list_(subscriptions|resource_groups|storage|acrs|vms)'
-   ```
-   A repeated `AuthorizationFailed` line is the smoking gun for missing
-   sub-scope Reader.
-
-The local-compose equivalent of this failure mode (no host `az login`
-mounted) is documented in
-[docs/features_change/2026-05/2026-05-15-dev-compose-az-cli-mount.md](features_change/2026-05/2026-05-15-dev-compose-az-cli-mount.md).
+    Read it next: **[Runtime Plan — Networking, Identity, Storage, AKS](runtime-plan.md)**.

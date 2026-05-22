@@ -1,6 +1,8 @@
 ---
 title: Resource Plane (Agent Detail)
 description: Celery task surface that mirrors azure-prereq.md — AKS provisioning, ACR build, BLAST submit / status / delete, database warmup, and scheduled reconciliation tasks.
+tags:
+  - agent
 ---
 
 # ElasticBLAST Resource Plane (detail)

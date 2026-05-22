@@ -1,6 +1,9 @@
 ---
 title: Monitoring UI (Agent Detail)
 description: Card-by-card specification of the ElasticBLAST Control Plane Dashboard — readiness signals, degraded-state semantics, and the api/routes/monitor backend contract.
+tags:
+  - agent
+  - ui
 ---
 
 # Monitoring UI (detail)

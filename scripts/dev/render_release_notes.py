@@ -131,7 +131,17 @@ def render(version: str, range_desc: str, entries: list[dict], warnings: list[st
         else:
             sections["Other"].append(e)
 
-    lines = [f"# {version}", ""]
+    lines = [
+        "---",
+        f"title: {version}",
+        f"description: ElasticBLAST Control Plane {version} release notes \u2014 feature-change notes that landed in this version.",
+        "tags:",
+        "  - release",
+        "---",
+        "",
+        f"# {version}",
+        "",
+    ]
     lines.append(f"Feature-change notes added in `{range_desc}`.")
     lines.append("")
     if warnings:

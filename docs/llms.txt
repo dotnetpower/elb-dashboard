@@ -42,15 +42,17 @@
 
 ### Architecture
 
-- [High Level Architecture](https://dotnetpower.github.io/elb-dashboard/high-level-architecture/):
+- [High Level Architecture](https://dotnetpower.github.io/elb-dashboard/architecture/high-level/):
   major boundaries and flows for researchers vs operators.
-- [Container Apps Migration](https://dotnetpower.github.io/elb-dashboard/container-apps-migration/):
+- [Container Apps Architecture](https://dotnetpower.github.io/elb-dashboard/architecture/container-apps/):
   authoritative reference for the shipped six-sidecar topology.
-- [Authentication & Authorization](https://dotnetpower.github.io/elb-dashboard/auth/):
+- [Storage Isolation & Browser ↔ Storage Proxy](https://dotnetpower.github.io/elb-dashboard/architecture/storage-contract/):
+  hard requirement that workload Storage stays publicNetworkAccess Disabled, plus the api-sidecar streaming proxy contract.
+- [Authentication & Authorization](https://dotnetpower.github.io/elb-dashboard/architecture/authentication/):
   MSAL flow, RBAC roles, managed identity scopes.
-- [BLAST Search Space Discovery](https://dotnetpower.github.io/elb-dashboard/blast-searchsp-discovery/):
+- [BLAST Search Space Discovery](https://dotnetpower.github.io/elb-dashboard/research/blast-searchsp-discovery/):
   how database discovery is performed on Azure storage.
-- [Web BLAST Compatibility Plan](https://dotnetpower.github.io/elb-dashboard/web-blast-compatibility-implementation-plan/):
+- [Web BLAST Compatibility Plan](https://dotnetpower.github.io/elb-dashboard/research/web-blast-compatibility-plan/):
   feature compatibility between Web BLAST and ElasticBLAST.
 
 ### User guide

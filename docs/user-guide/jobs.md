@@ -1,6 +1,9 @@
 ---
 title: Recent Searches (User Guide)
 description: How to find every BLAST job the workspace knows about, jump into results detail, inspect logs, and clean up completed runs.
+tags:
+  - user-guide
+  - blast
 ---
 
 # Recent Searches
