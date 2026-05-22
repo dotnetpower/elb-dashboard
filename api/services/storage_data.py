@@ -230,6 +230,55 @@ def read_blob_text(
     return data.decode("utf-8", errors="replace")
 
 
+# Cap for control-plane metadata blob reads (workload Storage JSON, oracle
+# status, BLAST v5 ``.njs``). Catches a corrupted or maliciously oversized
+# blob before it OOMs the api/worker sidecar. NCBI ``.njs`` files we have
+# observed top out near 1 MiB; the 16 MiB ceiling leaves headroom while
+# still bounding worst-case memory per call. Callers that already know
+# their blob is tiny (e.g. ``*-metadata.json``) pass a smaller ``max_bytes``.
+METADATA_BLOB_MAX_BYTES = 16 * 1024 * 1024
+
+
+def read_metadata_blob_bytes(
+    blob_client: Any,
+    *,
+    max_bytes: int = METADATA_BLOB_MAX_BYTES,
+    label: str = "metadata",
+) -> bytes:
+    """Read a small metadata blob with a hard size cap.
+
+    Uses the SDK's ``download_blob(length=max_bytes + 1)`` so the over-cap
+    detection runs server-side — we never pull more than ``max_bytes + 1``
+    bytes across the network. Raises ``ValueError`` with the size in the
+    message when the blob exceeds the cap so callers can log + degrade
+    cleanly instead of OOM'ing the worker.
+    """
+    raw = blob_client.download_blob(offset=0, length=max_bytes + 1).readall()
+    if len(raw) > max_bytes:
+        LOGGER.warning(
+            "%s blob exceeds %d bytes (got %d); refusing to load",
+            label,
+            max_bytes,
+            len(raw),
+        )
+        raise ValueError(
+            f"{label} blob exceeds {max_bytes} bytes (got {len(raw)}); refusing to load"
+        )
+    return raw
+
+
+def read_metadata_blob_text(
+    blob_client: Any,
+    *,
+    max_bytes: int = METADATA_BLOB_MAX_BYTES,
+    label: str = "metadata",
+) -> str:
+    """UTF-8 text wrapper around :func:`read_metadata_blob_bytes`."""
+    return read_metadata_blob_bytes(blob_client, max_bytes=max_bytes, label=label).decode(
+        "utf-8"
+    )
+
+
 def read_result_blob_text(
     credential: TokenCredential,
     account_name: str,
@@ -576,7 +625,9 @@ def list_databases(
             meta_db_name = name.replace("-metadata.json", "")
             try:
                 bc = cc.get_blob_client(blob.name)
-                metadata_blobs[meta_db_name] = bc.download_blob().readall().decode("utf-8")
+                metadata_blobs[meta_db_name] = read_metadata_blob_text(
+                    bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
+                )
             except Exception as exc:
                 LOGGER.debug("metadata blob read skipped for %s: %s", blob.name, exc)
             continue
@@ -588,7 +639,9 @@ def list_databases(
         ):
             try:
                 bc = cc.get_blob_client(blob.name)
-                oracle_status_blobs[parts[2]] = bc.download_blob().readall().decode("utf-8")
+                oracle_status_blobs[parts[2]] = read_metadata_blob_text(
+                    bc, max_bytes=4 * 1024 * 1024, label="oracle-status.json"
+                )
             except Exception as exc:
                 LOGGER.debug("oracle status blob read skipped for %s: %s", blob.name, exc)
             continue
@@ -604,7 +657,7 @@ def list_databases(
             base = re.sub(r"\.\d+$", "", name[:-4])
             try:
                 bc = cc.get_blob_client(blob.name)
-                blastdb_json_blobs[base] = bc.download_blob().readall().decode("utf-8")
+                blastdb_json_blobs[base] = read_metadata_blob_text(bc, label="blast-db-njs")
             except Exception as exc:
                 LOGGER.debug("BLAST DB metadata read skipped for %s: %s", blob.name, exc)
         # Skip staging artifacts

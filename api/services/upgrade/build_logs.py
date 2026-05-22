@@ -133,10 +133,16 @@ class _AzureAppendBlobBackend:
     def read(self, name: str) -> bytes:
         blob = self._container().get_blob_client(name)
         try:
-            stream = blob.download_blob()
+            from api.services.storage_data import (
+                METADATA_BLOB_MAX_BYTES,
+                read_metadata_blob_bytes,
+            )
+
+            return read_metadata_blob_bytes(
+                blob, max_bytes=METADATA_BLOB_MAX_BYTES, label=f"upgrade-build-log:{name}"
+            )
         except ResourceNotFoundError as exc:
             raise KeyError(name) from exc
-        return stream.readall()
 
 
 _BACKEND_LOCK = threading.Lock()

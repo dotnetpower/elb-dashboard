@@ -153,7 +153,8 @@ def test_update_metadata_retries_on_etag_clash(
             return self._data
 
     class _Blob:
-        def download_blob(self) -> _Stream:
+        def download_blob(self, *, offset: int = 0, length: int | None = None) -> _Stream:
+            del offset, length
             import json as _json
 
             return _Stream(_json.dumps(state["meta"]).encode("utf-8"), state["etag"])

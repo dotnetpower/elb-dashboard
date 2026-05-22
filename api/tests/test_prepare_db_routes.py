@@ -87,7 +87,8 @@ class _FakeContainer:
             outer = self
 
             class _Meta:
-                def download_blob(self) -> Any:
+                def download_blob(self, *, offset: int = 0, length: int | None = None) -> Any:
+                    del offset, length
                     import json as _json
 
                     payload = _json.dumps(outer._meta).encode("utf-8")

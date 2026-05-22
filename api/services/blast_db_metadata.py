@@ -74,7 +74,13 @@ def resolve_db_metadata(storage_account: str, db_name: str) -> dict[str, Any] | 
         service = _blob_service(get_credential(), storage_account)
         container = service.get_container_client("blast-db")
         try:
-            data = container.get_blob_client(f"{db_name}-metadata.json").download_blob().readall()
+            from api.services.storage_data import read_metadata_blob_bytes
+
+            data = read_metadata_blob_bytes(
+                container.get_blob_client(f"{db_name}-metadata.json"),
+                max_bytes=4 * 1024 * 1024,
+                label="db-metadata.json",
+            )
         except ResourceNotFoundError:
             return None
         metadata = json.loads(data.decode("utf-8"))
@@ -389,17 +395,23 @@ def resolve_blastdb_json_metadata(storage_account: str, db_name: str) -> dict[st
 
         service = _blob_service(get_credential(), storage_account)
         container = service.get_container_client("blast-db")
+        from api.services.storage_data import read_metadata_blob_bytes
+
         for blob_name in (
             f"{db_name}/{db_name}.njs",
             f"{db_name}.njs",
             f"custom_db/{db_name}/{db_name}.njs",
         ):
             try:
-                data = container.get_blob_client(blob_name).download_blob().readall()
+                data = read_metadata_blob_bytes(
+                    container.get_blob_client(blob_name), label="blast-db-njs"
+                )
                 payload = json.loads(data.decode("utf-8"))
                 if isinstance(payload, dict):
                     return _blastdb_json_info(payload)
             except ResourceNotFoundError:
+                continue
+            except ValueError:
                 continue
         return None
     except Exception as exc:

@@ -197,7 +197,11 @@ def blast_database_shard(
     bc = cc.get_blob_client(f"{db_name}-metadata.json")
     existing: dict[str, Any] = {}
     try:
-        existing = json.loads(bc.download_blob().readall().decode("utf-8"))
+        from api.services.storage_data import read_metadata_blob_text
+
+        existing = json.loads(
+            read_metadata_blob_text(bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json")
+        )
     except ResourceNotFoundError:
         existing = {"db_name": db_name}
     except Exception:

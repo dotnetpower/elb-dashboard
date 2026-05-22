@@ -43,12 +43,16 @@ class _FakeBlobClient:
             raise ResourceNotFoundError(self.name)
         return MagicMock(name=self.name)
 
-    def download_blob(self):
+    def download_blob(self, *, offset: int = 0, length: int | None = None):
         if self.name not in self._store:
             from azure.core.exceptions import ResourceNotFoundError
 
             raise ResourceNotFoundError(self.name)
         data = self._store[self.name]
+        if length is not None:
+            data = data[offset : offset + length]
+        elif offset:
+            data = data[offset:]
         m = MagicMock()
         m.readall.return_value = data
         return m

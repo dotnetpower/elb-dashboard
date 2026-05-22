@@ -157,7 +157,13 @@ def warmup_database(
                 bc = cc.get_blob_client(f"{database_name}-metadata.json")
                 pre: dict[str, Any] = {}
                 try:
-                    pre = json.loads(bc.download_blob().readall().decode("utf-8"))
+                    from api.services.storage_data import read_metadata_blob_text
+
+                    pre = json.loads(
+                        read_metadata_blob_text(
+                            bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
+                        )
+                    )
                 except Exception:
                     pre = {"db_name": database_name}
                 pre["db_name"] = database_name
@@ -180,7 +186,13 @@ def warmup_database(
                 # poll flips the chip to "sharded".
                 final: dict[str, Any] = {}
                 try:
-                    final = json.loads(bc.download_blob().readall().decode("utf-8"))
+                    from api.services.storage_data import read_metadata_blob_text
+
+                    final = json.loads(
+                        read_metadata_blob_text(
+                            bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
+                        )
+                    )
                 except Exception:
                     final = {"db_name": database_name}
                 final["sharding_in_progress"] = False
@@ -237,7 +249,13 @@ def warmup_database(
                     )
                     err_meta: dict[str, Any] = {}
                     try:
-                        err_meta = _json.loads(bc2.download_blob().readall().decode("utf-8"))
+                        from api.services.storage_data import read_metadata_blob_text
+
+                        err_meta = _json.loads(
+                            read_metadata_blob_text(
+                                bc2, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
+                            )
+                        )
                     except Exception:
                         err_meta = {"db_name": database_name}
                     err_meta["sharding_in_progress"] = False

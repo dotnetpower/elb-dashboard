@@ -293,7 +293,8 @@ class FakeDownloadBlobClient:
     def __init__(self, payload: str) -> None:
         self.payload = payload
 
-    def download_blob(self) -> FakeDownload:
+    def download_blob(self, *, offset: int = 0, length: int | None = None) -> FakeDownload:
+        del offset, length
         return FakeDownload(self.payload)
 
 

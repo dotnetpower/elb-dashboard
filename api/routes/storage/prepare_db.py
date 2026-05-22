@@ -119,7 +119,11 @@ def _is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
 def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
     metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
     try:
-        payload = metadata_blob.download_blob().readall().decode("utf-8")
+        from api.services.storage_data import read_metadata_blob_text
+
+        payload = read_metadata_blob_text(
+            metadata_blob, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
+        )
         parsed = json.loads(payload)
         if isinstance(parsed, dict):
             return parsed
@@ -132,8 +136,20 @@ def _download_blob_with_etag(container: Any, db_name: str) -> tuple[dict[str, An
     """Read metadata + its current ETag for optimistic concurrency writes."""
     blob = container.get_blob_client(f"{db_name}-metadata.json")
     try:
-        stream = blob.download_blob()
-        payload = stream.readall().decode("utf-8")
+        # ``length=`` here caps the download server-side; we accept the
+        # `etag` lookup may run twice (download then properties) but the
+        # blob is small (<4 MiB) so latency is fine.
+        max_bytes = 4 * 1024 * 1024
+        stream = blob.download_blob(offset=0, length=max_bytes + 1)
+        payload_bytes = stream.readall()
+        if len(payload_bytes) > max_bytes:
+            LOGGER.warning(
+                "db-metadata.json blob exceeds %d bytes (got %d); treating as missing",
+                max_bytes,
+                len(payload_bytes),
+            )
+            return {"db_name": db_name}, ""
+        payload = payload_bytes.decode("utf-8")
         try:
             parsed = json.loads(payload) if payload else {}
             if not isinstance(parsed, dict):

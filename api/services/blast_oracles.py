@@ -128,8 +128,14 @@ def db_order_oracle_part_urls(
     container = svc.get_container_client("blast-db")
     status_blob = f"{ORACLE_PREFIX_ROOT}/{db_name}/status.json"
     try:
+        from api.services.storage_data import read_metadata_blob_text
+
         status = json.loads(
-            container.get_blob_client(status_blob).download_blob().readall().decode("utf-8")
+            read_metadata_blob_text(
+                container.get_blob_client(status_blob),
+                max_bytes=4 * 1024 * 1024,
+                label="oracle-status.json",
+            )
         )
     except Exception:
         return []

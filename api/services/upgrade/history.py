@@ -134,7 +134,16 @@ class _AzureAppendHistoryBackend:
 
     def read_all(self) -> bytes:
         try:
-            return self._blob().download_blob().readall()
+            from api.services.storage_data import (
+                METADATA_BLOB_MAX_BYTES,
+                read_metadata_blob_bytes,
+            )
+
+            return read_metadata_blob_bytes(
+                self._blob(),
+                max_bytes=METADATA_BLOB_MAX_BYTES,
+                label="upgrade-history",
+            )
         except ResourceNotFoundError:
             return b""
 

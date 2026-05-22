@@ -178,8 +178,12 @@ def read_blastdb_stats(
     cc = svc.get_container_client(container)
     bc = cc.get_blob_client(f"{db_name}/{db_name}.njs")
     try:
-        raw = bc.download_blob().readall()
+        from api.services.storage_data import read_metadata_blob_bytes
+
+        raw = read_metadata_blob_bytes(bc, label="blast-db-njs")
     except ResourceNotFoundError:
+        return {}
+    except ValueError:
         return {}
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -388,11 +392,21 @@ def upload_shard_set(
             bc = cc.get_blob_client(path)
             if not force:
                 try:
-                    existing = bc.download_blob().readall().decode("utf-8")
+                    # Manifest + .nal blobs are tiny (volume names only);
+                    # cap the comparison read at 64 KiB so a corrupt
+                    # oversized blob cannot OOM the worker.
+                    from api.services.storage_data import read_metadata_blob_text
+
+                    existing = read_metadata_blob_text(
+                        bc, max_bytes=64 * 1024, label="shard-manifest"
+                    )
                     if existing == text:
                         skipped += 1
                         continue
                 except ResourceNotFoundError:
+                    pass
+                except ValueError:
+                    # Over-cap means it's not our shape — overwrite.
                     pass
             bc.upload_blob(text.encode("utf-8"), overwrite=True)
             created += 1
