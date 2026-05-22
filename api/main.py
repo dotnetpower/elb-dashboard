@@ -458,6 +458,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await _SIDECAR_BROADCASTER.close()
         except Exception as exc:
             LOGGER.warning("sidecar broadcaster shutdown failed: %s", exc)
+        try:
+            from api.routes.frontend_proxy import close_client
+
+            await close_client()
+        except Exception as exc:
+            LOGGER.debug("frontend_proxy close skipped: %s", type(exc).__name__)
         if stop_invalidate_subscriber is not None:
             try:
                 stop_invalidate_subscriber()

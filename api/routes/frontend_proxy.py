@@ -83,6 +83,23 @@ def _get_client() -> httpx.AsyncClient:
     return _client
 
 
+async def close_client() -> None:
+    """Close the cached AsyncClient on FastAPI shutdown.
+
+    Called from ``_lifespan`` so a uvicorn reload (or graceful shutdown)
+    closes the keep-alive sockets pointed at the frontend sidecar instead
+    of leaking them past process exit.
+    """
+    global _client
+    client = _client
+    _client = None
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception as exc:
+            LOGGER.debug("frontend_proxy client close skipped: %s", type(exc).__name__)
+
+
 @router.api_route(
     "/{full_path:path}",
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],

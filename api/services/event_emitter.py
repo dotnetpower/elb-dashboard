@@ -74,6 +74,14 @@ def _get_client() -> redis.Redis | None:
     now = time.monotonic()
     if now < _disabled_until:
         return None
+    # Lock-free fast path: ``_client`` is set once on the first successful
+    # build and only cleared on failure inside ``_record_failure`` (which
+    # holds ``_lock``). A racing reader that misses the freshly-set client
+    # just falls through into the lock and either reads it then or rebuilds
+    # — both are correct and bounded.
+    cached = _client
+    if cached is not None:
+        return cached
     with _lock:
         now = time.monotonic()
         if now < _disabled_until:
