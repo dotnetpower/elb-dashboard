@@ -58,6 +58,8 @@ extra:
 nav:
   - Overview: index.md
   - Get Started: get-started.md
+  - Joining An Existing Deployment: joining-existing-deployment.md
+  - Troubleshooting: troubleshooting.md
   - Deployment Reference: deployment-reference.md
   - Auth: auth.md
   - Change Log: changelog.md
