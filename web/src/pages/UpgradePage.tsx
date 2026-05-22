@@ -56,21 +56,31 @@ export function UpgradePage() {
       setStatus(s);
       setCandidates(c);
       setHistory(h.events);
-      // Best-effort escape hatch (admin only — surfaces 403 silently)
+      // Probe escape-hatch first: when it 403s the caller is not an
+      // upgrade admin and we skip the rollback-preflight probe entirely
+      // so the SPA does not spam the browser console with 403s.
+      let blocked = false;
       try {
         const e = await upgradeApi.escapeHatch();
         setEscape(e);
-        setAdminBlocked(false);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("403")) setAdminBlocked(true);
-        else setEscape(null);
+        if (msg.includes("403")) {
+          blocked = true;
+          setEscape(null);
+        } else {
+          setEscape(null);
+        }
       }
-      // Best-effort rollback pre-flight (admin only too)
-      try {
-        const p = await upgradeApi.rollbackPreflight();
-        setPreflight(p);
-      } catch {
+      setAdminBlocked(blocked);
+      if (!blocked) {
+        try {
+          const p = await upgradeApi.rollbackPreflight();
+          setPreflight(p);
+        } catch {
+          setPreflight(null);
+        }
+      } else {
         setPreflight(null);
       }
     } finally {

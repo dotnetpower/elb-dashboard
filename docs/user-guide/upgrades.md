@@ -102,3 +102,32 @@ hatch (Recovery commands section on `/upgrade`) — it lists per-container
 Storage is `publicNetworkAccess: Disabled` per repo invariant. The
 dashboard streams these blobs back through the api sidecar; no SAS is
 ever issued to the browser.
+
+### Pruning old logs
+
+There is no automatic retention on the `upgrade-logs` or
+`upgrade-history` containers — the api stays read-only on them. A
+maintainer who wants to cap storage growth can attach a lifecycle
+management rule:
+
+```bash
+SA=$(azd env get-value AZURE_STORAGE_ACCOUNT)
+RG=$(azd env get-value AZURE_RESOURCE_GROUP)
+az storage account management-policy create \
+  --account-name "$SA" --resource-group "$RG" \
+  --policy '{
+    "rules": [
+      {
+        "enabled": true, "name": "expire-old-upgrade-logs", "type": "Lifecycle",
+        "definition": {
+          "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 180 } } },
+          "filters": { "blobTypes": ["appendBlob"],
+                       "prefixMatch": ["upgrade-logs/", "upgrade-history/"] }
+        }
+      }
+    ]
+  }'
+```
+
+Each per-job build log peaks around 1 MB so even a dozen upgrades a
+month stays well under any reasonable retention.

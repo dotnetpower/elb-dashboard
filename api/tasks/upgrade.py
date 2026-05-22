@@ -178,7 +178,13 @@ def start_upgrade_inline(
         submit(target_version, target_sha or "", started_by_oid or "", job_id)
     except Exception as enqueue_exc:
         LOGGER.exception("upgrade.start: enqueue failed")
-        detail = f"enqueue_failed: {enqueue_exc}"[:240]
+        # Sanitise: a Celery broker exception may carry the broker URL
+        # (which includes a password component on `redis://:pw@host`).
+        # We surface only the exception type to the SPA-visible field;
+        # the full traceback stays in the api log via LOGGER.exception.
+        from api.services.sanitise import sanitise
+
+        detail = sanitise(f"enqueue_failed: {type(enqueue_exc).__name__}")[:240]
         try:
             state.cas_state(
                 expected_state=state.STATE_QUEUED,
@@ -482,6 +488,30 @@ def reconcile_rolling_out_inline(
         except (state.StateTransitionRefused, state.RowEtagMismatch):
             return state.get_state()
 
+    # Fast-fail when the ARM PATCH evidently never landed: if the row has
+    # been `rolling_out` for >2 minutes but the deployed template still
+    # carries the OLD image refs (i.e. target_version is missing), the
+    # producing worker died after the CAS commit but before begin_update
+    # completed. Short-circuit the 15-min stuck guard so the operator can
+    # restart sooner.
+    if row.target_version and row.started_at:
+        try:
+            started = datetime.fromisoformat(row.started_at)
+            elapsed = (clock() - started).total_seconds()
+        except ValueError:
+            elapsed = 0
+        if elapsed > PATCH_NEVER_LANDED_GRACE_SECONDS:
+            try:
+                deployed = aca_mod.read_current_images()
+                target_in_template = f":v{row.target_version}" in deployed.api
+            except aca_template.TemplateError:
+                target_in_template = True  # don't escalate on a transient SDK glitch
+            if not target_in_template:
+                return _fail_rollout(
+                    row.job_id,
+                    f"ARM PATCH evidently never landed ({elapsed:.0f}s elapsed)",
+                )
+
     try:
         latest = aca_mod.latest_revision_name()
     except aca_template.TemplateError as exc:
@@ -512,6 +542,11 @@ def reconcile_rolling_out_inline(
 # minutes. The escape-hatch / rollback paths are always available so
 # the operator is never trapped.
 ROLLING_OUT_TIMEOUT_SECONDS = 15 * 60
+# Fast-fail when the row says "rolling_out" but the ACA template still
+# carries the old image after this many seconds (the new revision should
+# at least appear in the latest_revision_name by then). 120 s is generous
+# vs the typical begin_update -> revision-created lag of < 30 s.
+PATCH_NEVER_LANDED_GRACE_SECONDS = 120
 
 
 @shared_task(name="api.tasks.upgrade.reconcile_rolling_out")

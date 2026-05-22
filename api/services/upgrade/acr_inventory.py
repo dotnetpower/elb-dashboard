@@ -126,7 +126,7 @@ def _probe(client: Any, image_ref: str, repo: str, tag: str) -> ImageInfo:
         ResourceNotFoundError = None  # type: ignore[assignment]
     try:
         props = client.get_tag_properties(repo, tag)
-    except Exception as exc:  # noqa: BLE001 - SDK raises a variety
+    except Exception as exc:
         # Distinguish "not found" (= retention purge) from "registry
         # offline" so the upstream rollback gate stays precise.
         if ResourceNotFoundError is not None and isinstance(exc, ResourceNotFoundError):

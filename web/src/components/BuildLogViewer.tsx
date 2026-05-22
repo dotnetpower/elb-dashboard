@@ -51,13 +51,14 @@ export function BuildLogViewer({ jobId, component, active }: Props) {
   }, [jobId, component]);
 
   useEffect(() => {
+    if (!jobId) return undefined;
     void fetchOnce();
     const interval = active ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS;
     const id = window.setInterval(() => {
       void fetchOnce();
     }, interval);
     return () => window.clearInterval(id);
-  }, [fetchOnce, active]);
+  }, [fetchOnce, active, jobId]);
 
   useEffect(() => {
     if (autoScroll && viewportRef.current) {

@@ -174,6 +174,81 @@ azd env get-values | grep '^API_CLIENT_ID='
 
 Then restart `scripts/dev/local-run.sh web`. The log line `[local-run] Picked up VITE_AZURE_CLIENT_ID from azd env (...)` on stderr confirms the auto-pull fired.
 
+## In-app upgrade flow
+
+### The header badge never appears
+
+Set `UPGRADE_GIT_REMOTE` on the deployed Container App and wait for the
+30-minute discovery beat (or hit **Check remote** on `/upgrade`). The
+URL must end in `.git` and resolve to a public HTTPS endpoint. The
+upgrade subsystem is intentionally inert until the env is set —
+[upgrades.md](user-guide/upgrades.md) has the full env table.
+
+### "Start" returns 403
+
+Your caller `oid` is not in `UPGRADE_ADMIN_OIDS` and you do not carry
+the `UpgradeAdmin` app role. Add your oid to the env (comma-separated)
+or grant the app role:
+
+```bash
+RG=$(azd env get-value AZURE_RESOURCE_GROUP)
+APP=$(azd env get-value CONTAINER_APP_NAME)
+MY_OID=$(az ad signed-in-user show --query id -o tsv)
+EXISTING=$(az containerapp show --name "$APP" --resource-group "$RG" \
+  --query "properties.template.containers[?name=='api'].env[?name=='UPGRADE_ADMIN_OIDS'].value | [0]" -o tsv)
+az containerapp update --name "$APP" --resource-group "$RG" \
+  --set-env-vars UPGRADE_ADMIN_OIDS="${EXISTING:+$EXISTING,}$MY_OID"
+```
+
+### "Start" returns 409 — `upgrade already in progress`
+
+`upgradestate` row is not `idle`. Inspect the row state on the
+`/upgrade` page; if a previous attempt left it in `failed_pre` or
+`failed_rollout`, transition it back to `idle` by clicking **Rollback**
+(if a snapshot exists) or by clearing the row manually with the Azure
+Storage Explorer / `az storage entity replace`.
+
+### Upgrade stayed in `rolling_out` past the budget
+
+The reconciler's stuck guard moves the row to `failed_rollout` after
+15 minutes — or as fast as 2 minutes when the ACA template clearly
+does not carry the target version. If the new revision is actually
+unhealthy:
+
+1. Read the per-component build log on `/upgrade` (or
+   `curl /api/upgrade/jobs/<job_id>/build-log/api`).
+2. Click **Rollback**; the dashboard refuses if ACR no longer carries
+   the snapshot tags — see the next section.
+3. If even the api sidecar is unreachable, copy the **Recovery
+   commands** from `/upgrade` (or `/api/upgrade/escape-hatch`) and
+   paste them into any `az login`-ed shell.
+
+### Rollback says "ACR no longer carries the snapshotted tags"
+
+Retention has purged at least one of the per-sidecar image tags. The
+rollback PATCH would succeed but ACA would crashloop on
+`ImagePullBackOff`. Recovery options:
+
+* Re-build the older release locally — `azd up` from a checkout of the
+  prior git tag rebuilds the missing tags with the same names.
+* Or pick a *forward* upgrade to a known-good newer tag instead of
+  rolling back.
+
+Bump ACR retention so the next rollback succeeds:
+
+```bash
+az acr config retention update \
+  --registry "$(azd env get-value PLATFORM_ACR_NAME)" \
+  --status enabled --days 180 --type UntaggedManifests
+```
+
+### Build logs are empty / 404
+
+The Append Blob is only created when the `az acr build` for that
+component actually starts. If the upgrade `failed_pre` during clone or
+before the `building` state, no log was produced. Inspect the row's
+`phase_detail` and the audit history (`/api/upgrade/history`).
+
 ## `azd env refresh` fails with "no environment selected"
 
 **Symptom**

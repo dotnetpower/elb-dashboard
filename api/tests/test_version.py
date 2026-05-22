@@ -23,6 +23,24 @@ import api as api_pkg
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_version_module() -> None:
+    """Reload `api` after every test so a reload that adopted a transient
+    `APP_VERSION` env does not pollute downstream tests via the cached
+    `api.__version__` module attribute.
+
+    Tests in this file rely on `importlib.reload(api_pkg)`; without this
+    autouse the next test in pytest collection would observe whatever
+    `APP_VERSION` env survived the previous test, even when monkeypatch
+    cleared it on its own scope.
+    """
+    yield
+    import os as _os
+
+    _os.environ.pop("APP_VERSION", None)
+    importlib.reload(api_pkg)
+
+
 def _reload_with_env(monkeypatch: pytest.MonkeyPatch, env_value: str | None) -> str:
     if env_value is None:
         monkeypatch.delenv("APP_VERSION", raising=False)

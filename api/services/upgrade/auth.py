@@ -37,10 +37,19 @@ def _allowed_oids() -> set[str]:
 
 
 def is_upgrade_admin(caller: CallerIdentity) -> bool:
-    """Return True when the caller is permitted to mutate upgrade state."""
+    """Return True when the caller is permitted to mutate upgrade state.
+
+    Role matching is case-insensitive: a typo on the Azure portal
+    (`upgradeadmin`, `UPGRADEADMIN`, …) is still recognised. The oid
+    allowlist comparison stays case-sensitive because GUIDs are
+    canonicalised by AAD.
+    """
     roles = caller.claims.get("roles") if isinstance(caller.claims, dict) else None
-    if isinstance(roles, list) and UPGRADE_ADMIN_ROLE in roles:
-        return True
+    if isinstance(roles, list):
+        target = UPGRADE_ADMIN_ROLE.casefold()
+        for role in roles:
+            if isinstance(role, str) and role.casefold() == target:
+                return True
     if caller.object_id and caller.object_id in _allowed_oids():
         return True
     return False
