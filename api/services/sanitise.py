@@ -35,6 +35,18 @@ _PASSWORD_RE = re.compile(r"(?i)(password|passwd|pwd|secret|token)[\"'\s:=]+\S{8
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
+# Cheap pre-check: avoid the 8-regex pipeline (and 8 fresh string
+# allocations) when no plausible secret marker is present. Hits short-
+# circuit early; the false-positive rate is acceptable because matching
+# this fast regex is O(n) over a SIMD-friendly character class.
+_FAST_TRIGGER_RE = re.compile(
+    r"(?i)(\?[A-Za-z0-9_-]+=|sig=|bearer\s|account[-_]?key|access[-_]?key|"
+    r"client[-_]?secret|DefaultEndpointsProtocol|password|passwd|pwd|secret|token|"
+    r"[A-Za-z0-9+/]{40})"
+)
+_GUID_FAST_RE = re.compile(r"[0-9a-fA-F]{8}-")
+
+
 def sanitise(text: str | None, *, mask_subscription_ids: bool = True) -> str:
     """Mask sensitive substrings in `text`.
 
@@ -43,18 +55,39 @@ def sanitise(text: str | None, *, mask_subscription_ids: bool = True) -> str:
     - account/access keys, client secrets → `<key>=<redacted>`
     - Azure GUIDs       → first 8 chars + `…` (subscriptions, tenant ids)
                           when `mask_subscription_ids=True`.
+
+    Short-circuits via ``_FAST_TRIGGER_RE`` / ``_GUID_FAST_RE`` so plain
+    text payloads (the common case for streaming log lines) skip the
+    full 8-regex pipeline.
     """
     if not text:
         return ""
     out = text
-    out = _ANSI_CSI_RE.sub("", out)
-    out = _SAS_RE.sub("?<sas-redacted>", out)
-    out = _SAS_SIG_RE.sub(r"\1sig=<redacted>", out)
-    out = _BEARER_RE.sub("Bearer <redacted>", out)
-    out = _AZURE_KEY_RE.sub(r"\1=<redacted>", out)
-    out = _CONN_STR_RE.sub("<connection-string-redacted>", out)
-    out = _PASSWORD_RE.sub(r"\1=<redacted>", out)
-    out = _BASE64_BLOB_RE.sub("<base64-redacted>", out)
-    if mask_subscription_ids:
-        out = _GUID_RE.sub(lambda m: m.group(0)[:8] + "…", out)
+    if "\x1b" in out:
+        out = _ANSI_CSI_RE.sub("", out)
+    needs_secret_pass = bool(_FAST_TRIGGER_RE.search(out))
+    needs_guid_pass = mask_subscription_ids and bool(_GUID_FAST_RE.search(out))
+    if not needs_secret_pass and not needs_guid_pass:
+        return out
+    if needs_secret_pass:
+        out = _SAS_RE.sub("?<sas-redacted>", out)
+        out = _SAS_SIG_RE.sub(r"\1sig=<redacted>", out)
+        out = _BEARER_RE.sub("Bearer <redacted>", out)
+        out = _AZURE_KEY_RE.sub(r"\1=<redacted>", out)
+        out = _CONN_STR_RE.sub("<connection-string-redacted>", out)
+        out = _PASSWORD_RE.sub(r"\1=<redacted>", out)
+        out = _BASE64_BLOB_RE.sub("<base64-redacted>", out)
+    if needs_guid_pass:
+        out = _GUID_RE.sub(_redact_guid, out)
     return out
+
+
+def _redact_guid(match: re.Match[str]) -> str:
+    """GUID abbreviator — first 8 hex chars + ellipsis.
+
+    Factored out of the previous inline lambda so ``re.sub`` keeps a
+    stable reference and so the hot path avoids the per-call lambda
+    construction cost that ``timeit`` confirmed was measurable on long
+    text payloads.
+    """
+    return match.group(0)[:8] + "…"
