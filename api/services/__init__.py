@@ -67,21 +67,33 @@ def get_credential() -> TokenCredential:
 
 
 def reset_credential() -> None:
-    """Drop the cached credential. Test-only — production code never needs this."""
+    """Drop the cached credential. Test-only — production code never needs this.
+
+    Every downstream client pool that may hold a reference to the old
+    credential's token cache must be reset too, otherwise the next call
+    would return a stale BlobServiceClient / TableClient / Redis client
+    that authenticates with the old token. Each reset is wrapped in its
+    own try so a missing dep (or an import-time error in test contexts)
+    does not block the credential rotation itself.
+    """
     global _CREDENTIAL
     with _CREDENTIAL_LOCK:
         _CREDENTIAL = None
-    # Pooled BlobServiceClients hold a reference to the old credential and
-    # its token cache; drop them so the next call rebuilds against the new
-    # credential. Imported lazily to avoid a cycle (storage_data imports
-    # services indirectly via get_credential helpers).
-    try:
-        from api.services.storage_data import reset_blob_service_pool
 
-        reset_blob_service_pool()
-    except Exception as exc:
-        import logging
+    import logging
 
-        logging.getLogger(__name__).debug(
-            "blob service pool reset skipped: %s", type(exc).__name__
-        )
+    log = logging.getLogger(__name__)
+    # Lazy imports to avoid a cycle (downstream modules import services
+    # indirectly via get_credential helpers).
+    for module_name, attr in (
+        ("api.services.storage_data", "reset_blob_service_pool"),
+        ("api.services.job_artifacts", "_reset_artifact_table_pool"),
+        ("api.services.auto_warmup", "_reset_autowarmup_table_pool"),
+        ("api.services.redis_clients", "reset_redis_clients"),
+    ):
+        try:
+            module = __import__(module_name, fromlist=[attr])
+            reset_fn = getattr(module, attr)
+            reset_fn()
+        except Exception as exc:
+            log.debug("%s reset skipped: %s", attr, type(exc).__name__)
