@@ -61,7 +61,9 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     from api.routes._blast_shared import _reset_external_jobs_cache as _reset
     from api.routes.blast.jobs import _reset_blast_jobs_list_cache
     from api.routes.storage.common import reset_ncbi_catalogue_cache
+    from api.services.auto_warmup import _reset_autowarmup_table_pool
     from api.services.blast_db_metadata import _reset_blast_db_metadata_cache
+    from api.services.job_artifacts import _reset_artifact_table_pool
     from api.services.k8s_monitoring import (
         _reset_blast_status_cache,
         reset_k8s_credential_cache,
@@ -81,6 +83,8 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_k8s_credential_cache()
     reset_k8s_session_pool()
     reset_redis_clients()
+    _reset_artifact_table_pool()
+    _reset_autowarmup_table_pool()
     yield
     _reset()
     _reset_blast_jobs_list_cache()
@@ -92,3 +96,5 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_k8s_credential_cache()
     reset_k8s_session_pool()
     reset_redis_clients()
+    _reset_artifact_table_pool()
+    _reset_autowarmup_table_pool()
