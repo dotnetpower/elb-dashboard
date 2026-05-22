@@ -11,13 +11,13 @@ Validation: `uv run pytest -q api/tests/test_storage_usage_cache.py`.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -48,7 +48,9 @@ class UsageCacheResult:
 
 @dataclass
 class _UsageEntry:
-    summaries: dict[str, dict[str, Any]] | None
+    # Serialized JSON bytes so reads do not pay a ``deepcopy`` tax on every
+    # monitor poll. ``json.loads`` yields a fresh mutable dict on each hit.
+    summaries_bytes: bytes | None
     refreshed_monotonic: float | None
     refreshed_wall: float | None
     expires_at: float
@@ -120,18 +122,18 @@ def cached_container_usage_summaries(
         entry = _CACHE.get(cache_key)
         if entry is not None:
             _CACHE.move_to_end(cache_key)
-            if entry.summaries is not None and entry.expires_at > now:
+            if entry.summaries_bytes is not None and entry.expires_at > now:
                 return _result_from_entry(entry, state="fresh", hit=True)
-            if entry.summaries is not None and entry.stale_until > now:
+            if entry.summaries_bytes is not None and entry.stale_until > now:
                 if not entry.refreshing:
                     entry.refreshing = True
                     refresh_needed = True
                 result = _result_from_entry(entry, state="stale", hit=True)
-            elif entry.summaries is None and entry.refreshing:
+            elif entry.summaries_bytes is None and entry.refreshing:
                 return _pending_result(names, state="pending", hit=True)
             else:
                 entry = _UsageEntry(
-                    summaries=None,
+                    summaries_bytes=None,
                     refreshed_monotonic=None,
                     refreshed_wall=None,
                     expires_at=now,
@@ -143,7 +145,7 @@ def cached_container_usage_summaries(
                 result = _pending_result(names, state="pending", hit=False)
         else:
             entry = _UsageEntry(
-                summaries=None,
+                summaries_bytes=None,
                 refreshed_monotonic=None,
                 refreshed_wall=None,
                 expires_at=now,
@@ -171,7 +173,7 @@ def cached_container_usage_summaries(
             refreshed = _CACHE.get(cache_key)
             if (
                 refreshed is not None
-                and refreshed.summaries is not None
+                and refreshed.summaries_bytes is not None
                 and not refreshed.refreshing
                 and refreshed.expires_at > _monotonic()
             ):
@@ -206,9 +208,10 @@ def _refresh(
         summaries = _failed_summaries(container_names, type(exc).__name__)
     now = _monotonic()
     wall = _wall_time()
+    serialized = json.dumps(summaries, default=str).encode("utf-8")
     with _LOCK:
         _CACHE[cache_key] = _UsageEntry(
-            summaries=deepcopy(summaries),
+            summaries_bytes=serialized,
             refreshed_monotonic=now,
             refreshed_wall=wall,
             expires_at=now + ttl_seconds,
@@ -273,7 +276,7 @@ def _failed_summaries(
 
 
 def _result_from_entry(_entry: _UsageEntry, *, state: str, hit: bool) -> UsageCacheResult:
-    if _entry.summaries is None:
+    if _entry.summaries_bytes is None:
         return UsageCacheResult(
             summaries={},
             state=state,
@@ -283,7 +286,7 @@ def _result_from_entry(_entry: _UsageEntry, *, state: str, hit: bool) -> UsageCa
             age_seconds=None,
         )
     return _result_from_summaries(
-        _entry.summaries,
+        _entry.summaries_bytes,
         state=state,
         hit=hit,
         pending=False,
@@ -293,7 +296,7 @@ def _result_from_entry(_entry: _UsageEntry, *, state: str, hit: bool) -> UsageCa
 
 
 def _result_from_summaries(
-    summaries: dict[str, dict[str, Any]],
+    summaries: dict[str, dict[str, Any]] | bytes,
     *,
     state: str,
     hit: bool,
@@ -304,8 +307,15 @@ def _result_from_summaries(
     age_seconds = None
     if refreshed_monotonic is not None:
         age_seconds = round(max(0.0, _monotonic() - refreshed_monotonic), 3)
+    # Accept either a raw dict (cold path) or pre-serialized bytes (cache
+    # hit path). ``json.loads`` plus the bytes path gives the caller a
+    # fresh mutable dict at a fraction of ``deepcopy``'s cost.
+    if isinstance(summaries, (bytes, bytearray)):
+        out = json.loads(summaries)
+    else:
+        out = json.loads(json.dumps(summaries, default=str))
     return UsageCacheResult(
-        summaries=deepcopy(summaries),
+        summaries=out,
         state=state,
         hit=hit,
         pending=pending,
