@@ -113,6 +113,7 @@ export function DashboardHeader({
                 : null
             }
             allowCustom
+            preferKnownValue
             compact
             style={{ maxWidth: 220, minWidth: 140 }}
           />

@@ -120,7 +120,21 @@ export interface StorageSummary {
     name: string;
     public_access: string | null;
     last_modified_time: string | null;
+    blob_count?: number | null;
+    size_bytes?: number | null;
+    usage_pending?: boolean;
+    usage_truncated?: boolean;
+    usage_error?: string | null;
+    usage_cache_state?: string | null;
+    usage_refreshed_at?: string | null;
   }[];
+  containers_usage_cache?: {
+    state: string;
+    hit: boolean;
+    pending: boolean;
+    age_seconds: number | null;
+    refreshed_at: string | null;
+  };
 }
 
 export interface AcrSummary {

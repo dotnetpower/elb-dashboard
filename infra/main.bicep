@@ -295,6 +295,7 @@ module controlApp 'modules/containerAppControl.bicep' = {
     acrLoginServer: acr.outputs.acrLoginServer
     sharedIdentityResourceId: identity.outputs.identityResourceId
     sharedIdentityClientId: identity.outputs.identityClientId
+    sharedIdentityPrincipalId: identity.outputs.identityPrincipalId
     tenantId: tenantId
     apiClientId: apiClientId
     featureCustomDb: featureCustomDb

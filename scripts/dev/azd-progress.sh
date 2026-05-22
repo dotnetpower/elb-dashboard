@@ -5,51 +5,88 @@ set -euo pipefail
 
 cmd="${1:-plan}"
 shift || true
+style="${ELB_DEPLOY_STYLE:-pretty}"
+use_color=false
+
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${CI:-}" != "true" && "$style" != "plain" ]]; then
+  use_color=true
+fi
 
 timestamp() {
   date -u +%H:%M:%S
 }
 
+paint() {
+  local code="$1"
+  shift
+  if $use_color; then
+    printf '\033[%sm%s\033[0m' "$code" "$*"
+  else
+    printf '%s' "$*"
+  fi
+}
+
+bold() { paint '1' "$*"; }
+dim() { paint '2' "$*"; }
+cyan() { paint '36' "$*"; }
+green() { paint '32' "$*"; }
+yellow() { paint '33' "$*"; }
+red() { paint '31' "$*"; }
+
+rule() {
+  dim '------------------------------------------------------------'
+  printf '\n'
+}
+
+print_row() {
+  local number="$1"
+  local title="$2"
+  local detail="$3"
+  printf '  %s  %-24s %s\n' "$(cyan "$number/8")" "$title" "$(dim "$detail")"
+}
+
 case "$cmd" in
   plan)
-    cat <<'EOF'
-
-============================================================
-azd up progress map
-============================================================
-[0/8] Local bootstrap        - ./deploy.sh only: login, azd env, env values
-[1/8] Provider registration  - preprovision: required Azure providers
-[2/8] Resource group choice  - preprovision: reuse, delete, or choose rg-elb-dashboard-01 style numbering
-[3/8] Bicep provision        - azd: RG, VNet, identity, ACR, Storage, Key Vault, Container Apps Environment, bootstrap app
-[4/8] App registration       - postprovision: create/reuse SPA/API App Registration when needed
-[5/8] Resource validation    - postprovision: Storage HNS and workspace tags
-[6/8] Image builds           - postprovision: api, frontend, terminal via az acr build
-[7/8] Sidecar swap           - postprovision: replace bootstrap app with six-sidecar layout
-[8/8] Health check           - postprovision: wait for /api/health and print URL
-============================================================
-
-EOF
+    printf '\n'
+    rule
+    bold 'elb-dashboard deploy'
+    printf '\n'
+    dim 'azd up progress map'
+    printf '\n'
+    rule
+    print_row 0 'Local bootstrap' 'login, azd env, env values'
+    print_row 1 'Provider registration' 'required Azure providers'
+    print_row 2 'Resource group choice' 'reuse, delete, or choose numbered RG'
+    print_row 3 'Bicep provision' 'RG, VNet, identity, ACR, Storage, Key Vault, Container Apps Environment'
+    print_row 4 'App registration' 'create/reuse SPA/API App Registration'
+    print_row 5 'Resource validation' 'Storage HNS and workspace tags'
+    print_row 6 'Image builds' 'api, frontend, terminal via az acr build'
+    print_row 7 'Sidecar swap' 'replace bootstrap app with six-sidecar layout'
+    print_row 8 'Health check' 'wait for /api/health and print URL'
+    rule
+    printf '\n'
     ;;
   step)
     number="${1:?step number required}"
     title="${2:?step title required}"
     detail="${3:-}"
-    printf '[%s] [%s/8] %s\n' "$(timestamp)" "$number" "$title"
+    printf '[%s] %s %s  %-24s' "$(timestamp)" "$(cyan '>')" "$(bold "$number/8")" "$title"
     if [[ -n "$detail" ]]; then
-      printf '          %s\n' "$detail"
+      printf ' %s' "$detail"
     fi
+    printf '\n'
     ;;
   done)
     number="${1:?step number required}"
     title="${2:?step title required}"
-    printf '[%s] [%s/8] done: %s\n' "$(timestamp)" "$number" "$title"
+    printf '[%s] %s %s  %-24s %s\n' "$(timestamp)" "$(green '+')" "$(bold "$number/8")" "$title" "$(green 'done')"
     ;;
   note)
     message="${1:?message required}"
-    printf '[%s]      %s\n' "$(timestamp)" "$message"
+    printf '[%s] %s %s\n' "$(timestamp)" "$(yellow '-')" "$(dim "$message")"
     ;;
   *)
-    echo "ERROR: unknown progress command: $cmd" >&2
+    printf '%s unknown progress command: %s\n' "$(red 'ERROR:')" "$cmd" >&2
     exit 2
     ;;
 esac

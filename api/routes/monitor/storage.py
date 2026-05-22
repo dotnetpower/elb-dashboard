@@ -39,6 +39,7 @@ def storage_summary(
         return cached_snapshot(
             _cache_key("monitor", "storage", sub, resource_group, account_name),
             lambda: monitoring_svc.get_storage_summary(cred, sub, resource_group, account_name),
+            ttl_seconds=5.0,
         )
     except Exception as exc:
         return cast(

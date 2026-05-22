@@ -30,8 +30,10 @@ interface Window {
 }
 
 // Injected by vite.config.ts `define` at build time. See readme/version
-// stamp section — APP_VERSION is the SemVer from web/package.json,
-// APP_COMMIT is the short git SHA (or "dev"), and APP_BUILD_TIME is ISO-8601.
+// stamp section — APP_VERSION is the release version from web/package.json,
+// APP_BUILD_NUMBER is the commit count since the latest v* tag, APP_COMMIT is
+// the short git SHA (or "dev"), and APP_BUILD_TIME is ISO-8601.
 declare const __APP_VERSION__: string;
+declare const __APP_BUILD_NUMBER__: string;
 declare const __APP_COMMIT__: string;
 declare const __APP_BUILD_TIME__: string;

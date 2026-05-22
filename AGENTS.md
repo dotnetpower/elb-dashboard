@@ -134,11 +134,17 @@ where the failure was found, but knowing them up front saves a lot of time.
     `infra/*.bicep`, AND the bug cannot be reproduced in Tier 1/2a. State the
     reason in the change note. Charter §13 calls this out explicitly.
 11. **Do not hand-edit `version` in `web/package.json` or `pyproject.toml`.**
-    Always go through [scripts/dev/bump-version.sh](./scripts/dev/bump-version.sh)
-    so the release commit + tag stay consistent and SPA header / backend
-    image carry the same SemVer. Policy in
-    [.github/copilot-instructions.md §13](./.github/copilot-instructions.md);
-    full workflow in [docs/copilot/version-management.md](./docs/copilot/version-management.md).
+   Always go through [scripts/dev/bump-version.sh](./scripts/dev/bump-version.sh)
+   so the release commit + tag stay consistent and SPA header / backend image
+   carry the same release version. Policy in
+   [.github/copilot-instructions.md §13](./.github/copilot-instructions.md);
+   full workflow in [docs/copilot/version-management.md](./docs/copilot/version-management.md).
+12. **Version bump workflow requires dry-run and approval.** For version
+   questions, compare `web/package.json` and `pyproject.toml`; for bump
+   requests, run `scripts/dev/bump-version.sh --dry-run`, recommend `--major`,
+   default auto, or `--release` / `--minor`, then wait for maintainer approval
+   before running the non-dry-run command. `--patch` is intentionally rejected
+   because the patch segment is the build number.
 
 ---
 

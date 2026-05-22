@@ -1,27 +1,26 @@
 #!/usr/bin/env bash
-# Bump the project SemVer based on Conventional Commits since the last
-# `vX.Y.Z` tag, then update web/package.json + pyproject.toml in lockstep.
+# Bump the project release version based on Conventional Commits since the
+# last `vX.Y.0` tag, then update web/package.json + pyproject.toml in lockstep.
 #
 # Rules (matches the user's chosen scheme):
-#   MAJOR — manual only: `bump-version.sh --major`. Used for breaking
-#           changes the maintainer decides to ship.
-#   MINOR — auto when ANY commit since the last tag starts with `feat:`
-#           (or `feat(scope):`).
-#   PATCH — auto when no `feat:` commits exist but at least one `fix:`
-#           commit does. If neither feat nor fix landed, the script
-#           refuses to bump (use --patch / --minor to force).
+#   A — manual only: `bump-version.sh --major`. Used for breaking product
+#       generation changes the maintainer decides to ship.
+#   B — release train: auto when ANY commit since the last tag starts with
+#       `feat:` / `fix:` (or scoped forms). Use --release / --minor to force.
+#   C — build number: never committed by this script. Frontend builds compute
+#       it from commits since the latest release tag and bake it into the UI.
 #
 # Usage:
-#   scripts/dev/bump-version.sh           # auto (feat -> minor, fix -> patch)
+#   scripts/dev/bump-version.sh           # auto (feat/fix -> next release)
 #   scripts/dev/bump-version.sh --major   # force major bump
-#   scripts/dev/bump-version.sh --minor   # force minor bump
-#   scripts/dev/bump-version.sh --patch   # force patch bump
+#   scripts/dev/bump-version.sh --release # force release bump
+#   scripts/dev/bump-version.sh --minor   # alias for --release
 #   scripts/dev/bump-version.sh --dry-run # show what would happen, no changes
 #
 # Side effects (only when --dry-run is NOT passed):
 #   1. Updates web/package.json `"version"` and pyproject.toml `version`.
-#   2. Stages both files and creates `chore(release): vX.Y.Z` commit.
-#   3. Creates annotated git tag `vX.Y.Z` pointing at that commit.
+#   2. Stages both files and creates `chore(release): vX.Y.0` commit.
+#   3. Creates annotated git tag `vX.Y.0` pointing at that commit.
 #
 # It does NOT push. The maintainer reviews and runs:
 #   git push origin main --follow-tags
@@ -42,8 +41,8 @@ DRY_RUN=false
 for arg in "$@"; do
   case "$arg" in
     --major) FORCE_BUMP="major" ;;
-    --minor) FORCE_BUMP="minor" ;;
-    --patch) FORCE_BUMP="patch" ;;
+    --minor|--release) FORCE_BUMP="release" ;;
+    --patch) die "C is the build number and is not committed. Use --release/--minor or --major." ;;
     --dry-run|-n) DRY_RUN=true ;;
     -h|--help)
       sed -n '1,30p' "$0" | sed 's/^# \{0,1\}//'
@@ -69,7 +68,7 @@ if [[ "$PY_CURRENT" != "$CURRENT" ]]; then
   ts "WARNING: $PYPROJECT version ($PY_CURRENT) != $PKG_JSON ($CURRENT). The bump will sync both to the new value."
 fi
 
-# 3. Find the last release tag (vX.Y.Z) on this branch.
+# 3. Find the last release tag (vX.Y.0) on this branch.
 LAST_TAG="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname --merged HEAD | head -n1 || true)"
 if [[ -z "$LAST_TAG" ]]; then
   ts "no previous v* tag — scanning full history for feat/fix commits"
@@ -111,11 +110,10 @@ else
     ts "detected BREAKING change in history — refuse auto-bump. Re-run with --major to acknowledge."
     exit 2
   fi
-  if $HAS_FEAT;  then KIND="minor"; fi
-  if [[ -z "$KIND" ]] && $HAS_FIX; then KIND="patch"; fi
+  if $HAS_FEAT || $HAS_FIX; then KIND="release"; fi
   if [[ -z "$KIND" ]]; then
     ts "no feat/fix commits since ${LAST_TAG:-repo root} — nothing to bump."
-    ts "(use --patch / --minor / --major to force.)"
+    ts "(use --release / --minor / --major to force.)"
     exit 0
   fi
   ts "auto-detected bump: $KIND  (feat=$HAS_FEAT fix=$HAS_FIX)"
@@ -124,8 +122,7 @@ fi
 # 6. Compute new version.
 case "$KIND" in
   major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
-  minor) MINOR=$((MINOR+1)); PATCH=0 ;;
-  patch) PATCH=$((PATCH+1)) ;;
+  release) MINOR=$((MINOR+1)); PATCH=0 ;;
 esac
 NEW="$MAJOR.$MINOR.$PATCH"
 ts "$CURRENT -> $NEW"

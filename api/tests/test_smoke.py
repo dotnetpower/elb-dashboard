@@ -202,6 +202,156 @@ def test_storage_summary_preserves_hns_when_container_list_fails(
     assert body["containers_degraded_reason"] == "RuntimeError"
 
 
+def test_storage_summary_includes_container_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import storage_usage_cache
+    from api.services.monitoring import get_storage_summary
+
+    storage_usage_cache.reset_storage_usage_cache()
+    monkeypatch.setattr(storage_usage_cache, "_start_refresh_thread", lambda target: target())
+
+    class FakeBlobContainers:
+        def list(self, _resource_group: str, _account_name: str) -> list[object]:
+            return [
+                SimpleNamespace(
+                    name="queries",
+                    public_access=None,
+                    last_modified_time=None,
+                ),
+                SimpleNamespace(
+                    name="job-artifacts",
+                    public_access=None,
+                    last_modified_time=None,
+                ),
+            ]
+
+    fake_client = SimpleNamespace(
+        storage_accounts=SimpleNamespace(
+            get_properties=lambda _resource_group, account_name: SimpleNamespace(
+                name=account_name,
+                location="eastus",
+                sku=SimpleNamespace(name="Standard_LRS"),
+                kind="StorageV2",
+                public_network_access="Disabled",
+                is_hns_enabled=True,
+            )
+        ),
+        blob_containers=FakeBlobContainers(),
+    )
+    monkeypatch.setattr("api.services.monitoring.storage_client", lambda *_args: fake_client)
+    monkeypatch.setattr(
+        "api.services.storage_usage_cache.storage_data.container_usage_summaries",
+        lambda _credential, _account_name, _names, **_kwargs: {
+            "queries": {
+                "blob_count": 2,
+                "size_bytes": 128,
+                "usage_error": None,
+                "usage_truncated": False,
+            },
+            "job-artifacts": {
+                "blob_count": 1,
+                "size_bytes": 64,
+                "usage_error": None,
+                "usage_truncated": True,
+            },
+        },
+    )
+
+    body = get_storage_summary(object(), "sub", "rg", "stelb")
+
+    for container in body["containers"]:
+        assert container.pop("usage_refreshed_at") is not None
+    assert body["containers"] == [
+        {
+            "name": "queries",
+            "public_access": None,
+            "last_modified_time": None,
+            "blob_count": 2,
+            "size_bytes": 128,
+            "usage_pending": False,
+            "usage_truncated": False,
+            "usage_error": None,
+            "usage_cache_state": "fresh",
+        },
+        {
+            "name": "job-artifacts",
+            "public_access": None,
+            "last_modified_time": None,
+            "blob_count": 1,
+            "size_bytes": 64,
+            "usage_pending": False,
+            "usage_truncated": True,
+            "usage_error": None,
+            "usage_cache_state": "fresh",
+        },
+    ]
+    assert body["containers_usage_cache"]["state"] == "fresh"
+
+
+def test_storage_summary_keeps_containers_when_usage_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import storage_usage_cache
+    from api.services.monitoring import get_storage_summary
+
+    storage_usage_cache.reset_storage_usage_cache()
+    monkeypatch.setattr(storage_usage_cache, "_start_refresh_thread", lambda target: target())
+
+    class FakeBlobContainers:
+        def list(self, _resource_group: str, _account_name: str) -> list[object]:
+            return [
+                SimpleNamespace(
+                    name="queries",
+                    public_access=None,
+                    last_modified_time=None,
+                )
+            ]
+
+    fake_client = SimpleNamespace(
+        storage_accounts=SimpleNamespace(
+            get_properties=lambda _resource_group, account_name: SimpleNamespace(
+                name=account_name,
+                location="eastus",
+                sku=SimpleNamespace(name="Standard_LRS"),
+                kind="StorageV2",
+                public_network_access="Disabled",
+                is_hns_enabled=True,
+            )
+        ),
+        blob_containers=FakeBlobContainers(),
+    )
+    monkeypatch.setattr("api.services.monitoring.storage_client", lambda *_args: fake_client)
+
+    def raise_usage(*_args: object, **_kwargs: object) -> dict[str, dict[str, int]]:
+        raise RuntimeError("usage unavailable")
+
+    monkeypatch.setattr(
+        "api.services.storage_usage_cache.storage_data.container_usage_summaries",
+        raise_usage,
+    )
+
+    body = get_storage_summary(object(), "sub", "rg", "stelb")
+
+    assert body["containers"] == [
+        {
+            "name": "queries",
+            "public_access": None,
+            "last_modified_time": None,
+            "blob_count": None,
+            "size_bytes": None,
+            "usage_pending": False,
+            "usage_truncated": False,
+            "usage_error": "RuntimeError",
+            "usage_cache_state": "fresh",
+            "usage_refreshed_at": body["containers"][0]["usage_refreshed_at"],
+        }
+    ]
+    assert body["containers"][0]["usage_refreshed_at"] is not None
+    assert "containers_usage_degraded" not in body
+    assert body["containers_usage_cache"]["state"] == "fresh"
+
+
 def test_aks_events_rejects_invalid_namespace(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

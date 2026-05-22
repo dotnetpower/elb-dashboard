@@ -170,7 +170,22 @@ When deployment finishes, open the URL printed by the helper:
 https://ca-elb-dashboard.<subdomain>.<region>.azurecontainerapps.io
 ```
 
-Sign in with the same tenant that owns the App Registration. The Dashboard should load Azure workspace readiness from the deployed API sidecar.
+The browser opens the ElasticBLAST on Azure sign-in page. Click **Sign in with Microsoft**, then use an account from the same tenant that owns the App Registration.
+
+![ElasticBLAST on Azure sign-in page with the Sign in with Microsoft button](images/screenshots/signin.png)
+
+After sign-in, the Dashboard should load Azure workspace readiness from the deployed API sidecar.
+
+On a new workspace, the **Getting Started** dialog appears after sign-in. This dialog is the first-search readiness checklist, not another `azd` deployment step: the control plane is deployed, but the workload runtime still needs to be prepared before BLAST can run.
+
+![Getting Started dialog showing completed image and terminal checks, with AKS cluster and BLAST database preparation still pending](images/screenshots/getting-started.png)
+
+From this state, complete the workload setup in the browser before submitting a BLAST job. A complete BLAST-ready workspace needs these runtime pieces:
+
+1. Create an AKS cluster from the Cluster Plane card.
+2. Get and warm a BLAST database from the BLAST Databases dialog.
+3. Build the ElasticBLAST container images in ACR, including `elb-openapi`.
+4. Deploy or update the `elb-openapi` service to AKS before using the [API Reference](user-guide/api-reference.md) or OpenAPI execution surface.
 
 If sign-in works locally but not in Azure, the deployed Container App origin may need to be added as a SPA redirect URI. See [Deployment Reference](deployment-reference.md#redirect-uri-after-deployment).
 
@@ -182,7 +197,7 @@ The Dashboard is the browser landing page after sign-in. On first load it scans 
 - If multiple workspaces are found, choose the one researchers should use.
 - If no workspace is found, the setup wizard opens so you can select the subscription, resource group, Storage account, and ACR.
 
-The setup wizard only connects the dashboard to the Azure workspace. It does not make the workspace BLAST-ready by itself. After the workspace is selected, use the Dashboard readiness flow to prepare the runtime pieces: build the ElasticBLAST images in ACR, prepare a BLAST database in Storage, create or start AKS, and warm the selected database before the first search.
+The setup wizard only connects the dashboard to the Azure workspace. It does not make the workspace BLAST-ready by itself. After the workspace is selected, use the Dashboard readiness flow to prepare the runtime pieces: build the ElasticBLAST images in ACR, deploy `elb-openapi` when needed, prepare a BLAST database in Storage, create or start AKS, and warm the selected database before the first search.
 
 You can re-run the setup wizard later from the Dashboard resource settings panel if the subscription, resource group, Storage account, or ACR changes.
 
@@ -192,9 +207,10 @@ A deployed dashboard is ready for real searches only after the workload resource
 
 1. Storage account: prepare at least one BLAST database copied from NCBI into the workload Storage account.
 2. Database layout: let the prepare flow create the available shard layouts so the submit form can choose an appropriate sharded execution path.
-3. ACR: build the ElasticBLAST runtime images required by submit, split, merge, and OpenAPI execution.
+3. ACR: build the ElasticBLAST runtime images required by submit, split, merge, and OpenAPI execution, including `elb-openapi`.
 4. AKS: create or start a workload cluster with enough nodes and memory for the chosen database.
-5. Warmup: keep the selected database warm on AKS before submitting work, so the first search does not pay the full database staging cost.
+5. OpenAPI service: deploy or update `elb-openapi` to AKS when the API Reference or OpenAPI execution surface will be used.
+6. Warmup: keep the selected database warm on AKS before submitting work, so the first search does not pay the full database staging cost.
 
 The Dashboard should guide this sequence. The setup wizard is the resource-selection gate; the BLAST readiness flow is the operational gate before New Search.
 

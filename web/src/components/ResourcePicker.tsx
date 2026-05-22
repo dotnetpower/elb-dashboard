@@ -21,6 +21,8 @@ interface Props {
   disabledPlaceholder?: string;
   /** Allow free-text entry as a fallback (renders an `Other…` option). */
   allowCustom?: boolean;
+  /** Replace stale saved values with the first enabled fetched item. */
+  preferKnownValue?: boolean;
   /** Compact chip mode for the config strip. */
   compact?: boolean;
   style?: CSSProperties;
@@ -34,6 +36,7 @@ export function ResourcePicker({
   fetcher,
   disabledPlaceholder = "Configure parent first",
   allowCustom = false,
+  preferKnownValue = false,
   compact = false,
   style,
 }: Props) {
@@ -46,14 +49,24 @@ export function ResourcePicker({
     staleTime: 30_000,
   });
 
-  // Auto-select first item when nothing is chosen yet.
+  // Auto-select first item when nothing is chosen yet, and optionally replace
+  // stale persisted values that no longer exist in the fetched scope.
   useEffect(() => {
     if (!enabled) return;
-    if (!value && query.data && query.data.length > 0) {
-      const firstEnabled = query.data.find((i) => !i.disabled);
-      if (firstEnabled) onChange(firstEnabled.value);
+    if (!query.data || query.data.length === 0) return;
+    const firstEnabled = query.data.find((i) => !i.disabled);
+    if (!firstEnabled) return;
+    if (!value) {
+      onChange(firstEnabled.value);
+      return;
     }
-  }, [enabled, value, query.data, onChange]);
+    if (preferKnownValue) {
+      const selected = query.data.find((i) => i.value === value);
+      if (!selected || selected.disabled) {
+        onChange(firstEnabled.value);
+      }
+    }
+  }, [enabled, preferKnownValue, value, query.data, onChange]);
 
   const knownValues = new Set(query.data?.map((i) => i.value) ?? []);
   const showCustomInput = allowCustom && value && !knownValues.has(value);

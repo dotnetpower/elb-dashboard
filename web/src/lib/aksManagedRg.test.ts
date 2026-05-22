@@ -11,6 +11,14 @@ describe("isAksManagedResourceGroup", () => {
     ).toBe(true);
   });
 
+  it("flags the default ME_ managed-environment RG name", () => {
+    expect(
+      isAksManagedResourceGroup({
+        name: "ME_cae-elb-dashboard-01_abcd_rg-elb-dashboard-01_koreacentral",
+      }),
+    ).toBe(true);
+  });
+
   it("flags any RG carrying the aks-managed-cluster-name tag", () => {
     expect(
       isAksManagedResourceGroup({
@@ -30,8 +38,10 @@ describe("isAksManagedResourceGroup", () => {
   });
 
   it("does not flag RGs whose name merely contains MC_ later", () => {
-    expect(
-      isAksManagedResourceGroup({ name: "rg-MC_something" }),
-    ).toBe(false);
+    expect(isAksManagedResourceGroup({ name: "rg-MC_something" })).toBe(false);
+  });
+
+  it("does not flag RGs whose name merely contains ME_ later", () => {
+    expect(isAksManagedResourceGroup({ name: "rg-ME_something" })).toBe(false);
   });
 });

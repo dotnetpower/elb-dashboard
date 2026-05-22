@@ -19,36 +19,34 @@ export function ConfigBar({ config, onChange, onOpenSettings }: Props) {
   const rgFetcher = sub
     ? async () => {
         const groups = await armProxyApi.listResourceGroups(sub);
-        // Classify each RG and disable the ones the dashboard cannot
-        // manage as a workspace:
-        //   * AKS-managed node RGs (default `MC_…` name or
-        //     `aks-managed-cluster-name` tag) — owned by AKS, never a
-        //     workspace.
-        //   * RGs without any `elb-*` tag — listed so users can see they
-        //     exist, but disabled to prevent accidental selection.
-        const items = groups.map((g) => {
-          const tags = g.tags ?? {};
-          const isAksManaged = isAksManagedResourceGroup({
-            name: g.name,
-            tags,
+        // Hide Azure-managed infrastructure RGs (`MC_…`, `ME_…`) entirely;
+        // they may inherit `elb-*` tags but are never dashboard workspaces.
+        // RGs without any `elb-*` tag remain visible but disabled so users
+        // can see they exist without accidentally selecting them.
+        const items = groups
+          .filter(
+            (g) =>
+              !isAksManagedResourceGroup({
+                name: g.name,
+                tags: g.tags ?? {},
+              }),
+          )
+          .map((g) => {
+            const tags = g.tags ?? {};
+            const isElb = Object.keys(tags).some((k) => k.startsWith("elb-"));
+            let description = g.location;
+            let disabled = false;
+            if (!isElb) {
+              description = `${g.location} · no elb-* tag`;
+              disabled = true;
+            }
+            return {
+              value: g.name,
+              label: g.name,
+              description,
+              disabled,
+            };
           });
-          const isElb = Object.keys(tags).some((k) => k.startsWith("elb-"));
-          let description = g.location;
-          let disabled = false;
-          if (isAksManaged) {
-            description = `${g.location} · AKS-managed (node RG)`;
-            disabled = true;
-          } else if (!isElb) {
-            description = `${g.location} · no elb-* tag`;
-            disabled = true;
-          }
-          return {
-            value: g.name,
-            label: g.name,
-            description,
-            disabled,
-          };
-        });
         // Selectable (elb-tagged) RGs first, then disabled rows; keep
         // alpha order within each bucket.
         items.sort((a, b) => {
@@ -93,10 +91,14 @@ export function ConfigBar({ config, onChange, onOpenSettings }: Props) {
                   if (tags["elb-acr-rg"]) next.acrResourceGroup = tags["elb-acr-rg"];
                   if (tags["elb-acr"]) next.acrName = tags["elb-acr"];
                   if (tags["elb-storage"]) next.storageAccountName = tags["elb-storage"];
-                  if (tags["elb-terminal-rg"]) next.terminalResourceGroup = tags["elb-terminal-rg"];
-                  if (tags["elb-terminal-vm"]) next.terminalVmName = tags["elb-terminal-vm"];
+                  if (tags["elb-terminal-rg"])
+                    next.terminalResourceGroup = tags["elb-terminal-rg"];
+                  if (tags["elb-terminal-vm"])
+                    next.terminalVmName = tags["elb-terminal-vm"];
                   if (tags["elb-region"]) next.region = tags["elb-region"];
-                } catch { /* tags not found — keep existing config */ }
+                } catch {
+                  /* tags not found — keep existing config */
+                }
               }
               onChange(next);
             }}
@@ -109,7 +111,10 @@ export function ConfigBar({ config, onChange, onOpenSettings }: Props) {
         </>
       ) : (
         <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-          {config.subscriptionId ? config.subscriptionId.slice(0, 8) + "…" : "No subscription"} · {config.workloadResourceGroup || "—"}
+          {config.subscriptionId
+            ? config.subscriptionId.slice(0, 8) + "…"
+            : "No subscription"}{" "}
+          · {config.workloadResourceGroup || "—"}
         </span>
       )}
 

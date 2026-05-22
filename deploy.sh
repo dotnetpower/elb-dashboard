@@ -19,6 +19,7 @@ Environment overrides:
   ELB_EXISTING_RG_ACTION       delete | number | abort when rg-elb-dashboard has resources
   ELB_RESOURCE_NAME_SUFFIX     Optional suffix such as -01 for numbered deployments
   ELB_RESOURCE_NAME_SLOT       Optional azd-safe slot such as slot01 for numbered deployments
+  ELB_ALLOW_AZD_ENV_RETARGET   true to allow overwriting an existing azd env target subscription/tenant
 
 USAGE
 }
@@ -66,11 +67,24 @@ open_url() {
   fi
 }
 
+azd_env_value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key {gsub(/"/, "", $2); print $2; exit}'
+}
+
+is_true() {
+  case "${1:-}" in
+    true|TRUE|1|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 need_cmd az
 need_cmd azd
 
 bash "$repo_root/scripts/dev/azd-progress.sh" plan
 export ELB_AZD_PROGRESS_PLAN_SHOWN=true
+echo "==> Full deployment usually takes 10-20 minutes. Code-only changes are faster with scripts/dev/quick-deploy.sh."
 bash "$repo_root/scripts/dev/azd-progress.sh" step 0 "Local bootstrap" "Checking Azure CLI, azd auth, and azd environment values."
 
 if ! az account show -o none >/dev/null 2>&1; then
@@ -88,10 +102,69 @@ echo "    User:         $user_name"
 echo "    Subscription: $account_name ($subscription_id)"
 echo "    Tenant:       $tenant_id"
 
+existing_env_values="$(azd env get-values --environment "$env_name" 2>/dev/null || true)"
+existing_subscription_id="$(printf '%s\n' "$existing_env_values" | azd_env_value AZURE_SUBSCRIPTION_ID)"
+existing_tenant_id="$(printf '%s\n' "$existing_env_values" | azd_env_value AZURE_TENANT_ID)"
+if ! is_true "${ELB_ALLOW_AZD_ENV_RETARGET:-}"; then
+  if [[ -n "$existing_subscription_id" && "$existing_subscription_id" != "$subscription_id" ]]; then
+    cat >&2 <<EOF
+ERROR: azd environment '$env_name' targets subscription '$existing_subscription_id',
+but the active Azure CLI subscription is '$subscription_id'.
+
+This value comes from the existing azd environment state (.azure/$env_name/.env),
+not from the repository .env file. Fresh clones without an existing azd
+environment will use the active Azure CLI subscription.
+
+Refusing to retarget the existing azd environment from the current shell.
+Choose one of these paths, then rerun ./deploy.sh:
+
+1. Keep using the existing azd environment target:
+  az account set --subscription "$existing_subscription_id"
+  azd auth login --use-device-code --tenant-id "${existing_tenant_id:-$tenant_id}"
+
+2. Intentionally retarget this azd environment to the active Azure CLI context:
+  ELB_ALLOW_AZD_ENV_RETARGET=true ./deploy.sh
+
+EOF
+    exit 1
+  fi
+  if [[ -n "$existing_tenant_id" && "$existing_tenant_id" != "$tenant_id" ]]; then
+    cat >&2 <<EOF
+ERROR: azd environment '$env_name' targets tenant '$existing_tenant_id',
+but the active Azure CLI tenant is '$tenant_id'.
+
+This value comes from the existing azd environment state (.azure/$env_name/.env),
+not from the repository .env file. Fresh clones without an existing azd
+environment will use the active Azure CLI tenant.
+
+Refusing to mix Azure CLI and azd accounts. Choose one of these paths, then
+rerun ./deploy.sh:
+
+1. Keep using the existing azd environment target:
+  az login --tenant "$existing_tenant_id"
+
+2. Intentionally retarget this azd environment to the active Azure CLI context:
+  ELB_ALLOW_AZD_ENV_RETARGET=true ./deploy.sh
+EOF
+    exit 1
+  fi
+fi
+
 azd_status="$(azd auth login --check-status 2>&1 || true)"
 if [[ "$azd_status" != *"$user_name"* ]]; then
   echo "==> azd is not signed in as the active Azure CLI user; starting device-code login..."
+  echo "    Use the same browser account as Azure CLI: $user_name"
   azd auth login --use-device-code --tenant-id "$tenant_id"
+  azd_status="$(azd auth login --check-status 2>&1 || true)"
+  if [[ "$azd_status" != *"$user_name"* ]]; then
+    cat >&2 <<EOF
+ERROR: azd is still not signed in as the active Azure CLI user '$user_name'.
+
+The browser device-code flow likely completed with a different account. Sign out
+or switch accounts so Azure CLI and azd use the same tenant/user, then rerun.
+EOF
+    exit 1
+  fi
 fi
 
 if azd env get-values --environment "$env_name" >/dev/null 2>&1; then
@@ -119,11 +192,26 @@ if [[ -v ELB_RESOURCE_NAME_SUFFIX ]]; then
 elif [[ -v ELB_RESOURCE_NAME_SLOT ]]; then
   export ELB_RESOURCE_NAME_SLOT
 else
-  export ELB_RESOURCE_NAME_SLOT="$existing_resource_slot"
+  if [[ -n "$existing_resource_slot" ]]; then
+    base_rg_exists="$(az group exists --name rg-elb-dashboard -o tsv 2>/dev/null || echo false)"
+    base_rg_count="0"
+    if [[ "$base_rg_exists" == "true" ]]; then
+      base_rg_count="$(az resource list --resource-group rg-elb-dashboard --query 'length(@)' -o tsv 2>/dev/null || echo 0)"
+    fi
+    if [[ "$base_rg_exists" == "true" && "$base_rg_count" != "0" ]]; then
+      export ELB_RESOURCE_NAME_SLOT="$existing_resource_slot"
+    else
+      echo "==> Clearing stale numbered resource slot: $existing_resource_slot (rg-elb-dashboard is available)"
+      export ELB_RESOURCE_NAME_SLOT=""
+    fi
+  else
+    export ELB_RESOURCE_NAME_SLOT=""
+  fi
 fi
 
-echo "==> Pre-flight provider check (azd up verifies providers again in step 1)"
+echo "==> Pre-flight provider check"
 bash "$repo_root/scripts/dev/register-providers.sh" --subscription "$subscription_id"
+export ELB_PROVIDER_REGISTRATION_READY=true
 
 bash "$repo_root/scripts/dev/resolve-resource-group.sh" --subscription "$subscription_id" --environment "$env_name"
 resource_slot="$(azd env get-values --environment "$env_name" 2>/dev/null | awk -F= '/^ELB_RESOURCE_NAME_SLOT=/{gsub(/"/, "", $2); print $2; exit}')"
@@ -133,12 +221,12 @@ if [[ -n "$resource_slot" ]]; then
 fi
 echo "==> Target resource group: rg-elb-dashboard${resource_suffix}"
 if [[ "$prepare_only" == "true" ]]; then
-  bash "$repo_root/scripts/dev/azd-progress.sh" done 0 "Local bootstrap"
+  bash "$repo_root/scripts/dev/azd-progress.sh" "done" 0 "Local bootstrap"
   echo "==> Prepare-only mode complete. Run azd up to deploy."
   exit 0
 fi
 
-bash "$repo_root/scripts/dev/azd-progress.sh" done 0 "Local bootstrap"
+bash "$repo_root/scripts/dev/azd-progress.sh" "done" 0 "Local bootstrap"
 echo "==> Running azd up"
 azd up \
   --environment "$env_name" \

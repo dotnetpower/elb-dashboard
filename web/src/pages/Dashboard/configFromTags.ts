@@ -7,10 +7,9 @@ export function configFromTags(
   subscriptionId: string,
   rg: { name: string; location: string; tags?: Record<string, string> },
 ): ResourceConfig | null {
-  // AKS auto-creates a node resource group (default name `MC_…`) that
-  // inherits some tags from the parent and may therefore look like an
-  // ElasticBLAST workspace. It is not — the dashboard cannot manage it
-  // directly, so suppress it from the workspace picker entirely.
+  // Azure creates managed infrastructure resource groups (`MC_…`, `ME_…`)
+  // that can inherit deployment tags and look like ElasticBLAST workspaces.
+  // They are not user-selectable workload RGs, so suppress them entirely.
   if (isAksManagedResourceGroup(rg)) return null;
   const t = rg.tags ?? {};
   // Must have at least one elb- tag to qualify

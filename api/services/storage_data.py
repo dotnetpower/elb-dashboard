@@ -4,7 +4,7 @@ Responsibility: Azure Blob data-plane helpers for BLAST storage workflows
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `encode_blob_file_id`, `decode_blob_file_id`, `safe_download_filename`,
-`result_media_type`, `upload_blob_bytes`, `upload_blob_text`
+`result_media_type`, `upload_blob_bytes`, `upload_blob_text`, `container_usage_summaries`
 Risky contracts: Validate Storage account/blob inputs and preserve the no-browser-SAS policy.
 Validation: `uv run pytest -q api/tests/test_storage_data.py`.
 """
@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import os
 import re
 import threading
 import zlib
@@ -112,9 +113,7 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
         try:
             evicted.close()
         except Exception as exc:
-            LOGGER.debug(
-                "blob service evict-close failed: %s", type(exc).__name__
-            )
+            LOGGER.debug("blob service evict-close failed: %s", type(exc).__name__)
     return client
 
 
@@ -137,9 +136,7 @@ def reset_blob_service_pool() -> None:
         try:
             client.close()
         except Exception as exc:
-            LOGGER.debug(
-                "blob service reset-close failed: %s", type(exc).__name__
-            )
+            LOGGER.debug("blob service reset-close failed: %s", type(exc).__name__)
 
 
 _STORAGE_ACCOUNT_NAME_RE = re.compile(r"^[a-z0-9]{3,24}$")
@@ -310,6 +307,49 @@ def list_result_blobs(
     return blobs
 
 
+def container_usage_summaries(
+    credential: TokenCredential,
+    account_name: str,
+    container_names: Iterable[str],
+    *,
+    max_blobs_per_container: int | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return best-effort blob-count and byte-size totals for named containers."""
+    svc = _blob_service(credential, account_name)
+    summaries: dict[str, dict[str, Any]] = {}
+    for container_name in container_names:
+        total_size = 0
+        blob_count = 0
+        truncated = False
+        try:
+            cc = svc.get_container_client(container_name)
+            for blob in cc.list_blobs():
+                blob_count += 1
+                size = getattr(blob, "size", None)
+                if size is None:
+                    size = getattr(blob, "content_length", None)
+                if isinstance(size, int):
+                    total_size += size
+                if max_blobs_per_container is not None and blob_count >= max_blobs_per_container:
+                    truncated = True
+                    break
+        except Exception as exc:
+            summaries[container_name] = {
+                "blob_count": None,
+                "size_bytes": None,
+                "usage_error": type(exc).__name__,
+                "usage_truncated": False,
+            }
+            continue
+        summaries[container_name] = {
+            "blob_count": blob_count,
+            "size_bytes": total_size,
+            "usage_error": None,
+            "usage_truncated": truncated,
+        }
+    return summaries
+
+
 # NOTE: There is intentionally NO `generate_download_url` / SAS issuer here.
 # Per .github/copilot-instructions.md §9, every Storage account stays
 # `publicNetworkAccess: Disabled` and **the browser must never receive a SAS
@@ -450,14 +490,25 @@ def classify_storage_failure(
             ),
         }
 
+    if os.environ.get("CONTAINER_APP_NAME") or os.environ.get("IDENTITY_ENDPOINT"):
+        remediation = (
+            "Assign 'Storage Blob Data Reader' (or Contributor for write) on the "
+            "storage account to the shared managed identity attached to this "
+            "Container App, then wait a few minutes for RBAC propagation."
+        )
+    else:
+        remediation = (
+            "Assign 'Storage Blob Data Reader' (or Contributor for write) on the "
+            "storage account to your az login identity, then wait a few minutes "
+            "for RBAC propagation."
+        )
+
     return {
         "degraded": True,
         "degraded_reason": "access_denied",
         "message": (
             f"Cannot read data from storage account '{account_name}'. "
-            "Assign 'Storage Blob Data Reader' (or Contributor for write) on the "
-            "storage account to your az login identity, then wait a few minutes "
-            "for RBAC propagation."
+            f"{remediation}"
         ),
     }
 

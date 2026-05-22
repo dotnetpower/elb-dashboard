@@ -28,6 +28,7 @@ REQUIRED_VARS=(
   ACR_LOGIN_SERVER
   CONTAINER_APP_NAME
   CONTAINER_APP_FQDN
+  CONTAINER_ENV_NAME
   SHARED_IDENTITY_RESOURCE_ID
   SHARED_IDENTITY_CLIENT_ID
   AZURE_TENANT_ID
@@ -47,6 +48,51 @@ progress() {
   bash "$REPO_ROOT/scripts/dev/azd-progress.sh" "$@"
 }
 
+ensure_spa_redirect_uri() {
+  local app_id="$1"
+  local redirect_uri="$2"
+  local object_id current_redirects redirects
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "FATAL: jq is required to update App Registration redirect URIs." >&2
+    exit 1
+  fi
+
+  object_id="$(az ad app show --id "$app_id" --query id -o tsv --only-show-errors 2>/dev/null || true)"
+  if [ -z "$object_id" ]; then
+    cat >&2 <<EOF
+FATAL: cannot find App Registration '$app_id' in the active Azure CLI tenant.
+
+The Azure CLI subscription must match AZURE_SUBSCRIPTION_ID before postprovision
+updates the SPA redirect URI for the deployed Container App origin.
+EOF
+    exit 1
+  fi
+
+  current_redirects="$(az rest \
+    --method GET \
+    --uri "https://graph.microsoft.com/v1.0/applications/$object_id?\$select=spa" \
+    --only-show-errors \
+    | jq -c '.spa.redirectUris // []')"
+
+  if jq -e --arg uri "$redirect_uri" 'index($uri) != null' <<<"$current_redirects" >/dev/null; then
+    progress note "App Registration already includes SPA redirect URI $redirect_uri."
+    return 0
+  fi
+
+  redirects="$(jq -cn \
+    --arg uri "$redirect_uri" \
+    --argjson existing "$current_redirects" \
+    '$existing + [$uri] | unique')"
+  az rest \
+    --method PATCH \
+    --uri "https://graph.microsoft.com/v1.0/applications/$object_id" \
+    --headers "Content-Type=application/json" \
+    --body "{\"spa\":{\"redirectUris\":$redirects}}" \
+    --only-show-errors >/dev/null
+  progress note "Added SPA redirect URI $redirect_uri to the App Registration."
+}
+
 # Ensure az CLI uses the correct subscription for all subsequent calls
 # (including App Registration setup and sourced helper scripts). This matters
 # when the script is run directly after a failed azd hook rather than through
@@ -54,8 +100,12 @@ progress() {
 if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
   az account set --subscription "$AZURE_SUBSCRIPTION_ID"
 fi
-progress note "Refreshing provider registration state before postprovision work."
-bash "$REPO_ROOT/scripts/dev/register-providers.sh" --subscription "$AZURE_SUBSCRIPTION_ID"
+if [ "${ELB_PROVIDER_REGISTRATION_READY:-}" = "true" ]; then
+  progress note "Provider registration already completed by ./deploy.sh; skipping postprovision refresh."
+else
+  progress note "Refreshing provider registration state before postprovision work."
+  bash "$REPO_ROOT/scripts/dev/register-providers.sh" --subscription "$AZURE_SUBSCRIPTION_ID"
+fi
 
 progress step 4 "App registration" "Create/reuse the Entra App Registration if API_CLIENT_ID is empty."
 API_CLIENT_ID_VAL="${API_CLIENT_ID:-}"
@@ -79,7 +129,8 @@ EOF
 else
   progress note "API_CLIENT_ID is already set; reusing the configured App Registration."
 fi
-progress done 4 "App registration"
+ensure_spa_redirect_uri "$API_CLIENT_ID_VAL" "https://$CONTAINER_APP_FQDN"
+progress "done" 4 "App registration"
 APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="${APPLICATIONINSIGHTS_CONNECTION_STRING:-}"
 VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
 VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
@@ -107,6 +158,31 @@ ts() {
   secs=$(( elapsed % 60 ))
   hms=$(date -u +%H:%M:%S)
   printf '[%s +%dm%02ds] %s\n' "$hms" "$mins" "$secs" "$1"
+}
+
+release_version() {
+  local value=""
+  if command -v node >/dev/null 2>&1; then
+    value="$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || true)"
+  fi
+  if [ -z "$value" ]; then
+    value="$(grep -E '"version"[[:space:]]*:' "$REPO_ROOT/web/package.json" | head -n1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)"
+  fi
+  printf '%s\n' "${value:-0.0.0}"
+}
+
+release_build_number() {
+  local latest_tag=""
+  latest_tag="$(git -C "$REPO_ROOT" tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname --merged HEAD 2>/dev/null | head -n1 || true)"
+  if [ -n "$latest_tag" ]; then
+    git -C "$REPO_ROOT" rev-list --count "$latest_tag..HEAD" 2>/dev/null || printf '0\n'
+  else
+    git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || printf '0\n'
+  fi
+}
+
+short_commit() {
+  git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || printf 'dev\n'
 }
 
 ts "==> Postprovision starting"
@@ -150,6 +226,48 @@ EOF
 progress step 5 "Resource validation" "Validate Storage HNS and merge dashboard discovery tags."
 validate_storage_account
 
+resolve_platform_private_endpoint_subnet_id() {
+  local explicit subnet_id vnet_id resolved
+
+  explicit="${PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID:-}"
+  if [ -n "$explicit" ]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+
+  subnet_id="$(az containerapp env show \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --name "$CONTAINER_ENV_NAME" \
+    --query 'properties.vnetConfiguration.infrastructureSubnetId' \
+    -o tsv \
+    --only-show-errors 2>/dev/null || true)"
+  if [ -z "$subnet_id" ] || [[ "$subnet_id" != */subnets/* ]]; then
+    cat >&2 <<EOF
+FATAL: cannot resolve Container Apps Environment infrastructure subnet for '$CONTAINER_ENV_NAME'.
+
+The six-sidecar template needs PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID so runtime
+resource creation can attach workload Storage private endpoints to this
+deployment's VNet. Re-run azd provision, or set PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID
+to the snet-private-endpoints subnet resource id and re-run postprovision.
+EOF
+    exit 1
+  fi
+
+  vnet_id="${subnet_id%/subnets/*}"
+  resolved="$vnet_id/subnets/snet-private-endpoints"
+  if ! az network vnet subnet show --ids "$resolved" --query id -o tsv --only-show-errors >/dev/null 2>&1; then
+    cat >&2 <<EOF
+FATAL: cannot find private endpoint subnet derived from Container Apps VNet:
+  $resolved
+
+The deployment expects the network module to create a sibling subnet named
+'snet-private-endpoints'. Verify infra/modules/network.bicep and re-run azd provision.
+EOF
+    exit 1
+  fi
+  printf '%s' "$resolved"
+}
+
 tag_workspace_resource_group() {
   local rg_id
 
@@ -173,7 +291,7 @@ tag_workspace_resource_group() {
 }
 
 tag_workspace_resource_group
-progress done 5 "Resource validation"
+progress "done" 5 "Resource validation"
 
 # ---------------------------------------------------------------------------
 # 1. Parallel image builds. Each build writes to its own log file; the
@@ -200,6 +318,10 @@ build_image() {
       --build-arg "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL"
       --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
       --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
+      --build-arg "APP_VERSION=$(release_version)"
+      --build-arg "APP_BUILD_NUMBER=$(release_build_number)"
+      --build-arg "GIT_COMMIT=$(short_commit)"
+      --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     )
   elif [ "$image_name" = "elb-terminal" ]; then
     extra_args=(
@@ -224,13 +346,43 @@ build_image() {
   printf -v "$pid_var" '%s' "$!"
 }
 
-progress step 6 "Image builds" "Build api, frontend, and terminal images in parallel via az acr build."
-ts "==> Building 3 images in parallel via az acr build (no local Docker needed)"
+build_terminal_image() {
+  local pid_var="${1:-}"
+  local log="$LOG_DIR/build-elb-terminal.log"
+  local extra_args=()
+  if [ -z "$pid_var" ]; then
+    echo "build_terminal_image: missing pid var" >&2
+    return 1
+  fi
+  {
+    echo "[build-elb-terminal] checking terminal base image at $(date -u +%H:%M:%S)"
+    ensure_terminal_base_image
+    extra_args=(
+      --build-arg "TERMINAL_BASE_IMAGE=$(terminal_base_image)"
+    )
+    echo "[build-elb-terminal] starting at $(date -u +%H:%M:%S)"
+    az acr build \
+      --registry "$ACR_NAME" \
+      --subscription "${AZURE_SUBSCRIPTION_ID}" \
+      --image "elb-terminal:${TAG}" \
+      --image "elb-terminal:latest" \
+      --file "$REPO_ROOT/terminal/Dockerfile.runtime" \
+      "${extra_args[@]}" \
+      "$REPO_ROOT/terminal" \
+      --output none
+    rc=$?
+    echo "[build-elb-terminal] finished at $(date -u +%H:%M:%S), rc=$rc"
+    exit $rc
+  } > "$log" 2>&1 &
+  printf -v "$pid_var" '%s' "$!"
+}
+
+progress step 6 "Image builds" "Build api and frontend immediately; terminal builds after its base image is ready."
+ts "==> Building images via az acr build (api/frontend parallel; terminal chains after base)"
 acr_ensure_build_access "$ACR_NAME"
-ensure_terminal_base_image
 build_image PID_API      "elb-api"      "$REPO_ROOT/api/Dockerfile"      "$REPO_ROOT"
 build_image PID_FRONTEND "elb-frontend" "$REPO_ROOT/web/Dockerfile"      "$REPO_ROOT"
-build_image PID_TERMINAL "elb-terminal" "$REPO_ROOT/terminal/Dockerfile.runtime" "$REPO_ROOT/terminal"
+build_terminal_image PID_TERMINAL
 
 ts "    elb-api:      pid=$PID_API"
 ts "    elb-frontend: pid=$PID_FRONTEND"
@@ -282,7 +434,7 @@ if [ "$fail" = "1" ]; then
   exit 1
 fi
 ts "==> All 3 images built and pushed"
-progress done 6 "Image builds"
+progress "done" 6 "Image builds"
 
 # ---------------------------------------------------------------------------
 # 2. Swap the Container App template to the six-sidecar layout.
@@ -305,6 +457,8 @@ ts "==> Deploying six-sidecar layout via Bicep (one shot)"
 DEPLOY_NAME="ca-swap-$TAG"
 SUB_ID=$(az account show --query id -o tsv)
 ENV_RID="/subscriptions/$SUB_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/${CONTAINER_ENV_NAME:-cae-elb-dashboard}"
+PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL="$(resolve_platform_private_endpoint_subnet_id)"
+ts "    Private endpoint subnet: $PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL"
 
 az deployment group create \
   --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -321,6 +475,7 @@ az deployment group create \
       useBootstrapImage=false \
       sharedIdentityResourceId="$SHARED_IDENTITY_RESOURCE_ID" \
       sharedIdentityClientId="$SHARED_IDENTITY_CLIENT_ID" \
+      sharedIdentityPrincipalId="$SHARED_IDENTITY_PRINCIPAL_ID" \
       tenantId="$AZURE_TENANT_ID" \
       apiClientId="$API_CLIENT_ID_VAL" \
       featureCustomDb="$VITE_FEATURE_CUSTOM_DB_VAL" \
@@ -328,6 +483,7 @@ az deployment group create \
       featureTerminal="$VITE_FEATURE_TERMINAL_VAL" \
       applicationInsightsConnectionString="$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" \
       platformStorageAccountName="${STORAGE_ACCOUNT_NAME:-}" \
+      platformPrivateEndpointSubnetId="$PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL" \
       subscriptionId="$(az account show --query id -o tsv)" \
       allowedOrigins="$ALLOWED_ORIGINS_JSON" \
   --output none \
@@ -347,7 +503,7 @@ if [ "$SWAP_RC" != "0" ]; then
   exit "$SWAP_RC"
 fi
 ts "==> Container App updated to six-sidecar layout"
-progress done 7 "Sidecar swap"
+progress "done" 7 "Sidecar swap"
 
 # ---------------------------------------------------------------------------
 # 3. Wait for /api/health on the new revision and print URL.
@@ -373,7 +529,7 @@ echo
 echo "============================================================"
 if [ "$ok" = "1" ]; then
   ts "✓ Deployment OK."
-  progress done 8 "Health check"
+  progress "done" 8 "Health check"
 else
   ts "⚠ Container App deployed but /api/health did not respond 200 within 180s."
   progress note "Step 8 completed with warning: /api/health was not ready within 180s."
