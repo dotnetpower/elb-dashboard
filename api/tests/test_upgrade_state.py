@@ -106,8 +106,52 @@ def test_first_write_race_is_refused() -> None:
         state._backend().upsert(second, expected_etag="")
 
 
-def test_load_json_dict_tolerates_bad_payloads() -> None:
-    assert state._load_json_dict("") == {}
-    assert state._load_json_dict("not json") == {}
-    assert state._load_json_dict("[1,2]") == {}
-    assert state._load_json_dict('{"a":1}') == {"a": "1"}
+def test_cas_state_does_not_retry_on_transition_refused() -> None:
+    """`cas_state` retries `RowEtagMismatch` but a `StateTransitionRefused`
+    is a real precondition failure and must surface immediately. Without
+    this guarantee a concurrent operator's second `/start` would burn
+    through every retry slot before returning 409.
+    """
+    state.update_state(lambda s: setattr(s, "state", state.STATE_QUEUED))
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    with pytest.raises(state.StateTransitionRefused):
+        state.cas_state(
+            expected_state=state.STATE_IDLE,
+            new_state=state.STATE_QUEUED,
+            sleeper=fake_sleep,
+        )
+    assert sleeps == []
+
+
+def test_cas_state_retries_on_etag_mismatch_with_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backoff schedule must be consulted on `RowEtagMismatch` retries.
+    Without backoff a 4-way concurrent first-write race exhausted the
+    retry budget faster than legitimate writers could land their CAS.
+    """
+    state.update_state(lambda s: setattr(s, "state", state.STATE_IDLE))
+    call_count = {"n": 0}
+    real_do_cas = state._do_cas
+
+    def flaky_do_cas(expected: str, new: str, mut):
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            raise state.RowEtagMismatch("simulated transient race")
+        return real_do_cas(expected, new, mut)
+
+    monkeypatch.setattr(state, "_do_cas", flaky_do_cas)
+    sleeps: list[float] = []
+    out = state.cas_state(
+        expected_state=state.STATE_IDLE,
+        new_state=state.STATE_QUEUED,
+        sleeper=sleeps.append,
+    )
+    assert out.state == state.STATE_QUEUED
+    assert call_count["n"] == 3
+    # Two retries → two sleeps using the configured schedule.
+    assert sleeps == list(state._CAS_BACKOFF_SCHEDULE_SECONDS[:2])

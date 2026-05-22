@@ -1121,6 +1121,132 @@ def scenario_first_write_race() -> int:
     return failures
 
 
+def scenario_pre_patch_stuck_timeout() -> int:
+    """Worker dies mid-build → row sits in BUILDING forever.
+
+    The reconciler's pre-PATCH timeout guard must move the row to
+    `failed_pre` once `PRE_PATCH_TIMEOUT_SECONDS` is exceeded. Without
+    this guard the SPA's progress bar spun indefinitely and the only
+    recovery path was a manual row edit.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    print("\n--- Scenario: pre-PATCH stuck timeout (worker died mid-build) ---")
+    failures = 0
+    _reset_backends()
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _AlwaysExistsAcr())
+    _set_running_version("0.2.0")
+    try:
+        started = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
+        state.update_state(
+            lambda s: (
+                setattr(s, "state", state.STATE_BUILDING),
+                setattr(s, "started_at", started.isoformat(timespec="seconds")),
+                setattr(s, "job_id", "dead-worker"),
+                setattr(s, "target_version", "0.3.0"),
+            )[-1]
+        )
+        fake_now = lambda: started + timedelta(minutes=40)  # noqa: E731
+        after = upgrade_task.reconcile_rolling_out_inline(
+            aca=_FakeAca(), watcher=_FakeWatcher(), now=fake_now
+        )
+        ok = after.state == state.STATE_FAILED_PRE
+        _print("stuck pre-PATCH row escalated to failed_pre", ok, f"state={after.state}")
+        failures += 0 if ok else 1
+        ok2 = "stuck in" in after.phase_detail
+        _print("phase_detail explains the stuck-state cause", ok2, after.phase_detail)
+        failures += 0 if ok2 else 1
+    except Exception as exc:
+        _print("scenario crashed", False, f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        failures += 1
+    finally:
+        acr_inventory.set_client_factory_for_tests(None)
+    return failures
+
+
+def scenario_degraded_running_state() -> int:
+    """`running_state=Degraded` must be treated as a terminal rollout
+    failure (CrashLoopBackOff masquerading as Provisioned). Without
+    this detection the operator waited the full 15-min stuck-guard
+    window for an actionable signal.
+    """
+    print("\n--- Scenario: degraded running_state → failed_rollout ---")
+    failures = 0
+    _reset_backends()
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _AlwaysExistsAcr())
+    _set_running_version("0.2.0")
+    aca = _FakeAca()
+    runner = _FakeRunner()
+    try:
+        s = upgrade_task.start_upgrade_inline(
+            target_version="0.3.0",
+            target_sha="",
+            started_by_oid="oid-test",
+            enqueue=lambda *args: None,
+        )
+        upgrade_task.execute_upgrade_inline(
+            target_version="0.3.0",
+            target_sha="",
+            started_by_oid="oid-test",
+            job_id=s.job_id,
+            runner=runner,
+            aca=aca,
+        )
+        original_version = upgrade_task.__version__
+        try:
+            upgrade_task.__version__ = "0.2.0"  # pin so success branch does not fire
+            degraded_watcher = _FakeWatcher(running="Degraded", provisioning="Provisioned")
+            after = upgrade_task.reconcile_rolling_out_inline(
+                aca=aca, watcher=degraded_watcher
+            )
+            ok = after.state == state.STATE_FAILED_ROLLOUT
+            _print(
+                "Degraded running_state escalated to failed_rollout",
+                ok,
+                f"state={after.state}",
+            )
+            failures += 0 if ok else 1
+            ok2 = (
+                "Degraded" in after.phase_detail or "running_state" in after.phase_detail
+            )
+            _print("phase_detail explains the failure cause", ok2, after.phase_detail)
+            failures += 0 if ok2 else 1
+        finally:
+            upgrade_task.__version__ = original_version
+    except Exception as exc:
+        _print("scenario crashed", False, f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        failures += 1
+    finally:
+        acr_inventory.set_client_factory_for_tests(None)
+    return failures
+
+
+def scenario_history_dedupes_double_write() -> int:
+    """Append-blob backends are at-least-once. A double-written event
+    must appear only once in `tail_events` (event_id dedup).
+    """
+    print("\n--- Scenario: history dedupes double-write ---")
+    failures = 0
+    _reset_backends()
+    try:
+        history.record_event("start", job_id="jdup", target_version="0.3.0")
+        raw = history._backend().read_all()
+        line = raw.strip().split(b"\n")[-1]
+        history._backend().append(line + b"\n")
+        history._backend().append(line + b"\n")
+        events = history.tail_events(limit=10)
+        ok = len(events) == 1 and events[0].event == "start"
+        _print("three writes deduped to one logical event", ok, f"len={len(events)}")
+        failures += 0 if ok else 1
+    except Exception as exc:
+        _print("scenario crashed", False, f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        failures += 1
+    return failures
+
+
 SCENARIOS = {
     "happy_path": scenario_happy_path,
     "build_failure": scenario_build_failure,
@@ -1140,6 +1266,9 @@ SCENARIOS = {
     "enqueue_sanitised": scenario_enqueue_failure_sanitised,
     "escape_hatch_placeholders": scenario_escape_hatch_env_placeholders,
     "first_write_race": scenario_first_write_race,
+    "pre_patch_stuck": scenario_pre_patch_stuck_timeout,
+    "degraded_state": scenario_degraded_running_state,
+    "history_dedup": scenario_history_dedupes_double_write,
 }
 
 

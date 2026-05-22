@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -42,6 +43,12 @@ _PARTITION_KEY = "control-plane"
 _ROW_KEY = "current"
 
 STATE_IDLE = "idle"
+# STATE_CHECKING is reserved for a future short-lived "discovery in
+# progress" indicator. Intentionally not emitted today: every existing
+# code path treats discovery as a side-effect of `check_latest_inline`
+# rather than a row state. Kept in the enum so a row that was written
+# by a future revision and rolled back to an older api version still
+# round-trips cleanly.
 STATE_CHECKING = "checking"
 STATE_QUEUED = "queued"
 STATE_FETCHING = "fetching"
@@ -422,12 +429,16 @@ class StateTransitionRefused(RuntimeError):
         self.target = target
 
 
+_CAS_BACKOFF_SCHEDULE_SECONDS: tuple[float, ...] = (0.02, 0.05, 0.1, 0.2, 0.4)
+
+
 def cas_state(
     *,
     expected_state: str,
     new_state: str,
     mutate: Callable[[UpgradeState], None] | None = None,
-    retries: int = 2,
+    retries: int = 5,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> UpgradeState:
     """Transition the persisted state row's `state` field via CAS.
 
@@ -435,17 +446,30 @@ def cas_state(
     the gate the upgrade flow uses to prevent concurrent operators from
     starting overlapping upgrades (only `idle -> queued` is valid). When
     the underlying Tables ETag is stale we retry up to ``retries`` times
-    so a benign racing reader does not derail a legitimate transition.
+    with exponential backoff so a flurry of racing readers does not
+    derail a legitimate transition. ``StateTransitionRefused`` is NOT
+    retried (a wrong-state CAS is a real precondition failure, not a
+    transient race) and propagates immediately.
     """
     if new_state not in VALID_STATES:
         raise ValueError(f"unknown target state {new_state!r}")
 
+    attempts = max(1, retries + 1)
     last_exc: Exception | None = None
-    for _ in range(max(1, retries + 1)):
+    for attempt in range(attempts):
         try:
             return _do_cas(expected_state, new_state, mutate)
         except RowEtagMismatch as exc:
             last_exc = exc
+            if attempt + 1 >= attempts:
+                break
+            delay_idx = min(attempt, len(_CAS_BACKOFF_SCHEDULE_SECONDS) - 1)
+            delay = _CAS_BACKOFF_SCHEDULE_SECONDS[delay_idx]
+            try:
+                sleeper(delay)
+            except Exception as sleep_exc:
+                # A test sleeper that raises is treated as "do not sleep".
+                LOGGER.debug("cas_state sleeper raised; skipping backoff: %s", sleep_exc)
             continue
     # Should be unreachable: _do_cas either returns or raises
     # StateTransitionRefused before falling out.

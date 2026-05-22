@@ -124,6 +124,13 @@ STATE_TRANSITION_TIMELINE = (
     state.STATE_ROLLING_OUT,
     state.STATE_SUCCEEDED,
 )
+# Invariant enforced by `test_state_transition_timeline_matches_machine`:
+# every state in STATE_TRANSITION_TIMELINE except the terminal
+# (`succeeded`) must be the `expected_state` of exactly one `cas_state`
+# call in this module — the next entry in the timeline is the
+# corresponding `new_state`. This catches PR-time drift where a new
+# intermediate state is added to `state.VALID_STATES` but the happy
+# path forgets to walk through it.
 
 
 def _utc_now() -> str:
@@ -302,7 +309,11 @@ def execute_upgrade_inline(
                 runner=runner,
             )
         except image_builder.ImageBuilderError as exc:
-            return _fail_pre(job_id, f"az acr build {component} failed: {exc}")
+            return _fail_pre(
+                job_id,
+                f"az acr build {component} failed: {exc}",
+                orphan_image_refs=[r.image_ref for r in built],
+            )
         built.append(result)
 
     # 3. patching — snapshot rollback target, swap template, commit
@@ -378,10 +389,39 @@ def execute_upgrade_inline(
     return state.get_state()
 
 
-def _fail_pre(job_id: str, detail: str) -> state.UpgradeState:
-    """Move the row to `failed_pre` from any pre-PATCH stage via CAS."""
+def _fail_pre(
+    job_id: str,
+    detail: str,
+    *,
+    orphan_image_refs: list[str] | None = None,
+) -> state.UpgradeState:
+    """Move the row to `failed_pre` from any pre-PATCH stage via CAS.
+
+    When ``orphan_image_refs`` is supplied (i.e. one or more component
+    images were already pushed to ACR before the failure), the refs are
+    recorded in the audit blob as an ``orphan_acr_tags`` event so an
+    operator can clean them up via the ACR purge task. We do not delete
+    them here — the user-assigned MI's ACR role is `acrPull`/`acrPush`,
+    not `acrDelete`, and silently failing a delete would mask the
+    orphan.
+    """
     LOGGER.warning("upgrade.execute job=%s failed_pre: %s", job_id, detail)
     history.record_event("failed", job_id=job_id, stage="pre", detail=detail)
+    if orphan_image_refs:
+        LOGGER.warning(
+            "upgrade.execute job=%s orphan ACR tags (built but not deployed): %s",
+            job_id,
+            orphan_image_refs,
+        )
+        history.record_event(
+            "orphan_acr_tags",
+            job_id=job_id,
+            image_refs=list(orphan_image_refs),
+            note=(
+                "images were pushed to ACR before the upgrade failed; "
+                "delete via `az acr repository untag` or wait for retention."
+            ),
+        )
     truncated = detail[:240]
     for expected in (
         state.STATE_QUEUED,
@@ -434,8 +474,26 @@ def reconcile_rolling_out_inline(
     watcher: object | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> state.UpgradeState:
-    """Drive `rolling_out` to `succeeded`/`failed_rollout` when possible."""
+    """Drive `rolling_out` to `succeeded`/`failed_rollout` when possible.
+
+    Also fails-out pre-PATCH states (`queued`/`fetching`/`building`/
+    `patching`) that have been parked longer than
+    ``PRE_PATCH_TIMEOUT_SECONDS`` — those are the worker-died-mid-task
+    cases where no other code path can advance the row. Without this
+    guard the row stayed in `queued`/`building` indefinitely and the SPA
+    showed a permanently spinning progress bar.
+    """
     row = state.get_state()
+    clock = now or (lambda: datetime.now(UTC))
+
+    # Pre-PATCH stuck guard. Runs first so a dead-worker scenario is
+    # detected even before the `rolling_out` early return below.
+    if row.state in PRE_PATCH_STATES:
+        stuck = _check_pre_patch_stuck(row, clock)
+        if stuck is not None:
+            return stuck
+        return row
+
     if row.state != state.STATE_ROLLING_OUT:
         if row.running_version != __version__:
             try:
@@ -448,7 +506,7 @@ def reconcile_rolling_out_inline(
 
     aca_mod = aca or aca_template
     watcher_mod = watcher or rollout_watcher
-    clock = now or (lambda: datetime.now(UTC))
+    # `clock` already set above.
 
     # Stuck guard: if rolling_out has been the state longer than the
     # rollout budget we mark failed_rollout so the operator can rollback
@@ -536,6 +594,11 @@ def reconcile_rolling_out_inline(
             row.job_id,
             f"revision {latest} provisioning {status.provisioning_state}",
         )
+    if status.running_state.lower() in _RUNNING_STATE_TERMINAL_FAILURES:
+        return _fail_rollout(
+            row.job_id,
+            f"revision {latest} running_state={status.running_state}",
+        )
     return row
 
 
@@ -549,6 +612,52 @@ ROLLING_OUT_TIMEOUT_SECONDS = 15 * 60
 # at least appear in the latest_revision_name by then). 120 s is generous
 # vs the typical begin_update -> revision-created lag of < 30 s.
 PATCH_NEVER_LANDED_GRACE_SECONDS = 120
+
+# Pre-PATCH stuck guard. A row parked in queued/fetching/building/patching
+# longer than this implies the producing Celery worker died (process kill,
+# OOM, broker drop after enqueue) — nothing else can advance the row.
+# 35 min covers a slow 30-min `az acr build` plus a 5-min slack so a
+# legitimate slow build never trips the guard. The reconciler runs every
+# 60 s, so worst-case dead-row latency is ~36 min.
+PRE_PATCH_TIMEOUT_SECONDS = 35 * 60
+PRE_PATCH_STATES = (
+    state.STATE_QUEUED,
+    state.STATE_FETCHING,
+    state.STATE_BUILDING,
+    state.STATE_PATCHING,
+)
+
+# A revision whose `runningState` is one of these has crash-looped or
+# been killed; the rollout watcher's `provisioning_state` check alone
+# misses this because ACA reports `provisioning_state=Provisioned`
+# while the container is in CrashLoopBackOff.
+_RUNNING_STATE_TERMINAL_FAILURES = frozenset(
+    {"degraded", "unhealthy", "failed", "deactivating"}
+)
+
+
+def _check_pre_patch_stuck(
+    row: state.UpgradeState, clock: Callable[[], datetime]
+) -> state.UpgradeState | None:
+    """Return the post-fail snapshot when ``row`` exceeds the pre-PATCH budget.
+
+    Returns ``None`` when the row is within budget or its ``started_at``
+    is malformed (we never escalate on a parse error — the cheaper
+    decision is to let the next reconciler tick try again).
+    """
+    if not row.started_at:
+        return None
+    try:
+        started = datetime.fromisoformat(row.started_at)
+    except ValueError:
+        return None
+    elapsed = (clock() - started).total_seconds()
+    if elapsed <= PRE_PATCH_TIMEOUT_SECONDS:
+        return None
+    return _fail_pre(
+        row.job_id,
+        f"stuck in {row.state} for {elapsed:.0f}s; producing worker likely died",
+    )
 
 
 def _image_matches_version(image_ref: str, target_version: str) -> bool:
