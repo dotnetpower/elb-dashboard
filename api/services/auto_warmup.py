@@ -32,6 +32,7 @@ _TABLE_NAME = "autowarmup"
 _TYPE = "auto_warmup"
 _LOCAL_STATE_ENV = "ELB_LOCAL_STATE_DIR"
 _ENSURED_TABLES: set[str] = set()
+_ENSURED_TABLES_LOCK = threading.Lock()
 _AUTOWARMUP_TABLE_POOLED: TableClient | None = None
 _AUTOWARMUP_TABLE_POOL_LOCK = threading.Lock()
 
@@ -269,15 +270,18 @@ def _ensure_table() -> None:
     endpoint = os.environ[_TABLE_ENDPOINT_ENV]
     if endpoint in _ENSURED_TABLES:
         return
-    with TableServiceClient(endpoint=endpoint, credential=get_credential()) as service:
-        try:
-            service.create_table_if_not_exists(_TABLE_NAME)
-        except AttributeError:
+    with _ENSURED_TABLES_LOCK:
+        if endpoint in _ENSURED_TABLES:
+            return
+        with TableServiceClient(endpoint=endpoint, credential=get_credential()) as service:
             try:
-                service.create_table(_TABLE_NAME)
-            except ResourceExistsError:
-                pass
-    _ENSURED_TABLES.add(endpoint)
+                service.create_table_if_not_exists(_TABLE_NAME)
+            except AttributeError:
+                try:
+                    service.create_table(_TABLE_NAME)
+                except ResourceExistsError:
+                    pass
+        _ENSURED_TABLES.add(endpoint)
 
 
 def _save_table(pref: AutoWarmupPreference) -> None:

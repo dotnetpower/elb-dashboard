@@ -42,6 +42,7 @@ _ARTIFACT_TABLE_POOL_LOCK = threading.Lock()
 _ANALYTICS_JSON_MAX_BYTES = int(os.environ.get("RESULT_ANALYTICS_ARTIFACT_MAX_BYTES", "16777216"))
 _PENDING_STALE_SECONDS = int(os.environ.get("JOB_ARTIFACT_PENDING_STALE_SECONDS", "900"))
 _ENSURED_TABLES: set[tuple[str, str]] = set()
+_ENSURED_TABLES_LOCK = threading.Lock()
 _ENSURED_CONTAINERS: set[tuple[str, str]] = set()
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "deleted"}
 _ANALYTICS_ARTIFACT_TYPES = {
@@ -115,15 +116,18 @@ def _ensure_artifacts_table(endpoint: str) -> None:
     key = (endpoint, ARTIFACTS_TABLE)
     if key in _ENSURED_TABLES:
         return
-    with TableServiceClient(endpoint=endpoint, credential=get_credential()) as service:
-        try:
-            service.create_table_if_not_exists(ARTIFACTS_TABLE)
-        except AttributeError:
+    with _ENSURED_TABLES_LOCK:
+        if key in _ENSURED_TABLES:
+            return
+        with TableServiceClient(endpoint=endpoint, credential=get_credential()) as service:
             try:
-                service.create_table(ARTIFACTS_TABLE)
-            except ResourceExistsError:
-                pass
-    _ENSURED_TABLES.add(key)
+                service.create_table_if_not_exists(ARTIFACTS_TABLE)
+            except AttributeError:
+                try:
+                    service.create_table(ARTIFACTS_TABLE)
+                except ResourceExistsError:
+                    pass
+        _ENSURED_TABLES.add(key)
 
 
 def _artifact_table_client() -> TableClient:

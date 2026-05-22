@@ -31,6 +31,7 @@ LOGGER = logging.getLogger(__name__)
 
 _TABLE_ENDPOINT_ENV = "AZURE_TABLE_ENDPOINT"  # eg https://stelb*.table.core.windows.net
 _ENSURED_TABLES: set[tuple[str, str]] = set()
+_ENSURED_TABLES_LOCK = threading.Lock()
 
 
 class _PooledTableClient:
@@ -323,15 +324,23 @@ class JobStateRepository:
         key = (self._endpoint, table_name)
         if key in _ENSURED_TABLES:
             return
-        with TableServiceClient(endpoint=self._endpoint, credential=self._cred) as service:
-            try:
-                service.create_table_if_not_exists(table_name)
-            except AttributeError:
+        # Double-checked locking — concurrent first requests previously
+        # all saw an empty set and each fired their own TableServiceClient
+        # + ``create_table_if_not_exists`` round-trip (idempotent on the
+        # Azure side but wasteful TLS handshakes locally). The lock
+        # collapses the storm into one client per (endpoint, table).
+        with _ENSURED_TABLES_LOCK:
+            if key in _ENSURED_TABLES:
+                return
+            with TableServiceClient(endpoint=self._endpoint, credential=self._cred) as service:
                 try:
-                    service.create_table(table_name)
-                except ResourceExistsError:
-                    pass
-        _ENSURED_TABLES.add(key)
+                    service.create_table_if_not_exists(table_name)
+                except AttributeError:
+                    try:
+                        service.create_table(table_name)
+                    except ResourceExistsError:
+                        pass
+            _ENSURED_TABLES.add(key)
 
     # --- jobstate ---
 
