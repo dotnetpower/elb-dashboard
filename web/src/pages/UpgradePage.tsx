@@ -40,6 +40,7 @@ export function UpgradePage() {
 
   const [pickedTarget, setPickedTarget] = useState<string>("");
   const [confirmDowntime, setConfirmDowntime] = useState(false);
+  const [confirmBreaking, setConfirmBreaking] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -97,6 +98,24 @@ export function UpgradePage() {
     );
   }, [candidates, status]);
 
+  /**
+   * True when `pickedTarget`'s major segment is greater than the running
+   * major. Major bumps may carry schema / infra changes that the in-app
+   * upgrade can't reason about, so we require a second confirmation
+   * checkbox before the Start button enables.
+   */
+  const isMajorBump = useMemo(() => {
+    if (!pickedTarget || !status?.running_version) return false;
+    const target = pickedTarget.split(".").map((n) => parseInt(n, 10) || 0);
+    const running = status.running_version.split(".").map((n) => parseInt(n, 10) || 0);
+    return target.length >= 1 && running.length >= 1 && target[0] > running[0];
+  }, [pickedTarget, status]);
+
+  // Reset breaking-change confirmation whenever the picked target changes.
+  useEffect(() => {
+    setConfirmBreaking(false);
+  }, [pickedTarget]);
+
   const startUpgrade = async () => {
     if (!pickedTarget) {
       setActionError("Choose a target version first");
@@ -104,6 +123,12 @@ export function UpgradePage() {
     }
     if (!confirmDowntime) {
       setActionError("Confirm the downtime checkbox");
+      return;
+    }
+    if (isMajorBump && !confirmBreaking) {
+      setActionError(
+        "Major-version upgrade requires confirming the breaking-change checkbox.",
+      );
       return;
     }
     setActionError(null);
@@ -257,10 +282,47 @@ export function UpgradePage() {
                 I accept a short downtime (≈ 1 minute) while the new revision boots.
               </span>
             </label>
+            {isMajorBump && (
+              <div
+                role="alert"
+                style={{
+                  borderRadius: 6,
+                  border: "1px solid var(--danger, #dc2626)",
+                  color: "var(--danger, #dc2626)",
+                  padding: "8px 10px",
+                  fontSize: 12,
+                  display: "grid",
+                  gap: 6,
+                }}
+              >
+                <strong>Major-version upgrade.</strong> Crossing the major boundary
+                (v{status.running_version?.split(".")[0]} → v
+                {pickedTarget.split(".")[0]}) may carry breaking changes that
+                in-app upgrade cannot reason about (schema migrations, env-var
+                changes, Bicep diffs). Read the release notes before
+                continuing — consider <code>azd up</code> from a workstation
+                for major bumps.
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={confirmBreaking}
+                    onChange={(e) => setConfirmBreaking(e.target.checked)}
+                  />
+                  <span>I have read the release notes and accept the risk.</span>
+                </label>
+              </div>
+            )}
             <button
               type="button"
               className="glass-button glass-button--primary"
-              disabled={submitting || phase === "active" || phase === "succeeded"}
+              disabled={
+                submitting ||
+                phase === "active" ||
+                phase === "succeeded" ||
+                !pickedTarget ||
+                !confirmDowntime ||
+                (isMajorBump && !confirmBreaking)
+              }
               onClick={() => void startUpgrade()}
             >
               <ArrowUpCircle size={14} strokeWidth={1.6} /> Start upgrade
