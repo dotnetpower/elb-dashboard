@@ -92,6 +92,26 @@ _INSPECTOR_EXCLUDE_PREFIXES: tuple[str, ...] = (
 )
 _INSPECTOR_EXCLUDE_EXACT: frozenset[str] = frozenset({"/api/health"})
 
+# High-volume polling GETs whose response body is buffered into memory by
+# the middleware on every dashboard tick (30 s default, 5 s minimum). The
+# inspector value of these reads is low — the dashboard refetches them
+# constantly so the same payload is captured over and over, pushing more
+# interesting one-shot calls (POST submit, DELETE) out of the ring buffer.
+# Non-GET methods on the same paths (e.g. POST /api/blast/jobs submit)
+# are still captured.
+_INSPECTOR_EXCLUDE_GET_PREFIXES: tuple[str, ...] = (
+    "/api/monitor/aks",
+    "/api/monitor/storage",
+    "/api/monitor/acr",
+    "/api/monitor/terminal",
+    "/api/monitor/cluster",
+    "/api/monitor/jobs",
+    "/api/blast/jobs",
+    "/api/blast/databases",
+    "/api/warmup",
+    "/api/me",
+)
+
 # Hard cap on how many bytes the middleware will buffer when capturing
 # request OR response body for the inspector. The detail buffer itself
 # truncates at 4 KiB; this is a safety ceiling so a misclassified content
@@ -99,13 +119,27 @@ _INSPECTOR_EXCLUDE_EXACT: frozenset[str] = frozenset({"/api/health"})
 _INSPECTOR_MAX_BUFFER_BYTES = 64 * 1024
 
 
-def _inspector_should_capture(path: str) -> bool:
-    """True iff the per-request DETAIL inspector should record this path."""
+def _inspector_should_capture(path: str, method: str = "POST") -> bool:
+    """True iff the per-request DETAIL inspector should record this path.
+
+    ``method`` defaults to a non-GET verb to preserve the historical
+    single-arg call sites (treat as "is this path ever capturable?").
+    Pass the actual method to skip body buffering for high-volume polling
+    GETs that would otherwise dominate the inspector ring buffer. ``None``
+    is normalised to the default so a caller forwarding an unset header
+    cannot crash the middleware.
+    """
     if not path.startswith("/api/"):
         return False
     if path in _INSPECTOR_EXCLUDE_EXACT:
         return False
-    return not any(path.startswith(p) for p in _INSPECTOR_EXCLUDE_PREFIXES)
+    if any(path.startswith(p) for p in _INSPECTOR_EXCLUDE_PREFIXES):
+        return False
+    if (method or "POST").upper() == "GET" and any(
+        path.startswith(p) for p in _INSPECTOR_EXCLUDE_GET_PREFIXES
+    ):
+        return False
+    return True
 
 
 def _decode_jwt_upn(authz: str | None) -> str | None:
@@ -155,10 +189,11 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
         # Per-request DETAIL inspector — buffer request body BEFORE handing
         # the request to the route, then replay via _receive so the route
-        # handler still sees it. Skipped for SSE/WebSocket/health/metrics.
+        # handler still sees it. Skipped for SSE/WebSocket/health/metrics
+        # and for high-volume polling GETs (see _INSPECTOR_EXCLUDE_GET_PREFIXES).
         capture = os.environ.get(
             "REQUEST_DETAIL_CAPTURE_ENABLED", "true"
-        ).lower() != "false" and _inspector_should_capture(path)
+        ).lower() != "false" and _inspector_should_capture(path, method)
         captured_request_body: bytes | None = None
         if capture and method in {"POST", "PUT", "PATCH", "DELETE"}:
             try:

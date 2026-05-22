@@ -134,6 +134,7 @@ def test_happy_path_projects_metadata(
     assert custom["db_type"] == "nucl"
 
 
+@pytest.mark.slow
 def test_storage_failure_returns_degraded(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

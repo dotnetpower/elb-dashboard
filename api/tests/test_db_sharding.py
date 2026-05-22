@@ -260,6 +260,7 @@ def test_partition_prefix_matches_v3_layout_convention() -> None:
 # ---------------------------------------------------------------------------
 # list_db_volumes (with fake blob storage)
 # ---------------------------------------------------------------------------
+@pytest.mark.slow
 def test_list_db_volumes_multi_volume_core_nt(monkeypatch: pytest.MonkeyPatch) -> None:
     blobs = []
     # Fake 5-volume core_nt with marker (.nsq) + auxiliary (.nhr, .nin).

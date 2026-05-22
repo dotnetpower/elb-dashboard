@@ -17,6 +17,7 @@ import re
 import threading
 import time
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
@@ -73,12 +74,18 @@ __all__ = [
     "k8s_top_nodes",
     "k8s_warmup_status",
     "reset_k8s_credential_cache",
+    "reset_k8s_session_pool",
 ]
 
 
 def reset_k8s_credential_cache() -> None:
     _k8s_client.reset_k8s_credential_cache()
     _reset_blast_status_cache()
+
+
+def reset_k8s_session_pool() -> None:
+    """Drop all pooled K8s sessions. Test-only re-export of the client helper."""
+    _k8s_client.reset_k8s_session_pool()
 
 
 # ---------------------------------------------------------------------------
@@ -794,7 +801,14 @@ def k8s_warmup_status(
     resource_group: str,
     cluster_name: str,
 ) -> dict[str, Any]:
-    """Detect warmup state by inspecting ElasticBLAST Kubernetes resources."""
+    """Detect warmup state by inspecting ElasticBLAST Kubernetes resources.
+
+    The six top-level GETs are independent and fan out via a thread pool so
+    the total wall time is bounded by the slowest call instead of the sum
+    of all calls. ``requests.Session`` is thread-safe for concurrent
+    requests (it's just a connection pool + cookie jar — we don't mutate
+    session state on these read paths).
+    """
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
@@ -807,59 +821,85 @@ def k8s_warmup_status(
             "namespaces": [],
         }
 
-        response = session.get(
-            f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
-            timeout=10,
-        )
-        if response.status_code == 200:
-            status = response.json().get("status", {})
-            result["workspace_ready"] = status.get("numberReady", 0)
-            result["workspace_desired"] = status.get("desiredNumberScheduled", 0)
-            result["warm"] = result["workspace_ready"] > 0
+        # Phase 1 — fan out the six independent reads in parallel.
+        def _get(url: str, params: dict[str, str] | None = None) -> Any:
+            return session.get(url, params=params, timeout=10)
 
-        response = session.get(
-            f"{server}/apis/apps/v1/namespaces/default/daemonsets/vmtouch-db-cache",
-            timeout=10,
-        )
-        if response.status_code == 200:
-            result["vmtouch_ready"] = response.json().get("status", {}).get("numberReady", 0)
-            result["warm"] = result["warm"] or result["vmtouch_ready"] > 0
+        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="warmup-status") as pool:
+            f_workspace = pool.submit(
+                _get,
+                f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
+            )
+            f_vmtouch = pool.submit(
+                _get,
+                f"{server}/apis/apps/v1/namespaces/default/daemonsets/vmtouch-db-cache",
+            )
+            f_setup_jobs = pool.submit(
+                _get,
+                f"{server}/apis/batch/v1/namespaces/default/jobs",
+                {"labelSelector": "app=setup"},
+            )
+            f_warmup_jobs = pool.submit(
+                _get,
+                f"{server}/apis/batch/v1/namespaces/default/jobs",
+                {"labelSelector": f"app={DEFAULT_WARMUP_APP_LABEL}"},
+            )
+            f_warmup_ds = pool.submit(
+                _get,
+                f"{server}/apis/apps/v1/namespaces/default/daemonsets",
+                {"labelSelector": "app=db-warmup"},
+            )
+            f_namespaces = pool.submit(_get, f"{server}/api/v1/namespaces")
 
-        response = session.get(
-            f"{server}/apis/batch/v1/namespaces/default/jobs",
-            params={"labelSelector": "app=setup"},
-            timeout=10,
-        )
-        if response.status_code == 200:
-            result["databases"] = _database_status_from_setup_jobs(response.json().get("items", []))
+            response = f_workspace.result()
+            if response.status_code == 200:
+                status = response.json().get("status", {})
+                result["workspace_ready"] = status.get("numberReady", 0)
+                result["workspace_desired"] = status.get("desiredNumberScheduled", 0)
+                result["warm"] = result["workspace_ready"] > 0
 
-        response = session.get(
-            f"{server}/apis/batch/v1/namespaces/default/jobs",
-            params={"labelSelector": f"app={DEFAULT_WARMUP_APP_LABEL}"},
-            timeout=10,
-        )
-        if response.status_code == 200:
-            warmup_databases = database_status_from_warmup_jobs(response.json().get("items", []))
-            _mark_stale_warmup_nodes(session, server, warmup_databases)
-            pods, logs_by_pod = _warmup_pods_and_logs(session, server)
-            attach_pod_progress_to_database_status(warmup_databases, pods, logs_by_pod)
-            _merge_database_statuses(result, warmup_databases)
+            response = f_vmtouch.result()
+            if response.status_code == 200:
+                result["vmtouch_ready"] = response.json().get("status", {}).get("numberReady", 0)
+                result["warm"] = result["warm"] or result["vmtouch_ready"] > 0
 
-        response = session.get(
-            f"{server}/apis/apps/v1/namespaces/default/daemonsets",
-            params={"labelSelector": "app=db-warmup"},
-            timeout=10,
-        )
-        if response.status_code == 200:
-            _append_warmup_daemonsets(result, response.json().get("items", []))
+            response = f_setup_jobs.result()
+            if response.status_code == 200:
+                result["databases"] = _database_status_from_setup_jobs(
+                    response.json().get("items", [])
+                )
 
-        response = session.get(f"{server}/api/v1/namespaces", timeout=10)
-        if response.status_code == 200:
-            result["namespaces"] = [
-                namespace_item.get("metadata", {}).get("name", "")
-                for namespace_item in response.json().get("items", [])
-                if namespace_item.get("metadata", {}).get("name", "").startswith("elastic-blast-")
-            ][:20]
+            response = f_warmup_jobs.result()
+            if response.status_code == 200:
+                warmup_databases = database_status_from_warmup_jobs(
+                    response.json().get("items", [])
+                )
+                # Phase 2 — node-pinning check and pod-log fetch are independent
+                # of each other and of the remaining Phase 1 results, so fan
+                # them out too. Pod log fetches are themselves parallelised
+                # inside `_warmup_pods_and_logs`.
+                f_stale = pool.submit(
+                    _mark_stale_warmup_nodes, session, server, warmup_databases
+                )
+                f_pods = pool.submit(_warmup_pods_and_logs, session, server)
+                f_stale.result()
+                pods, logs_by_pod = f_pods.result()
+                attach_pod_progress_to_database_status(warmup_databases, pods, logs_by_pod)
+                _merge_database_statuses(result, warmup_databases)
+
+            response = f_warmup_ds.result()
+            if response.status_code == 200:
+                _append_warmup_daemonsets(result, response.json().get("items", []))
+
+            response = f_namespaces.result()
+            if response.status_code == 200:
+                result["namespaces"] = [
+                    namespace_item.get("metadata", {}).get("name", "")
+                    for namespace_item in response.json().get("items", [])
+                    if namespace_item.get("metadata", {}).get("name", "").startswith(
+                        "elastic-blast-"
+                    )
+                ][:20]
 
         return result
     except Exception as exc:
@@ -1011,18 +1051,37 @@ def _warmup_pods_and_logs(session: Any, server: str) -> tuple[list[dict[str, Any
     if response.status_code != 200:
         return [], {}
     pods = response.json().get("items", [])
+    pod_names = [
+        pod.get("metadata", {}).get("name", "")
+        for pod in pods[:12]
+        if pod.get("metadata", {}).get("name")
+    ]
+    if not pod_names:
+        return pods, {}
+
+    def _fetch_log(name: str) -> tuple[str, str | None]:
+        try:
+            log_response = session.get(
+                f"{server}/api/v1/namespaces/default/pods/{name}/log",
+                params={"container": "warmup", "tailLines": 80},
+                timeout=2,
+            )
+        except Exception:
+            return name, None
+        if log_response.status_code != 200:
+            return name, None
+        return name, log_response.text[-8000:]
+
+    # Up to 12 pod log GETs — fire concurrently so the wall time is bounded
+    # by the slowest log fetch (2 s timeout each) instead of summing all 12.
     logs_by_pod: dict[str, str] = {}
-    for pod in pods[:12]:
-        name = pod.get("metadata", {}).get("name", "")
-        if not name:
-            continue
-        log_response = session.get(
-            f"{server}/api/v1/namespaces/default/pods/{name}/log",
-            params={"container": "warmup", "tailLines": 80},
-            timeout=2,
-        )
-        if log_response.status_code == 200:
-            logs_by_pod[name] = log_response.text[-8000:]
+    with ThreadPoolExecutor(
+        max_workers=min(12, len(pod_names)),
+        thread_name_prefix="warmup-logs",
+    ) as pool:
+        for name, text in pool.map(_fetch_log, pod_names):
+            if text is not None:
+                logs_by_pod[name] = text
     return pods, logs_by_pod
 
 

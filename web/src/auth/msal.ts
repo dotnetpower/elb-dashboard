@@ -1,9 +1,9 @@
 import { Configuration, PublicClientApplication } from "@azure/msal-browser";
 
-import { configValue } from "@/config/runtime";
+import { azureClientId, configValue } from "@/config/runtime";
 
 const tenantId = configValue("VITE_AZURE_TENANT_ID", "common");
-const clientId = configValue("VITE_AZURE_CLIENT_ID");
+const clientId = azureClientId();
 // Resolve redirect URI at runtime — never bake in localhost for production.
 // .env.production sets VITE_AZURE_REDIRECT_URI=__RUNTIME__ to override .env.local.
 // Any non-URL value (empty, undefined, __RUNTIME__) falls back to the browser origin.
@@ -17,7 +17,9 @@ const redirectUri = resolveRedirectUri();
 
 if (!clientId) {
   console.warn(
-    "VITE_AZURE_CLIENT_ID is not set — MSAL will fail to initialise. Configure web/.env.local.",
+    "VITE_AZURE_CLIENT_ID is empty or a placeholder — MSAL will not initialise. " +
+      "Configure web/.env.local with the Entra App Registration clientId, or run `azd up` " +
+      "and re-run `scripts/dev/local-run.sh web` (it pulls API_CLIENT_ID from azd env).",
   );
 }
 

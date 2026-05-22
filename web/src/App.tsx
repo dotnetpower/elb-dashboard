@@ -16,10 +16,10 @@ import { AksCardMockupsRefined } from "@/pages/mockups/AksCardMockupsRefined";
 import { AksCardMockupsPremium } from "@/pages/mockups/AksCardMockupsPremium";
 import { AksCardMockupsSimple } from "@/pages/mockups/AksCardMockupsSimple";
 import { SidecarInspectorMockups } from "@/pages/mockups/SidecarInspectorMockups";
-import { configValue, isDevBypassEnabled, isFeatureEnabled } from "@/config/runtime";
+import { configValue, isDevBypassEnabled, isFeatureEnabled, isUsableClientId } from "@/config/runtime";
 
 const DEV_BYPASS = isDevBypassEnabled();
-const CLIENT_ID_MISSING = !configValue("VITE_AZURE_CLIENT_ID") && !DEV_BYPASS;
+const CLIENT_ID_MISSING = !isUsableClientId(configValue("VITE_AZURE_CLIENT_ID")) && !DEV_BYPASS;
 
 const RemoteTerminal = lazy(() =>
   import("@/pages/RemoteTerminal").catch((error: unknown) => ({

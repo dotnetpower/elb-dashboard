@@ -862,3 +862,102 @@
     padding-right: 8px !important;
   }
 }
+
+/* Workspace diagnostics banner (auth/tenant mismatch, stale wizard settings, etc.) */
+.workspace-diag-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  margin: 8px 0 16px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 32%, transparent);
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.workspace-diag-banner--danger {
+  border-color: color-mix(in srgb, var(--danger) 36%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-secondary));
+}
+.workspace-diag-banner__icon {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 2px;
+  color: var(--warning);
+}
+.workspace-diag-banner--danger .workspace-diag-banner__icon {
+  color: var(--danger);
+}
+.workspace-diag-banner__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.workspace-diag-banner__title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.workspace-diag-banner__text {
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.workspace-diag-banner__reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.workspace-diag-banner__reasons-label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.workspace-diag-banner__reason-chip {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.workspace-diag-banner__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.workspace-diag-banner__dismiss {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.workspace-diag-banner__dismiss:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-tertiary) 12%, transparent);
+}
+
+/* Subscription / RG picker chip when the saved value is no longer visible
+   to the current Azure credential. Surfaces the mismatch instead of letting
+   the <select> render a silently-blank value. */
+.cfg-chip--invalid {
+  border-color: color-mix(in srgb, var(--warning) 50%, transparent) !important;
+  background: color-mix(in srgb, var(--warning) 8%, transparent) !important;
+}
+.cfg-chip--invalid .lbl {
+  color: var(--warning) !important;
+}
+.cfg-chip__warn {
+  color: var(--warning);
+  flex: 0 0 auto;
+  margin-left: 4px;
+}

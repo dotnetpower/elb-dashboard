@@ -4,11 +4,13 @@ import { useQuery } from "@tanstack/react-query";
 import { formatApiError } from "@/api/client";
 import { monitoringApi } from "@/api/endpoints";
 import { MonitorCard } from "@/components/MonitorCard";
+import { degradedStatusOverride } from "@/components/cards/cardStatusOverride";
 import { BlastDbSection } from "@/components/cards/storage/BlastDbSection";
 import { StorageContainersTable } from "@/components/cards/storage/StorageContainersTable";
 import { StorageMetaGrid } from "@/components/cards/storage/StorageMetaGrid";
 import { StorageWarnings } from "@/components/cards/storage/StorageWarnings";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
+import { getDegradedInfo } from "@/utils/monitorDegraded";
 
 interface Props {
   subscriptionId: string;
@@ -53,6 +55,9 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName, cluste
   const isPublic = publicAccess === "Enabled";
   const isHnsEnabled = query.data?.is_hns_enabled ?? null;
 
+  const degradedInfo = getDegradedInfo(query.data);
+  const statusOverride = degradedStatusOverride(degradedInfo);
+
   return (
     <MonitorCard
       title="Storage Account"
@@ -67,6 +72,7 @@ export function StorageCard({ subscriptionId, resourceGroup, accountName, cluste
         )
       }
       status={status}
+      statusOverride={statusOverride}
       fetching={query.isFetching || dbDownloading !== null}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
       onRefresh={() => query.refetch()}

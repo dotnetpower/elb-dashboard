@@ -31,9 +31,17 @@
       "command": "${workspaceFolder}/scripts/dev/local-run.sh",
       "args": ["api"],
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}",
+        "env": { "LOCAL_LOG_CONSOLE": "false" }
       },
       "isBackground": true,
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "echo": false,
+        "showReuseMessage": false,
+        "focus": false
+      },
       "problemMatcher": {
         "pattern": {
           "regexp": "^.*$",
@@ -54,10 +62,18 @@
       "command": "${workspaceFolder}/scripts/dev/local-run.sh",
       "args": ["worker"],
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}",
+        "env": { "LOCAL_LOG_CONSOLE": "false" }
       },
       "dependsOn": ["redis: ensure"],
       "isBackground": true,
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "echo": false,
+        "showReuseMessage": false,
+        "focus": false
+      },
       "problemMatcher": {
         "pattern": {
           "regexp": "^.*$",
@@ -78,10 +94,18 @@
       "command": "${workspaceFolder}/scripts/dev/local-run.sh",
       "args": ["beat"],
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}",
+        "env": { "LOCAL_LOG_CONSOLE": "false" }
       },
       "dependsOn": ["redis: ensure"],
       "isBackground": true,
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "echo": false,
+        "showReuseMessage": false,
+        "focus": false
+      },
       "problemMatcher": {
         "pattern": {
           "regexp": "^.*$",
@@ -102,9 +126,17 @@
       "command": "${workspaceFolder}/scripts/dev/local-run.sh",
       "args": ["web"],
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}",
+        "env": { "LOCAL_LOG_CONSOLE": "false" }
       },
       "isBackground": true,
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "echo": false,
+        "showReuseMessage": false,
+        "focus": false
+      },
       "problemMatcher": {
         "pattern": {
           "regexp": "^.*$",
@@ -126,9 +158,17 @@
       "command": "${workspaceFolder}/scripts/dev/local-run.sh",
       "args": ["terminal-exec"],
       "options": {
-        "cwd": "${workspaceFolder}"
+        "cwd": "${workspaceFolder}",
+        "env": { "LOCAL_LOG_CONSOLE": "false" }
       },
       "isBackground": true,
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "echo": false,
+        "showReuseMessage": false,
+        "focus": false
+      },
       "problemMatcher": {
         "pattern": {
           "regexp": "^.*$",

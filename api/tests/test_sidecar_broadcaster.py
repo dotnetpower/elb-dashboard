@@ -91,6 +91,7 @@ async def test_two_subscribers_see_identical_frames(fresh_broadcaster):
 
 
 @pytest.mark.asyncio
+@pytest.mark.slow
 async def test_drain_task_stops_when_last_subscriber_leaves(fresh_broadcaster):
     bc, counter = fresh_broadcaster
 

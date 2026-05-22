@@ -26,6 +26,7 @@ from api.services.auto_warmup import (
     save_auto_warmup_preference,
 )
 from api.tasks.storage import reconcile_auto_warmup, warmup_database
+from api.tests._fakes import make_send_task_recorder
 
 
 def _patch_ready_warmup_nodes(monkeypatch, count: int) -> None:
@@ -70,14 +71,7 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
         lambda credential, storage_account: [{"name": "core_nt"}],
     )
 
-    calls: list[dict[str, Any]] = []
-
-    class FakeTask:
-        id = "warmup-task-1"
-
-    def fake_send_task(task_name: str, *, kwargs: dict[str, Any], queue: str) -> FakeTask:
-        calls.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
-        return FakeTask()
+    calls, fake_send_task = make_send_task_recorder("warmup-task-1")
 
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
 
@@ -193,14 +187,7 @@ def test_reconcile_auto_warmup_enqueues_when_all_ready_workload_nodes(
         lambda credential, storage_account: [{"name": "core_nt"}],
     )
 
-    calls: list[dict[str, Any]] = []
-
-    class FakeTask:
-        id = "warmup-task-ready"
-
-    def fake_send_task(task_name: str, *, kwargs: dict[str, Any], queue: str) -> FakeTask:
-        calls.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
-        return FakeTask()
+    calls, fake_send_task = make_send_task_recorder("warmup-task-ready")
 
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
 
@@ -333,14 +320,7 @@ def test_reconcile_auto_warmup_reenqueues_stale_warm_generation(
         lambda: "2026-05-20-00-00-00",
     )
 
-    calls: list[dict[str, Any]] = []
-
-    class FakeTask:
-        id = "warmup-task-current-generation"
-
-    def fake_send_task(task_name: str, *, kwargs: dict[str, Any], queue: str) -> FakeTask:
-        calls.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
-        return FakeTask()
+    calls, fake_send_task = make_send_task_recorder("warmup-task-current-generation")
 
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
 
@@ -435,14 +415,7 @@ def test_reconcile_auto_warmup_reenqueues_when_db_not_warm(monkeypatch, tmp_path
         lambda credential, storage_account: [{"name": "core_nt"}],
     )
 
-    calls: list[dict[str, Any]] = []
-
-    class FakeTask:
-        id = "warmup-task-reenqueue"
-
-    def fake_send_task(task_name: str, *, kwargs: dict[str, Any], queue: str) -> FakeTask:
-        calls.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
-        return FakeTask()
+    calls, fake_send_task = make_send_task_recorder("warmup-task-reenqueue")
 
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
 

@@ -89,5 +89,15 @@
     "web/dist",
     ".pytest_cache",
     ".ruff_cache"
-  ]
+  ],
+
+  // ─── Integrated terminal: keep chatty background tasks light ──────────────
+  // Long-running tasks (api/worker/beat/web/terminal-exec) write to
+  // .logs/local/latest/*.log and skip console mirroring via LOCAL_LOG_CONSOLE=false.
+  // These limits cap memory if something does emit output, and pick the most
+  // efficient renderer to avoid hangs.
+  "terminal.integrated.scrollback": 500,
+  "terminal.integrated.gpuAcceleration": "on",
+  "terminal.integrated.enablePersistentSessions": false,
+  "terminal.integrated.persistentSessionReviveProcess": "never"
 }

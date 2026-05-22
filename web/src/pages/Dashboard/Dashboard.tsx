@@ -3,6 +3,7 @@ import { useCallback, useState } from "react";
 import { GettingStartedGuide } from "@/components/GettingStartedGuide";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { clearConfig, SetupWizard, type ResourceConfig } from "@/components/SetupWizard";
+import { WorkspaceDiagnosticsBanner } from "@/components/WorkspaceDiagnosticsBanner";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 import { DashboardGrid } from "./DashboardGrid";
@@ -88,6 +89,11 @@ export function Dashboard() {
         gettingStartedDismissed={gettingStartedDismissed}
         onReopenGettingStarted={reopenGettingStarted}
         onOpenSettings={() => setShowSettings(true)}
+      />
+
+      <WorkspaceDiagnosticsBanner
+        config={config}
+        onResetWorkspace={handleRerunWizard}
       />
 
       <DashboardGrid config={config} />

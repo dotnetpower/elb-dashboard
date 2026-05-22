@@ -17,6 +17,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from api.tests._fakes import (
+    AsyncResultStub,
+    make_delay_recorder,
+    make_send_task_recorder,
+)
 from fastapi.testclient import TestClient
 
 
@@ -33,19 +38,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 def test_warmup_start_forwards_cluster_topology_to_task(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[dict[str, Any]] = []
-
-    class FakeAsyncResult:
-        id = "task-warmup-123"
-
-    def fake_send_task(
-        task_name: str,
-        *,
-        kwargs: dict[str, Any],
-        queue: str | None = None,
-    ) -> FakeAsyncResult:
-        calls.append({"task_name": task_name, "queue": queue, **kwargs})
-        return FakeAsyncResult()
+    calls, fake_send_task = make_send_task_recorder("task-warmup-123")
 
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
 
@@ -68,24 +61,17 @@ def test_warmup_start_forwards_cluster_topology_to_task(
     assert response.json()["instance_id"] == "task-warmup-123"
     assert calls[0]["task_name"] == "api.tasks.storage.warmup_database"
     assert calls[0]["queue"] == "storage"
-    assert calls[0]["database_name"] == "core_nt"
-    assert calls[0]["cluster_name"] == "aks-elb"
-    assert calls[0]["machine_type"] == "Standard_E16s_v5"
-    assert calls[0]["num_nodes"] == 10
-    assert calls[0]["acr_name"] == "elbacr01"
+    assert calls[0]["kwargs"]["database_name"] == "core_nt"
+    assert calls[0]["kwargs"]["cluster_name"] == "aks-elb"
+    assert calls[0]["kwargs"]["machine_type"] == "Standard_E16s_v5"
+    assert calls[0]["kwargs"]["num_nodes"] == 10
+    assert calls[0]["kwargs"]["acr_name"] == "elbacr01"
 
 
 def test_aks_start_forwards_auto_warmup_payload(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[dict[str, Any]] = []
-
-    class FakeAsyncResult:
-        id = "task-start-aks"
-
-    def fake_delay(**kwargs: Any) -> FakeAsyncResult:
-        calls.append(kwargs)
-        return FakeAsyncResult()
+    calls, fake_delay = make_delay_recorder("task-start-aks")
 
     monkeypatch.setattr("api.tasks.azure.start_aks.delay", fake_delay)
 
@@ -124,14 +110,7 @@ def test_aks_start_forwards_auto_warmup_payload(
 def test_aks_start_forwards_auto_openapi_payload(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[dict[str, Any]] = []
-
-    class FakeAsyncResult:
-        id = "task-start-aks"
-
-    def fake_delay(**kwargs: Any) -> FakeAsyncResult:
-        calls.append(kwargs)
-        return FakeAsyncResult()
+    calls, fake_delay = make_delay_recorder("task-start-aks")
 
     monkeypatch.setattr("api.tasks.azure.start_aks.delay", fake_delay)
 
@@ -165,14 +144,7 @@ def test_aks_start_forwards_auto_openapi_payload(
 def test_aks_assign_roles_forwards_storage_rbac_fields(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[dict[str, Any]] = []
-
-    class FakeAsyncResult:
-        id = "task-assign-roles"
-
-    def fake_delay(**kwargs: Any) -> FakeAsyncResult:
-        calls.append(kwargs)
-        return FakeAsyncResult()
+    calls, fake_delay = make_delay_recorder("task-assign-roles")
 
     monkeypatch.setattr("api.tasks.azure.assign_aks_roles.delay", fake_delay)
 
@@ -219,12 +191,9 @@ def test_aks_lifecycle_routes_invalidate_monitor_cache(
     """
     from api.services import monitor_cache
 
-    class FakeAsyncResult:
-        id = f"task-{verb}"
-
     monkeypatch.setattr(
         f"api.tasks.azure.{task_attr}.delay",
-        lambda **_: FakeAsyncResult(),
+        lambda **_: AsyncResultStub(f"task-{verb}"),
     )
 
     sub = "sub-cache-1"

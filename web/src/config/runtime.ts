@@ -49,6 +49,24 @@ export function apiBaseUrl(): string {
   return configValue("VITE_API_BASE_URL");
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ALL_ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+
+/** A clientId is usable only if it is a valid UUID and not the all-zero
+ *  placeholder shipped in `.env.example`. AAD returns AADSTS700038 if the
+ *  placeholder slips through, so reject it client-side before MSAL is built. */
+export function isUsableClientId(value: string | undefined | null): boolean {
+  const v = (value ?? "").trim().toLowerCase();
+  if (!v) return false;
+  if (v === ALL_ZERO_UUID) return false;
+  return UUID_RE.test(v);
+}
+
+export function azureClientId(): string {
+  const v = configValue("VITE_AZURE_CLIENT_ID");
+  return isUsableClientId(v) ? v : "";
+}
+
 export function parseFeatureFlag(value: string | undefined, fallback = true): boolean {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) return fallback;

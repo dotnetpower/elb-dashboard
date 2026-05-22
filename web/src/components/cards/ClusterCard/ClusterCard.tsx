@@ -1,22 +1,28 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
+import { armProxyApi } from "@/api/armProxy";
 import { formatApiError } from "@/api/client";
 import { ClusterItem } from "@/components/ClusterItem";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { MonitorCard } from "@/components/MonitorCard";
+import { degradedStatusOverride } from "@/components/cards/cardStatusOverride";
 import { useAksSkus } from "@/hooks/useAksSkus";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 import { isAksProvisioning, isAksProvisioningFailed } from "@/utils/aksStatus";
+import { getDegradedInfo } from "@/utils/monitorDegraded";
 
 import { AddClusterButton } from "./AddClusterButton";
 import { ClusterListSkeleton } from "./ClusterListSkeleton";
 import { ProvisionDoneBanner, ProvisioningBanner } from "./ProvisioningBanner";
 import { ProvisionModal } from "./ProvisionModal";
 import { useClusterActions } from "./useClusterActions";
-import { useClusterProvisioning } from "./useClusterProvisioning";
+import {
+  nextElbClusterName,
+  useClusterProvisioning,
+} from "./useClusterProvisioning";
 
 interface Props {
   subscriptionId: string;
@@ -55,6 +61,34 @@ export function ClusterCard({
   const hasProvisioningCluster = clusters.some(isAksProvisioning);
   const hasFailedProvisioningCluster = clusters.some(isAksProvisioningFailed);
 
+  // Existing resource group names — fed into the provision modal so the user
+  // can be warned before they submit a duplicate name. Fetched lazily; the
+  // SPA tolerates an empty list (the modal then skips the duplicate warning).
+  const rgListQuery = useQuery({
+    queryKey: ["arm", "resource-groups", subscriptionId],
+    queryFn: () => armProxyApi.listResourceGroups(subscriptionId),
+    enabled: Boolean(subscriptionId),
+    staleTime: 60_000,
+  });
+  // Stable reference so downstream hooks that take this array as a dep
+  // don't re-run on every parent render. The mapped array changes only when
+  // the underlying query data changes.
+  const existingResourceGroupNames = useMemo(
+    () => rgListQuery.data?.map((g) => g.name) ?? [],
+    [rgListQuery.data],
+  );
+  // Subscription-allowed regions. Falls back to the hard-coded AZURE_REGIONS
+  // constant inside ProvisionModal if this list is empty (network error,
+  // permissions, or first paint before the query resolves).
+  const locationsQuery = useQuery({
+    queryKey: ["arm", "locations", subscriptionId],
+    queryFn: () => armProxyApi.listLocations(subscriptionId),
+    enabled: Boolean(subscriptionId),
+    // Subscription locations change very rarely; cache for 15 minutes.
+    staleTime: 15 * 60_000,
+  });
+  const availableLocations = locationsQuery.data ?? [];
+
   // Role assignment result (shown after provision completes).
   const [roleResult] = useState<string[] | null>(null);
   const [showProvision, setShowProvision] = useState(false);
@@ -75,6 +109,7 @@ export function ClusterCard({
     storageResourceGroup,
     storageAccount,
     defaultSystemSku,
+    existingResourceGroupNames,
     closeModal: () => setShowProvision(false),
     query,
   });
@@ -92,6 +127,18 @@ export function ClusterCard({
     terminalVmName,
   });
 
+  const openProvision = () => {
+    const suggested = nextElbClusterName(clusters, existingResourceGroupNames);
+    // Order matters: reset RG tracking before setting cluster name so the
+    // auto-sync useEffect inside the hook picks up the new name and writes
+    // `rg-<name>` itself. Setting RG explicitly would flip the userTouched
+    // flag and break the auto-sync on subsequent cluster-name edits.
+    prov.resetProvisionResourceGroupTracking();
+    prov.setClusterName(suggested);
+    prov.resetProvisionRegionToDashboard();
+    setShowProvision(true);
+  };
+
   const status = !enabled
     ? "idle"
     : query.isLoading
@@ -106,11 +153,15 @@ export function ClusterCard({
               ? "loading"
               : "ok";
 
+  const degradedInfo = getDegradedInfo(query.data);
+  const statusOverride = degradedStatusOverride(degradedInfo);
+
   return (
     <MonitorCard
       title="Azure Kubernetes Service Cluster"
       subtitle={enabled ? resourceGroup : "Configure subscription / RG"}
       status={prov.provStatus === "creating" ? "loading" : status}
+      statusOverride={statusOverride}
       fetching={query.isFetching}
       lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
       onRefresh={() => {
@@ -120,7 +171,7 @@ export function ClusterCard({
       }}
       rightSlot={
         enabled && !query.isLoading && !noClusters ? (
-          <AddClusterButton variant="pill" onClick={() => setShowProvision(true)} />
+          <AddClusterButton variant="pill" onClick={openProvision} />
         ) : null
       }
       accentColor="cluster"
@@ -161,8 +212,15 @@ export function ClusterCard({
           skuOptions={skuOptions}
           groupLabels={groupLabels}
           groupOrder={groupOrder}
-          region={region}
-          resourceGroup={resourceGroup}
+          region={prov.provisionRegion}
+          setRegion={prov.setProvisionRegion}
+          availableLocations={availableLocations}
+          locationsLoading={locationsQuery.isLoading}
+          resourceGroup={prov.provisionResourceGroup}
+          setResourceGroup={prov.setProvisionResourceGroup}
+          resourceGroupValid={prov.provisionResourceGroupValid}
+          resourceGroupConflict={prov.provisionResourceGroupConflict}
+          resourceGroupsLoading={rgListQuery.isLoading}
           provStatus={prov.provStatus}
           provError={prov.provError}
           onSubmit={prov.handleProvision}
@@ -223,7 +281,7 @@ export function ClusterCard({
 
       {/* Big dashed "Add Cluster" CTA only when the list is empty. */}
       {enabled && !query.isLoading && noClusters && (
-        <AddClusterButton variant="dashed" onClick={() => setShowProvision(true)} />
+        <AddClusterButton variant="dashed" onClick={openProvision} />
       )}
 
       {actions.actionError && (

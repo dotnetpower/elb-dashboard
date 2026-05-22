@@ -2,7 +2,7 @@
 
 Responsibility: pytest configuration for api/
 Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
-Key entry points: `_reset_external_jobs_cache`
+Key entry points: `_env_baseline`, `_reset_external_jobs_cache`
 Risky contracts: Keep imports lightweight and preserve existing public contracts.
 Validation: `uv run pytest -q api/tests`.
 """
@@ -26,6 +26,31 @@ os.environ.setdefault("BLAST_DB_METADATA_INVALIDATE_DISABLED", "true")
 
 
 @pytest.fixture(autouse=True)
+def _env_baseline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Force a clean environment for every test.
+
+    Two motivations, both seen in recurring failures:
+
+    * ``AZURE_TABLE_ENDPOINT`` — when set (e.g. by ``scripts/dev/local-run.sh``)
+      the state-repo tries to write to a real Azure Table during unit tests,
+      causing ``AzureError: tenant must be specified`` warnings, slow
+      retries, and the cross-test state pollution we saw in the 2026-05-22
+      facade-refactor failure cascade. Tests that need a Table backend
+      monkeypatch it back inside the test body — that override wins because
+      ``monkeypatch.setenv`` inside the test body re-applies AFTER this
+      autouse setup.
+    * ``ELB_LOCAL_STATE_DIR`` — when unset the state-repo's local JSON
+      fallback writes to the repo root. Default it to a per-test temp dir
+      so stray writes never pollute the workspace and concurrent runs do
+      not collide on the same file.
+    """
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path_factory.mktemp("elb_state")))
+
+
+@pytest.fixture(autouse=True)
 def _reset_external_jobs_cache() -> Generator[None, None, None]:
     """Clear the in-memory external-OpenAPI jobs cache between every test.
 
@@ -37,7 +62,11 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     from api.routes.blast.jobs import _reset_blast_jobs_list_cache
     from api.routes.storage.common import reset_ncbi_catalogue_cache
     from api.services.blast_db_metadata import _reset_blast_db_metadata_cache
-    from api.services.k8s_monitoring import _reset_blast_status_cache
+    from api.services.k8s_monitoring import (
+        _reset_blast_status_cache,
+        reset_k8s_credential_cache,
+        reset_k8s_session_pool,
+    )
     from api.services.state_repo import reset_state_repo_cache
     from api.services.storage_data import reset_blob_service_pool
 
@@ -48,6 +77,8 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_state_repo_cache()
     reset_blob_service_pool()
     reset_ncbi_catalogue_cache()
+    reset_k8s_credential_cache()
+    reset_k8s_session_pool()
     yield
     _reset()
     _reset_blast_jobs_list_cache()
@@ -56,3 +87,5 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_state_repo_cache()
     reset_blob_service_pool()
     reset_ncbi_catalogue_cache()
+    reset_k8s_credential_cache()
+    reset_k8s_session_pool()

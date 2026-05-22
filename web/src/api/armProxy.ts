@@ -30,12 +30,26 @@ export interface ArmVm {
   location: string;
 }
 
+export interface ArmLocation {
+  /** ARM region id, e.g. `koreacentral`. */
+  name: string;
+  /** Friendly name, e.g. `Korea Central`. */
+  displayName: string;
+  /** Regional bucket, e.g. `(Asia Pacific) Korea Central`. */
+  regionalDisplayName: string;
+}
+
 export const armProxyApi = {
   listSubscriptions: () => api.get<ArmSubscription[]>("/arm/subscriptions"),
 
   listResourceGroups: (subscriptionId: string) =>
     api.get<ArmResourceGroup[]>(
       `/arm/subscriptions/${encodeURIComponent(subscriptionId)}/resource-groups`,
+    ),
+
+  listLocations: (subscriptionId: string) =>
+    api.get<ArmLocation[]>(
+      `/arm/subscriptions/${encodeURIComponent(subscriptionId)}/locations`,
     ),
 
   listStorageAccounts: (subscriptionId: string, rg: string) =>

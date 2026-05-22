@@ -305,6 +305,16 @@ or `compose-local`; detached compose runs also create
 `compose-full-containers.log` / `compose-local-containers.log` with container
 stdout/stderr and replay only the newest 200 lines by default.
 
+If a teammate has already deployed the dashboard with `azd up` and you only
+want to run the SPA / backend locally against that environment, do **not**
+hand-edit `web/.env.local` with a clientId. Run `azd env refresh -e <env-name>`
+to bind this clone to the existing azd environment, then start the web tier
+with `scripts/dev/local-run.sh web` — it auto-exports `VITE_AZURE_CLIENT_ID`
+from the deployed `API_CLIENT_ID`. Full walkthrough:
+[docs/joining-existing-deployment.md](./docs/joining-existing-deployment.md).
+When something is already broken, start with
+[docs/troubleshooting.md](./docs/troubleshooting.md).
+
 ## Driving a deployed environment from your laptop
 
 One-time RBAC + network setup. The local api uses `DefaultAzureCredential` →

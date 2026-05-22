@@ -30,7 +30,7 @@
         "EXEC_TOKEN": "dev-exec-token-not-secret-but-long-enough-for-startup-check"
       },
       "justMyCode": false,
-      "console": "integratedTerminal",
+      "console": "internalConsole",
       "preLaunchTask": "redis: ensure"
     },
     {
@@ -60,7 +60,7 @@
         "LOG_LEVEL": "DEBUG"
       },
       "justMyCode": false,
-      "console": "integratedTerminal",
+      "console": "internalConsole",
       "preLaunchTask": "redis: ensure"
     },
     {
@@ -86,7 +86,7 @@
         "LOG_LEVEL": "DEBUG"
       },
       "justMyCode": false,
-      "console": "integratedTerminal",
+      "console": "internalConsole",
       "preLaunchTask": "redis: ensure"
     },
     {
@@ -101,7 +101,7 @@
         "AZCOPY_AUTO_LOGIN_TYPE": "AZCLI"
       },
       "justMyCode": false,
-      "console": "integratedTerminal"
+      "console": "internalConsole"
     },
     {
       "name": "Pytest: Current File",
@@ -114,7 +114,7 @@
         "PYTHONPATH": "${workspaceFolder}"
       },
       "justMyCode": false,
-      "console": "integratedTerminal"
+      "console": "internalConsole"
     },
     {
       "name": "Pytest: All (api/tests)",
@@ -127,7 +127,7 @@
         "PYTHONPATH": "${workspaceFolder}"
       },
       "justMyCode": false,
-      "console": "integratedTerminal"
+      "console": "internalConsole"
     },
     {
       "name": "Web: Vite Dev",

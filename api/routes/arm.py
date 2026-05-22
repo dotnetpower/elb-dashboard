@@ -3,8 +3,8 @@
 Responsibility: ARM discovery + Resource Group tag routes (`/api/arm/*`)
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `list_subscriptions`, `list_resource_groups`, `get_rg_tags`, `set_rg_tags`,
-`list_storage_accounts`, `list_acrs`
+Key entry points: `list_subscriptions`, `list_resource_groups`, `list_locations`, `get_rg_tags`,
+`set_rg_tags`, `list_storage_accounts`, `list_acrs`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
@@ -132,6 +132,51 @@ def list_resource_groups(
     except Exception as exc:
         LOGGER.warning(
             "list_resource_groups failed: %s: %s",
+            type(exc).__name__,
+            sanitise(str(exc)),
+            exc_info=True,
+        )
+        return []
+
+
+@router.get("/subscriptions/{subscription_id}/locations")
+def list_locations(
+    subscription_id: str = Path(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> list[dict[str, Any]]:
+    """Locations the given subscription can deploy to.
+
+    Lets the provision-AKS modal show a region dropdown that reflects the
+    subscription's actual allow-list instead of a hard-coded SPA constant.
+    Returns an empty array on failure so the SPA can fall back to its
+    bundled `AZURE_REGIONS` list.
+    """
+    from azure.mgmt.subscription import SubscriptionClient
+
+    cred = get_credential()
+    try:
+        client = SubscriptionClient(cred)
+        locations: list[dict[str, Any]] = []
+        for loc in client.subscriptions.list_locations(subscription_id):
+            # Skip non-physical regions (`category != "Recommended"` includes
+            # logical/extended zones the AKS control plane refuses to host).
+            metadata = getattr(loc, "metadata", None)
+            region_type = getattr(metadata, "region_type", None) if metadata else None
+            if region_type and region_type != "Physical":
+                continue
+            locations.append(
+                {
+                    "name": loc.name,
+                    "displayName": loc.display_name,
+                    "regionalDisplayName": getattr(loc, "regional_display_name", None)
+                    or loc.display_name,
+                }
+            )
+        locations.sort(key=lambda x: x["displayName"])
+        return locations
+    except Exception as exc:
+        LOGGER.warning(
+            "list_locations failed: %s: %s",
             type(exc).__name__,
             sanitise(str(exc)),
             exc_info=True,

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { aksApi, type AksSku } from "@/api/endpoints";
 
-export const DEFAULT_AKS_SKU = "Standard_E32s_v5";
+export const DEFAULT_AKS_SKU = "Standard_E16s_v5";
 /** Mirrors sibling repo constants.py::ELB_DFLT_AZURE_SYSTEM_VM_SIZE. */
 export const DEFAULT_AKS_SYSTEM_SKU = "Standard_D2s_v3";
 
@@ -19,11 +19,11 @@ const FALLBACK_AKS_SKUS: AksSku[] = [
   },
   {
     name: DEFAULT_AKS_SKU,
-    vCPUs: 32,
-    memoryGiB: 256,
+    vCPUs: 16,
+    memoryGiB: 128,
     category: "memory",
     series: "E-v5",
-    hourlyUsd: 2.016,
+    hourlyUsd: 1.008,
     role: "blast",
     group: "memory-v5",
   },

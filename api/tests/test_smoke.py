@@ -17,6 +17,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from api.tests._fakes import AsyncResultStub, make_delay_recorder
 from fastapi.testclient import TestClient
 
 
@@ -64,6 +65,7 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
         ("GET", "/api/monitor/metrics"),
         ("GET", "/api/monitor/aks/events?resource_group=rg-x&cluster_name=cx"),
         ("GET", "/api/arm/subscriptions"),
+        ("GET", "/api/arm/subscriptions/sub-x/locations"),
         ("POST", "/api/resources/ensure-rg"),
         ("POST", "/api/storage/prepare-db"),
         ("POST", "/api/blast/submit"),
@@ -428,6 +430,7 @@ def test_blast_submit_rejects_storage_account_mismatch_before_queue(
     assert "database URL must belong" in body["message"]
 
 
+@pytest.mark.slow
 def test_blast_preflight_blocks_precise_multi_query(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -459,6 +462,7 @@ def test_blast_preflight_blocks_precise_multi_query(
     )
 
 
+@pytest.mark.slow
 def test_blast_preflight_allows_precise_multi_query_uniform_search_space(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -486,6 +490,7 @@ def test_blast_preflight_allows_precise_multi_query_uniform_search_space(
     assert precision_check["precision"]["precision_level"] == "precise_tabular"
 
 
+@pytest.mark.slow
 def test_blast_preflight_reports_web_blast_compatibility(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -573,6 +578,7 @@ def test_blast_jobs_submit_blocks_false_precise_with_unverified_database(
     assert body["compatibility"]["mode"] == "calibration_required"
 
 
+@pytest.mark.slow
 def test_blast_preflight_allows_precise_multi_query_split_search_spaces(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -638,14 +644,7 @@ def test_blast_submit_allows_mixed_precise_split_parent_queue(
         "api.services.monitoring.list_aks_clusters",
         lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
     )
-    calls: list[dict[str, object]] = []
-
-    class FakeAsyncResult:
-        id = "task-123"
-
-    def fake_delay(**kwargs: object) -> FakeAsyncResult:
-        calls.append(kwargs)
-        return FakeAsyncResult()
+    calls, fake_delay = make_delay_recorder("task-123")
 
     monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
 
@@ -691,9 +690,6 @@ def test_blast_submit_persists_celery_task_id(
         lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
     )
 
-    class FakeAsyncResult:
-        id = "task-persisted"
-
     updates: list[tuple[str, dict[str, object]]] = []
 
     class FakeRepository:
@@ -708,7 +704,9 @@ def test_blast_submit_persists_celery_task_id(
             return SimpleNamespace(job_id=job_id, **kwargs)
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
-    monkeypatch.setattr("api.tasks.blast.submit.delay", lambda **_kwargs: FakeAsyncResult())
+    monkeypatch.setattr(
+        "api.tasks.blast.submit.delay", lambda **_kwargs: AsyncResultStub("task-persisted")
+    )
 
     r = client.post(
         "/api/blast/submit",
@@ -737,14 +735,7 @@ def test_blast_submit_merges_top_level_precision_metadata(
         "api.services.monitoring.list_aks_clusters",
         lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
     )
-    calls: list[dict[str, object]] = []
-
-    class FakeAsyncResult:
-        id = "task-456"
-
-    def fake_delay(**kwargs: object) -> FakeAsyncResult:
-        calls.append(kwargs)
-        return FakeAsyncResult()
+    calls, fake_delay = make_delay_recorder("task-456")
 
     monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
 
@@ -784,7 +775,6 @@ def test_canonical_dashboard_submit_uploads_inline_query(
         lambda *_args, **_kwargs: [{"name": "elb-cluster", "power_state": "Running"}],
     )
     uploads: list[dict[str, object]] = []
-    calls: list[dict[str, object]] = []
 
     def fake_upload_query_text(
         credential: object,
@@ -803,12 +793,7 @@ def test_canonical_dashboard_submit_uploads_inline_query(
         )
         return f"https://{account_name}.blob.core.windows.net/{container}/{blob_path}"
 
-    class FakeAsyncResult:
-        id = "task-789"
-
-    def fake_delay(**kwargs: object) -> FakeAsyncResult:
-        calls.append(kwargs)
-        return FakeAsyncResult()
+    calls, fake_delay = make_delay_recorder("task-789")
 
     monkeypatch.setattr("api.services.storage_data.upload_query_text", fake_upload_query_text)
     monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
@@ -1360,12 +1345,26 @@ def test_azure_discovery_probe_sanitises_subscription_ids(
 # ---------------------------------------------------------------------------
 # Security audit (2026-05-22): #6 ownership + #7 audit sanitisation
 # ---------------------------------------------------------------------------
-def test_operations_status_returns_403_when_owner_differs(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "module_path,url_prefix",
+    [
+        ("api.routes.operations", "/api/operations/"),
+        ("api.routes.tasks", "/api/tasks/"),
+    ],
+    ids=["operations", "tasks"],
+)
+def test_status_route_returns_403_when_owner_differs(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    module_path: str,
+    url_prefix: str,
 ) -> None:
-    """`/api/operations/{id}` must reject callers who do not own the task."""
+    """`/api/operations/{id}` and the `/api/tasks/{id}` legacy alias must both
+    reject callers who do not own the task."""
+    import importlib
+
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
-    from api.routes import operations
+    module = importlib.import_module(module_path)
 
     other_owner_state = SimpleNamespace(owner_oid="another-oid-not-the-dev-bypass")
 
@@ -1373,42 +1372,20 @@ def test_operations_status_returns_403_when_owner_differs(
         def find_by_task_id(self, _task_id: str) -> object:
             return other_owner_state
 
-    monkeypatch.setattr(operations, "JobStateRepository", lambda: FakeRepo(), raising=True)
+    monkeypatch.setattr(module, "JobStateRepository", lambda: FakeRepo(), raising=True)
 
     class _UnusedAR:
         def __init__(self, *_a: object, **_kw: object) -> None:
             raise AssertionError("ownership rejection should short-circuit")
 
-    monkeypatch.setattr(operations, "AsyncResult", _UnusedAR)
+    monkeypatch.setattr(module, "AsyncResult", _UnusedAR)
 
-    r = client.get("/api/operations/task-foreign")
+    r = client.get(f"{url_prefix}task-foreign")
     assert r.status_code == 403
-    assert r.json().get("detail") == "not owner"
-
-
-def test_tasks_status_returns_403_when_owner_differs(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`/api/tasks/{id}` (legacy alias) must enforce the same ownership gate."""
-    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
-    from api.routes import tasks as tasks_mod
-
-    other_owner_state = SimpleNamespace(owner_oid="another-oid-not-the-dev-bypass")
-
-    class FakeRepo:
-        def find_by_task_id(self, _task_id: str) -> object:
-            return other_owner_state
-
-    monkeypatch.setattr(tasks_mod, "JobStateRepository", lambda: FakeRepo(), raising=True)
-
-    class _UnusedAR:
-        def __init__(self, *_a: object, **_kw: object) -> None:
-            raise AssertionError("ownership rejection should short-circuit")
-
-    monkeypatch.setattr(tasks_mod, "AsyncResult", _UnusedAR)
-
-    r = client.get("/api/tasks/task-foreign")
-    assert r.status_code == 403
+    # Only the canonical route currently asserts the body shape; the legacy
+    # alias just has to return 403 (its handler is the same function).
+    if url_prefix == "/api/operations/":
+        assert r.json().get("detail") == "not owner"
 
 
 def test_operations_status_allows_when_no_jobstate(

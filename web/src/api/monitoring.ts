@@ -116,6 +116,10 @@ export interface StorageSummary {
   kind: string | null;
   public_network_access: string | null;
   is_hns_enabled: boolean | null;
+  /** Backend graceful-degrade flag — set when ARM returned 401/403/404 etc. */
+  degraded?: boolean;
+  /** Stable degraded reason code (see `web/src/utils/monitorDegraded.ts`). */
+  degraded_reason?: string;
   containers: {
     name: string;
     public_access: string | null;
@@ -145,6 +149,10 @@ export interface AcrSummary {
   actual_tags?: Record<string, string[]>;
   building_images?: string[];
   build_details?: { image: string; status: string; run_id: string }[];
+  /** Backend graceful-degrade flag — set when ARM returned 401/403/404 etc. */
+  degraded?: boolean;
+  /** Stable degraded reason code (see `web/src/utils/monitorDegraded.ts`). */
+  degraded_reason?: string;
 }
 
 export interface VmStatus {
@@ -207,7 +215,11 @@ export interface K8sNodeMetrics {
 
 export const monitoringApi = {
   aks: (subscriptionId: string, rg: string) =>
-    api.get<{ clusters: AksClusterSummary[] }>(
+    api.get<{
+      clusters: AksClusterSummary[];
+      degraded?: boolean;
+      degraded_reason?: string;
+    }>(
       `/monitor/aks?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}`,
     ),
 

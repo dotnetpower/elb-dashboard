@@ -374,4 +374,10 @@ If the local dashboard shows `access_denied` or `network_blocked` against a depl
 scripts/dev/grant-local-rbac.sh
 ```
 
+To grant the same minimum role set to a different account (e.g. a teammate joining an existing deployment), pass `--user`:
+
+```bash
+scripts/dev/grant-local-rbac.sh --user teammate@contoso.onmicrosoft.com
+```
+
 Then wait 1-5 minutes for RBAC propagation.

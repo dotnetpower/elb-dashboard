@@ -31,9 +31,13 @@ export function useFocusTrap<T extends HTMLElement = HTMLDivElement>(active: boo
       }
     };
 
-    // Focus first focusable element
+    // Focus first focusable element — but only if focus isn't already
+    // inside the container (e.g. an `autoFocus` input has just claimed it).
+    // Without this guard the trap clobbers any deliberate initial focus.
     const els = focusable();
-    if (els.length > 0) els[0].focus();
+    if (els.length > 0 && !container.contains(document.activeElement)) {
+      els[0].focus();
+    }
 
     container.addEventListener("keydown", handleKeyDown);
     return () => container.removeEventListener("keydown", handleKeyDown);

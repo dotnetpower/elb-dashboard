@@ -251,6 +251,8 @@ azd down --purge --force
 
 ## More Detail
 
+- [Joining An Existing Deployment](joining-existing-deployment.md) walks a second teammate through binding a fresh clone to a deployment that already exists, including RBAC.
+- [Troubleshooting](troubleshooting.md) lists the most common sign-in, RBAC, and dashboard error symptoms with the fix for each.
 - [Deployment Reference](deployment-reference.md) covers tool installation, manual `azd` deployment, redirect URI setup, smoke testing, network lockdown, cleanup, and troubleshooting.
 - [User Guide](user-guide/index.md) explains day-to-day operation from the browser.
 - [Dashboard](user-guide/dashboard.md) explains the readiness signals to check before a search.

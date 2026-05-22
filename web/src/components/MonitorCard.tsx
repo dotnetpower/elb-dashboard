@@ -13,6 +13,17 @@ interface Props {
   accentColor?: "cluster" | "storage" | "acr" | "terminal" | "jobs";
   collapsible?: boolean;
   defaultCollapsed?: boolean;
+  /**
+   * When set, overrides the status chip rendered in the card header. Used by
+   * cards that received a graceful-degraded payload from the backend so the
+   * user sees an actionable label (e.g. "Wrong tenant", "No access") instead
+   * of a misleading "OK" / "Ready". Tone maps to the existing chip palette.
+   */
+  statusOverride?: {
+    label: string;
+    tone: "warning" | "danger" | "muted";
+    title?: string;
+  } | null;
 }
 
 const STATUS_TAG: Record<
@@ -26,6 +37,15 @@ const STATUS_TAG: Record<
   "not-provisioned": { cls: "gt gt-m", label: "Not Provisioned" },
   unavailable: { cls: "gt gt-m", label: "Unavailable" },
   error: { cls: "gt gt-r", label: "Error" },
+};
+
+const OVERRIDE_TONE_CLS: Record<
+  NonNullable<NonNullable<Props["statusOverride"]>["tone"]>,
+  string
+> = {
+  warning: "gt gt-o",
+  danger: "gt gt-r",
+  muted: "gt gt-m",
 };
 
 const STORAGE_PREFIX = "elb-card-collapsed-";
@@ -50,9 +70,19 @@ export function MonitorCard({
   accentColor,
   collapsible = false,
   defaultCollapsed = false,
+  statusOverride = null,
   children,
 }: PropsWithChildren<Props>) {
   const tag = STATUS_TAG[status];
+  const renderedTag = statusOverride
+    ? {
+        cls: OVERRIDE_TONE_CLS[statusOverride.tone],
+        label: statusOverride.label,
+        title: statusOverride.title,
+      }
+    : tag
+      ? { cls: tag.cls, label: tag.label, title: undefined }
+      : null;
   const relTime = useRelativeTime(lastRefreshed?.getTime() ?? null);
   const [collapsed, setCollapsed] = useState(() =>
     getCollapsedState(title, defaultCollapsed),
@@ -118,7 +148,11 @@ export function MonitorCard({
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {tag && <span className={tag.cls}>{tag.label}</span>}
+          {renderedTag && (
+            <span className={renderedTag.cls} title={renderedTag.title}>
+              {renderedTag.label}
+            </span>
+          )}
           {rightSlot && <div onClick={(e) => e.stopPropagation()}>{rightSlot}</div>}
         </div>
       </div>

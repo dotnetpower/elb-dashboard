@@ -464,6 +464,7 @@ def test_canonical_jobs_list_uses_cluster_openapi_context(monkeypatch):
     assert body["jobs"][0]["status"] == "completed"
 
 
+@pytest.mark.slow
 def test_canonical_jobs_list_filters_local_rows_by_scope(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
@@ -1205,6 +1206,7 @@ def test_sync_skips_tombstoned_deleted_rows(monkeypatch):
     assert result == (0, 0, {"zzz999"})
 
 
+@pytest.mark.slow
 def test_canonical_jobs_list_refreshes_active_local_rows(monkeypatch):
     """List endpoint must refresh active rows so the dashboard doesn't wait
     up to 60 s for the next beat reconcile to flip a finished job."""

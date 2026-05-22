@@ -307,6 +307,19 @@ case "$service" in
     export VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8085}
     export VITE_AUTH_DEV_BYPASS=${VITE_AUTH_DEV_BYPASS:-true}
     export VITE_AZURE_TENANT_ID=${VITE_AZURE_TENANT_ID:-${AZURE_TENANT_ID:-common}}
+    # Auto-pull the App Registration clientId from azd env so a clone-and-run
+    # after `azd up` does not need a manual web/.env.local edit. The placeholder
+    # all-zero UUID shipped in web/.env.example is treated as "unset" here so it
+    # cannot reach MSAL (AADSTS700038 otherwise).
+    if [[ -z "${VITE_AZURE_CLIENT_ID:-}" || "${VITE_AZURE_CLIENT_ID:-}" == "00000000-0000-0000-0000-000000000000" ]]; then
+      if command -v azd >/dev/null 2>&1; then
+        azd_client_id="$(azd env get-values 2>/dev/null | awk -F= '/^API_CLIENT_ID=/{gsub(/"/, "", $2); print $2; exit}')"
+        if [[ -n "${azd_client_id:-}" && "$azd_client_id" != "00000000-0000-0000-0000-000000000000" ]]; then
+          export VITE_AZURE_CLIENT_ID="$azd_client_id"
+          echo "[local-run] Picked up VITE_AZURE_CLIENT_ID from azd env (API_CLIENT_ID=$azd_client_id)." >&2
+        fi
+      fi
+    fi
     cd "$project_root/web"
     exec "$run_with_log" web -- npm run dev "$@"
     ;;

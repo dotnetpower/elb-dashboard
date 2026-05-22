@@ -2,6 +2,8 @@ import { Hammer } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
+import { degradedStatusOverride } from "@/components/cards/cardStatusOverride";
+import { getDegradedInfo } from "@/utils/monitorDegraded";
 
 import { AcrImageTable, ExpandedErrorBlock } from "./AcrImageTable";
 import { AcrSummaryCells } from "./AcrSummaryCells";
@@ -54,6 +56,9 @@ export function AcrCard({
         ? "error"
         : "ready";
 
+  const degradedInfo = getDegradedInfo(query.data);
+  const statusOverride = degradedStatusOverride(degradedInfo);
+
   return (
     <MonitorCard
       title="Azure Container Registry"
@@ -63,6 +68,7 @@ export function AcrCard({
       status={
         buildStatus === "building" || hasServerBuilding ? "loading" : status
       }
+      statusOverride={statusOverride}
       fetching={query.isFetching}
       lastRefreshed={
         query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null

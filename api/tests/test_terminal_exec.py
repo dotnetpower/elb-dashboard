@@ -199,6 +199,7 @@ def test_run_sanitises_stdout(
     assert "<sas-redacted>" in result["stdout"]
 
 
+@pytest.mark.slow
 def test_run_times_out_and_returns_124(
     exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -297,6 +298,7 @@ def test_stream_yields_lines_and_summary(
 # ---------------------------------------------------------------------------
 # Concurrency cap
 # ---------------------------------------------------------------------------
+@pytest.mark.slow
 def test_concurrency_cap_returns_503(
     exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

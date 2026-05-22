@@ -171,6 +171,7 @@ def _make_app(monkeypatch):
     return app
 
 
+@pytest.mark.slow
 def test_middleware_captures_post_body_and_route_returns_it(monkeypatch):
     rm.reset_details_for_tests()
     app = _make_app(monkeypatch)
