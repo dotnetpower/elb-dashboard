@@ -356,17 +356,55 @@ def submit(
         lock_key = submit_lock_key(cluster_name, "default")
         submit_lock = acquire_submit_lock(job_id, lock_key=lock_key)
         if submit_lock is None:
-            return _blast._retry_or_fail(
-                self,
-                job_id=job_id,
-                phase="waiting_for_submit_slot",
-                exc=RuntimeError(
-                    "another ElasticBLAST submit is configuring Kubernetes resources "
-                    f"on cluster={cluster_name} namespace=default"
-                ),
+            # Lock contention is expected when two submits target the same
+            # (cluster, namespace). Treat it as a wait, not an error — do
+            # NOT consume the task's max_retries budget. The current task
+            # finishes "successfully" with a queued state row, and a
+            # fresh submit task is enqueued for the same job after the
+            # cooldown so the dashboard keeps the row visible the whole
+            # time the contender is waiting in line.
+            _blast._update_state(
+                job_id,
+                "waiting_for_submit_slot",
+                status="running",
+                event="submit_lock_busy",
                 error_code="blast_submit_lock_busy",
                 retry_after_seconds=30,
             )
+            try:
+                submit.apply_async(
+                    kwargs={
+                        "job_id": job_id,
+                        "subscription_id": subscription_id,
+                        "resource_group": resource_group,
+                        "cluster_name": cluster_name,
+                        "storage_account": storage_account,
+                        "program": program,
+                        "database": database,
+                        "query_file": query_file,
+                        "options": options,
+                        "caller_oid": caller_oid,
+                        "caller_tenant_id": caller_tenant_id,
+                    },
+                    countdown=30,
+                    queue="blast",
+                )
+            except Exception as enq_exc:
+                # If re-enqueue itself fails (broker gone), fall back to
+                # the retry path so we surface the broker error properly.
+                return _blast._retry_or_fail(
+                    self,
+                    job_id=job_id,
+                    phase="waiting_for_submit_slot",
+                    exc=enq_exc,
+                    error_code="blast_submit_requeue_failed",
+                )
+            return {
+                "job_id": job_id,
+                "status": "running",
+                "phase": "waiting_for_submit_slot",
+                "requeued": True,
+            }
         lock_client, lock_token = submit_lock
         try:
             # Azure CLI login was warmed up alongside the warmup poll; retry
