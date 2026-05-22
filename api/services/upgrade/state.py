@@ -119,6 +119,7 @@ class UpgradeState:
     build_log_blob: str = ""
     rollback_target_json: str = ""
     rollback_available_until: str = ""
+    idempotency_key: str = ""
     updated_at: str = ""
     etag: str = field(default="", compare=False)
 
@@ -373,6 +374,7 @@ def _entity_to_state(entity: Any) -> UpgradeState:
         build_log_blob=str(entity.get("build_log_blob", "")),
         rollback_target_json=str(entity.get("rollback_target_json", "")),
         rollback_available_until=str(entity.get("rollback_available_until", "")),
+        idempotency_key=str(entity.get("idempotency_key", "")),
         updated_at=str(entity.get("updated_at", "")),
         etag=etag,
     )
@@ -401,6 +403,7 @@ def _state_to_entity(state: UpgradeState) -> dict[str, Any]:
         "build_log_blob": state.build_log_blob,
         "rollback_target_json": state.rollback_target_json,
         "rollback_available_until": state.rollback_available_until,
+        "idempotency_key": state.idempotency_key,
         "updated_at": state.updated_at,
     }
 

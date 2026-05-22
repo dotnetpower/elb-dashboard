@@ -142,6 +142,8 @@ class _Backend(Protocol):
 
     def read_all(self) -> bytes: ...
 
+    def reset(self, replacement: bytes) -> None: ...
+
 
 class InMemoryHistoryBackend:
     """Test-only in-memory append-blob substitute."""
@@ -161,6 +163,10 @@ class InMemoryHistoryBackend:
     def read_all(self) -> bytes:
         with self._lock:
             return bytes(self._buf)
+
+    def reset(self, replacement: bytes) -> None:
+        with self._lock:
+            self._buf = bytearray(replacement)
 
 
 class _AzureAppendHistoryBackend:
@@ -213,6 +219,32 @@ class _AzureAppendHistoryBackend:
             )
         except ResourceNotFoundError:
             return b""
+
+    def reset(self, replacement: bytes) -> None:
+        """Replace the append blob with ``replacement`` (whole-blob rewrite).
+
+        Used by compaction. Append Blob does not support overwrite, so
+        we delete the existing blob and create a fresh one with the
+        replacement bytes appended in one batch. A transient failure
+        between delete and write would lose audit data — we therefore
+        only call this from the scheduled compactor, never on the
+        hot path. Re-acquisition of the SDK client is intentional so
+        the existing append-blob `_blob()` cached state is invalidated.
+        """
+        container = self._container()
+        blob = container.get_blob_client(HISTORY_BLOB)
+        try:
+            blob.delete_blob()
+        except ResourceNotFoundError:
+            pass
+        new_blob = container.get_blob_client(HISTORY_BLOB)
+        new_blob.create_append_blob()
+        if replacement:
+            # Chunk if necessary; 3 MiB stays well under the per-append
+            # 4 MiB ceiling and matches build_logs's limit.
+            chunk = 3 * 1024 * 1024
+            for offset in range(0, len(replacement), chunk):
+                new_blob.append_block(replacement[offset : offset + chunk])
 
 
 _BACKEND_LOCK = threading.Lock()
@@ -305,6 +337,60 @@ def record_event(event: str, *, job_id: str, **detail: Any) -> None:
         LOGGER.warning("upgrade.history record_event swallowed: %s", exc)
         return
     _advance_chain(evt)
+
+
+def compact_blob() -> dict:
+    """Drop events older than `MAX_TAIL_AGE_DAYS` from the persisted blob.
+
+    Caps unbounded blob growth over multi-year deployments. Idempotent:
+    re-running on a freshly-compacted blob is a no-op. The chain head
+    is reset so subsequent writes continue chaining from the newest
+    surviving event. Returns a dict with compaction stats.
+    """
+    backend = _backend()
+    raw = backend.read_all()
+    if not raw:
+        return {"compacted": True, "before": 0, "after": 0, "dropped": 0}
+    lines = [line for line in raw.split(b"\n") if line.strip()]
+    cutoff = datetime.now(UTC).timestamp() - MAX_TAIL_AGE_DAYS * 86400
+    keep: list[bytes] = []
+    dropped = 0
+    for line in lines:
+        try:
+            evt = HistoryEvent.from_json(line)
+        except json.JSONDecodeError:
+            keep.append(line)  # preserve garbage rather than silently lose data
+            continue
+        if evt.ts:
+            try:
+                if datetime.fromisoformat(evt.ts).timestamp() < cutoff:
+                    dropped += 1
+                    continue
+            except ValueError:
+                pass
+        keep.append(line)
+    if dropped == 0:
+        return {
+            "compacted": True,
+            "before": len(lines),
+            "after": len(lines),
+            "dropped": 0,
+        }
+    replacement = b"\n".join(keep) + (b"\n" if keep else b"")
+    backend.reset(replacement)
+    reset_chain_for_tests()  # re-bootstrap chain head from newest surviving event
+    LOGGER.info(
+        "upgrade.history.compact_blob: before=%d after=%d dropped=%d",
+        len(lines),
+        len(keep),
+        dropped,
+    )
+    return {
+        "compacted": True,
+        "before": len(lines),
+        "after": len(keep),
+        "dropped": dropped,
+    }
 
 
 def verify_chain() -> tuple[bool, str]:
