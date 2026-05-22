@@ -1,6 +1,6 @@
 [project]
 name = "elb-dashboard"
-version = "0.2.0"
+version = "0.3.0"
 description = "Browser-only control plane for ElasticBLAST on Azure (FastAPI + Celery in Azure Container Apps)."
 requires-python = ">=3.12,<3.13"
 readme = "README.md"
