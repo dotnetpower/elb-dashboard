@@ -91,12 +91,26 @@ export interface UpgradeEscapeHatch {
   commands: string[];
 }
 
+export interface UpgradeRollbackPreflightImage {
+  image_ref: string;
+  exists: boolean;
+  created_on: string | null;
+  error: string;
+}
+
+export interface UpgradeRollbackPreflight {
+  available: boolean;
+  reason: string;
+  images: UpgradeRollbackPreflightImage[];
+}
+
 export const upgradeApi = {
   status: () => api.get<UpgradeStatus>("/upgrade/status"),
   candidates: () => api.get<UpgradeCandidatesResponse>("/upgrade/candidates"),
   check: () => api.post<UpgradeStatus>("/upgrade/check", {}),
   start: (body: UpgradeStartRequest) => api.post<UpgradeStatus>("/upgrade/start", body),
   rollback: () => api.post<UpgradeStatus>("/upgrade/rollback", {}),
+  rollbackPreflight: () => api.get<UpgradeRollbackPreflight>("/upgrade/rollback-preflight"),
   escapeHatch: () => api.get<UpgradeEscapeHatch>("/upgrade/escape-hatch"),
   history: (limit = 50) =>
     api.get<{ events: UpgradeHistoryEvent[] }>(`/upgrade/history?limit=${limit}`),

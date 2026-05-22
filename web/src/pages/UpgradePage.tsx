@@ -23,6 +23,7 @@ import {
   type UpgradeCandidatesResponse,
   type UpgradeEscapeHatch,
   type UpgradeHistoryEvent,
+  type UpgradeRollbackPreflight,
   type UpgradeStatus,
 } from "@/api/upgrade";
 
@@ -33,6 +34,7 @@ export function UpgradePage() {
   const [candidates, setCandidates] = useState<UpgradeCandidatesResponse | null>(null);
   const [history, setHistory] = useState<UpgradeHistoryEvent[]>([]);
   const [escape, setEscape] = useState<UpgradeEscapeHatch | null>(null);
+  const [preflight, setPreflight] = useState<UpgradeRollbackPreflight | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [adminBlocked, setAdminBlocked] = useState(false);
 
@@ -61,6 +63,13 @@ export function UpgradePage() {
         const msg = err instanceof Error ? err.message : "";
         if (msg.includes("403")) setAdminBlocked(true);
         else setEscape(null);
+      }
+      // Best-effort rollback pre-flight (admin only too)
+      try {
+        const p = await upgradeApi.rollbackPreflight();
+        setPreflight(p);
+      } catch {
+        setPreflight(null);
       }
     } finally {
       setRefreshing(false);
@@ -280,10 +289,53 @@ export function UpgradePage() {
               current={status.current_images}
               target={status.rollback_target}
             />
+            {preflight && !preflight.available && (
+              <div
+                role="alert"
+                style={{
+                  borderRadius: 6,
+                  border: "1px solid var(--danger, #dc2626)",
+                  color: "var(--danger, #dc2626)",
+                  padding: "8px 10px",
+                  fontSize: 12,
+                }}
+              >
+                <strong>Rollback unsafe.</strong> {preflight.reason}.
+                <ul style={{ margin: "6px 0 0 18px", padding: 0 }}>
+                  {preflight.images
+                    .filter((img) => !img.exists)
+                    .map((img) => (
+                      <li key={img.image_ref}>
+                        <code>{img.image_ref}</code>
+                        {img.error ? ` — ${img.error}` : ""}
+                      </li>
+                    ))}
+                </ul>
+                Use the escape-hatch commands below or rebuild the older image.
+              </div>
+            )}
+            {preflight && preflight.available && (
+              <div
+                className="muted"
+                style={{ fontSize: 12 }}
+              >
+                ACR pre-flight passed — all snapshot tags resolve.
+                {preflight.images.find((img) => img.created_on) && (
+                  <>
+                    {" "}
+                    Snapshot created{" "}
+                    {new Date(
+                      preflight.images.find((img) => img.created_on)?.created_on ?? "",
+                    ).toLocaleDateString()}
+                    .
+                  </>
+                )}
+              </div>
+            )}
             <button
               type="button"
               className="glass-button"
-              disabled={submitting}
+              disabled={submitting || (preflight ? !preflight.available : false)}
               onClick={() => void triggerRollback()}
             >
               <RotateCcw size={14} strokeWidth={1.6} /> Roll back

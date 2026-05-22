@@ -46,6 +46,19 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-containerregistry"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "isodate" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/70/0b/0bf7fd78e8dd45d53d57d6fdca5ab0d23bd9094ea70fe2d4701c6f6cda0a/azure-containerregistry-1.2.0.zip", hash = "sha256:4acd32821d086553eabd5ddfecbb21fb915b5d13ef8375d15afcb2c80bdc96a3", size = 159643, upload-time = "2023-07-11T17:47:19.599Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cf/74/c4821d3643dd32d6f35c02358b17a0f8635f43050190d89956ee8e92e395/azure_containerregistry-1.2.0-py3-none-any.whl", hash = "sha256:7ba5b84911f1b381cec290b22747a679b98ddbf536fae7923124743f5ed97e6c", size = 101180, upload-time = "2023-07-11T17:47:21.584Z" },
+]
+
+[[package]]
 name = "azure-core"
 version = "1.41.0"
 source = { registry = "https://pypi.org/simple" }
@@ -557,6 +570,7 @@ name = "elb-dashboard"
 version = "0.3.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "azure-containerregistry" },
     { name = "azure-data-tables" },
     { name = "azure-identity" },
     { name = "azure-keyvault-secrets" },
@@ -598,6 +612,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "azure-containerregistry", specifier = "==1.2.0" },
     { name = "azure-data-tables", specifier = "==12.5.0" },
     { name = "azure-identity", specifier = "==1.19.0" },
     { name = "azure-keyvault-secrets", specifier = "==4.9.0" },

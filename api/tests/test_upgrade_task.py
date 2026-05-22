@@ -28,6 +28,7 @@ import pytest
 from api.services import terminal_exec
 from api.services.upgrade import (
     aca_template,
+    acr_inventory,
     build_logs,
     history,
     image_builder,
@@ -125,10 +126,30 @@ def env(monkeypatch: pytest.MonkeyPatch) -> None:
     state.set_backend(state.InMemoryBackend())
     build_logs.set_backend(build_logs.InMemoryBuildLogBackend())
     history.set_backend(history.InMemoryHistoryBackend())
+    # ACR pre-flight stub — "every snapshot tag still resolves". Tests
+    # that need to simulate retention purge override this with
+    # `acr_inventory.set_client_factory_for_tests(...)` of their own.
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _AlwaysExistsAcrClient())
     yield
     state.set_backend(None)
     build_logs.set_backend(None)
     history.set_backend(None)
+    acr_inventory.set_client_factory_for_tests(None)
+
+
+class _AlwaysExistsAcrClient:
+    """Test ACR client whose `get_tag_properties` always returns a fake."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def get_tag_properties(self, _repo: str, _tag: str):
+        from datetime import UTC, datetime
+
+        return type("P", (), {"created_on": datetime(2026, 5, 22, tzinfo=UTC)})()
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _start(version: str = "0.3.0", sha: str = "abc1234"):
@@ -261,6 +282,44 @@ def test_rollback_refuses_without_snapshot(env: None) -> None:
         upgrade_task.start_rollback_inline(
             started_by_oid="oid-1", aca=_FakeAca(), watcher=_FakeWatcher()
         )
+
+
+def test_rollback_refuses_when_acr_tag_retention_purged(env: None) -> None:
+    """If ACR no longer carries the snapshot tag, the rollback CAS is never
+    attempted — the row stays in `succeeded` and the SPA can present the
+    operator with the escape-hatch alternative."""
+
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+
+    # Replace the always-exists ACR factory with one that says "not found".
+    class _MissingTagClient:
+        def get_tag_properties(self, _repo: str, _tag: str):
+            raise Exception("TagNotFound")
+
+        def close(self) -> None:
+            pass
+
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _MissingTagClient())
+
+    with pytest.raises(upgrade_task.RollbackStartRefused) as exc:
+        upgrade_task.start_rollback_inline(
+            started_by_oid="oid-2", aca=aca, watcher=_FakeWatcher()
+        )
+    assert "ACR no longer carries" in str(exc.value)
+    # Row state unchanged (rollback CAS was never reached).
+    current_state = state.get_state().state
+    assert current_state in {state.STATE_ROLLING_OUT, state.STATE_SUCCEEDED}
+    # The fake aca was never called for apply (rollback PATCH).
+    assert aca.applied_images == []
 
 
 def test_reconciler_finalises_succeeded_when_version_matches(

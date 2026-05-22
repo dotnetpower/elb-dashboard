@@ -36,10 +36,12 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     )
     state.set_backend(state.InMemoryBackend())
 
-    from api.services.upgrade import build_logs, history
+    from api.services.upgrade import acr_inventory, build_logs, history
 
     build_logs.set_backend(build_logs.InMemoryBuildLogBackend())
     history.set_backend(history.InMemoryHistoryBackend())
+    # ACR pre-flight stub used by /rollback-preflight + /rollback.
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _RoutesAcrStub())
     from api.main import app
     from api.routes.upgrade import reset_check_throttle_for_tests
 
@@ -47,9 +49,22 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     with TestClient(app) as c:
         yield c
     reset_check_throttle_for_tests()
+    acr_inventory.set_client_factory_for_tests(None)
     history.set_backend(None)
     build_logs.set_backend(None)
     state.set_backend(None)
+
+
+class _RoutesAcrStub:
+    """Default routes-fixture ACR client — every probed tag exists."""
+
+    def get_tag_properties(self, _repo: str, _tag: str):
+        from datetime import UTC, datetime
+
+        return type("P", (), {"created_on": datetime(2026, 5, 22, tzinfo=UTC)})()
+
+    def close(self) -> None:
+        pass
 
 
 def test_status_returns_defaults(client: TestClient) -> None:
@@ -452,6 +467,51 @@ def test_history_requires_auth(
         assert resp.status_code == 401
     finally:
         state.set_backend(None)
+
+
+def test_rollback_preflight_reports_available(client: TestClient) -> None:
+    _seed_rollback_snapshot()
+    resp = client.get("/api/upgrade/rollback-preflight")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert len(body["images"]) == 3
+    assert all(img["exists"] for img in body["images"])
+
+
+def test_rollback_preflight_reports_missing(client: TestClient) -> None:
+    from api.services.upgrade import acr_inventory
+
+    _seed_rollback_snapshot()
+
+    class _MissingClient:
+        def get_tag_properties(self, _repo: str, _tag: str):
+            raise Exception("TagNotFound")
+
+        def close(self) -> None:
+            pass
+
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _MissingClient())
+    resp = client.get("/api/upgrade/rollback-preflight")
+    body = resp.json()
+    assert body["available"] is False
+    assert any(not img["exists"] for img in body["images"])
+
+
+def test_rollback_preflight_404_without_snapshot(client: TestClient) -> None:
+    resp = client.get("/api/upgrade/rollback-preflight")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "no snapshot" in body["reason"]
+
+
+def test_rollback_preflight_requires_admin(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UPGRADE_ADMIN_OIDS", raising=False)
+    resp = client.get("/api/upgrade/rollback-preflight")
+    assert resp.status_code == 403
 
 
 def test_httpx_client_pkt_parser_smoke() -> None:

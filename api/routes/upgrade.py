@@ -35,7 +35,14 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.auth import CallerIdentity, require_caller
-from api.services.upgrade import build_logs, escape_hatch, history, remote_tags, state
+from api.services.upgrade import (
+    acr_inventory,
+    build_logs,
+    escape_hatch,
+    history,
+    remote_tags,
+    state,
+)
 from api.services.upgrade.aca_template import SidecarImages
 from api.services.upgrade.auth import require_upgrade_admin
 from api.tasks.upgrade import (
@@ -190,6 +197,49 @@ def upgrade_build_log(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="build log not found") from exc
     return Response(content=payload, media_type="text/plain; charset=utf-8")
+
+
+@router.get("/rollback-preflight")
+def upgrade_rollback_preflight(
+    _caller: CallerIdentity = Depends(require_upgrade_admin),
+) -> dict[str, Any]:
+    """Inspect whether the rollback snapshot is still resolvable in ACR.
+
+    Returns per-image existence + creation timestamp so the SPA can warn
+    proactively when an upcoming rollback would fail because retention
+    purged a tag. Cheap read — used by the rollback card on render.
+    """
+    row = state.get_state()
+    target = row.rollback_target()
+    if not target:
+        return {"available": False, "reason": "no snapshot recorded", "images": []}
+    refs = [target.get("api", ""), target.get("frontend", ""), target.get("terminal", "")]
+    refs = [r for r in refs if r]
+    if not refs:
+        return {"available": False, "reason": "snapshot empty", "images": []}
+    try:
+        probes = acr_inventory.lookup_images(refs)
+    except Exception as exc:
+        LOGGER.warning("upgrade.rollback-preflight: %s", exc)
+        return {
+            "available": False,
+            "reason": f"acr probe failed: {exc}",
+            "images": [{"image_ref": r, "exists": False, "error": str(exc)} for r in refs],
+        }
+    missing = [p for p in probes if not p.exists]
+    return {
+        "available": not missing,
+        "reason": "ok" if not missing else "one or more tags missing",
+        "images": [
+            {
+                "image_ref": p.image_ref,
+                "exists": p.exists,
+                "created_on": p.created_on.isoformat() if p.created_on else None,
+                "error": p.error,
+            }
+            for p in probes
+        ],
+    }
 
 
 @router.post("/rollback", status_code=status.HTTP_202_ACCEPTED)

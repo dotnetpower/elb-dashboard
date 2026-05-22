@@ -36,6 +36,7 @@ from celery import shared_task
 from api import __version__
 from api.services.upgrade import (
     aca_template,
+    acr_inventory,
     build_logs,
     escape_hatch,
     git_workspace,
@@ -528,13 +529,14 @@ def start_rollback_inline(
     started_by_oid: str,
     aca: object | None = None,
     watcher: object | None = None,
+    acr: object | None = None,
 ) -> state.UpgradeState:
     """PATCH the Container App back to the snapshot taken before the upgrade.
 
     Allowed from any post-PATCH state (`rolling_out`, `succeeded`,
     `failed_rollout`). Refuses when there is no rollback target, when
     the row is mid-upgrade pre-PATCH, or when ACR no longer carries the
-    snapshotted tags.
+    snapshotted tags (verified via the pre-flight before the CAS).
     """
     row = state.get_state()
     if row.state not in {
@@ -550,6 +552,7 @@ def start_rollback_inline(
         raise RollbackStartRefused("no rollback target snapshot is recorded")
 
     aca_mod = aca or aca_template
+    acr_mod = acr or acr_inventory
     try:
         target_images = aca_template.SidecarImages(
             api=target_dict["api"],
@@ -558,6 +561,24 @@ def start_rollback_inline(
         )
     except KeyError as exc:
         raise RollbackStartRefused(f"snapshot missing key: {exc}") from exc
+
+    # ACR pre-flight — refuse the rollback when any snapshotted tag has
+    # already been retention-purged. Catches the silent-failure path
+    # where the rollback PATCH succeeds but ACA cannot pull and the
+    # new revision crashloops.
+    refs = [target_images.api, target_images.frontend, target_images.terminal]
+    missing: list[str] = []
+    try:
+        probes = acr_mod.lookup_images(refs)
+    except Exception as exc:
+        LOGGER.warning("upgrade.rollback: ACR pre-flight failed: %s", exc)
+        probes = []
+    if probes:
+        missing = [p.image_ref for p in probes if not p.exists]
+    if missing:
+        raise RollbackStartRefused(
+            "ACR no longer carries the snapshotted tags: " + ", ".join(missing)
+        )
 
     suffix = f"rb-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
     try:
