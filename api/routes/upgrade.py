@@ -83,6 +83,22 @@ class UpgradeStartRequest(BaseModel):
             "container restart and a short downtime window."
         ),
     )
+    reason: str = Field(
+        "",
+        max_length=280,
+        description=(
+            "Optional operator-supplied justification (CVE id, ticket #, "
+            "feature flag, etc.) recorded verbatim in the start audit event."
+        ),
+    )
+
+
+class UpgradeRollbackRequest(BaseModel):
+    reason: str = Field(
+        "",
+        max_length=280,
+        description="Optional rollback justification recorded in audit.",
+    )
 
 
 def _mask_state(payload: dict[str, Any]) -> dict[str, Any]:
@@ -176,6 +192,7 @@ def upgrade_start(
             target_version=body.target_version,
             target_sha=body.target_sha,
             started_by_oid=caller.object_id,
+            reason=body.reason,
         )
     except UpgradeStartRefused as exc:
         raise HTTPException(
@@ -250,6 +267,7 @@ def upgrade_rollback_preflight(
 
 @router.post("/rollback", status_code=status.HTTP_202_ACCEPTED)
 def upgrade_rollback(
+    body: UpgradeRollbackRequest | None = None,
     caller: CallerIdentity = Depends(require_upgrade_admin),
 ) -> dict[str, Any]:
     """Roll the Container App back to the snapshot taken before the upgrade.
@@ -259,8 +277,11 @@ def upgrade_rollback(
     ACR — if retention expired the call fails. Returns the updated
     state row.
     """
+    reason = body.reason if body else ""
     try:
-        updated = start_rollback_inline(started_by_oid=caller.object_id)
+        updated = start_rollback_inline(
+            started_by_oid=caller.object_id, reason=reason
+        )
     except RollbackStartRefused as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
