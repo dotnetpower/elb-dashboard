@@ -62,6 +62,45 @@ def test_openapi_proxy_forwards_try_it_request(
         async def __aexit__(self, *args: Any) -> None:
             pass
 
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {
+                'method': method,
+                'url': url,
+                'headers': dict(headers or {}),
+                'content': content,
+            }
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
+        ) -> httpx.Response:
+            cap = self._captured
+            resp = await self.request(
+                cap['method'],
+                cap['url'],
+                headers=cap['headers'],
+                content=cap['content'],
+            )
+            if stream:
+                body = resp.content
+                resp = httpx.Response(
+                    resp.status_code,
+                    headers=dict(resp.headers),
+                    stream=httpx.ByteStream(body),
+                )
+            return resp
+
+        async def aclose(self) -> None:
+            return None
+
         async def request(
             self,
             method: str,
@@ -120,6 +159,45 @@ def test_openapi_proxy_uses_runtime_token_when_env_token_missing(
         async def __aexit__(self, *args: Any) -> None:
             pass
 
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {
+                'method': method,
+                'url': url,
+                'headers': dict(headers or {}),
+                'content': content,
+            }
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
+        ) -> httpx.Response:
+            cap = self._captured
+            resp = await self.request(
+                cap['method'],
+                cap['url'],
+                headers=cap['headers'],
+                content=cap['content'],
+            )
+            if stream:
+                body = resp.content
+                resp = httpx.Response(
+                    resp.status_code,
+                    headers=dict(resp.headers),
+                    stream=httpx.ByteStream(body),
+                )
+            return resp
+
+        async def aclose(self) -> None:
+            return None
+
         async def request(
             self,
             method: str,
@@ -159,6 +237,45 @@ def test_openapi_proxy_forwards_query_path_and_json_body(
 
         async def __aexit__(self, *args: Any) -> None:
             pass
+
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {
+                'method': method,
+                'url': url,
+                'headers': dict(headers or {}),
+                'content': content,
+            }
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
+        ) -> httpx.Response:
+            cap = self._captured
+            resp = await self.request(
+                cap['method'],
+                cap['url'],
+                headers=cap['headers'],
+                content=cap['content'],
+            )
+            if stream:
+                body = resp.content
+                resp = httpx.Response(
+                    resp.status_code,
+                    headers=dict(resp.headers),
+                    stream=httpx.ByteStream(body),
+                )
+            return resp
+
+        async def aclose(self) -> None:
+            return None
 
         async def request(
             self,
@@ -271,6 +388,45 @@ def test_openapi_proxy_forwards_zip_download_headers(
 
         async def __aexit__(self, *args: Any) -> None:
             pass
+
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {
+                'method': method,
+                'url': url,
+                'headers': dict(headers or {}),
+                'content': content,
+            }
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
+        ) -> httpx.Response:
+            cap = self._captured
+            resp = await self.request(
+                cap['method'],
+                cap['url'],
+                headers=cap['headers'],
+                content=cap['content'],
+            )
+            if stream:
+                body = resp.content
+                resp = httpx.Response(
+                    resp.status_code,
+                    headers=dict(resp.headers),
+                    stream=httpx.ByteStream(body),
+                )
+            return resp
+
+        async def aclose(self) -> None:
+            return None
 
         async def request(
             self,
@@ -390,6 +546,45 @@ def test_openapi_proxy_allows_healthz(
         async def __aexit__(self, *args: Any) -> None:
             pass
 
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {
+                'method': method,
+                'url': url,
+                'headers': dict(headers or {}),
+                'content': content,
+            }
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
+        ) -> httpx.Response:
+            cap = self._captured
+            resp = await self.request(
+                cap['method'],
+                cap['url'],
+                headers=cap['headers'],
+                content=cap['content'],
+            )
+            if stream:
+                body = resp.content
+                resp = httpx.Response(
+                    resp.status_code,
+                    headers=dict(resp.headers),
+                    stream=httpx.ByteStream(body),
+                )
+            return resp
+
+        async def aclose(self) -> None:
+            return None
+
         async def request(
             self,
             method: str,
@@ -427,6 +622,45 @@ def test_openapi_proxy_allows_openapi_spec_and_docs(
 
         async def __aexit__(self, *args: Any) -> None:
             pass
+
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {
+                'method': method,
+                'url': url,
+                'headers': dict(headers or {}),
+                'content': content,
+            }
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
+        ) -> httpx.Response:
+            cap = self._captured
+            resp = await self.request(
+                cap['method'],
+                cap['url'],
+                headers=cap['headers'],
+                content=cap['content'],
+            )
+            if stream:
+                body = resp.content
+                resp = httpx.Response(
+                    resp.status_code,
+                    headers=dict(resp.headers),
+                    stream=httpx.ByteStream(body),
+                )
+            return resp
+
+        async def aclose(self) -> None:
+            return None
 
         async def request(self, *_args: Any, **_kwargs: Any) -> httpx.Response:
             return httpx.Response(200, json={"openapi": "3.0.0"})
@@ -610,6 +844,45 @@ def test_openapi_proxy_allows_public_ip_when_opt_in_env_set(
 
         async def __aexit__(self, *args: Any) -> None:
             pass
+
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: dict[str, str] | None = None,
+            content: bytes | None = None,
+            **_kwargs: Any,
+        ) -> httpx.Request:
+            self._captured = {
+                'method': method,
+                'url': url,
+                'headers': dict(headers or {}),
+                'content': content,
+            }
+            return httpx.Request(method, url, headers=headers, content=content)
+
+        async def send(
+            self, _request: httpx.Request, *, stream: bool = False, **_kwargs: Any
+        ) -> httpx.Response:
+            cap = self._captured
+            resp = await self.request(
+                cap['method'],
+                cap['url'],
+                headers=cap['headers'],
+                content=cap['content'],
+            )
+            if stream:
+                body = resp.content
+                resp = httpx.Response(
+                    resp.status_code,
+                    headers=dict(resp.headers),
+                    stream=httpx.ByteStream(body),
+                )
+            return resp
+
+        async def aclose(self) -> None:
+            return None
 
         async def request(
             self,
