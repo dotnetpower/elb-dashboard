@@ -1456,6 +1456,26 @@ def test_audit_log_payload_is_sanitised(
                 }
             ]
 
+        def get_history_for_jobs(
+            self,
+            job_ids: list[str],
+            *,
+            per_job_limit: int = 20,
+        ) -> dict[str, list[dict[str, object]]]:
+            del per_job_limit
+            return {
+                jid: [
+                    {
+                        "event": "submitted",
+                        "ts": "2026-05-22T00:00:00Z",
+                        "payload_json": raw_payload,
+                        "PartitionKey": jid,
+                        "RowKey": "0",
+                    }
+                ]
+                for jid in job_ids
+            }
+
     monkeypatch.setattr(
         "api.services.state_repo.get_state_repo",
         lambda: FakeRepo(),
