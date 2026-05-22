@@ -121,6 +121,23 @@ celery_app.conf.update(
             "schedule": 60.0,
             "options": {"queue": "default"},
         },
+        # Retry orphan ACR tag deletes recorded by `_fail_pre` when the
+        # MI didn't have `acrDelete` at the time of failure. Daily is
+        # plenty — most operators add the role within hours of seeing
+        # the audit row, and the retry is idempotent.
+        "upgrade-purge-orphan-tags": {
+            "task": "api.tasks.upgrade.purge_orphan_acr_tags",
+            "schedule": 24 * 60 * 60.0,
+            "options": {"queue": "default"},
+        },
+        # Compact the upgrade-history append blob weekly: drop events
+        # older than the read-time age cap so the blob doesn't grow
+        # unboundedly even if the deployment runs for years.
+        "upgrade-compact-history": {
+            "task": "api.tasks.upgrade.compact_history",
+            "schedule": 7 * 24 * 60 * 60.0,
+            "options": {"queue": "default"},
+        },
     },
     timezone="UTC",
     enable_utc=True,

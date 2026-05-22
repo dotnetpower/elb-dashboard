@@ -91,6 +91,17 @@ class UpgradeStartRequest(BaseModel):
             "feature flag, etc.) recorded verbatim in the start audit event."
         ),
     )
+    idempotency_key: str = Field(
+        "",
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._\-]{0,64}$",
+        description=(
+            "Optional client-supplied retry key. If two POSTs share the "
+            "same key + target_version, the second returns the existing "
+            "in-flight row instead of 409 — protects double-click / "
+            "network-retry scenarios."
+        ),
+    )
 
 
 class UpgradeRollbackRequest(BaseModel):
@@ -193,6 +204,7 @@ def upgrade_start(
             target_sha=body.target_sha,
             started_by_oid=caller.object_id,
             reason=body.reason,
+            idempotency_key=body.idempotency_key,
         )
     except UpgradeStartRefused as exc:
         raise HTTPException(

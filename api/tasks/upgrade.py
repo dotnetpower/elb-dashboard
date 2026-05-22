@@ -143,6 +143,7 @@ def start_upgrade_inline(
     target_sha: str,
     started_by_oid: str,
     reason: str = "",
+    idempotency_key: str = "",
     enqueue: Callable[[str, str, str, str], object] | None = None,
 ) -> state.UpgradeState:
     """CAS the row from idle -> queued and enqueue the Celery task.
@@ -151,9 +152,30 @@ def start_upgrade_inline(
     verbatim in the `start` audit event so a later operator can see why
     a particular upgrade was triggered (e.g. "CVE patch", "feature
     flag rollout"). Empty `reason` is allowed but logged as such.
+
+    ``idempotency_key`` (optional) makes the call retry-safe: if the
+    caller passes the same key twice and an upgrade matching that key
+    is already in flight or just completed, the existing row is
+    returned instead of raising 409. This protects against
+    double-click / browser-retry scenarios. Empty key disables the
+    optimisation (behaves like before).
     """
     if not target_version:
         raise UpgradeStartRefused("target_version required")
+    # Idempotency check: if the current row already carries this key
+    # and matches the same target_version, return it unchanged.
+    if idempotency_key:
+        existing = state.get_state()
+        if (
+            existing.idempotency_key == idempotency_key
+            and existing.target_version == target_version
+        ):
+            LOGGER.info(
+                "upgrade.start: idempotent retry recognised (key=%s, state=%s)",
+                idempotency_key,
+                existing.state,
+            )
+            return existing
     job_id = uuid.uuid4().hex[:16]
     now = _utc_now()
 
@@ -167,6 +189,7 @@ def start_upgrade_inline(
         s.phase_progress = 1
         s.build_log_blob = ""
         s.rollback_target_json = ""
+        s.idempotency_key = idempotency_key or ""
 
     try:
         updated = state.cas_state(
@@ -776,6 +799,90 @@ def reconcile_rolling_out() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Scheduled maintenance: orphan ACR tag purge + history compaction.
+# ---------------------------------------------------------------------------
+
+
+def purge_orphan_acr_tags_inline(
+    *,
+    acr: object | None = None,
+    history_mod: object | None = None,
+) -> dict:
+    """Retry `delete_tag` for any orphan_acr_tags audit row still marked as
+    orphaned. The MI's `acrDelete` role often arrives hours after the
+    initial failure; this task closes the loop without operator action.
+
+    Idempotent: re-running yields the same result for tags already deleted
+    (the helper returns ``(True, "already absent")``). The retry result is
+    appended to history as ``orphan_purge_attempt`` so an operator can
+    see the cleanup trajectory in the SPA history view.
+    """
+    acr_mod = acr or acr_inventory
+    hist_mod = history_mod or history
+    events = hist_mod.tail_events(limit=200)
+    refs_to_retry: dict[str, str] = {}  # ref -> job_id (last seen)
+    for evt in events:
+        if evt.event != "orphan_acr_tags":
+            continue
+        cleanup = evt.detail.get("cleanup_results", {}) or {}
+        for ref, status in cleanup.items():
+            if isinstance(status, str) and "orphaned" in status:
+                refs_to_retry[ref] = evt.job_id
+    if not refs_to_retry:
+        return {"checked": 0, "retried": 0, "deleted": 0}
+    retried = 0
+    deleted = 0
+    results: dict[str, str] = {}
+    for ref, _job in refs_to_retry.items():
+        retried += 1
+        ok, reason = acr_mod.delete_tag_best_effort(ref)
+        results[ref] = "deleted" if ok else f"orphaned ({reason})"
+        if ok:
+            deleted += 1
+    hist_mod.record_event(
+        "orphan_purge_attempt",
+        job_id="",
+        attempted=retried,
+        deleted=deleted,
+        results=results,
+    )
+    LOGGER.info(
+        "upgrade.purge_orphan_acr_tags: attempted=%d deleted=%d", retried, deleted
+    )
+    return {"checked": len(refs_to_retry), "retried": retried, "deleted": deleted}
+
+
+@shared_task(name="api.tasks.upgrade.purge_orphan_acr_tags")
+def purge_orphan_acr_tags() -> dict:
+    return purge_orphan_acr_tags_inline()
+
+
+def compact_history_inline(*, history_mod: object | None = None) -> dict:
+    """Rewrite the upgrade-history blob keeping only events newer than the
+    read-time age cap. Caps unbounded blob growth over multi-year
+    deployments.
+
+    Implementation: read every event, filter by age, rewrite via the
+    backend's ``compact`` method. The default Azure backend implements
+    compact by deleting the existing append blob and creating a fresh
+    one with the surviving events. A failed compact is a no-op (the
+    blob remains as-is) so a transient Storage outage does not lose
+    audit data.
+    """
+    hist = history_mod or history
+    try:
+        return hist.compact_blob()
+    except Exception as exc:
+        LOGGER.warning("upgrade.compact_history failed: %s", exc)
+        return {"compacted": False, "reason": str(exc)}
+
+
+@shared_task(name="api.tasks.upgrade.compact_history")
+def compact_history() -> dict:
+    return compact_history_inline()
+
+
+# ---------------------------------------------------------------------------
 # Rollback.
 # ---------------------------------------------------------------------------
 
@@ -791,15 +898,17 @@ def start_rollback_inline(
     """PATCH the Container App back to the snapshot taken before the upgrade.
 
     Allowed from any post-PATCH state (`rolling_out`, `succeeded`,
-    `failed_rollout`). Refuses when there is no rollback target, when
-    the row is mid-upgrade pre-PATCH, or when ACR no longer carries the
-    snapshotted tags (verified via the pre-flight before the CAS).
+    `failed_rollout`) AND from `rollback_failed` (so an operator can
+    retry after a transient ACA outage). Refuses when there is no
+    rollback target, when the row is mid-upgrade pre-PATCH, or when
+    ACR no longer carries the snapshotted tags.
     """
     row = state.get_state()
     if row.state not in {
         state.STATE_ROLLING_OUT,
         state.STATE_SUCCEEDED,
         state.STATE_FAILED_ROLLOUT,
+        state.STATE_ROLLBACK_FAILED,
     }:
         raise RollbackStartRefused(
             f"rollback only valid after PATCH was issued (state={row.state})"

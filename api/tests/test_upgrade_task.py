@@ -788,3 +788,132 @@ def test_start_records_reason_in_audit(env: None) -> None:
     start_events = [e for e in events if e.event == "start"]
     assert start_events
     assert start_events[0].detail.get("reason") == "CVE-2026-1234 hotfix"
+
+
+def test_rollback_of_rollback_allowed_after_rollback_failed(env: None) -> None:
+    """When the first rollback PATCH fails (ROLLBACK_FAILED), the operator
+    must be able to retry without dropping to the escape-hatch shell.
+    """
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    # First rollback: aca.apply_images raises → ROLLBACK_FAILED
+    class _FlakyAca(_FakeAca):
+        def __init__(self) -> None:
+            super().__init__()
+            self._fail_count = 1
+
+        def apply_images(self, *, images, revision_suffix=None):
+            if self._fail_count > 0:
+                self._fail_count -= 1
+                raise aca_template.TemplateError("transient ACA outage")
+            return super().apply_images(images=images, revision_suffix=revision_suffix)
+
+    flaky = _FlakyAca()
+    flaky._current = aca._current
+    after_first = upgrade_task.start_rollback_inline(
+        started_by_oid="oid-2", aca=flaky, watcher=_FakeWatcher()
+    )
+    assert after_first.state == state.STATE_ROLLBACK_FAILED
+    # Retry from ROLLBACK_FAILED should succeed.
+    after_second = upgrade_task.start_rollback_inline(
+        started_by_oid="oid-2", aca=flaky, watcher=_FakeWatcher()
+    )
+    assert after_second.state == state.STATE_ROLLED_BACK
+
+
+def test_start_with_idempotency_key_is_retry_safe(env: None) -> None:
+    """Same key + same target → second call returns the existing row, not 409."""
+    first = upgrade_task.start_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        idempotency_key="op-retry-abc",
+        enqueue=lambda *args: None,
+    )
+    assert first.idempotency_key == "op-retry-abc"
+    # Retry with same key + same target — must NOT raise UpgradeStartRefused.
+    retry = upgrade_task.start_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        idempotency_key="op-retry-abc",
+        enqueue=lambda *args: None,
+    )
+    assert retry.job_id == first.job_id
+    # Different key with row still in QUEUED → still refused (real conflict).
+    with pytest.raises(upgrade_task.UpgradeStartRefused):
+        upgrade_task.start_upgrade_inline(
+            target_version="0.3.0",
+            target_sha="",
+            started_by_oid="oid-1",
+            idempotency_key="different-key",
+            enqueue=lambda *args: None,
+        )
+
+
+def test_purge_orphan_acr_tags_retries_orphaned_refs(env: None) -> None:
+    """The scheduled purge task must re-attempt delete for refs still
+    marked as orphaned in audit history (e.g. MI gained acrDelete role
+    after the original failure)."""
+
+    # Seed history with an orphan_acr_tags event whose cleanup_results
+    # mark the refs as orphaned.
+    history.record_event(
+        "orphan_acr_tags",
+        job_id="old-failed",
+        image_refs=["myacr.azurecr.io/elb-api:v0.3.0", "myacr.azurecr.io/elb-frontend:v0.3.0"],
+        cleanup_results={
+            "myacr.azurecr.io/elb-api:v0.3.0": "orphaned (forbidden)",
+            "myacr.azurecr.io/elb-frontend:v0.3.0": "orphaned (forbidden)",
+        },
+    )
+
+    class _AcrThatNowDeletes:
+        def delete_tag(self, _repo: str, _tag: str) -> None:
+            pass  # success
+
+        def close(self) -> None:
+            pass
+
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _AcrThatNowDeletes())
+    result = upgrade_task.purge_orphan_acr_tags_inline()
+    assert result["retried"] == 2
+    assert result["deleted"] == 2
+    # An audit row records the retry outcome.
+    events = history.tail_events(limit=10)
+    purge_events = [e for e in events if e.event == "orphan_purge_attempt"]
+    assert len(purge_events) == 1
+    assert purge_events[0].detail["deleted"] == 2
+
+
+def test_compact_history_drops_old_events(env: None) -> None:
+    """compact_blob must drop events older than MAX_TAIL_AGE_DAYS and
+    keep newer events intact.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    too_old = (
+        datetime.now(UTC) - timedelta(days=history.MAX_TAIL_AGE_DAYS + 30)
+    ).isoformat(timespec="seconds")
+    fresh = (datetime.now(UTC) - timedelta(days=1)).isoformat(timespec="seconds")
+    history._backend().append(
+        f'{{"ts":"{too_old}","job_id":"old","event":"succeeded","event_id":"o","prev_hash":""}}\n'.encode()
+    )
+    history._backend().append(
+        f'{{"ts":"{fresh}","job_id":"new","event":"succeeded","event_id":"n","prev_hash":""}}\n'.encode()
+    )
+    result = upgrade_task.compact_history_inline()
+    assert result["compacted"] is True
+    assert result["dropped"] == 1
+    # Only the fresh event survives.
+    surviving = history.tail_events(limit=10)
+    assert len(surviving) == 1
+    assert surviving[0].job_id == "new"
