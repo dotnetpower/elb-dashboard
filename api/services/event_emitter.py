@@ -168,6 +168,24 @@ def reset_for_tests() -> None:
     """Test helper — clear the cached client so tests can patch the URL."""
     global _client, _disabled, _disabled_until
     with _lock:
+        old = _client
         _client = None
         _disabled = False
         _disabled_until = 0.0
+    if old is not None:
+        close = getattr(old, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                LOGGER.debug("event_emitter close skipped: %s", type(exc).__name__)
+
+
+def _atexit_cleanup() -> None:
+    """Best-effort close of the module-cached client on interpreter shutdown."""
+    reset_for_tests()
+
+
+import atexit  # noqa: E402
+
+atexit.register(_atexit_cleanup)

@@ -123,12 +123,21 @@ def resolve_database_display_metadata(
                 _DISPLAY_METADATA_CACHE.move_to_end(cache_key)
                 payload_bytes = cached[1]
                 return None if payload_bytes is None else json.loads(payload_bytes)
-            inflight = _DISPLAY_METADATA_INFLIGHT.get(cache_key)
-            if inflight is None:
+            inflight_entry = _DISPLAY_METADATA_INFLIGHT.get(cache_key)
+            if inflight_entry is not None:
+                inflight, registered_at = inflight_entry
+                if now - registered_at > _DISPLAY_METADATA_INFLIGHT_TTL_SECONDS:
+                    # Leader took too long to clean up — treat the entry as
+                    # stale, wake any sleepers, and re-elect.
+                    inflight.set()
+                    _DISPLAY_METADATA_INFLIGHT.pop(cache_key, None)
+                    inflight_entry = None
+            if inflight_entry is None:
                 inflight = threading.Event()
-                _DISPLAY_METADATA_INFLIGHT[cache_key] = inflight
+                _DISPLAY_METADATA_INFLIGHT[cache_key] = (inflight, now)
                 leader = True
             else:
+                inflight = inflight_entry[0]
                 leader = False
         if not leader:
             # Wait briefly for the leader to populate the cache, then retry
@@ -184,7 +193,14 @@ _DISPLAY_METADATA_CACHE: OrderedDict[tuple[str, str, str], tuple[float, bytes | 
     OrderedDict()
 )
 _DISPLAY_METADATA_CACHE_LOCK = threading.Lock()
-_DISPLAY_METADATA_INFLIGHT: dict[tuple[str, str, str], threading.Event] = {}
+# Single-flight coordination. ``threading.Event`` plus a registration
+# timestamp so a leader that crashed before clearing the entry (process
+# killed mid-block, finalizer raced with SIGTERM, …) cannot block fresh
+# readers forever. The ``_DISPLAY_METADATA_INFLIGHT_TTL_SECONDS`` cap is
+# checked on every leader-election attempt so the cleanup is amortized
+# across normal traffic — no background sweeper thread.
+_DISPLAY_METADATA_INFLIGHT: dict[tuple[str, str, str], tuple[threading.Event, float]] = {}
+_DISPLAY_METADATA_INFLIGHT_TTL_SECONDS = 60.0
 
 
 def invalidate_blast_db_metadata_cache(

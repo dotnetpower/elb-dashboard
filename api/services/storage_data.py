@@ -72,6 +72,18 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
     # names are 3-24 lowercase alphanumeric characters.
     if not _STORAGE_ACCOUNT_NAME_RE.fullmatch(account_name):
         raise ValueError(f"invalid storage account name: {account_name!r}")
+    cred_id = id(credential)
+    pool_key = (cred_id, account_name)
+    # Thread-local fast path: each worker thread keeps a tiny dict of
+    # ``pool_key -> BlobServiceClient`` so the hot read path never touches
+    # the global pool lock. Cache miss still consults the global pool.
+    thread_cache = getattr(_BLOB_SERVICE_THREAD_LOCAL, "cache", None)
+    if thread_cache is None:
+        thread_cache = {}
+        _BLOB_SERVICE_THREAD_LOCAL.cache = thread_cache
+    cached_local = thread_cache.get(pool_key)
+    if cached_local is not None:
+        return cached_local
     # Process-shared pool keyed by ``(id(credential), account_name)``. The
     # ``id(credential)`` half guarantees we never reuse a client that was
     # built against a different credential object (token leak guard); a
@@ -80,8 +92,6 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
     # resolve to a stale BlobServiceClient. Per-entry ``last_used`` is
     # tracked so idle clients can be reclaimed via
     # :func:`prune_idle_blob_service_clients`.
-    cred_id = id(credential)
-    pool_key = (cred_id, account_name)
     now = time.monotonic()
     evicted_clients: list[BlobServiceClient] = []
     with _BLOB_SERVICE_POOL_LOCK:
@@ -90,6 +100,7 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
             cached_client, _last_used = cached
             _BLOB_SERVICE_POOL[pool_key] = (cached_client, now)
             _BLOB_SERVICE_POOL.move_to_end(pool_key)
+            thread_cache[pool_key] = cached_client
             return cached_client
         # Fail fast on network-blocked accounts (publicNetworkAccess: Disabled)
         # instead of letting the SDK retry for ~30s. The api sidecar is the
@@ -115,6 +126,7 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
         # someone else's BlobServiceClient. Cheap (single weakref); the
         # ``WeakSet`` guards against double-registration.
         _ensure_credential_eviction(credential)
+    thread_cache[pool_key] = client
     # Close evicted clients outside the lock — BlobServiceClient.close()
     # tears down the underlying HTTP pool and may do synchronous IO; we
     # must not hold the pool lock while that happens or every other caller
@@ -136,6 +148,7 @@ _BLOB_SERVICE_POOL: OrderedDict[
 ] = OrderedDict()
 _BLOB_SERVICE_POOL_LOCK = threading.Lock()
 _BLOB_SERVICE_CREDENTIAL_FINALIZED: set[int] = set()
+_BLOB_SERVICE_THREAD_LOCAL = threading.local()
 
 
 def _ensure_credential_eviction(credential: Any) -> None:
@@ -218,6 +231,13 @@ def reset_blob_service_pool() -> None:
         clients = [client for client, _ts in _BLOB_SERVICE_POOL.values()]
         _BLOB_SERVICE_POOL.clear()
         _BLOB_SERVICE_CREDENTIAL_FINALIZED.clear()
+    # Clear THIS thread's local cache; sibling threads will re-resolve via
+    # the global pool on their next call. Holding sibling-thread caches
+    # across a credential reset is the documented risk that justifies
+    # ``reset_credential`` calling ``reset_blob_service_pool``.
+    cache = getattr(_BLOB_SERVICE_THREAD_LOCAL, "cache", None)
+    if cache is not None:
+        cache.clear()
     for client in clients:
         try:
             client.close()
