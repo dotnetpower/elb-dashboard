@@ -44,6 +44,25 @@ DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 1800  # hard 30-min cap; longer tasks must be split
 SIGTERM_GRACE_SECONDS = 5
 EXEC_TMP_ROOT = "/tmp/exec"  # noqa: S108 - intentional; cleaned per-request
+
+
+def _run_output_max_bytes() -> int:
+    """Resolve the run() output cap at request time.
+
+    Read from env on every call so tests (and ops) can rotate the cap
+    without redeploying the sidecar. Production sets the env once at
+    container startup so the lookup is effectively free.
+    """
+    try:
+        return int(os.environ.get("EXEC_RUN_MAX_OUTPUT_BYTES", str(8 * 1024 * 1024)))
+    except ValueError:
+        return 8 * 1024 * 1024
+
+
+# Module-level constant kept for backwards compatibility / introspection. The
+# live value flows through ``_run_output_max_bytes()`` so a test or operator
+# can mutate ``EXEC_RUN_MAX_OUTPUT_BYTES`` after import.
+RUN_OUTPUT_MAX_BYTES = _run_output_max_bytes()
 EXEC_AZURE_CONFIG_DIR = os.environ.get("EXEC_AZURE_CONFIG_DIR", "")
 ELB_RUNTIME_OVERRIDES_DIR = os.environ.get(
     "ELB_RUNTIME_OVERRIDES_DIR", "/opt/elb/runtime_overrides"
@@ -209,25 +228,100 @@ def _kill_proc(proc: subprocess.Popen[bytes]) -> None:
             pass
 
 
+def _drain_capped(pipe, cap: int) -> tuple[bytes, bool]:
+    """Read ``pipe`` until EOF, return (bytes_buffered, truncated)."""
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
+    try:
+        while True:
+            chunk = pipe.read(65536)
+            if not chunk:
+                break
+            if total >= cap:
+                # Keep draining so the writer (child) doesn't block on a
+                # full pipe, but discard the data so we stay under cap.
+                truncated = True
+                continue
+            remaining = cap - total
+            if len(chunk) > remaining:
+                chunks.append(chunk[:remaining])
+                total = cap
+                truncated = True
+            else:
+                chunks.append(chunk)
+                total += len(chunk)
+    except (BrokenPipeError, OSError):
+        pass
+    return b"".join(chunks), truncated
+
+
 def _run_buffered(req: dict) -> dict:
-    """Run the command, capture full output, return as a single dict."""
+    """Run the command, capture bounded output, return as a single dict.
+
+    Replaces the prior ``proc.communicate(...)`` path so a verbose child
+    (``elastic-blast submit`` log output, ``az`` debug output) cannot OOM
+    the terminal sidecar. Output above ``RUN_OUTPUT_MAX_BYTES`` is dropped
+    on the floor and the response carries ``stdout_truncated`` / ``stderr_truncated``
+    so the caller can degrade gracefully.
+    """
     cwd, owned = _make_cwd(req["cwd"])
     started = time.monotonic()
+    out_holder: list[bytes] = []
+    err_holder: list[bytes] = []
+    truncated_flags = {"stdout": False, "stderr": False}
+    cap = _run_output_max_bytes()
+
+    def _reader(pipe, key: str, dest: list[bytes]) -> None:
+        data, truncated = _drain_capped(pipe, cap)
+        dest.append(data)
+        truncated_flags[key] = truncated
+
     try:
         _write_stdin_file(req, cwd)
         proc = _spawn(req["argv"], cwd, req["stdin"])
+        # Send stdin (if any) without holding the whole output in RAM —
+        # ``communicate`` would do that for us, but here we drain via
+        # capped reader threads.
+        stdin_bytes = req["stdin"].encode("utf-8") if req["stdin"] is not None else None
+        if stdin_bytes is not None and proc.stdin is not None:
+            try:
+                proc.stdin.write(stdin_bytes)
+            except (BrokenPipeError, OSError):
+                pass
+            try:
+                proc.stdin.close()
+            except Exception:  # noqa: S110 - stdin close races with subprocess exit
+                pass
+        stdout_thread = threading.Thread(
+            target=_reader, args=(proc.stdout, "stdout", out_holder), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_reader, args=(proc.stderr, "stderr", err_holder), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
         try:
-            stdin_bytes = req["stdin"].encode("utf-8") if req["stdin"] is not None else None
-            out, err = proc.communicate(input=stdin_bytes, timeout=req["timeout"])
+            proc.wait(timeout=req["timeout"])
             timed_out = False
         except subprocess.TimeoutExpired:
             _kill_proc(proc)
-            out, err = proc.communicate()
+            try:
+                proc.wait(timeout=SIGTERM_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
             timed_out = True
+        # Make sure the reader threads have drained before we return.
+        stdout_thread.join(timeout=SIGTERM_GRACE_SECONDS)
+        stderr_thread.join(timeout=SIGTERM_GRACE_SECONDS)
+        out = b"".join(out_holder)
+        err = b"".join(err_holder)
         return {
             "exit_code": proc.returncode if not timed_out else 124,
             "stdout": out.decode("utf-8", errors="replace"),
             "stderr": err.decode("utf-8", errors="replace"),
+            "stdout_truncated": truncated_flags["stdout"],
+            "stderr_truncated": truncated_flags["stderr"],
             "duration_ms": int((time.monotonic() - started) * 1000),
             "timed_out": timed_out,
         }

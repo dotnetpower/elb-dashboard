@@ -298,6 +298,36 @@ def test_stream_yields_lines_and_summary(
 # ---------------------------------------------------------------------------
 # Concurrency cap
 # ---------------------------------------------------------------------------
+# Output cap — verbose children must not OOM the sidecar.
+# ---------------------------------------------------------------------------
+def test_run_truncates_stdout_above_cap(
+    exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Stdout above ``EXEC_RUN_MAX_OUTPUT_BYTES`` is truncated, not OOM."""
+    # 64 KiB cap; child prints 256 KiB. Cap is read at request time so the
+    # env override applies even though the server thread is already running.
+    monkeypatch.setenv("EXEC_RUN_MAX_OUTPUT_BYTES", str(64 * 1024))
+
+    _install_stub(
+        tmp_path,
+        "az",
+        '#!/bin/bash\nfor i in $(seq 1 4096); do printf "%64s\\n" "" | tr " " "A"; done\n',
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+
+    from api.services import terminal_exec
+
+    result = terminal_exec.run(["az", "flood"], timeout_seconds=10)
+    assert result["exit_code"] == 0
+    # After sidecar truncation the api-side sanitizer expands each A-line
+    # into ``<base64-redacted>``; the bytes-on-the-wire pre-sanitize cap
+    # was 64 KiB, which converts to ~18 KiB sanitized lines. Allow some
+    # slack but require well under the un-capped 256 KiB.
+    assert len(result["stdout"]) < 64 * 1024
+    assert result["stdout_truncated"] is True
+
+
+# ---------------------------------------------------------------------------
 @pytest.mark.slow
 def test_concurrency_cap_returns_503(
     exec_server: tuple[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path

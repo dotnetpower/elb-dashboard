@@ -45,6 +45,33 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
+    # Recycle worker children every N tasks so allocator fragmentation +
+    # one-shot leaks in long-running deps (xml parsers, gzip buffers, K8s
+    # clients, Azure SDK pipelines) cannot accumulate into a GB-sized RSS
+    # over thousands of BLAST submits. 200 tasks is a comfortable cadence —
+    # high enough that the cold-start cost (Python interpreter + Celery
+    # import) stays amortised, low enough that the steady-state RSS is
+    # bounded. Override via env if a particular sidecar wants a tighter or
+    # looser bound.
+    worker_max_tasks_per_child=int(
+        os.environ.get("CELERY_WORKER_MAX_TASKS_PER_CHILD", "200")
+    ),
+    # Hard ceiling on every task — guards against a stuck terminal_exec
+    # stream, hung Storage call, or runaway Kubernetes wait blocking a
+    # worker slot forever. Soft limit fires SoftTimeLimitExceeded so the
+    # task can checkpoint / clean up; hard limit kills the worker child if
+    # the soft handler hangs too. The 1-hour ceiling matches the longest
+    # legit submit we have observed (sharded prepare-db); shorter tasks
+    # (poll, reconcile) finish in seconds so this never trips for them.
+    # The BLAST submit task itself is wrapped in its own retry loop so a
+    # soft-timeout pushes the work to the retry, not a dead end.
+    task_soft_time_limit=int(os.environ.get("CELERY_TASK_SOFT_TIME_LIMIT", "3300")),
+    task_time_limit=int(os.environ.get("CELERY_TASK_TIME_LIMIT", "3600")),
+    # Drop Celery result payloads after one hour so the result Redis db
+    # does not retain GB of stale dicts. Routes that need a result poll
+    # ``AsyncResult(...)`` within the first hour; anything older has been
+    # reflected into ``state_repo`` already.
+    result_expires=int(os.environ.get("CELERY_RESULT_EXPIRES", "3600")),
     # Silence the Celery 6.0 deprecation warning by opting in explicitly.
     # We want broker connection retries on startup so the worker comes up
     # gracefully even if Redis takes a few seconds to become reachable.
