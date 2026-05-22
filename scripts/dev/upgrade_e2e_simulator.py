@@ -259,8 +259,10 @@ def _reset_backends() -> None:
 
 
 def _set_running_version(value: str) -> None:
-    """Patch `api.tasks.upgrade.__version__` for the reconciler test."""
-    upgrade_task.__version__ = value
+    """Patch `api.__version__` for the reconciler test."""
+    import api
+
+    api.__version__ = value
 
 
 def _print(label: str, ok: bool, detail: str = "") -> None:
@@ -1204,9 +1206,11 @@ def scenario_degraded_running_state() -> int:
             runner=runner,
             aca=aca,
         )
-        original_version = upgrade_task.__version__
+        import api
+
+        original_version = api.__version__
         try:
-            upgrade_task.__version__ = "0.2.0"  # pin so success branch does not fire
+            api.__version__ = "0.2.0"  # pin so success branch does not fire
             degraded_watcher = _FakeWatcher(running="Degraded", provisioning="Provisioned")
             after = upgrade_task.reconcile_rolling_out_inline(
                 aca=aca, watcher=degraded_watcher
@@ -1224,7 +1228,7 @@ def scenario_degraded_running_state() -> int:
             _print("phase_detail explains the failure cause", ok2, after.phase_detail)
             failures += 0 if ok2 else 1
         finally:
-            upgrade_task.__version__ = original_version
+            api.__version__ = original_version
     except Exception as exc:
         _print("scenario crashed", False, f"{type(exc).__name__}: {exc}")
         traceback.print_exc()

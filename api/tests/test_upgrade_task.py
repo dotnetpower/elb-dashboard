@@ -369,7 +369,8 @@ def test_reconciler_finalises_succeeded_when_version_matches(
         runner=runner,
         aca=aca,
     )
-    monkeypatch.setattr(upgrade_task, "__version__", "0.3.0")
+    import api
+    monkeypatch.setattr(api, "__version__", "0.3.0")
     after_reconcile = upgrade_task.reconcile_rolling_out_inline(
         aca=aca, watcher=_FakeWatcher(running="Running", provisioning="Provisioned")
     )
@@ -392,7 +393,8 @@ def test_reconciler_idle_branch_returns_post_update_snapshot(
     `reconcile_rolling_out_inline` updated `running_version` on disk
     but returned the pre-update snapshot, leaving the SPA stale.
     """
-    monkeypatch.setattr(upgrade_task, "__version__", "0.7.0")
+    import api
+    monkeypatch.setattr(api, "__version__", "0.7.0")
     result = upgrade_task.reconcile_rolling_out_inline(
         aca=_FakeAca(), watcher=_FakeWatcher()
     )
@@ -516,7 +518,8 @@ def test_reconciler_treats_degraded_running_state_as_terminal_failure(
     )
     # Pin the api __version__ to the OLD version so the success branch
     # does not fire; force the rollout watcher to report `Degraded`.
-    monkeypatch.setattr(upgrade_task, "__version__", "0.2.1")
+    import api
+    monkeypatch.setattr(api, "__version__", "0.2.1")
     after = upgrade_task.reconcile_rolling_out_inline(
         aca=aca, watcher=_FakeWatcher(running="Degraded", provisioning="Provisioned")
     )
@@ -606,7 +609,8 @@ def test_reconciler_replica_zero_escalates_after_grace(
         runner=_FakeRunner(),
         aca=aca,
     )
-    monkeypatch.setattr(upgrade_task, "__version__", "0.2.1")
+    import api
+    monkeypatch.setattr(api, "__version__", "0.2.1")
     started = datetime.now(UTC) - timedelta(minutes=4)
     state.update_state(
         lambda s: setattr(s, "started_at", started.isoformat(timespec="seconds"))
@@ -635,7 +639,8 @@ def test_reconciler_pre_warm_defers_when_revision_not_ready(
         runner=_FakeRunner(),
         aca=aca,
     )
-    monkeypatch.setattr(upgrade_task, "__version__", "0.3.0")
+    import api
+    monkeypatch.setattr(api, "__version__", "0.3.0")
     after = upgrade_task.reconcile_rolling_out_inline(
         aca=aca,
         watcher=_FakeWatcher(running="Activating", provisioning="InProgress"),
@@ -917,3 +922,56 @@ def test_compact_history_drops_old_events(env: None) -> None:
     surviving = history.tail_events(limit=10)
     assert len(surviving) == 1
     assert surviving[0].job_id == "new"
+
+
+def test_facade_re_exports_every_documented_symbol() -> None:
+    """The SRP split moved task code into sibling modules; the facade
+    `api.tasks.upgrade` must re-export every name callers depend on.
+    Without this guard a silent removal of a re-export would surface
+    as `AttributeError` only in production (Celery task lookup, route
+    code) — pytest would still pass because tests import from the
+    facade implicitly.
+    """
+    from api.tasks import upgrade as facade
+
+    expected_public = {
+        # discovery
+        "check_latest",
+        "check_latest_inline",
+        # pipeline
+        "STATE_TRANSITION_TIMELINE",
+        "UpgradeStartRefused",
+        "execute_upgrade",
+        "execute_upgrade_inline",
+        "start_upgrade_inline",
+        # reconciler
+        "PATCH_NEVER_LANDED_GRACE_SECONDS",
+        "PRE_PATCH_BUDGET_SECONDS",
+        "PRE_PATCH_STATES",
+        "PRE_PATCH_TIMEOUT_SECONDS",
+        "ROLLING_OUT_TIMEOUT_SECONDS",
+        "reconcile_rolling_out",
+        "reconcile_rolling_out_inline",
+        # rollback
+        "RollbackStartRefused",
+        "start_rollback_inline",
+        # maintenance
+        "compact_history",
+        "compact_history_inline",
+        "purge_orphan_acr_tags",
+        "purge_orphan_acr_tags_inline",
+    }
+    for name in expected_public:
+        assert hasattr(facade, name), f"facade missing public symbol {name!r}"
+    # Internal symbols that tests historically patch must also stay
+    # reachable so the test surface isn't accidentally narrowed.
+    expected_internal = {
+        "_fail_pre",
+        "_fail_rollback",
+        "_fail_rollout",
+        "_image_matches_version",
+        "_new_revision_is_ready",
+        "_check_pre_patch_stuck",
+    }
+    for name in expected_internal:
+        assert hasattr(facade, name), f"facade missing internal symbol {name!r}"
