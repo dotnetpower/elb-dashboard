@@ -44,6 +44,24 @@ DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 1800  # hard 30-min cap; longer tasks must be split
 SIGTERM_GRACE_SECONDS = 5
 EXEC_TMP_ROOT = "/tmp/exec"  # noqa: S108 - intentional; cleaned per-request
+# Per-NDJSON-line cap for the streaming ``_stream`` response. A child can
+# emit single lines of hundreds of MB (binary blob accidentally dumped to
+# stdout, az --debug spew with no embedded newlines, …); without a cap
+# ``pipe.readline()`` would keep growing one bytearray until OOM. Lines
+# longer than the cap are sent with the captured prefix + a marker, then
+# the rest of that line is drained so the next read starts cleanly.
+NDJSON_LINE_MAX_BYTES = int(os.environ.get("EXEC_STREAM_LINE_MAX_BYTES", str(64 * 1024)))
+# Periodic GC for stale request workdirs. The per-request ``finally``
+# already cleans up on the happy path; this catches the cases where the
+# server was SIGKILL'd mid-request (Container Apps revision rollover,
+# OOMKill) or where the SIGTERM cleanup raced with the child holding an
+# open fd into the dir.
+EXEC_TMPDIR_GC_INTERVAL_SECONDS = int(
+    os.environ.get("EXEC_TMPDIR_GC_INTERVAL_SECONDS", "300")
+)
+EXEC_TMPDIR_GC_MAX_AGE_SECONDS = int(
+    os.environ.get("EXEC_TMPDIR_GC_MAX_AGE_SECONDS", "3600")
+)
 
 
 def _run_output_max_bytes() -> int:
@@ -345,9 +363,35 @@ def _stream(req: dict, write_line, client_alive=None) -> dict:
     client_gone = [False]
 
     def _read_pipe(pipe, stream_name: str) -> None:
-        for raw in iter(pipe.readline, b""):
+        cap = NDJSON_LINE_MAX_BYTES
+        while True:
+            try:
+                # readline(size) returns at most ``size`` bytes OR up to and
+                # including the next \n, whichever comes first. We ask for
+                # one byte past the cap so we can detect over-cap lines
+                # (size==cap+1 with no trailing \n).
+                raw = pipe.readline(cap + 1)
+            except (BrokenPipeError, OSError):
+                break
+            if not raw:
+                break
+            truncated = False
+            if len(raw) > cap and not raw.endswith(b"\n"):
+                # Drain the rest of this oversized line so the next
+                # ``readline`` starts cleanly. Bounded by the child's
+                # output cadence; we use 8 KiB reads so the drain is fast.
+                truncated = True
+                while True:
+                    try:
+                        chunk = pipe.readline(8192)
+                    except (BrokenPipeError, OSError):
+                        break
+                    if not chunk or chunk.endswith(b"\n"):
+                        break
             try:
                 decoded = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if truncated:
+                    decoded += " [truncated:line-over-cap]"
                 write_line({"stream": stream_name, "line": decoded})
             except (BrokenPipeError, ConnectionResetError):
                 # Client gone — flag the main loop and stop trying to write.
@@ -565,6 +609,69 @@ class _Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
+def _gc_stale_tmpdirs(max_age_seconds: int) -> int:
+    """Remove ``EXEC_TMP_ROOT/req-*`` dirs older than ``max_age_seconds``.
+
+    Returns the number of dirs removed. Cheap: ``os.scandir`` + ``stat`` per
+    entry. Safe to call concurrently with ``_make_cwd`` because we only
+    touch dirs whose mtime is older than the cap; an in-flight request is
+    actively mutating its workdir so its mtime is fresh.
+    """
+    cutoff = time.time() - max_age_seconds
+    removed = 0
+    if not os.path.isdir(EXEC_TMP_ROOT):
+        return 0
+    try:
+        entries = list(os.scandir(EXEC_TMP_ROOT))
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.startswith("req-"):
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        if stat.st_mtime >= cutoff:
+            continue
+        try:
+            shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def _start_tmpdir_gc_thread() -> None:
+    """Spawn a daemon thread that periodically prunes stale request workdirs."""
+    if EXEC_TMPDIR_GC_INTERVAL_SECONDS <= 0:
+        return
+
+    def _loop() -> None:
+        # Initial sweep catches anything left behind by the previous
+        # container instance before the first request even arrives.
+        try:
+            removed = _gc_stale_tmpdirs(0)
+            if removed:
+                _audit("exec_tmpdir_initial_gc", removed=removed)
+        except Exception as exc:  # pragma: no cover - defensive
+            _audit("exec_tmpdir_initial_gc_failed", error=type(exc).__name__)
+        while True:
+            time.sleep(EXEC_TMPDIR_GC_INTERVAL_SECONDS)
+            try:
+                removed = _gc_stale_tmpdirs(EXEC_TMPDIR_GC_MAX_AGE_SECONDS)
+                if removed:
+                    _audit(
+                        "exec_tmpdir_gc",
+                        removed=removed,
+                        max_age=EXEC_TMPDIR_GC_MAX_AGE_SECONDS,
+                    )
+            except Exception as exc:  # pragma: no cover - defensive
+                _audit("exec_tmpdir_gc_failed", error=type(exc).__name__)
+
+    threading.Thread(target=_loop, daemon=True, name="exec-tmpdir-gc").start()
+
+
 def main() -> None:
     if not EXEC_TOKEN or len(EXEC_TOKEN) < 16:
         # Fail fast — refuse to start without a real shared secret.
@@ -577,6 +684,7 @@ def main() -> None:
 
     httpd = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), _Handler)
     httpd.daemon_threads = True
+    _start_tmpdir_gc_thread()
     _audit(
         "exec_server_started",
         host=LISTEN_HOST,
