@@ -145,9 +145,11 @@ def test_claims_cache_soft_cap_evicts_when_full(monkeypatch: pytest.MonkeyPatch)
 def test_dev_bypass_returns_synthetic_identity_without_header() -> None:
     os.environ["AUTH_DEV_BYPASS"] = "true"
     try:
+        import asyncio
+
         from api.auth import require_caller
 
-        ident = require_caller(authorization=None)
+        ident = asyncio.run(require_caller(authorization=None))
         assert ident.object_id == "00000000-0000-0000-0000-000000000000"
         assert ident.upn == "dev-bypass@local"
         assert ident.claims.get("dev_bypass") is True
@@ -160,8 +162,10 @@ def test_dev_bypass_returns_synthetic_identity_without_header() -> None:
 
 def test_no_bypass_still_requires_bearer() -> None:
     """Without AUTH_DEV_BYPASS=true the dependency must reject empty headers."""
+    import asyncio
+
     from api.auth import require_caller
 
     with pytest.raises(HTTPException) as exc:
-        require_caller(authorization=None)
+        asyncio.run(require_caller(authorization=None))
     assert exc.value.status_code == 401

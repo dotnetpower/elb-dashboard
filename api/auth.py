@@ -208,7 +208,9 @@ def _dev_bypass_identity() -> CallerIdentity:
     )
 
 
-def require_caller(authorization: str | None = Header(default=None)) -> CallerIdentity:
+async def require_caller(
+    authorization: str | None = Header(default=None),
+) -> CallerIdentity:
     """FastAPI dependency that returns a validated CallerIdentity or raises 401.
 
     Usage:
@@ -218,13 +220,29 @@ def require_caller(authorization: str | None = Header(default=None)) -> CallerId
 
     With ``AUTH_DEV_BYPASS=true`` (development only) returns a synthetic
     identity without inspecting the Authorization header.
+
+    Async so the JWT validation (cache miss → synchronous OIDC discovery
+    + JWKS fetch via ``httpx.Client``) runs on ``asyncio.to_thread``
+    instead of blocking one of FastAPI's threadpool slots for every
+    bearer-authed request. Cache hit short-circuits and pays no
+    threadpool round-trip — that's the common case under dashboard
+    polling.
     """
     if os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true":
         return _dev_bypass_identity()
     if not authorization or not authorization.lower().startswith("bearer "):
         raise AuthError(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
-    return _validate_token(token)
+    # Cache hit: no IO, return directly without burning a threadpool slot.
+    cached = _claims_cache_get(_token_cache_key(token))
+    if cached is not None:
+        return cached
+    # Cache miss: validation involves a synchronous JWKS fetch on first
+    # tenant access. Run it in a worker thread so the event loop stays
+    # responsive for SSE / WebSocket / streaming responses.
+    import asyncio
+
+    return await asyncio.to_thread(_validate_token, token)
 
 
 def reset_caches() -> None:
