@@ -103,6 +103,17 @@ def wait_for_warmup_jobs(
 
     deadline = time.monotonic() + timeout_seconds
     last_database: dict[str, Any] = {}
+    # State-write dedup + adaptive backoff:
+    #   * Skip the Table write when the visible progress fields have not
+    #     moved since the last tick - a long-running warmup (10-30 min)
+    #     used to write 60-180 identical rows that Storage Tables had to
+    #     persist, throttle, and ship back as audit history.
+    #   * Stretch the poll interval after a few quiet ticks so the
+    #     k8s_warmup_status request rate falls from 1/15s to 1/60s once
+    #     it is clear nothing is changing — k8s_warmup_status itself fans
+    #     out 6 GETs per call against the AKS API.
+    last_progress_signature: tuple[int, int, int, int] | None = None
+    quiet_ticks = 0
     while True:
         status = k8s_warmup_status(credential, subscription_id, resource_group, cluster_name)
         databases = status.get("databases", []) if isinstance(status, dict) else []
@@ -126,8 +137,14 @@ def wait_for_warmup_jobs(
             "total_jobs": total_jobs,
             "expected_jobs": expected_jobs,
         }
-        record_task_progress(task, "warming_nodes", **progress)
-        update_state(job_id, "warming_nodes", status="running", **progress)
+        signature = (nodes_ready, nodes_failed, nodes_active, total_jobs)
+        if signature != last_progress_signature:
+            record_task_progress(task, "warming_nodes", **progress)
+            update_state(job_id, "warming_nodes", status="running", **progress)
+            last_progress_signature = signature
+            quiet_ticks = 0
+        else:
+            quiet_ticks += 1
 
         if nodes_failed > 0:
             return {"status": "failed", **progress, "detail": last_database}
@@ -135,4 +152,13 @@ def wait_for_warmup_jobs(
             return {"status": "completed", **progress, "detail": last_database}
         if time.monotonic() >= deadline:
             return {"status": "timeout", **progress, "detail": last_database}
-        time.sleep(poll_seconds)
+        # Adaptive sleep: stay at the configured `poll_seconds` for the
+        # first few ticks (so transitions get the low-latency UI update),
+        # then stretch to 2x → 4x → 4x… so a long quiet wait stops
+        # hammering the AKS API. Capped at 60 s.
+        sleep_seconds = poll_seconds
+        if quiet_ticks >= 6:
+            sleep_seconds = min(60, poll_seconds * 4)
+        elif quiet_ticks >= 3:
+            sleep_seconds = min(60, poll_seconds * 2)
+        time.sleep(sleep_seconds)
