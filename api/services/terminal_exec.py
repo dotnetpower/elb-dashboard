@@ -121,7 +121,7 @@ def run(
     ----------
     argv : list[str]
         Command + args. ``argv[0]`` MUST be in the exec server's allowlist
-        (currently ``{azcopy, kubectl, elastic-blast, elb, az}``).
+        (currently ``{azcopy, kubectl, elastic-blast, elb, az, git}``).
     stdin : str | None
         Data piped to the subprocess's stdin. ``None`` means closed stdin.
     stdin_file : str | None

@@ -383,3 +383,63 @@ def update_state(mutate: Callable[[UpgradeState], None]) -> UpgradeState:
     mutate(current)
     current.updated_at = _now_iso()
     return backend.upsert(current, expected_etag=expected_etag)
+
+
+class StateTransitionRefused(RuntimeError):
+    """Raised when a CAS state transition is attempted from the wrong state."""
+
+    def __init__(self, current: str, expected: str, target: str) -> None:
+        super().__init__(
+            f"transition refused: cannot move state {current!r} -> {target!r} "
+            f"(precondition required {expected!r})"
+        )
+        self.current = current
+        self.expected = expected
+        self.target = target
+
+
+def cas_state(
+    *,
+    expected_state: str,
+    new_state: str,
+    mutate: Callable[[UpgradeState], None] | None = None,
+    retries: int = 2,
+) -> UpgradeState:
+    """Transition the persisted state row's `state` field via CAS.
+
+    Refuses the write when the row is not in ``expected_state``; this is
+    the gate the upgrade flow uses to prevent concurrent operators from
+    starting overlapping upgrades (only `idle -> queued` is valid). When
+    the underlying Tables ETag is stale we retry up to ``retries`` times
+    so a benign racing reader does not derail a legitimate transition.
+    """
+    if new_state not in VALID_STATES:
+        raise ValueError(f"unknown target state {new_state!r}")
+
+    last_exc: Exception | None = None
+    for _ in range(max(1, retries + 1)):
+        try:
+            return _do_cas(expected_state, new_state, mutate)
+        except RowEtagMismatch as exc:
+            last_exc = exc
+            continue
+    # Should be unreachable: _do_cas either returns or raises
+    # StateTransitionRefused before falling out.
+    raise RowEtagMismatch(str(last_exc) if last_exc else "cas_state exhausted retries")
+
+
+def _do_cas(
+    expected_state: str,
+    new_state: str,
+    mutate: Callable[[UpgradeState], None] | None,
+) -> UpgradeState:
+    backend = _backend()
+    current = backend.get()
+    if current.state != expected_state:
+        raise StateTransitionRefused(current.state, expected_state, new_state)
+    expected_etag = current.etag
+    current.state = new_state
+    if mutate is not None:
+        mutate(current)
+    current.updated_at = _now_iso()
+    return backend.upsert(current, expected_etag=expected_etag)

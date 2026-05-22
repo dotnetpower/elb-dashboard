@@ -32,7 +32,9 @@ from pathlib import PurePosixPath
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-ALLOWED_BIN: frozenset[str] = frozenset({"azcopy", "kubectl", "elastic-blast", "elb", "az"})
+ALLOWED_BIN: frozenset[str] = frozenset(
+    {"azcopy", "kubectl", "elastic-blast", "elb", "az", "git"}
+)
 LISTEN_HOST = os.environ.get("EXEC_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("EXEC_PORT", "7682"))
 EXEC_TOKEN = os.environ.get("EXEC_TOKEN", "")
