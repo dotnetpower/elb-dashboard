@@ -283,6 +283,11 @@ export function UpgradePage() {
                 I accept a short downtime (≈ 1 minute) while the new revision boots.
               </span>
             </label>
+            <p className="muted" style={{ margin: 0, fontSize: 11 }}>
+              Note: in-flight BLAST jobs that submit during the restart window may
+              need to be retried by the user once the upgrade settles. Persisted job
+              state (Storage Table) and uploaded results survive the restart.
+            </p>
             {isMajorBump && (
               <div
                 role="alert"

@@ -62,9 +62,18 @@ export function UpgradeBadge() {
     label = "Upgrade failed";
     tone = "danger";
   } else if (phase === "succeeded") {
-    icon = <ArrowUpCircle size={14} strokeWidth={1.6} />;
-    label = `Now on v${status.running_version}`;
-    tone = "ok";
+    // After a successful upgrade the badge re-prioritises any newer tag
+    // discovered in the meantime. The ok-toned "Now on vX" only wins when
+    // the run we just observed is also the latest available.
+    if (available) {
+      icon = <ArrowUpCircle size={14} strokeWidth={1.6} />;
+      label = `Upgrade to v${status.latest_version}`;
+      tone = "info";
+    } else {
+      icon = <ArrowUpCircle size={14} strokeWidth={1.6} />;
+      label = `Now on v${status.running_version}`;
+      tone = "ok";
+    }
   } else if (phase === "rolled_back") {
     icon = <RotateCcw size={14} strokeWidth={1.6} />;
     label = "Rolled back";

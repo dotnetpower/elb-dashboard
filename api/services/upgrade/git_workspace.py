@@ -106,6 +106,12 @@ def _scrub_remote_credentials(target_dir: str, *, runner: object) -> None:
     introduced in a future PR ends up persisted under `.git/config` inside
     the build context and ships into the resulting container image. We mask
     eagerly, on every clone, so the contract holds even before that PR lands.
+
+    SECURITY: When the upstream URL carries credentials (i.e. `masked != url`)
+    and the scrub *write* fails, this function raises `WorkspaceError` so
+    the upgrade pipeline aborts before invoking `az acr build`. Without
+    that guard, a transient terminal_exec failure could ship the PAT-bearing
+    `.git/config` into the new image.
     """
     try:
         existing = runner.run(
@@ -115,6 +121,16 @@ def _scrub_remote_credentials(target_dir: str, *, runner: object) -> None:
         )
     except terminal_exec.TerminalExecError as exc:
         LOGGER.warning("upgrade.git_workspace: cannot read remote.origin.url: %s", exc)
+        # We could not verify there is nothing sensitive to scrub. Refuse
+        # to proceed when the supplied remote actually carries an
+        # `userinfo@` segment that would warrant scrubbing.
+        from api.services.upgrade.remote_tags import configured_remote, mask_remote_url
+
+        remote = configured_remote() or ""
+        if remote and mask_remote_url(remote) != remote:
+            raise WorkspaceError(
+                f"could not verify credential scrub on cloned workspace: {exc}"
+            ) from exc
         return
     if int(existing.get("exit_code", -1)) != 0:
         return
@@ -127,7 +143,7 @@ def _scrub_remote_credentials(target_dir: str, *, runner: object) -> None:
     if masked == url:
         return
     try:
-        runner.run(
+        result = runner.run(
             [
                 "git",
                 "-C",
@@ -140,7 +156,14 @@ def _scrub_remote_credentials(target_dir: str, *, runner: object) -> None:
             timeout_seconds=15,
         )
     except terminal_exec.TerminalExecError as exc:
-        LOGGER.warning("upgrade.git_workspace: scrub failed: %s", exc)
+        # SECURITY: the unmasked URL is still in `.git/config`. Refuse.
+        raise WorkspaceError(
+            f"credential scrub write failed; refusing to ship build context: {exc}"
+        ) from exc
+    if int(result.get("exit_code", -1)) != 0:
+        raise WorkspaceError(
+            f"credential scrub write returned exit={result.get('exit_code')}; refusing build"
+        )
 
 
 def cleanup(workspace: WorkspacePath, *, runner: object = terminal_exec) -> None:

@@ -96,6 +96,37 @@ def test_clone_scrubs_credentials_from_remote_origin_url() -> None:
     assert written_url == "https://example.test/foo.git"
 
 
+def test_clone_aborts_when_credential_scrub_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SECURITY: if we can't rewrite remote.origin.url, the unmasked PAT
+    is still in `.git/config` and would ship to the built image. The
+    clone must raise instead of silently returning."""
+
+    class _ScrubWriteFailure(_Recorder):
+        def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
+            self.calls.append({"argv": argv, "cwd": cwd, "timeout_seconds": timeout_seconds})
+            if argv[:5] == ["git", "-C", "/tmp/elb-upgrade/jobABCD", "config", "--get"]:  # noqa: S108
+                return {
+                    "exit_code": 0,
+                    "stdout": "https://x-access-token:supersecret@example.test/foo.git\n",
+                    "stderr": "",
+                }
+            if argv[:4] == ["git", "-C", "/tmp/elb-upgrade/jobABCD", "config"] and len(argv) > 5:  # noqa: S108
+                # Simulate the scrub-write failing.
+                raise terminal_exec.TerminalExecError("simulated write failure")
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    with pytest.raises(git_workspace.WorkspaceError) as exc:
+        git_workspace.clone(
+            git_remote="https://x-access-token:supersecret@example.test/foo.git",
+            target_version="0.3.0",
+            job_id="jobABCD",
+            runner=_ScrubWriteFailure(),
+        )
+    assert "scrub" in str(exc.value).lower()
+
+
 def test_clone_rejects_invalid_version() -> None:
     with pytest.raises(git_workspace.WorkspaceError):
         git_workspace.clone(

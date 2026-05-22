@@ -58,6 +58,12 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/upgrade", tags=["upgrade"])
 
 _CHECK_MIN_INTERVAL_SECONDS = 15.0
+# Process-local throttle — the api Dockerfile launches 2 uvicorn workers,
+# so worst-case the upstream git remote can see one /check per worker per
+# `_CHECK_MIN_INTERVAL_SECONDS`. That is still gentle (≤ 8 req/min) and
+# avoids needing a Redis-backed coordinator. Distributed throttling is
+# only worth wiring if the worker count ever grows or if the beat job
+# becomes more frequent than the current 30 minutes.
 _check_lock = threading.Lock()
 _last_check_at: float = 0.0
 
