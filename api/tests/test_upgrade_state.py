@@ -153,5 +153,25 @@ def test_cas_state_retries_on_etag_mismatch_with_backoff(
     )
     assert out.state == state.STATE_QUEUED
     assert call_count["n"] == 3
-    # Two retries → two sleeps using the configured schedule.
-    assert sleeps == list(state._CAS_BACKOFF_SCHEDULE_SECONDS[:2])
+    # Two retries → two sleeps. With jitter active each sleep is within
+    # ±_CAS_JITTER_RATIO of the configured base. We assert the bounds
+    # rather than the exact value so the test stays stable.
+    assert len(sleeps) == 2
+    for idx, observed in enumerate(sleeps):
+        base = state._CAS_BACKOFF_SCHEDULE_SECONDS[idx]
+        spread = base * state._CAS_JITTER_RATIO
+        assert base - spread <= observed <= base + spread, (
+            f"sleep[{idx}]={observed} outside [{base - spread}, {base + spread}]"
+        )
+
+
+def test_legacy_state_coerced_to_idle_on_read() -> None:
+    """A row written by a previous deployment with a now-removed state
+    name (e.g. STATE_CHECKING) must coerce to IDLE on read so an old
+    persisted row doesn't crash the new reader.
+    """
+    legacy_row = state.UpgradeState(state="checking", job_id="old-job")
+    state._backend().upsert(legacy_row, expected_etag="")
+    read = state.get_state()
+    assert read.state == state.STATE_IDLE
+    assert read.job_id == "old-job"

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -43,13 +44,6 @@ _PARTITION_KEY = "control-plane"
 _ROW_KEY = "current"
 
 STATE_IDLE = "idle"
-# STATE_CHECKING is reserved for a future short-lived "discovery in
-# progress" indicator. Intentionally not emitted today: every existing
-# code path treats discovery as a side-effect of `check_latest_inline`
-# rather than a row state. Kept in the enum so a row that was written
-# by a future revision and rolled back to an older api version still
-# round-trips cleanly.
-STATE_CHECKING = "checking"
 STATE_QUEUED = "queued"
 STATE_FETCHING = "fetching"
 STATE_BUILDING = "building"
@@ -65,7 +59,6 @@ STATE_ROLLBACK_FAILED = "rollback_failed"
 VALID_STATES = frozenset(
     {
         STATE_IDLE,
-        STATE_CHECKING,
         STATE_QUEUED,
         STATE_FETCHING,
         STATE_BUILDING,
@@ -79,6 +72,12 @@ VALID_STATES = frozenset(
         STATE_ROLLBACK_FAILED,
     }
 )
+# Backward-compat: rows written by an older deployment that briefly
+# carried STATE_CHECKING should not crash this build. The reader
+# coerces an unrecognised state into IDLE so the upgrade flow remains
+# operable. This keeps `VALID_STATES` strict for new writes while not
+# bricking old data.
+_LEGACY_TO_IDLE: frozenset[str] = frozenset({"checking"})
 
 
 class RowEtagMismatch(RuntimeError):
@@ -342,6 +341,18 @@ def _entity_to_state(entity: Any) -> UpgradeState:
         etag = str(metadata.get("etag", "") or "")
     if not etag:
         etag = str(entity.get("odata.etag", "") or "")
+    raw_state = str(entity.get("state", STATE_IDLE))
+    # Legacy coercion: a row written by a previous deployment that briefly
+    # used a now-removed state name lands in IDLE rather than crashing
+    # the reader. The next operator-driven transition then re-anchors
+    # the row in a known state.
+    if raw_state in _LEGACY_TO_IDLE:
+        LOGGER.warning(
+            "upgrade.state: coercing legacy state %r to %r on read",
+            raw_state,
+            STATE_IDLE,
+        )
+        raw_state = STATE_IDLE
     return UpgradeState(
         running_version=str(entity.get("running_version", "")),
         running_sha=str(entity.get("running_sha", "")),
@@ -351,7 +362,7 @@ def _entity_to_state(entity: Any) -> UpgradeState:
         latest_sha=str(entity.get("latest_sha", "")),
         latest_checked_at=str(entity.get("latest_checked_at", "")),
         git_remote=str(entity.get("git_remote", "")),
-        state=str(entity.get("state", STATE_IDLE)),
+        state=raw_state,
         target_version=str(entity.get("target_version", "")),
         target_sha=str(entity.get("target_sha", "")),
         job_id=str(entity.get("job_id", "")),
@@ -395,8 +406,21 @@ def _state_to_entity(state: UpgradeState) -> dict[str, Any]:
 
 
 def get_state() -> UpgradeState:
-    """Read the singleton state row, returning defaults when not present."""
-    return _backend().get()
+    """Read the singleton state row, returning defaults when not present.
+
+    Applies legacy-state coercion (see `_LEGACY_TO_IDLE`) so a row
+    written by an older deployment with a now-removed state name does
+    not propagate up to callers as an unknown state.
+    """
+    row = _backend().get()
+    if row.state in _LEGACY_TO_IDLE:
+        LOGGER.warning(
+            "upgrade.state: coercing legacy state %r to %r on get_state",
+            row.state,
+            STATE_IDLE,
+        )
+        row.state = STATE_IDLE
+    return row
 
 
 def update_state(mutate: Callable[[UpgradeState], None]) -> UpgradeState:
@@ -430,6 +454,14 @@ class StateTransitionRefused(RuntimeError):
 
 
 _CAS_BACKOFF_SCHEDULE_SECONDS: tuple[float, ...] = (0.02, 0.05, 0.1, 0.2, 0.4)
+# Maximum jitter ratio applied per backoff step. With ratio 0.5, a base
+# of 100ms becomes uniformly distributed over [50ms, 150ms]. Jitter
+# breaks lock-step retry waves when N workers all wake on the same
+# beat tick — a thundering-herd scenario the deterministic schedule
+# alone cannot disperse.
+_CAS_JITTER_RATIO: float = 0.5
+# Jitter is for spread, not security.
+_jitter_rng = random.Random()  # noqa: S311
 
 
 def cas_state(
@@ -464,9 +496,12 @@ def cas_state(
             if attempt + 1 >= attempts:
                 break
             delay_idx = min(attempt, len(_CAS_BACKOFF_SCHEDULE_SECONDS) - 1)
-            delay = _CAS_BACKOFF_SCHEDULE_SECONDS[delay_idx]
+            base = _CAS_BACKOFF_SCHEDULE_SECONDS[delay_idx]
+            # Jitter spread: uniform over [base*(1-r), base*(1+r)].
+            spread = base * _CAS_JITTER_RATIO
+            delay = base + _jitter_rng.uniform(-spread, spread)
             try:
-                sleeper(delay)
+                sleeper(max(0.0, delay))
             except Exception as sleep_exc:
                 # A test sleeper that raises is treated as "do not sleep".
                 LOGGER.debug("cas_state sleeper raised; skipping backoff: %s", sleep_exc)

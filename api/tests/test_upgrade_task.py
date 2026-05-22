@@ -736,3 +736,55 @@ def test_state_transition_timeline_walks_through_every_state(env: None) -> None:
     # Silence unused-var warning.
     _ = seen_phase_details
 
+
+
+def test_pre_patch_budget_per_state(env: None) -> None:
+    """QUEUED has a smaller budget than BUILDING — verify per-state escalation."""
+    from datetime import UTC, datetime, timedelta
+
+    # QUEUED budget = 5 min; elapsed 6 min → should escalate.
+    started = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
+    state.update_state(
+        lambda s: (
+            setattr(s, "state", state.STATE_QUEUED),
+            setattr(s, "started_at", started.isoformat(timespec="seconds")),
+            setattr(s, "job_id", "queued-dead"),
+            setattr(s, "target_version", "0.3.0"),
+        )[-1]
+    )
+    fake_now = lambda: started + timedelta(minutes=6)  # noqa: E731
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=_FakeAca(), watcher=_FakeWatcher(), now=fake_now
+    )
+    assert after.state == state.STATE_FAILED_PRE
+    assert "budget" in after.phase_detail
+
+    # BUILDING budget = 30 min; elapsed 6 min → must NOT escalate.
+    state.set_backend(state.InMemoryBackend())
+    state.update_state(
+        lambda s: (
+            setattr(s, "state", state.STATE_BUILDING),
+            setattr(s, "started_at", started.isoformat(timespec="seconds")),
+            setattr(s, "job_id", "building-ok"),
+            setattr(s, "target_version", "0.3.0"),
+        )[-1]
+    )
+    after2 = upgrade_task.reconcile_rolling_out_inline(
+        aca=_FakeAca(), watcher=_FakeWatcher(), now=fake_now
+    )
+    assert after2.state == state.STATE_BUILDING
+
+
+def test_start_records_reason_in_audit(env: None) -> None:
+    """The optional `reason` field on start is recorded verbatim in the audit."""
+    upgrade_task.start_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        reason="CVE-2026-1234 hotfix",
+        enqueue=lambda *_args: None,
+    )
+    events = history.tail_events(limit=10)
+    start_events = [e for e in events if e.event == "start"]
+    assert start_events
+    assert start_events[0].detail.get("reason") == "CVE-2026-1234 hotfix"

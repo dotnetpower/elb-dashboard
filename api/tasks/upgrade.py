@@ -142,9 +142,16 @@ def start_upgrade_inline(
     target_version: str,
     target_sha: str,
     started_by_oid: str,
+    reason: str = "",
     enqueue: Callable[[str, str, str, str], object] | None = None,
 ) -> state.UpgradeState:
-    """CAS the row from idle -> queued and enqueue the Celery task."""
+    """CAS the row from idle -> queued and enqueue the Celery task.
+
+    ``reason`` is an optional human-supplied justification recorded
+    verbatim in the `start` audit event so a later operator can see why
+    a particular upgrade was triggered (e.g. "CVE patch", "feature
+    flag rollout"). Empty `reason` is allowed but logged as such.
+    """
     if not target_version:
         raise UpgradeStartRefused("target_version required")
     job_id = uuid.uuid4().hex[:16]
@@ -178,6 +185,7 @@ def start_upgrade_inline(
         target_version=target_version,
         target_sha=target_sha or "",
         started_by_oid=started_by_oid or "",
+        reason=reason or "",
     )
 
     submit = enqueue or _default_enqueue
@@ -542,9 +550,22 @@ def reconcile_rolling_out_inline(
     if row.target_version and __version__ == row.target_version:
         ready = _new_revision_is_ready(row, aca_mod, watcher_mod)
         if not ready:
-            # Defer to the next tick — stuck-guard upper bound still
-            # protects against an indefinite wait.
-            return row
+            # Defer to the next tick — update progress so the SPA
+            # surfaces the pre-warm step instead of looking frozen.
+            try:
+                state.update_state(
+                    lambda s: (
+                        setattr(
+                            s,
+                            "phase_detail",
+                            "new revision booting; awaiting readiness probe",
+                        ),
+                        setattr(s, "phase_progress", 95),
+                    )[-1]
+                )
+            except state.RowEtagMismatch:
+                pass
+            return state.get_state()
         try:
             after = state.cas_state(
                 expected_state=state.STATE_ROLLING_OUT,
@@ -647,19 +668,21 @@ ROLLING_OUT_TIMEOUT_SECONDS = 15 * 60
 # vs the typical begin_update -> revision-created lag of < 30 s.
 PATCH_NEVER_LANDED_GRACE_SECONDS = 120
 
-# Pre-PATCH stuck guard. A row parked in queued/fetching/building/patching
-# longer than this implies the producing Celery worker died (process kill,
-# OOM, broker drop after enqueue) — nothing else can advance the row.
-# 35 min covers a slow 30-min `az acr build` plus a 5-min slack so a
-# legitimate slow build never trips the guard. The reconciler runs every
-# 60 s, so worst-case dead-row latency is ~36 min.
-PRE_PATCH_TIMEOUT_SECONDS = 35 * 60
-PRE_PATCH_STATES = (
-    state.STATE_QUEUED,
-    state.STATE_FETCHING,
-    state.STATE_BUILDING,
-    state.STATE_PATCHING,
-)
+# Pre-PATCH stuck guard. Per-state budget so a fast operation (worker
+# pickup) does not get the same generous ceiling as a slow one (3-way
+# `az acr build`). The reconciler escalates a row whose elapsed time
+# in its current state exceeds the per-state budget. Each budget is
+# generous vs the observed P99 of that step so a legitimate slow run
+# is never tripped. The reconciler runs every 60 s so worst-case
+# dead-row latency is `budget + 60 s`.
+PRE_PATCH_TIMEOUT_SECONDS = 35 * 60  # legacy aggregate budget (kept for callers)
+PRE_PATCH_BUDGET_SECONDS: dict[str, int] = {
+    state.STATE_QUEUED: 5 * 60,  # worker pickup (typical: <5 s)
+    state.STATE_FETCHING: 10 * 60,  # git clone (typical: 10-60 s)
+    state.STATE_BUILDING: 30 * 60,  # 3x az acr build (typical: 5-15 min total)
+    state.STATE_PATCHING: 5 * 60,  # ACR snapshot + ARM PATCH prep (typical: <30 s)
+}
+PRE_PATCH_STATES = tuple(PRE_PATCH_BUDGET_SECONDS.keys())
 
 # A revision whose `runningState` is one of these has crash-looped or
 # been killed; the rollout watcher's `provisioning_state` check alone
@@ -673,7 +696,7 @@ _RUNNING_STATE_TERMINAL_FAILURES = frozenset(
 def _check_pre_patch_stuck(
     row: state.UpgradeState, clock: Callable[[], datetime]
 ) -> state.UpgradeState | None:
-    """Return the post-fail snapshot when ``row`` exceeds the pre-PATCH budget.
+    """Return the post-fail snapshot when ``row`` exceeds its per-state budget.
 
     Returns ``None`` when the row is within budget or its ``started_at``
     is malformed (we never escalate on a parse error — the cheaper
@@ -686,11 +709,13 @@ def _check_pre_patch_stuck(
     except ValueError:
         return None
     elapsed = (clock() - started).total_seconds()
-    if elapsed <= PRE_PATCH_TIMEOUT_SECONDS:
+    budget = PRE_PATCH_BUDGET_SECONDS.get(row.state, PRE_PATCH_TIMEOUT_SECONDS)
+    if elapsed <= budget:
         return None
     return _fail_pre(
         row.job_id,
-        f"stuck in {row.state} for {elapsed:.0f}s; producing worker likely died",
+        f"stuck in {row.state} for {elapsed:.0f}s (budget {budget}s); "
+        "producing worker likely died",
     )
 
 
@@ -758,6 +783,7 @@ def reconcile_rolling_out() -> dict:
 def start_rollback_inline(
     *,
     started_by_oid: str,
+    reason: str = "",
     aca: object | None = None,
     watcher: object | None = None,
     acr: object | None = None,
@@ -832,6 +858,7 @@ def start_rollback_inline(
         job_id=row.job_id,
         started_by_oid=started_by_oid or "",
         target=target_images.as_dict(),
+        reason=reason or "",
     )
 
     try:

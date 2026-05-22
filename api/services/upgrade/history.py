@@ -20,6 +20,7 @@ Validation: `uv run pytest -q api/tests/test_upgrade_history.py`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -55,6 +56,12 @@ class HistoryEvent:
     (network retry, partial-failure resend). It is also persisted to the
     blob alongside the rest of the payload so dedup survives a process
     restart.
+
+    ``prev_hash`` chains each event to the previous one's SHA-256 so a
+    later operator can verify the audit blob has not been tampered with
+    (a manually-edited row breaks the chain at that point onward). The
+    chain is computed by `record_event` at write time; tests assert end
+    -to-end via `verify_chain`.
     """
 
     ts: str  # ISO-8601 UTC
@@ -64,6 +71,7 @@ class HistoryEvent:
     event: str
     detail: dict[str, Any]
     event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    prev_hash: str = ""
 
     def to_json_line(self) -> bytes:
         payload = {
@@ -71,9 +79,30 @@ class HistoryEvent:
             "job_id": self.job_id,
             "event": self.event,
             "event_id": self.event_id,
+            "prev_hash": self.prev_hash,
             **self.detail,
         }
         return (json.dumps(payload, default=str) + "\n").encode("utf-8")
+
+    def content_hash(self) -> str:
+        """SHA-256 of this event's canonical payload + prev_hash.
+
+        This is the value the next event's ``prev_hash`` is compared
+        against during chain verification.
+        """
+        canonical = json.dumps(
+            {
+                "ts": self.ts,
+                "job_id": self.job_id,
+                "event": self.event,
+                "event_id": self.event_id,
+                "detail": self.detail,
+                "prev_hash": self.prev_hash,
+            },
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @classmethod
     def from_json(cls, raw: bytes | str) -> HistoryEvent:
@@ -84,17 +113,23 @@ class HistoryEvent:
         job_id = str(payload.pop("job_id", ""))
         event = str(payload.pop("event", ""))
         event_id = str(payload.pop("event_id", "") or "")
+        prev_hash = str(payload.pop("prev_hash", "") or "")
         if not event_id:
             # Backfill: events written before the event_id field landed
             # are deduped by their full payload hash, which is stable
             # for the historical record.
-            import hashlib
-
             digest = hashlib.sha256(
                 f"{ts}|{job_id}|{event}|{json.dumps(payload, sort_keys=True, default=str)}".encode()
             ).hexdigest()
             event_id = f"sha256:{digest[:32]}"
-        return cls(ts=ts, job_id=job_id, event=event, detail=payload, event_id=event_id)
+        return cls(
+            ts=ts,
+            job_id=job_id,
+            event=event,
+            detail=payload,
+            event_id=event_id,
+            prev_hash=prev_hash,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -203,18 +238,105 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+# Track the last written event's hash so the next `record_event` can
+# chain to it. On process start the chain is bootstrapped from the
+# tail of the existing blob so the chain survives a revision restart.
+_CHAIN_LOCK = threading.Lock()
+_LAST_HASH: str | None = None
+
+
+def _chain_predecessor() -> str:
+    """Return the previous event's content hash for chaining.
+
+    Lazy bootstrap: on the first call we walk the existing blob to find
+    the last event's hash so the chain continues across restarts. A
+    fresh deployment starts with the empty string.
+    """
+    global _LAST_HASH
+    with _CHAIN_LOCK:
+        if _LAST_HASH is not None:
+            return _LAST_HASH
+        try:
+            raw = _backend().read_all()
+        except Exception as exc:
+            LOGGER.warning("upgrade.history chain bootstrap failed: %s", exc)
+            _LAST_HASH = ""
+            return _LAST_HASH
+        last = ""
+        for line in raw.split(b"\n"):
+            if not line.strip():
+                continue
+            try:
+                evt = HistoryEvent.from_json(line)
+            except json.JSONDecodeError:
+                continue
+            last = evt.content_hash()
+        _LAST_HASH = last
+        return _LAST_HASH
+
+
+def _advance_chain(evt: HistoryEvent) -> None:
+    global _LAST_HASH
+    with _CHAIN_LOCK:
+        _LAST_HASH = evt.content_hash()
+
+
+def reset_chain_for_tests() -> None:
+    """Reset the in-process chain bootstrap so each test sees a clean state."""
+    global _LAST_HASH
+    with _CHAIN_LOCK:
+        _LAST_HASH = None
+
+
 def record_event(event: str, *, job_id: str, **detail: Any) -> None:
     """Best-effort: append one event to the history blob.
 
     Never raises — audit logging must never break the upgrade flow.
+    Each event embeds the SHA-256 of the previous event's payload so a
+    later reader can verify the chain has not been tampered with.
     """
-    payload = HistoryEvent(
-        ts=_now_iso(), job_id=job_id or "", event=event, detail=detail
-    ).to_json_line()
+    prev_hash = _chain_predecessor()
+    evt = HistoryEvent(
+        ts=_now_iso(), job_id=job_id or "", event=event, detail=detail, prev_hash=prev_hash
+    )
     try:
-        _backend().append(payload)
+        _backend().append(evt.to_json_line())
     except Exception as exc:
         LOGGER.warning("upgrade.history record_event swallowed: %s", exc)
+        return
+    _advance_chain(evt)
+
+
+def verify_chain() -> tuple[bool, str]:
+    """Walk the audit blob and verify every ``prev_hash`` links correctly.
+
+    Returns ``(ok, reason)``. ``ok=False`` means the chain is broken at
+    the position called out in ``reason`` (a row was tampered with or
+    inserted out of order). The first event's ``prev_hash`` should be
+    empty; subsequent events must hash-match.
+    """
+    try:
+        raw = _backend().read_all()
+    except Exception as exc:
+        return False, f"read failed: {exc}"
+    expected = ""
+    n = 0
+    for line in raw.split(b"\n"):
+        if not line.strip():
+            continue
+        try:
+            evt = HistoryEvent.from_json(line)
+        except json.JSONDecodeError:
+            continue
+        if evt.prev_hash != expected:
+            return False, (
+                f"chain broken at event #{n} (event_id={evt.event_id}, "
+                f"event={evt.event}): expected prev_hash={expected!r}, "
+                f"got {evt.prev_hash!r}"
+            )
+        expected = evt.content_hash()
+        n += 1
+    return True, f"chain verified across {n} events"
 
 
 def tail_events(*, limit: int = 50) -> list[HistoryEvent]:

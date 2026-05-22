@@ -36,6 +36,7 @@ from packaging.version import InvalidVersion, Version
 LOGGER = logging.getLogger(__name__)
 
 UPGRADE_GIT_REMOTE_ENV = "UPGRADE_GIT_REMOTE"
+UPGRADE_GIT_REMOTE_ALLOWLIST_ENV = "UPGRADE_GIT_REMOTE_ALLOWLIST"
 HTTP_TIMEOUT_SECONDS = 10.0
 MAX_TAGS = 20
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024  # 4 MiB — generous for any real refs list.
@@ -122,6 +123,20 @@ def _validate_url(url: str) -> str:
         raise RemoteTagsError(
             f"remote URL hostname {hostname!r} resolves to a banned address"
         )
+    # Optional positive allowlist. When `UPGRADE_GIT_REMOTE_ALLOWLIST`
+    # is set (comma-separated hostnames, case-insensitive), only refs
+    # under those hosts are accepted. The default — unset — preserves
+    # backwards-compatible permissive behaviour. Allowlist matches the
+    # full hostname (no wildcards) so a deliberate strict policy cannot
+    # be widened by a typo.
+    allowlist_raw = os.environ.get(UPGRADE_GIT_REMOTE_ALLOWLIST_ENV, "").strip()
+    if allowlist_raw:
+        allowed = {h.strip().lower() for h in allowlist_raw.split(",") if h.strip()}
+        if hostname not in allowed:
+            raise RemoteTagsError(
+                f"remote URL hostname {hostname!r} is not in "
+                f"{UPGRADE_GIT_REMOTE_ALLOWLIST_ENV}"
+            )
     return url
 
 

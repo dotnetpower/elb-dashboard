@@ -24,8 +24,10 @@ from api.services.upgrade import history
 @pytest.fixture(autouse=True)
 def _in_memory() -> None:
     history.set_backend(history.InMemoryHistoryBackend())
+    history.reset_chain_for_tests()
     yield
     history.set_backend(None)
+    history.reset_chain_for_tests()
 
 
 def test_record_and_tail_returns_newest_first() -> None:
@@ -134,3 +136,30 @@ def test_legacy_events_without_event_id_dedupe_by_payload() -> None:
     events = history.tail_events(limit=10)
     assert len(events) == 1
     assert events[0].event == "succeeded"
+
+
+def test_audit_hash_chain_is_valid_on_normal_write() -> None:
+    """Sequential record_event calls form a valid hash chain."""
+    history.record_event("start", job_id="chain1", target_version="0.3.0")
+    history.record_event("state", job_id="chain1", phase="building")
+    history.record_event("succeeded", job_id="chain1", running_version="0.3.0")
+    ok, reason = history.verify_chain()
+    assert ok, reason
+    assert "verified across 3 events" in reason
+
+
+def test_audit_hash_chain_detects_tampering() -> None:
+    """If a row is mutated after the fact, verify_chain reports the break."""
+    history.record_event("start", job_id="tampered", target_version="0.3.0")
+    history.record_event("succeeded", job_id="tampered", running_version="0.3.0")
+    raw = history._backend().read_all()
+    lines = raw.split(b"\n")
+    tampered_first = lines[0].replace(
+        b'"target_version": "0.3.0"', b'"target_version": "9.9.9"'
+    )
+    rebuilt = tampered_first + b"\n" + b"\n".join(lines[1:])
+    history.set_backend(history.InMemoryHistoryBackend())
+    history._backend().append(rebuilt)
+    ok, reason = history.verify_chain()
+    assert not ok
+    assert "chain broken" in reason

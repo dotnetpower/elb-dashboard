@@ -246,3 +246,21 @@ def test_max_tags_caps_result() -> None:
         max_tags=5,
     )
     assert len(tags) == 5
+
+
+def test_hostname_allowlist_blocks_unknown_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When UPGRADE_GIT_REMOTE_ALLOWLIST is set, only listed hostnames are accepted."""
+    monkeypatch.setenv("UPGRADE_GIT_REMOTE_ALLOWLIST", "github.com,corp.git.test")
+    # Allowed
+    assert remote_tags._validate_url("https://github.com/foo/bar.git") == "https://github.com/foo/bar.git"
+    # Blocked
+    with pytest.raises(remote_tags.RemoteTagsError) as exc:
+        remote_tags._validate_url("https://malicious.example/foo.git")
+    assert "not in" in str(exc.value)
+
+
+def test_hostname_allowlist_unset_keeps_backward_compat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the env, any non-banned hostname continues to work."""
+    monkeypatch.delenv("UPGRADE_GIT_REMOTE_ALLOWLIST", raising=False)
+    assert remote_tags._validate_url("https://github.com/foo/bar.git") == "https://github.com/foo/bar.git"
+    assert remote_tags._validate_url("https://gitlab.example/foo.git") == "https://gitlab.example/foo.git"
