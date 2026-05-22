@@ -35,19 +35,25 @@ def audit_log(
         from api.services.state_repo import get_state_repo
 
         repo = get_state_repo()
-        # List recent jobs for the caller, then collect their history
+        # 1) List recent jobs for the caller (one Table query).
         jobs = repo.list_for_owner(caller.object_id, limit=50)
+        job_window = jobs[:20]
+        if not job_window:
+            return {"events": []}
+        # 2) Bulk-fetch history for those jobs in ONE Table query — the
+        # previous loop issued one call per job (N+1).
+        history_by_job = repo.get_history_for_jobs(
+            [job.job_id for job in job_window],
+            per_job_limit=20,
+        )
+        # 3) Flatten + filter + sanitise. ``payload_json`` may contain SAS
+        # URLs, bearer tokens, or subscription ids; the repo stores raw
+        # blobs for forensic use and redaction is a presentation concern.
         events: list[dict[str, Any]] = []
-        for job in jobs[:20]:  # cap to avoid excessive table queries
-            history = repo.get_history(job.job_id, limit=20)
-            for h in history:
+        for job in job_window:
+            for h in history_by_job.get(job.job_id, ()):
                 if action and h.get("event") != action:
                     continue
-                # Sanitise payload_json before it leaves the api boundary:
-                # the same blob may contain SAS URLs, bearer tokens, or
-                # subscription ids that audit consumers must not see in
-                # raw form. The repo layer stores raw blobs for forensic
-                # use; redaction is a presentation concern.
                 events.append(
                     {
                         "job_id": job.job_id,

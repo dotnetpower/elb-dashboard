@@ -686,6 +686,50 @@ class JobStateRepository:
         rows.sort(key=lambda r: r["RowKey"])
         return rows
 
+    def get_history_for_jobs(
+        self,
+        job_ids: list[str],
+        *,
+        per_job_limit: int = 20,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Bulk-fetch history for many jobs in a single Table query.
+
+        The ``/api/audit/log`` route previously called ``get_history(job_id)``
+        in a tight loop over the user's recent jobs (~20 calls per audit
+        page render = 20 sequential Table round-trips). Azure Tables does
+        not have a JOIN — but it does accept ``PartitionKey eq 'a' or
+        PartitionKey eq 'b' or ...`` filter expressions, which the service
+        evaluates as one query plan. We group locally afterwards and cap
+        each partition at ``per_job_limit`` rows (matching the per-call
+        contract of ``get_history``) so a single chatty job cannot crowd
+        out the others in the audit pane.
+        """
+        if not job_ids:
+            return {}
+        unique_ids = list(dict.fromkeys(job_ids))
+        clauses = " or ".join(
+            f"PartitionKey eq '{_sanitise_odata_value(job_id)}'" for job_id in unique_ids
+        )
+        # Generous per-page so the SDK doesn't paginate mid-flight for a
+        # 20-job batch with up to ``per_job_limit`` rows each.
+        page_size = max(per_job_limit, per_job_limit * len(unique_ids))
+        grouped: dict[str, list[dict[str, Any]]] = {job_id: [] for job_id in unique_ids}
+        with self._history_client() as t:
+            try:
+                entities = t.query_entities(clauses, results_per_page=page_size)
+                for e in entities:
+                    row = dict(e)
+                    partition = str(row.get("PartitionKey") or "")
+                    bucket = grouped.get(partition)
+                    if bucket is None or len(bucket) >= per_job_limit:
+                        continue
+                    bucket.append(row)
+            except ResourceNotFoundError:
+                self._ensure_table("jobhistory")
+        for rows in grouped.values():
+            rows.sort(key=lambda r: r.get("RowKey", ""))
+        return grouped
+
 
 # ---------------------------------------------------------------------------
 # Module-level repository singleton
