@@ -39,6 +39,7 @@ from api.services.upgrade import (
     build_logs,
     escape_hatch,
     git_workspace,
+    history,
     image_builder,
     remote_tags,
     rollout_watcher,
@@ -162,6 +163,14 @@ def start_upgrade_inline(
         raise UpgradeStartRefused(
             f"upgrade already in progress (state={exc.current})"
         ) from exc
+
+    history.record_event(
+        "start",
+        job_id=job_id,
+        target_version=target_version,
+        target_sha=target_sha or "",
+        started_by_oid=started_by_oid or "",
+    )
 
     submit = enqueue or _default_enqueue
     try:
@@ -328,6 +337,13 @@ def execute_upgrade_inline(
     LOGGER.info(
         "upgrade.execute: escape_hatch_commands=%s", json.dumps(plan.commands)
     )
+    history.record_event(
+        "escape_hatch",
+        job_id=job_id,
+        commands=plan.commands,
+        snapshot=previous_images.as_dict(),
+        target=target_images.as_dict(),
+    )
 
     # Move to rolling_out BEFORE issuing PATCH — if this sidecar dies
     # during the swap the next revision sees the row in rolling_out and
@@ -358,6 +374,7 @@ def execute_upgrade_inline(
 def _fail_pre(job_id: str, detail: str) -> state.UpgradeState:
     """Move the row to `failed_pre` from any pre-PATCH stage via CAS."""
     LOGGER.warning("upgrade.execute job=%s failed_pre: %s", job_id, detail)
+    history.record_event("failed", job_id=job_id, stage="pre", detail=detail)
     truncated = detail[:240]
     for expected in (
         state.STATE_QUEUED,
@@ -384,6 +401,7 @@ def _fail_pre(job_id: str, detail: str) -> state.UpgradeState:
 def _fail_rollout(job_id: str, detail: str) -> state.UpgradeState:
     """Move the row to `failed_rollout` (post-PATCH failure)."""
     LOGGER.warning("upgrade.execute job=%s failed_rollout: %s", job_id, detail)
+    history.record_event("failed", job_id=job_id, stage="rollout", detail=detail)
     truncated = detail[:240]
     try:
         return state.cas_state(
@@ -445,7 +463,7 @@ def reconcile_rolling_out_inline(
     # target version. If so, the new revision is up and we are it.
     if row.target_version and __version__ == row.target_version:
         try:
-            return state.cas_state(
+            after = state.cas_state(
                 expected_state=state.STATE_ROLLING_OUT,
                 new_state=state.STATE_SUCCEEDED,
                 mutate=lambda s: (
@@ -454,6 +472,12 @@ def reconcile_rolling_out_inline(
                     setattr(s, "running_version", __version__),
                 )[-1],
             )
+            history.record_event(
+                "succeeded",
+                job_id=row.job_id,
+                running_version=__version__,
+            )
+            return after
         except (state.StateTransitionRefused, state.RowEtagMismatch):
             return state.get_state()
 
@@ -551,6 +575,13 @@ def start_rollback_inline(
             f"row moved before rollback could start (state={exc.current})"
         ) from exc
 
+    history.record_event(
+        "rollback_start",
+        job_id=row.job_id,
+        started_by_oid=started_by_oid or "",
+        target=target_images.as_dict(),
+    )
+
     try:
         aca_mod.apply_images(images=target_images, revision_suffix=suffix)
     except aca_template.TemplateError as exc:
@@ -558,7 +589,7 @@ def start_rollback_inline(
         return _fail_rollback(str(exc))
 
     try:
-        return state.cas_state(
+        after = state.cas_state(
             expected_state=state.STATE_ROLLING_BACK,
             new_state=state.STATE_ROLLED_BACK,
             mutate=lambda s: (
@@ -567,6 +598,10 @@ def start_rollback_inline(
                 setattr(s, "current_images_json", json.dumps(target_images.as_dict())),
             )[-1],
         )
+        history.record_event(
+            "rollback_done", job_id=after.job_id, target=target_images.as_dict()
+        )
+        return after
     except (state.StateTransitionRefused, state.RowEtagMismatch):
         return state.get_state()
 

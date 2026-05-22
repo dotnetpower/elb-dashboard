@@ -35,7 +35,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.auth import CallerIdentity, require_caller
-from api.services.upgrade import build_logs, escape_hatch, remote_tags, state
+from api.services.upgrade import build_logs, escape_hatch, history, remote_tags, state
 from api.services.upgrade.aca_template import SidecarImages
 from api.services.upgrade.auth import require_upgrade_admin
 from api.tasks.upgrade import (
@@ -210,6 +210,21 @@ def upgrade_rollback(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
     return _mask_state(updated.to_public_dict())
+
+
+@router.get("/history")
+def upgrade_history(
+    limit: int = 50,
+    _caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the tail of the upgrade-history append blob."""
+    events = history.tail_events(limit=limit)
+    return {
+        "events": [
+            {"ts": e.ts, "job_id": e.job_id, "event": e.event, **e.detail}
+            for e in events
+        ]
+    }
 
 
 @router.get("/escape-hatch")

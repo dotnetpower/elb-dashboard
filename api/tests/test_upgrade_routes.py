@@ -36,9 +36,10 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     )
     state.set_backend(state.InMemoryBackend())
 
-    from api.services.upgrade import build_logs
+    from api.services.upgrade import build_logs, history
 
     build_logs.set_backend(build_logs.InMemoryBuildLogBackend())
+    history.set_backend(history.InMemoryHistoryBackend())
     from api.main import app
     from api.routes.upgrade import reset_check_throttle_for_tests
 
@@ -46,6 +47,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     with TestClient(app) as c:
         yield c
     reset_check_throttle_for_tests()
+    history.set_backend(None)
     build_logs.set_backend(None)
     state.set_backend(None)
 
@@ -423,6 +425,33 @@ def test_escape_hatch_returns_commands(
 def test_escape_hatch_404_without_snapshot(client: TestClient) -> None:
     resp = client.get("/api/upgrade/escape-hatch")
     assert resp.status_code == 404
+
+
+def test_history_returns_tail(client: TestClient) -> None:
+    from api.services.upgrade import history as hist
+
+    hist.record_event("start", job_id="j1", target_version="0.3.0")
+    hist.record_event("succeeded", job_id="j1", running_version="0.3.0")
+    resp = client.get("/api/upgrade/history?limit=10")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [e["event"] for e in body["events"]] == ["succeeded", "start"]
+    assert body["events"][0]["running_version"] == "0.3.0"
+
+
+def test_history_requires_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    state.set_backend(state.InMemoryBackend())
+    try:
+        from api.main import app
+
+        with TestClient(app) as c:
+            resp = c.get("/api/upgrade/history")
+        assert resp.status_code == 401
+    finally:
+        state.set_backend(None)
 
 
 def test_httpx_client_pkt_parser_smoke() -> None:

@@ -11,6 +11,7 @@ import { BlastJobs } from "@/pages/BlastJobs";
 import { BlastResults } from "@/pages/BlastResults";
 import { BlastAnalytics } from "@/pages/BlastAnalytics";
 import { ApiReference } from "@/pages/ApiReference";
+import { UpgradePage } from "@/pages/UpgradePage";
 import { AksCardMockups } from "@/pages/mockups/AksCardMockups";
 import { AksCardMockupsRefined } from "@/pages/mockups/AksCardMockupsRefined";
 import { AksCardMockupsPremium } from "@/pages/mockups/AksCardMockupsPremium";
@@ -116,6 +117,7 @@ function AppRoutes() {
             }
           />
           <Route path="/docs" element={<ApiReference />} />
+          <Route path="/upgrade" element={<UpgradePage />} />
           <Route path="/mockups/aks-card" element={<AksCardMockups />} />
           <Route
             path="/mockups/aks-card-refined"

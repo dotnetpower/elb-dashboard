@@ -5,6 +5,7 @@ import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, H
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { LatestJobChip } from "@/components/LatestJobChip";
+import { UpgradeBadge } from "@/components/UpgradeBadge";
 import { useTheme } from "@/hooks/useTheme";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { apiLoginRequest } from "@/auth/msal";
@@ -239,6 +240,7 @@ export function Layout({ children }: PropsWithChildren) {
               >
                 v{buildVersion} · {__APP_COMMIT__}
               </span>
+              <UpgradeBadge />
             </div>
           </div>
         </div>

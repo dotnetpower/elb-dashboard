@@ -29,6 +29,7 @@ from api.services import terminal_exec
 from api.services.upgrade import (
     aca_template,
     build_logs,
+    history,
     image_builder,
     state,
 )
@@ -123,9 +124,11 @@ def env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(aca_template.CONTAINER_APP_NAME_ENV, "ca-elb-dashboard")
     state.set_backend(state.InMemoryBackend())
     build_logs.set_backend(build_logs.InMemoryBuildLogBackend())
+    history.set_backend(history.InMemoryHistoryBackend())
     yield
     state.set_backend(None)
     build_logs.set_backend(None)
+    history.set_backend(None)
 
 
 def _start(version: str = "0.3.0", sha: str = "abc1234"):
