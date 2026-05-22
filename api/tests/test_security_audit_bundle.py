@@ -102,19 +102,27 @@ class _RecordingAsyncClient:
     def __init__(self, *_a: Any, **_kw: Any) -> None:
         pass
 
-    async def request(
+    def build_request(
         self,
         _method: str,
         _url: str,
         *,
         headers: dict[str, str],
         content: bytes | None,
-    ) -> httpx.Response:
+    ) -> httpx.Request:
         del content
         _RecordingAsyncClient.last_headers = dict(headers)
+        # Build a real httpx.Request so the proxy's ``client.send`` stub
+        # below can ignore it without violating the protocol.
+        return httpx.Request(_method, _url, headers=headers)
+
+    async def send(self, _request: httpx.Request, *, stream: bool = False) -> httpx.Response:
+        del _request, stream
+        # Return a streaming-friendly response so the proxy's
+        # ``upstream_resp.aiter_raw()`` consumer works end-to-end.
         return httpx.Response(
             200,
-            content=b"<html>spa</html>",
+            stream=httpx.ByteStream(b"<html>spa</html>"),
             headers={"content-type": "text/html"},
         )
 

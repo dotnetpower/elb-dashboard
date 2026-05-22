@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 LOGGER = logging.getLogger(__name__)
 
@@ -139,14 +141,15 @@ async def reverse_proxy(full_path: str, request: Request) -> Response:
     }
 
     client = _get_client()
+    body = await request.body()
     try:
-        body = await request.body()
-        upstream_resp = await client.request(
+        upstream_req = client.build_request(
             request.method,
             upstream_url,
             headers=upstream_headers,
             content=body if body else None,
         )
+        upstream_resp = await client.send(upstream_req, stream=True)
     except httpx.RequestError as exc:
         LOGGER.warning("frontend proxy upstream error for %s: %s", upstream_url, exc)
         raise HTTPException(status_code=502, detail="frontend sidecar unreachable") from exc
@@ -156,25 +159,32 @@ async def reverse_proxy(full_path: str, request: Request) -> Response:
         k: v for k, v in upstream_resp.headers.items() if k.lower() not in _HOP_BY_HOP
     }
 
-    # 304 Not Modified: empty body, headers only.
+    # 304 Not Modified: empty body, headers only — close the upstream cursor
+    # before returning so the connection goes back to the pool immediately.
     if upstream_resp.status_code == 304:
+        await upstream_resp.aclose()
         return Response(
             status_code=304,
             headers=response_headers,
         )
 
-    # Read the entire body once. We previously branched on Content-Length to
-    # stream large bodies, but httpx already buffers the response when we use
-    # AsyncClient.request(...) (which is non-streaming). The streaming branch
-    # was therefore dead code AND was returning empty bodies for any response
-    # whose Content-Length header was 0 or absent (the spec allows that for
-    # chunked responses). Always return the full bytes — SPA assets are at
-    # most ~1.2 MiB which fits comfortably in memory.
-    body_bytes = upstream_resp.content
-    # Drop any stale content-length — ASGI sets it from the actual byte length.
+    # Stream the response back to the client so a large asset (source map,
+    # wasm bundle, …) never lives entirely in the api sidecar's RAM. The
+    # iterator owns the upstream lifecycle: ``aiter_raw`` flushes chunks as
+    # they arrive from the frontend nginx and ``upstream_resp.aclose()``
+    # in ``finally`` returns the connection to the pool even when the
+    # browser aborts mid-download.
     response_headers.pop("content-length", None)
-    return Response(
-        content=body_bytes,
+
+    async def _body_iter() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in upstream_resp.aiter_raw():
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+
+    return StreamingResponse(
+        _body_iter(),
         status_code=upstream_resp.status_code,
         headers=response_headers,
         media_type=upstream_resp.headers.get("content-type"),
