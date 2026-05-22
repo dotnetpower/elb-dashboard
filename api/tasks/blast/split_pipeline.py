@@ -666,17 +666,21 @@ def _verify_split_child_result_artifacts(
 
         credential = get_credential()
 
-    statuses: list[dict[str, Any]] = []
-    missing: list[dict[str, Any]] = []
+    # Reject non-completed children before fanning out so the threadpool
+    # work is uniform; mirror the legacy sequential validation contract.
+    prepared: list[tuple[Any, str, dict[str, Any]]] = []
     for child in children:
         child_job_id = str(getattr(child, "job_id", "") or "")
         status = str(getattr(child, "status", "") or "").lower()
-        payload = child.payload if isinstance(getattr(child, "payload", None), dict) else {}
         if not child_job_id:
             raise ValueError("split child state is missing job_id")
         if status != "completed":
             raise ValueError(f"split child {child_job_id} is not completed: {status}")
+        payload = child.payload if isinstance(getattr(child, "payload", None), dict) else {}
+        prepared.append((child, child_job_id, payload))
 
+    def _probe(item: tuple[Any, str, dict[str, Any]]) -> dict[str, Any]:
+        _child, child_job_id, payload = item
         paths = _blast._split_child_result_paths(child_job_id)
         blobs = _blast._result_blob_map(
             storage_account=storage_account,
@@ -696,17 +700,32 @@ def _verify_split_child_result_artifacts(
             "merged_result_size": blobs.get(paths["merged_result_path"], {}).get("size"),
             "merge_report_size": blobs.get(paths["merge_report_path"], {}).get("size"),
         }
-        statuses.append(status_item)
-        if not (has_merged and has_report):
+        return status_item
+
+    statuses: list[dict[str, Any]]
+    if prepared:
+        from concurrent.futures import ThreadPoolExecutor
+
+        max_workers = min(4, len(prepared))
+        with ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="split-verify"
+        ) as pool:
+            statuses = list(pool.map(_probe, prepared))
+    else:
+        statuses = []
+
+    missing: list[dict[str, Any]] = []
+    for status_item in statuses:
+        if not (status_item["has_merged_result"] and status_item["has_merge_report"]):
             missing_bits = []
-            if not has_merged:
+            if not status_item["has_merged_result"]:
                 missing_bits.append(SPLIT_CHILD_MERGED_RESULT_BLOB)
-            if not has_report:
+            if not status_item["has_merge_report"]:
                 missing_bits.append(SPLIT_CHILD_MERGE_REPORT_BLOB)
             missing.append(
                 {
-                    "child_job_id": child_job_id,
-                    "group_id": payload.get("group_id"),
+                    "child_job_id": status_item["child_job_id"],
+                    "group_id": status_item["group_id"],
                     "missing": missing_bits,
                 }
             )
@@ -725,10 +744,22 @@ def _load_split_child_merge_reports(
     children: list[Any],
     credential: Any,
 ) -> list[dict[str, Any]]:
+    """Fetch every child's merge report. Returns rows in input child order.
+
+    Per-shard reports are tiny JSON blobs (<= ``SPLIT_MERGE_REPORT_MAX_BYTES``).
+    Sequential downloads (one HTTPS RTT per child) made the parent merge
+    spend 100×RTT just to fetch reports on a 100-shard split. The fan-out
+    ceiling matches ``stream_blob_bytes`` (4 concurrent transfers) so we
+    don't blow the api sidecar's BlobServiceClient pool budget.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
     from api.services.storage_data import read_blob_text
 
-    reports: list[dict[str, Any]] = []
-    for child in children:
+    if not children:
+        return []
+
+    def _fetch(child: Any) -> dict[str, Any]:
         child_job_id = str(getattr(child, "job_id", "") or "")
         payload = child.payload if isinstance(getattr(child, "payload", None), dict) else {}
         path = _blast._split_child_result_paths(child_job_id)["merge_report_path"]
@@ -745,14 +776,19 @@ def _load_split_child_merge_reports(
             raise ValueError(f"invalid child merge report JSON: {child_job_id}") from exc
         if not isinstance(report, dict):
             raise ValueError(f"child merge report must be an object: {child_job_id}")
-        reports.append(
-            {
-                "child_job_id": child_job_id,
-                "group_id": payload.get("group_id"),
-                "report": report,
-            }
-        )
-    return reports
+        return {
+            "child_job_id": child_job_id,
+            "group_id": payload.get("group_id"),
+            "report": report,
+        }
+
+    max_workers = min(4, len(children))
+    with ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="split-merge-report"
+    ) as pool:
+        # Map preserves input order — callers depend on stable ordering
+        # so the aggregated child report list matches the parent state.
+        return list(pool.map(_fetch, children))
 
 
 def _aggregate_split_merge_reports(
