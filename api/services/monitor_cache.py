@@ -12,12 +12,12 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 from collections.abc import Callable
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -34,7 +34,11 @@ _MAX_ENTRIES_CAP = 4096
 
 @dataclass
 class _SnapshotEntry:
-    value: dict[str, Any]
+    # Serialized JSON bytes so reads do not pay a ``deepcopy`` tax. JSON
+    # round-trip on read yields a fresh mutable dict (same isolation as
+    # deepcopy) at a fraction of the cost for the dict-of-primitives
+    # shape monitor snapshots actually carry.
+    payload_bytes: bytes
     refreshed_at: float
     expires_at: float
     stale_until: float
@@ -115,7 +119,7 @@ def cached_snapshot(
     )
     if ttl <= 0:
         return _with_cache_meta(
-            loader(),
+            json.dumps(loader(), default=str).encode("utf-8"),
             state="disabled",
             hit=False,
             refreshed_at=_monotonic(),
@@ -129,7 +133,7 @@ def cached_snapshot(
         entry = _CACHE.get(cache_key)
         if entry is not None and entry.expires_at > now:
             return _with_cache_meta(
-                entry.value,
+                entry.payload_bytes,
                 state="fresh",
                 hit=True,
                 refreshed_at=entry.refreshed_at,
@@ -137,7 +141,7 @@ def cached_snapshot(
             )
         if entry is not None and entry.stale_until > now:
             value = _with_cache_meta(
-                entry.value,
+                entry.payload_bytes,
                 state="stale",
                 hit=True,
                 refreshed_at=entry.refreshed_at,
@@ -175,7 +179,7 @@ def cached_snapshot(
             fallback = _CACHE.get(cache_key)
         if fallback is not None and fallback.stale_until > _monotonic():
             out = _with_cache_meta(
-                fallback.value,
+                fallback.payload_bytes,
                 state="stale_error",
                 hit=True,
                 refreshed_at=fallback.refreshed_at,
@@ -186,7 +190,7 @@ def cached_snapshot(
             return out
         raise
     return _with_cache_meta(
-        refreshed.value,
+        refreshed.payload_bytes,
         state="refreshed",
         hit=False,
         refreshed_at=refreshed.refreshed_at,
@@ -205,8 +209,11 @@ def _refresh(
     try:
         payload = loader()
         now = _monotonic()
+        # ``default=str`` makes datetime / UUID values JSON-safe instead of
+        # raising; monitor loaders historically returned anything dict-ish.
+        serialized = json.dumps(payload, default=str).encode("utf-8")
         entry = _SnapshotEntry(
-            value=deepcopy(payload),
+            payload_bytes=serialized,
             refreshed_at=now,
             expires_at=now + ttl_seconds,
             stale_until=now + ttl_seconds + stale_seconds,
@@ -239,14 +246,16 @@ def _start_refresh_thread(target: Callable[[], object]) -> None:
 
 
 def _with_cache_meta(
-    value: dict[str, Any],
+    payload_bytes: bytes,
     *,
     state: str,
     hit: bool,
     refreshed_at: float,
     ttl_seconds: float,
 ) -> dict[str, Any]:
-    out = deepcopy(value)
+    out = json.loads(payload_bytes)
+    if not isinstance(out, dict):
+        out = {"value": out}
     age_seconds = max(0.0, _monotonic() - refreshed_at)
     out["cache"] = {
         "hit": hit,
