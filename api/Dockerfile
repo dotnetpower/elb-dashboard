@@ -29,10 +29,20 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 FROM python:3.12-slim AS runtime
 WORKDIR /app
+# Build-time stamps so the running api can answer with its own release
+# identity. Consumed by `api/__init__.py::_from_env`, which is the
+# highest-priority source for `__version__` (see that module's
+# `Risky contracts` for the full discovery order).
+ARG APP_VERSION="0.0.0+unknown"
+ARG APP_GIT_COMMIT=""
+ARG APP_BUILD_TIME=""
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    PATH="/app/.venv/bin:${PATH}"
+    PATH="/app/.venv/bin:${PATH}" \
+    APP_VERSION=$APP_VERSION \
+    APP_GIT_COMMIT=$APP_GIT_COMMIT \
+    APP_BUILD_TIME=$APP_BUILD_TIME
 
 # Copy the prebuilt venv from the deps stage.
 COPY --from=deps /app/.venv /app/.venv

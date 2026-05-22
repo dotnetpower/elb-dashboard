@@ -223,14 +223,20 @@ def blast_database_shard(
         )
 
     started_at = datetime.now(UTC).isoformat()
-    existing["db_name"] = db_name
-    existing["sharding_in_progress"] = True
-    existing["sharding_started_at"] = started_at
-    # Clear any prior error so the SPA doesn't keep showing a stale
-    # failure once a fresh attempt is launched.
-    existing.pop("sharding_error", None)
+    # ETag-aware metadata write. Concurrent prepare-db / warmup writers can
+    # not race the same metadata blob anymore — `_update_metadata` retries on
+    # 412 instead of blindly overwriting.
     try:
-        bc.upload_blob(json.dumps(existing).encode("utf-8"), overwrite=True)
+        from api.routes.storage.prepare_db import _update_metadata as _update_md
+
+        def _pre_mutator(meta: dict[str, Any]) -> dict[str, Any]:
+            meta["db_name"] = db_name
+            meta["sharding_in_progress"] = True
+            meta["sharding_started_at"] = started_at
+            meta.pop("sharding_error", None)
+            return meta
+
+        _update_md(cc, db_name, account_name, _pre_mutator)
     except Exception as exc:
         lock.release()
         LOGGER.warning(
@@ -249,6 +255,7 @@ def blast_database_shard(
 
     def _do_shard() -> None:
         """Background worker — owns the lock for the lifetime of the call."""
+        from api.routes.storage.prepare_db import _update_metadata as _update_md
         from api.services import get_credential as _get_cred
 
         try:
@@ -264,17 +271,14 @@ def blast_database_shard(
             try:
                 local_cred = _get_cred()
                 svc2 = _blob_service(local_cred, account_name)
-                bc2 = svc2.get_container_client(DEFAULT_CONTAINER).get_blob_client(
-                    f"{db_name}-metadata.json"
-                )
-                final: dict[str, Any] = {}
-                try:
-                    final = json.loads(bc2.download_blob().readall().decode("utf-8"))
-                except Exception:
-                    final = {"db_name": db_name}
-                final["sharding_in_progress"] = False
-                final["sharding_error"] = err_msg
-                bc2.upload_blob(json.dumps(final).encode("utf-8"), overwrite=True)
+                cc2 = svc2.get_container_client(DEFAULT_CONTAINER)
+
+                def _err_mut(meta: dict[str, Any]) -> dict[str, Any]:
+                    meta["sharding_in_progress"] = False
+                    meta["sharding_error"] = err_msg
+                    return meta
+
+                _update_md(cc2, db_name, account_name, _err_mut)
             except Exception as inner:
                 LOGGER.warning(
                     "blast_database_shard error-state write failed db=%s: %s",
@@ -285,31 +289,35 @@ def blast_database_shard(
                 lock.release()
             return
 
-        # Success — merge the summary into metadata.
+        # Success — merge the summary into metadata via ETag-aware writer
+        # so a concurrent prepare-db / warmup writer cannot clobber the
+        # shard fields.
         try:
             local_cred = _get_cred()
             svc2 = _blob_service(local_cred, account_name)
-            bc2 = svc2.get_container_client(DEFAULT_CONTAINER).get_blob_client(
-                f"{db_name}-metadata.json"
-            )
-            final_meta: dict[str, Any] = {}
-            try:
-                final_meta = json.loads(bc2.download_blob().readall().decode("utf-8"))
-            except Exception:
-                final_meta = {"db_name": db_name}
-            final_meta["sharding_in_progress"] = False
-            final_meta.pop("sharding_error", None)
-            final_meta["sharded"] = bool(summary.get("shard_sets"))
-            final_meta["shard_sets"] = summary.get("shard_sets", [])
-            if final_meta.get("source_version"):
-                final_meta["shard_source_version"] = final_meta.get("source_version")
-            final_meta["sharded_at"] = datetime.now(UTC).isoformat()
-            if summary.get("total_bytes"):
-                final_meta.setdefault("total_bytes", summary["total_bytes"])
-            for key in ("total_letters", "total_sequences", "bytes_to_cache", "bytes_total"):
-                if summary.get(key):
-                    final_meta.setdefault(key, summary[key])
-            bc2.upload_blob(json.dumps(final_meta).encode("utf-8"), overwrite=True)
+            cc2 = svc2.get_container_client(DEFAULT_CONTAINER)
+
+            def _ok_mut(meta: dict[str, Any]) -> dict[str, Any]:
+                meta["sharding_in_progress"] = False
+                meta.pop("sharding_error", None)
+                meta["sharded"] = bool(summary.get("shard_sets"))
+                meta["shard_sets"] = summary.get("shard_sets", [])
+                if meta.get("source_version"):
+                    meta["shard_source_version"] = meta.get("source_version")
+                meta["sharded_at"] = datetime.now(UTC).isoformat()
+                if summary.get("total_bytes"):
+                    meta.setdefault("total_bytes", summary["total_bytes"])
+                for key in (
+                    "total_letters",
+                    "total_sequences",
+                    "bytes_to_cache",
+                    "bytes_total",
+                ):
+                    if summary.get(key):
+                        meta.setdefault(key, summary[key])
+                return meta
+
+            _update_md(cc2, db_name, account_name, _ok_mut)
             LOGGER.info(
                 "blast_database_shard daemon ok db=%s shard_sets=%s",
                 db_name,
@@ -436,6 +444,20 @@ def blast_database_order_oracle(
         )
     if db_meta.get("update_in_progress"):
         raise HTTPException(409, f"database {db_name} is updating; wait for promotion")
+    # Reject when the DB's last prepare-db ended in partial/init_failed —
+    # the on-disk files may be missing volumes and the oracle would produce
+    # an incomplete pointer list. Require a clean Ready state.
+    copy_status = db_meta.get("copy_status")
+    if isinstance(copy_status, dict):
+        phase = str(copy_status.get("phase") or "")
+        if phase in {"partial", "init_failed", "copying"}:
+            raise HTTPException(
+                409,
+                (
+                    f"database {db_name} download is not Ready (phase={phase}); "
+                    "retry Download before building the order oracle"
+                ),
+            )
     if db_meta.get("shards_stale"):
         raise HTTPException(409, f"database {db_name} shard layouts are stale; rebuild shards")
 
@@ -656,6 +678,7 @@ def blast_databases_check_updates(
         if not name:
             continue
         stored_etag = str(db.get("signature_etag") or "").strip()
+        stored_composite = str(db.get("composite_signature") or "").strip()
         stored_version = str(db.get("source_version") or "").strip()
         try:
             preview = preview_database(name)
@@ -669,11 +692,18 @@ def blast_databases_check_updates(
         if not preview.get("available"):
             continue
         ncbi_etag = str(preview.get("signature_etag") or "").strip()
+        ncbi_composite = str(preview.get("composite_signature") or "").strip()
         ncbi_snapshot = str(preview.get("snapshot") or "").strip()
-        # Update detection precedence:
-        #   * stored_etag present -> compare ETag (precise, per-DB)
-        #   * else fall back to source_version vs snapshot (legacy, noisier)
-        if stored_etag:
+        # Update detection precedence (most precise first):
+        #   1. composite_signature — hashes N md5 ETags, detects updates on
+        #      any sampled shard (multi-volume safe).
+        #   2. signature_etag — single .tar.gz.md5 ETag (legacy DBs prepared
+        #      before composite signatures landed).
+        #   3. source_version vs snapshot — coarsest fallback for DBs whose
+        #      metadata predates ETag tracking.
+        if stored_composite:
+            changed = bool(ncbi_composite) and ncbi_composite != stored_composite
+        elif stored_etag:
             changed = bool(ncbi_etag) and ncbi_etag != stored_etag
         else:
             changed = bool(ncbi_snapshot) and ncbi_snapshot != stored_version
@@ -683,7 +713,9 @@ def blast_databases_check_updates(
                     "db": name,
                     "snapshot": ncbi_snapshot,
                     "signature_etag": ncbi_etag,
+                    "composite_signature": ncbi_composite or None,
                     "stored_etag": stored_etag or None,
+                    "stored_composite_signature": stored_composite or None,
                     "stored_source_version": stored_version or None,
                 }
             )
