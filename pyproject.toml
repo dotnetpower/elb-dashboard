@@ -1,6 +1,6 @@
 [project]
 name = "elb-dashboard"
-version = "0.4.0"
+version = "0.2.0"
 description = "Browser-only control plane for ElasticBLAST on Azure (FastAPI + Celery in Azure Container Apps)."
 requires-python = ">=3.12,<3.13"
 readme = "README.md"
@@ -51,6 +51,10 @@ dependencies = [
 dev = [
   "mkdocs>=1.6,<2",
   "mkdocs-material>=9.5,<10",
+  # IA continuity (#17) — keep old URLs after the docs reorganisation.
+  "mkdocs-redirects>=1.2,<2",
+  # Per-page last-updated badge driven by git history (#18).
+  "mkdocs-git-revision-date-localized-plugin>=1.2,<2",
   # mkdocs-material `social` plugin dependencies — generate Open Graph PNG
   # cards at build time. Pinned conservatively; libcairo2 + fonts-dejavu
   # are expected to be present on the build host.
