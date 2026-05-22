@@ -405,6 +405,37 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     broadcaster cleanly on shutdown so subscribers see an EOF instead of
     a half-closed socket. See `api.routes.monitor._SidecarBroadcaster`.
     """
+    # Warm the managed-identity credential at startup so the first
+    # bearer-authed call (auth + Storage/Tables/AKS) does not block on a
+    # cold IMDS / `az login` token fetch. The fetch happens off-loop so
+    # uvicorn keeps accepting connections while the token is being
+    # acquired; any failure is logged at debug only — the first real
+    # request will retry the token fetch through the normal path.
+    try:
+        import asyncio
+
+        from api.services import get_credential
+
+        async def _prime() -> None:
+            try:
+                credential = await asyncio.to_thread(get_credential)
+                # ``DefaultAzureCredential.get_token`` is the actual cold
+                # path; the credential object itself is lazy.
+                await asyncio.to_thread(
+                    credential.get_token,
+                    "https://management.azure.com/.default",
+                )
+            except Exception as exc:
+                LOGGER.debug(
+                    "credential warm-up skipped: %s", type(exc).__name__
+                )
+
+        # Keep a reference so the task is not GC'd while pending — ruff
+        # RUF006 catches the "fire-and-forget without retention" pattern
+        # that otherwise lets the asyncio loop cancel the task early.
+        app.state._cred_warmup_task = asyncio.create_task(_prime())
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.debug("credential warm-up scheduling skipped: %s", type(exc).__name__)
     try:
         from api.services.blast_db_metadata import (
             start_invalidate_subscriber,
