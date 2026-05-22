@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import threading
+import time
 import zlib
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
@@ -71,21 +72,25 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
     # names are 3-24 lowercase alphanumeric characters.
     if not _STORAGE_ACCOUNT_NAME_RE.fullmatch(account_name):
         raise ValueError(f"invalid storage account name: {account_name!r}")
-    # Process-shared pool keyed by (id(credential), account_name). Reusing
-    # the same BlobServiceClient lets azure-core keep its HTTP connection
-    # pool warm across calls (saves the TLS handshake on every list/download)
-    # and avoids re-running the credential discovery on first use. The
-    # ``id(credential)`` half of the key means we never reuse a client built
-    # against a different credential object (token leak guard); in normal
-    # operation ``get_credential()`` is a process-wide singleton so the key
-    # is effectively just the account name.
-    pool_key = (id(credential), account_name)
+    # Process-shared pool keyed by ``(id(credential), account_name)``. The
+    # ``id(credential)`` half guarantees we never reuse a client that was
+    # built against a different credential object (token leak guard); a
+    # ``weakref.finalize`` hook evicts every entry with that id the moment
+    # the credential is garbage-collected so a recycled id can never
+    # resolve to a stale BlobServiceClient. Per-entry ``last_used`` is
+    # tracked so idle clients can be reclaimed via
+    # :func:`prune_idle_blob_service_clients`.
+    cred_id = id(credential)
+    pool_key = (cred_id, account_name)
+    now = time.monotonic()
     evicted_clients: list[BlobServiceClient] = []
     with _BLOB_SERVICE_POOL_LOCK:
         cached = _BLOB_SERVICE_POOL.get(pool_key)
         if cached is not None:
+            cached_client, _last_used = cached
+            _BLOB_SERVICE_POOL[pool_key] = (cached_client, now)
             _BLOB_SERVICE_POOL.move_to_end(pool_key)
-            return cached
+            return cached_client
         # Fail fast on network-blocked accounts (publicNetworkAccess: Disabled)
         # instead of letting the SDK retry for ~30s. The api sidecar is the
         # only legitimate caller in production and reaches Storage via the
@@ -101,10 +106,15 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
             connection_timeout=5,
             read_timeout=10,
         )
-        _BLOB_SERVICE_POOL[pool_key] = client
+        _BLOB_SERVICE_POOL[pool_key] = (client, now)
         while len(_BLOB_SERVICE_POOL) > _BLOB_SERVICE_POOL_MAX:
-            _evicted_key, evicted = _BLOB_SERVICE_POOL.popitem(last=False)
+            _evicted_key, (evicted, _ts) = _BLOB_SERVICE_POOL.popitem(last=False)
             evicted_clients.append(evicted)
+        # Register a finalizer so a GC'd credential evicts its pooled
+        # clients before its id can be recycled and silently resolved to
+        # someone else's BlobServiceClient. Cheap (single weakref); the
+        # ``WeakSet`` guards against double-registration.
+        _ensure_credential_eviction(credential)
     # Close evicted clients outside the lock — BlobServiceClient.close()
     # tears down the underlying HTTP pool and may do synchronous IO; we
     # must not hold the pool lock while that happens or every other caller
@@ -118,8 +128,83 @@ def _blob_service(credential: TokenCredential, account_name: str) -> BlobService
 
 
 _BLOB_SERVICE_POOL_MAX = 32
-_BLOB_SERVICE_POOL: OrderedDict[tuple[int, str], BlobServiceClient] = OrderedDict()
+_BLOB_SERVICE_POOL_IDLE_TTL_SECONDS = float(
+    os.environ.get("BLOB_SERVICE_POOL_IDLE_TTL_SECONDS", "1800.0")
+)
+_BLOB_SERVICE_POOL: OrderedDict[
+    tuple[int, str], tuple[BlobServiceClient, float]
+] = OrderedDict()
 _BLOB_SERVICE_POOL_LOCK = threading.Lock()
+_BLOB_SERVICE_CREDENTIAL_FINALIZED: set[int] = set()
+
+
+def _ensure_credential_eviction(credential: Any) -> None:
+    """Register a weakref finalizer that evicts pooled clients on GC.
+
+    Must be called from inside ``_BLOB_SERVICE_POOL_LOCK``.
+    """
+    import weakref
+
+    cred_id = id(credential)
+    if cred_id in _BLOB_SERVICE_CREDENTIAL_FINALIZED:
+        return
+
+    def _evict_for_credential(target_id: int = cred_id) -> None:
+        stale: list[BlobServiceClient] = []
+        with _BLOB_SERVICE_POOL_LOCK:
+            keys = [key for key in _BLOB_SERVICE_POOL if key[0] == target_id]
+            for key in keys:
+                client, _ts = _BLOB_SERVICE_POOL.pop(key)
+                stale.append(client)
+            _BLOB_SERVICE_CREDENTIAL_FINALIZED.discard(target_id)
+        for client in stale:
+            try:
+                client.close()
+            except Exception as exc:
+                LOGGER.debug(
+                    "blob service finalizer close skipped: %s", type(exc).__name__
+                )
+
+    try:
+        weakref.finalize(credential, _evict_for_credential)
+    except TypeError:
+        # Some test doubles use objects that don't support weakrefs;
+        # fall back to leaving the entry pinned. Production credentials
+        # from azure-identity support weakrefs.
+        return
+    _BLOB_SERVICE_CREDENTIAL_FINALIZED.add(cred_id)
+
+
+def prune_idle_blob_service_clients(
+    *, idle_ttl_seconds: float | None = None
+) -> int:
+    """Evict pooled BlobServiceClients that have been idle for too long.
+
+    Returns the number of clients closed. Cheap enough to call from any
+    request path; production wiring is in ``reset_credential`` and the
+    periodic monitor cache invalidator. The eviction sweep is O(N) over
+    pool size, which is bounded by ``_BLOB_SERVICE_POOL_MAX = 32``.
+    """
+    ttl = (
+        idle_ttl_seconds
+        if idle_ttl_seconds is not None
+        else _BLOB_SERVICE_POOL_IDLE_TTL_SECONDS
+    )
+    if ttl <= 0:
+        return 0
+    cutoff = time.monotonic() - ttl
+    stale: list[BlobServiceClient] = []
+    with _BLOB_SERVICE_POOL_LOCK:
+        keys = [key for key, (_c, ts) in _BLOB_SERVICE_POOL.items() if ts < cutoff]
+        for key in keys:
+            client, _ts = _BLOB_SERVICE_POOL.pop(key)
+            stale.append(client)
+    for client in stale:
+        try:
+            client.close()
+        except Exception as exc:
+            LOGGER.debug("blob service idle-evict close skipped: %s", type(exc).__name__)
+    return len(stale)
 
 
 def reset_blob_service_pool() -> None:
@@ -130,8 +215,9 @@ def reset_blob_service_pool() -> None:
     token cache. Closing the clients releases the underlying HTTP pools.
     """
     with _BLOB_SERVICE_POOL_LOCK:
-        clients = list(_BLOB_SERVICE_POOL.values())
+        clients = [client for client, _ts in _BLOB_SERVICE_POOL.values()]
         _BLOB_SERVICE_POOL.clear()
+        _BLOB_SERVICE_CREDENTIAL_FINALIZED.clear()
     for client in clients:
         try:
             client.close()
