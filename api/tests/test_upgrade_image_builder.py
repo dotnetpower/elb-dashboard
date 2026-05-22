@@ -71,6 +71,11 @@ def test_build_happy_path_returns_image_ref_and_logs() -> None:
     argv = runner.calls[0]["argv"]
     assert argv[0:4] == ["az", "acr", "build", "--registry"]
     assert "elb-api:v0.3.0" in argv
+    # `--build-arg APP_VERSION=0.3.0` MUST appear so the resulting image
+    # bakes the right `APP_VERSION` env — the reconciler's success
+    # detection depends on it.
+    assert "--build-arg" in argv
+    assert "APP_VERSION=0.3.0" in argv
 
 
 def test_build_propagates_non_zero_exit_as_error() -> None:

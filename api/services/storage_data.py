@@ -770,6 +770,11 @@ def list_databases(
                 # latest-dir.
                 if isinstance(meta.get("signature_etag"), str):
                     info["signature_etag"] = meta["signature_etag"]
+                # Composite signature (sha256-16 hex of N sampled md5 ETags)
+                # — preferred over signature_etag for multi-volume DBs. The
+                # check-updates route picks composite > etag > snapshot.
+                if isinstance(meta.get("composite_signature"), str):
+                    info["composite_signature"] = meta["composite_signature"]
                 # Allow metadata to override total_bytes if the prepare-db
                 # pipeline computed it more precisely than blob enumeration
                 # (e.g. for very large multi-volume DBs).

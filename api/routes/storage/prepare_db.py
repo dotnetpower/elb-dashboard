@@ -677,12 +677,16 @@ def prepare_db(
 
             # Per-DB ETag signature so /databases/check-updates can render
             # accurate per-DB update detection without bouncing latest-dir.
+            # Composite signature samples N md5 ETags so multi-volume DBs
+            # detect updates that touched only later shards.
             new_signature_etag: str | None = None
+            new_composite_signature: str | None = None
             try:
                 from api.services.ncbi_catalogue import database_update_signature
 
                 sig = database_update_signature(db_name)
                 new_signature_etag = sig.get("signature_etag")
+                new_composite_signature = sig.get("composite_signature")
             except Exception as exc:
                 LOGGER.debug(
                     "post-prepare signature lookup skipped db=%s: %s",
@@ -695,6 +699,8 @@ def prepare_db(
                 meta["source_version"] = latest_dir
                 if new_signature_etag:
                     meta["signature_etag"] = new_signature_etag
+                if new_composite_signature:
+                    meta["composite_signature"] = new_composite_signature
                 meta["downloaded_at"] = datetime.now(UTC).isoformat()
                 meta["file_count"] = poll_summary["success"]
                 meta["update_in_progress"] = False

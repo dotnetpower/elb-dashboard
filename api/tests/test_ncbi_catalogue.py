@@ -20,7 +20,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from api.routes.storage import common as storage_common
 from api.services import ncbi_catalogue
 

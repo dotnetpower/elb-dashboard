@@ -101,7 +101,7 @@ def _acr_name() -> str:
 def _argv_for(plan: BuildPlan, *, target_version: str, source_dir: str) -> list[str]:
     acr = _acr_name()
     tag = f"v{target_version}"
-    return [
+    argv = [
         "az",
         "acr",
         "build",
@@ -111,8 +111,16 @@ def _argv_for(plan: BuildPlan, *, target_version: str, source_dir: str) -> list[
         f"{plan.image_name}:{tag}",
         "--file",
         plan.dockerfile,
+        # APP_VERSION is consumed by api/Dockerfile (and web/vite.config.ts)
+        # to bake the release version into the image. The upgrade
+        # reconciler relies on the running `api.__version__` matching
+        # `target_version` to mark `succeeded`, so this MUST be set on
+        # every self-built image.
+        "--build-arg",
+        f"APP_VERSION={target_version}",
         source_dir if plan.context == "." else f"{source_dir}/{plan.context}",
     ]
+    return argv
 
 
 def build(

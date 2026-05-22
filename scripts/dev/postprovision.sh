@@ -323,6 +323,15 @@ build_image() {
       --build-arg "GIT_COMMIT=$(short_commit)"
       --build-arg "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     )
+  elif [ "$image_name" = "elb-api" ]; then
+    # Bake the release version into the api runtime so `api/__init__.py`
+    # surfaces it via `__version__` and the upgrade reconciler can match
+    # `__version__ == target_version` on the freshly booted revision.
+    extra_args=(
+      --build-arg "APP_VERSION=$(release_version)"
+      --build-arg "APP_GIT_COMMIT=$(short_commit)"
+      --build-arg "APP_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    )
   elif [ "$image_name" = "elb-terminal" ]; then
     extra_args=(
       --build-arg "TERMINAL_BASE_IMAGE=$(terminal_base_image)"
