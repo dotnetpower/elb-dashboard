@@ -102,75 +102,125 @@ def parse_blast_xml(content: str) -> list[dict[str, Any]]:
     enough for aggregate stats, CSV export, and the alignment preview. BLAST
     XML reports total gap characters as `Hsp_gaps`; the historical UI field is
     named `gapopen`, so both `gapopen` and `gaps` carry that same value.
+
+    Implementation note: walks the XML through ``defusedxml.iterparse`` with
+    ``elem.clear()`` after each ``Hit`` / ``Iteration`` end event so the
+    parser's resident DOM never grows past one Hit subtree. Pre-iterparse
+    refactor a 20 MiB BLAST XML input (the route cap) blew up to a ~150 MiB
+    DOM while ``ET.fromstring`` finished — under concurrent analytics calls
+    that summed to multi-GB worker memory before the parser even returned.
     """
-    root = ET.fromstring(content)
-    if _local_name(root.tag) != "BlastOutput":
-        return []
+    import io
 
     hits: list[dict[str, Any]] = []
-    iterations_parent = _child(root, "BlastOutput_iterations")
-    for iteration in _children(iterations_parent, "Iteration"):
-        query_id = (
-            _text(iteration, "Iteration_query-ID")
-            or _text(iteration, "Iteration_query-def")
-            or "Query_1"
-        )
-        query_len = _int_or_none(_text(iteration, "Iteration_query-len"))
-        hits_parent = _child(iteration, "Iteration_hits")
-        for hit in _children(hits_parent, "Hit"):
+    iter_query_id: str | None = None
+    iter_query_len: int | None = None
+    in_iteration = False
+
+    parser = ET.iterparse(io.StringIO(content), events=("start", "end"))
+    root: ET.Element | None = None
+    for event, elem in parser:
+        tag = _local_name(elem.tag)
+        if event == "start":
+            if root is None:
+                root = elem
+                if tag != "BlastOutput":
+                    return []
+            elif tag == "Iteration":
+                in_iteration = True
+                iter_query_id = None
+                iter_query_len = None
+            continue
+        # event == "end"
+        if not in_iteration:
+            continue
+        if tag == "Iteration_query-ID" and iter_query_id is None:
+            iter_query_id = (elem.text or "").strip() or None
+        elif tag == "Iteration_query-def" and iter_query_id is None:
+            iter_query_id = (elem.text or "").strip() or None
+        elif tag == "Iteration_query-len":
+            iter_query_len = _int_or_none((elem.text or "").strip())
+        elif tag == "Hit":
             subject_id = (
-                _versioned_accession(hit) or _text(hit, "Hit_accession") or _text(hit, "Hit_id")
+                _versioned_accession(elem)
+                or _text(elem, "Hit_accession")
+                or _text(elem, "Hit_id")
             )
-            subject_title = _text(hit, "Hit_def")
-            subject_len = _int_or_none(_text(hit, "Hit_len"))
-            if not subject_id:
-                continue
-            hsps_parent = _child(hit, "Hit_hsps")
-            for hsp in _children(hsps_parent, "Hsp"):
-                align_len = _int_or_none(_text(hsp, "Hsp_align-len"))
-                identity = _int_or_none(_text(hsp, "Hsp_identity"))
-                gaps = _int_or_none(_text(hsp, "Hsp_gaps")) or 0
-                positive = _int_or_none(_text(hsp, "Hsp_positive"))
-                pident = (
-                    round((identity * 100.0) / align_len, 3)
-                    if identity is not None and align_len and align_len > 0
-                    else None
-                )
-                ppos = (
-                    round((positive * 100.0) / align_len, 3)
-                    if positive is not None and align_len and align_len > 0
-                    else None
-                )
-                row: dict[str, Any] = {
-                    "qseqid": query_id,
-                    "sseqid": subject_id,
-                    "pident": pident,
-                    "length": align_len,
-                    "mismatch": (
-                        max(0, align_len - identity - gaps)
-                        if align_len is not None and identity is not None
-                        else None
-                    ),
-                    "gapopen": gaps,
-                    "gaps": gaps,
-                    "qstart": _int_or_none(_text(hsp, "Hsp_query-from")),
-                    "qend": _int_or_none(_text(hsp, "Hsp_query-to")),
-                    "sstart": _int_or_none(_text(hsp, "Hsp_hit-from")),
-                    "send": _int_or_none(_text(hsp, "Hsp_hit-to")),
-                    "evalue": _float_or_none(_text(hsp, "Hsp_evalue")),
-                    "bitscore": _float_or_none(_text(hsp, "Hsp_bit-score")),
-                    "score": _int_or_none(_text(hsp, "Hsp_score")),
-                    "qlen": query_len,
-                    "slen": subject_len,
-                    "stitle": subject_title or None,
-                    "qseq": _text(hsp, "Hsp_qseq") or None,
-                    "sseq": _text(hsp, "Hsp_hseq") or None,
-                    "midline": _text(hsp, "Hsp_midline") or None,
-                }
-                if ppos is not None:
-                    row["ppos"] = ppos
-                hits.append({key: value for key, value in row.items() if value is not None})
+            subject_title = _text(elem, "Hit_def")
+            subject_len = _int_or_none(_text(elem, "Hit_len"))
+            if subject_id:
+                hsps_parent = _child(elem, "Hit_hsps")
+                for hsp in _children(hsps_parent, "Hsp"):
+                    hit_row = _build_hit_row(
+                        query_id=iter_query_id or "Query_1",
+                        query_len=iter_query_len,
+                        subject_id=subject_id,
+                        subject_title=subject_title,
+                        subject_len=subject_len,
+                        hsp=hsp,
+                    )
+                    if hit_row is not None:
+                        hits.append(hit_row)
+            # Free the Hit subtree so iterparse does not grow the DOM.
+            elem.clear()
+        elif tag == "Iteration":
+            in_iteration = False
+            elem.clear()
     return hits
+
+
+def _build_hit_row(
+    *,
+    query_id: str,
+    query_len: int | None,
+    subject_id: str,
+    subject_title: str,
+    subject_len: int | None,
+    hsp: ET.Element,
+) -> dict[str, Any] | None:
+    align_len = _int_or_none(_text(hsp, "Hsp_align-len"))
+    identity = _int_or_none(_text(hsp, "Hsp_identity"))
+    gaps = _int_or_none(_text(hsp, "Hsp_gaps")) or 0
+    positive = _int_or_none(_text(hsp, "Hsp_positive"))
+    pident = (
+        round((identity * 100.0) / align_len, 3)
+        if identity is not None and align_len and align_len > 0
+        else None
+    )
+    ppos = (
+        round((positive * 100.0) / align_len, 3)
+        if positive is not None and align_len and align_len > 0
+        else None
+    )
+    row: dict[str, Any] = {
+        "qseqid": query_id,
+        "sseqid": subject_id,
+        "pident": pident,
+        "length": align_len,
+        "mismatch": (
+            max(0, align_len - identity - gaps)
+            if align_len is not None and identity is not None
+            else None
+        ),
+        "gapopen": gaps,
+        "gaps": gaps,
+        "qstart": _int_or_none(_text(hsp, "Hsp_query-from")),
+        "qend": _int_or_none(_text(hsp, "Hsp_query-to")),
+        "sstart": _int_or_none(_text(hsp, "Hsp_hit-from")),
+        "send": _int_or_none(_text(hsp, "Hsp_hit-to")),
+        "evalue": _float_or_none(_text(hsp, "Hsp_evalue")),
+        "bitscore": _float_or_none(_text(hsp, "Hsp_bit-score")),
+        "score": _int_or_none(_text(hsp, "Hsp_score")),
+        "qlen": query_len,
+        "slen": subject_len,
+        "stitle": subject_title or None,
+        "qseq": _text(hsp, "Hsp_qseq") or None,
+        "sseq": _text(hsp, "Hsp_hseq") or None,
+        "midline": _text(hsp, "Hsp_midline") or None,
+    }
+    if ppos is not None:
+        row["ppos"] = ppos
+    return {key: value for key, value in row.items() if value is not None}
 
 
 def parse_blast_tabular(content: str) -> list[dict[str, Any]]:
