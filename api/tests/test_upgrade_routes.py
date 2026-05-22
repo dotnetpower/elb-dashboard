@@ -29,7 +29,16 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    # AUTH_DEV_BYPASS synthesises an identity with this oid (see api/auth.py);
+    # admin routes only pass when that oid is in the allowlist.
+    monkeypatch.setenv(
+        "UPGRADE_ADMIN_OIDS", "00000000-0000-0000-0000-000000000000"
+    )
     state.set_backend(state.InMemoryBackend())
+
+    from api.services.upgrade import build_logs
+
+    build_logs.set_backend(build_logs.InMemoryBuildLogBackend())
     from api.main import app
     from api.routes.upgrade import reset_check_throttle_for_tests
 
@@ -37,6 +46,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     with TestClient(app) as c:
         yield c
     reset_check_throttle_for_tests()
+    build_logs.set_backend(None)
     state.set_backend(None)
 
 
@@ -223,6 +233,117 @@ def test_candidates_masks_credentialed_remote(
     body = resp.json()
     assert body["remote"] == "https://example.test/foo.git"
     assert "supersecret" not in resp.text
+
+
+def test_start_requires_confirm_downtime(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_version": "0.3.0", "confirm_downtime": False},
+    )
+    assert resp.status_code == 422
+
+
+def test_start_enforces_admin_role(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.delenv("UPGRADE_ADMIN_OIDS", raising=False)
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_version": "0.3.0", "confirm_downtime": True},
+    )
+    assert resp.status_code == 403
+
+
+def test_start_queues_and_enqueues(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    submitted: list[str] = []
+
+    class _NoOpResult:
+        id = "celery-task-id"
+
+    def _fake_delay(*args: object) -> _NoOpResult:
+        submitted.append("called")
+        return _NoOpResult()
+
+    monkeypatch.setattr(
+        "api.tasks.upgrade.execute_upgrade.delay", _fake_delay
+    )
+
+    resp = client.post(
+        "/api/upgrade/start",
+        json={"target_version": "0.4.1", "confirm_downtime": True},
+    )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["state"] == "queued"
+    assert body["target_version"] == "0.4.1"
+    assert body["job_id"]
+    assert submitted == ["called"]
+
+
+def test_start_second_call_returns_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        remote_tags.UPGRADE_GIT_REMOTE_ENV, "https://example.test/foo.git"
+    )
+    monkeypatch.setattr(
+        "api.tasks.upgrade.execute_upgrade.delay", lambda *args: None
+    )
+    first = client.post(
+        "/api/upgrade/start",
+        json={"target_version": "0.4.1", "confirm_downtime": True},
+    )
+    assert first.status_code == 202
+    second = client.post(
+        "/api/upgrade/start",
+        json={"target_version": "0.4.2", "confirm_downtime": True},
+    )
+    assert second.status_code == 409
+
+
+def test_build_log_endpoint_returns_blob(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.services.upgrade import build_logs as _logs
+
+    writer = _logs.open_writer("jobABCD", "api")
+    writer.write_line("hello")
+    writer.flush()
+
+    resp = client.get("/api/upgrade/jobs/jobABCD/build-log/api")
+    assert resp.status_code == 200
+    assert resp.text.startswith("hello")
+
+
+def test_build_log_endpoint_404_for_missing(client: TestClient) -> None:
+    resp = client.get("/api/upgrade/jobs/jobABCD/build-log/api")
+    assert resp.status_code == 404
+
+
+def test_build_log_endpoint_rejects_invalid_component(client: TestClient) -> None:
+    resp = client.get("/api/upgrade/jobs/jobABCD/build-log/redis")
+    assert resp.status_code == 400
+
+
+def test_build_log_endpoint_requires_admin(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UPGRADE_ADMIN_OIDS", raising=False)
+    resp = client.get("/api/upgrade/jobs/jobABCD/build-log/api")
+    assert resp.status_code == 403
 
 
 def test_httpx_client_pkt_parser_smoke() -> None:

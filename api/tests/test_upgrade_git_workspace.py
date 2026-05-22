@@ -1,0 +1,147 @@
+"""Tests for the terminal-sidecar git clone helper.
+
+Module summary: Drives `api.services.upgrade.git_workspace.clone` with a
+fake `runner` so no real terminal sidecar / git binary is needed.
+
+Responsibility: Verify argv shape, exit-code interpretation, and shape
+  guards on caller-supplied version/job_id.
+Edit boundaries: When the clone argv contract changes, update these tests.
+Key entry points: Tests for happy path, failure exit, invalid inputs,
+  cleanup safety guard.
+Risky contracts: Confirms the absolute target path lives under
+  `/tmp/elb-upgrade/` so cleanup cannot escape the upgrade root.  # noqa: S108
+Validation: `uv run pytest -q api/tests/test_upgrade_git_workspace.py`.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from api.services import terminal_exec
+from api.services.upgrade import git_workspace
+
+
+class _Recorder:
+    def __init__(self, *, exit_code: int = 0, stderr: str = "") -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._exit_code = exit_code
+        self._stderr = stderr
+        # Forward the exception class so the helper can `except` against it.
+        self.TerminalExecError = terminal_exec.TerminalExecError
+
+    def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
+        self.calls.append({"argv": argv, "cwd": cwd, "timeout_seconds": timeout_seconds})
+        return {"exit_code": self._exit_code, "stdout": "", "stderr": self._stderr}
+
+
+def test_clone_happy_path_builds_expected_argv() -> None:
+    rec = _Recorder(exit_code=0)
+    result = git_workspace.clone(
+        git_remote="https://example.test/foo.git",
+        target_version="0.3.0",
+        job_id="job1234",
+        runner=rec,
+    )
+    assert result.target_dir == "/tmp/elb-upgrade/job1234"  # noqa: S108
+    assert result.target_version == "0.3.0"
+    # First call: git clone. Second call (best-effort): git config read.
+    assert rec.calls[0]["argv"] == [
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        "--branch",
+        "v0.3.0",
+        "https://example.test/foo.git",
+        "/tmp/elb-upgrade/job1234",  # noqa: S108
+    ]
+    # Scrubber attempts a config read of remote.origin.url.
+    assert any("config" in c["argv"] for c in rec.calls[1:])
+
+
+def test_clone_scrubs_credentials_from_remote_origin_url() -> None:
+    class _Scrubbed(_Recorder):
+        def __init__(self) -> None:
+            super().__init__(exit_code=0)
+            self.config_reads = 0
+            self.config_writes: list[list[str]] = []
+
+        def run(self, argv: list[str], *, cwd: str | None, timeout_seconds: int) -> dict[str, Any]:
+            self.calls.append({"argv": argv, "cwd": cwd, "timeout_seconds": timeout_seconds})
+            if argv[:5] == ["git", "-C", "/tmp/elb-upgrade/job1234", "config", "--get"]:  # noqa: S108
+                self.config_reads += 1
+                return {
+                    "exit_code": 0,
+                    "stdout": "https://x-access-token:supersecret@example.test/foo.git\n",
+                    "stderr": "",
+                }
+            if argv[:4] == ["git", "-C", "/tmp/elb-upgrade/job1234", "config"] and len(argv) > 5:  # noqa: S108
+                self.config_writes.append(argv)
+                return {"exit_code": 0, "stdout": "", "stderr": ""}
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    rec = _Scrubbed()
+    git_workspace.clone(
+        git_remote="https://x-access-token:supersecret@example.test/foo.git",
+        target_version="0.3.0",
+        job_id="job1234",
+        runner=rec,
+    )
+    assert rec.config_reads == 1
+    assert len(rec.config_writes) == 1
+    written_url = rec.config_writes[0][-1]
+    assert "supersecret" not in written_url
+    assert written_url == "https://example.test/foo.git"
+
+
+def test_clone_rejects_invalid_version() -> None:
+    with pytest.raises(git_workspace.WorkspaceError):
+        git_workspace.clone(
+            git_remote="https://example.test/foo.git",
+            target_version="not-a-version",
+            job_id="job1234",
+            runner=_Recorder(),
+        )
+
+
+def test_clone_rejects_invalid_job_id() -> None:
+    with pytest.raises(git_workspace.WorkspaceError):
+        git_workspace.clone(
+            git_remote="https://example.test/foo.git",
+            target_version="0.3.0",
+            job_id="../escape",
+            runner=_Recorder(),
+        )
+
+
+def test_clone_propagates_non_zero_exit() -> None:
+    rec = _Recorder(exit_code=128, stderr="fatal: Remote branch not found")
+    with pytest.raises(git_workspace.WorkspaceError) as exc:
+        git_workspace.clone(
+            git_remote="https://example.test/foo.git",
+            target_version="0.99.0",
+            job_id="jobABCD",
+            runner=rec,
+        )
+    assert "exit=128" in str(exc.value)
+
+
+def test_cleanup_refuses_paths_outside_upgrade_root() -> None:
+    rec = _Recorder()
+    workspace = git_workspace.WorkspacePath(
+        target_dir="/etc/passwd", target_version="0.3.0", job_id="job"
+    )
+    git_workspace.cleanup(workspace, runner=rec)
+    assert rec.calls == []  # short-circuited before running anything
+
+
+def test_cleanup_runs_git_clean_when_path_is_safe() -> None:
+    rec = _Recorder()
+    workspace = git_workspace.WorkspacePath(
+        target_dir="/tmp/elb-upgrade/jobXYZ", target_version="0.3.0", job_id="jobXYZ"  # noqa: S108
+    )
+    git_workspace.cleanup(workspace, runner=rec)
+    assert len(rec.calls) == 1
+    assert rec.calls[0]["argv"][:3] == ["git", "-C", "/tmp/elb-upgrade/jobXYZ"]  # noqa: S108
