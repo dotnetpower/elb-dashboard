@@ -16,11 +16,14 @@ Validation: ``uv run pytest -q api/tests/test_blast_tasks.py``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from celery import shared_task
 
 from api.tasks import blast as _blast
+
+LOGGER = logging.getLogger(__name__)
 
 __all__ = ("cancel",)
 
@@ -47,7 +50,30 @@ def cancel(
 
         credential = get_credential()
         repo = JobStateRepository()
-        children = list(repo.list_children(job_id, limit=1000))
+        # Bump the cap high enough to cover every realistic split-query
+        # fan-out (the split planner caps at ~256 groups, but a future
+        # auto-shard could push higher). Log + abort the cancel if the
+        # cap is actually hit so an operator sees the zombie risk
+        # instead of silent partial cancellation.
+        child_cap = 10_000
+        children = list(repo.list_children(job_id, limit=child_cap))
+        if len(children) >= child_cap:
+            LOGGER.error(
+                "cancel: list_children hit cap=%d for parent=%s; "
+                "refusing partial cancel to avoid zombies",
+                child_cap,
+                job_id,
+            )
+            return _blast._retry_or_fail(
+                self,
+                job_id=job_id,
+                phase="cancel_blocked",
+                exc=RuntimeError(
+                    f"cancel refused: parent has >= {child_cap} children; "
+                    "manual cleanup required"
+                ),
+                error_code="cancel_too_many_children",
+            )
         target_job_ids = [str(child.job_id) for child in children] or [job_id]
         results: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []

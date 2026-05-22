@@ -2289,7 +2289,7 @@ def test_cancel_split_parent_cascades_to_children(monkeypatch: pytest.MonkeyPatc
     class FakeRepo:
         def list_children(self, parent_job_id: str, limit: int = 100) -> list[object]:
             assert parent_job_id == "job-123"
-            assert limit == 1000
+            assert limit == 10_000
             return children
 
         def update(self, job_id: str, **kwargs: object) -> object:
