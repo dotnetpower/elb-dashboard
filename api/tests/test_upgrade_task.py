@@ -205,6 +205,29 @@ def test_double_start_is_refused(env: None) -> None:
         _start()
 
 
+def test_start_enqueue_failure_does_not_leak_broker_credentials(env: None) -> None:
+    """Regression: a Celery broker exception whose repr embeds the broker
+    URL (e.g. `redis://:password@host`) must not have that password copied
+    into the SPA-visible `phase_detail` field."""
+
+    def _boom(*_args):
+        raise ConnectionRefusedError(
+            "Cannot connect to redis://:topsecret-broker-pass@10.0.0.5:6379/0"
+        )
+
+    with pytest.raises(ConnectionRefusedError):
+        upgrade_task.start_upgrade_inline(
+            target_version="0.3.0",
+            target_sha="",
+            started_by_oid="oid-1",
+            enqueue=_boom,
+        )
+    row = state.get_state()
+    assert row.state == state.STATE_IDLE
+    assert "ConnectionRefusedError" in row.phase_detail
+    assert "topsecret-broker-pass" not in row.phase_detail
+
+
 def test_execute_without_remote_marks_failed_pre(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -350,3 +373,20 @@ def test_reconciler_noop_when_state_is_idle(env: None) -> None:
         aca=_FakeAca(), watcher=_FakeWatcher()
     )
     assert result.state == state.STATE_IDLE
+
+
+def test_reconciler_idle_branch_returns_post_update_snapshot(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for the bug where the idle branch of
+    `reconcile_rolling_out_inline` updated `running_version` on disk
+    but returned the pre-update snapshot, leaving the SPA stale.
+    """
+    monkeypatch.setattr(upgrade_task, "__version__", "0.7.0")
+    result = upgrade_task.reconcile_rolling_out_inline(
+        aca=_FakeAca(), watcher=_FakeWatcher()
+    )
+    assert result.state == state.STATE_IDLE
+    assert result.running_version == "0.7.0"
+    # Persisted as well.
+    assert state.get_state().running_version == "0.7.0"

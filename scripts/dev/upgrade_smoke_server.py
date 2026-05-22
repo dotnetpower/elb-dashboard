@@ -34,7 +34,6 @@ os.environ.pop("AZURE_TABLE_ENDPOINT", None)
 os.environ.pop("AZURE_BLOB_ENDPOINT", None)
 
 import uvicorn  # noqa: E402
-
 from api.services.upgrade import build_logs, history, state  # noqa: E402
 
 state.set_backend(state.InMemoryBackend())

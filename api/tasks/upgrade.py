@@ -439,7 +439,7 @@ def reconcile_rolling_out_inline(
     if row.state != state.STATE_ROLLING_OUT:
         if row.running_version != __version__:
             try:
-                state.update_state(
+                row = state.update_state(
                     lambda s: setattr(s, "running_version", __version__)
                 )
             except state.RowEtagMismatch:
