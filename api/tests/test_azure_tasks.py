@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from api.tasks import azure
+from api.tests._fakes import AsyncResultStub
 
 
 def test_attach_acr_uses_subscription_scoped_role_definition(monkeypatch) -> None:
@@ -208,17 +209,14 @@ def test_start_aks_enqueues_openapi_after_cluster_start(monkeypatch) -> None:
     class FakeAksClient:
         managed_clusters = FakeManagedClusters()
 
-    class FakeAsyncResult:
-        id = "task-openapi-123"
-
     def fake_send_task(
         task_name: str,
         *,
         kwargs: dict[str, Any],
         queue: str | None = None,
-    ) -> FakeAsyncResult:
+    ) -> AsyncResultStub:
         sent_tasks.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
-        return FakeAsyncResult()
+        return AsyncResultStub("task-openapi-123")
 
     monkeypatch.setattr(azure, "get_credential", lambda: object())
     monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())

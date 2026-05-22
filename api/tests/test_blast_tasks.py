@@ -64,6 +64,7 @@ def _parse_ini(content: str) -> configparser.ConfigParser:
     return parser
 
 
+@pytest.mark.slow
 def test_build_config_content_targets_existing_cluster_and_storage_urls() -> None:
     content = blast._build_config_content(
         job_id="job-123",
@@ -95,6 +96,7 @@ def test_build_config_content_targets_existing_cluster_and_storage_urls() -> Non
     assert cfg.get("cloud-provider", "azure-storage-account-container") == "blast-db"
 
 
+@pytest.mark.slow
 def test_build_config_content_preserves_full_blob_urls() -> None:
     content = blast._build_config_content(
         job_id="job-123",
