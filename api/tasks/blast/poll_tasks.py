@@ -36,20 +36,46 @@ LOGGER = logging.getLogger(__name__)
 #
 # A submit task enqueues ``poll_running_status`` with countdown=POLL_RUNNING_START_DELAY,
 # and each iteration that observes a still-active row self-reschedules with
-# countdown=POLL_RUNNING_INTERVAL. The cap (POLL_RUNNING_MAX_ITERATIONS) bounds
-# a single submit's poll chain to ~30 minutes so we never leave a runaway
-# polling chain behind if something goes sideways. The 60 s beat reconcile is
-# still the safety net for any row whose poll chain ended early.
+# a cadence that *backs off* over time:
+#   - First 6 iterations (~1 minute): 10 s for low-latency UI updates.
+#   - Next  9 iterations (~5 minutes): 30 s.
+#   - Beyond that: 60 s. The 60 s beat reconcile is still the safety net
+#     for any row whose poll chain ended early.
+# The cap (POLL_RUNNING_MAX_ITERATIONS) bounds a single submit's poll
+# chain to ~30 minutes so we never leave a runaway polling chain behind
+# if something goes sideways. Backoff keeps the broker pressure roughly
+# constant even when many BLAST submits are in flight concurrently:
+# previously each job ran 1 poll task per 10 s for up to 30 minutes
+# (~180 tasks/job) regardless of how long the job had been running.
 POLL_RUNNING_START_DELAY = 10
 POLL_RUNNING_INTERVAL = 10
-POLL_RUNNING_MAX_ITERATIONS = 180
+POLL_RUNNING_INTERVAL_MEDIUM = 30
+POLL_RUNNING_INTERVAL_LONG = 60
+POLL_RUNNING_FAST_ITERATIONS = 6
+POLL_RUNNING_MEDIUM_ITERATIONS = 15
+POLL_RUNNING_MAX_ITERATIONS = 60
 _POLL_RUNNING_ELIGIBLE_PHASES = frozenset({"submitted", "running", "results_pending"})
 
+
+def _poll_running_interval(iteration: int) -> int:
+    """Resolve the next reschedule countdown based on how many polls fired."""
+    if iteration < POLL_RUNNING_FAST_ITERATIONS:
+        return POLL_RUNNING_INTERVAL
+    if iteration < POLL_RUNNING_MEDIUM_ITERATIONS:
+        return POLL_RUNNING_INTERVAL_MEDIUM
+    return POLL_RUNNING_INTERVAL_LONG
+
+
 __all__ = (
+    "POLL_RUNNING_FAST_ITERATIONS",
     "POLL_RUNNING_INTERVAL",
+    "POLL_RUNNING_INTERVAL_LONG",
+    "POLL_RUNNING_INTERVAL_MEDIUM",
     "POLL_RUNNING_MAX_ITERATIONS",
+    "POLL_RUNNING_MEDIUM_ITERATIONS",
     "POLL_RUNNING_START_DELAY",
     "_POLL_RUNNING_ELIGIBLE_PHASES",
+    "_poll_running_interval",
     "check_status",
     "poll_running_status",
 )
@@ -205,7 +231,7 @@ def poll_running_status(
     try:
         poll_running_status.apply_async(
             kwargs={"job_id": job_id, "iteration": iteration + 1},
-            countdown=POLL_RUNNING_INTERVAL,
+            countdown=_poll_running_interval(iteration + 1),
             queue="blast",
         )
         summary["rescheduled"] = True
