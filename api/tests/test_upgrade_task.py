@@ -78,6 +78,10 @@ class _FakeAca:
         if self._fail_swap:
             raise aca_template.TemplateError("simulated PATCH refusal")
         target = aca_template._compute_target_images(target_version)
+        # Realistic: ACA returns the new images on subsequent reads after
+        # the PATCH lands. Tests previously relied on the reconciler's
+        # PATCH-never-landed grace not firing within the test timeline.
+        self._current = target
         return ("poller", self._current, target)
 
     def apply_images(
@@ -99,9 +103,13 @@ class _FakeWatcher:
         *,
         running: str = "Provisioning",
         provisioning: str = "Provisioning",
+        replicas: int = -1,
+        active: bool = True,
     ) -> None:
         self._running = running
         self._provisioning = provisioning
+        self._replicas = replicas
+        self._active = active
 
     def revision_status(self, _name: str) -> Any:
         return type(
@@ -112,6 +120,8 @@ class _FakeWatcher:
                 "running_state": self._running,
                 "provisioning_state": self._provisioning,
                 "health_state": "Healthy",
+                "replicas": self._replicas,
+                "active": self._active,
             },
         )()
 
@@ -361,7 +371,7 @@ def test_reconciler_finalises_succeeded_when_version_matches(
     )
     monkeypatch.setattr(upgrade_task, "__version__", "0.3.0")
     after_reconcile = upgrade_task.reconcile_rolling_out_inline(
-        aca=aca, watcher=_FakeWatcher()
+        aca=aca, watcher=_FakeWatcher(running="Running", provisioning="Provisioned")
     )
     assert after_reconcile.state == state.STATE_SUCCEEDED
     assert after_reconcile.phase_progress == 100
@@ -574,6 +584,119 @@ def test_failed_pre_omits_orphan_event_when_no_images_were_built(
     )
     events = history.tail_events(limit=20)
     assert all(e.event != "orphan_acr_tags" for e in events)
+
+
+def test_reconciler_replica_zero_escalates_after_grace(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revision reports Running+Provisioned but `replicas=0, active=False`
+    — e.g. all pods crashed before becoming ready. After the
+    PATCH_NEVER_LANDED_GRACE_SECONDS budget the reconciler must escalate
+    to `failed_rollout` instead of waiting the full 15-min stuck guard.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    monkeypatch.setattr(upgrade_task, "__version__", "0.2.1")
+    started = datetime.now(UTC) - timedelta(minutes=4)
+    state.update_state(
+        lambda s: setattr(s, "started_at", started.isoformat(timespec="seconds"))
+    )
+    watcher = _FakeWatcher(
+        running="Running", provisioning="Provisioned", replicas=0, active=False
+    )
+    after = upgrade_task.reconcile_rolling_out_inline(aca=aca, watcher=watcher)
+    assert after.state == state.STATE_FAILED_ROLLOUT
+    assert "0 replicas" in after.phase_detail
+
+
+def test_reconciler_pre_warm_defers_when_revision_not_ready(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even when `__version__` matches `target_version`, the reconciler
+    must wait one more tick if the ACA revision is still `Activating`.
+    """
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    monkeypatch.setattr(upgrade_task, "__version__", "0.3.0")
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="Activating", provisioning="InProgress"),
+    )
+    assert after.state == state.STATE_ROLLING_OUT
+    after2 = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca,
+        watcher=_FakeWatcher(running="Running", provisioning="Provisioned"),
+    )
+    assert after2.state == state.STATE_SUCCEEDED
+
+
+def test_orphan_tag_cleanup_results_recorded_in_audit(env: None) -> None:
+    """The orphan_acr_tags audit row must include the per-ref cleanup
+    outcome so an operator can see at a glance whether the MI's
+    acrDelete permission actually cleaned up.
+    """
+
+    class _ForbiddenAcr:
+        def delete_tag(self, _repo: str, _tag: str) -> None:
+            raise Exception("403 Forbidden")
+
+        def close(self) -> None:
+            pass
+
+        def get_tag_properties(self, _repo: str, _tag: str):
+            from datetime import UTC, datetime
+
+            return type("P", (), {"created_on": datetime(2026, 5, 22, tzinfo=UTC)})()
+
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _ForbiddenAcr())
+
+    class _PartialRunner(_FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self._calls = 0
+
+        def stream(self, argv, *, timeout_seconds):
+            self._calls += 1
+            if self._calls >= 2:
+                yield {"line": "build failed"}
+                yield {"exit_code": 1, "duration_ms": 1, "timed_out": False}
+                return
+            yield {"line": "step 1 ok"}
+            yield {"exit_code": 0, "duration_ms": 1, "timed_out": False}
+
+    after_start = _start()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_PartialRunner(),
+        aca=_FakeAca(),
+    )
+    events = history.tail_events(limit=20)
+    orphan_events = [e for e in events if e.event == "orphan_acr_tags"]
+    assert len(orphan_events) == 1
+    cleanup = orphan_events[0].detail.get("cleanup_results", {})
+    assert cleanup, "cleanup_results missing"
+    assert all("orphaned" in v for v in cleanup.values())
 
 
 def test_state_transition_timeline_walks_through_every_state(env: None) -> None:

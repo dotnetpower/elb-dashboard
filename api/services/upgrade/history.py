@@ -39,6 +39,10 @@ LOGGER = logging.getLogger(__name__)
 HISTORY_CONTAINER = "upgrade-history"
 HISTORY_BLOB = "events.log"
 MAX_TAIL_ENTRIES = 200
+# Cap event age surfaced to the SPA. The append blob itself is bounded by
+# the operator's container retention policy (default: forever); this
+# limit only governs what the UI shows so the timeline stays scannable.
+MAX_TAIL_AGE_DAYS = 180
 _BLOB_ENDPOINT_ENV = "AZURE_BLOB_ENDPOINT"
 
 
@@ -219,7 +223,9 @@ def tail_events(*, limit: int = 50) -> list[HistoryEvent]:
     Deduplicates by ``event_id`` so a double-written event (network retry
     on the append-blob side) only appears once. Within a duplicate set,
     the first observed (oldest position) wins so the timeline preserves
-    the original ordering.
+    the original ordering. Events older than ``MAX_TAIL_AGE_DAYS`` are
+    dropped so the UI never surfaces year-old runs that distract from
+    the current state.
     """
     capped = max(1, min(limit, MAX_TAIL_ENTRIES))
     try:
@@ -232,6 +238,7 @@ def tail_events(*, limit: int = 50) -> list[HistoryEvent]:
     lines = [line for line in raw.split(b"\n") if line.strip()]
     events: list[HistoryEvent] = []
     seen: set[str] = set()
+    cutoff = datetime.now(UTC).timestamp() - MAX_TAIL_AGE_DAYS * 86400
     for line in lines:
         try:
             evt = HistoryEvent.from_json(line)
@@ -239,10 +246,16 @@ def tail_events(*, limit: int = 50) -> list[HistoryEvent]:
             continue
         if evt.event_id in seen:
             continue
+        # Age cap. Malformed or missing ts → keep (cheaper than guessing).
+        if evt.ts:
+            try:
+                evt_ts = datetime.fromisoformat(evt.ts).timestamp()
+                if evt_ts < cutoff:
+                    continue
+            except ValueError:
+                pass
         seen.add(evt.event_id)
         events.append(evt)
-    # Reverse for newest-first, then cap. We cap AFTER dedup so a tail
-    # of mostly-duplicated events still yields ``capped`` unique rows.
     return list(reversed(events))[:capped]
 
 

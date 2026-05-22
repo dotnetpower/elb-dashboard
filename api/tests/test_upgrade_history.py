@@ -100,6 +100,27 @@ def test_tail_dedupes_by_event_id() -> None:
     assert events[0].event == "start"
 
 
+def test_tail_drops_events_older_than_max_age() -> None:
+    """Stale audit rows must not clutter the SPA history view. Events
+    older than `MAX_TAIL_AGE_DAYS` are filtered out.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    too_old = (
+        datetime.now(UTC) - timedelta(days=history.MAX_TAIL_AGE_DAYS + 5)
+    ).isoformat(timespec="seconds")
+    fresh = (datetime.now(UTC) - timedelta(days=1)).isoformat(timespec="seconds")
+    history._backend().append(
+        f'{{"ts":"{too_old}","job_id":"old","event":"succeeded","event_id":"a"}}\n'.encode()
+    )
+    history._backend().append(
+        f'{{"ts":"{fresh}","job_id":"new","event":"succeeded","event_id":"b"}}\n'.encode()
+    )
+    events = history.tail_events(limit=10)
+    assert len(events) == 1
+    assert events[0].job_id == "new"
+
+
 def test_legacy_events_without_event_id_dedupe_by_payload() -> None:
     """Events written before the `event_id` field landed still need to
     dedupe — fall back to a payload hash so the tail stays stable.

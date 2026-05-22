@@ -78,6 +78,46 @@ def test_writer_recovers_buffer_on_backend_failure() -> None:
     assert b"first line" in bytes(writer._buffer)
 
 
+def test_secret_scanner_masks_common_token_shapes() -> None:
+    """Defence in depth: the persisted build log must never carry
+    bearer/AWS/GitHub/password-shaped values verbatim, even if a
+    future Dockerfile echoes one during build.
+    """
+    from api.services.upgrade.build_logs import _mask_secrets
+
+    cases = [
+        "Authorization: Bearer abc123ABCDEF.xyzqwertyuiopasdfghjkl",
+        'aws_access_key: "AKIAIOSFODNN7EXAMPLE"',
+        "export GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "db_password=hunter2isagreatpassword",
+        "cloning https://user:supersecret@github.com/foo/bar.git",
+    ]
+    for raw in cases:
+        masked = _mask_secrets(raw)
+        assert "***REDACTED***" in masked, f"failed to mask: {raw!r} -> {masked!r}"
+    combined = " || ".join(_mask_secrets(r) for r in cases)
+    assert "hunter2isagreatpassword" not in combined
+    assert "supersecret" not in combined
+    assert "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" not in combined
+    assert "AKIAIOSFODNN7EXAMPLE" not in combined
+
+
+def test_writer_masks_secrets_at_write_time() -> None:
+    """`BuildLogWriter.write_line` must mask before persistence so even
+    a leak in the in-memory buffer is already redacted.
+    """
+    writer = build_logs.open_writer("jobMask1", "api")
+    writer.write_line("step 1: ok")
+    writer.write_line("Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig")
+    writer.write_line("done")
+    writer.flush()
+    payload = build_logs.read_blob("jobMask1", "api").decode()
+    assert "step 1: ok" in payload
+    assert "done" in payload
+    assert "eyJhbGc" not in payload
+    assert "***REDACTED***" in payload
+
+
 def test_writer_buffer_caps_when_backend_persistently_fails() -> None:
     """With a backend that never accepts a flush, the retain-on-failure
     path must drop the OLDEST bytes once the per-writer ceiling is hit

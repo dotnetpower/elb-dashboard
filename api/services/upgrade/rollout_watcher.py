@@ -51,6 +51,14 @@ class RevisionStatus:
     running_state: str
     provisioning_state: str
     health_state: str
+    # `replicas` reflects how many pods are actually scheduled. A new
+    # revision whose pods all crashed before becoming ready will report
+    # `provisioning_state=Provisioned, running_state=Running` for the
+    # revision object while `replicas=0`. The reconciler uses this as
+    # an additional terminal-failure signal so the operator doesn't
+    # wait the full stuck-guard window.
+    replicas: int = -1
+    active: bool = True
 
 
 def revision_status(revision_name: str, *, client: Any | None = None) -> RevisionStatus:
@@ -63,11 +71,22 @@ def revision_status(revision_name: str, *, client: Any | None = None) -> Revisio
     except Exception as exc:
         raise TemplateError(f"failed to read revision {revision_name!r}: {exc}") from exc
     properties = getattr(rev, "properties", rev)
+    # `replicas` may be `None` on a freshly-created revision before the
+    # control plane has scheduled any pods — treat as -1 so the caller
+    # can distinguish "unknown" from "explicitly zero".
+    raw_replicas = getattr(properties, "replicas", None)
+    try:
+        replicas = int(raw_replicas) if raw_replicas is not None else -1
+    except (TypeError, ValueError):
+        replicas = -1
+    active = bool(getattr(properties, "active", True))
     return RevisionStatus(
         name=str(getattr(rev, "name", revision_name)),
         running_state=str(getattr(properties, "running_state", "") or ""),
         provisioning_state=str(getattr(properties, "provisioning_state", "") or ""),
         health_state=str(getattr(properties, "health_state", "") or ""),
+        replicas=replicas,
+        active=active,
     )
 
 

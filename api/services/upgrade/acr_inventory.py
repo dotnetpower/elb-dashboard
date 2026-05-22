@@ -143,3 +143,45 @@ def image_exists(image_ref: str) -> bool:
     """Shortcut: True if and only if the image manifest resolves in ACR."""
     info = lookup_images([image_ref])
     return bool(info and info[0].exists)
+
+
+def delete_tag_best_effort(image_ref: str) -> tuple[bool, str]:
+    """Try to delete the tag pointed to by ``image_ref`` from its ACR.
+
+    Returns ``(deleted, reason)``. Never raises — a missing `acrDelete`
+    role on the MI, a transient registry outage, or a malformed ref all
+    return ``(False, <reason>)`` so the caller (upgrade ``_fail_pre``)
+    can fall back to recording the orphan in the audit blob. Used for
+    best-effort cleanup of partial-build orphan tags after an upgrade
+    fails mid-pipeline.
+    """
+    if not image_ref:
+        return False, "empty image ref"
+    try:
+        endpoint, repo, tag = parse_image_ref(image_ref)
+    except ValueError as exc:
+        return False, f"unsupported ref: {exc}"
+    client = _make_client(endpoint)
+    try:
+        delete = getattr(client, "delete_tag", None)
+        if not callable(delete):
+            return False, "client has no delete_tag method"
+        try:
+            delete(repo, tag)
+            return True, "deleted"
+        except Exception as exc:
+            msg = str(exc) or type(exc).__name__
+            # `Forbidden` / 403 typically means the MI lacks `acrDelete`
+            # — surface a precise reason so the audit row is actionable.
+            if "403" in msg or "Forbidden" in msg or "AuthorizationFailed" in msg:
+                return False, f"forbidden (MI needs acrDelete): {msg}"
+            if "TagNotFound" in msg or "404" in msg:
+                return True, "already absent"  # idempotent success
+            return False, f"delete error: {msg}"
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                LOGGER.debug("acr client close failed: %s", exc)

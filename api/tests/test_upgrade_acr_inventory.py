@@ -103,3 +103,71 @@ def test_image_exists_shortcut() -> None:
     acr_inventory.set_client_factory_for_tests(lambda _ep: fake)
     assert acr_inventory.image_exists("myacr.azurecr.io/elb-api:v0.2.0") is True
     assert acr_inventory.image_exists("myacr.azurecr.io/elb-api:v9.9.9") is False
+
+
+def test_delete_tag_best_effort_success() -> None:
+    """Happy path: the client exposes `delete_tag` and returns cleanly."""
+
+    class _DeletingClient:
+        def __init__(self) -> None:
+            self.deleted: list[tuple[str, str]] = []
+
+        def delete_tag(self, repo: str, tag: str) -> None:
+            self.deleted.append((repo, tag))
+
+        def close(self) -> None:
+            pass
+
+    fake = _DeletingClient()
+    acr_inventory.set_client_factory_for_tests(lambda _ep: fake)
+    ok, reason = acr_inventory.delete_tag_best_effort(
+        "myacr.azurecr.io/elb-api:v0.3.0"
+    )
+    assert ok is True
+    assert reason == "deleted"
+    assert fake.deleted == [("elb-api", "v0.3.0")]
+
+
+def test_delete_tag_best_effort_forbidden_does_not_raise() -> None:
+    """When the MI lacks `acrDelete`, the helper returns False with a
+    precise reason instead of raising \u2014 the caller can fall back to
+    recording the orphan in audit.
+    """
+
+    class _ForbiddenClient:
+        def delete_tag(self, _repo: str, _tag: str) -> None:
+            raise Exception("(Forbidden) 403 AuthorizationFailed")
+
+        def close(self) -> None:
+            pass
+
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _ForbiddenClient())
+    ok, reason = acr_inventory.delete_tag_best_effort(
+        "myacr.azurecr.io/elb-api:v0.3.0"
+    )
+    assert ok is False
+    assert "forbidden" in reason.lower()
+
+
+def test_delete_tag_best_effort_already_absent_is_idempotent_success() -> None:
+    """`TagNotFound` means the tag is already gone \u2014 idempotent success."""
+
+    class _MissingClient:
+        def delete_tag(self, _repo: str, _tag: str) -> None:
+            raise Exception("TagNotFound: 404")
+
+        def close(self) -> None:
+            pass
+
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _MissingClient())
+    ok, reason = acr_inventory.delete_tag_best_effort(
+        "myacr.azurecr.io/elb-api:v0.3.0"
+    )
+    assert ok is True
+    assert reason == "already absent"
+
+
+def test_delete_tag_best_effort_malformed_ref_is_safe() -> None:
+    ok, reason = acr_inventory.delete_tag_best_effort("garbage")
+    assert ok is False
+    assert "unsupported" in reason.lower()

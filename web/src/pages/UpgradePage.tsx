@@ -29,6 +29,7 @@ import {
 import { BuildLogViewer } from "@/components/BuildLogViewer";
 
 const STATUS_POLL_MS = 5_000;
+const BROADCAST_CHANNEL_NAME = "elb-upgrade-status";
 
 export function UpgradePage() {
   const [status, setStatus] = useState<UpgradeStatus | null>(null);
@@ -90,14 +91,24 @@ export function UpgradePage() {
 
   useEffect(() => {
     void refreshAll();
+    const channel =
+      typeof BroadcastChannel !== "undefined"
+        ? new BroadcastChannel(BROADCAST_CHANNEL_NAME)
+        : null;
     const id = window.setInterval(() => {
       // Light polling: status only.
       upgradeApi
         .status()
-        .then((s) => setStatus(s))
+        .then((s) => {
+          setStatus(s);
+          channel?.postMessage(s);
+        })
         .catch(() => undefined);
     }, STATUS_POLL_MS);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearInterval(id);
+      channel?.close();
+    };
   }, [refreshAll]);
 
   const phase = status ? statePhase(status.state) : "idle";

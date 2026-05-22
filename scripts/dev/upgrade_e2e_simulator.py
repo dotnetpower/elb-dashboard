@@ -203,9 +203,18 @@ class _FakeAca:
 
 
 class _FakeWatcher:
-    def __init__(self, *, running: str = "Running", provisioning: str = "Provisioned") -> None:
+    def __init__(
+        self,
+        *,
+        running: str = "Running",
+        provisioning: str = "Provisioned",
+        replicas: int = 1,
+        active: bool = True,
+    ) -> None:
         self.running = running
         self.provisioning = provisioning
+        self.replicas = replicas
+        self.active = active
 
     def revision_status(self, name: str):
         return type(
@@ -216,6 +225,8 @@ class _FakeWatcher:
                 "running_state": self.running,
                 "provisioning_state": self.provisioning,
                 "health_state": "Healthy",
+                "replicas": self.replicas,
+                "active": self.active,
             },
         )()
 

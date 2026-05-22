@@ -399,27 +399,34 @@ def _fail_pre(
 
     When ``orphan_image_refs`` is supplied (i.e. one or more component
     images were already pushed to ACR before the failure), the refs are
-    recorded in the audit blob as an ``orphan_acr_tags`` event so an
-    operator can clean them up via the ACR purge task. We do not delete
-    them here — the user-assigned MI's ACR role is `acrPull`/`acrPush`,
-    not `acrDelete`, and silently failing a delete would mask the
-    orphan.
+    recorded in the audit blob as an ``orphan_acr_tags`` event. We also
+    attempt a best-effort `delete_tag` so the typical case (`acrDelete`
+    role present on the MI) cleans up automatically; when the role is
+    missing the audit row remains as the actionable record so an
+    operator can untag manually.
     """
     LOGGER.warning("upgrade.execute job=%s failed_pre: %s", job_id, detail)
     history.record_event("failed", job_id=job_id, stage="pre", detail=detail)
     if orphan_image_refs:
+        delete_results: dict[str, str] = {}
+        for ref in orphan_image_refs:
+            deleted, reason = acr_inventory.delete_tag_best_effort(ref)
+            delete_results[ref] = "deleted" if deleted else f"orphaned ({reason})"
+        deleted_count = sum(1 for v in delete_results.values() if v == "deleted")
         LOGGER.warning(
-            "upgrade.execute job=%s orphan ACR tags (built but not deployed): %s",
+            "upgrade.execute job=%s orphan ACR tag cleanup: %d/%d deleted",
             job_id,
-            orphan_image_refs,
+            deleted_count,
+            len(orphan_image_refs),
         )
         history.record_event(
             "orphan_acr_tags",
             job_id=job_id,
             image_refs=list(orphan_image_refs),
+            cleanup_results=delete_results,
             note=(
                 "images were pushed to ACR before the upgrade failed; "
-                "delete via `az acr repository untag` or wait for retention."
+                "best-effort delete attempted via the MI's `acrDelete` role."
             ),
         )
     truncated = detail[:240]
@@ -525,8 +532,19 @@ def reconcile_rolling_out_inline(
             pass
 
     # The simplest reliable signal: the running api version matches the
-    # target version. If so, the new revision is up and we are it.
+    # target version. If so, the new revision is up and we are it. We
+    # additionally probe the latest revision's running/provisioning
+    # state (best-effort) so a freshly-booted reconciler that observes
+    # `__version__` matching but the revision still in `Activating` waits
+    # one more tick — catching the corner case where `__version__` was
+    # baked correctly but the container's readiness probe is still
+    # failing.
     if row.target_version and __version__ == row.target_version:
+        ready = _new_revision_is_ready(row, aca_mod, watcher_mod)
+        if not ready:
+            # Defer to the next tick — stuck-guard upper bound still
+            # protects against an indefinite wait.
+            return row
         try:
             after = state.cas_state(
                 expected_state=state.STATE_ROLLING_OUT,
@@ -586,6 +604,22 @@ def reconcile_rolling_out_inline(
         status.running_state.lower() == "running"
         and status.provisioning_state.lower() == "provisioned"
     ):
+        # Replica-zero guard: the revision reports "Running" + "Provisioned"
+        # but no pods are scheduled and the revision itself is inactive
+        # — every pod must have crashed before becoming ready. Escalate
+        # immediately rather than letting the stuck-guard win.
+        if status.replicas == 0 and not status.active and row.started_at:
+            try:
+                started = datetime.fromisoformat(row.started_at)
+                elapsed = (clock() - started).total_seconds()
+            except ValueError:
+                elapsed = 0
+            if elapsed > PATCH_NEVER_LANDED_GRACE_SECONDS:
+                return _fail_rollout(
+                    row.job_id,
+                    f"revision {latest} has 0 replicas after {elapsed:.0f}s; "
+                    "new pods never came up",
+                )
         # We are likely the old revision still draining; let the new
         # revision's reconciler finalise. No state change here.
         return row
@@ -658,6 +692,37 @@ def _check_pre_patch_stuck(
         row.job_id,
         f"stuck in {row.state} for {elapsed:.0f}s; producing worker likely died",
     )
+
+
+def _new_revision_is_ready(
+    row: state.UpgradeState, aca_mod: object, watcher_mod: object
+) -> bool:
+    """Best-effort pre-warm gate before declaring `succeeded`.
+
+    The api `__version__` matching `target_version` proves the new code
+    is running in *this* worker, but in single-revision mode the ACA
+    revision object can still be `Activating` if the readiness probe
+    has not flipped to ready yet. Confirming the revision is
+    `Running`+`Provisioned` (or at least has ≥1 replica scheduled)
+    avoids a brief window where the SPA flips to `succeeded` while
+    other sidecars are still rebooting.
+
+    Returns ``True`` when the gate cannot read ARM (open-fail: we'd
+    rather declare succeeded on a transient ARM glitch than block on
+    it forever — the stuck-guard remains the upper bound).
+    """
+    try:
+        latest = aca_mod.latest_revision_name()  # type: ignore[attr-defined]
+        status = watcher_mod.revision_status(latest)  # type: ignore[attr-defined]
+    except Exception as exc:
+        LOGGER.warning(
+            "upgrade.reconcile: pre-warm probe failed (%s); declaring ready", exc
+        )
+        return True
+    running_ok = status.running_state.lower() in {"running", ""}
+    provisioning_ok = status.provisioning_state.lower() in {"provisioned", ""}
+    replicas_ok = status.replicas != 0  # -1 (unknown) or >=1 both pass
+    return running_ok and provisioning_ok and replicas_ok
 
 
 def _image_matches_version(image_ref: str, target_version: str) -> bool:
@@ -774,6 +839,17 @@ def start_rollback_inline(
     except aca_template.TemplateError as exc:
         # rollback PATCH itself failed; mark the row and surface to UI.
         return _fail_rollback(str(exc))
+
+    # Intermediate progress: PATCH accepted but new revision still booting.
+    try:
+        state.update_state(
+            lambda s: (
+                setattr(s, "phase_detail", "rollback PATCH accepted; revision booting"),
+                setattr(s, "phase_progress", 75),
+            )[-1]
+        )
+    except state.RowEtagMismatch:
+        pass
 
     try:
         after = state.cas_state(

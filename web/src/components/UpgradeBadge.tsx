@@ -5,6 +5,12 @@
  *
  * Stays inert (renders nothing) when the operator hasn't configured a
  * remote, so a fresh deployment doesn't dangle a dead control.
+ *
+ * Cross-tab sync: a `BroadcastChannel("elb-upgrade-status")` instance
+ * propagates the latest status payload to every open tab so an upgrade
+ * triggered in one tab updates badges/pages in others within ~5s
+ * (whatever cadence the publisher uses) instead of the badge's own
+ * 60s polling interval.
  */
 
 import { useEffect, useState } from "react";
@@ -19,6 +25,7 @@ import {
 } from "@/api/upgrade";
 
 const POLL_INTERVAL_MS = 60_000;
+const BROADCAST_CHANNEL_NAME = "elb-upgrade-status";
 
 export function UpgradeBadge() {
   const [status, setStatus] = useState<UpgradeStatus | null>(null);
@@ -26,12 +33,23 @@ export function UpgradeBadge() {
 
   useEffect(() => {
     let cancelled = false;
+    let channel: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== "undefined") {
+      channel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
+      channel.onmessage = (e) => {
+        if (!cancelled && e.data && typeof e.data === "object") {
+          setStatus(e.data as UpgradeStatus);
+          setError(false);
+        }
+      };
+    }
     const tick = async () => {
       try {
         const fresh = await upgradeApi.status();
         if (!cancelled) {
           setStatus(fresh);
           setError(false);
+          channel?.postMessage(fresh);
         }
       } catch {
         if (!cancelled) setError(true);
@@ -42,6 +60,7 @@ export function UpgradeBadge() {
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      channel?.close();
     };
   }, []);
 

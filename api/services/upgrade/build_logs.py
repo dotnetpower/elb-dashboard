@@ -4,13 +4,15 @@ Module summary: Captures `az acr build` stdout/stderr lines into a
 per-component Append Blob (`upgrade-logs/<job_id>/build-<component>.log`)
 so an operator can review the build evidence even after the producing
 revision has been rolled. The backend is swappable so unit tests run
-entirely in-memory.
+entirely in-memory. Lines are scanned for token-like patterns and the
+matched value is masked before persistence — defence in depth against
+a future Docker build context accidentally echoing a secret.
 
 Responsibility: Persistent per-component build logs for the upgrade flow.
 Edit boundaries: Blob naming and creation live here; routes/tasks just
   call `open_writer()` / `read_blob()`.
 Key entry points: `BuildLogWriter`, `open_writer`, `read_blob`,
-  `blob_name`, `set_backend`, `InMemoryBuildLogBackend`.
+  `blob_name`, `set_backend`, `InMemoryBuildLogBackend`, `_mask_secrets`.
 Risky contracts: Append-blob block size is bounded; writers chunk lines
   so a runaway producer can't blow past Azure's 4 MiB block ceiling.
   Tests must use `InMemoryBuildLogBackend` (guarded by
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from collections.abc import Iterable
 from typing import Protocol
@@ -45,6 +48,66 @@ _MAX_BLOCK_BYTES = 3 * 1024 * 1024  # 3 MiB; Azure caps at 4 MiB per append.
 # actually reads — is always preserved.
 _MAX_BUFFER_BYTES = 16 * 1024 * 1024
 _TRUNCATION_MARKER = b"\n... [build log truncated: backend backpressure dropped older lines] ...\n"
+
+# Token-like patterns that should never appear verbatim in a persisted
+# build log. Defence in depth: the upgrade pipeline already scrubs the
+# remote URL's `userinfo` and never passes credentials as `--build-arg`,
+# but a future Dockerfile that echoes an env at build time could land
+# a real secret here. We mask on write so the persisted blob is safe
+# to share with a wider operator audience.
+_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # Bearer / Authorization tokens
+    ("BEARER", re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._\-]{16,})")),
+    ("AUTH_BASIC", re.compile(r"(?i)\b(basic\s+)([A-Za-z0-9+/=]{16,})")),
+    # AWS access key id / secret
+    ("AWS_ACCESS_KEY_ID", re.compile(r"\b(AKIA[0-9A-Z]{16})\b")),
+    (
+        "AWS_SECRET",
+        re.compile(
+            r"(?i)(aws[_-]?secret[_-]?access[_-]?key\s*[:=]\s*)([A-Za-z0-9/+=]{30,})"
+        ),
+    ),
+    # GitHub / GitLab classic + fine-grained tokens
+    ("GITHUB_TOKEN", re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{30,})\b")),
+    ("GITHUB_FG", re.compile(r"\b(github_pat_[A-Za-z0-9_]{30,})\b")),
+    # generic password-looking key/value (foo_pass=..., FOO_PASSWORD=...)
+    (
+        "PASSWORD_KV",
+        re.compile(
+            r"(?i)((?:password|passwd|pwd|secret|token)\s*[:=]\s*)"
+            r"['\"]?([^\s'\"&]{8,})"
+        ),
+    ),
+    # URL credentials (https://user:pw@host)
+    (
+        "URL_CRED",
+        re.compile(r"(?i)\b(https?://[^\s/:@]+):([^\s/@]+)@"),
+    ),
+)
+
+
+def _mask_secrets(line: str) -> str:
+    """Return ``line`` with any matched secret-shaped substring redacted.
+
+    The mask preserves the surrounding context so a build-log reader
+    still sees ``Bearer ***REDACTED***`` (not just whitespace) and can
+    confirm a token was emitted at that point. Multiple patterns may
+    match the same line; each is applied independently.
+    """
+    if not line:
+        return line
+    out = line
+    for _label, pattern in _SECRET_PATTERNS:
+        out = pattern.sub(_replace_secret, out)
+    return out
+
+
+def _replace_secret(match: re.Match[str]) -> str:
+    """Helper: keep group(1) (the label/prefix), redact group(2)/whole."""
+    if match.lastindex and match.lastindex >= 2:
+        prefix = match.group(1)
+        return f"{prefix}***REDACTED***"
+    return "***REDACTED***"
 
 
 def blob_name(job_id: str, component: str) -> str:
@@ -189,7 +252,8 @@ class BuildLogWriter:
         return self._name
 
     def write_line(self, line: str) -> None:
-        encoded = (line.rstrip("\n") + "\n").encode("utf-8", errors="replace")
+        masked = _mask_secrets(line)
+        encoded = (masked.rstrip("\n") + "\n").encode("utf-8", errors="replace")
         with self._lock:
             self._buffer.extend(encoded)
             if len(self._buffer) >= 64 * 1024:  # flush every ~64 KiB
