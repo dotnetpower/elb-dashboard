@@ -18,6 +18,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -188,25 +189,43 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         method = request.method
 
-        # Per-request DETAIL inspector — buffer request body BEFORE handing
-        # the request to the route, then replay via _receive so the route
-        # handler still sees it. Skipped for SSE/WebSocket/health/metrics
-        # and for high-volume polling GETs (see _INSPECTOR_EXCLUDE_GET_PREFIXES).
+        # Per-request DETAIL inspector — capture up to N bytes of the
+        # request body for the metrics buffer. Skipped for SSE/WebSocket/
+        # health/metrics and for high-volume polling GETs (see
+        # _INSPECTOR_EXCLUDE_GET_PREFIXES).
+        #
+        # Memory contract: the previous version did
+        #   raw = await request.body()
+        #   captured_request_body = raw[:_INSPECTOR_MAX_BUFFER_BYTES]
+        #   request._receive = closure-over-raw
+        # which kept *two* copies of the body in RAM (the captured slice
+        # and the raw closure body) for the lifetime of the route. We now
+        # keep a single ``raw_body`` and slice lazily only when the
+        # metrics emitter actually asks for it, so multi-MB uploads
+        # consume body-size + zero on the inspector side instead of 2x.
         capture = os.environ.get(
             "REQUEST_DETAIL_CAPTURE_ENABLED", "true"
         ).lower() != "false" and _inspector_should_capture(path, method)
-        captured_request_body: bytes | None = None
+        raw_body: bytes | None = None
         if capture and method in {"POST", "PUT", "PATCH", "DELETE"}:
             try:
-                raw = await request.body()
-                captured_request_body = raw[:_INSPECTOR_MAX_BUFFER_BYTES]
+                raw_body = await request.body()
 
-                async def _replay_receive(_body: bytes = raw) -> dict[str, object]:
+                async def _replay_receive(_body: bytes = raw_body) -> dict[str, Any]:
                     return {"type": "http.request", "body": _body, "more_body": False}
 
-                request._receive = _replay_receive
+                request._receive = _replay_receive  # type: ignore[attr-defined]
             except Exception:
-                captured_request_body = None
+                raw_body = None
+
+        def _captured_body_bytes() -> bytes | None:
+            if raw_body is None:
+                return None
+            # Slice the prefix here — single allocation, only when an
+            # emitter (success or error branch) actually consumes it.
+            if len(raw_body) <= _INSPECTOR_MAX_BUFFER_BYTES:
+                return raw_body
+            return raw_body[:_INSPECTOR_MAX_BUFFER_BYTES]
 
         try:
             response = await call_next(request)
@@ -248,7 +267,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                         caller=_decode_jwt_upn(request.headers.get("authorization")),
                         client_ip=_extract_client_ip(request),
                         request_headers=list(request.headers.items()),
-                        request_body=captured_request_body,
+                        request_body=_captured_body_bytes(),
                         request_content_type=request.headers.get("content-type"),
                         response_headers=[],
                         response_body=None,
@@ -354,7 +373,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                     caller=_decode_jwt_upn(request.headers.get("authorization")),
                     client_ip=_extract_client_ip(request),
                     request_headers=list(request.headers.items()),
-                    request_body=captured_request_body,
+                    request_body=_captured_body_bytes(),
                     request_content_type=request.headers.get("content-type"),
                     response_headers=list(response.headers.items()),
                     response_body=captured_response_body,
