@@ -12,6 +12,7 @@ Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import re
 import threading
@@ -48,6 +49,57 @@ from api.services.warmup_jobs import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# Shared thread pool for the K8s monitor fan-outs. Replaces the per-call
+# ``ThreadPoolExecutor(max_workers=...)`` blocks that used to spawn +
+# tear down 6-12 worker threads every monitor poll. One process-wide
+# executor (default 16 workers, env-overridable) lets the dashboard's
+# repeated polls reuse the same warm threads — saving the
+# pthread_create / start_new_thread cost per tick.
+_K8S_FANOUT_POOL_MAX_WORKERS = 16
+
+
+def _resolve_k8s_fanout_max_workers() -> int:
+    import os
+
+    raw = os.environ.get("K8S_FANOUT_POOL_MAX_WORKERS", "")
+    if raw:
+        try:
+            return max(1, min(int(raw), 128))
+        except ValueError:
+            return _K8S_FANOUT_POOL_MAX_WORKERS
+    return _K8S_FANOUT_POOL_MAX_WORKERS
+
+
+_K8S_FANOUT_POOL: ThreadPoolExecutor | None = None
+_K8S_FANOUT_POOL_LOCK = threading.Lock()
+
+
+def _k8s_fanout_pool() -> ThreadPoolExecutor:
+    """Return the process-shared executor for monitor fan-outs."""
+    global _K8S_FANOUT_POOL
+    pool = _K8S_FANOUT_POOL
+    if pool is not None:
+        return pool
+    with _K8S_FANOUT_POOL_LOCK:
+        if _K8S_FANOUT_POOL is None:
+            _K8S_FANOUT_POOL = ThreadPoolExecutor(
+                max_workers=_resolve_k8s_fanout_max_workers(),
+                thread_name_prefix="k8s-fanout",
+            )
+        return _K8S_FANOUT_POOL
+
+
+def _shutdown_k8s_fanout_pool() -> None:
+    global _K8S_FANOUT_POOL
+    with _K8S_FANOUT_POOL_LOCK:
+        pool = _K8S_FANOUT_POOL
+        _K8S_FANOUT_POOL = None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+atexit.register(_shutdown_k8s_fanout_pool)
 
 _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,63}$")
 _SAFE_K8S_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
@@ -825,81 +877,85 @@ def k8s_warmup_status(
         def _get(url: str, params: dict[str, str] | None = None) -> Any:
             return session.get(url, params=params, timeout=10)
 
-        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="warmup-status") as pool:
-            f_workspace = pool.submit(
-                _get,
-                f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
-            )
-            f_vmtouch = pool.submit(
-                _get,
-                f"{server}/apis/apps/v1/namespaces/default/daemonsets/vmtouch-db-cache",
-            )
-            f_setup_jobs = pool.submit(
-                _get,
-                f"{server}/apis/batch/v1/namespaces/default/jobs",
-                {"labelSelector": "app=setup"},
-            )
-            f_warmup_jobs = pool.submit(
-                _get,
-                f"{server}/apis/batch/v1/namespaces/default/jobs",
-                {"labelSelector": f"app={DEFAULT_WARMUP_APP_LABEL}"},
-            )
-            f_warmup_ds = pool.submit(
-                _get,
-                f"{server}/apis/apps/v1/namespaces/default/daemonsets",
-                {"labelSelector": "app=db-warmup"},
-            )
-            f_namespaces = pool.submit(_get, f"{server}/api/v1/namespaces")
+        # Reuses the process-wide ``_k8s_fanout_pool`` so we do not
+        # spawn + tear down 6 worker threads on every monitor poll.
+        # Submitted futures' exceptions are re-raised inside ``.result()``
+        # which we already let bubble to the outer try/except below.
+        pool = _k8s_fanout_pool()
+        f_workspace = pool.submit(
+            _get,
+            f"{server}/apis/apps/v1/namespaces/kube-system/daemonsets/create-workspace",
+        )
+        f_vmtouch = pool.submit(
+            _get,
+            f"{server}/apis/apps/v1/namespaces/default/daemonsets/vmtouch-db-cache",
+        )
+        f_setup_jobs = pool.submit(
+            _get,
+            f"{server}/apis/batch/v1/namespaces/default/jobs",
+            {"labelSelector": "app=setup"},
+        )
+        f_warmup_jobs = pool.submit(
+            _get,
+            f"{server}/apis/batch/v1/namespaces/default/jobs",
+            {"labelSelector": f"app={DEFAULT_WARMUP_APP_LABEL}"},
+        )
+        f_warmup_ds = pool.submit(
+            _get,
+            f"{server}/apis/apps/v1/namespaces/default/daemonsets",
+            {"labelSelector": "app=db-warmup"},
+        )
+        f_namespaces = pool.submit(_get, f"{server}/api/v1/namespaces")
 
-            response = f_workspace.result()
-            if response.status_code == 200:
-                status = response.json().get("status", {})
-                result["workspace_ready"] = status.get("numberReady", 0)
-                result["workspace_desired"] = status.get("desiredNumberScheduled", 0)
-                result["warm"] = result["workspace_ready"] > 0
+        response = f_workspace.result()
+        if response.status_code == 200:
+            status = response.json().get("status", {})
+            result["workspace_ready"] = status.get("numberReady", 0)
+            result["workspace_desired"] = status.get("desiredNumberScheduled", 0)
+            result["warm"] = result["workspace_ready"] > 0
 
-            response = f_vmtouch.result()
-            if response.status_code == 200:
-                result["vmtouch_ready"] = response.json().get("status", {}).get("numberReady", 0)
-                result["warm"] = result["warm"] or result["vmtouch_ready"] > 0
+        response = f_vmtouch.result()
+        if response.status_code == 200:
+            result["vmtouch_ready"] = response.json().get("status", {}).get("numberReady", 0)
+            result["warm"] = result["warm"] or result["vmtouch_ready"] > 0
 
-            response = f_setup_jobs.result()
-            if response.status_code == 200:
-                result["databases"] = _database_status_from_setup_jobs(
-                    response.json().get("items", [])
+        response = f_setup_jobs.result()
+        if response.status_code == 200:
+            result["databases"] = _database_status_from_setup_jobs(
+                response.json().get("items", [])
+            )
+
+        response = f_warmup_jobs.result()
+        if response.status_code == 200:
+            warmup_databases = database_status_from_warmup_jobs(
+                response.json().get("items", [])
+            )
+            # Phase 2 — node-pinning check and pod-log fetch are independent
+            # of each other and of the remaining Phase 1 results, so fan
+            # them out too. Pod log fetches are themselves parallelised
+            # inside `_warmup_pods_and_logs`.
+            f_stale = pool.submit(
+                _mark_stale_warmup_nodes, session, server, warmup_databases
+            )
+            f_pods = pool.submit(_warmup_pods_and_logs, session, server)
+            f_stale.result()
+            pods, logs_by_pod = f_pods.result()
+            attach_pod_progress_to_database_status(warmup_databases, pods, logs_by_pod)
+            _merge_database_statuses(result, warmup_databases)
+
+        response = f_warmup_ds.result()
+        if response.status_code == 200:
+            _append_warmup_daemonsets(result, response.json().get("items", []))
+
+        response = f_namespaces.result()
+        if response.status_code == 200:
+            result["namespaces"] = [
+                namespace_item.get("metadata", {}).get("name", "")
+                for namespace_item in response.json().get("items", [])
+                if namespace_item.get("metadata", {}).get("name", "").startswith(
+                    "elastic-blast-"
                 )
-
-            response = f_warmup_jobs.result()
-            if response.status_code == 200:
-                warmup_databases = database_status_from_warmup_jobs(
-                    response.json().get("items", [])
-                )
-                # Phase 2 — node-pinning check and pod-log fetch are independent
-                # of each other and of the remaining Phase 1 results, so fan
-                # them out too. Pod log fetches are themselves parallelised
-                # inside `_warmup_pods_and_logs`.
-                f_stale = pool.submit(
-                    _mark_stale_warmup_nodes, session, server, warmup_databases
-                )
-                f_pods = pool.submit(_warmup_pods_and_logs, session, server)
-                f_stale.result()
-                pods, logs_by_pod = f_pods.result()
-                attach_pod_progress_to_database_status(warmup_databases, pods, logs_by_pod)
-                _merge_database_statuses(result, warmup_databases)
-
-            response = f_warmup_ds.result()
-            if response.status_code == 200:
-                _append_warmup_daemonsets(result, response.json().get("items", []))
-
-            response = f_namespaces.result()
-            if response.status_code == 200:
-                result["namespaces"] = [
-                    namespace_item.get("metadata", {}).get("name", "")
-                    for namespace_item in response.json().get("items", [])
-                    if namespace_item.get("metadata", {}).get("name", "").startswith(
-                        "elastic-blast-"
-                    )
-                ][:20]
+            ][:20]
 
         return result
     except Exception as exc:
@@ -1074,12 +1130,11 @@ def _warmup_pods_and_logs(session: Any, server: str) -> tuple[list[dict[str, Any
 
     # Up to 12 pod log GETs — fire concurrently so the wall time is bounded
     # by the slowest log fetch (2 s timeout each) instead of summing all 12.
+    # Reuses the process-wide ``_k8s_fanout_pool`` so we do not spawn +
+    # tear down 12 worker threads on every monitor poll.
     logs_by_pod: dict[str, str] = {}
-    with ThreadPoolExecutor(
-        max_workers=min(12, len(pod_names)),
-        thread_name_prefix="warmup-logs",
-    ) as pool:
-        for name, text in pool.map(_fetch_log, pod_names):
+    if pod_names:
+        for name, text in _k8s_fanout_pool().map(_fetch_log, pod_names):
             if text is not None:
                 logs_by_pod[name] = text
     return pods, logs_by_pod
