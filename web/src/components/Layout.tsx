@@ -15,6 +15,14 @@ import { isFeatureEnabled } from "@/config/runtime";
 
 import "./Layout.css";
 
+function formatBuildVersion(releaseVersion: string, buildNumber: string): string {
+  const parts = releaseVersion.split(".");
+  if (parts.length !== 3 || !/^\d+$/.test(buildNumber)) {
+    return releaseVersion;
+  }
+  return `${parts[0]}.${parts[1]}.${buildNumber}`;
+}
+
 // ---------------------------------------------------------------------------
 // UserMenuDropdown — avatar click → popover with user info + sign out
 // ---------------------------------------------------------------------------
@@ -186,6 +194,7 @@ export function Layout({ children }: PropsWithChildren) {
   const newSearchBlocked = !cluster.hasRunningCluster;
   const terminalBlocked = !terminalSidecar.isHealthy;
   const showToolsGroup = labToolsEnabled || terminalEnabled;
+  const buildVersion = formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__);
 
   useEffect(() => subscribeAuthSessionIssues(setSessionIssue), []);
 
@@ -226,9 +235,9 @@ export function Layout({ children }: PropsWithChildren) {
               <span>Control Plane</span>
               <span
                 className="layout__logo-version"
-                title={`Version: v${__APP_VERSION__}\nCommit: ${__APP_COMMIT__}\nBuilt: ${__APP_BUILD_TIME__}`}
+                title={`Release: v${__APP_VERSION__}\nBuild: v${buildVersion}\nBuild number: ${__APP_BUILD_NUMBER__}\nCommit: ${__APP_COMMIT__}\nBuilt: ${__APP_BUILD_TIME__}`}
               >
-                v{__APP_VERSION__} · {__APP_COMMIT__}
+                v{buildVersion} · {__APP_COMMIT__}
               </span>
             </div>
           </div>

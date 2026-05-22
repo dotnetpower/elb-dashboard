@@ -1,6 +1,6 @@
 ---
 title: Unreleased
-description: Feature-change notes landed since the last SemVer tag but not yet shipped in a release of ElasticBLAST Control Plane.
+description: Feature-change notes landed since the last release tag but not yet shipped in a release of ElasticBLAST Control Plane.
 ---
 
 # Unreleased

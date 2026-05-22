@@ -10,8 +10,8 @@ const hmrClientPort = Number(process.env.VITE_HMR_CLIENT_PORT || "");
 
 // Build-time version stamp.
 // Resolution order: explicit env (Docker build-arg) -> local git -> fallback.
-// Docker builds run without .git in context, so quick-deploy.sh passes
-// APP_VERSION / GIT_COMMIT / BUILD_TIME as --build-arg.
+// Docker builds run without .git in context, so deploy scripts pass
+// APP_VERSION / APP_BUILD_NUMBER / GIT_COMMIT / BUILD_TIME as --build-arg.
 function readPkgVersion(): string {
   try {
     const pkg = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"), "utf-8"));
@@ -29,7 +29,15 @@ function tryGit(args: string[]): string {
     return "";
   }
 }
+function readBuildNumber(): string {
+  const latestTag = tryGit(["tag", "--list", "'v[0-9]*.[0-9]*.[0-9]*'", "--sort=-v:refname", "--merged", "HEAD"])
+    .split(/\r?\n/)
+    .find(Boolean);
+  const count = tryGit(latestTag ? ["rev-list", "--count", `${latestTag}..HEAD`] : ["rev-list", "--count", "HEAD"]);
+  return /^\d+$/.test(count) ? count : "0";
+}
 const APP_VERSION = process.env.APP_VERSION?.trim() || readPkgVersion();
+const APP_BUILD_NUMBER = process.env.APP_BUILD_NUMBER?.trim() || readBuildNumber();
 const APP_COMMIT = process.env.GIT_COMMIT?.trim() || tryGit(["rev-parse", "--short", "HEAD"]) || "dev";
 const APP_BUILD_TIME = process.env.BUILD_TIME?.trim() || new Date().toISOString();
 
@@ -38,6 +46,7 @@ export default defineConfig({
   plugins: [react()],
   define: {
     __APP_VERSION__: JSON.stringify(APP_VERSION),
+    __APP_BUILD_NUMBER__: JSON.stringify(APP_BUILD_NUMBER),
     __APP_COMMIT__: JSON.stringify(APP_COMMIT),
     __APP_BUILD_TIME__: JSON.stringify(APP_BUILD_TIME),
   },

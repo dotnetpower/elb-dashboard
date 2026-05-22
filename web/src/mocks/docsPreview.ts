@@ -52,7 +52,8 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
 
 function textResponse(body: string, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "text/plain;charset=utf-8");
+  if (!headers.has("Content-Type"))
+    headers.set("Content-Type", "text/plain;charset=utf-8");
   return new Response(body, { status: init.status ?? 200, headers });
 }
 
@@ -132,9 +133,51 @@ function storagePayload() {
     public_network_access: "Disabled",
     is_hns_enabled: true,
     containers: [
-      { name: "blast-db", public_access: null, last_modified_time: iso(-1440) },
-      { name: "queries", public_access: null, last_modified_time: iso(-42) },
-      { name: "results", public_access: null, last_modified_time: iso(-5) },
+      {
+        name: "blast-db",
+        public_access: null,
+        last_modified_time: iso(-1440),
+        blob_count: 8,
+        size_bytes: 13958643712,
+        usage_truncated: false,
+        usage_error: null,
+      },
+      {
+        name: "queries",
+        public_access: null,
+        last_modified_time: iso(-42),
+        blob_count: 3,
+        size_bytes: 92712,
+        usage_truncated: false,
+        usage_error: null,
+      },
+      {
+        name: "results",
+        public_access: null,
+        last_modified_time: iso(-5),
+        blob_count: 11,
+        size_bytes: 5483312,
+        usage_truncated: false,
+        usage_error: null,
+      },
+      {
+        name: "audit",
+        public_access: null,
+        last_modified_time: iso(-30),
+        blob_count: 2,
+        size_bytes: 8192,
+        usage_truncated: false,
+        usage_error: null,
+      },
+      {
+        name: "job-artifacts",
+        public_access: null,
+        last_modified_time: iso(-30),
+        blob_count: 4,
+        size_bytes: 32144,
+        usage_truncated: false,
+        usage_error: null,
+      },
     ],
   };
 }
@@ -255,7 +298,9 @@ function baseJob(jobId: string, status: string) {
     dashboard_job_id: jobId,
     openapi_job_id: openApiJobId,
     instance_id: `task-${jobId.slice(0, 8)}`,
-    job_title: completed ? "core_nt monkeypox completed example" : "core_nt monkeypox smoke test",
+    job_title: completed
+      ? "core_nt monkeypox completed example"
+      : "core_nt monkeypox smoke test",
     program: "blastn",
     db: "core_nt",
     status,
@@ -264,7 +309,8 @@ function baseJob(jobId: string, status: string) {
     updated_at: completed ? iso(-142) : iso(-2),
     runtime_status: completed ? "Completed" : status === "failed" ? "Failed" : "Running",
     query_label: "NC_003310.1:c48509-48048",
-    error: status === "failed" ? "Demo failure: AKS pod image pull timed out." : undefined,
+    error:
+      status === "failed" ? "Demo failure: AKS pod image pull timed out." : undefined,
     infrastructure: {
       subscription_id: workspaceConfig.subscriptionId,
       resource_group: workspaceConfig.workloadResourceGroup,
@@ -287,7 +333,10 @@ function baseJob(jobId: string, status: string) {
       steps: {
         preparing: { phase: "completed", duration_ms: 14_200 },
         submitting: { phase: "completed", duration_ms: 31_400 },
-        running: { phase: completed ? "completed" : status === "failed" ? "failed" : "running", duration_ms: completed ? 474_400 : 139_400 },
+        running: {
+          phase: completed ? "completed" : status === "failed" ? "failed" : "running",
+          duration_ms: completed ? 474_400 : 139_400,
+        },
       },
     },
     payload: {
@@ -314,7 +363,10 @@ function jobsPayload() {
 }
 
 function jobById(id: string) {
-  return jobsPayload().jobs.find((job) => job.job_id === id) || baseJob(dashboardJobId, "completed");
+  return (
+    jobsPayload().jobs.find((job) => job.job_id === id) ||
+    baseJob(dashboardJobId, "completed")
+  );
 }
 
 function resultFilesPayload() {
@@ -369,18 +421,27 @@ function openApiSpecPayload() {
       { name: "System", description: "Health checks and configuration" },
       { name: "Cluster", description: "AKS cluster status" },
       { name: "Jobs", description: "BLAST job submission, status, and results" },
-      { name: "External ElasticBLAST", description: "Stable external integration facade" },
+      {
+        name: "External ElasticBLAST",
+        description: "Stable external integration facade",
+      },
     ],
     paths: {
       "/v1/health": { get: { tags: ["System"], summary: "Detailed health", ...ok } },
-      "/v1/config": { get: { tags: ["System"], summary: "Redacted active config", ...ok } },
-      "/v1/cluster": { get: { tags: ["Cluster"], summary: "Get AKS runtime overview", ...ok } },
+      "/v1/config": {
+        get: { tags: ["System"], summary: "Redacted active config", ...ok },
+      },
+      "/v1/cluster": {
+        get: { tags: ["Cluster"], summary: "Get AKS runtime overview", ...ok },
+      },
       "/v1/jobs": {
         get: { tags: ["Jobs"], summary: "List all jobs", ...ok },
         post: {
           tags: ["Jobs"],
           summary: "Submit a BLAST search",
-          requestBody: { content: { "application/json": { schema: { type: "object" } } } },
+          requestBody: {
+            content: { "application/json": { schema: { type: "object" } } },
+          },
           responses: { "202": { description: "Accepted" } },
         },
       },
@@ -388,7 +449,9 @@ function openApiSpecPayload() {
         get: {
           tags: ["Jobs"],
           summary: "Get job status",
-          parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }],
+          parameters: [
+            { name: "job_id", in: "path", required: true, schema: { type: "string" } },
+          ],
           ...ok,
         },
       },
@@ -398,19 +461,30 @@ function openApiSpecPayload() {
           summary: "Download results",
           parameters: [
             { name: "job_id", in: "path", required: true, schema: { type: "string" } },
-            { name: "content", in: "query", required: false, schema: { type: "string", enum: ["full", "merged", "xml"] } },
+            {
+              name: "content",
+              in: "query",
+              required: false,
+              schema: { type: "string", enum: ["full", "merged", "xml"] },
+            },
           ],
           ...ok,
         },
       },
       "/api/v1/elastic-blast/submit": {
-        post: { tags: ["External ElasticBLAST"], summary: "Submit an external ElasticBLAST job", responses: { "202": { description: "Accepted" } } },
+        post: {
+          tags: ["External ElasticBLAST"],
+          summary: "Submit an external ElasticBLAST job",
+          responses: { "202": { description: "Accepted" } },
+        },
       },
       "/api/v1/elastic-blast/jobs/{job_id}": {
         get: {
           tags: ["External ElasticBLAST"],
           summary: "Get external ElasticBLAST job status",
-          parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }],
+          parameters: [
+            { name: "job_id", in: "path", required: true, schema: { type: "string" } },
+          ],
           ...ok,
         },
       },
@@ -460,12 +534,61 @@ function sidecarsPayload() {
     ts,
     revision: "docs-mock-preview",
     sidecars: {
-      frontend: { name: "frontend", health: "ok", ts, cpu_pct: 4, mem_bytes: 58_000_000, mem_max_bytes: 268_435_456, mem_pct: 22 },
-      api: { name: "api", health: "ok", ts, cpu_pct: 12, mem_bytes: 174_000_000, mem_max_bytes: 536_870_912, mem_pct: 32 },
-      worker: { name: "worker", health: "ok", ts, cpu_pct: 18, mem_bytes: 238_000_000, mem_max_bytes: 536_870_912, mem_pct: 44 },
-      beat: { name: "beat", health: "ok", ts, cpu_pct: 3, mem_bytes: 82_000_000, mem_max_bytes: 268_435_456, mem_pct: 30 },
-      redis: { name: "redis", health: "ok", ts, cpu_pct: 2, mem_bytes: 42_000_000, mem_max_bytes: 268_435_456, mem_pct: 16, redis_version: "7.4" },
-      terminal: { name: "terminal", health: "ok", ts, cpu_pct: 7, mem_bytes: 126_000_000, mem_max_bytes: 536_870_912, mem_pct: 23 },
+      frontend: {
+        name: "frontend",
+        health: "ok",
+        ts,
+        cpu_pct: 4,
+        mem_bytes: 58_000_000,
+        mem_max_bytes: 268_435_456,
+        mem_pct: 22,
+      },
+      api: {
+        name: "api",
+        health: "ok",
+        ts,
+        cpu_pct: 12,
+        mem_bytes: 174_000_000,
+        mem_max_bytes: 536_870_912,
+        mem_pct: 32,
+      },
+      worker: {
+        name: "worker",
+        health: "ok",
+        ts,
+        cpu_pct: 18,
+        mem_bytes: 238_000_000,
+        mem_max_bytes: 536_870_912,
+        mem_pct: 44,
+      },
+      beat: {
+        name: "beat",
+        health: "ok",
+        ts,
+        cpu_pct: 3,
+        mem_bytes: 82_000_000,
+        mem_max_bytes: 268_435_456,
+        mem_pct: 30,
+      },
+      redis: {
+        name: "redis",
+        health: "ok",
+        ts,
+        cpu_pct: 2,
+        mem_bytes: 42_000_000,
+        mem_max_bytes: 268_435_456,
+        mem_pct: 16,
+        redis_version: "7.4",
+      },
+      terminal: {
+        name: "terminal",
+        health: "ok",
+        ts,
+        cpu_pct: 7,
+        mem_bytes: 126_000_000,
+        mem_max_bytes: 536_870_912,
+        mem_pct: 23,
+      },
     },
     events: { row1: 4, row2: 1, row3: 1, row4: 0 },
   };
@@ -492,10 +615,22 @@ function sidecarRequestsPayload() {
       caller: "researcher.kim@example.org",
       client_ip: "10.42.0.14",
       request_headers: authHeaders,
-      request_body: JSON.stringify({ db: "core_nt", program: "blastn", outfmt: 5, enable_warmup: true }, null, 2),
+      request_body: JSON.stringify(
+        { db: "core_nt", program: "blastn", outfmt: 5, enable_warmup: true },
+        null,
+        2,
+      ),
       request_body_truncated: false,
       response_headers: jsonHeaders,
-      response_body: JSON.stringify({ ready: true, critical_blockers: 0, summary: "Mock preview accepts this search." }, null, 2),
+      response_body: JSON.stringify(
+        {
+          ready: true,
+          critical_blockers: 0,
+          summary: "Mock preview accepts this search.",
+        },
+        null,
+        2,
+      ),
       response_body_truncated: false,
       response_size_bytes: 142,
     },
@@ -512,7 +647,11 @@ function sidecarRequestsPayload() {
       request_body: null,
       request_body_truncated: false,
       response_headers: jsonHeaders,
-      response_body: JSON.stringify({ databases: ["core_nt", "16S_ribosomal_RNA"], public_access_disabled: true }, null, 2),
+      response_body: JSON.stringify(
+        { databases: ["core_nt", "16S_ribosomal_RNA"], public_access_disabled: true },
+        null,
+        2,
+      ),
       response_body_truncated: false,
       response_size_bytes: 312,
     },
@@ -529,7 +668,11 @@ function sidecarRequestsPayload() {
       request_body: null,
       request_body_truncated: false,
       response_headers: jsonHeaders,
-      response_body: JSON.stringify({ warm: true, databases: [{ name: "core_nt", status: "Ready", nodes_ready: 4 }] }, null, 2),
+      response_body: JSON.stringify(
+        { warm: true, databases: [{ name: "core_nt", status: "Ready", nodes_ready: 4 }] },
+        null,
+        2,
+      ),
       response_body_truncated: false,
       response_size_bytes: 284,
     },
@@ -546,7 +689,14 @@ function sidecarRequestsPayload() {
       request_body: null,
       request_body_truncated: false,
       response_headers: jsonHeaders,
-      response_body: JSON.stringify({ public_network_access: "Disabled", containers: ["blast-db", "queries", "results"] }, null, 2),
+      response_body: JSON.stringify(
+        {
+          public_network_access: "Disabled",
+          containers: ["blast-db", "queries", "results"],
+        },
+        null,
+        2,
+      ),
       response_body_truncated: false,
       response_size_bytes: 421,
     },
@@ -563,7 +713,15 @@ function sidecarRequestsPayload() {
       request_body: null,
       request_body_truncated: false,
       response_headers: jsonHeaders,
-      response_body: JSON.stringify({ degraded: true, degraded_reason: "Kubernetes metrics API timed out; cached node status is still available." }, null, 2),
+      response_body: JSON.stringify(
+        {
+          degraded: true,
+          degraded_reason:
+            "Kubernetes metrics API timed out; cached node status is still available.",
+        },
+        null,
+        2,
+      ),
       response_body_truncated: false,
       response_size_bytes: 198,
     },
@@ -577,10 +735,18 @@ function sidecarRequestsPayload() {
       caller: "researcher.kim@example.org",
       client_ip: "10.42.0.14",
       request_headers: authHeaders,
-      request_body: JSON.stringify({ program: "blastn", db: "core_nt", resource_profile: "core_nt_safe" }, null, 2),
+      request_body: JSON.stringify(
+        { program: "blastn", db: "core_nt", resource_profile: "core_nt_safe" },
+        null,
+        2,
+      ),
       request_body_truncated: false,
       response_headers: jsonHeaders,
-      response_body: JSON.stringify({ job_id: dashboardJobId, openapi_job_id: openApiJobId, status: "queued" }, null, 2),
+      response_body: JSON.stringify(
+        { job_id: dashboardJobId, openapi_job_id: openApiJobId, status: "queued" },
+        null,
+        2,
+      ),
       response_body_truncated: false,
       response_size_bytes: 238,
     },
@@ -614,7 +780,8 @@ function alignmentsPayload() {
       {
         qseqid: "NC_003310.1:c48509-48048",
         sseqid: "OZ254294.1",
-        stitle: "Monkeypox virus isolate 24MPX2634V genome assembly, complete genome: monopartite",
+        stitle:
+          "Monkeypox virus isolate 24MPX2634V genome assembly, complete genome: monopartite",
         pident: 100,
         length: 462,
         mismatch: 0,
@@ -695,7 +862,10 @@ function matchApi(path: string, method: string): Response | null {
     );
   }
   if (path === "/api/arm/resource-group/tags") {
-    return jsonResponse({ resource_group: workspaceConfig.workloadResourceGroup, tags: { app: "elb-dashboard" } });
+    return jsonResponse({
+      resource_group: workspaceConfig.workloadResourceGroup,
+      tags: { app: "elb-dashboard" },
+    });
   }
   if (path === "/api/monitor/aks") return jsonResponse(clusterPayload());
   if (path === "/api/monitor/storage") return jsonResponse(storagePayload());
@@ -714,8 +884,10 @@ function matchApi(path: string, method: string): Response | null {
       identity_type: "UserAssigned",
     });
   }
-  if (path === "/api/terminal/health") return jsonResponse({ status: "ok", upstream_status: 200 });
-  if (path === "/api/monitor/aks/service-ip") return jsonResponse({ service_name: "elb-openapi", external_ip: "10.42.0.52" });
+  if (path === "/api/terminal/health")
+    return jsonResponse({ status: "ok", upstream_status: 200 });
+  if (path === "/api/monitor/aks/service-ip")
+    return jsonResponse({ service_name: "elb-openapi", external_ip: "10.42.0.52" });
   if (path === "/api/aks/openapi/spec") return jsonResponse(openApiSpecPayload());
   if (path === "/api/aks/openapi/deployment") {
     return jsonResponse({
@@ -742,8 +914,10 @@ function matchApi(path: string, method: string): Response | null {
   if (path === "/api/monitor/aks/warmup-status") return jsonResponse(warmupPayload());
   if (path === "/api/monitor/metrics") return jsonResponse(requestMetricsPayload());
   if (path === "/api/monitor/sidecars") return jsonResponse(sidecarsPayload());
-  if (path === "/api/monitor/sidecars/ticket") return jsonResponse({ ticket: "docs-mock-ticket", expires_in: 60 });
-  if (path === "/api/monitor/sidecar-requests") return jsonResponse(sidecarRequestsPayload());
+  if (path === "/api/monitor/sidecars/ticket")
+    return jsonResponse({ ticket: "docs-mock-ticket", expires_in: 60 });
+  if (path === "/api/monitor/sidecar-requests")
+    return jsonResponse(sidecarRequestsPayload());
   if (path === "/api/monitor/aks/events") {
     return jsonResponse({
       events: [
@@ -783,16 +957,34 @@ function matchApi(path: string, method: string): Response | null {
   }
   if (path === "/api/monitor/aks/pods") return jsonResponse({ pods: [] });
   if (path === "/api/storage/local-debug") {
-    return jsonResponse({ is_local: false, public_access: "Disabled", default_action: "Deny", ip_rules: [], caller_ip: null, caller_ip_in_rules: false });
+    return jsonResponse({
+      is_local: false,
+      public_access: "Disabled",
+      default_action: "Deny",
+      ip_rules: [],
+      caller_ip: null,
+      caller_ip_in_rules: false,
+    });
   }
   if (path === "/api/blast/databases") return jsonResponse(databasesPayload());
-  if (path === "/api/blast/databases/check-updates") return jsonResponse({ latest_version: "2026-05-20-00-00-00" });
+  if (path === "/api/blast/databases/check-updates")
+    return jsonResponse({ latest_version: "2026-05-20-00-00-00" });
   if (path === "/api/blast/jobs" && method === "GET") return jsonResponse(jobsPayload());
   if (path === "/api/blast/jobs" && method === "POST") {
-    return jsonResponse({ job_id: dashboardJobId, dashboard_job_id: dashboardJobId, openapi_job_id: openApiJobId, instance_id: "task-new-demo", status: "queued" }, { status: 202 });
+    return jsonResponse(
+      {
+        job_id: dashboardJobId,
+        dashboard_job_id: dashboardJobId,
+        openapi_job_id: openApiJobId,
+        instance_id: "task-new-demo",
+        status: "queued",
+      },
+      { status: 202 },
+    );
   }
   const jobMatch = path.match(/^\/api\/blast\/jobs\/([^/]+)$/);
-  if (jobMatch && method === "GET") return jsonResponse(jobById(decodeURIComponent(jobMatch[1])));
+  if (jobMatch && method === "GET")
+    return jsonResponse(jobById(decodeURIComponent(jobMatch[1])));
   if (path.match(/^\/api\/blast\/jobs\/[^/]+\/execution-steps$/)) {
     return jsonResponse({
       schema_version: 1,
@@ -804,34 +996,69 @@ function matchApi(path: string, method: string): Response | null {
       output: { status: "completed" },
     });
   }
-  if (path.match(/^\/api\/blast\/jobs\/[^/]+\/results$/)) return jsonResponse(resultFilesPayload());
-  if (path.match(/^\/api\/blast\/jobs\/[^/]+\/results\/aggregate$/)) return jsonResponse(aggregatePayload());
-  if (path.match(/^\/api\/blast\/jobs\/[^/]+\/results\/alignments$/)) return jsonResponse(alignmentsPayload());
+  if (path.match(/^\/api\/blast\/jobs\/[^/]+\/results$/))
+    return jsonResponse(resultFilesPayload());
+  if (path.match(/^\/api\/blast\/jobs\/[^/]+\/results\/aggregate$/))
+    return jsonResponse(aggregatePayload());
+  if (path.match(/^\/api\/blast\/jobs\/[^/]+\/results\/alignments$/))
+    return jsonResponse(alignmentsPayload());
   if (path.match(/^\/api\/blast\/jobs\/[^/]+\/results\/taxonomy$/)) {
     return jsonResponse({
       job_id: dashboardJobId,
-      organisms: [{ key: "10244", organism: "Monkeypox virus", taxid: "10244", count: 42, best_evalue: 0, top_bitscore: 828.419 }],
+      organisms: [
+        {
+          key: "10244",
+          organism: "Monkeypox virus",
+          taxid: "10244",
+          count: 42,
+          best_evalue: 0,
+          top_bitscore: 828.419,
+        },
+      ],
       total_hits: 42,
       files_parsed: 2,
       total_files: 2,
       read_failures: 0,
     });
   }
-  if (path.match(/^\/api\/blast\/jobs\/[^/]+\/events$/)) return jsonResponse({ job_id: dashboardJobId, events: [] });
+  if (path.match(/^\/api\/blast\/jobs\/[^/]+\/events$/))
+    return jsonResponse({ job_id: dashboardJobId, events: [] });
   if (path.match(/^\/api\/blast\/jobs\/[^/]+\/file$/)) {
-    return jsonResponse({ name: "batch_001.xml", content: "<BlastOutput><BlastOutput_db>core_nt</BlastOutput_db></BlastOutput>", truncated: false });
+    return jsonResponse({
+      name: "batch_001.xml",
+      content: "<BlastOutput><BlastOutput_db>core_nt</BlastOutput_db></BlastOutput>",
+      truncated: false,
+    });
   }
-  if (path === "/api/blast/pre-flight") return jsonResponse({ status: "ok", ready: true, checks: [], critical_blockers: 0, summary: "Mock preview accepts this search." });
+  if (path === "/api/blast/pre-flight")
+    return jsonResponse({
+      status: "ok",
+      ready: true,
+      checks: [],
+      critical_blockers: 0,
+      summary: "Mock preview accepts this search.",
+    });
   if (path === "/api/blast/taxonomy/search") {
     return jsonResponse({
       query: "monkeypox",
       count: 1,
       source: "ncbi_eutils",
       cached: true,
-      results: [{ taxid: 10244, scientific_name: "Monkeypox virus", common_name: null, rank: "species", lineage: "Viruses", matched_name: "Monkeypox virus", synonyms: [] }],
+      results: [
+        {
+          taxid: 10244,
+          scientific_name: "Monkeypox virus",
+          common_name: null,
+          rank: "species",
+          lineage: "Viruses",
+          matched_name: "Monkeypox virus",
+          synonyms: [],
+        },
+      ],
     });
   }
-  if (path.startsWith("/api/")) return jsonResponse({ mocked: true, path, method, items: [] });
+  if (path.startsWith("/api/"))
+    return jsonResponse({ mocked: true, path, method, items: [] });
   return null;
 }
 
@@ -839,9 +1066,15 @@ export function initDocsMockPreview(): void {
   if (!DOCS_MOCK_PREVIEW || typeof window === "undefined") return;
   seedLocalState();
   const originalFetch = window.fetch.bind(window);
-  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
-    const rawUrl = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+  window.fetch = async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const method = (
+      init?.method || (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
+    const rawUrl =
+      typeof input === "string" || input instanceof URL ? String(input) : input.url;
     const url = new URL(rawUrl, window.location.origin);
     const mocked = matchApi(url.pathname, method);
     if (mocked) return mocked;
@@ -851,7 +1084,9 @@ export function initDocsMockPreview(): void {
     try {
       return await originalFetch(input, init);
     } catch {
-      return textResponse(`Mock preview has no fixture for ${method} ${url.pathname}`, { status: 404 });
+      return textResponse(`Mock preview has no fixture for ${method} ${url.pathname}`, {
+        status: 404,
+      });
     }
   };
 

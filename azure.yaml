@@ -26,10 +26,14 @@ hooks:
         bash ./scripts/dev/azd-progress.sh plan
       fi
       bash ./scripts/dev/azd-progress.sh step 1 "Provider registration" "Register required providers before Bicep starts."
-      if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
-        bash ./scripts/dev/register-providers.sh --subscription "$AZURE_SUBSCRIPTION_ID"
+      if [ "${ELB_PROVIDER_REGISTRATION_READY:-}" = "true" ]; then
+        bash ./scripts/dev/azd-progress.sh note "Provider registration already completed by ./deploy.sh; skipping duplicate check."
       else
-        bash ./scripts/dev/register-providers.sh
+        if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
+          bash ./scripts/dev/register-providers.sh --subscription "$AZURE_SUBSCRIPTION_ID"
+        else
+          bash ./scripts/dev/register-providers.sh
+        fi
       fi
       bash ./scripts/dev/azd-progress.sh done 1 "Provider registration"
       bash ./scripts/dev/azd-progress.sh step 2 "Resource group choice" "If rg-elb-dashboard already contains resources, choose delete, numbering, or abort."

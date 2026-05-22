@@ -38,6 +38,9 @@ param sharedIdentityResourceId string
 @description('Client id of the same UAMI (used by azure-identity inside the containers).')
 param sharedIdentityClientId string
 
+@description('Principal/object id of the same UAMI (used for runtime RBAC assignments).')
+param sharedIdentityPrincipalId string = ''
+
 @description('AAD tenant id used to validate MSAL bearer tokens.')
 param tenantId string
 
@@ -165,6 +168,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_TENANT_ID', value: tenantId }
             { name: 'API_CLIENT_ID', value: apiClientId }
             { name: 'AZURE_CLIENT_ID', value: sharedIdentityClientId }
+            { name: 'SHARED_IDENTITY_PRINCIPAL_ID', value: sharedIdentityPrincipalId }
             { name: 'AZURE_SUBSCRIPTION_ID', value: subscriptionId }
             { name: 'AZURE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'AZURE_TABLE_ENDPOINT', value: tableEndpoint }
@@ -257,6 +261,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_TENANT_ID', value: tenantId }
             { name: 'API_CLIENT_ID', value: apiClientId }
             { name: 'AZURE_CLIENT_ID', value: sharedIdentityClientId }
+            { name: 'SHARED_IDENTITY_PRINCIPAL_ID', value: sharedIdentityPrincipalId }
             { name: 'AZURE_SUBSCRIPTION_ID', value: subscriptionId }
             { name: 'AZURE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'AZURE_TABLE_ENDPOINT', value: tableEndpoint }
@@ -340,6 +345,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
             { name: 'AZURE_TENANT_ID', value: tenantId }
             { name: 'AZURE_CLIENT_ID', value: sharedIdentityClientId }
+            { name: 'SHARED_IDENTITY_PRINCIPAL_ID', value: sharedIdentityPrincipalId }
             { name: 'AZCOPY_AUTO_LOGIN_TYPE', value: 'MSI' }
             { name: 'AZCOPY_MSI_CLIENT_ID', value: sharedIdentityClientId }
             { name: 'ELB_SKIP_DB_VERIFY', value: 'true' }

@@ -381,8 +381,10 @@ PRs welcome. Before opening one:
    only in source, commits, docs, and UI strings (Korean is fine in PR
    conversation).
 5. **No new dependency without justification** in the PR description.
-6. **Version bumps** go through [scripts/dev/bump-version.sh](./scripts/dev/bump-version.sh)
-   — do not hand-edit `version` in `web/package.json` or `pyproject.toml`.
+6. **Release version bumps** go through [scripts/dev/bump-version.sh](./scripts/dev/bump-version.sh)
+    — do not hand-edit `version` in `web/package.json` or `pyproject.toml`.
+    Frontend build numbers are computed at build time from commits since the
+    latest release tag.
    Full policy: [docs/copilot/version-management.md](./docs/copilot/version-management.md).
 
 ## License

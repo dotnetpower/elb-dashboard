@@ -210,16 +210,16 @@ When you do redeploy, state the reason in the change note (which sidecar, which 
 ### Cross-repo consistency
 When `dotnetpower/elastic-blast-azure` updates `src/elastic_blast/constants.py` image tags or the `azure-prereq.md` step structure, open a tracking issue here and bump `IMAGE_TAGS` / cloud-init in the same PR.
 
-### Version stamp & SemVer bump
-The SPA header carries `v<MAJOR>.<MINOR>.<PATCH> · <short-sha>` next to "Control Plane". The version comes from [web/package.json](../web/package.json) (single source of truth — [pyproject.toml](../pyproject.toml) is kept in sync); the short SHA comes from `git rev-parse --short HEAD`. Both are injected at build time via `vite.config.ts` `define`, and [scripts/dev/quick-deploy.sh](../scripts/dev/quick-deploy.sh) `frontend` resolves them on the host and passes them to `az acr build` as `--build-arg` (the ACR context has no `.git`).
+### Version stamp & release bump
+The SPA header carries `v<A>.<B>.<build> · <short-sha>` next to "Control Plane". The release version comes from [web/package.json](../web/package.json) (single source of truth — [pyproject.toml](../pyproject.toml) is kept in sync) and is stored as `A.B.0`; the build number is computed at build time from commits since the latest `vA.B.0` tag; the short SHA comes from `git rev-parse --short HEAD`. These values are injected at build time via `vite.config.ts` `define`, and [scripts/dev/quick-deploy.sh](../scripts/dev/quick-deploy.sh) `frontend` plus [scripts/dev/postprovision.sh](../scripts/dev/postprovision.sh) resolve them on the host and pass them to `az acr build` as `--build-arg` (the ACR context has no `.git`).
 
-Bump SemVer with [scripts/dev/bump-version.sh](../scripts/dev/bump-version.sh):
+Bump the release version with [scripts/dev/bump-version.sh](../scripts/dev/bump-version.sh):
 
-* **MAJOR** — manual only (`--major`). Breaking change you decide to ship.
-* **MINOR** — auto when any commit since the last `vX.Y.Z` tag starts with `feat:` / `feat(scope):`.
-* **PATCH** — auto when no `feat:` but at least one `fix:` / `fix(scope):` landed.
+* **A** — manual only (`--major`). Breaking product generation change you decide to ship.
+* **B** — auto when any commit since the last `vA.B.0` tag starts with `feat:` / `fix:` (scoped forms included), or manual with `--release` / `--minor`.
+* **C/build** — never committed. It is computed by frontend builds from the latest release tag to `HEAD`.
 
-The script refuses to auto-bump if a `BREAKING CHANGE` footer or `feat!:` / `fix!:` marker is detected — pass `--major` to acknowledge. It rewrites `web/package.json` + `pyproject.toml`, creates `chore(release): vX.Y.Z` + annotated tag, and does **not** push. Maintainer pushes with `git push origin <branch> --follow-tags`. Do not edit `version` in either file by hand — go through the script so the release commit and tag stay consistent. Full workflow + troubleshooting: [docs/copilot/version-management.md](../docs/copilot/version-management.md).
+The script refuses to auto-bump if a `BREAKING CHANGE` footer or `feat!:` / `fix!:` marker is detected — pass `--major` to acknowledge. It rewrites `web/package.json` + `pyproject.toml`, creates `chore(release): vA.B.0` + annotated tag, and does **not** push. Maintainer pushes with `git push origin <branch> --follow-tags`. Do not edit `version` in either file by hand — go through the script so the release commit and tag stay consistent. Full workflow + troubleshooting: [docs/copilot/version-management.md](../docs/copilot/version-management.md).
 
 ---
 

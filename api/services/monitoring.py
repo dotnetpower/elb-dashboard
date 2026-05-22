@@ -13,11 +13,13 @@ Validation: `uv run pytest -q api/tests`.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
 from azure.core.exceptions import ResourceNotFoundError
 
+from api.services import storage_usage_cache
 from api.services.azure_clients import (
     acr_client,
     aks_client,
@@ -42,6 +44,10 @@ from api.services.storage_network import ensure_workload_storage_private_endpoin
 
 LOGGER = logging.getLogger(__name__)
 BLAST_POOL_NAME = "blastpool"
+STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+ACR_PULL_ROLE_ID = "8311e382-0749-4cb8-b61a-304f252e45ec"
+_STORAGE_USAGE_DEFAULT_MAX_BLOBS = 50_000
+_STORAGE_USAGE_HARD_MAX_BLOBS = 500_000
 
 __all__ = [
     "_get_k8s_session",
@@ -163,15 +169,74 @@ def get_storage_summary(
         out["containers_degraded_reason"] = type(exc).__name__
         return out
 
-    out["containers"] = [
+    container_rows = [
         {
             "name": container.name,
             "public_access": container.public_access,
             "last_modified_time": _iso_or_none(container.last_modified_time),
+            "blob_count": None,
+            "size_bytes": None,
+            "usage_pending": False,
+            "usage_truncated": False,
+            "usage_error": None,
+            "usage_cache_state": None,
+            "usage_refreshed_at": None,
         }
         for container in containers
     ]
+    try:
+        usage_result = storage_usage_cache.cached_container_usage_summaries(
+            credential,
+            account_name,
+            [str(container["name"]) for container in container_rows],
+            max_blobs_per_container=_storage_usage_max_blobs_per_container(),
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "storage container usage failed account=%s rg=%s: %s",
+            account_name,
+            resource_group,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        out["containers_usage_degraded"] = True
+        out["containers_usage_degraded_reason"] = type(exc).__name__
+    else:
+        for container in container_rows:
+            usage = usage_result.summaries.get(str(container["name"]))
+            if usage is None:
+                continue
+            container["blob_count"] = usage.get("blob_count")
+            container["size_bytes"] = usage.get("size_bytes")
+            container["usage_pending"] = usage_result.pending
+            container["usage_truncated"] = bool(usage.get("usage_truncated"))
+            container["usage_error"] = usage.get("usage_error")
+            container["usage_cache_state"] = usage_result.state
+            container["usage_refreshed_at"] = usage_result.refreshed_at
+        out["containers_usage_cache"] = {
+            "state": usage_result.state,
+            "hit": usage_result.hit,
+            "pending": usage_result.pending,
+            "age_seconds": usage_result.age_seconds,
+            "refreshed_at": usage_result.refreshed_at,
+        }
+
+    out["containers"] = container_rows
     return out
+
+
+def _storage_usage_max_blobs_per_container() -> int | None:
+    raw = os.environ.get(
+        "STORAGE_USAGE_MAX_BLOBS_PER_CONTAINER",
+        str(_STORAGE_USAGE_DEFAULT_MAX_BLOBS),
+    ).strip()
+    if raw.lower() in {"", "0", "none", "unlimited"}:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return _STORAGE_USAGE_DEFAULT_MAX_BLOBS
+    return max(1, min(value, _STORAGE_USAGE_HARD_MAX_BLOBS))
 
 
 def _iso_or_none(value: Any) -> str | None:
@@ -392,7 +457,8 @@ def _auto_assign_role(
     principal_id: str,
     scope: str,
     role_definition_id: str,
-) -> None:
+    principal_type: str = "User",
+) -> bool:
     """Assign a role to a principal. Idempotent — ignores conflict."""
 
     import uuid as _uuid
@@ -400,7 +466,10 @@ def _auto_assign_role(
     from azure.mgmt.authorization import AuthorizationManagementClient
 
     auth_client = AuthorizationManagementClient(credential, subscription_id)
-    role_def = f"{scope}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
+    role_def = (
+        f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/"
+        f"roleDefinitions/{role_definition_id}"
+    )
     assignment_name = str(
         _uuid.uuid5(_uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_definition_id}")
     )
@@ -411,7 +480,7 @@ def _auto_assign_role(
             {
                 "role_definition_id": role_def,
                 "principal_id": principal_id,
-                "principal_type": "User",
+                "principal_type": principal_type,
             },
         )
         LOGGER.info(
@@ -420,11 +489,20 @@ def _auto_assign_role(
             principal_id[:8],
             scope.split("/")[-1],
         )
+        return True
     except Exception as exc:
         if "Conflict" in str(exc) or "RoleAssignmentExists" in str(exc):
             LOGGER.debug("Role already assigned, skipping")
+            return True
         else:
-            LOGGER.warning("RBAC assignment failed (non-fatal): %s", str(exc)[:200])
+            LOGGER.warning("RBAC assignment failed: %s", str(exc)[:200])
+            return False
+
+
+def _current_managed_identity_principal_id() -> str:
+    """Return the current app UAMI principal id when the deployment injected it."""
+
+    return os.environ.get("SHARED_IDENTITY_PRINCIPAL_ID", "").strip()
 
 
 def ensure_storage_account(
@@ -465,15 +543,37 @@ def ensure_storage_account(
         except Exception:  # noqa: S110 - container may already exist
             pass
 
+    storage_scope = (
+        f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+        f"/providers/Microsoft.Storage/storageAccounts/{account_name}"
+    )
+
     if caller_oid:
         _auto_assign_role(
             credential,
             subscription_id,
             caller_oid,
-            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
-            f"/providers/Microsoft.Storage/storageAccounts/{account_name}",
-            "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+            storage_scope,
+            STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID,
+            principal_type="User",
         )
+
+    uami_principal_id = _current_managed_identity_principal_id()
+    if uami_principal_id:
+        assigned = _auto_assign_role(
+            credential,
+            subscription_id,
+            uami_principal_id,
+            storage_scope,
+            STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID,
+            principal_type="ServicePrincipal",
+        )
+        if not assigned:
+            raise RuntimeError(
+                "failed to assign Storage Blob Data Contributor to the shared "
+                "managed identity; grant the control-plane identity User Access "
+                "Administrator on the Storage scope or assign the Blob role manually"
+            )
 
     ensure_workload_storage_private_endpoints(
         credential,
@@ -517,5 +617,5 @@ def ensure_acr(
             caller_oid,
             f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
             f"/providers/Microsoft.ContainerRegistry/registries/{registry_name}",
-            "8311e382-0749-4cb8-b61a-304f252e45ec",
+            ACR_PULL_ROLE_ID,
         )

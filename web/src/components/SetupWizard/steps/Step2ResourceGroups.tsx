@@ -2,6 +2,7 @@ import { Loader2, MapPin } from "lucide-react";
 import type { UseQueryResult } from "@tanstack/react-query";
 
 import { AZURE_REGIONS } from "@/constants";
+import { isAksManagedResourceGroup } from "@/lib/aksManagedRg";
 
 import { ErrorMsg } from "../ErrorMsg";
 import { RgField } from "../RgField";
@@ -11,6 +12,7 @@ import type { ValidationErrors } from "../validation";
 interface RgRow {
   name: string;
   location: string;
+  tags?: Record<string, string>;
 }
 
 function regionOptionsFor(region: string) {
@@ -33,12 +35,13 @@ export function Step2ResourceGroups({
   rgQuery: UseQueryResult<RgRow[]>;
 }) {
   const regionOptions = regionOptionsFor(config.region);
+  const selectableResourceGroups = rgQuery.data?.filter(
+    (rg) => !isAksManagedResourceGroup(rg),
+  );
 
   return (
     <div>
-      <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-        Project Folders
-      </h2>
+      <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Project Folders</h2>
       <p
         style={{
           fontSize: 12,
@@ -47,9 +50,9 @@ export function Step2ResourceGroups({
           lineHeight: 1.5,
         }}
       >
-        Resource groups are like project folders that organize your Azure
-        resources. You'll need one for BLAST workloads and one for the container
-        registry. We can create them for you if they don't exist yet.
+        Resource groups are like project folders that organize your Azure resources.
+        You'll need one for BLAST workloads and one for the container registry. We can
+        create them for you if they don't exist yet.
       </p>
 
       <div
@@ -96,8 +99,8 @@ export function Step2ResourceGroups({
             marginTop: 6,
           }}
         >
-          Used for new Storage and ACR resources. Selecting an existing workload
-          resource group suggests its Azure location.
+          Used for new Storage and ACR resources. Selecting an existing workload resource
+          group suggests its Azure location.
         </div>
         <ErrorMsg msg={errors.region} />
       </div>
@@ -140,8 +143,8 @@ export function Step2ResourceGroups({
             placeholder="rg-elb"
             config={config}
             setConfig={setConfig}
-            rgData={rgQuery.data}
-            isManual={rgQuery.isError || !rgQuery.data?.length}
+            rgData={selectableResourceGroups}
+            isManual={rgQuery.isError || !selectableResourceGroups?.length}
             error={errors.workloadResourceGroup}
             isPrimary
             tooltip={
@@ -151,19 +154,17 @@ export function Step2ResourceGroups({
                 Contains the resources for running BLAST searches.
                 <div className="tt-resources">
                   <div className="tt-resource">
-                    <span className="tt-icon">☸</span>{" "}
-                    <strong>AKS Cluster</strong> — runs BLAST jobs on Kubernetes
+                    <span className="tt-icon">☸</span> <strong>AKS Cluster</strong> — runs
+                    BLAST jobs on Kubernetes
                   </div>
                   <div className="tt-resource">
-                    <span className="tt-icon">🗄</span>{" "}
-                    <strong>Storage Account</strong> — holds blast-db, queries,
-                    and results
+                    <span className="tt-icon">🗄</span> <strong>Storage Account</strong> —
+                    holds blast-db, queries, and results
                   </div>
                 </div>
                 <div className="tt-note">
-                  Tip: Create separate RGs for different projects (e.g.
-                  rg-elb-projectA, rg-elb-projectB). Each gets its own AKS +
-                  Storage.
+                  Tip: Create separate RGs for different projects (e.g. rg-elb-projectA,
+                  rg-elb-projectB). Each gets its own AKS + Storage.
                 </div>
               </>
             }
@@ -173,9 +174,7 @@ export function Step2ResourceGroups({
           <div className="wiz-section-header">
             <span className="wiz-section-icon">🏗</span>
             Shared Infrastructure
-            <span className="wiz-shared-badge">
-              shared across all workloads
-            </span>
+            <span className="wiz-shared-badge">shared across all workloads</span>
           </div>
 
           <RgField
@@ -184,8 +183,8 @@ export function Step2ResourceGroups({
             placeholder="rg-elbacr"
             config={config}
             setConfig={setConfig}
-            rgData={rgQuery.data}
-            isManual={rgQuery.isError || !rgQuery.data?.length}
+            rgData={selectableResourceGroups}
+            isManual={rgQuery.isError || !selectableResourceGroups?.length}
             error={errors.acrResourceGroup}
             tooltip={
               <>
@@ -194,8 +193,8 @@ export function Step2ResourceGroups({
                 Holds the pre-built Docker images needed by ElasticBLAST.
                 <div className="tt-resources">
                   <div className="tt-resource">
-                    <span className="tt-icon">📦</span>{" "}
-                    <strong>ncbi/elb</strong> — ElasticBLAST runtime (1.4.0)
+                    <span className="tt-icon">📦</span> <strong>ncbi/elb</strong> —
+                    ElasticBLAST runtime (1.4.0)
                   </div>
                   <div className="tt-resource">
                     <span className="tt-icon">📦</span>{" "}
@@ -203,13 +202,12 @@ export function Step2ResourceGroups({
                   </div>
                   <div className="tt-resource">
                     <span className="tt-icon">📦</span>{" "}
-                    <strong>ncbi/elb-query-split</strong> — Query splitter
-                    (0.1.4)
+                    <strong>ncbi/elb-query-split</strong> — Query splitter (0.1.4)
                   </div>
                 </div>
                 <div className="tt-note">
-                  You only need one ACR. It is shared by all workload RGs. Images
-                  are built once and reused.
+                  You only need one ACR. It is shared by all workload RGs. Images are
+                  built once and reused.
                 </div>
               </>
             }
@@ -227,10 +225,9 @@ export function Step2ResourceGroups({
               lineHeight: 1.5,
             }}
           >
-            <strong style={{ color: "var(--text-primary)" }}>🗒 Terminal:</strong>{" "}
-            The browser terminal runs as a sidecar inside this control plane —
-            there is no Linux VM to provision. Open it from the dashboard
-            “Terminal” card after setup.
+            <strong style={{ color: "var(--text-primary)" }}>🗒 Terminal:</strong> The
+            browser terminal runs as a sidecar inside this control plane — there is no
+            Linux VM to provision. Open it from the dashboard “Terminal” card after setup.
           </div>
         </>
       )}

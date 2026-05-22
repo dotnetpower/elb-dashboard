@@ -43,6 +43,24 @@ class FakeBlobService:
         return self.blobs[key]
 
 
+class FakeUsageContainerClient:
+    def __init__(self, blobs: list[SimpleNamespace] | Exception) -> None:
+        self.blobs = blobs
+
+    def list_blobs(self) -> list[SimpleNamespace]:
+        if isinstance(self.blobs, Exception):
+            raise self.blobs
+        return self.blobs
+
+
+class FakeUsageBlobService:
+    def __init__(self, containers: dict[str, list[SimpleNamespace] | Exception]) -> None:
+        self.containers = containers
+
+    def get_container_client(self, container: str) -> FakeUsageContainerClient:
+        return FakeUsageContainerClient(self.containers[container])
+
+
 def test_upload_group_fasta_writes_queries_blob(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_service = FakeBlobService()
     monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: fake_service)
@@ -57,6 +75,66 @@ def test_upload_group_fasta_writes_queries_blob(monkeypatch: pytest.MonkeyPatch)
     assert url == "https://elbstg01.blob.core.windows.net/queries/split/job-123/qg1/query.fa"
     blob = fake_service.blobs[("queries", "split/job-123/qg1/query.fa")]
     assert blob.uploads == [(b">q1\nAAAA\n", True)]
+
+
+def test_container_usage_summaries_caps_large_containers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_service = FakeUsageBlobService(
+        {
+            "blast-db": [
+                SimpleNamespace(name="a", size=10),
+                SimpleNamespace(name="b", size=20),
+                SimpleNamespace(name="c", size=30),
+            ]
+        }
+    )
+    monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: fake_service)
+
+    usage = storage_data.container_usage_summaries(
+        object(),
+        "elbstg01",
+        ["blast-db"],
+        max_blobs_per_container=2,
+    )
+
+    assert usage["blast-db"] == {
+        "blob_count": 2,
+        "size_bytes": 30,
+        "usage_error": None,
+        "usage_truncated": True,
+    }
+
+
+def test_container_usage_summaries_isolates_container_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_service = FakeUsageBlobService(
+        {
+            "queries": [SimpleNamespace(name="query.fa", content_length=128)],
+            "dead-letter": RuntimeError("blocked"),
+        }
+    )
+    monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: fake_service)
+
+    usage = storage_data.container_usage_summaries(
+        object(),
+        "elbstg01",
+        ["queries", "dead-letter"],
+    )
+
+    assert usage["queries"] == {
+        "blob_count": 1,
+        "size_bytes": 128,
+        "usage_error": None,
+        "usage_truncated": False,
+    }
+    assert usage["dead-letter"] == {
+        "blob_count": None,
+        "size_bytes": None,
+        "usage_error": "RuntimeError",
+        "usage_truncated": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -130,6 +208,34 @@ def test_classify_storage_failure_reports_private_only_network(
 
     assert result["degraded_reason"] == "network_blocked"
     assert result["public_access_disabled"] is True
+
+
+def test_classify_storage_failure_access_denied_mentions_container_app_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+
+    result = storage_data.classify_storage_failure(
+        object(), "sub", "rg-elb-01", "elbstg01", RuntimeError("AuthorizationFailure")
+    )
+
+    assert result["degraded_reason"] == "access_denied"
+    assert "shared managed identity" in result["message"]
+    assert "az login identity" not in result["message"]
+
+
+def test_classify_storage_failure_access_denied_mentions_az_login_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+    monkeypatch.delenv("IDENTITY_ENDPOINT", raising=False)
+
+    result = storage_data.classify_storage_failure(
+        object(), "sub", "rg-elb-01", "elbstg01", RuntimeError("AuthorizationFailure")
+    )
+
+    assert result["degraded_reason"] == "access_denied"
+    assert "az login identity" in result["message"]
 
 
 class FakeChunkDownload:
@@ -522,4 +628,3 @@ def test_reset_blob_service_pool_closes_clients() -> None:
     client.close = _capture_close  # type: ignore[method-assign]
     storage_data.reset_blob_service_pool()
     assert closed == [True]
-

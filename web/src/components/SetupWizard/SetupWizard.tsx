@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { armProxyApi, resourceApi } from "@/api/endpoints";
 import { listSubscriptions as armListSubs } from "@/api/arm";
+import { isAksManagedResourceGroup } from "@/lib/aksManagedRg";
 
 import { saveConfig } from "./configStorage";
 import { Step1Subscription } from "./steps/Step1Subscription";
@@ -32,11 +33,14 @@ interface RgRow {
 }
 
 function findTaggedWorkspace(resourceGroups: RgRow[]): RgRow | undefined {
+  const selectableResourceGroups = resourceGroups.filter(
+    (rg) => !isAksManagedResourceGroup(rg),
+  );
   return (
-    resourceGroups.find(
+    selectableResourceGroups.find(
       (rg) => rg.tags?.["elb-workload-rg"] || rg.tags?.["elb-storage"],
     ) ??
-    resourceGroups.find(
+    selectableResourceGroups.find(
       (rg) => rg.tags?.app === "elb-dashboard" && Boolean(rg.tags?.["azd-env-name"]),
     )
   );

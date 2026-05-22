@@ -49,6 +49,16 @@ cd "$REPO_ROOT"
 ts() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+release_build_number() {
+  local latest_tag=""
+  latest_tag="$(git -C "$REPO_ROOT" tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname --merged HEAD 2>/dev/null | head -n1 || true)"
+  if [[ -n "$latest_tag" ]]; then
+    git -C "$REPO_ROOT" rev-list --count "$latest_tag..HEAD" 2>/dev/null || printf '0\n'
+  else
+    git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || printf '0\n'
+  fi
+}
+
 strip_quotes() {
   local value="${1:-}"
   value="${value%\"}"
@@ -162,6 +172,7 @@ if [[ "$SIDECAR" == "frontend" ]]; then
   fi
   # Version stamp: ACR builds run without .git in context, so resolve on host.
   APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"
+  APP_BUILD_NUMBER_VAL="${APP_BUILD_NUMBER:-$(release_build_number)}"
   GIT_COMMIT_VAL="${GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)}"
   BUILD_TIME_VAL="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   BUILD_ARGS=(
@@ -174,6 +185,7 @@ if [[ "$SIDECAR" == "frontend" ]]; then
     --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
     --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
     --build-arg "APP_VERSION=$APP_VERSION_VAL"
+    --build-arg "APP_BUILD_NUMBER=$APP_BUILD_NUMBER_VAL"
     --build-arg "GIT_COMMIT=$GIT_COMMIT_VAL"
     --build-arg "BUILD_TIME=$BUILD_TIME_VAL"
   )
