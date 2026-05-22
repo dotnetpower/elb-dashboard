@@ -1085,6 +1085,42 @@ def scenario_escape_hatch_env_placeholders() -> int:
     return failures
 
 
+def scenario_first_write_race() -> int:
+    """Two operators race past `cas_state(IDLE -> QUEUED)` on a fresh row.
+
+    The backend must refuse the second no-etag write so only one start
+    wins. Before the hardening, the second writer silently overwrote
+    the first on the shared row.
+    """
+    print("\n--- Scenario: first-write race ---")
+    failures = 0
+    _reset_backends()
+    acr_inventory.set_client_factory_for_tests(lambda _ep: _AlwaysExistsAcr())
+    _set_running_version("0.2.0")
+    try:
+        first = state.UpgradeState(state=state.STATE_QUEUED, job_id="first-job")
+        state._backend().upsert(first, expected_etag="")
+        refused = False
+        try:
+            second = state.UpgradeState(state=state.STATE_QUEUED, job_id="second-job")
+            state._backend().upsert(second, expected_etag="")
+        except state.RowEtagMismatch:
+            refused = True
+        _print("second no-etag upsert refused", refused)
+        failures += 0 if refused else 1
+        row = state.get_state()
+        ok = row.job_id == "first-job"
+        _print("first writer's job_id preserved", ok, f"job_id={row.job_id}")
+        failures += 0 if ok else 1
+    except Exception as exc:
+        _print("scenario crashed", False, f"{type(exc).__name__}: {exc}")
+        traceback.print_exc()
+        failures += 1
+    finally:
+        acr_inventory.set_client_factory_for_tests(None)
+    return failures
+
+
 SCENARIOS = {
     "happy_path": scenario_happy_path,
     "build_failure": scenario_build_failure,
@@ -1103,6 +1139,7 @@ SCENARIOS = {
     "ssrf_guard": scenario_ssrf_guard_blocks_imds,
     "enqueue_sanitised": scenario_enqueue_failure_sanitised,
     "escape_hatch_placeholders": scenario_escape_hatch_env_placeholders,
+    "first_write_race": scenario_first_write_race,
 }
 
 

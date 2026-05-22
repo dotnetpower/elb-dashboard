@@ -198,10 +198,24 @@ class InMemoryBackend:
 
     def upsert(self, state: UpgradeState, *, expected_etag: str) -> UpgradeState:
         with self._lock:
-            if self._row is not None and expected_etag and expected_etag != self._etag:
-                raise RowEtagMismatch(
-                    f"in-memory etag mismatch: have={self._etag!r} expected={expected_etag!r}"
-                )
+            if expected_etag:
+                if self._row is None:
+                    raise RowEtagMismatch(
+                        "in-memory row was deleted between read and write"
+                    )
+                if expected_etag != self._etag:
+                    raise RowEtagMismatch(
+                        f"in-memory etag mismatch: have={self._etag!r} "
+                        f"expected={expected_etag!r}"
+                    )
+            else:
+                # First write semantics: refuse if a concurrent creator
+                # already populated the row (mirrors the Azure backend's
+                # `create_entity`-on-no-etag behaviour).
+                if self._row is not None:
+                    raise RowEtagMismatch(
+                        "first-write race: row was created by a concurrent writer"
+                    )
             self._etag_counter += 1
             self._etag = f"W/\"v{self._etag_counter}\""
             stored = UpgradeState(**{k: v for k, v in asdict(state).items() if k != "etag"})
@@ -276,8 +290,18 @@ class _AzureTablesBackend:
                     # Row was deleted between read and write; treat as CAS miss.
                     raise RowEtagMismatch(str(exc)) from exc
             else:
-                # First write — upsert so we tolerate a row created concurrently.
-                table.upsert_entity(new_entity, mode=UpdateMode.REPLACE)
+                # First-ever write. Use create_entity (fails if the row already
+                # exists) so a concurrent creator surfaces as a CAS miss. The
+                # previous unconditional `upsert_entity` here let two
+                # operators race past `cas_state(IDLE -> QUEUED)` on a fresh
+                # deployment, silently overwriting each other's job_id /
+                # target_version on the single shared row.
+                try:
+                    table.create_entity(new_entity)
+                except ResourceExistsError as exc:
+                    raise RowEtagMismatch(
+                        "first-write race: another operator created the state row"
+                    ) from exc
         return self.get()
 
 

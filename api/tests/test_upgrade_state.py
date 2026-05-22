@@ -89,6 +89,23 @@ def test_cas_detects_concurrent_writer() -> None:
         state._backend().upsert(stale, expected_etag=stale.etag)
 
 
+def test_first_write_race_is_refused() -> None:
+    """Two concurrent first-ever writes: only the first must succeed.
+
+    Before the fix the backend issued an unconditional `upsert_entity` on
+    no-etag writes, so two operators racing past `cas_state(IDLE ->
+    QUEUED)` on a fresh deployment would silently overwrite each other on
+    the single shared row. The fix maps no-etag-with-existing-row to a
+    `RowEtagMismatch` so `cas_state`'s retry observes the row that the
+    first writer created and refuses the second start.
+    """
+    fresh = state.UpgradeState(state=state.STATE_QUEUED, job_id="first")
+    state._backend().upsert(fresh, expected_etag="")
+    second = state.UpgradeState(state=state.STATE_QUEUED, job_id="second")
+    with pytest.raises(state.RowEtagMismatch):
+        state._backend().upsert(second, expected_etag="")
+
+
 def test_load_json_dict_tolerates_bad_payloads() -> None:
     assert state._load_json_dict("") == {}
     assert state._load_json_dict("not json") == {}

@@ -16,6 +16,9 @@ import { upgradeApi } from "@/api/upgrade";
 const ACTIVE_INTERVAL_MS = 3_000;
 const IDLE_INTERVAL_MS = 30_000;
 const MAX_HEIGHT = 320;
+// Cap rendered content to keep the browser snappy on multi-MB logs.
+// The full blob is still downloadable via the raw endpoint.
+const MAX_RENDER_BYTES = 256 * 1024;
 
 interface Props {
   jobId: string;
@@ -110,6 +113,13 @@ export function BuildLogViewer({ jobId, component, active }: Props) {
           {error}
         </div>
       )}
+      {content.length > MAX_RENDER_BYTES && (
+        <div className="muted" style={{ fontSize: 11 }}>
+          Showing last {Math.round(MAX_RENDER_BYTES / 1024)} KiB of a{" "}
+          {Math.round(content.length / 1024)} KiB log — use the copy button for
+          the full payload.
+        </div>
+      )}
       <pre
         ref={viewportRef}
         onScroll={handleScroll}
@@ -127,7 +137,13 @@ export function BuildLogViewer({ jobId, component, active }: Props) {
           wordBreak: "break-word",
         }}
       >
-        {content || (loading ? "Loading…" : "(empty)")}
+        {content
+          ? content.length > MAX_RENDER_BYTES
+            ? content.slice(-MAX_RENDER_BYTES)
+            : content
+          : loading
+            ? "Loading…"
+            : "(empty)"}
       </pre>
     </div>
   );
