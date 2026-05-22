@@ -337,6 +337,30 @@ export const monitoringApi = {
       db_name: dbName,
     }),
 
+  /**
+   * Abort an in-flight prepare-db copy. Calls ``abort_copy`` against every
+   * pending blob and rewrites metadata with ``copy_status.phase=cancelled``
+   * so the SPA flips back to a clean state without waiting the 2 h
+   * stale-recovery window.
+   */
+  cancelPrepareBlastDb: (
+    subscriptionId: string,
+    storageRg: string,
+    accountName: string,
+    dbName: string,
+  ) =>
+    api.post<{
+      ok: boolean;
+      db_name: string;
+      aborted: number;
+      skipped: number;
+      errors: number;
+    }>(`/storage/prepare-db/${encodeURIComponent(dbName)}/cancel`, {
+      subscription_id: subscriptionId,
+      storage_resource_group: storageRg,
+      account_name: accountName,
+    }),
+
   warmupStatus: (subscriptionId: string, rg: string, clusterName: string) =>
     api.get<WarmupStatus>(
       `/monitor/aks/warmup-status?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,

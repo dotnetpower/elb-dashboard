@@ -84,18 +84,27 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
     dismissDownloadResult,
     handleDownload,
     handleBuildOracle,
+    handleCancel,
   } = state;
 
   // Preview NCBI snapshot info for every catalog row + the custom-input
   // value so the user sees real file count / size / last-modified BEFORE
   // clicking Download — and gets an honest "not on S3" hint when a DB is
   // FTP-only or mid-publish.
+  //
+  // ``skipReady`` suppresses the preview HEAD for DBs whose storage metadata
+  // already carries everything we need (file_count, total_bytes,
+  // source_version). For a deployment whose catalog is mostly downloaded
+  // this saves N HEAD round trips per modal open against NCBI.
   const previewNames = useMemo(() => DB_CATALOG.map((d) => d.value), []);
-  const { byName: previewByName } = useDbPreviews(
-    previewNames,
-    // Only fetch when the modal is open (the parent only mounts us then).
-    true,
-  );
+  const skipReady = useMemo(() => {
+    const skip = new Set<string>();
+    for (const item of DB_CATALOG) {
+      if (isDbReady(downloadedDbs.get(item.value))) skip.add(item.value);
+    }
+    return skip;
+  }, [downloadedDbs, isDbReady]);
+  const { byName: previewByName } = useDbPreviews(previewNames, true, skipReady);
 
   const startDownload = (name: string) => {
     void handleDownload(name);
@@ -405,6 +414,7 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                         onUpdate={() => setConfirmUpdateDb(db.value)}
                         onBuildOracle={() => void handleBuildOracle(db.value)}
                         onConfirmLarge={() => setConfirmLargeDb(db.value)}
+                        onCancel={() => void handleCancel(db.value)}
                         onToggleAutoWarmup={(checked) =>
                           toggleAutoWarmup(db.value, checked)
                         }

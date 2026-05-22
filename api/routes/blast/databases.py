@@ -246,6 +246,20 @@ def blast_database_shard(
         )
         raise HTTPException(502, f"metadata pre-write failed: {type(exc).__name__}") from exc
 
+    # Audit — records the sharding action against the caller so /api/audit/log
+    # surfaces it alongside BLAST / warmup operations.
+    try:
+        from api.services.db_ops_audit import record_db_op
+
+        record_db_op(
+            op="shard",
+            caller=caller,
+            account_name=account_name,
+            db_name=db_name,
+        )
+    except Exception as exc:
+        LOGGER.debug("shard audit record skipped: %s", type(exc).__name__)
+
     LOGGER.info(
         "blast_database_shard accepted oid=%s db=%s account=%s",
         caller.object_id,
@@ -565,6 +579,25 @@ def blast_database_order_oracle(
             content_type="application/json; charset=utf-8",
         )
         raise HTTPException(502, "oracle Job creation failed")
+
+    # Audit — capture run_id + expected_parts so a later /api/audit/log query
+    # can correlate this oracle run with its part blobs.
+    try:
+        from api.services.db_ops_audit import record_db_op
+
+        record_db_op(
+            op="oracle",
+            caller=caller,
+            account_name=account_name,
+            db_name=db_name,
+            extra={
+                "run_id": run_id,
+                "expected_parts": len(shard_nodes),
+                "cluster_name": cluster_name,
+            },
+        )
+    except Exception as exc:
+        LOGGER.debug("oracle audit record skipped: %s", type(exc).__name__)
 
     LOGGER.info(
         "db-order oracle accepted oid=%s db=%s run_id=%s parts=%d",

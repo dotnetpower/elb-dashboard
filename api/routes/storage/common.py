@@ -54,7 +54,8 @@ def _resolve_latest_dir() -> str:
     (env-overridable via ``NCBI_LATEST_DIR_CACHE_TTL``) so the prepare-db
     + warmup paths don't make a fresh HTTP round-trip every call.
     Failures are NOT cached — a transient throttle or DNS hiccup should not
-    poison the next 60 minutes of requests.
+    poison the next 60 minutes of requests. Repeated failures trip the
+    circuit breaker for ``_NCBI_BREAKER_COOLDOWN`` seconds.
     """
     import httpx
 
@@ -63,18 +64,24 @@ def _resolve_latest_dir() -> str:
         cached = _LATEST_DIR_CACHE.get(_NCBI_S3_BASE)
         if cached and cached[0] > now:
             return cached[1]
+    _breaker_check()
     try:
         resp = httpx.get(f"{_NCBI_S3_BASE}/latest-dir", timeout=15.0)
     except httpx.HTTPError as exc:
+        _breaker_record_failure()
         raise NcbiUnavailable(f"{type(exc).__name__}: {exc}") from exc
     if resp.status_code == 403:
+        _breaker_record_failure()
         raise NcbiAccessDenied(f"NCBI bucket returned 403 for latest-dir: {resp.text[:200]}")
     if resp.status_code >= 500 or resp.status_code == 404:
+        _breaker_record_failure()
         raise NcbiUnavailable(f"NCBI latest-dir HTTP {resp.status_code}: {resp.text[:200]}")
     resp.raise_for_status()
     latest = resp.text.strip()
     if not latest:
+        _breaker_record_failure()
         raise NcbiUnavailable("NCBI latest-dir returned empty body")
+    _breaker_record_success()
     expires_at = time.monotonic() + _LATEST_DIR_CACHE_TTL_SECONDS
     with _NCBI_CACHE_LOCK:
         _LATEST_DIR_CACHE[_NCBI_S3_BASE] = (expires_at, latest)
@@ -113,6 +120,7 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
     prefix = f"{latest_dir}/{db_name}"
     keys: list[str] = []
     continuation = ""
+    _breaker_check()
     # Hard cap at 50 pages x 1000 objects = 50k keys to bound surprise.
     try:
         with httpx.Client(timeout=30.0) as client:
@@ -122,10 +130,12 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
                     list_url += f"&continuation-token={continuation}"
                 resp = client.get(list_url)
                 if resp.status_code == 403:
+                    _breaker_record_failure()
                     raise NcbiAccessDenied(
                         f"NCBI bucket returned 403 listing {prefix!r}: {resp.text[:200]}"
                     )
                 if resp.status_code >= 500:
+                    _breaker_record_failure()
                     raise NcbiUnavailable(
                         f"NCBI bucket HTTP {resp.status_code} listing {prefix!r}"
                     )
@@ -141,7 +151,9 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
                 else:
                     break
     except httpx.HTTPError as exc:
+        _breaker_record_failure()
         raise NcbiUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    _breaker_record_success()
     # Only cache non-empty results — see docstring.
     if keys:
         expires_at = time.monotonic() + _LIST_KEYS_CACHE_TTL_SECONDS
@@ -163,9 +175,54 @@ _LATEST_DIR_CACHE: dict[str, tuple[float, str]] = {}
 _LIST_KEYS_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
 _NCBI_CACHE_LOCK = threading.Lock()
 
+# Circuit breaker — after `_NCBI_BREAKER_THRESHOLD` consecutive 403 / 5xx
+# events from NCBI we open the circuit for `_NCBI_BREAKER_COOLDOWN` seconds.
+# While open, every NCBI helper raises immediately without hitting the
+# network, so users see fast actionable errors instead of N seconds of timeout
+# per call and NCBI sees zero traffic from us during the cooldown.
+_NCBI_BREAKER_THRESHOLD = int(os.environ.get("NCBI_BREAKER_THRESHOLD", "5"))
+_NCBI_BREAKER_COOLDOWN = float(os.environ.get("NCBI_BREAKER_COOLDOWN", "120.0"))
+_NCBI_BREAKER_STATE: dict[str, float | int] = {"failures": 0, "opened_at": 0.0}
+
+
+def _breaker_open() -> bool:
+    """Return True if the circuit is currently open (calls should be refused)."""
+    opened_at = float(_NCBI_BREAKER_STATE.get("opened_at") or 0.0)
+    if opened_at <= 0:
+        return False
+    if time.monotonic() - opened_at >= _NCBI_BREAKER_COOLDOWN:
+        # Cooldown elapsed — close + reset for next attempt.
+        _NCBI_BREAKER_STATE["opened_at"] = 0.0
+        _NCBI_BREAKER_STATE["failures"] = 0
+        return False
+    return True
+
+
+def _breaker_record_failure() -> None:
+    failures = int(_NCBI_BREAKER_STATE.get("failures") or 0) + 1
+    _NCBI_BREAKER_STATE["failures"] = failures
+    if failures >= _NCBI_BREAKER_THRESHOLD:
+        _NCBI_BREAKER_STATE["opened_at"] = time.monotonic()
+
+
+def _breaker_record_success() -> None:
+    _NCBI_BREAKER_STATE["failures"] = 0
+    _NCBI_BREAKER_STATE["opened_at"] = 0.0
+
+
+def _breaker_check() -> None:
+    """Raise ``NcbiUnavailable`` if the circuit is open."""
+    if _breaker_open():
+        raise NcbiUnavailable(
+            f"NCBI circuit open ({_NCBI_BREAKER_THRESHOLD}+ consecutive failures); "
+            f"will retry after {_NCBI_BREAKER_COOLDOWN:.0f}s cooldown"
+        )
+
 
 def reset_ncbi_catalogue_cache() -> None:
-    """Test hook: drop both NCBI catalogue caches."""
+    """Test hook: drop both NCBI catalogue caches and the breaker state."""
     with _NCBI_CACHE_LOCK:
         _LATEST_DIR_CACHE.clear()
         _LIST_KEYS_CACHE.clear()
+        _NCBI_BREAKER_STATE["failures"] = 0
+        _NCBI_BREAKER_STATE["opened_at"] = 0.0

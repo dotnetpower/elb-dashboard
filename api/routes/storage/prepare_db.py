@@ -49,10 +49,20 @@ router = APIRouter()
 
 # Per-(account, db) lock registry. Mirrors the pattern used by
 # /api/blast/databases/{db}/shard so a re-clicked Download cannot spawn two
-# daemons that race the same metadata.json blob. The registry never shrinks
-# (one Lock per ever-touched DB) which is fine at our scale.
+# daemons that race the same metadata.json blob.
+#
+# Soft-GC: the registry caps at ``_PREPARE_DB_LOCK_REGISTRY_MAX`` entries and
+# evicts any currently-unlocked entry when full. This keeps memory bounded
+# even for deployments that prepare hundreds of custom databases over time.
 _PREPARE_DB_LOCK_REGISTRY: dict[str, threading.Lock] = {}
 _PREPARE_DB_LOCK_REGISTRY_GUARD = threading.Lock()
+_PREPARE_DB_LOCK_REGISTRY_MAX = 256
+# Cooperative shutdown event — checked by ``_poll_copy_completion`` between
+# batches so the api sidecar can exit cleanly on SIGTERM instead of waiting
+# the full poll interval. The event stays unset in normal operation; the
+# main process can call ``_SHUTDOWN_EVENT.set()`` from its lifespan shutdown
+# hook (not yet wired — opt-in).
+_SHUTDOWN_EVENT = threading.Event()
 # An older `update_in_progress=true` marker than this is treated as a crashed
 # previous daemon. Large enough to cover the worst-case copy initiation for
 # `nt`/`sra` but small enough that real crashes recover same-hour.
@@ -69,7 +79,25 @@ _COPY_POLL_BATCH_SIZE = 32
 def _prepare_db_lock(account_name: str, db_name: str) -> threading.Lock:
     key = f"{account_name.lower()}|{db_name}"
     with _PREPARE_DB_LOCK_REGISTRY_GUARD:
-        return _PREPARE_DB_LOCK_REGISTRY.setdefault(key, threading.Lock())
+        lock = _PREPARE_DB_LOCK_REGISTRY.get(key)
+        if lock is not None:
+            return lock
+        # Soft GC — evict any free locks if we're at the cap. Locked entries
+        # are kept so a live daemon's lock is never silently lost.
+        if len(_PREPARE_DB_LOCK_REGISTRY) >= _PREPARE_DB_LOCK_REGISTRY_MAX:
+            for stale_key in list(_PREPARE_DB_LOCK_REGISTRY):
+                candidate = _PREPARE_DB_LOCK_REGISTRY[stale_key]
+                if candidate.acquire(blocking=False):
+                    candidate.release()
+                    _PREPARE_DB_LOCK_REGISTRY.pop(stale_key, None)
+                    if (
+                        len(_PREPARE_DB_LOCK_REGISTRY)
+                        < _PREPARE_DB_LOCK_REGISTRY_MAX
+                    ):
+                        break
+        lock = threading.Lock()
+        _PREPARE_DB_LOCK_REGISTRY[key] = lock
+        return lock
 
 
 def _is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
@@ -309,8 +337,18 @@ def _poll_copy_completion(
                         db_name,
                         type(exc).__name__,
                     )
-            time.sleep(_COPY_POLL_INTERVAL_SECONDS)
-    timed_out = bool(pending)
+            # Cooperative sleep — Event.wait returns True if shutdown was
+            # signalled, in which case we exit the poll loop early so the
+            # api sidecar can drain before its grace period ends. The next
+            # process restart picks the work up via stale-flag recovery.
+            if _SHUTDOWN_EVENT.wait(timeout=_COPY_POLL_INTERVAL_SECONDS):
+                LOGGER.info(
+                    "copy poll exiting early on shutdown db=%s pending=%d",
+                    db_name,
+                    len(pending),
+                )
+                break
+    timed_out = bool(pending) and not _SHUTDOWN_EVENT.is_set()
     return {
         "success": success,
         "failed": failed,
@@ -755,13 +793,35 @@ def prepare_db(
 
     Thread(target=_do_copies, daemon=True, name=f"prepare-db-{db_name}").start()
 
+    # Audit — recorded after the lock + thread are set up so a 409 / 502
+    # earlier in the route does NOT leak a phantom "started" event.
+    try:
+        from api.services.db_ops_audit import record_db_op
+
+        audit_job_id = record_db_op(
+            op="prepare_db",
+            caller=caller,
+            account_name=account_name,
+            db_name=db_name,
+            extra={
+                "source_version": latest_dir,
+                "files_total": len(all_keys),
+                "subscription_id": sub,
+                "storage_resource_group": storage_rg,
+            },
+        )
+    except Exception as exc:
+        LOGGER.debug("prepare_db audit record skipped: %s", type(exc).__name__)
+        audit_job_id = ""
+
     LOGGER.info(
-        "prepare_db started oid=%s db=%s files=%d source=%s access=%s",
+        "prepare_db started oid=%s db=%s files=%d source=%s access=%s audit=%s",
         caller.object_id,
         db_name,
         len(all_keys),
         latest_dir,
         access.get("action"),
+        audit_job_id or "n/a",
     )
     response: dict[str, Any] = {
         "ok": True,
@@ -790,9 +850,135 @@ def prepare_db(
     return response
 
 
-# ---------------------------------------------------------------------------
-# Local-debug helpers — surface the Storage public-access toggle in the UI
-# but only when the api process is NOT running inside a Container App. The
-# Container-App guard lives in api.services.storage_public_access and is the
-# load-bearing safety check; do not bypass it.
-# ---------------------------------------------------------------------------
+@router.post("/prepare-db/{db_name}/cancel")
+def prepare_db_cancel(
+    db_name: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Abort an in-flight prepare-db copy and clear the in-progress marker.
+
+    Calls ``abort_copy`` on every staged blob whose copy is pending, then
+    rewrites the metadata blob with ``copy_status.phase = "cancelled"`` so
+    the SPA can flip the row back to a clean state without waiting the
+    full 2 h stale-recovery window.
+
+    Idempotent — if no copy is in flight, returns a no-op success. Refuses
+    (409) when ``copy_status.phase == "completed"`` to avoid undoing a
+    successful download.
+    """
+    sub = str(body.get("subscription_id") or "")
+    storage_rg = str(body.get("storage_resource_group") or "")
+    account_name = str(body.get("account_name") or "")
+    if not all([sub, storage_rg, account_name, db_name]):
+        raise HTTPException(
+            400,
+            "subscription_id, storage_resource_group, account_name path-{db_name} required",
+        )
+    _check(sub, _RE_SUB, "subscription_id")
+    _check(storage_rg, _RE_RG, "storage_resource_group")
+    _check(account_name, _RE_STORAGE_ACCOUNT, "account_name")
+    _check(db_name, _RE_DB_NAME, "db_name")
+
+    cred = get_credential()
+    from api.services.storage_public_access import ensure_local_storage_access
+
+    ensure_local_storage_access(cred, sub, storage_rg, account_name)
+
+    from azure.storage.blob import BlobServiceClient
+
+    from api.services.storage_endpoint import blob_account_url
+
+    blob_svc = BlobServiceClient(
+        account_url=blob_account_url(account_name),
+        credential=cred,
+    )
+    container = blob_svc.get_container_client("blast-db")
+    meta, _etag = _download_blob_with_etag(container, db_name)
+    copy_status = meta.get("copy_status") or {}
+    phase = str(copy_status.get("phase") or "") if isinstance(copy_status, dict) else ""
+    if phase == "completed" and not meta.get("update_in_progress"):
+        raise HTTPException(409, f"database {db_name} download already completed")
+
+    # Walk container for blobs under {db_name}/ and abort any pending copies.
+    aborted = 0
+    skipped = 0
+    errors = 0
+    for blob in container.list_blobs(name_starts_with=f"{db_name}/"):
+        try:
+            bc = container.get_blob_client(blob.name)
+            props = bc.get_blob_properties()
+            copy_props = getattr(props, "copy", None)
+            status = str(getattr(copy_props, "status", "") or "").lower()
+            cid = str(getattr(copy_props, "id", "") or "")
+            if status == "pending" and cid:
+                bc.abort_copy(cid)
+                aborted += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            errors += 1
+            LOGGER.debug(
+                "prepare_db_cancel abort_copy failed db=%s blob=%s: %s",
+                db_name,
+                blob.name,
+                type(exc).__name__,
+            )
+
+    def _cancel_mutator(meta_in: dict[str, Any]) -> dict[str, Any]:
+        meta_in["db_name"] = db_name
+        meta_in["update_in_progress"] = False
+        meta_in["update_error"] = (
+            f"cancelled by {caller.object_id}: aborted {aborted} pending copies "
+            f"({skipped} skipped, {errors} errors)"
+        )
+        meta_in["update_failed_at"] = datetime.now(UTC).isoformat()
+        meta_in["copy_status"] = {
+            "phase": "cancelled",
+            "aborted": aborted,
+            "skipped": skipped,
+            "errors": errors,
+        }
+        meta_in.pop("updating_to_source_version", None)
+        return meta_in
+
+    try:
+        _update_metadata(container, db_name, account_name, _cancel_mutator)
+    except Exception as exc:
+        LOGGER.warning(
+            "prepare_db_cancel metadata write failed for %s: %s",
+            db_name,
+            type(exc).__name__,
+        )
+
+    try:
+        from api.services.db_ops_audit import record_db_op
+
+        record_db_op(
+            op="prepare_db_cancel",
+            caller=caller,
+            account_name=account_name,
+            db_name=db_name,
+            extra={"aborted": aborted, "skipped": skipped, "errors": errors},
+        )
+    except Exception as exc:
+        LOGGER.debug("cancel audit record skipped: %s", type(exc).__name__)
+
+    LOGGER.info(
+        "prepare_db_cancel oid=%s db=%s aborted=%d skipped=%d errors=%d",
+        caller.object_id,
+        db_name,
+        aborted,
+        skipped,
+        errors,
+    )
+    return {
+        "ok": True,
+        "db_name": db_name,
+        "aborted": aborted,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
+

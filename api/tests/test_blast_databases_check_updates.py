@@ -182,3 +182,93 @@ def test_ncbi_unavailable_degrades(
     assert body["latest_version"] == ""
     assert body["degraded"] is True
     assert body["degraded_reason"] == "ncbi_unreachable"
+
+
+def test_legacy_etag_empty_falls_back_to_snapshot_diff(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DB prepared before composite/ETag signatures landed has no
+    ``signature_etag`` / ``composite_signature`` in its metadata. The route
+    must fall back to comparing ``source_version`` against the current
+    NCBI snapshot."""
+    _patch_resolve(monkeypatch, "2026-05-21-01-05-02")
+    _patch_dbs(
+        monkeypatch,
+        [
+            {
+                "name": "legacy_pdb",
+                "source": "ncbi",
+                "source_version": "2026-05-01-01-05-01",  # older snapshot
+                # No signature_etag / composite_signature.
+            }
+        ],
+    )
+    _patch_preview(
+        monkeypatch,
+        {
+            "legacy_pdb": {
+                "available": True,
+                "snapshot": "2026-05-21-01-05-02",
+                "signature_etag": "new-etag",
+                "composite_signature": "comp-new",
+            }
+        },
+    )
+    resp = client.get(
+        "/api/blast/databases/check-updates",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_account": "stworkload",
+            "resource_group": "rg-workload",
+        },
+    )
+    body = resp.json()
+    assert len(body["updates_available"]) == 1
+    item = body["updates_available"][0]
+    assert item["db"] == "legacy_pdb"
+    assert item["stored_etag"] is None
+    assert item["stored_composite_signature"] is None
+
+
+def test_composite_signature_takes_precedence_over_etag(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When stored composite_signature is present, route compares composite
+    even when the single-key ``signature_etag`` happens to match (legacy
+    .000.tar.gz.md5 unchanged but later shard rotated)."""
+    _patch_resolve(monkeypatch, "2026-05-21-01-05-02")
+    _patch_dbs(
+        monkeypatch,
+        [
+            {
+                "name": "core_nt",
+                "source": "ncbi",
+                "source_version": "2026-05-21-01-05-02",
+                "signature_etag": "etag-000-unchanged",
+                "composite_signature": "comp-old",
+            }
+        ],
+    )
+    _patch_preview(
+        monkeypatch,
+        {
+            "core_nt": {
+                "available": True,
+                "snapshot": "2026-05-21-01-05-02",
+                "signature_etag": "etag-000-unchanged",
+                "composite_signature": "comp-new",
+            }
+        },
+    )
+    resp = client.get(
+        "/api/blast/databases/check-updates",
+        params={
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
+            "storage_account": "stworkload",
+            "resource_group": "rg-workload",
+        },
+    )
+    body = resp.json()
+    assert len(body["updates_available"]) == 1
+    assert body["updates_available"][0]["stored_composite_signature"] == "comp-old"
+    assert body["updates_available"][0]["composite_signature"] == "comp-new"

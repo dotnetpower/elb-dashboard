@@ -141,7 +141,7 @@ def _pick_signature_keys(db_name: str, keys: list[str]) -> list[str]:
             return md5s
         # Evenly-spaced sample including first and last.
         step = (len(md5s) - 1) / (n - 1)
-        sampled = [md5s[int(round(i * step))] for i in range(n)]
+        sampled = [md5s[round(i * step)] for i in range(n)]
         # Dedup preserving order.
         seen: set[str] = set()
         out: list[str] = []

@@ -31,6 +31,47 @@ LOGGER = logging.getLogger(__name__)
 TERMINAL_UPSTREAM = os.environ.get("TERMINAL_UPSTREAM", "http://127.0.0.1:7681")
 TICKET_TTL_SECONDS = 30  # Browser must redeem within 30 s.
 
+# CSWSH (Cross-Site WebSocket Hijacking) defence. The browser's `Origin` header
+# is set automatically and cannot be forged from a malicious page. We refuse
+# any WebSocket upgrade whose origin is not in the allowlist below. The
+# allowlist defaults to "same-origin only" — i.e. an empty list means the
+# Origin must equal the request's Host. Operators can opt into specific
+# additional origins (e.g. preview Container App URLs) via
+# ``TERMINAL_WS_ALLOWED_ORIGINS=https://a.example,https://b.example``.
+_ALLOWED_ORIGINS_RAW = os.environ.get("TERMINAL_WS_ALLOWED_ORIGINS", "").strip()
+_ALLOWED_ORIGINS: frozenset[str] = frozenset(
+    o.strip().rstrip("/") for o in _ALLOWED_ORIGINS_RAW.split(",") if o.strip()
+)
+# Permissive bypass — set to "true" only in tests / local dev where the
+# browser may be on a different localhost port than the api.
+_TERMINAL_WS_ALLOW_ANY_ORIGIN = (
+    os.environ.get("TERMINAL_WS_ALLOW_ANY_ORIGIN", "").lower() == "true"
+)
+
+
+def _origin_allowed(websocket: WebSocket) -> bool:
+    """Return True if the WebSocket's Origin header passes the CSWSH check."""
+    if _TERMINAL_WS_ALLOW_ANY_ORIGIN:
+        return True
+    origin = (websocket.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        # Native (non-browser) clients (e.g. curl, python websockets test
+        # helpers) won't send an Origin header. We still require the ticket,
+        # which is bearer-validated, so this is safe.
+        return True
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    # Same-origin fallback — compare against the request's own scheme + host.
+    host = (websocket.headers.get("host") or "").strip().lower()
+    if host:
+        # Browser only sends one Host; we accept both http and https for it
+        # because the api sidecar runs behind the Container App's TLS
+        # terminator. The Origin from the SPA will be ``https://<host>``.
+        for scheme in ("https", "http"):
+            if origin == f"{scheme}://{host}".rstrip("/"):
+                return True
+    return False
+
 router = APIRouter(prefix="/api/terminal", tags=["terminal"])
 REQUIRE_CALLER = Depends(require_caller)
 
@@ -217,6 +258,19 @@ async def ws_terminal(
     except HTTPException as exc:
         # Cannot send a 401 over WebSocket; close with policy violation.
         await websocket.close(code=4401, reason=exc.detail)
+        return
+
+    if not _origin_allowed(websocket):
+        # Defence against Cross-Site WebSocket Hijacking. Even with a valid
+        # one-shot ticket, an attacker page that triggers the SPA to issue a
+        # ticket and then opens a WS from a different origin would otherwise
+        # get a working shell. Close BEFORE accept so no frames flow.
+        LOGGER.warning(
+            "terminal_ws origin rejected origin=%r host=%r",
+            websocket.headers.get("origin"),
+            websocket.headers.get("host"),
+        )
+        await websocket.close(code=4403, reason="origin not allowed")
         return
 
     upstream_url = (

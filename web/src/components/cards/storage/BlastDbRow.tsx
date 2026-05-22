@@ -44,6 +44,12 @@ interface BlastDbRowProps {
   onUpdate: () => void;
   onBuildOracle: () => void;
   onConfirmLarge: () => void;
+  /**
+   * Abort an in-flight prepare-db (or a stuck `partial`/`init_failed` row
+   * before the user retries). Optional — caller may omit when cancel is not
+   * supported in a given context.
+   */
+  onCancel?: () => void;
   onToggleAutoWarmup: (checked: boolean) => void;
 }
 
@@ -75,6 +81,7 @@ export function BlastDbRow({
   onUpdate,
   onBuildOracle,
   onConfirmLarge,
+  onCancel,
   onToggleAutoWarmup,
 }: BlastDbRowProps) {
   const triggerDownload = () => {
@@ -89,7 +96,8 @@ export function BlastDbRow({
   const isPartial = copyPhase === "partial" || copyPhase === "init_failed";
   const previewUnavailable = preview ? preview.available === false : false;
   const downloadBlocked =
-    downloadDisabled || (previewUnavailable && !isDownloaded);
+    (downloadDisabled && !isPartial) ||
+    (previewUnavailable && !isDownloaded);
 
   return (
     <div
@@ -567,9 +575,29 @@ export function BlastDbRow({
             {elapsed}s
           </span>
         ) : isCopying ? (
-          <span className="gt gt-b" style={{ fontSize: 10 }}>
-            {copyProgress}%
-          </span>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <span className="gt gt-b" style={{ fontSize: 10 }}>
+              {copyProgress}%
+            </span>
+            {onCancel && (
+              <button
+                className="glass-button"
+                style={{
+                  fontSize: 10,
+                  padding: "2px 6px",
+                  color: "var(--danger)",
+                  borderColor: "rgba(224,123,138,0.3)",
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCancel();
+                }}
+                title="Cancel in-flight download"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
         ) : (
           <button
             className="glass-button glass-button--primary"

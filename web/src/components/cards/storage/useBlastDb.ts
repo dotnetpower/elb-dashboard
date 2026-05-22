@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { formatApiError } from "@/api/client";
@@ -105,6 +105,10 @@ export function useBlastDb({
   >(() => new Map());
   const [elapsed, setElapsed] = useState(0);
   const [oracleBuilding, setOracleBuilding] = useState<string | null>(null);
+  // Dedup key for the completion-detection effect: we toast at most once per
+  // (db, terminal phase) so a 10 s dbQuery refetch interval doesn't re-fire
+  // the partial-error toast every poll while the row sits in `partial` state.
+  const phaseToastedRef = useRef<Map<string, string>>(new Map());
 
   const dbQuery = useQuery({
     queryKey: ["blast-databases", subscriptionId, accountName, resourceGroup],
@@ -298,9 +302,11 @@ export function useBlastDb({
             setLocallyDownloaded((p) =>
               new Map(p).set(name, { source_version: info.sourceVersion }),
             );
-          } else {
-            // Partial/init-failed: keep the user informed with an error toast
-            // instead of silently flipping to "Ready".
+          } else if (phaseToastedRef.current.get(name) !== phase) {
+            // Toast once per (db, terminal phase). Without this dedup the
+            // 10 s dbQuery poll would re-toast the partial-error every
+            // refresh while the row stays partial.
+            phaseToastedRef.current.set(name, phase);
             const fileCount = actual?.copy_status?.success ?? 0;
             const total = actual?.copy_status?.total_files ?? info.expectedFiles;
             const failed =
@@ -327,6 +333,9 @@ export function useBlastDb({
     if (!enabled) return;
     setDownloading(dbName);
     setDownloadResult(null);
+    // Allow the dedup ref to fire again for a fresh attempt — otherwise a
+    // retry after a partial would never re-toast on completion.
+    phaseToastedRef.current.delete(dbName);
     const startTime = Date.now();
     try {
       const resp = await monitoringApi.prepareBlastDb(
@@ -369,6 +378,38 @@ export function useBlastDb({
   };
 
   const handleUpdate = (dbName: string) => handleDownload(dbName, "update");
+
+  const handleCancel = async (dbName: string) => {
+    if (!enabled) return;
+    setDownloadResult(null);
+    try {
+      const resp = await monitoringApi.cancelPrepareBlastDb(
+        subscriptionId,
+        resourceGroup,
+        accountName,
+        dbName,
+      );
+      setInProgress((prev) => {
+        if (!prev.has(dbName)) return prev;
+        const next = new Map(prev);
+        next.delete(dbName);
+        return next;
+      });
+      phaseToastedRef.current.delete(dbName);
+      setDownloadResult({
+        db: dbName,
+        msg: `Cancelled — aborted ${resp.aborted} pending copies (${resp.skipped} skipped, ${resp.errors} errors).`,
+        type: "ok",
+      });
+      void dbQuery.refetch();
+    } catch (e) {
+      setDownloadResult({
+        db: dbName,
+        msg: formatApiError(e, "storage"),
+        type: "err",
+      });
+    }
+  };
 
   const handleBuildOracle = async (dbName: string) => {
     if (!enabled || !clusterName) return;
@@ -476,6 +517,7 @@ export function useBlastDb({
     handleDownload,
     handleUpdate,
     handleBuildOracle,
+    handleCancel,
   };
 }
 
