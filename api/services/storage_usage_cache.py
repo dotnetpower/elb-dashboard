@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests/test_storage_usage_cache.py`.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -358,14 +360,60 @@ def _evict_over_capacity(_now: float) -> None:
 
 
 def _start_refresh_thread(target: Any) -> None:
+    """Submit ``target`` to the shared storage-usage refresher pool."""
+
     def run() -> None:
         try:
             target()
         except Exception:
             LOGGER.warning("storage usage refresh thread failed", exc_info=True)
 
-    thread = threading.Thread(target=run, name="storage-usage-refresh", daemon=True)
-    thread.start()
+    pool = _refresher_pool()
+    try:
+        pool.submit(run)
+    except RuntimeError:
+        thread = threading.Thread(
+            target=run, name="storage-usage-refresh-fallback", daemon=True
+        )
+        thread.start()
+
+
+_REFRESHER_POOL_MAX_WORKERS = 4
+_REFRESHER_POOL: ThreadPoolExecutor | None = None
+_REFRESHER_POOL_LOCK = threading.Lock()
+
+
+def _refresher_pool() -> ThreadPoolExecutor:
+    global _REFRESHER_POOL
+    pool = _REFRESHER_POOL
+    if pool is not None:
+        return pool
+    with _REFRESHER_POOL_LOCK:
+        if _REFRESHER_POOL is None:
+            raw = os.environ.get("STORAGE_USAGE_REFRESHER_POOL_MAX_WORKERS", "")
+            try:
+                workers = (
+                    max(1, min(int(raw), 32)) if raw else _REFRESHER_POOL_MAX_WORKERS
+                )
+            except ValueError:
+                workers = _REFRESHER_POOL_MAX_WORKERS
+            _REFRESHER_POOL = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="storage-usage-refresh",
+            )
+        return _REFRESHER_POOL
+
+
+def _shutdown_refresher_pool() -> None:
+    global _REFRESHER_POOL
+    with _REFRESHER_POOL_LOCK:
+        pool = _REFRESHER_POOL
+        _REFRESHER_POOL = None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+atexit.register(_shutdown_refresher_pool)
 
 
 def _monotonic() -> float:

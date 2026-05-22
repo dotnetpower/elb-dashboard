@@ -17,9 +17,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.auth import CallerIdentity, require_caller
@@ -593,15 +595,23 @@ async def aks_openapi_proxy(
     if api_token:
         headers["X-ELB-API-Token"] = api_token
     body = await request.body()
+    # Streaming proxy: open the AsyncClient OUTSIDE the request scope so
+    # we can attach its lifecycle to the streaming response generator.
+    # Buffering the upstream response (the previous ``upstream.content``)
+    # would force a full BLAST result file into the api sidecar's RAM
+    # before the browser sees the first byte; large XML / gzip responses
+    # multiplied through the api sidecar's memory under concurrent loads.
+    client = httpx.AsyncClient(timeout=30.0, follow_redirects=False)
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
-            upstream = await client.request(
-                request.method,
-                f"http://{ip}{target_path}",
-                headers=headers,
-                content=body if body else None,
-            )
+        upstream_req = client.build_request(
+            request.method,
+            f"http://{ip}{target_path}",
+            headers=headers,
+            content=body if body else None,
+        )
+        upstream = await client.send(upstream_req, stream=True)
     except httpx.RequestError as exc:
+        await client.aclose()
         LOGGER.warning("openapi/proxy: upstream request failed for %s: %s", ip, exc)
         raise HTTPException(
             status_code=502,
@@ -617,8 +627,17 @@ async def aks_openapi_proxy(
         value = upstream.headers.get(header_name)
         if value:
             response_headers[header_name] = value
-    return Response(
-        content=upstream.content,
+
+    async def _body_iter() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _body_iter(),
         status_code=upstream.status_code,
         headers=response_headers,
     )
