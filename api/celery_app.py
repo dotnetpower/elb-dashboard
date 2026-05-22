@@ -87,6 +87,13 @@ celery_app.conf.update(
             "schedule": 1800.0,
             "options": {"queue": "default"},
         },
+        # Reconcile `rolling_out` to `succeeded`/`failed_rollout` on the
+        # post-PATCH revision. Cheap when state != rolling_out.
+        "upgrade-reconcile-rolling-out": {
+            "task": "api.tasks.upgrade.reconcile_rolling_out",
+            "schedule": 60.0,
+            "options": {"queue": "default"},
+        },
     },
     timezone="UTC",
     enable_utc=True,

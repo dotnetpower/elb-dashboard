@@ -1,32 +1,31 @@
 """Celery tasks for the in-app self-upgrade flow.
 
-Module summary: Hosts the beat-driven discovery task and the
-worker-triggered upgrade pipeline that the SPA initiates via
-`POST /api/upgrade/start`. PR1 shipped the read-only `check_latest`
-helper; PR2 adds the `execute_upgrade` task that clones the requested
-release tag and runs `az acr build` for each control-plane sidecar.
-The ARM PATCH that swaps the Container App template to the new images
-arrives in PR3 — PR2 stops at `STATE_SUCCEEDED` immediately after the
-last successful build.
+Module summary: Hosts the beat-driven discovery task, the upgrade
+pipeline triggered from the SPA, and the post-rollout reconciler that
+runs on the newly booted revision. PR1 shipped read-only discovery, PR2
+added clone + build, PR3 (this) wires the ARM PATCH, rollout watcher,
+rollback path, and reconciler that finalises `succeeded` /
+`failed_rollout` after the new revision boots.
 
 Responsibility: Long-running side effects for upgrade discovery and execution.
 Edit boundaries: Tasks here own the state-row transitions; routes call
   into these tasks via `.delay()` or directly via the helper functions
-  exposed for the synchronous "check now" / "start" endpoints.
+  exposed for the synchronous "check now" / "start" / "rollback" endpoints.
 Key entry points: `check_latest`, `check_latest_inline`, `execute_upgrade`,
-  `start_upgrade_inline`, `STATE_TRANSITION_TIMELINE`.
-Risky contracts: `start_upgrade_inline` performs the CAS that gates an
-  upgrade — it is the single funnel through which concurrent operators
-  are serialised. The task itself is idempotent on `(target_version,
-  target_sha)`: re-invoking with the same arguments while a previous
-  attempt is still in flight returns the existing job rather than
-  starting a new one.
-Validation: `uv run pytest -q api/tests/test_upgrade_routes.py
-  api/tests/test_upgrade_task.py api/tests/test_upgrade_state.py`.
+  `start_upgrade_inline`, `start_rollback_inline`, `reconcile_rolling_out`,
+  `STATE_TRANSITION_TIMELINE`.
+Risky contracts: `start_upgrade_inline` and `start_rollback_inline` are
+  the single funnels through which concurrent operators are serialised
+  via state CAS. `execute_upgrade_inline` commits the
+  `state=rolling_out` row BEFORE the ARM PATCH so the row survives the
+  producing revision being torn down — the reconciler on the freshly
+  booted revision then finalises the state.
+Validation: `uv run pytest -q api/tests/test_upgrade_*.py`.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import Callable
@@ -35,7 +34,16 @@ from datetime import UTC, datetime
 from celery import shared_task
 
 from api import __version__
-from api.services.upgrade import build_logs, git_workspace, image_builder, remote_tags, state
+from api.services.upgrade import (
+    aca_template,
+    build_logs,
+    escape_hatch,
+    git_workspace,
+    image_builder,
+    remote_tags,
+    rollout_watcher,
+    state,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -93,25 +101,25 @@ def check_latest() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# PR2: upgrade execution pipeline (fetch + build; PATCH lands in PR3).
+# PR2/PR3: upgrade execution pipeline.
 # ---------------------------------------------------------------------------
 
 
 class UpgradeStartRefused(RuntimeError):
-    """Raised by `start_upgrade_inline` when the request cannot be queued.
-
-    Routes translate this into a 409 so the SPA can render "an upgrade is
-    already in progress" rather than retrying.
-    """
+    """Raised when the upgrade-start CAS cannot proceed (already in progress)."""
 
 
-# Documented for tests + hardening — the routes follow this order so
-# anything that diverges (auto-rollback, retry, etc.) is visible.
+class RollbackStartRefused(RuntimeError):
+    """Raised when the rollback CAS cannot proceed."""
+
+
 STATE_TRANSITION_TIMELINE = (
     state.STATE_IDLE,
     state.STATE_QUEUED,
     state.STATE_FETCHING,
     state.STATE_BUILDING,
+    state.STATE_PATCHING,
+    state.STATE_ROLLING_OUT,
     state.STATE_SUCCEEDED,
 )
 
@@ -127,12 +135,7 @@ def start_upgrade_inline(
     started_by_oid: str,
     enqueue: Callable[[str, str, str, str], object] | None = None,
 ) -> state.UpgradeState:
-    """CAS the row from idle -> queued and enqueue the Celery task.
-
-    ``enqueue`` is injected so unit tests can run the gating logic
-    without spinning up a Celery worker. Production callers omit it; the
-    default value resolves to ``execute_upgrade.delay``.
-    """
+    """CAS the row from idle -> queued and enqueue the Celery task."""
     if not target_version:
         raise UpgradeStartRefused("target_version required")
     job_id = uuid.uuid4().hex[:16]
@@ -147,6 +150,7 @@ def start_upgrade_inline(
         s.phase_detail = "queued"
         s.phase_progress = 1
         s.build_log_blob = ""
+        s.rollback_target_json = ""
 
     try:
         updated = state.cas_state(
@@ -163,8 +167,6 @@ def start_upgrade_inline(
     try:
         submit(target_version, target_sha or "", started_by_oid or "", job_id)
     except Exception as enqueue_exc:
-        # Roll the row back to idle so a broken broker doesn't strand the
-        # state machine in `queued` forever.
         LOGGER.exception("upgrade.start: enqueue failed")
         detail = f"enqueue_failed: {enqueue_exc}"[:240]
         try:
@@ -174,8 +176,6 @@ def start_upgrade_inline(
                 mutate=lambda s: setattr(s, "phase_detail", detail),
             )
         except state.StateTransitionRefused:
-            # If the row already advanced past queued (worker raced us)
-            # there's nothing to undo; the worker owns the transitions.
             pass
         raise
     return updated
@@ -194,7 +194,7 @@ def execute_upgrade(
     started_by_oid: str,
     job_id: str,
 ) -> dict:
-    """Worker-side upgrade pipeline. PR2 ends at STATE_SUCCEEDED post-build."""
+    """Worker-side upgrade pipeline."""
     return execute_upgrade_inline(
         target_version=target_version,
         target_sha=target_sha,
@@ -210,11 +210,18 @@ def execute_upgrade_inline(
     started_by_oid: str,
     job_id: str,
     runner: object | None = None,
+    aca: object | None = None,
 ) -> state.UpgradeState:
-    """Run the upgrade pipeline end-to-end. Exposed for tests."""
+    """Run the upgrade pipeline end-to-end.
+
+    Parameters ``runner`` (terminal_exec) and ``aca`` (an object with the
+    same surface as `api.services.upgrade.aca_template`) are injected so
+    tests can drive the full pipeline without a terminal sidecar or ARM.
+    """
     from api.services import terminal_exec as _exec
 
     runner = runner or _exec
+    aca_mod = aca or aca_template
     remote = remote_tags.configured_remote()
     if not remote:
         return _fail_pre(job_id, "UPGRADE_GIT_REMOTE is not set")
@@ -259,7 +266,7 @@ def execute_upgrade_inline(
     built: list[image_builder.ImageBuildResult] = []
     components = ("api", "frontend", "terminal")
     for idx, component in enumerate(components):
-        progress = 30 + int(60 * (idx / len(components)))
+        progress = 30 + int(40 * (idx / len(components)))
         try:
             state.update_state(
                 lambda s, c=component, p=progress: (
@@ -282,43 +289,81 @@ def execute_upgrade_inline(
             return _fail_pre(job_id, f"az acr build {component} failed: {exc}")
         built.append(result)
 
-    # 3. PR2 stops here. PR3 will continue with patching/rolling_out.
-    final_detail = (
-        "build complete: "
-        + ", ".join(f"{r.component}={r.image_ref.rsplit('/', 1)[-1]}" for r in built)
-    )
+    # 3. patching — snapshot rollback target, swap template, commit
+    #    state=rolling_out BEFORE the ARM PATCH so the row survives this
+    #    revision being torn down by ACA.
     try:
-        return state.cas_state(
+        state.cas_state(
             expected_state=state.STATE_BUILDING,
-            new_state=state.STATE_SUCCEEDED,
+            new_state=state.STATE_PATCHING,
             mutate=lambda s: (
-                setattr(s, "phase_detail", final_detail),
-                setattr(s, "phase_progress", 100),
+                setattr(s, "phase_detail", "snapshot rollback target"),
+                setattr(s, "phase_progress", 80),
             )[-1],
         )
     except state.StateTransitionRefused as exc:
-        LOGGER.warning("upgrade.execute: finalise refused (%s)", exc.current)
-        return state.get_state()
+        return _fail_pre(job_id, f"state moved during build: {exc.current}")
+
+    try:
+        previous_images = aca_mod.read_current_images()
+    except aca_template.TemplateError as exc:
+        return _fail_pre(job_id, f"read current template failed: {exc}")
+
+    # Pre-record the escape-hatch + rollback snapshot so even if the api
+    # sidecar dies mid-PATCH the operator can still recover from the
+    # persisted row + audit history.
+    target_images = aca_template._compute_target_images(target_version)
+    plan = escape_hatch.build_plan(previous_images)
+    try:
+        state.update_state(
+            lambda s: (
+                setattr(s, "rollback_target_json", json.dumps(previous_images.as_dict())),
+                setattr(s, "current_images_json", json.dumps(target_images.as_dict())),
+                setattr(s, "phase_detail", "begin_update"),
+                setattr(s, "phase_progress", 85),
+            )[-1]
+        )
+    except state.RowEtagMismatch:
+        LOGGER.warning("upgrade.execute: stale etag on snapshot write; continuing")
+    LOGGER.info(
+        "upgrade.execute: escape_hatch_commands=%s", json.dumps(plan.commands)
+    )
+
+    # Move to rolling_out BEFORE issuing PATCH — if this sidecar dies
+    # during the swap the next revision sees the row in rolling_out and
+    # the reconciler decides the final state.
+    try:
+        state.cas_state(
+            expected_state=state.STATE_PATCHING,
+            new_state=state.STATE_ROLLING_OUT,
+            mutate=lambda s: (
+                setattr(s, "phase_detail", "ARM PATCH submitted"),
+                setattr(s, "phase_progress", 90),
+            )[-1],
+        )
+    except state.StateTransitionRefused as exc:
+        return _fail_pre(job_id, f"state moved during patching: {exc.current}")
+
+    revision_suffix = f"v{target_version.replace('.', '-')}-{job_id[:6]}"
+    try:
+        aca_mod.swap_images(
+            target_version=target_version, revision_suffix=revision_suffix
+        )
+    except aca_template.TemplateError as exc:
+        LOGGER.exception("upgrade.execute: begin_update failed; row stays in rolling_out")
+        return _fail_rollout(job_id, f"begin_update failed: {exc}")
+    return state.get_state()
 
 
 def _fail_pre(job_id: str, detail: str) -> state.UpgradeState:
-    """Drive the row into a terminal `failed_pre` state from any pre-PATCH stage.
-
-    `failed_pre` semantics: nothing customer-facing changed (no ARM PATCH
-    was issued). The row is moved back into a non-`idle` state so the SPA
-    can render the failure reason; an operator-initiated `/check` or the
-    next `start_upgrade_inline` resets it.
-
-    Uses CAS so we cannot overwrite a state another worker has already
-    advanced past (e.g. `succeeded`). When the CAS refuses we just
-    surface the current row — whatever state it landed in is the truth.
-    """
+    """Move the row to `failed_pre` from any pre-PATCH stage via CAS."""
     LOGGER.warning("upgrade.execute job=%s failed_pre: %s", job_id, detail)
     truncated = detail[:240]
     for expected in (
         state.STATE_QUEUED,
         state.STATE_FETCHING,
         state.STATE_BUILDING,
+        state.STATE_PATCHING,
     ):
         try:
             return state.cas_state(
@@ -334,3 +379,208 @@ def _fail_pre(job_id: str, detail: str) -> state.UpgradeState:
         except state.RowEtagMismatch:
             continue
     return state.get_state()
+
+
+def _fail_rollout(job_id: str, detail: str) -> state.UpgradeState:
+    """Move the row to `failed_rollout` (post-PATCH failure)."""
+    LOGGER.warning("upgrade.execute job=%s failed_rollout: %s", job_id, detail)
+    truncated = detail[:240]
+    try:
+        return state.cas_state(
+            expected_state=state.STATE_ROLLING_OUT,
+            new_state=state.STATE_FAILED_ROLLOUT,
+            mutate=lambda s, d=truncated: (
+                setattr(s, "phase_detail", d),
+                setattr(s, "phase_progress", 0),
+            )[-1],
+        )
+    except (state.StateTransitionRefused, state.RowEtagMismatch):
+        return state.get_state()
+
+
+# ---------------------------------------------------------------------------
+# Reconciler — runs on every revision via beat. Finalises rolling_out.
+# ---------------------------------------------------------------------------
+
+
+def reconcile_rolling_out_inline(
+    *,
+    aca: object | None = None,
+    watcher: object | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> state.UpgradeState:
+    """Drive `rolling_out` to `succeeded`/`failed_rollout` when possible."""
+    row = state.get_state()
+    if row.state != state.STATE_ROLLING_OUT:
+        if row.running_version != __version__:
+            try:
+                state.update_state(
+                    lambda s: setattr(s, "running_version", __version__)
+                )
+            except state.RowEtagMismatch:
+                pass
+        return row
+
+    aca_mod = aca or aca_template
+    watcher_mod = watcher or rollout_watcher
+    clock = now or (lambda: datetime.now(UTC))
+
+    # Stuck guard: if rolling_out has been the state longer than the
+    # rollout budget we mark failed_rollout so the operator can rollback
+    # or escape-hatch. ACA's own startup probe retries don't have a
+    # natural ceiling, but we cap our row at 15 minutes.
+    if row.started_at:
+        try:
+            started = datetime.fromisoformat(row.started_at)
+            elapsed = (clock() - started).total_seconds()
+            if elapsed > ROLLING_OUT_TIMEOUT_SECONDS:
+                return _fail_rollout(
+                    row.job_id,
+                    f"rolling_out exceeded budget ({elapsed:.0f}s); rollback or escape-hatch",
+                )
+        except ValueError:
+            pass
+
+    # The simplest reliable signal: the running api version matches the
+    # target version. If so, the new revision is up and we are it.
+    if row.target_version and __version__ == row.target_version:
+        try:
+            return state.cas_state(
+                expected_state=state.STATE_ROLLING_OUT,
+                new_state=state.STATE_SUCCEEDED,
+                mutate=lambda s: (
+                    setattr(s, "phase_detail", f"new revision running v{__version__}"),
+                    setattr(s, "phase_progress", 100),
+                    setattr(s, "running_version", __version__),
+                )[-1],
+            )
+        except (state.StateTransitionRefused, state.RowEtagMismatch):
+            return state.get_state()
+
+    try:
+        latest = aca_mod.latest_revision_name()
+    except aca_template.TemplateError as exc:
+        LOGGER.warning("upgrade.reconcile: cannot read latest revision: %s", exc)
+        return row
+    try:
+        status = watcher_mod.revision_status(latest)
+    except aca_template.TemplateError as exc:
+        LOGGER.warning("upgrade.reconcile: cannot read revision status: %s", exc)
+        return row
+    if (
+        status.running_state.lower() == "running"
+        and status.provisioning_state.lower() == "provisioned"
+    ):
+        # We are likely the old revision still draining; let the new
+        # revision's reconciler finalise. No state change here.
+        return row
+    if status.provisioning_state.lower() in {"failed", "canceled"}:
+        return _fail_rollout(
+            row.job_id,
+            f"revision {latest} provisioning {status.provisioning_state}",
+        )
+    return row
+
+
+# Stuck guard for reconcile_rolling_out_inline. Reasonably generous;
+# ACA's own startup-probe retries plus image pull can extend several
+# minutes. The escape-hatch / rollback paths are always available so
+# the operator is never trapped.
+ROLLING_OUT_TIMEOUT_SECONDS = 15 * 60
+
+
+@shared_task(name="api.tasks.upgrade.reconcile_rolling_out")
+def reconcile_rolling_out() -> dict:
+    return reconcile_rolling_out_inline().to_public_dict()
+
+
+# ---------------------------------------------------------------------------
+# Rollback.
+# ---------------------------------------------------------------------------
+
+
+def start_rollback_inline(
+    *,
+    started_by_oid: str,
+    aca: object | None = None,
+    watcher: object | None = None,
+) -> state.UpgradeState:
+    """PATCH the Container App back to the snapshot taken before the upgrade.
+
+    Allowed from any post-PATCH state (`rolling_out`, `succeeded`,
+    `failed_rollout`). Refuses when there is no rollback target, when
+    the row is mid-upgrade pre-PATCH, or when ACR no longer carries the
+    snapshotted tags.
+    """
+    row = state.get_state()
+    if row.state not in {
+        state.STATE_ROLLING_OUT,
+        state.STATE_SUCCEEDED,
+        state.STATE_FAILED_ROLLOUT,
+    }:
+        raise RollbackStartRefused(
+            f"rollback only valid after PATCH was issued (state={row.state})"
+        )
+    target_dict = row.rollback_target()
+    if not target_dict:
+        raise RollbackStartRefused("no rollback target snapshot is recorded")
+
+    aca_mod = aca or aca_template
+    try:
+        target_images = aca_template.SidecarImages(
+            api=target_dict["api"],
+            frontend=target_dict["frontend"],
+            terminal=target_dict["terminal"],
+        )
+    except KeyError as exc:
+        raise RollbackStartRefused(f"snapshot missing key: {exc}") from exc
+
+    suffix = f"rb-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+    try:
+        state.cas_state(
+            expected_state=row.state,
+            new_state=state.STATE_ROLLING_BACK,
+            mutate=lambda s: (
+                setattr(s, "phase_detail", f"rollback PATCH suffix={suffix}"),
+                setattr(s, "phase_progress", 50),
+                setattr(s, "started_by_oid", started_by_oid or s.started_by_oid),
+            )[-1],
+        )
+    except state.StateTransitionRefused as exc:
+        raise RollbackStartRefused(
+            f"row moved before rollback could start (state={exc.current})"
+        ) from exc
+
+    try:
+        aca_mod.apply_images(images=target_images, revision_suffix=suffix)
+    except aca_template.TemplateError as exc:
+        # rollback PATCH itself failed; mark the row and surface to UI.
+        return _fail_rollback(str(exc))
+
+    try:
+        return state.cas_state(
+            expected_state=state.STATE_ROLLING_BACK,
+            new_state=state.STATE_ROLLED_BACK,
+            mutate=lambda s: (
+                setattr(s, "phase_detail", "rollback PATCH submitted"),
+                setattr(s, "phase_progress", 100),
+                setattr(s, "current_images_json", json.dumps(target_images.as_dict())),
+            )[-1],
+        )
+    except (state.StateTransitionRefused, state.RowEtagMismatch):
+        return state.get_state()
+
+
+def _fail_rollback(detail: str) -> state.UpgradeState:
+    truncated = detail[:240]
+    try:
+        return state.cas_state(
+            expected_state=state.STATE_ROLLING_BACK,
+            new_state=state.STATE_ROLLBACK_FAILED,
+            mutate=lambda s, d=truncated: (
+                setattr(s, "phase_detail", d),
+                setattr(s, "phase_progress", 0),
+            )[-1],
+        )
+    except (state.StateTransitionRefused, state.RowEtagMismatch):
+        return state.get_state()

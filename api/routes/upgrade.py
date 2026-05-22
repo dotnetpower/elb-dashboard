@@ -35,11 +35,14 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.auth import CallerIdentity, require_caller
-from api.services.upgrade import build_logs, remote_tags, state
+from api.services.upgrade import build_logs, escape_hatch, remote_tags, state
+from api.services.upgrade.aca_template import SidecarImages
 from api.services.upgrade.auth import require_upgrade_admin
 from api.tasks.upgrade import (
+    RollbackStartRefused,
     UpgradeStartRefused,
     check_latest_inline,
+    start_rollback_inline,
     start_upgrade_inline,
 )
 
@@ -187,6 +190,63 @@ def upgrade_build_log(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="build log not found") from exc
     return Response(content=payload, media_type="text/plain; charset=utf-8")
+
+
+@router.post("/rollback", status_code=status.HTTP_202_ACCEPTED)
+def upgrade_rollback(
+    caller: CallerIdentity = Depends(require_upgrade_admin),
+) -> dict[str, Any]:
+    """Roll the Container App back to the snapshot taken before the upgrade.
+
+    Requires the row to be in `rolling_out`, `succeeded`, or
+    `failed_rollout`. The rollback target images must still exist in
+    ACR — if retention expired the call fails. Returns the updated
+    state row.
+    """
+    try:
+        updated = start_rollback_inline(started_by_oid=caller.object_id)
+    except RollbackStartRefused as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    return _mask_state(updated.to_public_dict())
+
+
+@router.get("/escape-hatch")
+def upgrade_escape_hatch(
+    _caller: CallerIdentity = Depends(require_upgrade_admin),
+) -> dict[str, Any]:
+    """Return copy-pasteable recovery commands using the recorded snapshot.
+
+    Used when the new revision fails to come up and the in-app rollback
+    path is unreachable. The operator runs the commands from an outside
+    `az login` shell.
+    """
+    row = state.get_state()
+    target_dict = row.rollback_target()
+    if not target_dict:
+        raise HTTPException(
+            status_code=404,
+            detail="no rollback snapshot recorded; nothing to escape to",
+        )
+    try:
+        images = SidecarImages(
+            api=target_dict["api"],
+            frontend=target_dict["frontend"],
+            terminal=target_dict["terminal"],
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"snapshot missing key: {exc}"
+        ) from exc
+    plan = escape_hatch.build_plan(images)
+    return {
+        "container_app": plan.container_app,
+        "subscription_id": plan.subscription_id,
+        "resource_group": plan.resource_group,
+        "target_images": plan.target_images,
+        "commands": plan.commands,
+    }
 
 
 def reset_check_throttle_for_tests() -> None:

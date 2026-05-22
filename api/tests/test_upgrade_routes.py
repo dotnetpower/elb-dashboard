@@ -346,6 +346,85 @@ def test_build_log_endpoint_requires_admin(
     assert resp.status_code == 403
 
 
+def _seed_rollback_snapshot() -> None:
+    import json as _json
+
+    state.update_state(
+        lambda s: (
+            setattr(s, "state", state.STATE_SUCCEEDED),
+            setattr(
+                s,
+                "rollback_target_json",
+                _json.dumps(
+                    {
+                        "api": "myacr.azurecr.io/elb-api:v0.2.1",
+                        "frontend": "myacr.azurecr.io/elb-frontend:v0.2.1",
+                        "terminal": "myacr.azurecr.io/elb-terminal:v0.2.1",
+                    }
+                ),
+            ),
+        )[-1]
+    )
+
+
+def test_rollback_requires_admin(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UPGRADE_ADMIN_OIDS", raising=False)
+    resp = client.post("/api/upgrade/rollback")
+    assert resp.status_code == 403
+
+
+def test_rollback_refuses_without_snapshot(client: TestClient) -> None:
+    resp = client.post("/api/upgrade/rollback")
+    assert resp.status_code == 409
+
+
+def test_rollback_happy_path(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_rollback_snapshot()
+    # Stub aca_template surface used by start_rollback_inline. The route
+    # imports `start_rollback_inline` by name, so we monkeypatch the
+    # reference held by `api.routes.upgrade` (not `api.tasks.upgrade`).
+    from api.routes import upgrade as upgrade_route
+    from api.tasks import upgrade as upgrade_task
+
+    class _Aca:
+        def apply_images(self, *, images, revision_suffix=None) -> str:
+            return "poller-rb"
+
+    def _wrap(*args, **kwargs):
+        kwargs["aca"] = _Aca()
+        return upgrade_task.start_rollback_inline(*args, **kwargs)
+
+    monkeypatch.setattr(upgrade_route, "start_rollback_inline", _wrap)
+
+    resp = client.post("/api/upgrade/rollback")
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["state"] == state.STATE_ROLLED_BACK
+
+
+def test_escape_hatch_returns_commands(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-1")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-elb")
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+    _seed_rollback_snapshot()
+    resp = client.get("/api/upgrade/escape-hatch")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["container_app"] == "ca-elb-dashboard"
+    assert any("--container-name api" in c for c in body["commands"])
+
+
+def test_escape_hatch_404_without_snapshot(client: TestClient) -> None:
+    resp = client.get("/api/upgrade/escape-hatch")
+    assert resp.status_code == 404
+
+
 def test_httpx_client_pkt_parser_smoke() -> None:
     """Belt-and-braces — exercise the parser through a MockTransport so the
     integration of fetch_release_tags + httpx pipeline stays covered after
