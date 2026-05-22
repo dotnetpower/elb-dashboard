@@ -67,6 +67,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
         reset_k8s_credential_cache,
         reset_k8s_session_pool,
     )
+    from api.services.redis_clients import reset_redis_clients
     from api.services.state_repo import reset_state_repo_cache
     from api.services.storage_data import reset_blob_service_pool
 
@@ -79,6 +80,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_ncbi_catalogue_cache()
     reset_k8s_credential_cache()
     reset_k8s_session_pool()
+    reset_redis_clients()
     yield
     _reset()
     _reset_blast_jobs_list_cache()
@@ -89,3 +91,4 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_ncbi_catalogue_cache()
     reset_k8s_credential_cache()
     reset_k8s_session_pool()
+    reset_redis_clients()

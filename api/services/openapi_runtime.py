@@ -18,7 +18,7 @@ import os
 import time
 from typing import Any
 
-import redis
+from api.services.redis_clients import get_ops_redis_client
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def save_openapi_base_url(
         "metadata": metadata or {},
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    redis_client = client or redis.Redis.from_url(_redis_url(), socket_timeout=1.5)
+    redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     try:
         redis_client.set(_RUNTIME_KEY, json.dumps(payload, separators=(",", ":")))
         return True
@@ -60,7 +60,7 @@ def save_openapi_base_url(
 
 def get_openapi_base_url(*, client: Any | None = None) -> str:
     """Return the cached OpenAPI base URL, or an empty string if unavailable."""
-    redis_client = client or redis.Redis.from_url(_redis_url(), socket_timeout=1.5)
+    redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     try:
         raw = redis_client.get(_RUNTIME_KEY)
     except Exception as exc:
@@ -94,7 +94,7 @@ def save_openapi_api_token(
         "metadata": metadata or {},
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    redis_client = client or redis.Redis.from_url(_redis_url(), socket_timeout=1.5)
+    redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     try:
         redis_client.set(_TOKEN_KEY, json.dumps(payload, separators=(",", ":")))
         return True
@@ -105,7 +105,7 @@ def save_openapi_api_token(
 
 def get_openapi_api_token(*, client: Any | None = None) -> str:
     """Return the cached OpenAPI API token, or an empty string if unavailable."""
-    redis_client = client or redis.Redis.from_url(_redis_url(), socket_timeout=1.5)
+    redis_client = client or get_ops_redis_client(socket_timeout=1.5)
     try:
         raw = redis_client.get(_TOKEN_KEY)
     except Exception as exc:

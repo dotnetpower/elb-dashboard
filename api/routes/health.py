@@ -141,11 +141,10 @@ def celery_diag(
 
     # 1. Redis queue lengths via raw redis client (no kombu wrapper)
     try:
-        import redis as _redis
-
         from api.celery_app import CELERY_BROKER_URL
+        from api.services.redis_clients import get_broker_redis_client
 
-        r = _redis.Redis.from_url(CELERY_BROKER_URL, socket_timeout=2)
+        r = get_broker_redis_client(socket_timeout=2)
         for q in ("default", "azure", "blast", "storage", "celery"):
             try:
                 out["queues"][q] = r.llen(q)

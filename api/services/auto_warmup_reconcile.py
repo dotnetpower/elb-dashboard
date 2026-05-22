@@ -14,7 +14,6 @@ Validation: `uv run pytest -q api/tests`.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -129,10 +128,9 @@ def autowarmup_inflight_key(
 
 def autowarmup_inflight_redis() -> Any | None:
     try:
-        import redis
+        from api.services.redis_clients import get_ops_redis_client
 
-        url = os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
-        return redis.Redis.from_url(url, socket_timeout=1.5)
+        return get_ops_redis_client(socket_timeout=1.5)
     except Exception as exc:  # pragma: no cover - defensive
         LOGGER.debug("auto warm inflight redis unavailable: %s", type(exc).__name__)
         return None

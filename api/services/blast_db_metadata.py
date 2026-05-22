@@ -242,10 +242,9 @@ def publish_blast_db_metadata_invalidate(
     if os.environ.get("BLAST_DB_METADATA_INVALIDATE_DISABLED", "").lower() == "true":
         return False
     try:
-        import redis
+        from api.services.redis_clients import get_ops_redis_client
 
-        url = os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
-        client = redis.Redis.from_url(url, socket_timeout=1.5)
+        client = get_ops_redis_client(socket_timeout=1.5)
         payload = json.dumps(
             {"account": storage_account or "", "db": db_name or ""},
             separators=(",", ":"),
@@ -297,14 +296,13 @@ def start_invalidate_subscriber() -> threading.Thread | None:
         stop_event = threading.Event()
 
         def _run() -> None:
-            import redis
+            from api.services.redis_clients import get_ops_redis_client
 
             backoff = 1.0
             while not stop_event.is_set():
                 pubsub = None
                 try:
-                    url = os.environ.get("OPS_REDIS_URL", "redis://127.0.0.1:6379/2")
-                    client = redis.Redis.from_url(url, socket_timeout=5)
+                    client = get_ops_redis_client(socket_timeout=5)
                     pubsub = client.pubsub(ignore_subscribe_messages=True)
                     pubsub.subscribe(_INVALIDATE_CHANNEL)
                     backoff = 1.0

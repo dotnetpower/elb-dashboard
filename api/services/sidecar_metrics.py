@@ -269,7 +269,12 @@ def collect_snapshot(
     """
 
     now = time.time()
-    redis_client = client or redis.Redis.from_url(redis_url or _redis_url(), socket_timeout=1.5)
+    if client is not None:
+        redis_client = client
+    else:
+        from api.services.redis_clients import get_redis_client
+
+        redis_client = get_redis_client(redis_url or _redis_url(), socket_timeout=1.5)
 
     try:
         raw_entries = list(_mget_reporters(redis_client))
