@@ -98,6 +98,29 @@ def _k8s_session_pool_max_entries() -> int:
     return _K8S_SESSION_POOL_MAX_ENTRIES
 
 
+_K8S_SESSION_HTTP_POOL_SIZE = 32
+
+
+def _k8s_session_http_pool_size() -> int:
+    """Resolve the urllib3 HTTPAdapter pool size for the pooled K8s session.
+
+    The default ``urllib3.HTTPAdapter(pool_maxsize=10)`` saturated as soon
+    as ``k8s_warmup_status``'s 6-way ThreadPoolExecutor lined up next to
+    other monitor polls on the same session; each over-cap GET then paid a
+    fresh TLS handshake. 32 connections per (cluster, admin) is enough
+    headroom for the documented monitor fan-outs plus the per-job log
+    fetches, while still bounded so a misbehaving caller cannot exhaust
+    the worker's socket table.
+    """
+    raw = os.environ.get("K8S_SESSION_HTTP_POOL_SIZE", "")
+    if raw:
+        try:
+            return max(1, min(int(raw), 256))
+        except ValueError:
+            return _K8S_SESSION_HTTP_POOL_SIZE
+    return _K8S_SESSION_HTTP_POOL_SIZE
+
+
 def _get_k8s_credential_material(
     credential: TokenCredential,
     subscription_id: str,
@@ -190,6 +213,23 @@ def _get_k8s_session(
     )
 
     session = _requests.Session()
+    # Bump urllib3 pool sizes well above the default 10 so concurrent
+    # fan-outs (e.g. ``k8s_warmup_status``'s 6-way ThreadPoolExecutor +
+    # ``_warmup_pods_and_logs`` per-pod log fetches) do not block on the
+    # underlying connection pool. With multiple dashboard pollers in
+    # flight the default pool was saturated within seconds, forcing a
+    # full TLS handshake per GET. ``pool_block=False`` keeps the
+    # behaviour of "allocate over-the-cap connections rather than wait"
+    # so a brief burst does not stall behind the pool — at the cost of
+    # extra short-lived sockets which urllib3 then closes.
+    _k8s_pool_size = _k8s_session_http_pool_size()
+    adapter = _requests.adapters.HTTPAdapter(
+        pool_connections=_k8s_pool_size,
+        pool_maxsize=_k8s_pool_size,
+        pool_block=False,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     temp_files: list[str] = []
 
     def write_secret_file(suffix: str, content: bytes) -> str:
