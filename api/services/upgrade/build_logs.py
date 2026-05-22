@@ -35,6 +35,16 @@ LOGGER = logging.getLogger(__name__)
 BUILD_LOG_CONTAINER = "upgrade-logs"
 _BLOB_ENDPOINT_ENV = "AZURE_BLOB_ENDPOINT"
 _MAX_BLOCK_BYTES = 3 * 1024 * 1024  # 3 MiB; Azure caps at 4 MiB per append.
+# Hard ceiling on the per-writer in-process buffer. When the backend
+# repeatedly fails to flush (Storage 503, throttling, network blip) the
+# `_flush_locked` retry path puts the payload back so a transient outage
+# does not lose lines. Without a ceiling, a sustained outage causes the
+# api / worker process RSS to grow until OOM-kill. 16 MiB is generous
+# (~150K log lines) vs the typical `az acr build` output and is dropped
+# oldest-first with a marker so the tail — which is what an operator
+# actually reads — is always preserved.
+_MAX_BUFFER_BYTES = 16 * 1024 * 1024
+_TRUNCATION_MARKER = b"\n... [build log truncated: backend backpressure dropped older lines] ...\n"
 
 
 def blob_name(job_id: str, component: str) -> str:
@@ -206,8 +216,20 @@ class BuildLogWriter:
                 len(payload),
                 self._name,
             )
-            # Put the bytes back so a future flush can retry.
-            self._buffer[:0] = payload
+            # Put the bytes back so a future flush can retry, but enforce
+            # the buffer ceiling so a backend in sustained failure mode
+            # never grows our RSS without bound. Drop oldest — the tail
+            # is what the operator reads.
+            combined = bytearray(payload) + self._buffer
+            if len(combined) > _MAX_BUFFER_BYTES:
+                overflow = len(combined) - _MAX_BUFFER_BYTES + len(_TRUNCATION_MARKER)
+                if overflow < len(combined):
+                    combined = bytearray(_TRUNCATION_MARKER) + combined[overflow:]
+                else:
+                    # The payload alone exceeds the ceiling; keep the tail.
+                    tail_budget = _MAX_BUFFER_BYTES - len(_TRUNCATION_MARKER)
+                    combined = bytearray(_TRUNCATION_MARKER) + combined[-tail_budget:]
+            self._buffer = combined
             raise
 
 

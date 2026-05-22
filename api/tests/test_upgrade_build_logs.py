@@ -76,3 +76,50 @@ def test_writer_recovers_buffer_on_backend_failure() -> None:
         writer.flush()
     # Buffer was restored — internal byte-array still has the unsynced payload.
     assert b"first line" in bytes(writer._buffer)
+
+
+def test_writer_buffer_caps_when_backend_persistently_fails() -> None:
+    """With a backend that never accepts a flush, the retain-on-failure
+    path must drop the OLDEST bytes once the per-writer ceiling is hit
+    so a sustained Storage outage does not OOM the worker. The tail —
+    which is what an operator reads first — is preserved, and a marker
+    line tells the reader the gap exists.
+    """
+
+    class _AlwaysFail:
+        def create(self, name: str) -> None:
+            pass
+
+        def append(self, name: str, payload: bytes) -> None:
+            raise RuntimeError("backend offline")
+
+        def read(self, name: str) -> bytes:
+            raise KeyError(name)
+
+    build_logs.set_backend(_AlwaysFail())
+    # Force the cap low so the test does not allocate 16 MiB.
+    import api.services.upgrade.build_logs as bl
+
+    original_cap = bl._MAX_BUFFER_BYTES
+    bl._MAX_BUFFER_BYTES = 1024  # 1 KiB ceiling for the test
+    try:
+        writer = build_logs.open_writer("jobBigBuf", "api")
+        # Each line ~= 64 B; push enough to exceed the ceiling several times.
+        for i in range(200):
+            writer.write_line(f"L{i:04d} " + "x" * 50)
+        # Drain whatever is buffered (will keep failing).
+        for _ in range(5):
+            try:
+                writer.flush()
+            except RuntimeError:
+                pass
+        buf = bytes(writer._buffer)
+        assert len(buf) <= bl._MAX_BUFFER_BYTES
+        # Truncation marker tells the reader some lines were dropped.
+        assert b"build log truncated" in buf
+        # Newest line (L0199) survives.
+        assert b"L0199" in buf
+        # Oldest line (L0000) was dropped to make room.
+        assert b"L0000" not in buf
+    finally:
+        bl._MAX_BUFFER_BYTES = original_cap

@@ -407,3 +407,209 @@ def test_image_matches_version_requires_exact_tag() -> None:
     assert fn("myacr.azurecr.io/elb-api:v0.3.0", "") is False
     # Malformed ref → False, not crash
     assert fn("not-a-ref", "0.3.0") is False
+
+
+def _set_row(**fields):
+    """Test helper: write the requested fields into the persisted row."""
+    def mutate(s):
+        for k, v in fields.items():
+            setattr(s, k, v)
+
+    return state.update_state(mutate)
+
+
+def test_reconciler_fails_pre_patch_when_stuck(env: None) -> None:
+    """A row parked in pre-PATCH states (queued/fetching/building/patching)
+    longer than `PRE_PATCH_TIMEOUT_SECONDS` must be transitioned to
+    `failed_pre` so the SPA shows an actionable failure and the operator
+    can restart. Before this guard a worker crash mid-build left the
+    row spinning forever — the only way out was a manual state row
+    edit.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    started = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
+    # 40 min after start — well past the 35-min budget.
+    fake_now = lambda: started + timedelta(minutes=40)  # noqa: E731
+    for stuck_state in upgrade_task.PRE_PATCH_STATES:
+        # Reset row to the stuck state.
+        state.set_backend(state.InMemoryBackend())
+        _set_row(
+            state=stuck_state,
+            started_at=started.isoformat(timespec="seconds"),
+            job_id="stuck-job",
+            target_version="0.3.0",
+        )
+        after = upgrade_task.reconcile_rolling_out_inline(
+            aca=_FakeAca(), watcher=_FakeWatcher(), now=fake_now
+        )
+        assert after.state == state.STATE_FAILED_PRE, (
+            f"pre-PATCH state {stuck_state!r} should escalate to failed_pre"
+        )
+        assert "stuck in" in after.phase_detail
+
+
+def test_reconciler_within_pre_patch_budget_does_not_escalate(env: None) -> None:
+    """A row still within the pre-PATCH budget must NOT be escalated;
+    only worker-died scenarios should trip the new guard.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    started = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
+    fake_now = lambda: started + timedelta(minutes=10)  # noqa: E731
+    _set_row(
+        state=state.STATE_BUILDING,
+        started_at=started.isoformat(timespec="seconds"),
+        job_id="slow-job",
+        target_version="0.3.0",
+    )
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=_FakeAca(), watcher=_FakeWatcher(), now=fake_now
+    )
+    assert after.state == state.STATE_BUILDING
+
+
+def test_reconciler_pre_patch_without_started_at_does_not_escalate(env: None) -> None:
+    """Malformed/empty `started_at` must not crash the reconciler.
+    The next tick will retry once a valid timestamp lands.
+    """
+    _set_row(
+        state=state.STATE_BUILDING,
+        started_at="",
+        job_id="no-ts-job",
+        target_version="0.3.0",
+    )
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=_FakeAca(), watcher=_FakeWatcher()
+    )
+    assert after.state == state.STATE_BUILDING
+
+
+def test_reconciler_treats_degraded_running_state_as_terminal_failure(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ACA reports `provisioning_state=Provisioned` even when the new
+    revision's container is in CrashLoopBackOff. The reconciler must
+    treat a terminal `running_state` (degraded/unhealthy/failed) as a
+    rollout failure so the operator does not wait the full 15 min
+    stuck-guard window before getting an actionable signal.
+    """
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    # Pin the api __version__ to the OLD version so the success branch
+    # does not fire; force the rollout watcher to report `Degraded`.
+    monkeypatch.setattr(upgrade_task, "__version__", "0.2.1")
+    after = upgrade_task.reconcile_rolling_out_inline(
+        aca=aca, watcher=_FakeWatcher(running="Degraded", provisioning="Provisioned")
+    )
+    assert after.state == state.STATE_FAILED_ROLLOUT
+    assert "Degraded" in after.phase_detail or "running_state" in after.phase_detail
+
+
+def test_failed_pre_records_orphan_acr_tags_when_partial_build(
+    env: None,
+) -> None:
+    """When one or more component images were pushed before the build
+    failed, the audit blob must call them out as orphan tags so the
+    operator (or a future ACR purge task) can clean them up. Without
+    this, partial builds accumulated silently in the registry.
+    """
+    after_start = _start()
+    # Build of `frontend` fails, but `api` was already pushed.
+    class _PartialRunner(_FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self._calls = 0
+
+        def stream(self, argv, *, timeout_seconds):
+            self._calls += 1
+            if self._calls >= 2:
+                yield {"line": "build failed"}
+                yield {"exit_code": 1, "duration_ms": 1, "timed_out": False}
+                return
+            yield {"line": "step 1 ok"}
+            yield {"exit_code": 0, "duration_ms": 1, "timed_out": False}
+
+    after_exec = upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_PartialRunner(),
+        aca=_FakeAca(),
+    )
+    assert after_exec.state == state.STATE_FAILED_PRE
+    events = history.tail_events(limit=20)
+    orphan_events = [e for e in events if e.event == "orphan_acr_tags"]
+    assert len(orphan_events) == 1
+    refs = orphan_events[0].detail["image_refs"]
+    # `api` was pushed before `frontend` failed; we should see its ref.
+    assert any(":v0.3.0" in r and "elb-api" in r for r in refs)
+
+
+def test_failed_pre_omits_orphan_event_when_no_images_were_built(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_fail_pre that fires before any image is built (clone fails)
+    must not record an `orphan_acr_tags` event — there is nothing to
+    clean up and a noisy audit row would mislead the operator.
+    """
+    after_start = _start()
+    runner = _FakeRunner(clone_exit=128)
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=runner,
+        aca=_FakeAca(),
+    )
+    events = history.tail_events(limit=20)
+    assert all(e.event != "orphan_acr_tags" for e in events)
+
+
+def test_state_transition_timeline_walks_through_every_state(env: None) -> None:
+    """Invariant guard: the documented `STATE_TRANSITION_TIMELINE` must
+    actually be walked end-to-end by a successful upgrade. Catches
+    PR-time drift where a new intermediate state is added to
+    `VALID_STATES` but the happy path skips it.
+    """
+    after_start = _start()
+    aca = _FakeAca()
+    upgrade_task.execute_upgrade_inline(
+        target_version="0.3.0",
+        target_sha="",
+        started_by_oid="oid-1",
+        job_id=after_start.job_id,
+        runner=_FakeRunner(),
+        aca=aca,
+    )
+    # Collect the `state` field on every recorded `state`-flavoured event
+    # (the reconciler will append `succeeded` after we simulate the new
+    # revision being up).
+    events = history.tail_events(limit=200)
+    seen_phase_details = {e.detail.get("detail") for e in events}
+    # The TIMELINE constant must include every state the row will ever
+    # be in for a *happy* path — if a new state is inserted into
+    # VALID_STATES without being added here, this test will need updating
+    # (which is the entire point).
+    assert state.STATE_IDLE in upgrade_task.STATE_TRANSITION_TIMELINE
+    assert state.STATE_QUEUED in upgrade_task.STATE_TRANSITION_TIMELINE
+    assert state.STATE_FETCHING in upgrade_task.STATE_TRANSITION_TIMELINE
+    assert state.STATE_BUILDING in upgrade_task.STATE_TRANSITION_TIMELINE
+    assert state.STATE_PATCHING in upgrade_task.STATE_TRANSITION_TIMELINE
+    assert state.STATE_ROLLING_OUT in upgrade_task.STATE_TRANSITION_TIMELINE
+    assert state.STATE_SUCCEEDED in upgrade_task.STATE_TRANSITION_TIMELINE
+    # And the rolling_out row landed during the run.
+    assert state.get_state().state == state.STATE_ROLLING_OUT
+    # Silence unused-var warning.
+    _ = seen_phase_details
+

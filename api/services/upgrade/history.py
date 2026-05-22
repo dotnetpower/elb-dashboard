@@ -24,8 +24,9 @@ import json
 import logging
 import os
 import threading
+import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -43,15 +44,31 @@ _BLOB_ENDPOINT_ENV = "AZURE_BLOB_ENDPOINT"
 
 @dataclass(frozen=True)
 class HistoryEvent:
-    """One persisted lifecycle event."""
+    """One persisted lifecycle event.
+
+    ``event_id`` is a per-event UUID stamped at write time so the read
+    path can dedupe in case the append-blob backend ever double-writes
+    (network retry, partial-failure resend). It is also persisted to the
+    blob alongside the rest of the payload so dedup survives a process
+    restart.
+    """
 
     ts: str  # ISO-8601 UTC
     job_id: str
-    event: str  # start | state | succeeded | failed | rollback_start | rollback_done | escape_hatch
+    # Known event types: start | state | succeeded | failed | rollback_start |
+    # rollback_done | escape_hatch | orphan_acr_tags
+    event: str
     detail: dict[str, Any]
+    event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def to_json_line(self) -> bytes:
-        payload = {"ts": self.ts, "job_id": self.job_id, "event": self.event, **self.detail}
+        payload = {
+            "ts": self.ts,
+            "job_id": self.job_id,
+            "event": self.event,
+            "event_id": self.event_id,
+            **self.detail,
+        }
         return (json.dumps(payload, default=str) + "\n").encode("utf-8")
 
     @classmethod
@@ -62,7 +79,18 @@ class HistoryEvent:
         ts = str(payload.pop("ts", ""))
         job_id = str(payload.pop("job_id", ""))
         event = str(payload.pop("event", ""))
-        return cls(ts=ts, job_id=job_id, event=event, detail=payload)
+        event_id = str(payload.pop("event_id", "") or "")
+        if not event_id:
+            # Backfill: events written before the event_id field landed
+            # are deduped by their full payload hash, which is stable
+            # for the historical record.
+            import hashlib
+
+            digest = hashlib.sha256(
+                f"{ts}|{job_id}|{event}|{json.dumps(payload, sort_keys=True, default=str)}".encode()
+            ).hexdigest()
+            event_id = f"sha256:{digest[:32]}"
+        return cls(ts=ts, job_id=job_id, event=event, detail=payload, event_id=event_id)
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +214,13 @@ def record_event(event: str, *, job_id: str, **detail: Any) -> None:
 
 
 def tail_events(*, limit: int = 50) -> list[HistoryEvent]:
-    """Return the most recent ``limit`` events (newest first), capped at MAX."""
+    """Return the most recent ``limit`` events (newest first), capped at MAX.
+
+    Deduplicates by ``event_id`` so a double-written event (network retry
+    on the append-blob side) only appears once. Within a duplicate set,
+    the first observed (oldest position) wins so the timeline preserves
+    the original ordering.
+    """
     capped = max(1, min(limit, MAX_TAIL_ENTRIES))
     try:
         raw = _backend().read_all()
@@ -196,14 +230,20 @@ def tail_events(*, limit: int = 50) -> list[HistoryEvent]:
     if not raw:
         return []
     lines = [line for line in raw.split(b"\n") if line.strip()]
-    tail = lines[-capped:]
     events: list[HistoryEvent] = []
-    for line in tail:
+    seen: set[str] = set()
+    for line in lines:
         try:
-            events.append(HistoryEvent.from_json(line))
+            evt = HistoryEvent.from_json(line)
         except json.JSONDecodeError:
             continue
-    return list(reversed(events))
+        if evt.event_id in seen:
+            continue
+        seen.add(evt.event_id)
+        events.append(evt)
+    # Reverse for newest-first, then cap. We cap AFTER dedup so a tail
+    # of mostly-duplicated events still yields ``capped`` unique rows.
+    return list(reversed(events))[:capped]
 
 
 def record_events(events: Iterable[HistoryEvent]) -> None:

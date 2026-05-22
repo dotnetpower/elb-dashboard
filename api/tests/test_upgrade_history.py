@@ -76,3 +76,40 @@ def test_history_event_round_trip() -> None:
     parsed = json.loads(line)
     assert parsed["event"] == "rollback_done"
     assert parsed["target"] == {"api": "x:1"}
+    # event_id is stamped at write time so downstream readers can dedupe.
+    assert parsed["event_id"]
+    assert len(parsed["event_id"]) >= 16
+
+
+def test_tail_dedupes_by_event_id() -> None:
+    """A double-written event (e.g. backend network retry replayed the
+    same payload twice) must appear only once in the tail. Without this
+    guarantee a transient outage made the SPA history page show the
+    same `succeeded` event twice.
+    """
+    history.record_event("start", job_id="jdup", target_version="0.3.0")
+    # Replay the most recent JSON line into the backend verbatim —
+    # simulating an at-least-once backend that double-wrote.
+    raw = history._backend().read_all()
+    line = raw.strip().split(b"\n")[-1]
+    history._backend().append(line + b"\n")
+    history._backend().append(line + b"\n")
+    events = history.tail_events(limit=10)
+    # Three writes → one logical event after dedup.
+    assert len(events) == 1
+    assert events[0].event == "start"
+
+
+def test_legacy_events_without_event_id_dedupe_by_payload() -> None:
+    """Events written before the `event_id` field landed still need to
+    dedupe — fall back to a payload hash so the tail stays stable.
+    """
+    legacy_line = (
+        b'{"ts":"2026-05-22T00:00:00+00:00","job_id":"jold",'
+        b'"event":"succeeded","running_version":"0.2.9"}\n'
+    )
+    history._backend().append(legacy_line)
+    history._backend().append(legacy_line)
+    events = history.tail_events(limit=10)
+    assert len(events) == 1
+    assert events[0].event == "succeeded"
