@@ -13,11 +13,11 @@ api/tests/test_route_contracts.py`.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
@@ -50,7 +50,12 @@ router = APIRouter()
 # common case (single user staring at the Jobs page) as a cache hit while
 # tab-switching or page reloads still see fresh data within one cycle.
 _JOBS_LIST_CACHE_TTL_SECONDS = 10.0
-_JOBS_LIST_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_JOBS_LIST_CACHE_MAX_ENTRIES = 128
+# Store the serialized JSON bytes so cache get/set never deepcopies. JSON
+# round-trip gives callers a fresh mutable dict (same isolation as a deep
+# copy) without ``copy.deepcopy``'s O(N) traversal of nested lists. The
+# OrderedDict supports O(1) LRU eviction via ``popitem(last=False)``.
+_JOBS_LIST_CACHE: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
 _JOBS_LIST_CACHE_LOCK = threading.Lock()
 
 _EXTERNAL_LIST_DETAIL_STATUSES = frozenset(
@@ -113,22 +118,28 @@ def _blast_jobs_list_cache_get(key: str) -> dict[str, Any] | None:
         entry = _JOBS_LIST_CACHE.get(key)
         if entry is None:
             return None
-        expires_at, payload = entry
+        expires_at, payload_bytes = entry
         if expires_at <= now:
             _JOBS_LIST_CACHE.pop(key, None)
             return None
-        return copy.deepcopy(payload)
+        # Touch for LRU semantics so frequently-read entries stay warm.
+        _JOBS_LIST_CACHE.move_to_end(key)
+    # json.loads outside the lock — deserialization is the only per-call
+    # cost and we don't want it blocking other readers.
+    decoded = json.loads(payload_bytes)
+    return decoded if isinstance(decoded, dict) else None
 
 
 def _blast_jobs_list_cache_set(key: str, response: dict[str, Any]) -> None:
+    payload_bytes = json.dumps(response, separators=(",", ":")).encode("utf-8")
+    expires_at = time.monotonic() + _JOBS_LIST_CACHE_TTL_SECONDS
     with _JOBS_LIST_CACHE_LOCK:
-        _JOBS_LIST_CACHE[key] = (
-            time.monotonic() + _JOBS_LIST_CACHE_TTL_SECONDS,
-            copy.deepcopy(response),
-        )
-        if len(_JOBS_LIST_CACHE) > 128:
-            oldest = min(_JOBS_LIST_CACHE.items(), key=lambda kv: kv[1][0])[0]
-            _JOBS_LIST_CACHE.pop(oldest, None)
+        # Replacing an existing key needs explicit pop so move_to_end-on-set
+        # semantics don't collide with the LRU bookkeeping.
+        _JOBS_LIST_CACHE.pop(key, None)
+        _JOBS_LIST_CACHE[key] = (expires_at, payload_bytes)
+        while len(_JOBS_LIST_CACHE) > _JOBS_LIST_CACHE_MAX_ENTRIES:
+            _JOBS_LIST_CACHE.popitem(last=False)
 
 
 def _reset_blast_jobs_list_cache() -> None:

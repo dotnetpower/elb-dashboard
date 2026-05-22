@@ -13,13 +13,13 @@ api/tests/test_blast_tasks.py`.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 from urllib.parse import urlparse
 
@@ -117,10 +117,12 @@ def resolve_database_display_metadata(
         with _DISPLAY_METADATA_CACHE_LOCK:
             cached = _DISPLAY_METADATA_CACHE.get(cache_key)
             if cached and cached[0] > now:
-                # Return a deep copy so caller mutations do not poison the
-                # cache. Cost is negligible compared to the saved Storage
-                # round-trips.
-                return copy.deepcopy(cached[1])
+                # Touch LRU and return a JSON round-trip so callers get a
+                # fresh mutable dict — strictly cheaper than ``deepcopy``
+                # for the dict-of-primitives shape we store here.
+                _DISPLAY_METADATA_CACHE.move_to_end(cache_key)
+                payload_bytes = cached[1]
+                return None if payload_bytes is None else json.loads(payload_bytes)
             inflight = _DISPLAY_METADATA_INFLIGHT.get(cache_key)
             if inflight is None:
                 inflight = threading.Event()
@@ -147,14 +149,17 @@ def resolve_database_display_metadata(
             )
             result = metadata or None
             expires_at = time.monotonic() + _DISPLAY_METADATA_CACHE_TTL_SECONDS
+            payload_bytes = (
+                None
+                if result is None
+                else json.dumps(result, separators=(",", ":")).encode("utf-8")
+            )
             with _DISPLAY_METADATA_CACHE_LOCK:
-                _DISPLAY_METADATA_CACHE[cache_key] = (expires_at, result)
-                if len(_DISPLAY_METADATA_CACHE) > 256:
-                    oldest = min(
-                        _DISPLAY_METADATA_CACHE.items(), key=lambda kv: kv[1][0]
-                    )[0]
-                    _DISPLAY_METADATA_CACHE.pop(oldest, None)
-            return copy.deepcopy(result)
+                _DISPLAY_METADATA_CACHE.pop(cache_key, None)
+                _DISPLAY_METADATA_CACHE[cache_key] = (expires_at, payload_bytes)
+                while len(_DISPLAY_METADATA_CACHE) > _DISPLAY_METADATA_CACHE_MAX_ENTRIES:
+                    _DISPLAY_METADATA_CACHE.popitem(last=False)
+            return None if result is None else json.loads(payload_bytes)
         finally:
             with _DISPLAY_METADATA_CACHE_LOCK:
                 _DISPLAY_METADATA_INFLIGHT.pop(cache_key, None)
@@ -169,7 +174,15 @@ def resolve_database_display_metadata(
 _DISPLAY_METADATA_CACHE_TTL_SECONDS = float(
     os.environ.get("BLAST_DB_METADATA_CACHE_TTL", "86400.0")
 )
-_DISPLAY_METADATA_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any] | None]] = {}
+_DISPLAY_METADATA_CACHE_MAX_ENTRIES = 256
+# Store the serialized payload bytes so reads do not pay a ``deepcopy``
+# tax (every cache hit used to traverse the full nested dict). JSON
+# round-trip on read yields a fresh mutable dict (same isolation), at a
+# fraction of the cost for dict-of-primitives metadata. OrderedDict gives
+# us O(1) LRU eviction.
+_DISPLAY_METADATA_CACHE: OrderedDict[tuple[str, str, str], tuple[float, bytes | None]] = (
+    OrderedDict()
+)
 _DISPLAY_METADATA_CACHE_LOCK = threading.Lock()
 _DISPLAY_METADATA_INFLIGHT: dict[tuple[str, str, str], threading.Event] = {}
 
