@@ -53,6 +53,7 @@ from api.routes import (
     tasks,
     terminal_legacy,
     terminal_ws,
+    upgrade,
     warmup,
 )
 
@@ -509,6 +510,7 @@ def create_app() -> FastAPI:
     app.include_router(warmup.warmup_router)
     app.include_router(audit.audit_router)
     app.include_router(client_log.router)
+    app.include_router(upgrade.router)
 
     # ---- Catch-all reverse proxy to the `frontend` sidecar ----
     app.include_router(frontend_proxy.router)
@@ -521,7 +523,11 @@ def create_app() -> FastAPI:
             payload = {"detail": detail}
         else:
             payload = detail if isinstance(detail, dict) else {"detail": str(detail)}
-        return JSONResponse(payload, status_code=exc.status_code)
+        # Preserve route-supplied headers (e.g. Retry-After on 429) — Starlette
+        # carries them on the exception but the default JSONResponse otherwise
+        # drops them.
+        headers = getattr(exc, "headers", None) or None
+        return JSONResponse(payload, status_code=exc.status_code, headers=headers)
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:

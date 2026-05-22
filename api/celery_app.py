@@ -29,6 +29,7 @@ celery_app = Celery(
         "api.tasks.blast_artifacts",
         "api.tasks.storage",
         "api.tasks.openapi",
+        "api.tasks.upgrade",
     ],
 )
 # Belt-and-braces: force this Celery instance to be both `default_app`
@@ -78,6 +79,13 @@ celery_app.conf.update(
             "task": "api.tasks.blast.backfill_completed_runtime_metrics",
             "schedule": 300.0,
             "options": {"queue": "blast"},
+        },
+        # Discover release tags on the configured `UPGRADE_GIT_REMOTE`.
+        # Inert when the env is unset; bounded HTTP call otherwise.
+        "upgrade-check-latest": {
+            "task": "api.tasks.upgrade.check_latest",
+            "schedule": 1800.0,
+            "options": {"queue": "default"},
         },
     },
     timezone="UTC",
