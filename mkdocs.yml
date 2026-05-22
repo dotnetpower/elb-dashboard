@@ -63,6 +63,7 @@ nav:
   - Change Log: changelog.md
   - Releases:
       - Overview: releases/index.md
+      - v0.2.0: releases/v0.2.0.md
       - Unreleased: releases/unreleased.md
       - v0.1.0: releases/v0.1.0.md
   - User Guide:
