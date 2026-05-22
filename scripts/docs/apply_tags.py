@@ -25,8 +25,6 @@ TAG_MAP: dict[str, list[str]] = {
     "troubleshooting.md": ["setup"],
     "changelog.md": ["release"],
     "releases/index.md": ["release"],
-    "releases/v0.4.0.md": ["release"],
-    "releases/v0.3.0.md": ["release"],
     "releases/v0.2.0.md": ["release"],
     "releases/v0.1.0.md": ["release"],
     "releases/unreleased.md": ["release"],
