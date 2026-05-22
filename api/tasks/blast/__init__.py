@@ -168,6 +168,7 @@ from api.tasks.blast.split_pipeline import (  # noqa: E402,F401
     _child_state_payload,
     _dispatch_split_child_submits,
     _finalize_split_parent_results,
+    _iter_parent_split_xml_chunks,
     _iter_split_child_merged_result_chunks,
     _load_split_child_merge_reports,
     _parent_split_result_artifacts_present,

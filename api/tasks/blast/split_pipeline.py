@@ -61,6 +61,7 @@ __all__ = (
     "_child_state_payload",
     "_dispatch_split_child_submits",
     "_finalize_split_parent_results",
+    "_iter_parent_split_xml_chunks",
     "_iter_split_child_merged_result_chunks",
     "_load_split_child_merge_reports",
     "_parent_split_result_artifacts_present",
@@ -877,56 +878,218 @@ def _build_parent_split_xml_result_bytes(
     children: list[Any],
     credential: Any,
 ) -> bytes:
-    """Build one valid BLAST XML gzip from disjoint child XML result files."""
-    import copy
-    import gzip
-    import io
-    import xml.etree.ElementTree as ET
+    """Buffered legacy entry point that materializes the streaming merge.
 
-    base_root: ET.Element | None = None
-    base_iterations: ET.Element | None = None
-    for child in children:
-        raw_gzip = _blast._read_split_child_merged_result_bytes(
+    Kept so existing tests / external callers that depended on the buffered
+    return type continue to work, but production callers (see
+    ``_write_split_parent_result_artifacts``) now consume
+    ``_iter_parent_split_xml_chunks`` directly to keep the worker's RSS
+    bounded regardless of child count or per-child XML size.
+    """
+    return b"".join(
+        _blast._iter_parent_split_xml_chunks(
             storage_account=storage_account,
-            child=child,
+            children=children,
             credential=credential,
         )
-        try:
-            xml_payload = gzip.decompress(raw_gzip)
-            child_root = ET.fromstring(xml_payload)  # noqa: S314 -- backend-generated BLAST XML
-        except (OSError, ET.ParseError) as exc:
-            child_job_id = str(getattr(child, "job_id", "") or "")
-            raise ValueError(f"invalid child XML result: {child_job_id}") from exc
-        if child_root.tag != "BlastOutput":
-            child_job_id = str(getattr(child, "job_id", "") or "")
-            raise ValueError(f"unexpected child XML root for {child_job_id}: {child_root.tag}")
-        child_iterations = child_root.find("BlastOutput_iterations")
-        if child_iterations is None:
-            child_job_id = str(getattr(child, "job_id", "") or "")
-            raise ValueError(f"child XML result has no iterations: {child_job_id}")
-        if base_root is None:
-            base_root = copy.deepcopy(child_root)
-            base_iterations = base_root.find("BlastOutput_iterations")
-            if base_iterations is None:
-                base_iterations = ET.SubElement(base_root, "BlastOutput_iterations")
-            base_iterations.clear()
-            db_node = base_root.find("BlastOutput_db")
-            if db_node is not None:
-                db_node.text = "merged split-query child results"
-        for iteration in child_iterations.findall("Iteration"):
-            iteration_copy = copy.deepcopy(iteration)
-            iter_num = iteration_copy.find("Iteration_iter-num")
-            if iter_num is None:
-                iter_num = ET.Element("Iteration_iter-num")
-                iteration_copy.insert(0, iter_num)
-            iter_num.text = str(len(base_iterations) + 1)  # type: ignore[arg-type]
-            base_iterations.append(iteration_copy)  # type: ignore[union-attr]
-    if base_root is None or base_iterations is None:
+    )
+
+
+class _GeneratorByteReader:
+    """Minimal binary file-like adapter over a ``bytes`` iterator.
+
+    ``gzip.GzipFile`` and ``xml.etree.ElementTree.iterparse`` both read
+    through ``.read(n)``; chaining them on top of ``stream_blob_bytes`` lets
+    us decompress + parse one child without materializing the whole gzip
+    blob in memory. The adapter is read-only and does not implement seek.
+    """
+
+    __slots__ = ("_buf", "_closed", "_iter")
+
+    def __init__(self, source: Iterator[bytes]) -> None:
+        self._iter = iter(source)
+        self._buf = b""
+        self._closed = False
+
+    def read(self, n: int = -1) -> bytes:
+        if self._closed:
+            return b""
+        if n is None or n < 0:
+            chunks = [self._buf]
+            self._buf = b""
+            for chunk in self._iter:
+                chunks.append(chunk)
+            return b"".join(chunks)
+        while len(self._buf) < n:
+            try:
+                self._buf += next(self._iter)
+            except StopIteration:
+                break
+        out = self._buf[:n]
+        self._buf = self._buf[n:]
+        return out
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return False
+
+    def seekable(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        self._closed = True
+        self._buf = b""
+
+    def __enter__(self) -> _GeneratorByteReader:
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.close()
+
+
+_BLAST_OUTPUT_META_TAGS: tuple[str, ...] = (
+    "BlastOutput_program",
+    "BlastOutput_version",
+    "BlastOutput_reference",
+    "BlastOutput_db",
+    "BlastOutput_query-ID",
+    "BlastOutput_query-def",
+    "BlastOutput_query-len",
+    "BlastOutput_param",
+)
+
+
+def _iter_parent_split_xml_chunks(
+    *,
+    storage_account: str,
+    children: list[Any],
+    credential: Any,
+) -> Iterator[bytes]:
+    """Yield gzip-compressed bytes of one merged BLAST XML built from children.
+
+    Memory profile: bounded by ``max(single Iteration element, gzip window)``
+    + a small metadata buffer extracted from the first child. The child gzip
+    blobs are decompressed and parsed incrementally via ``iterparse``; each
+    ``<Iteration>`` element is serialized, fed into ``zlib.compressobj`` and
+    yielded right away, then ``clear()``-ed so the DOM never accumulates.
+    Defeats the previous OOM path where a 100-shard × 200 MB child set forced
+    20 GB of resident DOM into a single worker.
+    """
+    import xml.etree.ElementTree as ET
+    import zlib
+    from gzip import GzipFile
+
+    from api.services.storage_data import stream_blob_bytes
+
+    if not children:
         raise ValueError("no child XML results to merge")
-    ET.indent(base_root, space="  ")
-    buffer = io.BytesIO()
-    ET.ElementTree(base_root).write(buffer, encoding="utf-8", xml_declaration=True)
-    return gzip.compress(buffer.getvalue())
+
+    compressor = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+
+    def _compress(raw: bytes) -> bytes:
+        return compressor.compress(raw)
+
+    iter_num = 0
+    header_emitted = False
+    saved_meta: dict[str, bytes] = {}
+
+    def _emit_header() -> bytes:
+        # Build the BlastOutput prologue from saved metadata, overriding
+        # BlastOutput_db so downstream parsers know this is a merged result.
+        # ``ET.tostring`` quotes attribute values safely; the metadata
+        # elements are otherwise emitted byte-for-byte from the source.
+        parts: list[bytes] = [b'<?xml version="1.0"?>\n<BlastOutput>\n']
+        for tag in _BLAST_OUTPUT_META_TAGS:
+            serialized = saved_meta.get(tag)
+            if serialized is None:
+                continue
+            if tag == "BlastOutput_db":
+                parts.append(
+                    b"  <BlastOutput_db>merged split-query child results</BlastOutput_db>\n"
+                )
+                continue
+            parts.append(b"  " + serialized + b"\n")
+        parts.append(b"  <BlastOutput_iterations>\n")
+        return b"".join(parts)
+
+    for child in children:
+        child_job_id = str(getattr(child, "job_id", "") or "")
+        path = _blast._split_child_result_paths(child_job_id)["merged_result_path"]
+        chunk_source = stream_blob_bytes(credential, storage_account, "results", path)
+        try:
+            with _GeneratorByteReader(chunk_source) as reader, GzipFile(
+                fileobj=reader, mode="rb"
+            ) as gz:
+                # iterparse on a file-like reads incrementally; ``end`` events
+                # fire as each element closes so we can serialize + free.
+                parser = ET.iterparse(gz, events=("start", "end"))  # noqa: S314
+                root: ET.Element | None = None
+                in_iterations = False
+                iterations_parent: ET.Element | None = None
+                for event, elem in parser:
+                    tag = elem.tag
+                    if event == "start":
+                        if root is None:
+                            if tag != "BlastOutput":
+                                raise ValueError(
+                                    f"unexpected child XML root for {child_job_id}: {tag}"
+                                )
+                            root = elem
+                        elif tag == "BlastOutput_iterations":
+                            in_iterations = True
+                            iterations_parent = elem
+                        continue
+                    # event == "end"
+                    if not header_emitted and tag in _BLAST_OUTPUT_META_TAGS:
+                        # Only the first child contributes header metadata so
+                        # we don't overwrite stable values on later passes.
+                        if tag not in saved_meta:
+                            saved_meta[tag] = ET.tostring(elem, encoding="utf-8")
+                    if tag == "Iteration" and in_iterations:
+                        iter_num += 1
+                        num_node = elem.find("Iteration_iter-num")
+                        if num_node is None:
+                            num_node = ET.Element("Iteration_iter-num")
+                            elem.insert(0, num_node)
+                        num_node.text = str(iter_num)
+                        if not header_emitted:
+                            chunk = _compress(_emit_header())
+                            if chunk:
+                                yield chunk
+                            header_emitted = True
+                        body = ET.tostring(elem, encoding="utf-8") + b"\n"
+                        chunk = _compress(body)
+                        if chunk:
+                            yield chunk
+                        # Detach + clear so iterparse never accumulates a
+                        # growing list of siblings under BlastOutput_iterations.
+                        if iterations_parent is not None:
+                            try:
+                                iterations_parent.remove(elem)
+                            except ValueError:
+                                pass
+                        elem.clear()
+                    elif tag == "BlastOutput_iterations":
+                        in_iterations = False
+                        iterations_parent = None
+                        elem.clear()
+        except (OSError, ET.ParseError) as exc:
+            raise ValueError(f"invalid child XML result: {child_job_id}") from exc
+
+    if not header_emitted:
+        # No iterations across all children — still emit a valid empty
+        # BlastOutput document so downstream parsers see real XML.
+        chunk = _compress(_emit_header())
+        if chunk:
+            yield chunk
+    tail = _compress(b"  </BlastOutput_iterations>\n</BlastOutput>\n")
+    if tail:
+        yield tail
+    final = compressor.flush()
+    if final:
+        yield final
 
 
 def _write_split_parent_result_artifacts(
@@ -977,13 +1140,11 @@ def _write_split_parent_result_artifacts(
         storage_account,
         "results",
         paths["merged_result_path"],
-        [
-            _blast._build_parent_split_xml_result_bytes(
-                storage_account=storage_account,
-                children=children,
-                credential=credential,
-            )
-        ]
+        _blast._iter_parent_split_xml_chunks(
+            storage_account=storage_account,
+            children=children,
+            credential=credential,
+        )
         if is_xml_result
         else _blast._iter_split_child_merged_result_chunks(
             storage_account=storage_account,
