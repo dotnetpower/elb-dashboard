@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -31,6 +32,8 @@ _TABLE_NAME = "autowarmup"
 _TYPE = "auto_warmup"
 _LOCAL_STATE_ENV = "ELB_LOCAL_STATE_DIR"
 _ENSURED_TABLES: set[str] = set()
+_AUTOWARMUP_TABLE_POOLED: TableClient | None = None
+_AUTOWARMUP_TABLE_POOL_LOCK = threading.Lock()
 
 
 def _now_iso() -> str:
@@ -227,8 +230,39 @@ def _pref_from_entity(entity: dict[str, Any]) -> AutoWarmupPreference | None:
 
 
 def _table_client() -> TableClient:
+    """Return a process-shared pooled ``TableClient`` for the autowarmup table."""
+    global _AUTOWARMUP_TABLE_POOLED
+    pool = _AUTOWARMUP_TABLE_POOLED
+    if pool is not None:
+        return pool  # type: ignore[return-value]
     endpoint = os.environ[_TABLE_ENDPOINT_ENV]
-    return TableClient(endpoint=endpoint, table_name=_TABLE_NAME, credential=get_credential())
+    with _AUTOWARMUP_TABLE_POOL_LOCK:
+        if _AUTOWARMUP_TABLE_POOLED is None:
+            from api.services.state_repo import _PooledTableClient
+
+            _AUTOWARMUP_TABLE_POOLED = _PooledTableClient(  # type: ignore[assignment]
+                TableClient(
+                    endpoint=endpoint,
+                    table_name=_TABLE_NAME,
+                    credential=get_credential(),
+                )
+            )
+        return _AUTOWARMUP_TABLE_POOLED  # type: ignore[return-value]
+
+
+def _reset_autowarmup_table_pool() -> None:
+    """Test hook + safety valve for credential reset."""
+    global _AUTOWARMUP_TABLE_POOLED
+    with _AUTOWARMUP_TABLE_POOL_LOCK:
+        pool = _AUTOWARMUP_TABLE_POOLED
+        _AUTOWARMUP_TABLE_POOLED = None
+    if pool is not None:
+        close = getattr(pool, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: S110 - close races are not fatal
+                pass
 
 
 def _ensure_table() -> None:

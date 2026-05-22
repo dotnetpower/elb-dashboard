@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -33,6 +34,11 @@ LOGGER = logging.getLogger(__name__)
 ARTIFACTS_CONTAINER = os.environ.get("JOB_ARTIFACTS_CONTAINER", "job-artifacts")
 ARTIFACTS_TABLE = os.environ.get("JOB_ARTIFACTS_TABLE", "jobartifactstate")
 _EXECUTION_STEPS_MAX_BYTES = int(os.environ.get("EXECUTION_STEPS_SNAPSHOT_MAX_BYTES", "4194304"))
+
+# Process-shared pooled TableClient for the artifact state table — see
+# ``_artifact_table_client`` for the contract.
+_ARTIFACT_TABLE_POOLED: TableClient | None = None
+_ARTIFACT_TABLE_POOL_LOCK = threading.Lock()
 _ANALYTICS_JSON_MAX_BYTES = int(os.environ.get("RESULT_ANALYTICS_ARTIFACT_MAX_BYTES", "16777216"))
 _PENDING_STALE_SECONDS = int(os.environ.get("JOB_ARTIFACT_PENDING_STALE_SECONDS", "900"))
 _ENSURED_TABLES: set[tuple[str, str]] = set()
@@ -121,9 +127,48 @@ def _ensure_artifacts_table(endpoint: str) -> None:
 
 
 def _artifact_table_client() -> TableClient:
+    """Return a process-shared pooled ``TableClient`` for the artifacts table.
+
+    Each call previously instantiated a fresh ``TableClient`` (and a fresh
+    azure-core HTTP pipeline) that the ``with`` block closed on exit. On
+    every BLAST submit the artifact write path was paying a full TLS
+    handshake. Pool a single client so the HTTP session is reused, with
+    :class:`state_repo._PooledTableClient` so ``with table:`` keeps working
+    without tearing down the transport.
+    """
     endpoint = _table_endpoint()
     _ensure_artifacts_table(endpoint)
-    return TableClient(endpoint=endpoint, table_name=ARTIFACTS_TABLE, credential=get_credential())
+    global _ARTIFACT_TABLE_POOLED
+    pool = _ARTIFACT_TABLE_POOLED
+    if pool is not None:
+        return pool  # type: ignore[return-value]
+    with _ARTIFACT_TABLE_POOL_LOCK:
+        if _ARTIFACT_TABLE_POOLED is None:
+            from api.services.state_repo import _PooledTableClient
+
+            _ARTIFACT_TABLE_POOLED = _PooledTableClient(  # type: ignore[assignment]
+                TableClient(
+                    endpoint=endpoint,
+                    table_name=ARTIFACTS_TABLE,
+                    credential=get_credential(),
+                )
+            )
+        return _ARTIFACT_TABLE_POOLED  # type: ignore[return-value]
+
+
+def _reset_artifact_table_pool() -> None:
+    """Test hook + safety valve for credential reset."""
+    global _ARTIFACT_TABLE_POOLED
+    with _ARTIFACT_TABLE_POOL_LOCK:
+        pool = _ARTIFACT_TABLE_POOLED
+        _ARTIFACT_TABLE_POOLED = None
+    if pool is not None:
+        close = getattr(pool, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: S110 - close races are not fatal
+                pass
 
 
 def _ensure_artifacts_container(account_name: str) -> None:
