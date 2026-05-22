@@ -27,6 +27,9 @@ LOGGER = logging.getLogger(__name__)
 
 _JWKS_CACHE: dict[str, tuple[float, PyJWKClient]] = {}
 _JWKS_TTL_SECONDS = 3600
+# Single-flight coordination for the JWKS fetch — see `_get_jwks_client`.
+_JWKS_INFLIGHT: dict[str, threading.Event] = {}
+_JWKS_INFLIGHT_LOCK = threading.Lock()
 
 # Validated CallerIdentity cache. Key = sha256(token); value = (expires_at, identity).
 # Bounded soft cap to prevent unbounded growth if many distinct tokens hit the
@@ -68,12 +71,44 @@ def _get_jwks_client(tenant_id: str) -> PyJWKClient:
     if cached and cached[0] > now:
         return cached[1]
 
-    with httpx.Client(timeout=10.0) as client:
-        oidc = client.get(_discovery_url(tenant_id)).raise_for_status().json()
-    jwks_uri = oidc["jwks_uri"]
-    new_client = PyJWKClient(jwks_uri, cache_keys=True, lifespan=_JWKS_TTL_SECONDS)
-    _JWKS_CACHE[tenant_id] = (now + _JWKS_TTL_SECONDS, new_client)
-    return new_client
+    # Single-flight election: while one thread builds the PyJWKClient
+    # (synchronous OIDC discovery + JWKS fetch via ``httpx.Client``),
+    # other threads asking for the same tenant wait on a per-tenant
+    # ``threading.Event`` instead of all paying the full discovery
+    # round-trip. Avoids the thundering-herd thrash that used to fire
+    # on a cold start when the dashboard's first authenticated polls
+    # arrived concurrently.
+    with _JWKS_INFLIGHT_LOCK:
+        cached = _JWKS_CACHE.get(tenant_id)
+        if cached and cached[0] > now:
+            return cached[1]
+        event = _JWKS_INFLIGHT.get(tenant_id)
+        if event is None:
+            event = threading.Event()
+            _JWKS_INFLIGHT[tenant_id] = event
+            leader = True
+        else:
+            leader = False
+    if not leader:
+        # Wait briefly for the leader to populate the cache, then retry.
+        # On timeout we fall through to elect ourselves instead of
+        # blocking forever — covers the case where the leader crashed.
+        event.wait(timeout=15.0)
+        cached = _JWKS_CACHE.get(tenant_id)
+        if cached and cached[0] > time.time():
+            return cached[1]
+        # Leader's cache write failed; fall through and try ourselves.
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            oidc = client.get(_discovery_url(tenant_id)).raise_for_status().json()
+        jwks_uri = oidc["jwks_uri"]
+        new_client = PyJWKClient(jwks_uri, cache_keys=True, lifespan=_JWKS_TTL_SECONDS)
+        _JWKS_CACHE[tenant_id] = (now + _JWKS_TTL_SECONDS, new_client)
+        return new_client
+    finally:
+        with _JWKS_INFLIGHT_LOCK:
+            _JWKS_INFLIGHT.pop(tenant_id, None)
+            event.set()
 
 
 def _token_cache_key(token: str) -> str:
