@@ -26,6 +26,7 @@ import {
   type UpgradeRollbackPreflight,
   type UpgradeStatus,
 } from "@/api/upgrade";
+import { BuildLogViewer } from "@/components/BuildLogViewer";
 
 const STATUS_POLL_MS = 5_000;
 
@@ -404,6 +405,27 @@ export function UpgradePage() {
             </button>
           </section>
         )}
+
+      {status.job_id && (
+        <section className="glass-card" style={cardStack}>
+          <h3 style={{ margin: 0 }}>Build logs</h3>
+          <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+            Per-sidecar `az acr build` output for job{" "}
+            <code>{status.job_id}</code>. Updates every 3 s while the
+            upgrade is active.
+          </p>
+          <div style={{ display: "grid", gap: 12 }}>
+            {(["api", "frontend", "terminal"] as const).map((c) => (
+              <BuildLogViewer
+                key={c}
+                jobId={status.job_id}
+                component={c}
+                active={phase === "active"}
+              />
+            ))}
+          </div>
+        </section>
+      )}
 
       {escape && (
         <section className="glass-card" style={cardStack}>
