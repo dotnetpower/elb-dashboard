@@ -412,12 +412,37 @@ def stream_blob_bytes(
     container: str,
     blob_path: str,
 ) -> Iterator[bytes]:
-    """Stream a blob through the api sidecar without issuing browser SAS."""
+    """Stream a blob through the api sidecar without issuing browser SAS.
+
+    Wraps every active download in a bounded semaphore (default 4 permits,
+    env ``STORAGE_STREAM_MAX_CONCURRENCY``). Without this cap, ten
+    simultaneous browser tab opens could each pin one BlobServiceClient
+    HTTP connection AND the api/worker thread serving them, starving every
+    other in-flight Storage call. The permit is held for the entire
+    generator lifetime so the upstream gating matches the actual resource
+    usage (one TCP socket per concurrent download).
+    """
     _validate_blob_path(blob_path)
     svc = _blob_service(credential, account_name)
     blob = svc.get_blob_client(container, blob_path)
-    downloader = blob.download_blob()
-    yield from downloader.chunks()
+    if not _STREAM_DOWNLOAD_SEMAPHORE.acquire(timeout=_STREAM_DOWNLOAD_ACQUIRE_TIMEOUT_SECONDS):
+        raise RuntimeError(
+            "storage download semaphore exhausted: too many concurrent transfers"
+        )
+    try:
+        downloader = blob.download_blob()
+        yield from downloader.chunks()
+    finally:
+        _STREAM_DOWNLOAD_SEMAPHORE.release()
+
+
+_STREAM_DOWNLOAD_MAX_CONCURRENCY = max(
+    1, int(os.environ.get("STORAGE_STREAM_MAX_CONCURRENCY", "4"))
+)
+_STREAM_DOWNLOAD_ACQUIRE_TIMEOUT_SECONDS = float(
+    os.environ.get("STORAGE_STREAM_ACQUIRE_TIMEOUT_SECONDS", "30")
+)
+_STREAM_DOWNLOAD_SEMAPHORE = threading.BoundedSemaphore(_STREAM_DOWNLOAD_MAX_CONCURRENCY)
 
 
 def list_result_blobs(
