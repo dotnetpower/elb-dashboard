@@ -36,6 +36,9 @@ from api.routes.blast.databases import (
     blast_database_order_oracle as blast_database_order_oracle,
 )
 from api.routes.blast.databases import (
+    blast_database_preview as blast_database_preview,
+)
+from api.routes.blast.databases import (
     blast_database_shard as blast_database_shard,
 )
 from api.routes.blast.databases import (

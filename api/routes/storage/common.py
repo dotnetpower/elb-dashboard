@@ -25,6 +25,14 @@ from api.services.sanitise import sanitise
 _NCBI_S3_BASE = "https://ncbi-blast-databases.s3.amazonaws.com"
 _S3_LIST_NS = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
 
+
+class NcbiAccessDenied(RuntimeError):
+    """S3 returned 403 — distinguishes throttling/IAM from "DB not found"."""
+
+
+class NcbiUnavailable(RuntimeError):
+    """S3 returned 5xx, network failed, or response was malformed."""
+
 # Validation patterns — kept narrow on purpose. NCBI database names are
 # `[A-Za-z0-9_]+` (e.g. `16S_ribosomal_RNA`, `core_nt`), storage account
 # names are `[a-z0-9]{3,24}`, resource groups follow the ARM rules below.
@@ -45,6 +53,8 @@ def _resolve_latest_dir() -> str:
     NCBI updates ``latest-dir`` once per snapshot day. We cache for 1 h
     (env-overridable via ``NCBI_LATEST_DIR_CACHE_TTL``) so the prepare-db
     + warmup paths don't make a fresh HTTP round-trip every call.
+    Failures are NOT cached — a transient throttle or DNS hiccup should not
+    poison the next 60 minutes of requests.
     """
     import httpx
 
@@ -53,9 +63,18 @@ def _resolve_latest_dir() -> str:
         cached = _LATEST_DIR_CACHE.get(_NCBI_S3_BASE)
         if cached and cached[0] > now:
             return cached[1]
-    resp = httpx.get(f"{_NCBI_S3_BASE}/latest-dir", timeout=15.0)
+    try:
+        resp = httpx.get(f"{_NCBI_S3_BASE}/latest-dir", timeout=15.0)
+    except httpx.HTTPError as exc:
+        raise NcbiUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    if resp.status_code == 403:
+        raise NcbiAccessDenied(f"NCBI bucket returned 403 for latest-dir: {resp.text[:200]}")
+    if resp.status_code >= 500 or resp.status_code == 404:
+        raise NcbiUnavailable(f"NCBI latest-dir HTTP {resp.status_code}: {resp.text[:200]}")
     resp.raise_for_status()
     latest = resp.text.strip()
+    if not latest:
+        raise NcbiUnavailable("NCBI latest-dir returned empty body")
     expires_at = time.monotonic() + _LATEST_DIR_CACHE_TTL_SECONDS
     with _NCBI_CACHE_LOCK:
         _LATEST_DIR_CACHE[_NCBI_S3_BASE] = (expires_at, latest)
@@ -71,6 +90,16 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
     ``NCBI_LIST_KEYS_CACHE_TTL`` (default 1 h) keyed by
     ``(latest_dir, db_name)`` because the contents of a given snapshot
     directory never change after NCBI publishes it.
+
+    Hardening:
+      * 403 responses raise ``NcbiAccessDenied`` so the caller can return a
+        clearer 502 ("NCBI throttled or restricted") instead of looking
+        like a 404 ("DB not in snapshot").
+      * Empty results are NOT cached. NCBI occasionally lists a snapshot
+        directory before all DB objects have been published; caching an
+        empty list would lock the next 60 minutes into a false "DB has no
+        files" answer until process restart.
+      * 5xx / network errors raise ``NcbiUnavailable`` (uncached).
     """
     import httpx
 
@@ -85,29 +114,42 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
     keys: list[str] = []
     continuation = ""
     # Hard cap at 50 pages x 1000 objects = 50k keys to bound surprise.
-    with httpx.Client(timeout=30.0) as client:
-        for _page in range(50):
-            list_url = f"{_NCBI_S3_BASE}?list-type=2&prefix={prefix}&max-keys=1000"
-            if continuation:
-                list_url += f"&continuation-token={continuation}"
-            resp = client.get(list_url)
-            resp.raise_for_status()
-            root = ElementTree.fromstring(resp.content)  # noqa: S314 — NCBI public bucket, schema fixed
-            for el in root.findall(".//s3:Contents/s3:Key", _S3_LIST_NS):
-                if el.text and not el.text.endswith("/"):
-                    keys.append(el.text)
-            is_truncated = root.findtext("s3:IsTruncated", "false", _S3_LIST_NS)
-            if is_truncated == "true":
-                tok = root.find("s3:NextContinuationToken", _S3_LIST_NS)
-                continuation = tok.text if tok is not None and tok.text else ""
-            else:
-                break
-    expires_at = time.monotonic() + _LIST_KEYS_CACHE_TTL_SECONDS
-    with _NCBI_CACHE_LOCK:
-        _LIST_KEYS_CACHE[cache_key] = (expires_at, list(keys))
-        if len(_LIST_KEYS_CACHE) > 64:
-            oldest = min(_LIST_KEYS_CACHE.items(), key=lambda kv: kv[1][0])[0]
-            _LIST_KEYS_CACHE.pop(oldest, None)
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            for _page in range(50):
+                list_url = f"{_NCBI_S3_BASE}?list-type=2&prefix={prefix}&max-keys=1000"
+                if continuation:
+                    list_url += f"&continuation-token={continuation}"
+                resp = client.get(list_url)
+                if resp.status_code == 403:
+                    raise NcbiAccessDenied(
+                        f"NCBI bucket returned 403 listing {prefix!r}: {resp.text[:200]}"
+                    )
+                if resp.status_code >= 500:
+                    raise NcbiUnavailable(
+                        f"NCBI bucket HTTP {resp.status_code} listing {prefix!r}"
+                    )
+                resp.raise_for_status()
+                root = ElementTree.fromstring(resp.content)  # noqa: S314 — NCBI public bucket, schema fixed
+                for el in root.findall(".//s3:Contents/s3:Key", _S3_LIST_NS):
+                    if el.text and not el.text.endswith("/"):
+                        keys.append(el.text)
+                is_truncated = root.findtext("s3:IsTruncated", "false", _S3_LIST_NS)
+                if is_truncated == "true":
+                    tok = root.find("s3:NextContinuationToken", _S3_LIST_NS)
+                    continuation = tok.text if tok is not None and tok.text else ""
+                else:
+                    break
+    except httpx.HTTPError as exc:
+        raise NcbiUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    # Only cache non-empty results — see docstring.
+    if keys:
+        expires_at = time.monotonic() + _LIST_KEYS_CACHE_TTL_SECONDS
+        with _NCBI_CACHE_LOCK:
+            _LIST_KEYS_CACHE[cache_key] = (expires_at, list(keys))
+            if len(_LIST_KEYS_CACHE) > 64:
+                oldest = min(_LIST_KEYS_CACHE.items(), key=lambda kv: kv[1][0])[0]
+                _LIST_KEYS_CACHE.pop(oldest, None)
     return keys
 
 

@@ -37,6 +37,7 @@ export interface DownloadedDbMeta {
   total_bytes?: number;
   last_modified?: string;
   source_version?: string;
+  signature_etag?: string;
   downloaded_at?: string;
   /** True when prepare-db has uploaded preset shard layouts for this DB. */
   sharded?: boolean;
@@ -50,6 +51,22 @@ export interface DownloadedDbMeta {
   update_completed_at?: string | null;
   update_error?: string | null;
   update_failed_at?: string | null;
+  /**
+   * Honest per-DB copy lifecycle from the hardened prepare-db pipeline.
+   * Source of truth for "is this DB actually downloaded": phase === "completed"
+   * is the ONLY value that means Ready. The pre-hardening SPA used
+   * `file_count >= 90% of expected` which surfaced partial copies as Ready.
+   */
+  copy_status?: {
+    phase: "copying" | "partial" | "init_failed" | "completed" | string;
+    total_files?: number;
+    success?: number;
+    failed?: number;
+    aborted?: number;
+    pending?: number;
+    timed_out?: boolean;
+  };
+  failed_files?: Array<{ blob: string; status: string; reason?: string }>;
   db_order_oracle?: {
     status: string;
     run_id?: string | null;
@@ -97,11 +114,37 @@ export function useBlastDb({
   });
 
   const latestQuery = useQuery({
-    queryKey: ["blast-db-latest-version"],
-    queryFn: () => blastApi.checkUpdates(),
+    queryKey: [
+      "blast-db-latest-version",
+      subscriptionId,
+      accountName,
+      resourceGroup,
+    ],
+    queryFn: () =>
+      blastApi.checkUpdates(
+        subscriptionId && accountName && resourceGroup
+          ? {
+              subscriptionId,
+              storageAccount: accountName,
+              resourceGroup,
+            }
+          : undefined,
+      ),
     staleTime: 300_000,
   });
   const latestVersion = latestQuery.data?.latest_version ?? null;
+  const updatesAvailableByDb = useMemo(() => {
+    const map = new Map<string, { snapshot?: string; etag?: string }>();
+    for (const item of latestQuery.data?.updates_available ?? []) {
+      if (item?.db) {
+        map.set(item.db, {
+          snapshot: item.snapshot,
+          etag: item.signature_etag,
+        });
+      }
+    }
+    return map;
+  }, [latestQuery.data?.updates_available]);
 
   // The backend signals "local laptop cannot reach data plane" through either
   // private-only accounts or selected-network firewall rejects. Treat both as
@@ -147,33 +190,75 @@ export function useBlastDb({
         next.set(name, {
           source_version: meta.source_version,
           downloaded_at: new Date().toISOString(),
+          copy_status: { phase: "completed" },
         });
       }
     }
     return next;
   }, [dbQuery.data?.databases, locallyDownloaded]);
 
+  /**
+   * Authoritative "this DB is genuinely usable for BLAST" predicate.
+   * Modern entries (post-hardening) carry ``copy_status.phase`` — only
+   * ``completed`` counts. Legacy entries without ``copy_status`` fall back
+   * to "has files and is not mid-update", which preserves the behaviour
+   * for DBs prepared before the hardening shipped.
+   */
+  const isDbReady = (meta: DownloadedDbMeta | undefined): boolean => {
+    if (!meta) return false;
+    if (meta.copy_status?.phase) {
+      return meta.copy_status.phase === "completed";
+    }
+    if (meta.update_in_progress) return false;
+    return Boolean(meta.file_count && meta.file_count > 0);
+  };
+
   const updatesAvailable = useMemo(() => {
+    // Prefer the server-side per-DB list (compares NCBI ETag against the
+    // ETag stored when prepare-db landed) — it does not fire whenever
+    // ``latest-dir`` rotates. Fall back to the legacy heuristic only when
+    // the server omitted the per-DB list (no storage scope passed).
+    if (updatesAvailableByDb.size > 0) {
+      let n = 0;
+      for (const [name] of updatesAvailableByDb) {
+        const meta = downloadedDbs.get(name);
+        if (meta && !meta.update_in_progress) n += 1;
+      }
+      return n;
+    }
     if (!latestVersion) return 0;
     return [...downloadedDbs.values()].filter(
       (d) =>
         d.source_version && d.source_version !== latestVersion && !d.update_in_progress,
     ).length;
-  }, [downloadedDbs, latestVersion]);
+  }, [downloadedDbs, latestVersion, updatesAvailableByDb]);
 
-  // Tick elapsed seconds while a download API call is in-flight
+  // Tick elapsed seconds while ANY copy is in-flight — either the API ack
+  // is pending (``downloading``) or the server-side copy daemon is polling
+  // (``inProgress`` map populated). Pre-hardening this was tied to
+  // ``downloading`` alone, so the elapsed counter reset to 0 immediately
+  // after the POST returned and the user saw "0s" while the multi-hour
+  // server-side copy was still running.
   useEffect(() => {
-    if (!downloading) {
+    const anyActive = Boolean(downloading) || inProgress.size > 0;
+    if (!anyActive) {
       setElapsed(0);
       return;
     }
-    const start = Date.now();
+    const earliestStart = (() => {
+      let earliest = Date.now();
+      for (const info of inProgress.values()) {
+        if (info.startTime < earliest) earliest = info.startTime;
+      }
+      return earliest;
+    })();
+    setElapsed(Math.floor((Date.now() - earliestStart) / 1000));
     const t = setInterval(
-      () => setElapsed(Math.floor((Date.now() - start) / 1000)),
+      () => setElapsed(Math.floor((Date.now() - earliestStart) / 1000)),
       1000,
     );
     return () => clearInterval(t);
-  }, [downloading]);
+  }, [downloading, inProgress]);
 
   // Poll storage every 10s while any copy is in progress.
   // Depends only on `dbQuery.refetch` (stable across renders in react-query),
@@ -188,7 +273,12 @@ export function useBlastDb({
     return () => clearInterval(t);
   }, [inProgress.size, refetchDbList]);
 
-  // Detect copy completion (>=90% of expected files materialised)
+  // Detect copy completion honestly — the hardened prepare-db pipeline writes
+  // ``copy_status.phase`` into ``{db}-metadata.json``. Only ``completed`` is
+  // success; ``partial`` / ``init_failed`` mean the user must intervene
+  // (retry / check NCBI). The pre-hardening 90%-of-files heuristic would
+  // mark partial successes as "Ready" forever, which broke later BLAST
+  // submits with cryptic "DB not found" errors.
   useEffect(() => {
     if (inProgress.size === 0) return;
     setInProgress((prev) => {
@@ -196,12 +286,34 @@ export function useBlastDb({
       const next = new Map(prev);
       for (const [name, info] of prev) {
         const actual = downloadedDbs.get(name);
-        if (actual?.file_count && actual.file_count >= info.expectedFiles * 0.9) {
+        const phase = actual?.copy_status?.phase;
+        if (
+          phase === "completed" ||
+          phase === "partial" ||
+          phase === "init_failed"
+        ) {
           next.delete(name);
           changed = true;
-          setLocallyDownloaded((p) =>
-            new Map(p).set(name, { source_version: info.sourceVersion }),
-          );
+          if (phase === "completed") {
+            setLocallyDownloaded((p) =>
+              new Map(p).set(name, { source_version: info.sourceVersion }),
+            );
+          } else {
+            // Partial/init-failed: keep the user informed with an error toast
+            // instead of silently flipping to "Ready".
+            const fileCount = actual?.copy_status?.success ?? 0;
+            const total = actual?.copy_status?.total_files ?? info.expectedFiles;
+            const failed =
+              (actual?.copy_status?.failed ?? 0) +
+              (actual?.copy_status?.aborted ?? 0);
+            setDownloadResult({
+              db: name,
+              msg:
+                actual?.update_error ||
+                `Server-side copy partial: ${fileCount}/${total} succeeded, ${failed} failed. Retry from the catalog.`,
+              type: "err",
+            });
+          }
         }
       }
       return changed ? next : prev;
@@ -342,7 +454,9 @@ export function useBlastDb({
     storageAccessTitle,
     storageAccessHint,
     downloadedDbs,
+    isDbReady,
     updatesAvailable,
+    updatesAvailableByDb,
     // Local-debug state (only meaningful when the api process is local)
     canEnableLocalAccess,
     localDebug,

@@ -296,6 +296,34 @@ export interface BlastDatabase {
   update_completed_at?: string | null;
   update_error?: string | null;
   update_failed_at?: string | null;
+  /**
+   * Honest per-DB copy lifecycle from the hardened prepare-db pipeline.
+   * Replaces the legacy "file_count >= 90% of expected" SPA heuristic which
+   * could mark partial copies as Ready (see ETag-based partial detection).
+   * Phases: `copying` (start_copy_from_url polling), `partial` (one or more
+   * server-side copies failed/aborted/timed out), `init_failed` (initiation
+   * itself errored), `completed` (every copy reached `copy.status=success`).
+   */
+  copy_status?: {
+    phase: "copying" | "partial" | "init_failed" | "completed" | string;
+    total_files?: number;
+    success?: number;
+    failed?: number;
+    aborted?: number;
+    pending?: number;
+    timed_out?: boolean;
+    initiation_started?: number;
+    initiation_skipped?: number;
+    initiation_errors?: number;
+  };
+  /** Per-blob failure details from copy.status polling (truncated to 50). */
+  failed_files?: Array<{ blob: string; status: string; reason?: string }>;
+  /**
+   * NCBI ETag (md5 or first tar.gz) captured at the end of prepare-db.
+   * Used by the per-DB update check to differentiate "real DB changed" from
+   * "NCBI rotated latest-dir but this DB's bytes did not".
+   */
+  signature_etag?: string;
   db_order_oracle?: {
     status: "ready" | "building" | "failed" | string;
     run_id?: string | null;
@@ -782,8 +810,60 @@ export const blastApi = {
     }>(qs);
   },
 
-  checkUpdates: () =>
-    api.get<{ latest_version: string }>("/blast/databases/check-updates"),
+  checkUpdates: (
+    options?: {
+      subscriptionId?: string;
+      storageAccount?: string;
+      resourceGroup?: string;
+    },
+  ) => {
+    let qs = "/blast/databases/check-updates";
+    if (
+      options?.subscriptionId &&
+      options?.storageAccount &&
+      options?.resourceGroup
+    ) {
+      qs +=
+        `?subscription_id=${encodeURIComponent(options.subscriptionId)}` +
+        `&storage_account=${encodeURIComponent(options.storageAccount)}` +
+        `&resource_group=${encodeURIComponent(options.resourceGroup)}`;
+    }
+    return api.get<{
+      latest_version: string;
+      updates_available: Array<{
+        db: string;
+        snapshot?: string;
+        signature_etag?: string;
+        stored_etag?: string | null;
+        stored_source_version?: string | null;
+      }>;
+      degraded?: boolean;
+      degraded_reason?: string;
+      message?: string;
+    }>(qs);
+  },
+
+  /**
+   * Dry-run NCBI snapshot summary for a DB the user might pull. Drives the
+   * "version info BEFORE download" surface in BlastDbModal — file count,
+   * snapshot id, estimated bytes, last-modified, and a clear "not on S3"
+   * hint when the DB exists only on the NCBI FTP mirror.
+   */
+  previewDatabase: (dbName: string) =>
+    api.get<{
+      db_name: string;
+      snapshot: string;
+      available: boolean;
+      file_count: number;
+      volume_count?: number;
+      total_bytes_estimate?: number;
+      last_modified?: string | null;
+      signature_key?: string | null;
+      signature_etag?: string | null;
+      files_sample?: string[];
+      source?: string;
+      message?: string;
+    }>(`/blast/databases/${encodeURIComponent(dbName)}/preview`),
 
   /**
    * Trigger prepare-db's sharding step against an already-downloaded DB.

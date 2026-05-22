@@ -15,10 +15,18 @@ import {
   formatStorageDate,
 } from "@/components/cards/storageDbCatalog";
 import type { DownloadedDbMeta } from "@/components/cards/storage/useBlastDb";
+import type { DbPreviewMeta } from "@/components/cards/storage/useDbPreviews";
 
 interface BlastDbRowProps {
   db: BlastDbCatalogItem;
   meta: DownloadedDbMeta | undefined;
+  /**
+   * Live NCBI snapshot dry-run for this catalog DB. When ``available=false``
+   * the DB is missing from the current S3 snapshot (FTP-only or
+   * mid-publish); the row surfaces a clear hint instead of letting the
+   * Download button fail with a 404 mid-copy.
+   */
+  preview?: DbPreviewMeta;
   isDownloaded: boolean;
   isDownloading: boolean;
   isCopying: boolean;
@@ -49,6 +57,7 @@ interface BlastDbRowProps {
 export function BlastDbRow({
   db,
   meta,
+  preview,
   isDownloaded,
   isDownloading,
   isCopying,
@@ -76,6 +85,11 @@ export function BlastDbRow({
     }
   };
   const isUpdating = Boolean(meta?.update_in_progress);
+  const copyPhase = meta?.copy_status?.phase;
+  const isPartial = copyPhase === "partial" || copyPhase === "init_failed";
+  const previewUnavailable = preview ? preview.available === false : false;
+  const downloadBlocked =
+    downloadDisabled || (previewUnavailable && !isDownloaded);
 
   return (
     <div
@@ -198,9 +212,42 @@ export function BlastDbRow({
             {db.value}
           </code>
           {!isDownloaded && !isDownloading && !isCopying && (
-            <span>
-              Est. {db.estFiles} files · {db.estMinutes}
-            </span>
+            <>
+              {preview?.available ? (
+                <>
+                  <span title="Live NCBI snapshot info — fetched before download">
+                    NCBI: {preview.file_count} files
+                    {preview.total_bytes_estimate
+                      ? ` · ~${formatBytes(preview.total_bytes_estimate)}`
+                      : ""}
+                  </span>
+                  {preview.snapshot && (
+                    <code
+                      style={{
+                        fontSize: 10,
+                        background: "var(--bg-tertiary)",
+                        padding: "1px 5px",
+                        borderRadius: 3,
+                      }}
+                      title={`Current NCBI snapshot: ${preview.snapshot}`}
+                    >
+                      v:{formatNcbiVersion(preview.snapshot)}
+                    </code>
+                  )}
+                </>
+              ) : preview && preview.available === false ? (
+                <span
+                  style={{ color: "var(--warning)" }}
+                  title={preview.message ?? "Not in current NCBI S3 snapshot"}
+                >
+                  Not in current NCBI snapshot
+                </span>
+              ) : (
+                <span>
+                  Est. {db.estFiles} files · {db.estMinutes}
+                </span>
+              )}
+            </>
           )}
           {isDownloading && (
             <span style={{ color: "var(--accent)" }}>
@@ -210,7 +257,9 @@ export function BlastDbRow({
           )}
           {isCopying && inProgressInfo && (
             <span style={{ color: "var(--accent)" }}>
-              Copying {meta?.file_count ?? 0} / {inProgressInfo.expectedFiles}{" "}
+              Copying{" "}
+              {meta?.copy_status?.success ?? meta?.file_count ?? 0} /{" "}
+              {meta?.copy_status?.total_files ?? inProgressInfo.expectedFiles}{" "}
               files{" "}
               <span
                 style={{
@@ -226,6 +275,38 @@ export function BlastDbRow({
                   · est. {db.estMinutes}
                 </span>
               )}
+            </span>
+          )}
+          {isPartial && meta && (
+            <span
+              className="db-shard-chip"
+              title={
+                meta.update_error ??
+                "Last download did not complete. Click Get to retry."
+              }
+              style={{
+                fontSize: 10,
+                padding: "1px 6px",
+                borderRadius: 3,
+                color: "var(--danger)",
+                background: "rgba(224,123,138,0.08)",
+                border: "1px solid rgba(224,123,138,0.22)",
+                fontWeight: 500,
+                whiteSpace: "nowrap",
+                letterSpacing: 0,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <AlertCircle size={10} />
+              {copyPhase === "init_failed" ? "Copy init failed" : "Partial copy"}
+              {meta.copy_status?.failed != null
+                ? ` · ${meta.copy_status.failed} failed`
+                : ""}
+              {meta.copy_status?.pending
+                ? ` · ${meta.copy_status.pending} pending`
+                : ""}
             </span>
           )}
           {isDownloaded && meta && (
@@ -503,14 +584,17 @@ export function BlastDbRow({
               e.stopPropagation();
               triggerDownload();
             }}
-            disabled={downloadDisabled}
+            disabled={downloadBlocked}
             title={
-              downloadDisabled
-                ? "Another download is in progress"
-                : `Download ${db.value}`
+              previewUnavailable
+                ? (preview?.message ??
+                  "Not in current NCBI S3 snapshot. Retry once the snapshot rotates.")
+                : downloadDisabled
+                  ? "Another download is in progress"
+                  : `Download ${db.value}`
             }
           >
-            <Download size={11} /> Get
+            <Download size={11} /> {isPartial ? "Retry" : "Get"}
           </button>
         )}
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Database, Lock, RefreshCw, X } from "lucide-react";
 
@@ -17,6 +17,7 @@ import {
   setAutoWarmupDb,
 } from "@/components/cards/storage/autoWarmupPrefs";
 import type { UseBlastDbReturn } from "@/components/cards/storage/useBlastDb";
+import { useDbPreviews } from "@/components/cards/storage/useDbPreviews";
 
 const CATEGORIES = ["Small / Test", "Medium", "Large"] as const;
 
@@ -72,7 +73,9 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
     storageAccessTitle,
     storageAccessHint,
     downloadedDbs,
+    isDbReady,
     updatesAvailable,
+    updatesAvailableByDb,
     downloading,
     oracleBuilding,
     inProgress,
@@ -82,6 +85,17 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
     handleDownload,
     handleBuildOracle,
   } = state;
+
+  // Preview NCBI snapshot info for every catalog row + the custom-input
+  // value so the user sees real file count / size / last-modified BEFORE
+  // clicking Download — and gets an honest "not on S3" hint when a DB is
+  // FTP-only or mid-publish.
+  const previewNames = useMemo(() => DB_CATALOG.map((d) => d.value), []);
+  const { byName: previewByName } = useDbPreviews(
+    previewNames,
+    // Only fetch when the modal is open (the parent only mounts us then).
+    true,
+  );
 
   const startDownload = (name: string) => {
     void handleDownload(name);
@@ -170,17 +184,24 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
             flexWrap: "wrap",
           }}
         >
-          <span>
-            {downloadedDbs.size}/{DB_CATALOG.length} downloaded
-          </span>
-          {downloadedDbs.size > 0 && (
-            <span>
-              {formatBytes(
-                [...downloadedDbs.values()].reduce((s, d) => s + (d.total_bytes ?? 0), 0),
-              )}{" "}
-              used
-            </span>
-          )}
+          {(() => {
+            const readyDbs = [...downloadedDbs.values()].filter((d) => isDbReady(d));
+            return (
+              <>
+                <span>
+                  {readyDbs.length}/{DB_CATALOG.length} downloaded
+                </span>
+                {readyDbs.length > 0 && (
+                  <span>
+                    {formatBytes(
+                      readyDbs.reduce((s, d) => s + (d.total_bytes ?? 0), 0),
+                    )}{" "}
+                    used
+                  </span>
+                )}
+              </>
+            );
+          })()}
           {updatesAvailable > 0 && (
             <span style={{ color: "var(--warning)", fontWeight: 600 }}>
               {updatesAvailable} update{updatesAvailable > 1 ? "s" : ""} available
@@ -277,7 +298,7 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
             {CATEGORIES.map((cat) => {
               const dbs = DB_CATALOG.filter((d) => d.category === cat);
               const downloadedInCat = dbs.filter((d) =>
-                downloadedDbs.has(d.value),
+                isDbReady(downloadedDbs.get(d.value)),
               ).length;
               return (
                 <div key={cat}>
@@ -325,29 +346,46 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                   {dbs.map((db) => {
                     const inProgressInfo = inProgress.get(db.value);
                     const isCopying = Boolean(inProgressInfo);
-                    const isDownloaded = !isCopying && downloadedDbs.has(db.value);
-                    const isDownloading = downloading === db.value;
                     const meta = downloadedDbs.get(db.value);
+                    const isDownloaded = !isCopying && isDbReady(meta);
+                    const isDownloading = downloading === db.value;
+                    const preview = previewByName.get(db.value);
+                    const expectedFromPreview =
+                      preview?.file_count ?? inProgressInfo?.expectedFiles ?? 0;
                     const copyProgress = inProgressInfo
                       ? Math.min(
                           100,
                           Math.round(
-                            ((meta?.file_count ?? 0) / inProgressInfo.expectedFiles) *
+                            ((meta?.copy_status?.success ?? meta?.file_count ?? 0) /
+                              Math.max(
+                                meta?.copy_status?.total_files ??
+                                  inProgressInfo.expectedFiles ??
+                                  expectedFromPreview ??
+                                  1,
+                                1,
+                              )) *
                               100,
                           ),
                         )
                       : 0;
-                    const hasUpdate =
-                      isDownloaded &&
+                    // Per-DB update detection prefers the server-side ETag
+                    // map; fall back to the legacy snapshot comparison only
+                    // when the server omitted the per-DB list.
+                    const etagUpdate = updatesAvailableByDb.has(db.value);
+                    const legacyUpdate =
                       !!meta?.source_version &&
                       !!latestVersion &&
-                      meta.source_version !== latestVersion &&
-                      !meta.update_in_progress;
+                      meta.source_version !== latestVersion;
+                    const hasUpdate =
+                      isDownloaded &&
+                      (etagUpdate || (updatesAvailableByDb.size === 0 && legacyUpdate)) &&
+                      !meta?.update_in_progress;
                     return (
                       <BlastDbRow
                         key={db.value}
                         db={db}
                         meta={meta}
+                        preview={preview}
                         isDownloaded={isDownloaded}
                         isDownloading={isDownloading}
                         isCopying={isCopying}

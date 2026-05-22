@@ -751,6 +751,25 @@ def list_databases(
                         info[key] = meta[key]
                 if isinstance(meta.get("update_error"), str):
                     info["update_error"] = meta["update_error"][:300]
+                # Hardened prepare-db pipeline fields. ``copy_status`` is the
+                # authoritative replacement for the SPA's old "90% of files
+                # arrived = Ready" heuristic — when phase == "completed" the
+                # download truly succeeded; "partial" / "init_failed" /
+                # "copying" are honest in-flight or partial states.
+                if isinstance(meta.get("copy_status"), dict):
+                    info["copy_status"] = meta["copy_status"]
+                if isinstance(meta.get("failed_files"), list):
+                    info["failed_files"] = [
+                        item
+                        for item in meta["failed_files"]
+                        if isinstance(item, dict)
+                    ][:50]
+                # ETag of a stable NCBI key (the .tar.gz.md5 we picked when
+                # the DB was prepared). The SPA uses it for per-DB update
+                # detection that does NOT fire whenever NCBI rotates
+                # latest-dir.
+                if isinstance(meta.get("signature_etag"), str):
+                    info["signature_etag"] = meta["signature_etag"]
                 # Allow metadata to override total_bytes if the prepare-db
                 # pipeline computed it more precisely than blob enumeration
                 # (e.g. for very large multi-volume DBs).

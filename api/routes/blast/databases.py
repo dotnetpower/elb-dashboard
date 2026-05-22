@@ -4,11 +4,13 @@ Responsibility: /api/blast database catalogue, sharding, and oracle routes
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
 Key entry points: `blast_databases`, `blast_database_shard`, `blast_database_order_oracle`,
-`blast_databases_check_updates`, `blast_databases_versions`, `blast_databases_build_stub`
+`blast_databases_check_updates`, `blast_databases_versions`, `blast_databases_build_stub`,
+`blast_database_preview`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
-api/tests/test_route_contracts.py`.
+api/tests/test_route_contracts.py api/tests/test_blast_databases_preview.py
+api/tests/test_blast_databases_check_updates.py`.
 """
 
 from __future__ import annotations
@@ -563,37 +565,170 @@ def blast_database_order_oracle(
 
 @router.get("/databases/check-updates")
 def blast_databases_check_updates(
+    subscription_id: str = Query(default=""),
+    storage_account: str = Query(default=""),
+    resource_group: str = Query(default=""),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
-    """Return NCBI's current ``latest-dir`` snapshot id.
+    """Return NCBI's current snapshot plus a per-DB update list.
 
-    The SPA compares this against each downloaded DB's ``source_version``
-    (written into ``{db}-metadata.json`` by ``/api/storage/prepare-db``) to
-    flag DBs whose snapshot is stale. The lookup is a single unauthenticated
-    GET to the NCBI public S3 bucket — fast and cheap; it is intentionally
-    not Celery-backed.
+    Two-tier response:
+
+    * ``latest_version`` — the bucket-wide ``latest-dir`` tag (back-compat).
+    * ``updates_available`` — per-DB list ``[{db, snapshot, signature_etag,
+      stored_etag, stored_source_version}]`` for every downloaded DB whose
+      NCBI signature ETag differs from the value last written into
+      ``{db}-metadata.json``. The ETag comparison replaces the previous
+      ``source_version != latest-dir`` heuristic, which produced false
+      positives every time NCBI rotated ``latest-dir`` even when the
+      requested DB itself had not changed.
+
+    Optional query params drive the per-DB enrichment. With no storage
+    account the response is the back-compat shape ``{latest_version,
+    updates_available: []}``.
     """
-    try:
-        import httpx
+    from api.routes.storage.common import (
+        NcbiAccessDenied,
+        NcbiUnavailable,
+    )
 
-        resp = httpx.get(
-            "https://ncbi-blast-databases.s3.amazonaws.com/latest-dir",
-            timeout=15.0,
-        )
-        resp.raise_for_status()
+    base: dict[str, Any] = {
+        "latest_version": "",
+        "updates_available": [],
+    }
+
+    try:
+        from api.routes.storage.common import _resolve_latest_dir
+        from api.services.ncbi_catalogue import preview_database
+
+        base["latest_version"] = _resolve_latest_dir()
+    except NcbiAccessDenied as exc:
+        LOGGER.warning("check-updates: NCBI denied: %s", type(exc).__name__)
         return {
-            "latest_version": resp.text.strip(),
-            "updates_available": [],
+            **base,
+            "degraded": True,
+            "degraded_reason": "ncbi_denied",
+            "message": "NCBI bucket refused the request (likely throttling).",
         }
-    except Exception as exc:
-        LOGGER.warning("blast/databases/check-updates failed: %s", type(exc).__name__)
+    except NcbiUnavailable as exc:
+        LOGGER.warning("check-updates: NCBI unavailable: %s", type(exc).__name__)
         return {
-            "latest_version": "",
-            "updates_available": [],
+            **base,
             "degraded": True,
             "degraded_reason": "ncbi_unreachable",
             "message": f"Could not contact NCBI: {type(exc).__name__}",
         }
+    except Exception as exc:
+        LOGGER.warning("check-updates failed: %s", type(exc).__name__)
+        return {
+            **base,
+            "degraded": True,
+            "degraded_reason": "ncbi_unreachable",
+            "message": f"Could not contact NCBI: {type(exc).__name__}",
+        }
+
+    if not (storage_account and resource_group):
+        return base
+
+    # Per-DB enrichment — only runs when the caller passes storage scope.
+    from api.services import get_credential
+    from api.services.storage_data import list_databases
+
+    cred = get_credential()
+    _maybe_open_local_storage_access(
+        cred,
+        subscription_id,
+        resource_group,
+        storage_account,
+        context="blast_databases_check_updates",
+    )
+    try:
+        downloaded = list_databases(cred, storage_account)
+    except Exception as exc:
+        LOGGER.warning("check-updates list_databases failed: %s", type(exc).__name__)
+        return base
+
+    updates: list[dict[str, Any]] = []
+    for db in downloaded:
+        if not isinstance(db, dict):
+            continue
+        name = str(db.get("name") or "").strip()
+        if not name:
+            continue
+        stored_etag = str(db.get("signature_etag") or "").strip()
+        stored_version = str(db.get("source_version") or "").strip()
+        try:
+            preview = preview_database(name)
+        except (NcbiAccessDenied, NcbiUnavailable, ValueError) as exc:
+            LOGGER.debug(
+                "check-updates: preview %s skipped: %s",
+                name,
+                type(exc).__name__,
+            )
+            continue
+        if not preview.get("available"):
+            continue
+        ncbi_etag = str(preview.get("signature_etag") or "").strip()
+        ncbi_snapshot = str(preview.get("snapshot") or "").strip()
+        # Update detection precedence:
+        #   * stored_etag present -> compare ETag (precise, per-DB)
+        #   * else fall back to source_version vs snapshot (legacy, noisier)
+        if stored_etag:
+            changed = bool(ncbi_etag) and ncbi_etag != stored_etag
+        else:
+            changed = bool(ncbi_snapshot) and ncbi_snapshot != stored_version
+        if changed:
+            updates.append(
+                {
+                    "db": name,
+                    "snapshot": ncbi_snapshot,
+                    "signature_etag": ncbi_etag,
+                    "stored_etag": stored_etag or None,
+                    "stored_source_version": stored_version or None,
+                }
+            )
+
+    base["updates_available"] = updates
+    return base
+
+
+@router.get("/databases/{db_name}/preview")
+def blast_database_preview(
+    db_name: str,
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return a dry-run NCBI snapshot summary for a DB the user might pull.
+
+    Used by the SPA modal to show snapshot id, file count, estimated bytes,
+    and last-modified BEFORE the user clicks Download. ``available=False``
+    means the DB is missing from the current S3 snapshot (likely FTP-only or
+    mid-publish) — the SPA surfaces that as a clear hint instead of letting
+    the Download button silently fail with a 404 mid-copy.
+    """
+    from api.routes.storage.common import (
+        NcbiAccessDenied,
+        NcbiUnavailable,
+    )
+    from api.services.ncbi_catalogue import RE_DB_NAME, preview_database
+
+    if not RE_DB_NAME.match(db_name):
+        raise HTTPException(400, "invalid db_name")
+    try:
+        return preview_database(db_name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)[:200]) from exc
+    except NcbiAccessDenied as exc:
+        LOGGER.warning("preview %s: NCBI denied: %s", db_name, type(exc).__name__)
+        raise HTTPException(
+            502,
+            "NCBI bucket refused the request (likely rate-limited); retry shortly.",
+        ) from exc
+    except NcbiUnavailable as exc:
+        LOGGER.warning("preview %s: NCBI unavailable: %s", db_name, type(exc).__name__)
+        raise HTTPException(
+            502,
+            f"Could not contact NCBI: {type(exc).__name__}",
+        ) from exc
 
 
 @router.get("/databases/versions")

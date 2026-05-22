@@ -19,9 +19,10 @@ from api.routes.storage import common
 
 
 class _FakeResponse:
-    def __init__(self, *, text: str = "", content: bytes = b"") -> None:
+    def __init__(self, *, text: str = "", content: bytes = b"", status_code: int = 200) -> None:
         self.text = text
         self.content = content
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         return None

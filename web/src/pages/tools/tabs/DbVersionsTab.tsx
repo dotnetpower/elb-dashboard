@@ -99,8 +99,6 @@ export function DbVersionsTab({
                 <th>Source</th>
                 <th>Version</th>
                 <th>Created</th>
-                <th>By</th>
-                <th>Notes</th>
               </tr>
             </thead>
             <tbody>
@@ -122,17 +120,6 @@ export function DbVersionsTab({
                   <td>{v.source_version || v.version_tag || "—"}</td>
                   <td className="muted">
                     {v.created_at ? new Date(v.created_at).toLocaleDateString() : "—"}
-                  </td>
-                  <td className="muted">{v.created_by ?? "—"}</td>
-                  <td
-                    className="muted"
-                    style={{
-                      maxWidth: 220,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {v.notes ?? ""}
                   </td>
                 </tr>
               ))}

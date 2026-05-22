@@ -3,21 +3,29 @@
 Responsibility: Storage prepare-db route for NCBI BLAST database copies
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `_read_db_metadata`, `_write_db_metadata`, `prepare_db`
+Key entry points: `_read_db_metadata`, `_write_db_metadata`, `_update_metadata`,
+`_poll_copy_completion`, `prepare_db`
 Risky contracts: Never issue browser SAS URLs; local public Storage access remains debug-only
-and IP-allowlisted.
+and IP-allowlisted. Concurrent prepare_db calls for the same (account, db) MUST be serialised
+by `_PREPARE_DB_LOCK_REGISTRY` so the metadata.json is never raced. `source_version` is
+promoted ONLY when every server-side copy reaches `success`; partial copies must leave the
+previous generation's `source_version` intact.
 Validation: `uv run pytest -q api/tests/test_storage_data.py
-api/tests/test_storage_public_access.py`.
+api/tests/test_storage_public_access.py api/tests/test_prepare_db_hardening.py`.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from datetime import UTC, datetime
 from threading import Thread
 from typing import Any
 
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.auth import CallerIdentity, require_caller
@@ -39,6 +47,47 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# Per-(account, db) lock registry. Mirrors the pattern used by
+# /api/blast/databases/{db}/shard so a re-clicked Download cannot spawn two
+# daemons that race the same metadata.json blob. The registry never shrinks
+# (one Lock per ever-touched DB) which is fine at our scale.
+_PREPARE_DB_LOCK_REGISTRY: dict[str, threading.Lock] = {}
+_PREPARE_DB_LOCK_REGISTRY_GUARD = threading.Lock()
+# An older `update_in_progress=true` marker than this is treated as a crashed
+# previous daemon. Large enough to cover the worst-case copy initiation for
+# `nt`/`sra` but small enough that real crashes recover same-hour.
+_PREPARE_DB_STALE_SECONDS = 2 * 60 * 60
+# Copy-status poll cadence and cap. The api sidecar wakes once a minute to
+# poll BlobProperties.copy.status for every staged file. Bounded so that an
+# orphaned daemon cannot run indefinitely; on hitting the cap we mark the
+# update failed with timed_out reason so the SPA shows an honest state.
+_COPY_POLL_INTERVAL_SECONDS = 60.0
+_COPY_POLL_MAX_SECONDS = 24 * 60 * 60
+_COPY_POLL_BATCH_SIZE = 32
+
+
+def _prepare_db_lock(account_name: str, db_name: str) -> threading.Lock:
+    key = f"{account_name.lower()}|{db_name}"
+    with _PREPARE_DB_LOCK_REGISTRY_GUARD:
+        return _PREPARE_DB_LOCK_REGISTRY.setdefault(key, threading.Lock())
+
+
+def _is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
+    """Return True if the metadata's update_in_progress flag is old enough to
+    be treated as a crashed previous daemon."""
+    if not metadata.get("update_in_progress"):
+        return True
+    started = str(metadata.get("update_started_at") or "")
+    if not started:
+        return True
+    try:
+        started_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        age = (datetime.now(UTC) - started_dt).total_seconds()
+    except Exception:
+        return True
+    return age >= _PREPARE_DB_STALE_SECONDS
+
+
 def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
     metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
     try:
@@ -51,17 +100,50 @@ def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
     return {"db_name": db_name}
 
 
+def _download_blob_with_etag(container: Any, db_name: str) -> tuple[dict[str, Any], str]:
+    """Read metadata + its current ETag for optimistic concurrency writes."""
+    blob = container.get_blob_client(f"{db_name}-metadata.json")
+    try:
+        stream = blob.download_blob()
+        payload = stream.readall().decode("utf-8")
+        try:
+            parsed = json.loads(payload) if payload else {}
+            if not isinstance(parsed, dict):
+                parsed = {"db_name": db_name}
+        except json.JSONDecodeError:
+            parsed = {"db_name": db_name}
+        etag = ""
+        try:
+            etag = getattr(stream, "properties", None).etag if stream.properties else ""  # type: ignore[union-attr]
+        except Exception:
+            etag = ""
+        return parsed, etag or ""
+    except ResourceNotFoundError:
+        return {"db_name": db_name}, ""
+    except Exception as exc:
+        LOGGER.debug("DB metadata read skipped for %s: %s", db_name, type(exc).__name__)
+        return {"db_name": db_name}, ""
+
+
 def _write_db_metadata(
     container: Any,
     db_name: str,
     payload: dict[str, Any],
     *,
     account_name: str,
-) -> None:
+    etag: str | None = None,
+) -> str:
+    """Write metadata.json. When ``etag`` is set, the upload uses
+    ``If-Match`` so a concurrent writer cannot clobber unrelated fields.
+    Returns the resulting blob's new ETag (or empty string)."""
     metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
-    metadata_blob.upload_blob(
+    kwargs: dict[str, Any] = {"overwrite": True}
+    if etag:
+        kwargs["etag"] = etag
+        kwargs["match_condition"] = MatchConditions.IfNotModified
+    result = metadata_blob.upload_blob(
         json.dumps(payload, sort_keys=True).encode("utf-8"),
-        overwrite=True,
+        **kwargs,
     )
     # Drop the merged display-metadata cache so /api/blast/jobs/{id} picks up
     # the new title / sequence count / sharded badge on the next read instead
@@ -81,6 +163,163 @@ def _write_db_metadata(
             db_name,
             type(exc).__name__,
         )
+    if isinstance(result, dict):
+        return str(result.get("etag", "") or "").strip('"')
+    return ""
+
+
+def _update_metadata(
+    container: Any,
+    db_name: str,
+    account_name: str,
+    mutator: Any,
+    *,
+    max_attempts: int = 5,
+) -> dict[str, Any]:
+    """Read-modify-write metadata.json with ETag retry.
+
+    ``mutator(meta_copy) -> dict`` must be a pure function over the snapshot
+    (it should not depend on external state). On 412 Precondition Failed
+    (concurrent writer) we re-read and retry up to ``max_attempts``. Final
+    fall-back is a blind overwrite — only reached when the concurrent writer
+    is itself in a loop, which we accept rather than failing the caller.
+    """
+    last: dict[str, Any] = {}
+    for attempt in range(max_attempts):
+        current, etag = _download_blob_with_etag(container, db_name)
+        try:
+            mutated = mutator(dict(current))
+        except Exception:
+            raise
+        try:
+            _write_db_metadata(
+                container,
+                db_name,
+                mutated,
+                account_name=account_name,
+                etag=etag or None,
+            )
+            return mutated
+        except ResourceModifiedError:
+            LOGGER.debug(
+                "metadata ETag retry db=%s attempt=%d",
+                db_name,
+                attempt + 1,
+            )
+            last = mutated
+            continue
+        except Exception:
+            raise
+    # Final blind write — we already exhausted retries; better to land the
+    # mutation and accept that a peer's interleaved field may be lost than to
+    # leave the metadata silently un-updated.
+    _write_db_metadata(container, db_name, last, account_name=account_name)
+    return last
+
+
+def _poll_copy_completion(
+    container: Any,
+    blob_names: list[str],
+    *,
+    db_name: str,
+    on_progress: Any = None,
+) -> dict[str, Any]:
+    """Poll each staged blob's copy.status until every copy reaches a terminal
+    state. Returns ``{success, failed, aborted, pending, failed_files,
+    timed_out, elapsed_seconds}``.
+
+    Why this exists: ``start_copy_from_url`` only ACKs that Azure accepted the
+    copy job; the actual transfer happens asynchronously and can fail with
+    ``copy.status='failed'`` (NCBI throttling, source 404 mid-snapshot,
+    transient network blip). The pre-hardening UI inferred completion from
+    the file_count >= 90% heuristic which let partial successes show as
+    "Ready" — see Critique items 6 & 7.
+    """
+    pending = set(blob_names)
+    success = 0
+    failed = 0
+    aborted = 0
+    failed_files: list[dict[str, str]] = []
+    deadline = time.monotonic() + _COPY_POLL_MAX_SECONDS
+    while pending and time.monotonic() < deadline:
+        # Iterate in deterministic order so logs stay diff-friendly.
+        for name in sorted(pending)[:_COPY_POLL_BATCH_SIZE]:
+            try:
+                props = container.get_blob_client(name).get_blob_properties()
+            except ResourceNotFoundError:
+                # The destination blob disappeared (eg an admin deleted the
+                # container mid-flight). Surface as a copy failure rather
+                # than hanging forever.
+                failed += 1
+                failed_files.append(
+                    {"blob": name, "status": "missing", "reason": "blob not found"}
+                )
+                pending.discard(name)
+                continue
+            except Exception as exc:
+                LOGGER.debug(
+                    "copy status probe failed db=%s blob=%s: %s",
+                    db_name,
+                    name,
+                    type(exc).__name__,
+                )
+                continue
+            copy = getattr(props, "copy", None)
+            status = ""
+            description = ""
+            if copy is not None:
+                status = str(getattr(copy, "status", "") or "").lower()
+                description = str(getattr(copy, "status_description", "") or "")
+            if not status:
+                # No copy metadata = the blob existed before this prepare_db
+                # call (e.g. shard alias). Treat as success.
+                success += 1
+                pending.discard(name)
+                continue
+            if status == "success":
+                success += 1
+                pending.discard(name)
+            elif status == "failed":
+                failed += 1
+                failed_files.append(
+                    {"blob": name, "status": "failed", "reason": description[:200]}
+                )
+                pending.discard(name)
+            elif status == "aborted":
+                aborted += 1
+                failed_files.append(
+                    {"blob": name, "status": "aborted", "reason": description[:200]}
+                )
+                pending.discard(name)
+            # "pending" stays in the set for the next sweep.
+        if pending:
+            if callable(on_progress):
+                try:
+                    on_progress(
+                        {
+                            "success": success,
+                            "failed": failed,
+                            "aborted": aborted,
+                            "pending": len(pending),
+                        }
+                    )
+                except Exception as exc:
+                    LOGGER.debug(
+                        "copy progress callback raised db=%s: %s",
+                        db_name,
+                        type(exc).__name__,
+                    )
+            time.sleep(_COPY_POLL_INTERVAL_SECONDS)
+    timed_out = bool(pending)
+    return {
+        "success": success,
+        "failed": failed,
+        "aborted": aborted,
+        "pending": len(pending),
+        "failed_files": failed_files[:50],
+        "timed_out": timed_out,
+        "elapsed_seconds": int(time.monotonic() - (deadline - _COPY_POLL_MAX_SECONDS)),
+    }
 
 
 @router.post("/prepare-db")
@@ -94,6 +333,17 @@ def prepare_db(
     Returns immediately. Per-file ``start_copy_from_url`` calls run in a
     daemon thread; the SPA observes progress by polling
     ``GET /api/blast/databases``.
+
+    Hardening:
+      * Per-(account, db) lock — a re-clicked Download returns 409 instead
+        of spawning a second daemon that races the metadata.json blob.
+      * Stale-flag recovery — a previous daemon's ``update_in_progress`` flag
+        older than 2 h is treated as crashed and the new call proceeds.
+      * Copy.status polling — every staged blob is polled until terminal
+        status. Partial successes record ``failed_files`` and DO NOT promote
+        ``source_version`` (atomic generation cut-over).
+      * ETag-aware metadata writes — concurrent writers (shard daemon, warmup
+        task) cannot clobber unrelated fields via blind read-modify-write.
     """
     sub = body.get("subscription_id", "")
     storage_rg = body.get("storage_resource_group", "")
@@ -136,6 +386,16 @@ def prepare_db(
     try:
         all_keys = _list_keys(latest_dir, db_name)
     except Exception as exc:
+        # Tell apart 403 (NCBI throttling) vs other 5xx so the SPA can show
+        # the right hint instead of a generic "could not list".
+        from api.routes.storage.common import NcbiAccessDenied
+
+        if isinstance(exc, NcbiAccessDenied):
+            LOGGER.warning("NCBI 403 listing %s", db_name)
+            raise HTTPException(
+                502,
+                "NCBI bucket refused the request (rate-limited); retry shortly.",
+            ) from exc
         LOGGER.warning("NCBI key list failed for %s: %s", db_name, type(exc).__name__)
         raise HTTPException(
             502, f"could not list NCBI database keys: {sanitise(str(exc))[:200]}"
@@ -144,186 +404,348 @@ def prepare_db(
     if not all_keys:
         raise HTTPException(
             404,
-            f"No files found for database '{db_name}' in NCBI S3 (dir: {latest_dir})",
+            (
+                f"No files found for database '{db_name}' in NCBI S3 (snapshot: "
+                f"{latest_dir}). The DB may be FTP-only or NCBI may still be "
+                "publishing the snapshot — wait a few minutes and retry."
+            ),
         )
+
+    # Acquire the per-(account, db) lock BEFORE building any clients so a
+    # 409 is fast for the second-clicker. If a stale flag is in the metadata
+    # we clear it and proceed; otherwise we refuse so two daemons can never
+    # race the metadata blob simultaneously.
+    lock = _prepare_db_lock(account_name, db_name)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "another prepare-db is in progress for this DB")
 
     # Build the destination container client. The api sidecar reaches the
     # storage account over the private endpoint via the shared MI; no SAS
     # is involved, no public network toggle is performed.
-    from azure.storage.blob import BlobServiceClient
-
-    from api.services.storage_endpoint import blob_account_url
-
-    blob_svc = BlobServiceClient(
-        account_url=blob_account_url(account_name),
-        credential=cred,
-    )
-    container = blob_svc.get_container_client("blast-db")
-
-    previous_metadata = _read_db_metadata(container, db_name)
-    previous_source_version = str(previous_metadata.get("source_version") or "")
     try:
-        start_metadata = dict(previous_metadata)
-        start_metadata["db_name"] = db_name
-        start_metadata["update_in_progress"] = True
-        start_metadata["update_started_at"] = datetime.now(UTC).isoformat()
-        start_metadata["updating_to_source_version"] = latest_dir
-        start_metadata.pop("update_error", None)
-        start_metadata.pop("update_failed_at", None)
-        if previous_source_version and previous_source_version != latest_dir:
-            start_metadata["previous_source_version"] = previous_source_version
-        _write_db_metadata(container, db_name, start_metadata, account_name=account_name)
-    except Exception as exc:
-        LOGGER.warning(
-            "prepare_db update-start metadata write failed for %s: %s",
-            db_name,
-            sanitise(str(exc))[:200],
+        from azure.storage.blob import BlobServiceClient
+
+        from api.services.storage_endpoint import blob_account_url
+
+        blob_svc = BlobServiceClient(
+            account_url=blob_account_url(account_name),
+            credential=cred,
         )
+        container = blob_svc.get_container_client("blast-db")
+
+        previous_metadata, _ = _download_blob_with_etag(container, db_name)
+        if previous_metadata.get("update_in_progress") and not _is_stale_prepare_marker(
+            previous_metadata
+        ):
+            # Another process (different api replica, peer worker) is mid-flight.
+            # Release our in-process lock; the live writer keeps the metadata
+            # flag and the SPA poll will show the existing in-progress state.
+            lock.release()
+            raise HTTPException(
+                409,
+                "prepare-db is already running for this DB (check the dashboard)",
+            )
+
+        previous_source_version = str(previous_metadata.get("source_version") or "")
+        started_at = datetime.now(UTC).isoformat()
+
+        def _start_mutator(meta: dict[str, Any]) -> dict[str, Any]:
+            meta["db_name"] = db_name
+            meta["update_in_progress"] = True
+            meta["update_started_at"] = started_at
+            meta["updating_to_source_version"] = latest_dir
+            meta["updating_signature_etag"] = None
+            meta.pop("update_error", None)
+            meta.pop("update_failed_at", None)
+            meta.pop("failed_files", None)
+            meta.pop("copy_status", None)
+            if previous_source_version and previous_source_version != latest_dir:
+                meta["previous_source_version"] = previous_source_version
+            return meta
+
+        try:
+            _update_metadata(container, db_name, account_name, _start_mutator)
+        except Exception as exc:
+            LOGGER.warning(
+                "prepare_db update-start metadata write failed for %s: %s",
+                db_name,
+                sanitise(str(exc))[:200],
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        lock.release()
+        raise
 
     def _do_copies() -> None:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        def _copy_one(key: str) -> tuple[str, str]:
-            source_url = f"{_NCBI_S3_BASE}/{key}"
-            # Layout MUST match `elastic-blast` upstream
-            # `util.py:get_blastdb_info`: it calls `os.path.dirname(db_url)`
-            # and runs `azcopy list`, then filters lines containing
-            # `os.path.basename(db)`. That requires files to live in a
-            # subfolder named after the DB (`blast-db/<db>/<files>`). A
-            # flat layout makes `azcopy list` of the parent return wrong
-            # results and elastic-blast reports
-            # "BLAST database … was not found".
-            file_basename = key.split("/")[-1]
-            blob_name = f"{db_name}/{file_basename}"
-            try:
-                container.get_blob_client(blob_name).start_copy_from_url(source_url)
-                return (blob_name, "started")
-            except Exception as e:
-                if "PendingCopyOperation" in str(e):
-                    return (blob_name, "skipped")
-                LOGGER.warning("Copy failed for %s: %s", blob_name, sanitise(str(e))[:200])
-                return (blob_name, "error")
-
-        started = skipped = errors = 0
-        with ThreadPoolExecutor(max_workers=20) as ex:
-            futures = [ex.submit(_copy_one, k) for k in all_keys]
-            for f in as_completed(futures):
-                _, status = f.result()
-                if status == "started":
-                    started += 1
-                elif status == "skipped":
-                    skipped += 1
-                else:
-                    errors += 1
-
-        LOGGER.info(
-            "DB prepare done for %s: %d started, %d skipped, %d errors",
-            db_name,
-            started,
-            skipped,
-            errors,
-        )
-
-        successful_files = started + skipped
-        if errors > 0 or successful_files <= 0:
-            try:
-                failed_metadata = _read_db_metadata(container, db_name)
-                failed_metadata["db_name"] = db_name
-                failed_metadata["update_in_progress"] = False
-                failed_metadata["updating_to_source_version"] = latest_dir
-                failed_metadata["update_error"] = (
-                    f"copy initiation failed for {errors} of {len(all_keys)} files"
-                )
-                failed_metadata["update_failed_at"] = datetime.now(UTC).isoformat()
-                _write_db_metadata(container, db_name, failed_metadata, account_name=account_name)
-            except Exception as exc:
-                LOGGER.warning(
-                    "prepare_db update-failure metadata write failed for %s: %s",
-                    db_name,
-                    sanitise(str(exc))[:200],
-                )
-            return
-
-        # Auto-shard step: as soon as the NCBI key enumeration is in hand,
-        # we know every volume name and can publish the manifest+.nal alias
-        # files for every preset shard count. The blobs they reference do
-        # not have to exist yet — the AKS init script will download them
-        # lazily at job runtime. ~50 KB total per DB across all presets.
-        from api.services.db_sharding import (
-            PRESET_SHARD_SETS,
-            derive_volumes_from_keys,
-            upload_shard_set,
-        )
-
-        shard_sets_created: list[int] = []
+        # Build a closure-local handle to the container so the daemon survives
+        # the request scope going away.
         try:
-            volumes = derive_volumes_from_keys(db_name, all_keys)
-            for n in PRESET_SHARD_SETS:
-                if n > len(volumes):
-                    continue  # small DB, fewer volumes than this preset
+            from azure.storage.blob import BlobServiceClient as _BSC
+
+            from api.services.storage_endpoint import blob_account_url as _url
+
+            local_svc = _BSC(account_url=_url(account_name), credential=cred)
+            local_container = local_svc.get_container_client("blast-db")
+
+            def _copy_one(key: str) -> tuple[str, str]:
+                source_url = f"{_NCBI_S3_BASE}/{key}"
+                # Layout MUST match `elastic-blast` upstream
+                # `util.py:get_blastdb_info`: files live in a subfolder named
+                # after the DB (`blast-db/<db>/<files>`). A flat layout makes
+                # `azcopy list` of the parent return wrong results and
+                # elastic-blast reports "BLAST database … was not found".
+                file_basename = key.split("/")[-1]
+                blob_name = f"{db_name}/{file_basename}"
                 try:
-                    upload_shard_set(
-                        cred,
-                        account_name,
-                        db_name,
-                        n,
-                        volumes,
+                    local_container.get_blob_client(blob_name).start_copy_from_url(
+                        source_url
                     )
-                    shard_sets_created.append(n)
+                    return (blob_name, "started")
+                except Exception as e:
+                    if "PendingCopyOperation" in str(e):
+                        return (blob_name, "skipped")
+                    LOGGER.warning(
+                        "Copy failed for %s: %s",
+                        blob_name,
+                        sanitise(str(e))[:200],
+                    )
+                    return (blob_name, "error")
+
+            started = skipped = errors = 0
+            staged_blob_names: list[str] = []
+            with ThreadPoolExecutor(max_workers=20) as ex:
+                futures = {ex.submit(_copy_one, k): k for k in all_keys}
+                for f in as_completed(futures):
+                    name, status = f.result()
+                    if status in ("started", "skipped"):
+                        staged_blob_names.append(name)
+                    if status == "started":
+                        started += 1
+                    elif status == "skipped":
+                        skipped += 1
+                    else:
+                        errors += 1
+
+            LOGGER.info(
+                "DB prepare initiation done for %s: %d started, %d skipped, %d errors",
+                db_name,
+                started,
+                skipped,
+                errors,
+            )
+
+            successful_inits = started + skipped
+            if errors > 0 or successful_inits <= 0:
+                # Initiation failed for at least one file — record honest
+                # state and DO NOT promote source_version. The previous
+                # generation (if any) stays the active version.
+                def _init_fail(meta: dict[str, Any]) -> dict[str, Any]:
+                    meta["db_name"] = db_name
+                    meta["update_in_progress"] = False
+                    meta["updating_to_source_version"] = latest_dir
+                    meta["update_error"] = (
+                        f"copy initiation failed for {errors} of {len(all_keys)} files"
+                    )
+                    meta["update_failed_at"] = datetime.now(UTC).isoformat()
+                    meta["copy_status"] = {
+                        "phase": "init_failed",
+                        "initiation_started": started,
+                        "initiation_skipped": skipped,
+                        "initiation_errors": errors,
+                        "total_files": len(all_keys),
+                    }
+                    return meta
+
+                try:
+                    _update_metadata(local_container, db_name, account_name, _init_fail)
                 except Exception as exc:
                     LOGGER.warning(
-                        "shard set N=%d failed for %s: %s",
-                        n,
+                        "prepare_db init-failure metadata write failed for %s: %s",
                         db_name,
                         sanitise(str(exc))[:200],
                     )
-        except LookupError:
-            # No volumes detected (e.g. key list was empty or unfamiliar
-            # extension layout). Leave sharded=False.
-            LOGGER.info("auto-shard skipped for %s: no volumes detected", db_name)
-        except Exception as exc:
-            LOGGER.warning(
-                "auto-shard failed for %s: %s",
-                db_name,
-                sanitise(str(exc))[:200],
+                return
+
+            # Phase 2: poll each staged blob's copy.status until terminal.
+            def _record_progress(snapshot: dict[str, int]) -> None:
+                def _mut(meta: dict[str, Any]) -> dict[str, Any]:
+                    meta["copy_status"] = {
+                        "phase": "copying",
+                        "total_files": len(all_keys),
+                        **snapshot,
+                    }
+                    return meta
+
+                try:
+                    _update_metadata(local_container, db_name, account_name, _mut)
+                except Exception as exc:
+                    LOGGER.debug(
+                        "copy progress metadata write skipped db=%s: %s",
+                        db_name,
+                        type(exc).__name__,
+                    )
+
+            poll_summary = _poll_copy_completion(
+                local_container,
+                staged_blob_names,
+                db_name=db_name,
+                on_progress=_record_progress,
             )
 
-        # Drop a metadata blob alongside the DB so the dashboard can show
-        # source_version / downloaded_at / sharding state without
-        # contacting NCBI again.
-        try:
-            final_metadata = _read_db_metadata(container, db_name)
-            final_metadata["db_name"] = db_name
-            final_metadata["source_version"] = latest_dir
-            final_metadata["downloaded_at"] = datetime.now(UTC).isoformat()
-            final_metadata["file_count"] = successful_files
-            final_metadata["update_in_progress"] = False
-            final_metadata["update_completed_at"] = datetime.now(UTC).isoformat()
-            final_metadata.pop("updating_to_source_version", None)
-            final_metadata.pop("update_error", None)
-            final_metadata.pop("update_failed_at", None)
-            if previous_source_version and previous_source_version != latest_dir:
-                final_metadata["updated_from_source_version"] = previous_source_version
-            if shard_sets_created:
-                final_metadata["sharded"] = True
-                final_metadata["shard_sets"] = shard_sets_created
-                final_metadata["shard_source_version"] = latest_dir
-                final_metadata["sharded_at"] = datetime.now(UTC).isoformat()
-                final_metadata.pop("sharding_error", None)
-            else:
-                final_metadata["sharded"] = False
-                final_metadata["shard_sets"] = []
-                final_metadata["shard_source_version"] = None
-                final_metadata["sharding_error"] = "preset shard layout generation failed"
-            final_metadata["sharding_in_progress"] = False
-            if isinstance(final_metadata.get("db_order_oracle"), dict):
-                oracle = dict(final_metadata["db_order_oracle"])
-                if oracle.get("source_version") and oracle.get("source_version") != latest_dir:
-                    oracle["status"] = "stale"
-                final_metadata["db_order_oracle"] = oracle
-            _write_db_metadata(container, db_name, final_metadata, account_name=account_name)
-        except Exception as e:
-            LOGGER.warning("metadata write failed for %s: %s", db_name, sanitise(str(e))[:200])
+            all_succeeded = (
+                poll_summary["failed"] == 0
+                and poll_summary["aborted"] == 0
+                and not poll_summary["timed_out"]
+                and poll_summary["success"] >= len(staged_blob_names)
+            )
+
+            if not all_succeeded:
+                # Partial completion or timeout — DO NOT promote source_version.
+                def _partial(meta: dict[str, Any]) -> dict[str, Any]:
+                    meta["db_name"] = db_name
+                    meta["update_in_progress"] = False
+                    if poll_summary["timed_out"]:
+                        reason = (
+                            f"timed out polling copy.status after "
+                            f"{_COPY_POLL_MAX_SECONDS}s; "
+                            f"{poll_summary['pending']} blobs still pending"
+                        )
+                    else:
+                        reason = (
+                            f"{poll_summary['failed']} failed, "
+                            f"{poll_summary['aborted']} aborted of "
+                            f"{len(staged_blob_names)} staged"
+                        )
+                    meta["update_error"] = reason
+                    meta["update_failed_at"] = datetime.now(UTC).isoformat()
+                    meta["failed_files"] = poll_summary["failed_files"]
+                    meta["copy_status"] = {
+                        "phase": "partial",
+                        "total_files": len(all_keys),
+                        "success": poll_summary["success"],
+                        "failed": poll_summary["failed"],
+                        "aborted": poll_summary["aborted"],
+                        "pending": poll_summary["pending"],
+                        "timed_out": poll_summary["timed_out"],
+                    }
+                    return meta
+
+                try:
+                    _update_metadata(local_container, db_name, account_name, _partial)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "prepare_db partial-completion metadata write failed for %s: %s",
+                        db_name,
+                        sanitise(str(exc))[:200],
+                    )
+                return
+
+            # Phase 3: all copies succeeded — auto-shard, then promote.
+            from api.services.db_sharding import (
+                PRESET_SHARD_SETS,
+                derive_volumes_from_keys,
+                upload_shard_set,
+            )
+
+            shard_sets_created: list[int] = []
+            try:
+                volumes = derive_volumes_from_keys(db_name, all_keys)
+                for n in PRESET_SHARD_SETS:
+                    if n > len(volumes):
+                        continue  # small DB, fewer volumes than this preset
+                    try:
+                        upload_shard_set(cred, account_name, db_name, n, volumes)
+                        shard_sets_created.append(n)
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "shard set N=%d failed for %s: %s",
+                            n,
+                            db_name,
+                            sanitise(str(exc))[:200],
+                        )
+            except LookupError:
+                LOGGER.info("auto-shard skipped for %s: no volumes detected", db_name)
+            except Exception as exc:
+                LOGGER.warning(
+                    "auto-shard failed for %s: %s",
+                    db_name,
+                    sanitise(str(exc))[:200],
+                )
+
+            # Per-DB ETag signature so /databases/check-updates can render
+            # accurate per-DB update detection without bouncing latest-dir.
+            new_signature_etag: str | None = None
+            try:
+                from api.services.ncbi_catalogue import database_update_signature
+
+                sig = database_update_signature(db_name)
+                new_signature_etag = sig.get("signature_etag")
+            except Exception as exc:
+                LOGGER.debug(
+                    "post-prepare signature lookup skipped db=%s: %s",
+                    db_name,
+                    type(exc).__name__,
+                )
+
+            def _promote(meta: dict[str, Any]) -> dict[str, Any]:
+                meta["db_name"] = db_name
+                meta["source_version"] = latest_dir
+                if new_signature_etag:
+                    meta["signature_etag"] = new_signature_etag
+                meta["downloaded_at"] = datetime.now(UTC).isoformat()
+                meta["file_count"] = poll_summary["success"]
+                meta["update_in_progress"] = False
+                meta["update_completed_at"] = datetime.now(UTC).isoformat()
+                meta.pop("updating_to_source_version", None)
+                meta.pop("update_error", None)
+                meta.pop("update_failed_at", None)
+                meta.pop("failed_files", None)
+                meta["copy_status"] = {
+                    "phase": "completed",
+                    "total_files": len(all_keys),
+                    "success": poll_summary["success"],
+                    "failed": 0,
+                    "aborted": 0,
+                    "pending": 0,
+                    "timed_out": False,
+                }
+                if previous_source_version and previous_source_version != latest_dir:
+                    meta["updated_from_source_version"] = previous_source_version
+                if shard_sets_created:
+                    meta["sharded"] = True
+                    meta["shard_sets"] = shard_sets_created
+                    meta["shard_source_version"] = latest_dir
+                    meta["sharded_at"] = datetime.now(UTC).isoformat()
+                    meta.pop("sharding_error", None)
+                else:
+                    meta["sharded"] = False
+                    meta["shard_sets"] = []
+                    meta["shard_source_version"] = None
+                    meta["sharding_error"] = "preset shard layout generation failed"
+                meta["sharding_in_progress"] = False
+                if isinstance(meta.get("db_order_oracle"), dict):
+                    oracle = dict(meta["db_order_oracle"])
+                    if (
+                        oracle.get("source_version")
+                        and oracle.get("source_version") != latest_dir
+                    ):
+                        oracle["status"] = "stale"
+                    meta["db_order_oracle"] = oracle
+                return meta
+
+            try:
+                _update_metadata(local_container, db_name, account_name, _promote)
+            except Exception as exc:
+                LOGGER.warning(
+                    "prepare_db promotion metadata write failed for %s: %s",
+                    db_name,
+                    sanitise(str(exc))[:200],
+                )
+        finally:
+            lock.release()
 
     Thread(target=_do_copies, daemon=True, name=f"prepare-db-{db_name}").start()
 
