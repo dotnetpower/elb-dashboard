@@ -16,6 +16,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.subprocess
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DOCKERFILE = REPO_ROOT / "terminal" / "Dockerfile"
 TOOL_VERSIONS = REPO_ROOT / "terminal" / "tool-versions.sh"

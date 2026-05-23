@@ -62,6 +62,8 @@ dev = [
   "pillow>=10.0,<12",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<1",
+  "pytest-xdist>=3.6,<4",
+  "pytest-timeout>=2.3,<3",
   "ruff>=0.7,<1",
   "mypy>=1.13,<2",
 ]

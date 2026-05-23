@@ -1,22 +1,20 @@
-"""pytest configuration for api/.
+"""pytest configuration for api/tests/.
 
-Responsibility: pytest configuration for api/
-Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
+Responsibility: pytest fixtures + env baseline for the api/ backend suite.
+Edit boundaries: Keep changes scoped to test setup; do not import heavy
+    modules at top level (slows collection across xdist workers).
 Key entry points: `_env_baseline`, `_reset_external_jobs_cache`
-Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Risky contracts: The autouse fixtures reset process-level singletons used by
+    routes/services/tasks. xdist workers are separate processes, so each
+    worker's resets are isolated. Tests inside the same worker rely on the
+    reset to avoid cross-test pollution.
 Validation: `uv run pytest -q api/tests`.
 """
 
 import os
-import sys
 from collections.abc import Generator
-from pathlib import Path
 
 import pytest
-
-# Make api/ importable as `api`.
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 # Disable the blast-db-metadata Redis pub/sub invalidation by default in
 # tests. Subscribers spawn daemon threads; publishes attempt a real Redis
@@ -109,8 +107,8 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_state_repo_cache()
     reset_blob_service_pool()
     reset_ncbi_catalogue_cache()
-    reset_k8s_credential_cache()
     reset_k8s_session_pool()
+    reset_k8s_credential_cache()
     reset_redis_clients()
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()

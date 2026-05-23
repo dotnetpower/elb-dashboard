@@ -17,6 +17,10 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.subprocess
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 GUARD = REPO_ROOT / "terminal" / "command_guard.sh"
 

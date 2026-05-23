@@ -226,6 +226,7 @@
     },
     {
       "label": "tests: pytest",
+      "detail": "Fast dev loop: parallel (-n auto), excludes 'slow' and 'subprocess' marked tests. ~3-5x faster than serial.",
       "type": "shell",
       "command": "uv run pytest -q api/tests",
       "options": {
@@ -238,6 +239,34 @@
         "kind": "test",
         "isDefault": true
       },
+      "problemMatcher": []
+    },
+    {
+      "label": "tests: full",
+      "detail": "Full suite including 'slow' and 'subprocess' marked tests. Run before PRs touching shell scripts or BLAST comparison helpers.",
+      "type": "shell",
+      "command": "uv run pytest api/tests -m ''",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}"
+        }
+      },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "tests: slow-only",
+      "detail": "Run only 'slow' and 'subprocess' marked tests (the ones excluded from the default dev loop).",
+      "type": "shell",
+      "command": "uv run pytest api/tests -m 'slow or subprocess'",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}"
+        }
+      },
+      "group": "test",
       "problemMatcher": []
     },
     {
