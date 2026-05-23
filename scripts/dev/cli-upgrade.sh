@@ -91,25 +91,23 @@ record_history() {
   local history_file="${ELB_UPGRADE_HISTORY:-$HOME/.elb-upgrade-history.jsonl}"
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local elapsed=$SECONDS
-  local line=""
-  if command -v jq >/dev/null 2>&1; then
-    line="$(jq -nc \
-      --arg ts "$now" \
-      --arg scope "${SCOPE:-unknown}" \
-      --arg app "${CONTAINER_APP_NAME:-unknown}" \
-      --arg tag "${TAG:-}" \
-      --arg head_sha "${HEAD_SHA:-}" \
-      --arg result "$result" \
-      --arg message "$message" \
-      --argjson elapsed_seconds "$elapsed" \
-      '{ts: $ts, scope: $scope, app: $app, tag: $tag, head_sha: $head_sha, result: $result, elapsed_seconds: $elapsed_seconds, message: $message}')"
-  else
-    # Fallback without jq: strip embedded double-quotes from message to keep
-    # the line valid JSON. Other fields are controlled by us and never quote.
-    local msg_safe="${message//\"/}"
-    line="$(printf '{"ts":"%s","scope":"%s","app":"%s","tag":"%s","head_sha":"%s","result":"%s","elapsed_seconds":%d,"message":"%s"}' \
-      "$now" "${SCOPE:-unknown}" "${CONTAINER_APP_NAME:-unknown}" "${TAG:-}" "${HEAD_SHA:-}" "$result" "$elapsed" "$msg_safe")"
-  fi
+  # jq is the only safe JSON serializer we can rely on for arbitrary
+  # message content (newlines, backslashes, control chars). The script
+  # already hard-requires jq for restore_from_snapshot; treat history
+  # the same way. Without jq, silently drop the history entry rather
+  # than write invalid JSONL.
+  command -v jq >/dev/null 2>&1 || return 0
+  local line
+  line="$(jq -nc \
+    --arg ts "$now" \
+    --arg scope "${SCOPE:-unknown}" \
+    --arg app "${CONTAINER_APP_NAME:-unknown}" \
+    --arg tag "${TAG:-}" \
+    --arg head_sha "${HEAD_SHA:-}" \
+    --arg result "$result" \
+    --arg message "$message" \
+    --argjson elapsed_seconds "$elapsed" \
+    '{ts: $ts, scope: $scope, app: $app, tag: $tag, head_sha: $head_sha, result: $result, elapsed_seconds: $elapsed_seconds, message: $message}')"
   printf '%s\n' "$line" >> "$history_file" 2>/dev/null || true
 }
 
