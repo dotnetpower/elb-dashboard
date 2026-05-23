@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from api.services.blast_db_metadata import extract_db_name, resolve_db_metadata
-from api.services.storage_url_validation import (
+from api.services.storage.url_validation import (
     validate_storage_blob_reference as validate_storage_blob_reference,
 )
 
@@ -38,7 +38,7 @@ def snippet(value: object, limit: int = ERROR_SNIPPET_CHARS) -> str:
 
 def storage_url(storage_account: str, container: str, path: str = "") -> str:
     suffix = path.strip("/")
-    from api.services.storage_endpoint import blob_account_url
+    from api.services.storage.endpoint import blob_account_url
 
     base = f"{blob_account_url(storage_account)}/{container}"
     return f"{base}/{suffix}" if suffix else base
@@ -82,7 +82,7 @@ def query_blob_path_from_query_file(*, storage_account: str, query_file: str) ->
 
     if raw.startswith("https://"):
         parsed = urlparse(raw)
-        from api.services.storage_endpoint import blob_host_for_account
+        from api.services.storage.endpoint import blob_host_for_account
 
         expected_host = blob_host_for_account(storage_account)
         if (parsed.hostname or "").lower() != expected_host.lower():

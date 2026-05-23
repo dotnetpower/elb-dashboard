@@ -39,7 +39,7 @@ def storage_local_debug_status(
     the button visibility. ``public_access``, ``default_action``, and
     ``ip_rules`` are best-effort context for the confirmation modal.
     """
-    from api.services.storage_public_access import (
+    from api.services.storage.public_access import (
         is_running_locally,
         read_local_storage_state,
     )
@@ -83,7 +83,7 @@ def storage_local_debug_open(
     (``LOCAL_DEBUG_AUTO_OPEN_STORAGE``) is bypassed. The Container-App guard
     is NOT bypassed — see ``ensure_local_storage_access(force=True)``.
     """
-    from api.services.storage_public_access import (
+    from api.services.storage.public_access import (
         ensure_local_storage_access,
         is_running_locally,
     )

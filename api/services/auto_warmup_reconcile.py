@@ -18,12 +18,13 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from api.services import monitoring, storage_data
+from api.services import monitoring
 from api.services.auto_warmup import (
     AutoWarmupPreference,
     list_auto_warmup_preferences,
     mark_auto_warmup_ready_state,
 )
+from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
 

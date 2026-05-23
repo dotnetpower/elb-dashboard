@@ -38,7 +38,7 @@ def check_database_updates(
     """
     try:
         from api.routes.storage.common import _resolve_latest_dir
-        from api.services.storage_data import list_databases
+        from api.services.storage.data import list_databases
 
         cred = _facade.get_credential()
         databases = list_databases(cred, storage_account)

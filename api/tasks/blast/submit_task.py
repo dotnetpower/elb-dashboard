@@ -284,7 +284,7 @@ def submit(
         config_blob_path = f"{job_id}/{ELASTIC_BLAST_CFG_FILE}"
         try:
             from api.services import get_credential
-            from api.services.storage_data import upload_blob_text
+            from api.services.storage.data import upload_blob_text
 
             config_url = upload_blob_text(
                 get_credential(),

@@ -19,7 +19,6 @@ from typing import Any, cast
 from azure.core.credentials import TokenCredential
 from azure.core.exceptions import ResourceNotFoundError
 
-from api.services import storage_usage_cache
 from api.services.azure_clients import (
     acr_client,
     aks_client,
@@ -40,7 +39,8 @@ from api.services.k8s_monitoring import (
     k8s_top_nodes,
     k8s_warmup_status,
 )
-from api.services.storage_network import ensure_workload_storage_private_endpoints
+from api.services.storage import usage_cache as storage_usage_cache
+from api.services.storage.network import ensure_workload_storage_private_endpoints
 
 LOGGER = logging.getLogger(__name__)
 BLAST_POOL_NAME = "blastpool"

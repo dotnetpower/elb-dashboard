@@ -29,7 +29,7 @@ from api.services.sharding_precision import (
     outfmt_is_merge_compatible,
     uniform_query_effective_search_space,
 )
-from api.services.storage_url_validation import validate_storage_blob_reference
+from api.services.storage.url_validation import validate_storage_blob_reference
 
 
 def generate_config(params: dict[str, Any]) -> str:

@@ -27,7 +27,8 @@ from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.data.tables import TableClient, TableServiceClient, UpdateMode
 from azure.storage.blob import BlobServiceClient
 
-from api.services import get_credential, storage_data
+from api.services import get_credential
+from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ def _ensure_artifacts_container(account_name: str) -> None:
     key = (account_name, ARTIFACTS_CONTAINER)
     if key in _ENSURED_CONTAINERS:
         return
-    from api.services.storage_endpoint import blob_account_url
+    from api.services.storage.endpoint import blob_account_url
 
     client = BlobServiceClient(
         account_url=blob_account_url(account_name),

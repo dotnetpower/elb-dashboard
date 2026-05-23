@@ -18,7 +18,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from api.services import storage_data
+from api.services.storage import data as storage_data
 
 
 class FakeBlobClient:
@@ -172,7 +172,7 @@ def test_classify_storage_failure_reports_selected_network_firewall(
         raising=True,
     )
     monkeypatch.setattr(
-        "api.services.storage_public_access._detect_caller_ip",
+        "api.services.storage.public_access._detect_caller_ip",
         lambda: "61.80.8.142",
         raising=True,
     )

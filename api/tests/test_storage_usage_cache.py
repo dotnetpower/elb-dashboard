@@ -11,7 +11,7 @@ Validation: `uv run pytest -q api/tests/test_storage_usage_cache.py`.
 from __future__ import annotations
 
 import pytest
-from api.services import storage_usage_cache
+from api.services.storage import usage_cache as storage_usage_cache
 
 
 @pytest.fixture(autouse=True)

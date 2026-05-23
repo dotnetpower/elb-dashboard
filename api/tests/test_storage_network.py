@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from api.services import storage_network
+from api.services.storage import network as storage_network
 
 
 class _Poller:

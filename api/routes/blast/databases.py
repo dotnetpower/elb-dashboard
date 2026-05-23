@@ -59,7 +59,7 @@ def blast_databases(
     if not storage_account or not resource_group:
         return {"databases": []}
     from api.services import get_credential
-    from api.services.storage_data import classify_storage_failure, list_databases
+    from api.services.storage.data import classify_storage_failure, list_databases
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -149,7 +149,7 @@ def blast_database_shard(
         ensure_shard_sets,
     )
     from api.services.sanitise import sanitise
-    from api.services.storage_data import _blob_service
+    from api.services.storage.data import _blob_service
 
     sub = body.get("subscription_id", "")
     storage_rg = body.get("resource_group", "")
@@ -200,7 +200,7 @@ def blast_database_shard(
     bc = cc.get_blob_client(f"{db_name}-metadata.json")
     existing: dict[str, Any] = {}
     try:
-        from api.services.storage_data import read_metadata_blob_text
+        from api.services.storage.data import read_metadata_blob_text
 
         existing = json.loads(
             read_metadata_blob_text(bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json")
@@ -401,7 +401,7 @@ def blast_database_order_oracle(
         k8s_ready_warmup_node_names,
         k8s_warmup_status,
     )
-    from api.services.storage_data import list_databases, upload_blob_text
+    from api.services.storage.data import list_databases, upload_blob_text
 
     sub = str(body.get("subscription_id") or "")
     storage_rg = str(body.get("resource_group") or "")
@@ -688,7 +688,7 @@ def blast_databases_check_updates(
 
     # Per-DB enrichment — only runs when the caller passes storage scope.
     from api.services import get_credential
-    from api.services.storage_data import list_databases
+    from api.services.storage.data import list_databases
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -817,7 +817,7 @@ def blast_databases_versions(
         return {"versions": [], "total": 0}
 
     from api.services import get_credential
-    from api.services.storage_data import classify_storage_failure, list_databases
+    from api.services.storage.data import classify_storage_failure, list_databases
 
     cred = get_credential()
     _maybe_open_local_storage_access(

@@ -69,12 +69,12 @@ def resolve_db_metadata(storage_account: str, db_name: str) -> dict[str, Any] | 
         from azure.core.exceptions import ResourceNotFoundError
 
         from api.services import get_credential
-        from api.services.storage_data import _blob_service
+        from api.services.storage.data import _blob_service
 
         service = _blob_service(get_credential(), storage_account)
         container = service.get_container_client("blast-db")
         try:
-            from api.services.storage_data import read_metadata_blob_bytes
+            from api.services.storage.data import read_metadata_blob_bytes
 
             data = read_metadata_blob_bytes(
                 container.get_blob_client(f"{db_name}-metadata.json"),
@@ -420,11 +420,11 @@ def resolve_blastdb_json_metadata(storage_account: str, db_name: str) -> dict[st
         from azure.core.exceptions import ResourceNotFoundError
 
         from api.services import get_credential
-        from api.services.storage_data import _blob_service
+        from api.services.storage.data import _blob_service
 
         service = _blob_service(get_credential(), storage_account)
         container = service.get_container_client("blast-db")
-        from api.services.storage_data import read_metadata_blob_bytes
+        from api.services.storage.data import read_metadata_blob_bytes
 
         for blob_name in (
             f"{db_name}/{db_name}.njs",

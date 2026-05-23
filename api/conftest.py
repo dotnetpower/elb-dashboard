@@ -72,7 +72,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     )
     from api.services.redis_clients import reset_redis_clients
     from api.services.state_repo import reset_state_repo_cache
-    from api.services.storage_data import reset_blob_service_pool
+    from api.services.storage.data import reset_blob_service_pool
 
     _reset()
     _reset_blast_jobs_list_cache()

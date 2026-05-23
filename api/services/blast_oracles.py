@@ -43,7 +43,7 @@ def upload_tie_order_oracle_if_present(
         return None
     text, accession_count = oracle
     from api.services import get_credential
-    from api.services.storage_data import upload_blob_text
+    from api.services.storage.data import upload_blob_text
 
     blob_path = f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_BLOB}"
     upload_blob_text(
@@ -95,7 +95,7 @@ def upload_db_order_oracle_pointer_if_available(
     if not part_urls:
         return None
     from api.services import get_credential
-    from api.services.storage_data import upload_blob_text
+    from api.services.storage.data import upload_blob_text
 
     blob_path = f"{_relative_blob_path(job_id, 'job_id')}/{TIE_ORDER_ORACLE_URLS_BLOB}"
     upload_blob_text(
@@ -122,13 +122,13 @@ def db_order_oracle_part_urls(
 ) -> list[str]:
     from api.services import get_credential
     from api.services.db.order_oracle import ORACLE_PARTS_DIR, ORACLE_PREFIX_ROOT
-    from api.services.storage_data import _blob_service
+    from api.services.storage.data import _blob_service
 
     svc = _blob_service(get_credential(), storage_account)
     container = svc.get_container_client("blast-db")
     status_blob = f"{ORACLE_PREFIX_ROOT}/{db_name}/status.json"
     try:
-        from api.services.storage_data import read_metadata_blob_text
+        from api.services.storage.data import read_metadata_blob_text
 
         status = json.loads(
             read_metadata_blob_text(
@@ -162,7 +162,7 @@ def db_order_oracle_part_urls(
     )
     if len(part_names) < expected_parts:
         return []
-    from api.services.storage_endpoint import blob_account_url
+    from api.services.storage.endpoint import blob_account_url
 
     base = blob_account_url(storage_account)
     return [f"{base}/blast-db/{name}" for name in part_names]
