@@ -103,6 +103,16 @@ def provision_aks(
     cred = _facade.get_credential()
     aks = _facade.aks_client(cred, subscription_id)
 
+    # Ensure the resource group exists before the long AKS provisioning call.
+    # The SPA defaults the RG to `rg-<base-cluster-name>` (e.g.
+    # `elb-cluster-01` → `rg-elb-cluster`); on a fresh subscription that RG
+    # may not exist yet, which would otherwise fail with `ResourceGroupNotFound`
+    # ~10 minutes into the create call. create_or_update is idempotent:
+    # creates if missing, no-op tag refresh if it already exists.
+    update_state(job_id, "ensuring_resource_group")
+    rc = _facade.resource_client(cred, subscription_id)
+    rc.resource_groups.create_or_update(resource_group, {"location": region})
+
     SYSTEM_POOL_NAME = "systempool"
     BLAST_POOL_NAME = "blastpool"
 

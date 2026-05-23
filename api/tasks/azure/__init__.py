@@ -24,6 +24,7 @@ from api.services import get_credential
 from api.services.azure_clients import (
     acr_client,
     aks_client,
+    resource_client,
     storage_client,
 )
 from api.tasks.azure.cluster_params import build_cluster_params as _build_cluster_params
@@ -63,6 +64,7 @@ __all__ = (
     "diag_noop",
     "get_credential",
     "provision_aks",
+    "resource_client",
     "start_aks",
     "stop_aks",
     "storage_client",
