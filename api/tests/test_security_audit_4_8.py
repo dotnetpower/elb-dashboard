@@ -187,7 +187,7 @@ def test_resolve_job_storage_account_accepts_matching(
 ) -> None:
     """Baseline: the supplied account matches the JobState row."""
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
-    from api.services.blast_job_state import _resolve_job_storage_account
+    from api.services.blast.job_state import _resolve_job_storage_account
 
     class _Repo:
         def get_summary(self, _job_id: str) -> Any:
@@ -205,7 +205,7 @@ def test_resolve_job_storage_account_normalises_case(
     submit-time value, but it must return the *recorded* casing so
     downstream code is byte-identical regardless of caller input."""
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
-    from api.services.blast_job_state import _resolve_job_storage_account
+    from api.services.blast.job_state import _resolve_job_storage_account
 
     class _Repo:
         def get_summary(self, _job_id: str) -> Any:
@@ -223,7 +223,7 @@ def test_resolve_job_storage_account_rejects_cross_account(
     must NOT echo the recorded value (that would leak the correct
     account name to anyone probing job_ids)."""
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
-    from api.services.blast_job_state import _resolve_job_storage_account
+    from api.services.blast.job_state import _resolve_job_storage_account
 
     class _Repo:
         def get_summary(self, _job_id: str) -> Any:
@@ -247,7 +247,7 @@ def test_resolve_job_storage_account_falls_back_when_unrecorded(
     The gate must degrade open (return supplied) — a hard failure here
     would break the legacy job listing for everyone."""
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
-    from api.services.blast_job_state import _resolve_job_storage_account
+    from api.services.blast.job_state import _resolve_job_storage_account
 
     class _Repo:
         def get_summary(self, _job_id: str) -> Any:
@@ -263,7 +263,7 @@ def test_resolve_job_storage_account_fails_closed_when_lookup_raises(
     """A state-repo outage must NOT be exploitable as a cross-account
     bypass. Without dev bypass set, the helper must raise 503."""
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
-    from api.services.blast_job_state import _resolve_job_storage_account
+    from api.services.blast.job_state import _resolve_job_storage_account
 
     class _ExplodingRepo:
         def get_summary(self, _job_id: str) -> Any:
@@ -284,7 +284,7 @@ def test_resolve_job_storage_account_degrades_open_in_dev_bypass(
     """Under AUTH_DEV_BYPASS the dev loop has no real state backend; the
     helper degrades open so local development is not blocked."""
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
-    from api.services.blast_job_state import _resolve_job_storage_account
+    from api.services.blast.job_state import _resolve_job_storage_account
 
     class _ExplodingRepo:
         def get_summary(self, _job_id: str) -> Any:
@@ -298,7 +298,7 @@ def test_resolve_job_storage_account_empty_supplied_returns_immediately() -> Non
     """If the caller did not supply storage_account at all (optional on a
     few routes), the helper must not raise — it should return the empty
     string and let the route's own validation handle it."""
-    from api.services.blast_job_state import _resolve_job_storage_account
+    from api.services.blast.job_state import _resolve_job_storage_account
 
     assert _resolve_job_storage_account("job-1", "") == ""
 

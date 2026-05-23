@@ -208,7 +208,7 @@ def _refresh_submit_terminal_status(
 
 def _has_parseable_result_artifact(storage_account: str, job_id: str) -> bool:
     try:
-        from api.services.blast_result_analytics import list_parseable_result_blobs
+        from api.services.blast.result_analytics import list_parseable_result_blobs
 
         return bool(list_parseable_result_blobs(storage_account, job_id))
     except Exception as exc:

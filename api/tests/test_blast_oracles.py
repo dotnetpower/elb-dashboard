@@ -20,7 +20,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from api.services import blast_oracles
+from api.services.blast import oracles as blast_oracles
 from api.tasks import blast as blast_tasks
 
 

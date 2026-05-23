@@ -94,7 +94,7 @@ def finalize_job_artifacts(
         if not storage_account and isinstance(state.payload, dict):
             storage_account = str(state.payload.get("storage_account") or "")
         if str(state.status or "").casefold() == "completed" and storage_account:
-            from api.services.blast_result_artifacts import build_and_write_default_result_artifacts
+            from api.services.blast.result_artifacts import build_and_write_default_result_artifacts
 
             summary["results"] = build_and_write_default_result_artifacts(
                 job_id,

@@ -11,8 +11,8 @@ Validation: `uv run pytest -q api/tests/test_blast_provenance.py`.
 
 from __future__ import annotations
 
-from api.services.blast_provenance import build_blast_provenance
-from api.services.blast_submit_payload import canonical_submit_snapshot, submit_contracts
+from api.services.blast.provenance import build_blast_provenance
+from api.services.blast.submit_payload import canonical_submit_snapshot, submit_contracts
 
 
 def test_build_blast_provenance_captures_query_database_and_compatibility() -> None:

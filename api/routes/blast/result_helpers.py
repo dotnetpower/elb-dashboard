@@ -19,7 +19,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from api.services.blast_result_analytics import (
+from api.services.blast.result_analytics import (
     RESULTS_DEFAULT_PAGE_SIZE,
     InvalidResultBlobName,
     validate_result_blob_name,

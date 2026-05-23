@@ -36,7 +36,7 @@ from api.routes.blast.result_helpers import (
     result_artifact_state,
     validate_result_blob_for_job,
 )
-from api.services.blast_result_analytics import (
+from api.services.blast.result_analytics import (
     RESULTS_EXPORT_MAX_BYTES,
     RESULTS_MAX_FILES,
     annotate_result_hit,
@@ -213,7 +213,7 @@ def blast_job_results(
                 context="blast_job_results",
             )
             files = list_result_blobs(cred, storage_account, container="results", prefix=job_id)
-            from api.services.blast_result_manifest import build_result_manifest
+            from api.services.blast.result_manifest import build_result_manifest
 
             return {
                 "job_id": job_id,
@@ -235,7 +235,7 @@ def blast_job_results(
 
         files = _external_result_files(external_blast.get_job(job_id))
         if files:
-            from api.services.blast_result_manifest import build_result_manifest
+            from api.services.blast.result_manifest import build_result_manifest
 
             return {
                 "job_id": job_id,
@@ -252,7 +252,7 @@ def blast_job_results(
         LOGGER.info("external blast result list unavailable: %s", type(exc).__name__)
 
     if local_failure:
-        from api.services.blast_result_manifest import build_result_manifest
+        from api.services.blast.result_manifest import build_result_manifest
 
         return {
             "job_id": job_id,
@@ -265,7 +265,7 @@ def blast_job_results(
             ),
             **local_failure,
         }
-    from api.services.blast_result_manifest import build_result_manifest
+    from api.services.blast.result_manifest import build_result_manifest
 
     return {
         "job_id": job_id,
@@ -327,7 +327,7 @@ def blast_job_results_aggregate(
         }
 
     try:
-        from api.services.blast_result_artifacts import build_result_aggregate_payload
+        from api.services.blast.result_artifacts import build_result_aggregate_payload
 
         payload = build_result_aggregate_payload(job_id, storage_account)
     except Exception as exc:
@@ -405,7 +405,7 @@ def blast_job_results_export(
     import json
 
     from api.services import get_credential
-    from api.services.blast_results_parser import (
+    from api.services.blast.results_parser import (
         EXPORT_DEFAULT_COLUMNS,
         EXPORT_EXTRA_COLUMNS,
         parse_blast_result_content,

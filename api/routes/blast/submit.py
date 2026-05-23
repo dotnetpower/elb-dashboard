@@ -24,7 +24,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request, Resp
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _normalise_blast_submit_body, _stub_log
 from api.routes.blast.common import LAB_TOOL_PENDING
-from api.services.blast_submit_payload import (
+from api.services.blast.submit_payload import (
     canonical_submit_metadata,
     canonical_submit_snapshot,
     submit_contracts,
@@ -182,7 +182,7 @@ def blast_submit(
     # Precision gate: exact/precise sharding claims must be validated before a
     # Celery task is queued. Approximate mode remains explicit and warning-only.
     try:
-        from api.services.blast_compatibility import build_compatibility_contract
+        from api.services.blast.compatibility import build_compatibility_contract
         from api.services.sharding_precision import build_precision_report, normalize_sharding_mode
 
         precision_options = dict(req.options or {})
@@ -223,7 +223,7 @@ def blast_submit(
                 },
             )
         normalised_body["compatibility_contract"] = early_contracts["compatibility_contract"]
-        from api.services.blast_provenance import build_blast_provenance
+        from api.services.blast.provenance import build_blast_provenance
 
         normalised_body["provenance"] = build_blast_provenance(
             job_id=job_id,
@@ -418,7 +418,7 @@ def blast_job_submit(
     payload.update(canonical_submit_metadata(payload, submission_source="external_api"))
     payload["canonical_request"] = canonical_submit_snapshot(payload)
     payload.update(submit_contracts(payload))
-    from api.services.blast_provenance import build_blast_provenance
+    from api.services.blast.provenance import build_blast_provenance
 
     payload["provenance"] = build_blast_provenance(
         job_id=str(payload["external_correlation_id"]),
