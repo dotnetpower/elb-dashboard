@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import api.routes.terminal_ws as ws_module
+import api.routes.terminal.ws as ws_module
 import pytest
 
 
