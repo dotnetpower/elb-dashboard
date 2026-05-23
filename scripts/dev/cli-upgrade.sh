@@ -295,7 +295,12 @@ poll_health() {
   local attempt=0 status=000
   local body_file
   body_file="$(mktemp -t elb-health-body.XXXXXX)"
+  # Use both RETURN (normal function exit) and EXIT (caller calls die()
+  # before we return, which would otherwise leak the tempfile). RETURN
+  # fires first on a normal return and removes the file; the EXIT trap is
+  # then a no-op because `rm -f` is idempotent.
   trap "rm -f '$body_file'" RETURN
+  trap "rm -f '$body_file'" EXIT
   ts "==> Polling $url (timeout ${HEALTH_TIMEOUT}s)"
   while (( SECONDS < deadline )); do
     attempt=$(( attempt + 1 ))

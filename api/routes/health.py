@@ -156,6 +156,17 @@ def _probe_storage_table() -> dict[str, Any]:
 
         # Single atomic publish: readers never see (new_result, old_ts) or
         # (old_result, new_ts).
+        prev_status = cached[0].get("status") if cached is not None else None
+        new_status = result.get("status")
+        if prev_status is not None and prev_status != new_status:
+            # State transition: log exactly once on the boundary so operators
+            # have a timestamped breadcrumb without log-spam every cache miss.
+            LOGGER.info(
+                "storage probe state transition: %s -> %s (%s)",
+                prev_status,
+                new_status,
+                result.get("error", result.get("reason", "")),
+            )
         _STORAGE_PROBE_CACHE = (result, time.monotonic())
         return result
 
