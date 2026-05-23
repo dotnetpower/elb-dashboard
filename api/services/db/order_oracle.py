@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from api.services.warmup_jobs import (
+from api.services.warmup.jobs import (
     DEFAULT_CONTAINER_DB_PATH,
     DEFAULT_NAMESPACE,
     DEFAULT_NODE_DB_PATH,

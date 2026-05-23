@@ -21,7 +21,7 @@ from api.services.db.sharding import (
     PRESET_SHARD_SETS,
     SAFE_SHARD_FRACTION_OF_NODE_RAM,
 )
-from api.services.warmup_planner import (
+from api.services.warmup.planner import (
     _MAX_PRESET_SHARDS,
     WarmupPlan,
     compute_warmup_feasibility,

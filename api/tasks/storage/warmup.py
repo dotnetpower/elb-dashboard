@@ -293,7 +293,7 @@ def warmup_database(
                     k8s_ready_warmup_node_names,
                     k8s_release_stale_warmup_jobs,
                 )
-                from api.services.warmup_jobs import build_warmup_job_plan
+                from api.services.warmup.jobs import build_warmup_job_plan
 
                 nodes = k8s_ready_warmup_node_names(
                     cred, subscription_id, resource_group, cluster_name

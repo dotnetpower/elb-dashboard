@@ -523,7 +523,7 @@ def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
         raise AssertionError("build_warmup_job_plan should not be called")
 
     monkeypatch.setattr(
-        "api.services.warmup_jobs.build_warmup_job_plan",
+        "api.services.warmup.jobs.build_warmup_job_plan",
         fake_build_warmup_job_plan,
     )
 

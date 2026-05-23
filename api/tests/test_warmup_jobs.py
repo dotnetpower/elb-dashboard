@@ -15,7 +15,7 @@ Validation: `uv run pytest -q api/tests/test_warmup_jobs.py`.
 from __future__ import annotations
 
 import pytest
-from api.services.warmup_jobs import (
+from api.services.warmup.jobs import (
     DEFAULT_CONTAINER_DB_PATH,
     attach_pod_progress_to_database_status,
     build_warmup_job_plan,

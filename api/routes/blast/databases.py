@@ -84,7 +84,7 @@ def blast_databases(
     # ARM round trip per page render would be wasteful since the SPA
     # already loads /api/monitor/aks via useClusterReadiness).
     if num_nodes > 0 and machine_type:
-        from api.services.warmup_planner import compute_warmup_feasibility
+        from api.services.warmup.planner import compute_warmup_feasibility
 
         for db in databases:
             try:

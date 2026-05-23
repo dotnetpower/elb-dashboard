@@ -41,7 +41,7 @@ from api.services.k8s_timestamps import (
 from api.services.k8s_timestamps import (
     min_k8s_timestamp as _min_k8s_timestamp,
 )
-from api.services.warmup_jobs import (
+from api.services.warmup.jobs import (
     DEFAULT_WARMUP_APP_LABEL,
     attach_pod_progress_to_database_status,
     build_warmup_scripts_configmap,
