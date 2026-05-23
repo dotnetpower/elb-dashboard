@@ -16,8 +16,10 @@ Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
+from azure.core.exceptions import ResourceNotFoundError
 from celery import shared_task
 
 import api.tasks.azure as _facade
@@ -25,6 +27,14 @@ from api.tasks.azure.cluster_params import build_cluster_params
 from api.tasks.azure.helpers import update_state
 
 LOGGER = logging.getLogger(__name__)
+
+# ARM eventual-consistency: after resource_groups.create_or_update returns
+# 200 OK, downstream control planes (notably AKS) occasionally still see
+# ResourceGroupNotFound for a brief window. Poll resource_groups.get to
+# confirm visibility before the long AKS create call (which would otherwise
+# fail ~10 minutes in).
+_RG_VISIBILITY_ATTEMPTS = 12
+_RG_VISIBILITY_DELAY_SECONDS = 5.0
 
 
 @shared_task(
@@ -112,6 +122,25 @@ def provision_aks(
     update_state(job_id, "ensuring_resource_group")
     rc = _facade.resource_client(cred, subscription_id)
     rc.resource_groups.create_or_update(resource_group, {"location": region})
+
+    # ARM eventual-consistency guard: confirm the RG is visible before
+    # handing off to AKS. Without this, AKS create occasionally still
+    # returns ResourceGroupNotFound for the freshly-created RG.
+    for attempt in range(_RG_VISIBILITY_ATTEMPTS):
+        try:
+            rc.resource_groups.get(resource_group)
+            break
+        except ResourceNotFoundError:
+            if attempt == _RG_VISIBILITY_ATTEMPTS - 1:
+                raise
+            LOGGER.info(
+                "resource group %s not yet visible (attempt %d/%d); waiting %.0fs",
+                resource_group,
+                attempt + 1,
+                _RG_VISIBILITY_ATTEMPTS,
+                _RG_VISIBILITY_DELAY_SECONDS,
+            )
+            time.sleep(_RG_VISIBILITY_DELAY_SECONDS)
 
     SYSTEM_POOL_NAME = "systempool"
     BLAST_POOL_NAME = "blastpool"
