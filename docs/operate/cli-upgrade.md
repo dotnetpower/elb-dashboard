@@ -117,12 +117,12 @@ flowchart TD
   confirm -- no --> ask[/"Proceed? [y/N]"/]
   confirm -- yes --> deploy
   ask -- y --> deploy["Dispatch<br/>api/frontend/terminal → quick-deploy.sh<br/>full → postprovision.sh"]
-  deploy --> health{"Poll /api/health<br/>≤ --health-timeout"}
+  deploy --> health{"Poll /api/health/ready<br/>≤ --health-timeout"}
   health -- 200 --> done(["✓ healthy<br/>print rollback hint"])
   health -- timeout --> ar{"--auto-rollback?"}
   ar -- yes --> restore["Re-PATCH per-sidecar image<br/>from snapshot"]
   ar -- no --> manual["print manual rollback command<br/>exit 1"]
-  restore --> health2{"Poll /api/health"}
+  restore --> health2{"Poll /api/health/ready"}
   health2 -- 200 --> rolled(["⚠ rolled back<br/>exit 1"])
   health2 -- timeout --> dead(["✗ rollback failed<br/>exit 1"])
 ```
@@ -172,6 +172,7 @@ The script enforces these automatically and refuses to proceed if any fails:
 | `--pull` only on the branch you started on | Accidental `pull` of a feature branch into `main` |
 | `git pull --ff-only` | Non-fast-forward pulls leaving a merge commit you did not intend |
 | Snapshot of current revision + image refs taken before any PATCH | Losing the previous tags to roll back to |
+| Workload Storage parity: refuses when `publicNetworkAccess=Disabled` AND no Private Endpoint exists | Deploying into a state where the Container App has no network path to Storage (worker would fail every minute on `403 AuthorizationFailure`). Override with `--skip-parity-check`. |
 
 ## Recommended workflow
 
@@ -244,7 +245,7 @@ curl -fsS "https://$CONTAINER_APP_FQDN/api/health"
 
 ## Health-check budget
 
-The script polls `https://<fqdn>/api/health` every 5 seconds for
+The script polls `https://<fqdn>/api/health/ready` every 5 seconds for
 `--health-timeout` seconds (default **180**). Tune it with
 `--health-timeout 300` when:
 
@@ -252,11 +253,17 @@ The script polls `https://<fqdn>/api/health` every 5 seconds for
 - The Container App was scaled to zero before the upgrade (revision warmup).
 - A managed-identity refresh is in progress (typically <30 s).
 
-`/api/health` is the cheap liveness probe — it never calls Azure or
-Storage, so a `200` means the api sidecar process is up and the
-new image's Python is importable. For deeper signal, follow up with
-the auth-gated `/api/health/azure-discovery` once you can sign in
-(see [`api/routes/health.py`](https://github.com/dotnetpower/elb-dashboard/blob/main/api/routes/health.py)).
+`/api/health/ready` is the **deep readiness probe** — it checks the Redis
+broker, the Managed Identity credential, the terminal sidecar's loopback
+exec server, and a cheap `list_tables(top=1)` call against the workload
+Storage Table data plane. A `200` means the api sidecar is up AND every
+critical downstream is actually reachable. On any 503 the script dumps
+the response body to stderr so you can see which component is `down`
+before the auto-rollback kicks in.
+
+The cheap `/api/health` (liveness) endpoint stays in place for Container
+Apps platform probes — never use it as a deploy verification gate, it
+does not call Azure at all.
 
 ## Common failure modes
 
@@ -268,6 +275,8 @@ the auth-gated `/api/health/azure-discovery` once you can sign in
 | `403` on `az containerapp update` | Caller's `az login` identity lacks `Contributor` on the Container App. | Use the deploying account, or have the deployer add a `Container Apps Contributor` role assignment. |
 | New revision crash-loops with `ImagePullBackOff` | Build succeeded but ACR pull permission for the Container App's MI is broken. | Run [`scripts/dev/postprovision.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/postprovision.sh) once to re-grant `AcrPull`. |
 | Health check passes but the SPA fails to load | `VITE_API_BASE_URL` leaked from `web/.env.local` into the frontend build. | The script unsets it; if you bypassed it, `cli-upgrade.sh frontend --pull` will overwrite. |
+| Preflight rejects with `Storage '...' is unreachable from the Container App` | Workload Storage is `publicNetworkAccess=Disabled` (most often left over from a local-debug `storage-public-access.sh off` / `local-run.sh storage-off` / `auth-off`) AND the deployment never created Private Endpoints (`LOCKDOWN_PRIVATE_NETWORKING=false`). | Quick: `scripts/dev/storage-public-access.sh on --account <acct> --rg <rg>`. Proper: `azd env set LOCKDOWN_PRIVATE_NETWORKING true && azd provision`. Last-resort override: `--skip-parity-check` (workload will still fail Storage calls). |
+| `/api/health/ready` returns 503 with `azure_storage: down` in the body | The api sidecar can reach Azure AD but not the Storage data plane. Same cause as the preflight rejection above, OR transient Azure outage, OR the workload Managed Identity is missing `Storage Table Data Contributor` on the workload storage account. | Confirm MI role: `az role assignment list --assignee <mi-principalId> --scope <storage-id>`. If correct, run the Storage recovery from the row above. |
 
 ## What this script does **not** do
 
