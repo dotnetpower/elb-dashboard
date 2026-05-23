@@ -251,6 +251,73 @@ def test_readiness_storage_down_result_uses_short_ttl(
     )
 
 
+def test_readiness_storage_probe_is_single_flight_on_cold_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent first-callers must collapse into one underlying Storage probe.
+
+    Without single-flight, a cold cache hit by N parallel readers fans out
+    N probes (thundering herd) and N TLS handshakes against the Storage
+    Table endpoint. Double-checked locking around the cache must coalesce
+    them into exactly one underlying `list_tables` call.
+    """
+    import threading
+    import time as _time
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    call_count = 0
+    enter_barrier = threading.Barrier(8)  # 8 concurrent readers
+
+    class _SlowPager:
+        def by_page(self) -> object:
+            return iter([[]])
+
+    class _SlowService:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _SlowService:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def list_tables(self, *args: object, **kwargs: object) -> _SlowPager:
+            nonlocal call_count
+            call_count += 1
+            # Block briefly so concurrent callers stack up behind the cache
+            # lock; the first caller must serve all of them.
+            _time.sleep(0.1)
+            return _SlowPager()
+
+    import api.services
+    import azure.data.tables
+
+    monkeypatch.setattr(azure.data.tables, "TableServiceClient", _SlowService)
+    monkeypatch.setattr(api.services, "get_credential", lambda: object())
+
+    storage_statuses: list[str] = []
+    lock = threading.Lock()
+
+    def _hit() -> None:
+        enter_barrier.wait()
+        r = client.get("/api/health/ready")
+        with lock:
+            storage_statuses.append(r.json()["components"]["azure_storage"]["status"])
+
+    workers = [threading.Thread(target=_hit) for _ in range(8)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout=5.0)
+        assert not w.is_alive(), "single-flight worker stuck"
+
+    assert storage_statuses == ["ok"] * 8, f"expected 8x 'ok', got {storage_statuses}"
+    assert call_count == 1, (
+        f"single-flight broken: expected 1 underlying Storage call, got {call_count}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Auth gates
 # ---------------------------------------------------------------------------

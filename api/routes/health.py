@@ -44,10 +44,23 @@ LOGGER = logging.getLogger(__name__)
 #   * `down`/`skipped` — cached for 3 s only. A long TTL on a `down` would
 #     keep returning the old failure for up to 14 s after an operator
 #     opens Storage back up, making recovery look broken when it is not.
+#
+# Single-flight: when the cache is cold (or just expired) and N requests
+# arrive concurrently, only ONE thread actually runs the probe and the
+# others reuse its result. Implemented with double-checked locking around
+# `_STORAGE_PROBE_CACHE_LOCK`.
 _STORAGE_PROBE_CACHE: dict[str, Any] = {"value": None, "ts": 0.0}
 _STORAGE_PROBE_CACHE_LOCK = threading.Lock()
 _STORAGE_PROBE_CACHE_TTL_OK_SECONDS = 15.0
 _STORAGE_PROBE_CACHE_TTL_BAD_SECONDS = 3.0
+
+# TableServiceClient is designed for long-lived reuse (internal connection
+# pool, TLS keep-alive). Recreating it per probe pays a fresh TLS handshake
+# every cache miss. Cache one instance keyed by endpoint so a change to
+# AZURE_TABLE_ENDPOINT (rare — only at process restart in practice) still
+# rebuilds the client.
+_TABLE_SERVICE_CLIENT: tuple[str, Any] | None = None
+_TABLE_SERVICE_CLIENT_LOCK = threading.Lock()
 
 
 def _ttl_for(result: dict[str, Any] | None) -> float:
@@ -58,9 +71,34 @@ def _ttl_for(result: dict[str, Any] | None) -> float:
 
 def _reset_storage_probe_cache() -> None:
     """Test helper: drop the cached result so the next call re-probes."""
+    global _TABLE_SERVICE_CLIENT
     with _STORAGE_PROBE_CACHE_LOCK:
         _STORAGE_PROBE_CACHE["value"] = None
         _STORAGE_PROBE_CACHE["ts"] = 0.0
+    with _TABLE_SERVICE_CLIENT_LOCK:
+        _TABLE_SERVICE_CLIENT = None
+
+
+def _get_table_service_client(endpoint: str) -> Any:
+    """Return a cached TableServiceClient for the endpoint, or build one."""
+    global _TABLE_SERVICE_CLIENT
+    cached = _TABLE_SERVICE_CLIENT
+    if cached is not None and cached[0] == endpoint:
+        return cached[1]
+    with _TABLE_SERVICE_CLIENT_LOCK:
+        cached = _TABLE_SERVICE_CLIENT
+        if cached is not None and cached[0] == endpoint:
+            return cached[1]
+        from azure.data.tables import TableServiceClient
+
+        from api.services import get_credential
+
+        client = TableServiceClient(
+            endpoint=endpoint,
+            credential=get_credential(),
+        )
+        _TABLE_SERVICE_CLIENT = (endpoint, client)
+        return client
 
 
 def _probe_storage_table() -> dict[str, Any]:
@@ -72,39 +110,44 @@ def _probe_storage_table() -> dict[str, Any]:
     returns 403 AuthorizationFailure at the data plane while ARM/credential
     paths look healthy. ``timeout=3`` caps a single call so a wedged Storage
     cannot tarpit ``/health/ready``.
+
+    Concurrency: a fast no-lock read serves cache hits; on a miss the
+    `_STORAGE_PROBE_CACHE_LOCK` is acquired and the cache re-checked
+    (double-checked locking) so only one of N concurrent first-callers
+    actually runs the probe.
     """
     now = time.monotonic()
-    with _STORAGE_PROBE_CACHE_LOCK:
-        cached = _STORAGE_PROBE_CACHE["value"]
-        cached_ts = _STORAGE_PROBE_CACHE["ts"]
+    cached = _STORAGE_PROBE_CACHE["value"]
+    cached_ts = _STORAGE_PROBE_CACHE["ts"]
     if cached is not None and now - cached_ts < _ttl_for(cached):
         return cached
 
-    endpoint = os.environ.get("AZURE_TABLE_ENDPOINT", "")
-    if not endpoint:
-        result: dict[str, Any] = {
-            "status": "skipped",
-            "reason": "AZURE_TABLE_ENDPOINT not set",
-        }
-    else:
-        try:
-            from azure.data.tables import TableServiceClient
-
-            from api.services import get_credential
-
-            with TableServiceClient(
-                endpoint=endpoint,
-                credential=get_credential(),
-            ) as svc:
-                next(svc.list_tables(results_per_page=1, timeout=3).by_page(), None)
-            result = {"status": "ok"}
-        except Exception as exc:
-            result = {"status": "down", "error": str(exc)[:200]}
-
     with _STORAGE_PROBE_CACHE_LOCK:
+        # Re-check after acquiring the lock: another thread may have just
+        # refreshed while we were waiting.
+        cached = _STORAGE_PROBE_CACHE["value"]
+        cached_ts = _STORAGE_PROBE_CACHE["ts"]
+        now = time.monotonic()
+        if cached is not None and now - cached_ts < _ttl_for(cached):
+            return cached
+
+        endpoint = os.environ.get("AZURE_TABLE_ENDPOINT", "")
+        if not endpoint:
+            result: dict[str, Any] = {
+                "status": "skipped",
+                "reason": "AZURE_TABLE_ENDPOINT not set",
+            }
+        else:
+            try:
+                svc = _get_table_service_client(endpoint)
+                next(svc.list_tables(results_per_page=1, timeout=3).by_page(), None)
+                result = {"status": "ok"}
+            except Exception as exc:
+                result = {"status": "down", "error": str(exc)[:200]}
+
         _STORAGE_PROBE_CACHE["value"] = result
-        _STORAGE_PROBE_CACHE["ts"] = now
-    return result
+        _STORAGE_PROBE_CACHE["ts"] = time.monotonic()
+        return result
 
 
 router = APIRouter(tags=["health"])
