@@ -55,6 +55,16 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 # Readiness probe — Storage component (Tier-1 gate for cli-upgrade.sh)
 # ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _reset_storage_probe_cache_between_tests() -> None:
+    """Drop the cached Storage probe result so each test starts fresh."""
+    from api.routes.health import _reset_storage_probe_cache
+
+    _reset_storage_probe_cache()
+    yield
+    _reset_storage_probe_cache()
+
+
 def test_readiness_storage_skipped_when_endpoint_unset(client: TestClient) -> None:
     """`AZURE_TABLE_ENDPOINT` unset → Storage probe reports 'skipped', not 'down'.
 
@@ -132,6 +142,51 @@ def test_readiness_storage_down_when_list_tables_raises(
     assert storage["status"] == "down"
     assert "simulated AuthorizationFailure" in storage["error"]
     assert body["status"] == "not_ready"
+
+
+def test_readiness_storage_probe_is_cached_within_ttl(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated `/health/ready` calls within the TTL must reuse the cached probe.
+
+    Without the cache, every unauthenticated readiness call fans out a
+    Storage Table data-plane request — the DDoS amplifier this hardening
+    fix exists to remove.
+    """
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    call_count = 0
+
+    class _CountingPager:
+        def by_page(self) -> object:
+            return iter([[]])
+
+    class _CountingService:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _CountingService:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def list_tables(self, *args: object, **kwargs: object) -> _CountingPager:
+            nonlocal call_count
+            call_count += 1
+            return _CountingPager()
+
+    import api.services
+    import azure.data.tables
+
+    monkeypatch.setattr(azure.data.tables, "TableServiceClient", _CountingService)
+    monkeypatch.setattr(api.services, "get_credential", lambda: object())
+
+    for _ in range(5):
+        r = client.get("/api/health/ready")
+        assert r.json()["components"]["azure_storage"] == {"status": "ok"}
+    assert call_count == 1, (
+        f"expected exactly 1 underlying Storage call within TTL, got {call_count}"
+    )
 
 
 # ---------------------------------------------------------------------------

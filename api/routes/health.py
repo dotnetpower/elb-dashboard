@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends
@@ -31,6 +33,66 @@ if TYPE_CHECKING:
 _require_caller_lazy = require_caller
 
 LOGGER = logging.getLogger(__name__)
+
+# Cache the Storage probe result. /api/health/ready is unauthenticated and
+# may be hit at high frequency by monitoring/CI; without a TTL cache each
+# request would fan out a real Storage Table data-plane call (DDoS
+# amplifier).
+_STORAGE_PROBE_CACHE: dict[str, Any] = {"value": None, "ts": 0.0}
+_STORAGE_PROBE_CACHE_LOCK = threading.Lock()
+_STORAGE_PROBE_CACHE_TTL_SECONDS = 15.0
+
+
+def _reset_storage_probe_cache() -> None:
+    """Test helper: drop the cached result so the next call re-probes."""
+    with _STORAGE_PROBE_CACHE_LOCK:
+        _STORAGE_PROBE_CACHE["value"] = None
+        _STORAGE_PROBE_CACHE["ts"] = 0.0
+
+
+def _probe_storage_table() -> dict[str, Any]:
+    """Run the Storage Table probe, or return a cached result within the TTL.
+
+    Cheapest call that exercises (a) AAD token (b) network reachability to
+    Storage (c) Storage Table RBAC. Catches the
+    ``publicNetworkAccess=Disabled`` without Private Endpoint footgun that
+    returns 403 AuthorizationFailure at the data plane while ARM/credential
+    paths look healthy. ``timeout=3`` caps a single call so a wedged Storage
+    cannot tarpit ``/health/ready``.
+    """
+    now = time.monotonic()
+    with _STORAGE_PROBE_CACHE_LOCK:
+        cached = _STORAGE_PROBE_CACHE["value"]
+        cached_ts = _STORAGE_PROBE_CACHE["ts"]
+    if cached is not None and now - cached_ts < _STORAGE_PROBE_CACHE_TTL_SECONDS:
+        return cached
+
+    endpoint = os.environ.get("AZURE_TABLE_ENDPOINT", "")
+    if not endpoint:
+        result: dict[str, Any] = {
+            "status": "skipped",
+            "reason": "AZURE_TABLE_ENDPOINT not set",
+        }
+    else:
+        try:
+            from azure.data.tables import TableServiceClient
+
+            from api.services import get_credential
+
+            with TableServiceClient(
+                endpoint=endpoint,
+                credential=get_credential(),
+            ) as svc:
+                next(svc.list_tables(results_per_page=1, timeout=3).by_page(), None)
+            result = {"status": "ok"}
+        except Exception as exc:
+            result = {"status": "down", "error": str(exc)[:200]}
+
+    with _STORAGE_PROBE_CACHE_LOCK:
+        _STORAGE_PROBE_CACHE["value"] = result
+        _STORAGE_PROBE_CACHE["ts"] = now
+    return result
+
 
 router = APIRouter(tags=["health"])
 
@@ -97,34 +159,13 @@ def readiness() -> Any:
         # Non-critical — terminal being down doesn't block BLAST submit
 
     # 4. Azure Storage Table data plane.
-    # Cheapest call that exercises (a) AAD token (b) network reachability to
-    # Storage (c) Storage Table RBAC. Catches the "publicNetworkAccess=Disabled
-    # without Private Endpoint" footgun that returns 403 AuthorizationFailure
-    # at the data plane while ARM/credential paths look healthy.
-    endpoint = os.environ.get("AZURE_TABLE_ENDPOINT", "")
-    if not endpoint:
-        components["azure_storage"] = {
-            "status": "skipped",
-            "reason": "AZURE_TABLE_ENDPOINT not set",
-        }
-    else:
-        try:
-            from azure.data.tables import TableServiceClient
-
-            from api.services import get_credential
-
-            # Short timeouts so a wedged Storage cannot tarpit /health/ready.
-            with TableServiceClient(
-                endpoint=endpoint,
-                credential=get_credential(),
-                connection_timeout=3,
-                read_timeout=3,
-            ) as svc:
-                next(svc.list_tables(results_per_page=1).by_page(), None)
-            components["azure_storage"] = {"status": "ok"}
-        except Exception as exc:
-            components["azure_storage"] = {"status": "down", "error": str(exc)[:200]}
-            overall_ok = False
+    # Delegated to a cached helper so high-frequency unauthenticated callers
+    # do not amplify into Storage data-plane traffic (see
+    # `_probe_storage_table` for cache TTL + per-call timeout details).
+    storage_status = _probe_storage_table()
+    components["azure_storage"] = storage_status
+    if storage_status["status"] == "down":
+        overall_ok = False
 
     status_code = 200 if overall_ok else 503
     from fastapi.responses import JSONResponse

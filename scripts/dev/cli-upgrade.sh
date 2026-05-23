@@ -168,33 +168,78 @@ fi
 # `403 AuthorizationFailure` (Azure's misleading error code for network
 # policy block on a public endpoint hit).
 #
-# We only reject the deploy when the broken combination is detected; we do
-# not require LOCKDOWN_PRIVATE_NETWORKING to be set either way.
+# Design notes:
+#   * Skipped for `rollback` scope — rollback might be the very recovery
+#     path FROM a broken-Storage state and must never be blocked here.
+#   * Prefers `AZURE_TABLE_ENDPOINT` (the env var the api sidecar actually
+#     uses) to derive the workload account name. Falls back to the first
+#     `st*` account in the RG only when the env is missing — that fallback
+#     could pick a sibling diagnostic account, so it warns loudly.
+#   * Uses the storage account's *own* view of approved Private Endpoint
+#     connections (via `az storage account show ... privateEndpointConnections`)
+#     so hub-and-spoke layouts (PE in a different RG) are counted correctly.
+#   * Distinguishes "RBAC failure on the az calls" from "0 PEs". The former
+#     warns and skips (preflight is best-effort, not authoritative for RBAC
+#     coverage); the latter rejects with a recovery guide.
 # ---------------------------------------------------------------------------
 preflight_storage_parity() {
   if $SKIP_PARITY; then
     warn "skipping Storage isolation parity check (--skip-parity-check)"
     return 0
   fi
-  local acct public pe_count
-  acct="$(az storage account list -g "$AZURE_RESOURCE_GROUP" \
-    --query "[?starts_with(name,'st')].name" -o tsv 2>/dev/null | head -1)"
-  if [[ -z "$acct" ]]; then
-    warn "no workload Storage account found in $AZURE_RESOURCE_GROUP — skipping parity check"
+  if [[ "$SCOPE" == "rollback" ]]; then
+    # Rollback might be the recovery path FROM a broken-Storage state.
+    # Never block a rollback on this check.
     return 0
   fi
-  public="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$acct" \
-    --query publicNetworkAccess -o tsv 2>/dev/null || echo unknown)"
-  pe_count="$(az network private-endpoint list -g "$AZURE_RESOURCE_GROUP" \
-    --query "[?contains(privateLinkServiceConnections[0].privateLinkServiceId,'$acct')] | length(@)" \
-    -o tsv 2>/dev/null || echo 0)"
-  ts "==> Storage parity: account=$acct publicNetworkAccess=$public privateEndpoints=$pe_count"
+
+  local acct=""
+  if [[ -n "${AZURE_TABLE_ENDPOINT:-}" ]]; then
+    # https://stelbdashboardmul5oh5j44.table.core.windows.net → stelbdashboardmul5oh5j44
+    acct="$(printf '%s' "$AZURE_TABLE_ENDPOINT" \
+      | sed -E 's|^https?://([^.]+)\..*|\1|')"
+  fi
+  if [[ -z "$acct" && -n "${STORAGE_ACCOUNT_NAME:-}" ]]; then
+    # azd env exposes the workload account name directly under this key.
+    acct="$STORAGE_ACCOUNT_NAME"
+  fi
+  if [[ -z "$acct" ]]; then
+    warn "neither AZURE_TABLE_ENDPOINT nor STORAGE_ACCOUNT_NAME in env;"
+    warn "  falling back to first 'st*' account in $AZURE_RESOURCE_GROUP (may pick a diagnostic account)"
+    if ! acct="$(az storage account list -g "$AZURE_RESOURCE_GROUP" \
+          --query "[?starts_with(name,'st')].name" -o tsv 2>/dev/null)"; then
+      warn "cannot list storage accounts in $AZURE_RESOURCE_GROUP (RBAC?); skipping parity check"
+      return 0
+    fi
+    acct="$(printf '%s\n' "$acct" | head -1)"
+  fi
+  if [[ -z "$acct" ]]; then
+    warn "no workload Storage account resolved — skipping parity check"
+    return 0
+  fi
+
+  # The storage account's own view of its PEs covers hub-and-spoke (PE in
+  # a different RG). RBAC needed: Reader on the storage account.
+  local show_json
+  if ! show_json="$(az storage account show -n "$acct" \
+        --query '{public:publicNetworkAccess, pecs:privateEndpointConnections[?properties.privateLinkServiceConnectionState.status==`Approved`]}' \
+        -o json 2>&1)"; then
+    warn "cannot read storage account '$acct' (RBAC on the account?); skipping parity check"
+    warn "  az error: ${show_json:0:200}"
+    return 0
+  fi
+  local public pe_count
+  public="$(printf '%s' "$show_json" | jq -r .public)"
+  pe_count="$(printf '%s' "$show_json" | jq -r '.pecs | length')"
+  ts "==> Storage parity: account=$acct publicNetworkAccess=$public approvedPrivateEndpoints=$pe_count"
   if [[ "$public" == "Disabled" && "$pe_count" -eq 0 ]]; then
     cat >&2 <<EOF
 
 ERROR: workload Storage '$acct' is unreachable from the Container App.
-       publicNetworkAccess=Disabled AND no Private Endpoint exists in
-       resource group '$AZURE_RESOURCE_GROUP'.
+       publicNetworkAccess=Disabled AND no approved Private Endpoint
+       connection exists on the account (checked via the account's own
+       privateEndpointConnections view, so this is correct even in a
+       hub-and-spoke layout).
 
 Recovery options:
   (A) Quick reopen (test / local-debug):
