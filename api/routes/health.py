@@ -101,29 +101,32 @@ def _get_table_service_client(endpoint: str) -> Any:
         cached = _TABLE_SERVICE_CLIENT
         if cached is not None and cached[0] == endpoint:
             return cached[1]
-        # Endpoint changed (rare — process restart only in practice).
-        # Close the stale client so its HTTP session is freed immediately
-        # instead of waiting for GC.
-        if cached is not None:
-            try:
-                cached[1].close()
-            except Exception:  # noqa: S110 - close() is best-effort
-                pass
         from azure.data.tables import TableServiceClient
 
         from api.services import get_credential
 
+        # Build the NEW client BEFORE closing the old one. If construction
+        # raises (bad endpoint, transient AAD failure), the old client
+        # stays in place and the next call retries cleanly. Closing first
+        # would leave `_TABLE_SERVICE_CLIENT` pointing at a closed client
+        # which subsequent probes would try to use.
         client = TableServiceClient(
             endpoint=endpoint,
             credential=get_credential(),
             # Probe is fail-fast on purpose: any failure is a real signal
             # readers (the SPA, cli-upgrade.sh, monitoring) want to see
             # immediately. The SDK's default retry policy would otherwise
-            # stretch a single readiness call to ~9 s (3 attempts × 3 s
+            # stretch a single readiness call to ~9 s (3 attempts x 3 s
             # timeout each) and mask transient symptoms behind retries.
             retry_total=0,
         )
+        old_cached = _TABLE_SERVICE_CLIENT
         _TABLE_SERVICE_CLIENT = (endpoint, client)
+        if old_cached is not None:
+            try:
+                old_cached[1].close()
+            except Exception:  # noqa: S110 - close() is best-effort
+                pass
         return client
 
 
