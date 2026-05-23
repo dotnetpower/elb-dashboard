@@ -71,7 +71,70 @@ ts() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 warn() { printf '\033[33mWARN:\033[0m %s\n' "$*" >&2; }
 
+# ---------------------------------------------------------------------------
+# Deploy history: append one JSON line per terminal outcome to
+# ${ELB_UPGRADE_HISTORY:-$HOME/.elb-upgrade-history.jsonl}.
+#
+# Best-effort: any failure to write the history line is swallowed (`|| true`)
+# so a missing $HOME or read-only filesystem never blocks a deploy. Dry-run
+# is intentionally skipped — there is no real outcome to record.
+#
+# Concurrent writers: single-line jsonl appends < PIPE_BUF (4 KiB) are
+# atomic on Linux with O_APPEND, which the shell's `>>` redirection uses.
+# No additional locking needed.
+# ---------------------------------------------------------------------------
+record_history() {
+  # The trap may fire BEFORE flag parsing initializes DRY_RUN, so default
+  # defensively here ("set -u" would otherwise kill the trap).
+  "${DRY_RUN:-false}" && return 0
+  local result="${1:-unknown}" message="${2:-}"
+  local history_file="${ELB_UPGRADE_HISTORY:-$HOME/.elb-upgrade-history.jsonl}"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local elapsed=$SECONDS
+  local line=""
+  if command -v jq >/dev/null 2>&1; then
+    line="$(jq -nc \
+      --arg ts "$now" \
+      --arg scope "${SCOPE:-unknown}" \
+      --arg app "${CONTAINER_APP_NAME:-unknown}" \
+      --arg tag "${TAG:-}" \
+      --arg head_sha "${HEAD_SHA:-}" \
+      --arg result "$result" \
+      --arg message "$message" \
+      --argjson elapsed_seconds "$elapsed" \
+      '{ts: $ts, scope: $scope, app: $app, tag: $tag, head_sha: $head_sha, result: $result, elapsed_seconds: $elapsed_seconds, message: $message}')"
+  else
+    # Fallback without jq: strip embedded double-quotes from message to keep
+    # the line valid JSON. Other fields are controlled by us and never quote.
+    local msg_safe="${message//\"/}"
+    line="$(printf '{"ts":"%s","scope":"%s","app":"%s","tag":"%s","head_sha":"%s","result":"%s","elapsed_seconds":%d,"message":"%s"}' \
+      "$now" "${SCOPE:-unknown}" "${CONTAINER_APP_NAME:-unknown}" "${TAG:-}" "${HEAD_SHA:-}" "$result" "$elapsed" "$msg_safe")"
+  fi
+  printf '%s\n' "$line" >> "$history_file" 2>/dev/null || true
+}
+
+# Outcome tracking. Each interesting code path calls `set_result <name>
+# [<message>]`; a single EXIT trap (registered just below) calls
+# record_history once with whatever the most recent assignment was. The
+# default 'aborted' covers Ctrl+C, SIGTERM, and any unforeseen exit path
+# that forgets to update the variable.
+RUN_RESULT="aborted"
+RUN_RESULT_MSG="exit before any outcome was recorded"
+set_result() {
+  RUN_RESULT="$1"
+  RUN_RESULT_MSG="${2:-}"
+}
+_history_on_exit() {
+  local rc=$?
+  # SCOPE may still be empty if argv parsing failed. record_history is
+  # best-effort and tolerates that.
+  record_history "$RUN_RESULT" "$RUN_RESULT_MSG (exit=$rc)"
+}
+trap _history_on_exit EXIT
+
 usage() {
+  # --help / argv-error usage prints don't need a history entry.
+  trap - EXIT
   sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
@@ -256,7 +319,10 @@ EOF
   fi
   return 0
 }
-preflight_storage_parity || die "Storage parity preflight failed (see above)."
+preflight_storage_parity || {
+  set_result "parity_rejected" "Storage parity preflight rejected the deploy"
+  die "Storage parity preflight failed (see above)."
+}
 
 SNAPSHOT="${ELB_UPGRADE_SNAPSHOT:-/tmp/elb-upgrade-snapshot-${CONTAINER_APP_NAME}.json}"
 
@@ -386,8 +452,10 @@ EOF
   restore_from_snapshot "$SNAPSHOT"
   if poll_health; then
     ts "✓ Rollback complete. App is healthy."
+    set_result "rollback_success" "explicit rollback scope completed and healthy"
     exit 0
   fi
+  set_result "rollback_failed" "explicit rollback PATCH applied but /api/health/ready did not return 200"
   die "Rollback PATCH applied but /api/health/ready did not return 200 within ${HEALTH_TIMEOUT}s."
 fi
 
@@ -442,7 +510,10 @@ EOF
 if ! $ASSUME_YES && ! $DRY_RUN; then
   printf 'Proceed? [y/N] '
   read -r ANSWER
-  [[ "$ANSWER" == "y" || "$ANSWER" == "Y" ]] || die "aborted by user"
+  if [[ "$ANSWER" != "y" && "$ANSWER" != "Y" ]]; then
+    set_result "aborted_by_user" "interactive 'Proceed?' prompt was declined"
+    die "aborted by user"
+  fi
 fi
 
 take_snapshot "$SNAPSHOT"
@@ -470,13 +541,14 @@ deploy_full() {
 }
 
 case "$SCOPE" in
-  api|frontend|terminal) deploy_one "$SCOPE" ;;
-  full)                  deploy_full ;;
+  api|frontend|terminal) set_result "build_in_progress" "running quick-deploy.sh $SCOPE"; deploy_one "$SCOPE" ;;
+  full)                  set_result "build_in_progress" "running postprovision.sh"; deploy_full ;;
   *)                     die "internal: unhandled scope $SCOPE" ;;
 esac
 
 if $DRY_RUN; then
   ts "==> Dry-run complete. No build was run, no PATCH applied."
+  set_result "dry_run" "dry-run completed; no PATCH applied"
   exit 0
 fi
 
@@ -486,6 +558,7 @@ fi
 if poll_health; then
   ts "✓ Upgrade complete and healthy."
   ts "  Roll back later with: $0 rollback --yes"
+  set_result "success" ""
   if $TAIL_LOGS; then
     ts "==> Tailing api logs (Ctrl-C to exit)"
     az containerapp logs show --name "$CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -500,8 +573,10 @@ if $AUTO_ROLLBACK; then
   restore_from_snapshot "$SNAPSHOT"
   if poll_health; then
     ts "✓ Rollback complete. App is healthy again on the previous tag."
+    set_result "upgrade_failed_rolled_back" "new tag failed /api/health/ready; rolled back to snapshot"
     die "Original upgrade failed health check. Investigate the new tag in ACR before retrying."
   fi
+  set_result "rollback_failed" "rollback PATCH applied but /api/health/ready still fails"
   die "Rollback PATCH applied but /api/health/ready still fails. Investigate immediately."
 fi
 
