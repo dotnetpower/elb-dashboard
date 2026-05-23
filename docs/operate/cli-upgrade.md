@@ -172,7 +172,51 @@ The script enforces these automatically and refuses to proceed if any fails:
 | `--pull` only on the branch you started on | Accidental `pull` of a feature branch into `main` |
 | `git pull --ff-only` | Non-fast-forward pulls leaving a merge commit you did not intend |
 | Snapshot of current revision + image refs taken before any PATCH | Losing the previous tags to roll back to |
-| Workload Storage parity: refuses when `publicNetworkAccess=Disabled` AND no Private Endpoint exists | Deploying into a state where the Container App has no network path to Storage (worker would fail every minute on `403 AuthorizationFailure`). Override with `--skip-parity-check`. |
+| Workload Storage parity: refuses when `publicNetworkAccess=Disabled` AND no approved Private Endpoint exists on the account | Deploying into a state where the Container App has no network path to Storage (worker would fail every minute on `403 AuthorizationFailure`). Override with `--skip-parity-check`. |
+| Exclusive lock on the snapshot file (`flock` on `/tmp/elb-upgrade-snapshot-<app>.json.lock`) | Two operators racing concurrent deploys against the same Container App and corrupting the rollback snapshot — the second run is rejected with a clear error |
+
+## Deploy history
+
+Every run appends one JSON line per terminal outcome to
+`$ELB_UPGRADE_HISTORY` (default `~/.elb-upgrade-history.jsonl`):
+
+```json
+{"ts":"2026-05-23T03:22:48Z","scope":"full","app":"ca-elb-dashboard","tag":"20260523122407-58cc179","head_sha":"58cc179","result":"success","elapsed_seconds":127,"message":""}
+```
+
+Possible `result` values:
+
+| Result | Meaning |
+|---|---|
+| `success` | Upgrade completed; `/api/health/ready` returned 200 within the timeout |
+| `dry_run` | Skipped — dry-run never writes a history entry (the recording function early-returns) |
+| `parity_rejected` | Storage parity preflight blocked the deploy |
+| `build_in_progress` | The build step (`quick-deploy.sh` or `postprovision.sh`) was running when the script exited — the last successful state before a build failure |
+| `upgrade_failed_rolled_back` | New tag failed `/api/health/ready`; auto-rollback to the snapshot succeeded |
+| `rollback_failed` | Auto-rollback PATCH applied but `/api/health/ready` still fails — manual intervention needed |
+| `rollback_success` | Explicit `cli-upgrade.sh rollback` scope completed and healthy |
+| `aborted_by_user` | Interactive `Proceed?` prompt was declined |
+| `aborted` | Catch-all for Ctrl+C, SIGTERM, internal errors, or any path that exited before setting an explicit result |
+
+Useful queries:
+
+```bash
+# Most recent 5 runs
+tail -5 ~/.elb-upgrade-history.jsonl | jq .
+
+# Outcome counts in the last 30 days
+jq -r 'select(.ts > "'$(date -u -d '30 days ago' +%Y-%m-%d)'") | .result' \
+  ~/.elb-upgrade-history.jsonl | sort | uniq -c | sort -rn
+
+# Average elapsed_seconds for successful 'full' deploys
+jq -r 'select(.result=="success" and .scope=="full") | .elapsed_seconds' \
+  ~/.elb-upgrade-history.jsonl | awk '{s+=$1; n++} END {print s/n}'
+```
+
+The file is best-effort: a missing `$HOME` or read-only filesystem never
+blocks a deploy. Single-line appends are < `PIPE_BUF` (4 KiB) so the
+shell's O_APPEND redirect is atomic against concurrent writers — no
+additional locking needed.
 
 ## Recommended workflow
 
@@ -276,7 +320,8 @@ does not call Azure at all.
 | New revision crash-loops with `ImagePullBackOff` | Build succeeded but ACR pull permission for the Container App's MI is broken. | Run [`scripts/dev/postprovision.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/postprovision.sh) once to re-grant `AcrPull`. |
 | Health check passes but the SPA fails to load | `VITE_API_BASE_URL` leaked from `web/.env.local` into the frontend build. | The script unsets it; if you bypassed it, `cli-upgrade.sh frontend --pull` will overwrite. |
 | Preflight rejects with `Storage '...' is unreachable from the Container App` | Workload Storage is `publicNetworkAccess=Disabled` (most often left over from a local-debug `storage-public-access.sh off` / `local-run.sh storage-off` / `auth-off`) AND the deployment never created Private Endpoints (`LOCKDOWN_PRIVATE_NETWORKING=false`). | Quick: `scripts/dev/storage-public-access.sh on --account <acct> --rg <rg>`. Proper: `azd env set LOCKDOWN_PRIVATE_NETWORKING true && azd provision`. Last-resort override: `--skip-parity-check` (workload will still fail Storage calls). |
-| `/api/health/ready` returns 503 with `azure_storage: down` in the body | The api sidecar can reach Azure AD but not the Storage data plane. Same cause as the preflight rejection above, OR transient Azure outage, OR the workload Managed Identity is missing `Storage Table Data Contributor` on the workload storage account. | Confirm MI role: `az role assignment list --assignee <mi-principalId> --scope <storage-id>`. If correct, run the Storage recovery from the row above. |
+| `/api/health/ready` returns 503 with `azure_storage: down` in the body | The api sidecar can reach Azure AD but not the Storage data plane. Same cause as the preflight rejection above, OR transient Azure outage, OR the workload Managed Identity is missing `Storage Table Data Contributor` on the workload storage account. | Confirm MI role: `az role assignment list --assignee <mi-principalId> --scope <storage-id>`. If correct, run the Storage recovery from the row above. The `azure_storage.error_class` field in the same body (e.g. `HttpResponseError`, `ServiceRequestError`, `ClientAuthenticationError`) tells you the SDK exception category at a glance. |
+| Preflight rejects with `another cli-upgrade run holds /tmp/elb-upgrade-snapshot-<app>.json.lock` | Another `cli-upgrade.sh` is already running against the same Container App on this workstation, or a previous run was killed before releasing the `flock(2)` advisory lock. | If a peer is genuinely deploying, wait for them to finish. If the lock is stale (no `cli-upgrade.sh` process exists), remove the lockfile: `rm /tmp/elb-upgrade-snapshot-<app>.json.lock`. |
 
 ## What this script does **not** do
 
