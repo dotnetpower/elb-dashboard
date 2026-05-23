@@ -53,6 +53,88 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Readiness probe — Storage component (Tier-1 gate for cli-upgrade.sh)
+# ---------------------------------------------------------------------------
+def test_readiness_storage_skipped_when_endpoint_unset(client: TestClient) -> None:
+    """`AZURE_TABLE_ENDPOINT` unset → Storage probe reports 'skipped', not 'down'.
+
+    The conftest fixture clears the env var by default, so the readiness
+    endpoint must not fail the overall check just because no Storage account
+    is configured (e.g. local pytest run without azd env).
+    """
+    r = client.get("/api/health/ready")
+    body = r.json()
+    storage = body["components"]["azure_storage"]
+    assert storage["status"] == "skipped"
+    assert "AZURE_TABLE_ENDPOINT" in storage["reason"]
+
+
+def test_readiness_storage_ok_when_list_tables_succeeds(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Successful `list_tables` paging → Storage probe reports 'ok'."""
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+
+    class _FakePager:
+        def by_page(self) -> object:
+            return iter([[]])
+
+    class _FakeService:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _FakeService:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def list_tables(self, *args: object, **kwargs: object) -> _FakePager:
+            return _FakePager()
+
+    import api.services
+    import azure.data.tables
+
+    monkeypatch.setattr(azure.data.tables, "TableServiceClient", _FakeService)
+    monkeypatch.setattr(api.services, "get_credential", lambda: object())
+    r = client.get("/api/health/ready")
+    assert r.json()["components"]["azure_storage"] == {"status": "ok"}
+
+
+def test_readiness_storage_down_when_list_tables_raises(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`list_tables` raising → Storage probe 'down' AND overall 503."""
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+
+    class _ExplodingService:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _ExplodingService:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def list_tables(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("simulated AuthorizationFailure")
+
+    import api.services
+    import azure.data.tables
+
+    monkeypatch.setattr(azure.data.tables, "TableServiceClient", _ExplodingService)
+    monkeypatch.setattr(api.services, "get_credential", lambda: object())
+    r = client.get("/api/health/ready")
+    assert r.status_code == 503, r.text
+    body = r.json()
+    storage = body["components"]["azure_storage"]
+    assert storage["status"] == "down"
+    assert "simulated AuthorizationFailure" in storage["error"]
+    assert body["status"] == "not_ready"
+
+
+# ---------------------------------------------------------------------------
 # Auth gates
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(

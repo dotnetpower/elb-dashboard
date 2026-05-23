@@ -96,6 +96,36 @@ def readiness() -> Any:
         components["terminal_sidecar"] = {"status": "down"}
         # Non-critical — terminal being down doesn't block BLAST submit
 
+    # 4. Azure Storage Table data plane.
+    # Cheapest call that exercises (a) AAD token (b) network reachability to
+    # Storage (c) Storage Table RBAC. Catches the "publicNetworkAccess=Disabled
+    # without Private Endpoint" footgun that returns 403 AuthorizationFailure
+    # at the data plane while ARM/credential paths look healthy.
+    endpoint = os.environ.get("AZURE_TABLE_ENDPOINT", "")
+    if not endpoint:
+        components["azure_storage"] = {
+            "status": "skipped",
+            "reason": "AZURE_TABLE_ENDPOINT not set",
+        }
+    else:
+        try:
+            from azure.data.tables import TableServiceClient
+
+            from api.services import get_credential
+
+            # Short timeouts so a wedged Storage cannot tarpit /health/ready.
+            with TableServiceClient(
+                endpoint=endpoint,
+                credential=get_credential(),
+                connection_timeout=3,
+                read_timeout=3,
+            ) as svc:
+                next(svc.list_tables(results_per_page=1).by_page(), None)
+            components["azure_storage"] = {"status": "ok"}
+        except Exception as exc:
+            components["azure_storage"] = {"status": "down", "error": str(exc)[:200]}
+            overall_ok = False
+
     status_code = 200 if overall_ok else 503
     from fastapi.responses import JSONResponse
 
