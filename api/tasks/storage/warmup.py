@@ -287,7 +287,7 @@ def warmup_database(
             _record_task_progress(self, "planning_node_warmup", database=database_name)
             _update_state(job_id, "planning_node_warmup", status="running")
             try:
-                from api.services.k8s_monitoring import (
+                from api.services.k8s.monitoring import (
                     k8s_ensure_job_manifests,
                     k8s_ensure_warmup_scripts_configmap,
                     k8s_ready_warmup_node_names,

@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from api.services import k8s_monitoring as km
+from api.services.k8s import monitoring as km
 
 
 def _make_job(name: str, node: str, source_version: str = "") -> dict[str, Any]:

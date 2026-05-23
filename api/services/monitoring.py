@@ -26,7 +26,7 @@ from api.services.azure_clients import (
     storage_client,
 )
 from api.services.image_tags import IMAGE_TAGS
-from api.services.k8s_monitoring import (
+from api.services.k8s.monitoring import (
     _get_k8s_session,
     k8s_cancel_blast_job,
     k8s_check_blast_status,

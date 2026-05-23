@@ -75,7 +75,7 @@ def auto_warmup_ready_gate(
             "ready_node_count": 0,
         }
     try:
-        from api.services.k8s_monitoring import k8s_ready_warmup_node_names
+        from api.services.k8s.monitoring import k8s_ready_warmup_node_names
 
         ready_nodes = k8s_ready_warmup_node_names(
             credential,

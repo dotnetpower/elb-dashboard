@@ -598,7 +598,7 @@ def test_select_warmup_shards_uses_feasible_ten_way_core_nt() -> None:
 
 
 def test_candidate_warmup_nodes_prefers_blastpool_ready_nodes() -> None:
-    from api.services.k8s_monitoring import _candidate_warmup_node_names
+    from api.services.k8s.monitoring import _candidate_warmup_node_names
 
     nodes = [
         {
@@ -649,7 +649,7 @@ class _FakeK8sSession:
 
 
 def test_ensure_job_manifests_is_idempotent_for_existing_jobs() -> None:
-    from api.services.k8s_monitoring import _ensure_job_manifests
+    from api.services.k8s.monitoring import _ensure_job_manifests
 
     plan = build_warmup_job_plan(
         db_name="core_nt",

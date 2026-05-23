@@ -396,7 +396,7 @@ def blast_database_order_oracle(
         oracle_status_blob_path,
     )
     from api.services.image_tags import IMAGE_TAGS
-    from api.services.k8s_monitoring import (
+    from api.services.k8s.monitoring import (
         k8s_ensure_job_manifests,
         k8s_ready_warmup_node_names,
         k8s_warmup_status,

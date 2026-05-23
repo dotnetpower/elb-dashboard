@@ -245,7 +245,7 @@ def aks_events(
 
     cred = monitor_package.get_credential()
     try:
-        from api.services.k8s_monitoring import k8s_list_events
+        from api.services.k8s.monitoring import k8s_list_events
 
         def load_events() -> dict[str, Any]:
             events = k8s_list_events(
