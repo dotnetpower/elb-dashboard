@@ -261,6 +261,29 @@ preflight_storage_parity || die "Storage parity preflight failed (see above)."
 SNAPSHOT="${ELB_UPGRADE_SNAPSHOT:-/tmp/elb-upgrade-snapshot-${CONTAINER_APP_NAME}.json}"
 
 # ---------------------------------------------------------------------------
+# Snapshot file lock — prevent two concurrent cli-upgrade runs from
+# interleaving snapshot writes and PATCH calls against the same Container
+# App. Without this, two operators could each capture a "snapshot" of an
+# already-mutated state, then auto-rollback to broken image refs from each
+# other's mid-deploy.
+#
+# Uses an advisory POSIX file lock on a sibling .lock file. The lock is
+# held for the duration of the script via fd 9 and released automatically
+# when the script exits (any exit path — normal return, die, Ctrl+C). The
+# lock is acquired non-blocking; a second concurrent run fails fast with a
+# clear message rather than silently waiting.
+# ---------------------------------------------------------------------------
+SNAPSHOT_LOCK="${SNAPSHOT}.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$SNAPSHOT_LOCK" || die "cannot open snapshot lock file: $SNAPSHOT_LOCK"
+  if ! flock -n 9; then
+    die "another cli-upgrade run holds $SNAPSHOT_LOCK; wait for it to finish or remove the lock if stale."
+  fi
+else
+  warn "flock(1) not available — concurrent cli-upgrade runs are NOT prevented"
+fi
+
+# ---------------------------------------------------------------------------
 # Helper: snapshot current per-sidecar image refs + active revision.
 # ---------------------------------------------------------------------------
 take_snapshot() {
