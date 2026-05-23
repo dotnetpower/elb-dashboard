@@ -94,7 +94,9 @@ record_history() {
   # than write invalid JSONL. Fast-skip BEFORE we do any work.
   command -v jq >/dev/null 2>&1 || return 0
   local result="${1:-unknown}" message="${2:-}"
-  local history_file="${ELB_UPGRADE_HISTORY:-$HOME/.elb-upgrade-history.jsonl}"
+  # Guard $HOME with a default — `set -u` would otherwise kill us in
+  # environments where HOME is unset (some Docker / CI images).
+  local history_file="${ELB_UPGRADE_HISTORY:-${HOME:-/tmp}/.elb-upgrade-history.jsonl}"
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local elapsed=$SECONDS
   local line
