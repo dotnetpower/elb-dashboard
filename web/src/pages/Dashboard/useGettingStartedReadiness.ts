@@ -96,14 +96,29 @@ export function useGettingStartedReadiness({
     ? Object.keys(acrQuery.data.actual_tags).length >= 4
     : false;
   const hasTerminal = terminalEnabled ? terminalSidecar.isHealthy : true;
+  // Only treat a prerequisite as "missing" when its probe actually
+  // returned a usable answer. Errored / unreachable probes give a
+  // false `hasCluster=false / hasImages=false` signal that would
+  // otherwise pop the Getting Started modal whenever the backend is
+  // unhealthy — turning a server outage into a misleading "you haven't
+  // set this up yet" UX. Treat unknown signals as conservatively true.
+  const aksProbeUsable = aksQuery.isSuccess;
+  const acrProbeUsable = acrQuery.isSuccess;
+  const terminalProbeUsable =
+    !terminalEnabled ||
+    terminalSidecar.status === "ok" ||
+    terminalSidecar.status === "degraded" ||
+    terminalSidecar.status === "down";
+  const probesUsable = aksProbeUsable && acrProbeUsable && terminalProbeUsable;
+  const clusterMissing = aksProbeUsable && !hasCluster;
+  const imagesMissing = acrProbeUsable && !hasImages;
+  const terminalMissing = terminalEnabled && terminalProbeUsable && !hasTerminal;
   const needsSetup =
     hasConfig &&
     !gettingStartedDismissed &&
-    (!hasCluster || !hasImages || !hasTerminal);
-  const queriesLoaded =
-    aksQuery.isFetched &&
-    acrQuery.isFetched &&
-    (!terminalEnabled || !terminalSidecar.isLoading);
+    probesUsable &&
+    (clusterMissing || imagesMissing || terminalMissing);
+  const queriesLoaded = probesUsable;
 
   useEffect(() => {
     if (isMobile) return;

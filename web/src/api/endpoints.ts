@@ -8,3 +8,4 @@ export * from "@/api/armProxy";
 export * from "@/api/blastTools";
 export * from "@/api/storage";
 export * from "@/api/clientLog";
+export * from "@/api/tasks";

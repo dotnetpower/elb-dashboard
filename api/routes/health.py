@@ -106,17 +106,16 @@ def _get_table_service_client(endpoint: str) -> Any:
         from api.services import get_credential
 
         # Build the NEW client BEFORE closing the old one. If construction
-        # raises (bad endpoint, transient AAD failure), the old client
-        # stays in place and the next call retries cleanly. Closing first
-        # would leave `_TABLE_SERVICE_CLIENT` pointing at a closed client
-        # which subsequent probes would try to use.
+        # raises (bad endpoint, transient AAD error), the old client stays
+        # usable and the next call retries cleanly. Closing first would
+        # leave `_TABLE_SERVICE_CLIENT` pointing at a closed client.
         client = TableServiceClient(
             endpoint=endpoint,
             credential=get_credential(),
             # Probe is fail-fast on purpose: any failure is a real signal
             # readers (the SPA, cli-upgrade.sh, monitoring) want to see
             # immediately. The SDK's default retry policy would otherwise
-            # stretch a single readiness call to ~9 s (3 attempts x 3 s
+            # stretch a single readiness call to ~9 s (3 attempts × 3 s
             # timeout each) and mask transient symptoms behind retries.
             retry_total=0,
         )

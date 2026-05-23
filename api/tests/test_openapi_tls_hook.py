@@ -17,7 +17,6 @@ Validation: `uv run pytest -q api/tests/test_openapi_tls_hook.py`.
 from __future__ import annotations
 
 import pytest
-
 from api.services.openapi.runtime import get_public_tls_base_url
 
 

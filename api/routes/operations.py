@@ -71,6 +71,13 @@ def _enforce_task_ownership(task_id: str, caller: CallerIdentity) -> None:
         )
         if os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true":
             return
+        # Local dev escape hatch — same reasoning as in api/routes/tasks.py:
+        # a workstation `az login` without Storage Table RBAC would otherwise
+        # 503 every operation poll and freeze the UI even when the worker
+        # is healthy. Production (CONTAINER_APP_NAME set by Azure Container
+        # Apps) keeps the strict fail-closed behaviour.
+        if not os.environ.get("CONTAINER_APP_NAME"):
+            return
         raise HTTPException(
             status_code=503,
             detail={"code": "ownership_check_unavailable", "retryable": True},

@@ -45,6 +45,17 @@ def _enforce_task_ownership(task_id: str, caller: CallerIdentity) -> None:
         )
         if os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true":
             return
+        # Local dev escape hatch: a workstation `az login` identity often
+        # lacks Storage Table RBAC on the deployed account, so this lookup
+        # 503s and the FE task-status poller never advances (a freshly
+        # provisioned cluster looks like it's spinning forever even though
+        # the worker is actually running). When no `CONTAINER_APP_NAME` is
+        # set we are by definition not the deployed control plane, so
+        # logging a warning and proceeding is strictly safer than crashing
+        # the loop. Production (where `CONTAINER_APP_NAME` is always set
+        # by Azure Container Apps) still fails closed.
+        if not os.environ.get("CONTAINER_APP_NAME"):
+            return
         raise HTTPException(
             status_code=503,
             detail={"code": "ownership_check_unavailable", "retryable": True},

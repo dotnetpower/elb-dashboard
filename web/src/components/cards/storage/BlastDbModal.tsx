@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { Database, Lock, RefreshCw, X } from "lucide-react";
+import { Database, Loader2, Lock, RefreshCw, ShieldCheck, X } from "lucide-react";
 
+import { useToast } from "@/components/Toast";
 import { StorageDownloadResultBanner } from "@/components/cards/StorageDownloadResultBanner";
 import {
   DB_CATALOG,
@@ -40,6 +41,7 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
     readAutoWarmupDbs(),
   );
+  const { toast } = useToast();
 
   // ESC key closes
   useEffect(() => {
@@ -68,8 +70,11 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
     latestVersion,
     publicAccessDisabled,
     canEnableLocalAccess,
+    canGrantLocalRbac,
     openingLocalDebug,
+    grantingLocalRbac,
     enableLocalAccess,
+    grantLocalRbac,
     storageAccessTitle,
     storageAccessHint,
     downloadedDbs,
@@ -259,10 +264,41 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
               border: "1px solid rgba(224,123,138,0.2)",
               color: "var(--danger)",
               lineHeight: 1.5,
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
             }}
           >
-            <strong>Cannot read databases from storage:</strong>{" "}
-            {degradedMsg ?? "Storage access denied. Check RBAC roles."}
+            <div style={{ flex: 1 }}>
+              <strong>Cannot read databases from storage:</strong>{" "}
+              {degradedMsg ?? "Storage access denied. Check RBAC roles."}
+            </div>
+            {canGrantLocalRbac && (
+              <button
+                className="glass-button glass-button--primary"
+                disabled={grantingLocalRbac}
+                onClick={async () => {
+                  const result = await grantLocalRbac();
+                  toast(result.message, result.ok ? "success" : "error");
+                }}
+                style={{
+                  padding: "5px 10px",
+                  fontSize: 11,
+                  whiteSpace: "nowrap",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+                title="Grant Storage RBAC for this local dashboard session"
+              >
+                {grantingLocalRbac ? (
+                  <Loader2 size={12} className="spin" />
+                ) : (
+                  <ShieldCheck size={12} strokeWidth={1.8} />
+                )}
+                {grantingLocalRbac ? "Granting…" : "Grant local RBAC"}
+              </button>
+            )}
           </div>
         )}
 

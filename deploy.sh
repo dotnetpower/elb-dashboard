@@ -20,6 +20,7 @@ Environment overrides:
   ELB_RESOURCE_NAME_SUFFIX     Optional suffix such as -01 for numbered deployments
   ELB_RESOURCE_NAME_SLOT       Optional azd-safe slot such as slot01 for numbered deployments
   ELB_ALLOW_AZD_ENV_RETARGET   true to allow overwriting an existing azd env target subscription/tenant
+  ELB_SKIP_LOCAL_RBAC          true to skip granting local-debug RBAC to the deployer
 
 USAGE
 }
@@ -234,9 +235,42 @@ azd up \
   --subscription "$subscription_id" \
   --no-prompt
 
-app_url="$(azd env get-values --environment "$env_name" 2>/dev/null | awk -F= '/^CONTAINER_APP_URL=/{gsub(/"/, "", $2); print $2; exit}')"
+post_deploy_env_values="$(azd env get-values --environment "$env_name" 2>/dev/null || true)"
+deployed_rg="$(printf '%s\n' "$post_deploy_env_values" | azd_env_value AZURE_RESOURCE_GROUP)"
+deployed_storage="$(printf '%s\n' "$post_deploy_env_values" | azd_env_value STORAGE_ACCOUNT_NAME)"
+deployed_acr="$(printf '%s\n' "$post_deploy_env_values" | azd_env_value ACR_NAME)"
+
+if is_true "${ELB_SKIP_LOCAL_RBAC:-false}"; then
+  echo "==> Skipping local-debug RBAC grant (ELB_SKIP_LOCAL_RBAC=true)"
+elif [[ -n "$deployed_rg" && -n "$deployed_storage" ]]; then
+  echo "==> Granting local-debug RBAC to the deployer"
+  grant_args=(
+    --subscription "$subscription_id"
+    --storage "$deployed_storage"
+    --storage-rg "$deployed_rg"
+  )
+  if [[ -n "$deployed_acr" ]]; then
+    grant_args+=(--acr "$deployed_acr" --acr-rg "$deployed_rg")
+  fi
+  if bash "$repo_root/scripts/dev/grant-local-rbac.sh" "${grant_args[@]}"; then
+    echo "==> Local-debug RBAC ready for $user_name"
+  else
+    cat >&2 <<EOF
+WARN: Could not grant local-debug RBAC to '$user_name'. Deployment is complete,
+but local host-mode API reads may show Storage access_denied until an Owner or
+User Access Administrator runs:
+
+  scripts/dev/grant-local-rbac.sh --subscription "$subscription_id" --storage "$deployed_storage" --storage-rg "$deployed_rg"
+
+EOF
+  fi
+else
+  echo "==> Skipping local-debug RBAC grant (azd did not expose Storage outputs)"
+fi
+
+app_url="$(printf '%s\n' "$post_deploy_env_values" | azd_env_value CONTAINER_APP_URL)"
 if [[ -z "$app_url" ]]; then
-  app_fqdn="$(azd env get-values --environment "$env_name" 2>/dev/null | awk -F= '/^CONTAINER_APP_FQDN=/{gsub(/"/, "", $2); print $2; exit}')"
+  app_fqdn="$(printf '%s\n' "$post_deploy_env_values" | azd_env_value CONTAINER_APP_FQDN)"
   if [[ -n "$app_fqdn" ]]; then
     app_url="https://$app_fqdn"
   fi

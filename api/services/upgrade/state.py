@@ -414,8 +414,26 @@ def get_state() -> UpgradeState:
     Applies legacy-state coercion (see `_LEGACY_TO_IDLE`) so a row
     written by an older deployment with a now-removed state name does
     not propagate up to callers as an unknown state.
+
+    Local-dev escape hatch: when the backend is unreachable (e.g. the
+    workstation `az login` lacks Storage Table RBAC on `elbstg01`) and
+    we are not running inside a deployed Container App
+    (`CONTAINER_APP_NAME` unset), return a fresh default
+    ``UpgradeState`` instead of bubbling a 500. The local dashboard then
+    renders the idle state cleanly and the FE upgrade-status poller stops
+    spamming the api log. Production behaviour is unchanged.
     """
-    row = _backend().get()
+    try:
+        row = _backend().get()
+    except Exception as exc:
+        if os.environ.get("CONTAINER_APP_NAME"):
+            raise
+        LOGGER.warning(
+            "upgrade.state: backend unreachable, returning empty state "
+            "(local dev only): %s",
+            type(exc).__name__,
+        )
+        return UpgradeState()
     if row.state in _LEGACY_TO_IDLE:
         LOGGER.warning(
             "upgrade.state: coercing legacy state %r to %r on get_state",

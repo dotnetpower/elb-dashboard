@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 
-import { aksApi } from "@/api/endpoints";
+import { aksApi, tasksApi } from "@/api/endpoints";
+import type { CeleryTaskStatus } from "@/api/tasks";
 import { formatApiError } from "@/api/client";
 import type { AksClusterSummary } from "@/api/endpoints";
 import {
@@ -146,13 +147,14 @@ export function useClusterProvisioning(args: {
   };
   useEffect(() => {
     if (rgUserTouched) return;
-    // Any cluster name that passes AKS naming rules gets mirrored as
-    // `rg-<name>` — the user typing `my-test-01` should see RG follow to
-    // `rg-my-test-01`, not stay pinned to the auto-suggested elb-cluster-NN.
-    // We deliberately stay loose: as long as the cluster name is valid for
-    // AKS, the derived RG (with a `rg-` prefix) also fits Azure RG rules.
+    // Mirror cluster name into RG, but strip the trailing `-NN` sequence
+    // so every cluster in the `elb-cluster-NN` family lands in the same
+    // `rg-elb-cluster` resource group instead of one RG per index.
+    // Custom names without a `-NN` suffix still mirror unchanged
+    // (`my-test` → `rg-my-test`).
     if (!CLUSTER_NAME_RE.test(clusterName)) return;
-    const suggested = `rg-${clusterName}`;
+    const baseName = clusterName.replace(/-\d+$/, "");
+    const suggested = `rg-${baseName}`;
     if (suggested !== provisionResourceGroup) {
       setProvisionResourceGroupState(suggested);
     }
@@ -162,6 +164,14 @@ export function useClusterProvisioning(args: {
   const [provError, setProvError] = useState<string | null>(null);
   const [provStart, setProvStart] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  /** Celery task id returned by /api/aks/provision. We poll its status to
+   *  detect failures the cluster-list poller can't see (e.g. the worker
+   *  failed to reach ARM at all). */
+  const [taskId, setTaskId] = useState<string | null>(null);
+  /** Latest phase reported by the task (e.g. "creating_cluster",
+   *  "arm_create_or_update", "ensuring_rbac"). Surfaced in the banner so the
+   *  user can tell live progress from a stuck timer. */
+  const [taskPhase, setTaskPhase] = useState<string | null>(null);
 
   // Adopt the backend's system-pool default the first time it loads.
   useEffect(() => {
@@ -180,6 +190,62 @@ export function useClusterProvisioning(args: {
     );
     return () => clearInterval(timer);
   }, [provStatus, provStart]);
+
+  // Hard timeout. AKS provisioning normally finishes in 5–10 minutes. If we
+  // are still "creating" after 20 minutes and the cluster never appeared in
+  // the AKS list, something is wrong (worker died, ARM never got the call,
+  // network blocked, RBAC denied the task before the ARM PUT, ...). Surface
+  // it so the user stops staring at a ghost timer.
+  useEffect(() => {
+    if (provStatus !== "creating") return;
+    if (elapsed < 20 * 60) return;
+    setProvStatus("error");
+    setProvError(
+      "Provisioning timed out after 20 minutes. The cluster never appeared in the AKS list. " +
+      "Check the Azure portal, the worker sidecar logs, and (for local dev) that your `az login` " +
+      "identity has Contributor on the target resource group.",
+    );
+  }, [provStatus, elapsed]);
+
+  // Poll the Celery task itself so we hear about failures the cluster-list
+  // poller can't see. Until 2026-05 the only failure path was the modal
+  // catch above (POST itself failing) — if the POST succeeded but the
+  // worker later crashed (storage AuthFailed, ARM 403, code bug), the FE
+  // would sit at "Provisioning..." forever. Polling /api/tasks/{id}
+  // gives us authoritative SUCCESS / FAILURE / REVOKED.
+  useEffect(() => {
+    if (provStatus !== "creating" || !taskId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await tasksApi.status(taskId);
+        if (cancelled) return;
+        const phase = (res.progress?.phase as string | undefined) ?? null;
+        if (phase) setTaskPhase(phase);
+        const status: CeleryTaskStatus = res.status;
+        if (status === "FAILURE" || status === "REVOKED") {
+          setProvStatus("error");
+          setProvError(
+            res.error?.trim()
+              ? `Provisioning task failed: ${res.error}`
+              : status === "REVOKED"
+                ? "Provisioning task was cancelled before it finished."
+                : "Provisioning task failed without an error message. Check worker logs.",
+          );
+        }
+      } catch {
+        // Transient — swallow one poll error so a 500 doesn't kill the
+        // banner. The hard timeout above will still catch us if the task
+        // is genuinely gone.
+      }
+    };
+    void poll();
+    const timer = setInterval(poll, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [provStatus, taskId]);
 
   // Auto-dismiss provStatus after 10 s
   useEffect(() => {
@@ -217,13 +283,15 @@ export function useClusterProvisioning(args: {
     setProvStatus("creating");
     setProvError(null);
     setProvStart(Date.now());
+    setTaskId(null);
+    setTaskPhase(null);
     // Do NOT close the modal here. If the ARM request fails (auth, quota,
     // RegionNotAllowed, …) the user would lose every field they typed and
     // only see an error banner outside. Close only after the API accepts
     // the request — by that point a "provisioning" record exists and the
     // banner can take over.
     try {
-      await aksApi.provision({
+      const response = await aksApi.provision({
         subscription_id: subscriptionId,
         resource_group: provisionResourceGroup,
         region: provisionRegion,
@@ -240,6 +308,12 @@ export function useClusterProvisioning(args: {
         storage_resource_group: storageResourceGroup || provisionResourceGroup,
         storage_account: storageAccount || "",
       });
+      // Capture the Celery task id so the poller above can drive the
+      // banner. The api route returns several aliases (task_id /
+      // instance_id / id) — pick whichever is present.
+      const tid =
+        response?.task_id ?? response?.instance_id ?? response?.id ?? null;
+      if (tid) setTaskId(tid);
       closeModal();
     } catch (e) {
       setProvError(formatApiError(e, "aks"));
@@ -299,6 +373,9 @@ export function useClusterProvisioning(args: {
     provError,
     setProvError,
     elapsed,
+    /** Phase reported by the Celery task; null while we wait for the first
+     *  poll to come back. Banner shows this so a stuck task looks stuck. */
+    taskPhase,
     clusterNameValid,
     handleProvision,
   };

@@ -34,6 +34,16 @@ export interface StorageLocalDebugOpenResult {
   error?: string;
 }
 
+export interface StorageLocalDebugGrantRbacResult {
+  action: "assigned" | "already_assigned" | "partial" | "failed";
+  principal_type: "User" | "ServicePrincipal" | string;
+  roles: Array<{
+    name: string;
+    status: "assigned" | "already_assigned" | "failed";
+    error?: string;
+  }>;
+}
+
 export const storageApi = {
   /** Probe whether the dashboard should show the local-debug toggle. */
   localDebugStatus: (
@@ -52,6 +62,18 @@ export const storageApi = {
     accountName: string,
   ) =>
     api.post<StorageLocalDebugOpenResult>("/storage/local-debug/open", {
+      subscription_id: subscriptionId,
+      resource_group: resourceGroup,
+      account_name: accountName,
+    }),
+
+  /** Grant Storage RBAC to the local API Azure credential (local only). */
+  localDebugGrantRbac: (
+    subscriptionId: string,
+    resourceGroup: string,
+    accountName: string,
+  ) =>
+    api.post<StorageLocalDebugGrantRbacResult>("/storage/local-debug/grant-rbac", {
       subscription_id: subscriptionId,
       resource_group: resourceGroup,
       account_name: accountName,

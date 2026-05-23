@@ -86,7 +86,8 @@ def warmup_start(
     try:
         from datetime import datetime
 
-        from api.services.state_repo import JobState, get_state_repo
+        from api.services.state_repo import JobState
+        from api.services.state_repo import get_state_repo
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
         repo = get_state_repo()

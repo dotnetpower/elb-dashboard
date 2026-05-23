@@ -225,7 +225,8 @@ def _dispatch_split_child_submits(
     terminal_run: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Create child state records and submit each child ElasticBLAST config."""
-    from api.services.state_repo import JobState, JobStateRepository
+    from api.services.state_repo import JobState
+    from api.services.state_repo import JobStateRepository
 
     if terminal_run is None:
         from api.services.terminal_exec import run as _terminal_run

@@ -29,6 +29,7 @@ def _build_client(monkeypatch: pytest.MonkeyPatch, *, limit: int, window: float 
     monkeypatch.delenv("OPENAPI_RATE_LIMIT_DISABLED", raising=False)
     # Re-import api.main so the middleware picks up the new env values.
     import importlib
+
     import api.main as api_main
 
     importlib.reload(api_main)

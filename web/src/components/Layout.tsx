@@ -251,6 +251,9 @@ export function Layout({ children }: PropsWithChildren) {
           <NavLink to="/" end className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <Activity size={14} strokeWidth={1.5} /> Dashboard
           </NavLink>
+          <NavLink to="/monitor/live-wall" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+            <Activity size={14} strokeWidth={1.5} /> Live Wall
+          </NavLink>
           <span className="layout__nav-sep" />
           <span className="layout__nav-group-label">BLAST</span>
           <NavLink

@@ -2,6 +2,22 @@ import { CheckCircle2, Loader2 } from "lucide-react";
 
 const formatTime = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
 
+/** Human label for a Celery task phase published by provision_aks. Keeps
+ *  the FE friendly even though the task strings stay machine-flavoured. */
+const PHASE_LABELS: Record<string, string> = {
+  creating_cluster: "Preparing ARM request",
+  arm_create_or_update: "Submitting cluster to Azure",
+  ensuring_rbac: "Granting role assignments",
+  rbac_ensure_failed_nonfatal: "RBAC partially failed (non-fatal)",
+  completed: "Finishing up",
+  failed: "Failing",
+};
+
+function prettifyPhase(phase: string | null | undefined): string | null {
+  if (!phase) return null;
+  return PHASE_LABELS[phase] ?? phase.replace(/_/g, " ");
+}
+
 /** Live "Provisioning..." banner — visible until the cluster appears in the list. */
 export function ProvisioningBanner({
   clusterName,
@@ -10,6 +26,7 @@ export function ProvisioningBanner({
   nodeSku,
   systemNodeCount,
   systemVmSize,
+  taskPhase,
 }: {
   clusterName: string;
   elapsed: number;
@@ -17,7 +34,11 @@ export function ProvisioningBanner({
   nodeSku: string;
   systemNodeCount: number;
   systemVmSize: string;
+  /** Celery phase string (e.g. "arm_create_or_update"). When null the
+   *  banner just shows the elapsed time — same UX as before this prop. */
+  taskPhase?: string | null;
 }) {
+  const phase = prettifyPhase(taskPhase);
   return (
     <div
       className="glass-card"
@@ -44,7 +65,8 @@ export function ProvisioningBanner({
               {clusterName}
             </div>
             <div style={{ fontSize: 11, color: "var(--accent)" }}>
-              Provisioning... {formatTime(elapsed)}
+              {phase ? `${phase} · ` : "Provisioning... "}
+              {formatTime(elapsed)}
             </div>
           </div>
         </div>

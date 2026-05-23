@@ -236,6 +236,7 @@ export function ClusterCard({
           nodeSku={prov.nodeSku}
           systemNodeCount={prov.systemNodeCount}
           systemVmSize={prov.systemVmSize}
+          taskPhase={prov.taskPhase}
         />
       )}
       {prov.provStatus === "done" && (

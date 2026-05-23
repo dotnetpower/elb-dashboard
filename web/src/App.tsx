@@ -35,6 +35,9 @@ const DatabaseBuilder = lazy(() =>
 const ToolsPage = lazy(() =>
   import("@/pages/ToolsPage").then((module) => ({ default: module.ToolsPage })),
 );
+const LiveWall = lazy(() =>
+  import("@/pages/Monitor/LiveWall").then((module) => ({ default: module.LiveWall })),
+);
 
 function OptionalFeatureRoute({
   enabled,
@@ -88,6 +91,14 @@ function AppRoutes() {
       <Layout>
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route
+            path="/monitor/live-wall"
+            element={
+              <Suspense fallback={<RouteLoadingSkeleton />}>
+                <LiveWall />
+              </Suspense>
+            }
+          />
           <Route
             path="/terminal"
             element={

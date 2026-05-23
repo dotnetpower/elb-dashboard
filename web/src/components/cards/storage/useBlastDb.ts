@@ -156,6 +156,7 @@ export function useBlastDb({
   const dbDegradedReason = (dbQuery.data as { degraded_reason?: string } | undefined)
     ?.degraded_reason;
   const localFirewallBlocked = dbDegradedReason === "firewall_blocked";
+  const storageAccessDenied = dbDegradedReason === "access_denied";
   const publicAccessDisabled =
     dbQuery.data?.public_access_disabled === true ||
     dbDegradedReason === "network_blocked" ||
@@ -181,6 +182,7 @@ export function useBlastDb({
   });
   const localDebug: StorageLocalDebugStatus | undefined = localDebugQuery.data;
   const canEnableLocalAccess = localDebug?.is_local === true;
+  const canGrantLocalRbac = storageAccessDenied && localDebug?.is_local === true;
 
   const downloadedDbs = useMemo(() => {
     const next = new Map<string, DownloadedDbMeta>();
@@ -448,6 +450,7 @@ export function useBlastDb({
   // Trigger an explicit local-debug open and refetch the DB list on success.
   const [openingLocalDebug, setOpeningLocalDebug] = useState(false);
   const [localDebugError, setLocalDebugError] = useState<string | null>(null);
+  const [grantingLocalRbac, setGrantingLocalRbac] = useState(false);
   const enableLocalAccess = async (): Promise<{
     ok: boolean;
     message: string;
@@ -486,12 +489,63 @@ export function useBlastDb({
     }
   };
 
+  const grantLocalRbac = async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    if (!enabled) return { ok: false, message: "select a storage account first" };
+    setGrantingLocalRbac(true);
+    setLocalDebugError(null);
+    try {
+      const result = await storageApi.localDebugGrantRbac(
+        subscriptionId,
+        resourceGroup,
+        accountName,
+      );
+      void dbQuery.refetch();
+      const failed = result.roles.filter((role) => role.status === "failed");
+      const assigned = result.roles.filter((role) => role.status === "assigned");
+      const alreadyAssigned = result.roles.filter(
+        (role) => role.status === "already_assigned",
+      );
+      if (result.action === "failed") {
+        return {
+          ok: false,
+          message: failed[0]?.error ?? "Storage RBAC grant failed",
+        };
+      }
+      if (result.action === "partial") {
+        return {
+          ok: false,
+          message: `Storage RBAC partially granted (${assigned.length} assigned, ${failed.length} failed). Wait for propagation, then retry if needed.`,
+        };
+      }
+      if (alreadyAssigned.length === result.roles.length) {
+        return {
+          ok: true,
+          message: "Storage RBAC already assigned. Wait a few minutes for token/RBAC propagation, then refresh.",
+        };
+      }
+      return {
+        ok: true,
+        message: `Storage RBAC assigned (${assigned.length} role${assigned.length === 1 ? "" : "s"}). Wait a few minutes, then refresh.`,
+      };
+    } catch (e) {
+      const msg = formatApiError(e, "storage");
+      setLocalDebugError(msg);
+      return { ok: false, message: msg };
+    } finally {
+      setGrantingLocalRbac(false);
+    }
+  };
+
   return {
     // Query state
     dbQuery,
     latestVersion,
     publicAccessDisabled,
     localFirewallBlocked,
+    storageAccessDenied,
     storageAccessTitle,
     storageAccessHint,
     downloadedDbs,
@@ -500,10 +554,13 @@ export function useBlastDb({
     updatesAvailableByDb,
     // Local-debug state (only meaningful when the api process is local)
     canEnableLocalAccess,
+    canGrantLocalRbac,
     localDebug,
     openingLocalDebug,
+    grantingLocalRbac,
     localDebugError,
     enableLocalAccess,
+    grantLocalRbac,
     // In-flight state
     downloading,
     oracleBuilding,

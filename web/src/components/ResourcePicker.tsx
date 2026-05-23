@@ -87,7 +87,14 @@ export function ResourcePicker({
           {query.data?.map((item) => (
             <option key={item.value} value={item.value} disabled={item.disabled}>
               {item.label}
-              {item.description ? ` · ${item.description}` : ""}
+              {/* Only append the description when the option is disabled
+                  — there it explains why the item can't be picked (e.g.
+                  "AKS-managed (node RG)", "no elb-* tag"). For enabled
+                  items the description is noise that also leaks into the
+                  closed-select display (`<select>` shows the selected
+                  option's text verbatim), making the chip look bloated
+                  with redundant region / location strings. */}
+              {item.disabled && item.description ? ` · ${item.description}` : ""}
             </option>
           ))}
           {allowCustom && <option value="__custom__">Other…</option>}

@@ -21,6 +21,16 @@ export interface AksProvisionRequest {
 }
 
 export interface AksProvisionResponse {
+  /** Celery task id — poll /api/tasks/{task_id} for live status. The api
+   *  route already returns this; if it's missing the FE falls back to
+   *  cluster-list polling only and can't detect task failures. */
+  task_id?: string;
+  /** Mirror of task_id kept for backwards compat with the Functions-era
+   *  Durable Functions response shape. */
+  id?: string;
+  job_id?: string;
+  instance_id?: string;
+  statusQueryGetUri?: string;
   cluster_name: string;
   resource_group: string;
   region: string;

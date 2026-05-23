@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Database, Loader2, Lock, Maximize2, Unlock } from "lucide-react";
+import { Database, Loader2, Lock, Maximize2, ShieldCheck, Unlock } from "lucide-react";
 
 import { useToast } from "@/components/Toast";
 import { DB_CATALOG } from "@/components/cards/storageDbCatalog";
@@ -54,13 +54,17 @@ export function BlastDbSection({
     updatesAvailable,
     publicAccessDisabled,
     canEnableLocalAccess,
+    canGrantLocalRbac,
     openingLocalDebug,
+    grantingLocalRbac,
     enableLocalAccess,
+    grantLocalRbac,
     storageAccessTitle,
     storageAccessHint,
   } = state;
 
   const showLocalDebugBanner = publicAccessDisabled && canEnableLocalAccess;
+  const showLocalRbacBanner = canGrantLocalRbac;
 
   return (
     <div className="dv3-db-section">
@@ -153,6 +157,58 @@ export function BlastDbSection({
               <Unlock size={12} strokeWidth={1.8} />
             )}
             {openingLocalDebug ? "Opening…" : "Enable for local debug"}
+          </button>
+        </div>
+      )}
+
+      {showLocalRbacBanner && (
+        <div
+          style={{
+            margin: "4px 4px 6px",
+            padding: "8px 10px",
+            background: "rgba(224,123,138,0.06)",
+            border: "1px solid rgba(224,123,138,0.22)",
+            borderRadius: 8,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            fontSize: 11,
+            color: "var(--text-muted)",
+            lineHeight: 1.4,
+          }}
+        >
+          <ShieldCheck size={14} style={{ color: "var(--danger)", flexShrink: 0 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ color: "var(--text-primary)", fontWeight: 500 }}>
+              Storage RBAC is missing for this local session
+            </div>
+            <div style={{ marginTop: 2 }}>
+              Grant the local API Azure credential Storage data-plane roles for local
+              debugging. Azure may take a few minutes to propagate the assignment.
+            </div>
+          </div>
+          <button
+            className="glass-button glass-button--primary"
+            disabled={grantingLocalRbac || !enabled}
+            onClick={async () => {
+              const result = await grantLocalRbac();
+              toast(result.message, result.ok ? "success" : "error");
+            }}
+            style={{
+              padding: "5px 10px",
+              fontSize: 11,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+            title="Grant Storage RBAC for this local dashboard session"
+          >
+            {grantingLocalRbac ? (
+              <Loader2 size={12} className="spin" />
+            ) : (
+              <ShieldCheck size={12} strokeWidth={1.8} />
+            )}
+            {grantingLocalRbac ? "Granting…" : "Grant local RBAC"}
           </button>
         </div>
       )}
