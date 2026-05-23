@@ -96,6 +96,12 @@ def _get_table_service_client(endpoint: str) -> Any:
         client = TableServiceClient(
             endpoint=endpoint,
             credential=get_credential(),
+            # Probe is fail-fast on purpose: any failure is a real signal
+            # readers (the SPA, cli-upgrade.sh, monitoring) want to see
+            # immediately. The SDK's default retry policy would otherwise
+            # stretch a single readiness call to ~9 s (3 attempts × 3 s
+            # timeout each) and mask transient symptoms behind retries.
+            retry_total=0,
         )
         _TABLE_SERVICE_CLIENT = (endpoint, client)
         return client
