@@ -229,8 +229,9 @@ preflight_storage_parity() {
     return 0
   fi
   local public pe_count
-  public="$(printf '%s' "$show_json" | jq -r .public)"
-  pe_count="$(printf '%s' "$show_json" | jq -r '.pecs | length')"
+  # Parse both fields in one jq invocation (1 fork instead of 2).
+  read -r public pe_count < <(printf '%s' "$show_json" \
+    | jq -r '"\(.public) \(.pecs | length)"')
   ts "==> Storage parity: account=$acct publicNetworkAccess=$public approvedPrivateEndpoints=$pe_count"
   if [[ "$public" == "Disabled" && "$pe_count" -eq 0 ]]; then
     cat >&2 <<EOF

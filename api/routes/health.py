@@ -49,7 +49,12 @@ LOGGER = logging.getLogger(__name__)
 # arrive concurrently, only ONE thread actually runs the probe and the
 # others reuse its result. Implemented with double-checked locking around
 # `_STORAGE_PROBE_CACHE_LOCK`.
-_STORAGE_PROBE_CACHE: dict[str, Any] = {"value": None, "ts": 0.0}
+#
+# The cache is published as a single `(result, ts)` tuple. CPython
+# guarantees the rebind of a module global is atomic under the GIL, so the
+# fast-path no-lock reader never sees a torn pair (result from one probe,
+# ts from a different probe).
+_STORAGE_PROBE_CACHE: tuple[dict[str, Any], float] | None = None
 _STORAGE_PROBE_CACHE_LOCK = threading.Lock()
 _STORAGE_PROBE_CACHE_TTL_OK_SECONDS = 15.0
 _STORAGE_PROBE_CACHE_TTL_BAD_SECONDS = 3.0
@@ -71,10 +76,9 @@ def _ttl_for(result: dict[str, Any] | None) -> float:
 
 def _reset_storage_probe_cache() -> None:
     """Test helper: drop the cached result so the next call re-probes."""
-    global _TABLE_SERVICE_CLIENT
+    global _STORAGE_PROBE_CACHE, _TABLE_SERVICE_CLIENT
     with _STORAGE_PROBE_CACHE_LOCK:
-        _STORAGE_PROBE_CACHE["value"] = None
-        _STORAGE_PROBE_CACHE["ts"] = 0.0
+        _STORAGE_PROBE_CACHE = None
     with _TABLE_SERVICE_CLIENT_LOCK:
         _TABLE_SERVICE_CLIENT = None
 
@@ -122,20 +126,19 @@ def _probe_storage_table() -> dict[str, Any]:
     (double-checked locking) so only one of N concurrent first-callers
     actually runs the probe.
     """
+    global _STORAGE_PROBE_CACHE
     now = time.monotonic()
-    cached = _STORAGE_PROBE_CACHE["value"]
-    cached_ts = _STORAGE_PROBE_CACHE["ts"]
-    if cached is not None and now - cached_ts < _ttl_for(cached):
-        return cached
+    cached = _STORAGE_PROBE_CACHE  # single atomic load under GIL
+    if cached is not None and now - cached[1] < _ttl_for(cached[0]):
+        return cached[0]
 
     with _STORAGE_PROBE_CACHE_LOCK:
         # Re-check after acquiring the lock: another thread may have just
         # refreshed while we were waiting.
-        cached = _STORAGE_PROBE_CACHE["value"]
-        cached_ts = _STORAGE_PROBE_CACHE["ts"]
+        cached = _STORAGE_PROBE_CACHE
         now = time.monotonic()
-        if cached is not None and now - cached_ts < _ttl_for(cached):
-            return cached
+        if cached is not None and now - cached[1] < _ttl_for(cached[0]):
+            return cached[0]
 
         endpoint = os.environ.get("AZURE_TABLE_ENDPOINT", "")
         if not endpoint:
@@ -151,8 +154,9 @@ def _probe_storage_table() -> dict[str, Any]:
             except Exception as exc:
                 result = {"status": "down", "error": str(exc)[:200]}
 
-        _STORAGE_PROBE_CACHE["value"] = result
-        _STORAGE_PROBE_CACHE["ts"] = time.monotonic()
+        # Single atomic publish: readers never see (new_result, old_ts) or
+        # (old_result, new_ts).
+        _STORAGE_PROBE_CACHE = (result, time.monotonic())
         return result
 
 
