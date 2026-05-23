@@ -59,7 +59,7 @@ def fake_list_databases(monkeypatch: pytest.MonkeyPatch) -> None:
 
         return copy.deepcopy(_FAKE_DBS)
 
-    monkeypatch.setattr("api.services.storage_data.list_databases", _fake, raising=True)
+    monkeypatch.setattr("api.services.storage.data.list_databases", _fake, raising=True)
 
     # Also short-circuit the local-debug auto-open helper so the test does
     # not try to call ARM. Returning {} == "no action taken".
@@ -67,7 +67,7 @@ def fake_list_databases(monkeypatch: pytest.MonkeyPatch) -> None:
         return {"action": "noop"}
 
     monkeypatch.setattr(
-        "api.services.storage_public_access.ensure_local_storage_access",
+        "api.services.storage.public_access.ensure_local_storage_access",
         _no_access,
         raising=True,
     )

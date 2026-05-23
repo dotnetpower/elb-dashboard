@@ -21,7 +21,7 @@ import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from api.services import k8s_monitoring as km
+from api.services.k8s import monitoring as km
 
 
 class _FakeResponse:

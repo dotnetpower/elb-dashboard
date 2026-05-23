@@ -68,7 +68,7 @@ def _deployment(token: str = "") -> dict[str, Any]:
 
 
 def test_existing_openapi_token_is_returned_without_patch(monkeypatch) -> None:
-    from api.services import openapi_token
+    from api.services.openapi import token as openapi_token
 
     session = FakeSession(_deployment("existing-token"))
     saved: list[str] = []
@@ -101,7 +101,7 @@ def test_existing_openapi_token_is_returned_without_patch(monkeypatch) -> None:
 
 
 def test_generate_openapi_token_patches_deployment_and_runtime_cache(monkeypatch) -> None:
-    from api.services import openapi_token
+    from api.services.openapi import token as openapi_token
 
     session = FakeSession(_deployment())
     saved: list[str] = []

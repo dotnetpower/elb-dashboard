@@ -37,6 +37,15 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Module-level compiled validation patterns (called from blast_database_check_updates
+# and blast_database_preview). Previously these were re-compiled on every request.
+_DB_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+_SUBSCRIPTION_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_RESOURCE_GROUP_RE = re.compile(r"^[A-Za-z0-9._\-()]{1,90}$")
+_STORAGE_ACCOUNT_RE = re.compile(r"^[a-z0-9]{3,24}$")
+
 
 @router.get("/databases")
 def blast_databases(
@@ -50,7 +59,7 @@ def blast_databases(
     if not storage_account or not resource_group:
         return {"databases": []}
     from api.services import get_credential
-    from api.services.storage_data import classify_storage_failure, list_databases
+    from api.services.storage.data import classify_storage_failure, list_databases
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -75,7 +84,7 @@ def blast_databases(
     # ARM round trip per page render would be wasteful since the SPA
     # already loads /api/monitor/aks via useClusterReadiness).
     if num_nodes > 0 and machine_type:
-        from api.services.warmup_planner import compute_warmup_feasibility
+        from api.services.warmup.planner import compute_warmup_feasibility
 
         for db in databases:
             try:
@@ -129,19 +138,18 @@ def blast_database_shard(
         landing in the metadata blob or the response.
     """
     import json
-    import re
     import threading
     from datetime import UTC, datetime
 
     from azure.core.exceptions import ResourceNotFoundError
 
     from api.services import get_credential
-    from api.services.db_sharding import (
+    from api.services.db.sharding import (
         DEFAULT_CONTAINER,
         ensure_shard_sets,
     )
     from api.services.sanitise import sanitise
-    from api.services.storage_data import _blob_service
+    from api.services.storage.data import _blob_service
 
     sub = body.get("subscription_id", "")
     storage_rg = body.get("resource_group", "")
@@ -152,20 +160,15 @@ def blast_database_shard(
             "subscription_id, resource_group, account_name required in body",
         )
     # Mirror the validation in /api/storage/prepare-db. Keep it tight —
-    # `db_name` flows straight to a blob path.
-    _re_db = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
-    _re_sub = re.compile(
-        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-    )
-    _re_rg = re.compile(r"^[A-Za-z0-9._\-()]{1,90}$")
-    _re_sa = re.compile(r"^[a-z0-9]{3,24}$")
-    if not _re_db.match(db_name):
+    # `db_name` flows straight to a blob path. Patterns are module-level
+    # (see top of file) so they are compiled once per process.
+    if not _DB_NAME_RE.match(db_name):
         raise HTTPException(400, "invalid db_name")
-    if not _re_sub.match(sub):
+    if not _SUBSCRIPTION_RE.match(sub):
         raise HTTPException(400, "invalid subscription_id")
-    if not _re_rg.match(storage_rg):
+    if not _RESOURCE_GROUP_RE.match(storage_rg):
         raise HTTPException(400, "invalid resource_group")
-    if not _re_sa.match(account_name):
+    if not _STORAGE_ACCOUNT_RE.match(account_name):
         raise HTTPException(400, "invalid account_name")
 
     cred = get_credential()
@@ -197,7 +200,7 @@ def blast_database_shard(
     bc = cc.get_blob_client(f"{db_name}-metadata.json")
     existing: dict[str, Any] = {}
     try:
-        from api.services.storage_data import read_metadata_blob_text
+        from api.services.storage.data import read_metadata_blob_text
 
         existing = json.loads(
             read_metadata_blob_text(bc, max_bytes=4 * 1024 * 1024, label="db-metadata.json")
@@ -253,7 +256,7 @@ def blast_database_shard(
     # Audit — records the sharding action against the caller so /api/audit/log
     # surfaces it alongside BLAST / warmup operations.
     try:
-        from api.services.db_ops_audit import record_db_op
+        from api.services.db.ops_audit import record_db_op
 
         record_db_op(
             op="shard",
@@ -386,19 +389,19 @@ def blast_database_order_oracle(
     from datetime import datetime
 
     from api.services import get_credential
-    from api.services.db_order_oracle import (
+    from api.services.db.order_oracle import (
         ORACLE_PARTS_DIR,
         ORACLE_PREFIX_ROOT,
         build_db_order_oracle_job_plan,
         oracle_status_blob_path,
     )
     from api.services.image_tags import IMAGE_TAGS
-    from api.services.k8s_monitoring import (
+    from api.services.k8s.monitoring import (
         k8s_ensure_job_manifests,
         k8s_ready_warmup_node_names,
         k8s_warmup_status,
     )
-    from api.services.storage_data import list_databases, upload_blob_text
+    from api.services.storage.data import list_databases, upload_blob_text
 
     sub = str(body.get("subscription_id") or "")
     storage_rg = str(body.get("resource_group") or "")
@@ -417,19 +420,13 @@ def blast_database_order_oracle(
             ),
         )
 
-    _re_db = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
-    _re_sub = re.compile(
-        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-    )
-    _re_rg = re.compile(r"^[A-Za-z0-9._\-()]{1,90}$")
-    _re_sa = re.compile(r"^[a-z0-9]{3,24}$")
-    if not _re_db.match(db_name):
+    if not _DB_NAME_RE.match(db_name):
         raise HTTPException(400, "invalid db_name")
-    if not _re_sub.match(sub):
+    if not _SUBSCRIPTION_RE.match(sub):
         raise HTTPException(400, "invalid subscription_id")
-    if not _re_rg.match(storage_rg):
+    if not _RESOURCE_GROUP_RE.match(storage_rg):
         raise HTTPException(400, "invalid resource_group")
-    if not _re_sa.match(account_name):
+    if not _STORAGE_ACCOUNT_RE.match(account_name):
         raise HTTPException(400, "invalid account_name")
 
     cred = get_credential()
@@ -587,7 +584,7 @@ def blast_database_order_oracle(
     # Audit — capture run_id + expected_parts so a later /api/audit/log query
     # can correlate this oracle run with its part blobs.
     try:
-        from api.services.db_ops_audit import record_db_op
+        from api.services.db.ops_audit import record_db_op
 
         record_db_op(
             op="oracle",
@@ -691,7 +688,7 @@ def blast_databases_check_updates(
 
     # Per-DB enrichment — only runs when the caller passes storage scope.
     from api.services import get_credential
-    from api.services.storage_data import list_databases
+    from api.services.storage.data import list_databases
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -820,7 +817,7 @@ def blast_databases_versions(
         return {"versions": [], "total": 0}
 
     from api.services import get_credential
-    from api.services.storage_data import classify_storage_failure, list_databases
+    from api.services.storage.data import classify_storage_failure, list_databases
 
     cred = get_credential()
     _maybe_open_local_storage_access(

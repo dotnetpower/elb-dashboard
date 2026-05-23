@@ -31,7 +31,7 @@ from api.routes.blast.result_helpers import (
     read_ready_result_artifact,
     validate_result_blob_for_job,
 )
-from api.services.blast_result_analytics import (
+from api.services.blast.result_analytics import (
     RESULTS_ALIGNMENTS_MAX_BYTES,
     RESULTS_ALIGNMENTS_MAX_HITS,
     RESULTS_DEFAULT_PAGE_SIZE,
@@ -97,8 +97,8 @@ def blast_job_results_alignments(
             return artifact
         enqueue_result_artifact_backfill(job_id, "result_alignments")
     from api.services import get_credential
-    from api.services.blast_results_parser import parse_blast_result_content
-    from api.services.storage_data import read_result_blob_text
+    from api.services.blast.results_parser import parse_blast_result_content
+    from api.services.storage.data import read_result_blob_text
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -289,8 +289,8 @@ def blast_job_results_taxonomy(
             return artifact
         enqueue_result_artifact_backfill(job_id, "result_taxonomy")
     from api.services import get_credential
-    from api.services.blast_results_parser import parse_blast_result_content
-    from api.services.storage_data import read_result_blob_text
+    from api.services.blast.results_parser import parse_blast_result_content
+    from api.services.storage.data import read_result_blob_text
 
     cred = get_credential()
     _maybe_open_local_storage_access(

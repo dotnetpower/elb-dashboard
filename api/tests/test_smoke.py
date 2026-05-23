@@ -207,8 +207,8 @@ def test_storage_summary_preserves_hns_when_container_list_fails(
 def test_storage_summary_includes_container_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from api.services import storage_usage_cache
     from api.services.monitoring import get_storage_summary
+    from api.services.storage import usage_cache as storage_usage_cache
 
     storage_usage_cache.reset_storage_usage_cache()
     monkeypatch.setattr(storage_usage_cache, "_start_refresh_thread", lambda target: target())
@@ -243,7 +243,7 @@ def test_storage_summary_includes_container_usage(
     )
     monkeypatch.setattr("api.services.monitoring.storage_client", lambda *_args: fake_client)
     monkeypatch.setattr(
-        "api.services.storage_usage_cache.storage_data.container_usage_summaries",
+        "api.services.storage.usage_cache.storage_data.container_usage_summaries",
         lambda _credential, _account_name, _names, **_kwargs: {
             "queries": {
                 "blob_count": 2,
@@ -294,8 +294,8 @@ def test_storage_summary_includes_container_usage(
 def test_storage_summary_keeps_containers_when_usage_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from api.services import storage_usage_cache
     from api.services.monitoring import get_storage_summary
+    from api.services.storage import usage_cache as storage_usage_cache
 
     storage_usage_cache.reset_storage_usage_cache()
     monkeypatch.setattr(storage_usage_cache, "_start_refresh_thread", lambda target: target())
@@ -329,7 +329,7 @@ def test_storage_summary_keeps_containers_when_usage_fails(
         raise RuntimeError("usage unavailable")
 
     monkeypatch.setattr(
-        "api.services.storage_usage_cache.storage_data.container_usage_summaries",
+        "api.services.storage.usage_cache.storage_data.container_usage_summaries",
         raise_usage,
     )
 
@@ -795,7 +795,7 @@ def test_canonical_dashboard_submit_uploads_inline_query(
 
     calls, fake_delay = make_delay_recorder("task-789")
 
-    monkeypatch.setattr("api.services.storage_data.upload_query_text", fake_upload_query_text)
+    monkeypatch.setattr("api.services.storage.data.upload_query_text", fake_upload_query_text)
     monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
 
     r = client.post(
@@ -948,7 +948,7 @@ def test_blast_job_file_reads_uploaded_query_from_queries_container(
         return ">q1\nACGT\n"
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     r = client.get(
         "/api/blast/jobs/job-123/file"
@@ -1012,7 +1012,7 @@ def test_blast_job_file_accepts_job_query_blob_url(
         return ">q1\nACGT\n"
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     query_url = "https://elbstg01.blob.core.windows.net/queries/uploads/job-123/query.fa"
     r = client.get(
@@ -1054,7 +1054,7 @@ def test_blast_job_file_falls_back_to_uploads_query_path(
         raise RuntimeError("BlobNotFound")
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     r = client.get(
         "/api/blast/jobs/job-123/file"
@@ -1104,7 +1104,7 @@ def test_blast_job_file_generates_config_preview_when_blob_missing(
         raise RuntimeError("BlobNotFound")
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
     monkeypatch.setattr(
         "api.routes.blast._config_preview_from_payload",
         lambda **_kwargs: "[blast]\nprogram=blastn\n",
@@ -1156,7 +1156,7 @@ def test_blast_job_file_config_preview_rejects_storage_account_mismatch(
         raise RuntimeError("BlobNotFound")
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     r = client.get(
         "/api/blast/jobs/job-123/file"
@@ -1444,7 +1444,13 @@ def test_audit_log_payload_is_sanitised(
         type = "blast"
 
     class FakeRepo:
-        def list_for_owner(self, _oid: str, limit: int = 50) -> list[FakeJob]:
+        def list_for_owner(
+            self, _oid: str, limit: int = 50, *, include_payload: bool = True
+        ) -> list[FakeJob]:
+            # ``include_payload`` is accepted so the route signature matches
+            # ``state_repo.JobStateRepository.list_for_owner``; this fake never
+            # populates payload anyway.
+            del include_payload
             return [FakeJob()]
 
         def get_history(self, _job_id: str, limit: int = 20) -> list[dict[str, object]]:

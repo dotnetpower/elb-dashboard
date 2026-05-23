@@ -34,7 +34,7 @@ class FakeSession:
 
 
 def test_openapi_deployment_status_extracts_image_tag(monkeypatch) -> None:
-    from api.services import openapi_deployment
+    from api.services.openapi import deployment as openapi_deployment
 
     session = FakeSession(
         {

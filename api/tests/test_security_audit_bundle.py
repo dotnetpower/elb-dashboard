@@ -265,11 +265,13 @@ def test_caller_ip_lookup_url_must_be_https(monkeypatch: pytest.MonkeyPatch) -> 
     import importlib
     import sys
 
+    sys.modules.pop("api.services.storage.public_access", None)
     sys.modules.pop("api.services.storage_public_access", None)
     with pytest.raises(RuntimeError, match=r"must be https://"):
-        importlib.import_module("api.services.storage_public_access")
+        importlib.import_module("api.services.storage.public_access")
     # Restore a clean module so other tests don't observe a half-loaded
     # state.
     monkeypatch.delenv("ELB_CALLER_IP_LOOKUP_URLS", raising=False)
+    sys.modules.pop("api.services.storage.public_access", None)
     sys.modules.pop("api.services.storage_public_access", None)
-    importlib.import_module("api.services.storage_public_access")
+    importlib.import_module("api.services.storage.public_access")

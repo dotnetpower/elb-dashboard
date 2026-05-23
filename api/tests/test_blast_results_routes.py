@@ -66,7 +66,7 @@ def patched_storage(monkeypatch: pytest.MonkeyPatch):
     `list_result_blobs` and `read_blob_text` return.
     """
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
-    from api.services import storage_data
+    from api.services.storage import data as storage_data
 
     state: dict[str, Any] = {
         "blobs": [{"name": "job123/results.out", "size": len(_OUTFMT6)}],
@@ -125,7 +125,7 @@ def test_results_list_opens_storage_for_local_debug_when_scope_present(
         return {"action": "already_open"}
 
     monkeypatch.setattr(
-        "api.services.storage_public_access.ensure_local_storage_access",
+        "api.services.storage.public_access.ensure_local_storage_access",
         fake_access,
         raising=True,
     )
@@ -520,7 +520,7 @@ def test_aggregate_degraded_when_all_reads_fail(monkeypatch, patched_storage):
     but storage is unreachable / RBAC missing.
     """
     from api.main import app
-    from api.services import storage_data
+    from api.services.storage import data as storage_data
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("simulated 403")
@@ -541,7 +541,7 @@ def test_aggregate_degraded_when_all_reads_fail(monkeypatch, patched_storage):
 def test_export_degraded_when_all_reads_fail(monkeypatch, patched_storage):
     """Export must NOT silently produce header-only CSV when every read fails."""
     from api.main import app
-    from api.services import storage_data
+    from api.services.storage import data as storage_data
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("simulated 403")
@@ -701,7 +701,7 @@ def test_taxonomy_handles_unclassified_when_metadata_missing(patched_storage):
 def test_taxonomy_degraded_when_all_reads_fail(monkeypatch, patched_storage):
     """If every blob fails to download, surface `degraded` like the
     aggregate/alignments endpoints do — the SPA reuses the same banner."""
-    from api.services import storage_data
+    from api.services.storage import data as storage_data
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("network down")

@@ -71,13 +71,13 @@ def fake_list_databases(monkeypatch: pytest.MonkeyPatch) -> None:
 
         return copy.deepcopy(_FAKE_DBS)
 
-    monkeypatch.setattr("api.services.storage_data.list_databases", _fake, raising=True)
+    monkeypatch.setattr("api.services.storage.data.list_databases", _fake, raising=True)
 
     def _no_access(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {"action": "noop"}
 
     monkeypatch.setattr(
-        "api.services.storage_public_access.ensure_local_storage_access",
+        "api.services.storage.public_access.ensure_local_storage_access",
         _no_access,
         raising=True,
     )
@@ -146,13 +146,13 @@ def test_storage_failure_returns_degraded(
     def _raise(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
         raise _AuthFail("This request is not authorized to perform this operation.")
 
-    monkeypatch.setattr("api.services.storage_data.list_databases", _raise, raising=True)
+    monkeypatch.setattr("api.services.storage.data.list_databases", _raise, raising=True)
 
     def _no_access(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {"action": "noop"}
 
     monkeypatch.setattr(
-        "api.services.storage_public_access.ensure_local_storage_access",
+        "api.services.storage.public_access.ensure_local_storage_access",
         _no_access,
         raising=True,
     )

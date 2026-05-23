@@ -53,7 +53,7 @@ def select_warmup_shard_count(
 
     total_bytes = int(database.get("total_bytes") or database.get("bytes_total") or 0)
     if total_bytes > 0:
-        from api.services.warmup_planner import compute_warmup_feasibility
+        from api.services.warmup.planner import compute_warmup_feasibility
 
         plan = compute_warmup_feasibility(
             db_total_bytes=total_bytes,

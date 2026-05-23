@@ -62,16 +62,17 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     from api.routes.blast.jobs import _reset_blast_jobs_list_cache
     from api.routes.storage.common import reset_ncbi_catalogue_cache
     from api.services.auto_warmup import _reset_autowarmup_table_pool
-    from api.services.blast_db_metadata import _reset_blast_db_metadata_cache
+    from api.services.blast.db_metadata import _reset_blast_db_metadata_cache
+    from api.services.httpx_pool import close_all_clients as _reset_httpx_pool
     from api.services.job_artifacts import _reset_artifact_table_pool
-    from api.services.k8s_monitoring import (
+    from api.services.k8s.monitoring import (
         _reset_blast_status_cache,
         reset_k8s_credential_cache,
         reset_k8s_session_pool,
     )
     from api.services.redis_clients import reset_redis_clients
     from api.services.state_repo import reset_state_repo_cache
-    from api.services.storage_data import reset_blob_service_pool
+    from api.services.storage.data import reset_blob_service_pool
 
     _reset()
     _reset_blast_jobs_list_cache()
@@ -85,6 +86,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_redis_clients()
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()
+    _reset_httpx_pool()
     yield
     _reset()
     _reset_blast_jobs_list_cache()
@@ -98,3 +100,4 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_redis_clients()
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()
+    _reset_httpx_pool()

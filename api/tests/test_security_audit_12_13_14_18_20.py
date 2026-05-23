@@ -161,7 +161,7 @@ def test_storage_open_refuses_when_shared_key_enabled(
     otherwise have network-unconditional reach."""
     monkeypatch.setenv("LOCAL_DEBUG_AUTO_OPEN_STORAGE", "true")
     monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
-    from api.services import storage_public_access as spa
+    from api.services.storage import public_access as spa
 
     # Reset the in-process "already open" cache so a previous test cannot
     # poison this one.
@@ -205,7 +205,7 @@ def test_storage_open_succeeds_when_shared_key_disabled(
     to completion."""
     monkeypatch.setenv("LOCAL_DEBUG_AUTO_OPEN_STORAGE", "true")
     monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
-    from api.services import storage_public_access as spa
+    from api.services.storage import public_access as spa
 
     with spa._cache_lock:
         spa._already_open_cache.clear()
@@ -248,7 +248,7 @@ def test_storage_open_succeeds_when_shared_key_disabled(
 # #20 — Centralised Storage endpoint helper
 # ---------------------------------------------------------------------------
 def test_blob_account_url_default_suffix() -> None:
-    from api.services.storage_endpoint import blob_account_url, blob_host_for_account
+    from api.services.storage.endpoint import blob_account_url, blob_host_for_account
 
     assert blob_account_url("stelb01") == "https://stelb01.blob.core.windows.net"
     assert blob_host_for_account("stelb01") == "stelb01.blob.core.windows.net"
@@ -259,7 +259,7 @@ def test_blob_account_url_honours_env_override(monkeypatch: pytest.MonkeyPatch) 
     suffix. The helper must read it from ``AZURE_STORAGE_SUFFIX`` so the
     callers do not have to."""
     monkeypatch.setenv("AZURE_STORAGE_SUFFIX", "core.usgovcloudapi.net")
-    from api.services.storage_endpoint import blob_account_url
+    from api.services.storage.endpoint import blob_account_url
 
     assert blob_account_url("stelb01") == "https://stelb01.blob.core.usgovcloudapi.net"
 
@@ -268,14 +268,14 @@ def test_blob_account_url_rejects_full_host_input() -> None:
     """Common mistake: passing ``acct.blob.core.windows.net`` here would
     produce ``https://acct.blob.core.windows.net.blob.core.windows.net``.
     Fail loudly."""
-    from api.services.storage_endpoint import blob_account_url
+    from api.services.storage.endpoint import blob_account_url
 
     with pytest.raises(ValueError, match=r"bare storage account name"):
         blob_account_url("acct.blob.core.windows.net")
 
 
 def test_table_account_url_uses_table_subdomain() -> None:
-    from api.services.storage_endpoint import table_account_url
+    from api.services.storage.endpoint import table_account_url
 
     assert table_account_url("stelb01") == "https://stelb01.table.core.windows.net"
 
@@ -286,7 +286,7 @@ def test_storage_url_validation_uses_centralised_helper(
     """The SSRF cross-account check in ``validate_storage_blob_reference``
     must keep working after the migration to the centralised helper."""
     monkeypatch.delenv("AZURE_STORAGE_SUFFIX", raising=False)
-    from api.services.storage_url_validation import validate_storage_blob_reference
+    from api.services.storage.url_validation import validate_storage_blob_reference
 
     # Same account → accepted.
     ok = validate_storage_blob_reference(

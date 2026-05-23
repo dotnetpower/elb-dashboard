@@ -20,7 +20,7 @@ from typing import Any
 
 from azure.core.credentials import TokenCredential
 
-from api.services.k8s_monitoring import _get_k8s_session
+from api.services.k8s.monitoring import _get_k8s_session
 from api.services.sanitise import sanitise
 
 _LINE_MAX_CHARS = 4_000

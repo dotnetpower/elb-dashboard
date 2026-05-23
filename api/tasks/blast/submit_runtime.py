@@ -208,7 +208,7 @@ def _refresh_submit_terminal_status(
 
 def _has_parseable_result_artifact(storage_account: str, job_id: str) -> bool:
     try:
-        from api.services.blast_result_analytics import list_parseable_result_blobs
+        from api.services.blast.result_analytics import list_parseable_result_blobs
 
         return bool(list_parseable_result_blobs(storage_account, job_id))
     except Exception as exc:
@@ -221,7 +221,7 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
         return ""
     try:
         from api.services import get_credential
-        from api.services.storage_data import _blob_service
+        from api.services.storage.data import _blob_service
 
         container = _blob_service(get_credential(), storage_account).get_container_client("results")
         prefix = f"{job_id}/job-"

@@ -51,7 +51,7 @@ def publish_db_metadata_invalidate(storage_account: str, database_name: str) -> 
     subscribe to. Never raises — see ``publish_blast_db_metadata_invalidate``.
     """
     try:
-        from api.services.blast_db_metadata import publish_blast_db_metadata_invalidate
+        from api.services.blast.db_metadata import publish_blast_db_metadata_invalidate
 
         publish_blast_db_metadata_invalidate(storage_account, database_name)
     except Exception as exc:
@@ -99,7 +99,7 @@ def wait_for_warmup_jobs(
     timeout_seconds: int,
     poll_seconds: int = 15,
 ) -> dict[str, Any]:
-    from api.services.k8s_monitoring import k8s_warmup_status
+    from api.services.k8s.monitoring import k8s_warmup_status
 
     deadline = time.monotonic() + timeout_seconds
     last_database: dict[str, Any] = {}

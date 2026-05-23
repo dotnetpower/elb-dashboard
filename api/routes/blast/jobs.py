@@ -39,7 +39,7 @@ from api.routes._blast_shared import (
     _split_child_summary_from_repo,
     _sync_external_jobs_to_table,
 )
-from api.services.blast_job_state import _K8S_REFRESH_PHASES
+from api.services.blast.job_state import _K8S_REFRESH_PHASES
 from api.services.response_contracts import build_meta, request_id_from_scope
 
 LOGGER = logging.getLogger(__name__)
@@ -503,7 +503,7 @@ def blast_job_events(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     try:
-        from api.services.blast_events import canonical_job_events
+        from api.services.blast.events import canonical_job_events
         from api.services.state_repo import get_state_repo
 
         repo = get_state_repo()
@@ -535,7 +535,7 @@ def blast_job_queue(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     try:
-        from api.services.blast_queue import queue_snapshot
+        from api.services.blast.queue import queue_snapshot
         from api.services.state_repo import get_state_repo
 
         repo = get_state_repo()

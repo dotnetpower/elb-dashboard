@@ -20,7 +20,7 @@ import configparser
 import io
 
 import pytest
-from api.services.blast_config import generate_config
+from api.services.blast.config import generate_config
 
 
 def _parse(content: str) -> configparser.ConfigParser:

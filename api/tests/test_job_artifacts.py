@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 from api.services import job_artifacts
-from api.services.blast_result_artifacts import build_result_aggregate_payload
+from api.services.blast.result_artifacts import build_result_aggregate_payload
 from api.services.job_artifacts import ArtifactState, build_execution_steps_snapshot
 from api.tasks import blast as blast_tasks
 
@@ -164,14 +164,14 @@ def test_streaming_aggregate_does_not_hit_cap(monkeypatch) -> None:
     ]
 
     monkeypatch.setattr(
-        "api.services.blast_result_artifacts.list_parseable_result_blobs",
+        "api.services.blast.result_artifacts.list_parseable_result_blobs",
         lambda *_args: [{"name": "job-1/out.tsv"}],
     )
     monkeypatch.setattr(
-        "api.services.blast_result_artifacts.storage_data.read_result_blob_text",
+        "api.services.blast.result_artifacts.storage_data.read_result_blob_text",
         lambda *_args, **_kwargs: "\n".join(rows),
     )
-    monkeypatch.setattr("api.services.blast_result_artifacts.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.blast.result_artifacts.get_credential", lambda: object())
 
     payload = build_result_aggregate_payload("job-1", "acct")
 

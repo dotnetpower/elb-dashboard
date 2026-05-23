@@ -119,7 +119,7 @@ def _is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
 def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
     metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
     try:
-        from api.services.storage_data import read_metadata_blob_text
+        from api.services.storage.data import read_metadata_blob_text
 
         payload = read_metadata_blob_text(
             metadata_blob, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
@@ -198,7 +198,7 @@ def _write_db_metadata(
     # Redis pub/sub channel so the worker / beat sidecars (and any peer api
     # replica) drop their copies too.
     try:
-        from api.services.blast_db_metadata import notify_blast_db_metadata_changed
+        from api.services.blast.db_metadata import notify_blast_db_metadata_changed
 
         notify_blast_db_metadata_changed(account_name, db_name)
     except Exception as exc:
@@ -421,7 +421,7 @@ def prepare_db(
     # copy below can actually reach the data plane. In production the api
     # sidecar already reaches Storage via the private endpoint and this is a
     # no-op. See api/services/storage_public_access.py and project policy §9.
-    from api.services.storage_public_access import ensure_local_storage_access
+    from api.services.storage.public_access import ensure_local_storage_access
 
     access = ensure_local_storage_access(cred, sub, storage_rg, account_name)
     if access.get("action") == "failed":
@@ -475,16 +475,13 @@ def prepare_db(
 
     # Build the destination container client. The api sidecar reaches the
     # storage account over the private endpoint via the shared MI; no SAS
-    # is involved, no public network toggle is performed.
+    # is involved, no public network toggle is performed. ``_blob_service``
+    # returns a pooled BlobServiceClient keyed by (credential id, account)
+    # so we don't pay credential re-validation per request.
     try:
-        from azure.storage.blob import BlobServiceClient
+        from api.services.storage.data import _blob_service
 
-        from api.services.storage_endpoint import blob_account_url
-
-        blob_svc = BlobServiceClient(
-            account_url=blob_account_url(account_name),
-            credential=cred,
-        )
+        blob_svc = _blob_service(cred, account_name)
         container = blob_svc.get_container_client("blast-db")
 
         previous_metadata, _ = _download_blob_with_etag(container, db_name)
@@ -539,7 +536,7 @@ def prepare_db(
         try:
             from azure.storage.blob import BlobServiceClient as _BSC
 
-            from api.services.storage_endpoint import blob_account_url as _url
+            from api.services.storage.endpoint import blob_account_url as _url
 
             local_svc = _BSC(account_url=_url(account_name), credential=cred)
             local_container = local_svc.get_container_client("blast-db")
@@ -698,7 +695,7 @@ def prepare_db(
                 return
 
             # Phase 3: all copies succeeded — auto-shard, then promote.
-            from api.services.db_sharding import (
+            from api.services.db.sharding import (
                 PRESET_SHARD_SETS,
                 derive_volumes_from_keys,
                 upload_shard_set,
@@ -812,7 +809,7 @@ def prepare_db(
     # Audit — recorded after the lock + thread are set up so a 409 / 502
     # earlier in the route does NOT leak a phantom "started" event.
     try:
-        from api.services.db_ops_audit import record_db_op
+        from api.services.db.ops_audit import record_db_op
 
         audit_job_id = record_db_op(
             op="prepare_db",
@@ -897,18 +894,13 @@ def prepare_db_cancel(
     _check(db_name, _RE_DB_NAME, "db_name")
 
     cred = get_credential()
-    from api.services.storage_public_access import ensure_local_storage_access
+    from api.services.storage.public_access import ensure_local_storage_access
 
     ensure_local_storage_access(cred, sub, storage_rg, account_name)
 
-    from azure.storage.blob import BlobServiceClient
+    from api.services.storage.data import _blob_service
 
-    from api.services.storage_endpoint import blob_account_url
-
-    blob_svc = BlobServiceClient(
-        account_url=blob_account_url(account_name),
-        credential=cred,
-    )
+    blob_svc = _blob_service(cred, account_name)
     container = blob_svc.get_container_client("blast-db")
     meta, _etag = _download_blob_with_etag(container, db_name)
     copy_status = meta.get("copy_status") or {}
@@ -968,7 +960,7 @@ def prepare_db_cancel(
         )
 
     try:
-        from api.services.db_ops_audit import record_db_op
+        from api.services.db.ops_audit import record_db_op
 
         record_db_op(
             op="prepare_db_cancel",

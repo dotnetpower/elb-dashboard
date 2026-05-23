@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from api.services.blast_queue import queue_snapshot
+from api.services.blast.queue import queue_snapshot
 
 
 def test_queue_snapshot_reports_position_and_depth() -> None:

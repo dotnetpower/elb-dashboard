@@ -18,7 +18,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 import jwt
 from fastapi import Header, HTTPException, status
 from jwt import PyJWKClient
@@ -99,8 +98,14 @@ def _get_jwks_client(tenant_id: str) -> PyJWKClient:
             return cached[1]
         # Leader's cache write failed; fall through and try ourselves.
     try:
-        with httpx.Client(timeout=10.0) as client:
-            oidc = client.get(_discovery_url(tenant_id)).raise_for_status().json()
+        # Pooled client so the OIDC discovery fetch reuses one TLS handshake
+        # across cold tenants. This path runs at most once per tenant per
+        # `_JWKS_TTL_SECONDS`, but a process churning through tenants on cold
+        # startup still benefited from skipping the per-call connect cost.
+        from api.services.httpx_pool import get_pooled_client
+
+        client = get_pooled_client("auth-oidc-discovery", timeout=10.0)
+        oidc = client.get(_discovery_url(tenant_id)).raise_for_status().json()
         jwks_uri = oidc["jwks_uri"]
         new_client = PyJWKClient(jwks_uri, cache_keys=True, lifespan=_JWKS_TTL_SECONDS)
         _JWKS_CACHE[tenant_id] = (now + _JWKS_TTL_SECONDS, new_client)

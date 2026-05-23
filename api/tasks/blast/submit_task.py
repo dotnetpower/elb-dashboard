@@ -28,8 +28,8 @@ from typing import Any
 
 from celery import shared_task
 
-from api.services.blast_db_metadata import extract_db_name
-from api.services.blast_oracles import (
+from api.services.blast.db_metadata import extract_db_name
+from api.services.blast.oracles import (
     upload_db_order_oracle_pointer_if_available,
     upload_tie_order_oracle_if_present,
 )
@@ -284,7 +284,7 @@ def submit(
         config_blob_path = f"{job_id}/{ELASTIC_BLAST_CFG_FILE}"
         try:
             from api.services import get_credential
-            from api.services.storage_data import upload_blob_text
+            from api.services.storage.data import upload_blob_text
 
             config_url = upload_blob_text(
                 get_credential(),

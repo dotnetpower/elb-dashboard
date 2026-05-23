@@ -120,8 +120,8 @@ class OpenApiTokenRequest(BaseModel):
 
 
 def _raise_openapi_route_error(exc: Exception) -> None:
-    from api.services.openapi_deployment import OpenApiDeploymentError
-    from api.services.openapi_token import OpenApiTokenError
+    from api.services.openapi.deployment import OpenApiDeploymentError
+    from api.services.openapi.token import OpenApiTokenError
 
     if isinstance(exc, (OpenApiTokenError, OpenApiDeploymentError)):
         raise HTTPException(
@@ -357,7 +357,7 @@ def aks_openapi_deployment(
     """Return the deployed ``elb-openapi`` image tag from the AKS deployment."""
 
     from api.services import get_credential
-    from api.services.openapi_deployment import get_openapi_deployment_status
+    from api.services.openapi.deployment import get_openapi_deployment_status
 
     del caller
     try:
@@ -382,7 +382,7 @@ def aks_openapi_token(
     """Return the current API token configured on the ``elb-openapi`` deployment."""
 
     from api.services import get_credential
-    from api.services.openapi_token import get_openapi_api_token_status
+    from api.services.openapi.token import get_openapi_api_token_status
 
     del caller
     try:
@@ -405,7 +405,7 @@ def aks_openapi_token_generate(
     """Generate or rotate the API token on the ``elb-openapi`` deployment."""
 
     from api.services import get_credential
-    from api.services.openapi_token import ensure_openapi_api_token
+    from api.services.openapi.token import ensure_openapi_api_token
 
     LOGGER.info(
         "openapi token update requested cluster=%s caller_oid=%s regenerate=%s",
@@ -440,10 +440,8 @@ def aks_openapi_spec(
     not yet reachable so the SPA's docs page does not crash.
     """
 
-    import httpx
-
     from api.services import get_credential
-    from api.services.k8s_monitoring import k8s_get_service_ip
+    from api.services.k8s.monitoring import k8s_get_service_ip
 
     sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
     cred = get_credential()
@@ -463,11 +461,13 @@ def aks_openapi_spec(
         }
 
     try:
-        with httpx.Client(timeout=10.0) as client:
-            for path in ("/openapi.json", "/docs/openapi.json"):
-                resp = client.get(f"http://{ip}{path}")
-                if resp.status_code == 200:
-                    return cast(dict[str, Any], resp.json())
+        from api.services.httpx_pool import get_pooled_client
+
+        client = get_pooled_client("aks-openapi-spec", timeout=10.0)
+        for path in ("/openapi.json", "/docs/openapi.json"):
+            resp = client.get(f"http://{ip}{path}")
+            if resp.status_code == 200:
+                return cast(dict[str, Any], resp.json())
     except Exception as exc:
         LOGGER.warning("openapi/spec: fetch failed for %s: %s", ip, exc)
 
@@ -497,7 +497,7 @@ async def aks_openapi_proxy(
     import httpx
 
     from api.services import get_credential
-    from api.services.k8s_monitoring import k8s_get_service_ip
+    from api.services.k8s.monitoring import k8s_get_service_ip
 
     if not target_path.startswith("/") or target_path.startswith("//"):
         raise HTTPException(
@@ -576,12 +576,12 @@ async def aks_openapi_proxy(
     }
     api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
     if not api_token:
-        from api.services.openapi_runtime import get_openapi_api_token
+        from api.services.openapi.runtime import get_openapi_api_token
 
         api_token = get_openapi_api_token()
     if not api_token:
         try:
-            from api.services.openapi_token import get_openapi_api_token_status
+            from api.services.openapi.token import get_openapi_api_token_status
 
             token_status = get_openapi_api_token_status(
                 cred,

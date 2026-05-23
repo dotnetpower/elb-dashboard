@@ -115,7 +115,7 @@ def warmup_database(
     _update_state(job_id, "downloading", status="running")
 
     try:
-        from api.services.storage_data import list_databases
+        from api.services.storage.data import list_databases
 
         cred = get_credential()
         databases = list_databases(cred, storage_account)
@@ -143,12 +143,12 @@ def warmup_database(
                 import json
                 from datetime import datetime
 
-                from api.services.db_sharding import (
+                from api.services.db.sharding import (
                     DEFAULT_CONTAINER,
                     ensure_shard_sets,
                 )
                 from api.services.sanitise import sanitise
-                from api.services.storage_data import _blob_service
+                from api.services.storage.data import _blob_service
 
                 # Mark in-progress before the long call so the SPA's
                 # chip strip can reflect the auto-shard step.
@@ -157,7 +157,7 @@ def warmup_database(
                 bc = cc.get_blob_client(f"{database_name}-metadata.json")
                 pre: dict[str, Any] = {}
                 try:
-                    from api.services.storage_data import read_metadata_blob_text
+                    from api.services.storage.data import read_metadata_blob_text
 
                     pre = json.loads(
                         read_metadata_blob_text(
@@ -186,7 +186,7 @@ def warmup_database(
                 # poll flips the chip to "sharded".
                 final: dict[str, Any] = {}
                 try:
-                    from api.services.storage_data import read_metadata_blob_text
+                    from api.services.storage.data import read_metadata_blob_text
 
                     final = json.loads(
                         read_metadata_blob_text(
@@ -238,9 +238,9 @@ def warmup_database(
                 try:
                     import json as _json
 
-                    from api.services.db_sharding import DEFAULT_CONTAINER as _DC
+                    from api.services.db.sharding import DEFAULT_CONTAINER as _DC
                     from api.services.sanitise import sanitise as _sanitise
-                    from api.services.storage_data import _blob_service as _bs
+                    from api.services.storage.data import _blob_service as _bs
 
                     cred2 = get_credential()
                     svc2 = _bs(cred2, storage_account)
@@ -249,7 +249,7 @@ def warmup_database(
                     )
                     err_meta: dict[str, Any] = {}
                     try:
-                        from api.services.storage_data import read_metadata_blob_text
+                        from api.services.storage.data import read_metadata_blob_text
 
                         err_meta = _json.loads(
                             read_metadata_blob_text(
@@ -287,13 +287,13 @@ def warmup_database(
             _record_task_progress(self, "planning_node_warmup", database=database_name)
             _update_state(job_id, "planning_node_warmup", status="running")
             try:
-                from api.services.k8s_monitoring import (
+                from api.services.k8s.monitoring import (
                     k8s_ensure_job_manifests,
                     k8s_ensure_warmup_scripts_configmap,
                     k8s_ready_warmup_node_names,
                     k8s_release_stale_warmup_jobs,
                 )
-                from api.services.warmup_jobs import build_warmup_job_plan
+                from api.services.warmup.jobs import build_warmup_job_plan
 
                 nodes = k8s_ready_warmup_node_names(
                     cred, subscription_id, resource_group, cluster_name

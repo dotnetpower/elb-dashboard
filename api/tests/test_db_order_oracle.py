@@ -15,7 +15,7 @@ Validation: `uv run pytest -q api/tests/test_db_order_oracle.py`.
 from __future__ import annotations
 
 import pytest
-from api.services.db_order_oracle import (
+from api.services.db.order_oracle import (
     build_db_order_oracle_job_plan,
     oracle_part_blob_path,
     oracle_part_url,

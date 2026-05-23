@@ -20,7 +20,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from api.services import blast_oracles
+from api.services.blast import oracles as blast_oracles
 from api.tasks import blast as blast_tasks
 
 
@@ -50,7 +50,7 @@ def test_upload_tie_order_oracle_writes_finalizer_metadata(monkeypatch) -> None:
         uploads.append({"args": args, "kwargs": kwargs})
 
     monkeypatch.setattr("api.services.get_credential", lambda: "credential")
-    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
+    monkeypatch.setattr("api.services.storage.data.upload_blob_text", fake_upload_blob_text)
 
     result = blast_oracles.upload_tie_order_oracle_if_present(
         storage_account="stelb",
@@ -115,7 +115,7 @@ def test_upload_db_order_oracle_pointer_writes_url_manifest(monkeypatch) -> None
         ]
 
     monkeypatch.setattr("api.services.get_credential", lambda: "credential")
-    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
+    monkeypatch.setattr("api.services.storage.data.upload_blob_text", fake_upload_blob_text)
     monkeypatch.setattr(
         blast_oracles,
         "resolve_db_metadata",
@@ -189,7 +189,7 @@ def test_db_order_oracle_part_urls_rejects_source_version_mismatch(monkeypatch) 
             return FakeContainer()
 
     monkeypatch.setattr("api.services.get_credential", lambda: "credential")
-    monkeypatch.setattr("api.services.storage_data._blob_service", lambda *_args: FakeService())
+    monkeypatch.setattr("api.services.storage.data._blob_service", lambda *_args: FakeService())
 
     assert (
         blast_oracles.db_order_oracle_part_urls(

@@ -48,14 +48,14 @@ def _patch_dbs(monkeypatch: pytest.MonkeyPatch, dbs: list[dict[str, Any]]) -> No
         return copy.deepcopy(dbs)
 
     monkeypatch.setattr(
-        "api.services.storage_data.list_databases", _fake, raising=True
+        "api.services.storage.data.list_databases", _fake, raising=True
     )
 
     def _no_access(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return {"action": "noop"}
 
     monkeypatch.setattr(
-        "api.services.storage_public_access.ensure_local_storage_access",
+        "api.services.storage.public_access.ensure_local_storage_access",
         _no_access,
         raising=True,
     )

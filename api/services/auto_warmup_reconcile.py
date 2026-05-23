@@ -18,12 +18,13 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from api.services import monitoring, storage_data
+from api.services import monitoring
 from api.services.auto_warmup import (
     AutoWarmupPreference,
     list_auto_warmup_preferences,
     mark_auto_warmup_ready_state,
 )
+from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ def auto_warmup_ready_gate(
             "ready_node_count": 0,
         }
     try:
-        from api.services.k8s_monitoring import k8s_ready_warmup_node_names
+        from api.services.k8s.monitoring import k8s_ready_warmup_node_names
 
         ready_nodes = k8s_ready_warmup_node_names(
             credential,

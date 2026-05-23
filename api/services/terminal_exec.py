@@ -19,6 +19,7 @@ from typing import Any, cast
 
 import httpx
 
+from api.services.httpx_pool import get_pooled_client
 from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
@@ -154,9 +155,17 @@ def run(
         cwd=cwd,
         timeout_seconds=timeout_seconds,
     )
+    # Pool one client per use-case so the TLS handshake / connection pool to
+    # the loopback exec server amortises across exec calls. Per-call timeout
+    # override is honoured via the ``timeout=`` kwarg on ``post()``.
+    client = get_pooled_client("terminal-exec-run", timeout=DEFAULT_HTTP_TIMEOUT)
     try:
-        with httpx.Client(timeout=_http_timeout(timeout_seconds)) as client:
-            resp = client.post(_upstream() + "/exec", headers=_headers(), json=body)
+        resp = client.post(
+            _upstream() + "/exec",
+            headers=_headers(),
+            json=body,
+            timeout=_http_timeout(timeout_seconds),
+        )
     except httpx.HTTPError as exc:
         raise TerminalExecError(f"exec server unreachable: {exc}") from exc
 
@@ -204,27 +213,27 @@ def stream(
         cwd=cwd,
         timeout_seconds=timeout_seconds,
     )
+    client = get_pooled_client("terminal-exec-stream", timeout=_stream_http_timeout())
     try:
-        with httpx.Client(timeout=_stream_http_timeout()) as client:
-            with client.stream(
-                "POST", _upstream() + "/exec/stream", headers=_headers(), json=body
-            ) as resp:
-                if resp.status_code != 200:
-                    raw = resp.read().decode("utf-8", errors="replace")
-                    raise TerminalExecError(
-                        f"exec server returned {resp.status_code}: {sanitise(raw)[:300]}"
-                    )
-                for raw_line in resp.iter_lines():
-                    if not raw_line:
-                        continue
-                    try:
-                        yield json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        # Skip malformed lines but keep the stream open; the
-                        # exec server's last line is always valid JSON, so
-                        # the caller still gets the summary.
-                        LOGGER.warning("exec stream produced non-JSON line; skipping")
-                        continue
+        with client.stream(
+            "POST", _upstream() + "/exec/stream", headers=_headers(), json=body
+        ) as resp:
+            if resp.status_code != 200:
+                raw = resp.read().decode("utf-8", errors="replace")
+                raise TerminalExecError(
+                    f"exec server returned {resp.status_code}: {sanitise(raw)[:300]}"
+                )
+            for raw_line in resp.iter_lines():
+                if not raw_line:
+                    continue
+                try:
+                    yield json.loads(raw_line)
+                except json.JSONDecodeError:
+                    # Skip malformed lines but keep the stream open; the
+                    # exec server's last line is always valid JSON, so
+                    # the caller still gets the summary.
+                    LOGGER.warning("exec stream produced non-JSON line; skipping")
+                    continue
     except httpx.HTTPError as exc:
         raise TerminalExecError(f"exec server unreachable: {exc}") from exc
 
@@ -233,9 +242,9 @@ def healthz() -> dict[str, Any]:
     """Probe the exec server's /healthz (no auth required). Returns the JSON
     body; raises ``TerminalExecError`` if the server is unreachable or
     returns non-200."""
+    client = get_pooled_client("terminal-exec-healthz", timeout=DEFAULT_HTTP_TIMEOUT)
     try:
-        with httpx.Client(timeout=DEFAULT_HTTP_TIMEOUT) as client:
-            resp = client.get(_upstream() + "/healthz")
+        resp = client.get(_upstream() + "/healthz")
     except httpx.HTTPError as exc:
         raise TerminalExecError(f"exec server unreachable: {exc}") from exc
     if resp.status_code != 200:

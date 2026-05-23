@@ -150,6 +150,11 @@ def test_composite_signature_samples_multiple_shards(
         type("_h", (), {"Client": _Client, "HTTPError": httpx.HTTPError}),
         raising=True,
     )
+    monkeypatch.setattr(
+        "api.services.httpx_pool.get_pooled_client",
+        lambda *_a, **_kw: _Client(),
+        raising=True,
+    )
     summary = ncbi_catalogue.preview_database(db)
     assert summary["composite_signature"]
     assert summary["signature_sample_count"] >= 2
@@ -202,6 +207,11 @@ def test_composite_changes_when_any_sampled_shard_rotates(
         ncbi_catalogue,
         "httpx",
         type("_h", (), {"Client": _Client, "HTTPError": httpx.HTTPError}),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.httpx_pool.get_pooled_client",
+        lambda *_a, **_kw: _Client(),
         raising=True,
     )
     before = ncbi_catalogue.preview_database(db)["composite_signature"]

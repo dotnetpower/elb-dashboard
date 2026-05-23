@@ -11,7 +11,7 @@ Validation: `uv run pytest -q api/tests/test_blast_events.py`.
 
 from __future__ import annotations
 
-from api.services.blast_events import canonical_job_events
+from api.services.blast.events import canonical_job_events
 
 
 def test_canonical_job_events_parse_history_payloads() -> None:

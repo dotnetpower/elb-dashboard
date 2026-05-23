@@ -14,7 +14,7 @@ Validation: `uv run pytest -q api/tests/test_blast_results_parser.py`.
 
 from __future__ import annotations
 
-from api.services.blast_results_parser import (
+from api.services.blast.results_parser import (
     EXPORT_DEFAULT_COLUMNS,
     aggregate_blast_hits,
     parse_blast_result_content,

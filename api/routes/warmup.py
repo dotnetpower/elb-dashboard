@@ -162,7 +162,7 @@ def warmup_release(
         raise HTTPException(400, "aks_cluster_name is required")
 
     from api.services import get_credential
-    from api.services.k8s_monitoring import k8s_release_warmup_cache
+    from api.services.k8s.monitoring import k8s_release_warmup_cache
 
     try:
         result = k8s_release_warmup_cache(

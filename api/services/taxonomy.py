@@ -221,15 +221,21 @@ def _matched_name(
 
 def _request_json(endpoint: str, params: dict[str, str]) -> dict[str, Any]:
     request_params = {**params, **_ncbi_identity_params()}
+    # Pooled module-level client — taxonomy search is user-initiated rather
+    # than polled, but pooling still saves the TLS handshake per repeated
+    # lookup and matches the project-wide pattern in api/services/httpx_pool.py.
+    from api.services.httpx_pool import get_pooled_client
+
+    client = get_pooled_client(
+        "taxonomy-ncbi-eutils-json",
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+        base_url=EUTILS_BASE_URL,
+        headers={"Accept": "application/json", "User-Agent": "elb-dashboard/1.0"},
+    )
     try:
-        with httpx.Client(
-            base_url=EUTILS_BASE_URL,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-            headers={"Accept": "application/json", "User-Agent": "elb-dashboard/1.0"},
-        ) as client:
-            response = client.get(endpoint, params=request_params)
-            response.raise_for_status()
-            data = response.json()
+        response = client.get(endpoint, params=request_params)
+        response.raise_for_status()
+        data = response.json()
     except httpx.HTTPError as exc:
         raise TaxonomySearchUnavailable("NCBI taxonomy service is unavailable") from exc
     except ValueError as exc:
@@ -718,21 +724,24 @@ def fetch_taxonomy_tree(
 def _request_bytes(endpoint: str, params: dict[str, str], *, max_bytes: int) -> bytes:
     """Fetch a binary payload from NCBI eutils with a hard byte cap."""
     request_params = {**params, **_ncbi_identity_params()}
+    from api.services.httpx_pool import get_pooled_client
+
+    client = get_pooled_client(
+        "taxonomy-ncbi-eutils-xml",
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+        base_url=EUTILS_BASE_URL,
+        headers={"Accept": "application/xml", "User-Agent": "elb-dashboard/1.0"},
+    )
     try:
-        with httpx.Client(
-            base_url=EUTILS_BASE_URL,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-            headers={"Accept": "application/xml", "User-Agent": "elb-dashboard/1.0"},
-        ) as client:
-            with client.stream("GET", endpoint, params=request_params) as response:
-                response.raise_for_status()
-                buffer = bytearray()
-                for chunk in response.iter_bytes():
-                    buffer.extend(chunk)
-                    if len(buffer) > max_bytes:
-                        raise TaxonomySearchUnavailable(
-                            "NCBI taxonomy response exceeded size limit"
-                        )
-                return bytes(buffer)
+        with client.stream("GET", endpoint, params=request_params) as response:
+            response.raise_for_status()
+            buffer = bytearray()
+            for chunk in response.iter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) > max_bytes:
+                    raise TaxonomySearchUnavailable(
+                        "NCBI taxonomy response exceeded size limit"
+                    )
+            return bytes(buffer)
     except httpx.HTTPError as exc:
         raise TaxonomySearchUnavailable("NCBI taxonomy service is unavailable") from exc

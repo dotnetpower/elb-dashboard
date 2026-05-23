@@ -172,7 +172,7 @@ def poll_running_status(
     }
 
     try:
-        from api.services.blast_job_state import (
+        from api.services.blast.job_state import (
             _K8S_REFRESH_PHASES,
             _refresh_running_blast_state,
         )

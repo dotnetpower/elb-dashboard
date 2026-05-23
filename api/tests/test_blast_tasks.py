@@ -372,7 +372,8 @@ def test_persist_submit_log_events_chunks_after_stream(monkeypatch) -> None:
 
 
 def test_k8s_cancel_blast_job_deletes_only_scoped_jobs(monkeypatch) -> None:
-    from api.services import k8s_monitoring, monitoring
+    from api.services import monitoring
+    from api.services.k8s import monitoring as k8s_monitoring
 
     session = FakeK8sSession()
     monkeypatch.setattr(
@@ -962,9 +963,9 @@ def test_upload_split_query_files_returns_state_safe_metadata(monkeypatch) -> No
         uploads.append((query_blob_path, group_fasta))
         return f"https://elbstg01.blob.core.windows.net/queries/{query_blob_path}"
 
-    monkeypatch.setattr("api.services.storage_data.upload_group_fasta", fake_upload_group_fasta)
+    monkeypatch.setattr("api.services.storage.data.upload_group_fasta", fake_upload_group_fasta)
     monkeypatch.setattr(
-        "api.services.storage_data.read_blob_text",
+        "api.services.storage.data.read_blob_text",
         lambda *_args, **_kwargs: ">verified\nAAAA\n",
     )
 
@@ -991,10 +992,10 @@ def test_upload_split_query_files_verifies_uploaded_blob(monkeypatch) -> None:
     )
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
-        "api.services.storage_data.upload_group_fasta",
+        "api.services.storage.data.upload_group_fasta",
         lambda *_args, **_kwargs: "https://elbstg01.blob.core.windows.net/queries/x",
     )
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", lambda *_args, **_kwargs: "")
 
     with pytest.raises(ValueError, match="upload verification failed"):
         blast._upload_split_query_files(storage_account="elbstg01", plan=plan)
@@ -1507,7 +1508,7 @@ def test_run_storage_query_split_parent_submission_reads_blob_and_drops_raw_fast
         assert max_bytes == blast.QUERY_FASTA_READ_MAX_BYTES + 1
         return ">q1\nAAAA\n>q2\nCCCC\n"
 
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     def fake_run_split_parent_submission(**kwargs: object) -> dict[str, object]:
         split_calls.append(kwargs)
@@ -1550,7 +1551,7 @@ def test_run_storage_query_split_parent_submission_rejects_non_fasta(
     )
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
-        "api.services.storage_data.read_blob_text",
+        "api.services.storage.data.read_blob_text",
         lambda *_args, **_kwargs: "not fasta",
     )
 
@@ -1581,7 +1582,7 @@ def test_run_storage_query_split_parent_submission_rejects_oversized_query(
     monkeypatch.setattr(blast, "_update_state", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
-        "api.services.storage_data.read_blob_text",
+        "api.services.storage.data.read_blob_text",
         lambda *_args, **_kwargs: ">q1\nAAAAA\n",
     )
 
@@ -1610,7 +1611,7 @@ def test_run_storage_query_split_parent_submission_reports_missing_query_file(
     def fake_read_blob_text(*_args: object, **_kwargs: object) -> str:
         raise ResourceNotFoundError("missing")
 
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     with pytest.raises(ValueError, match="not found"):
         blast._run_storage_query_split_parent_submission(
@@ -1859,7 +1860,7 @@ def test_verify_split_child_result_artifacts_detects_missing_report(
         assert prefix == "job-123-qg1/"
         return [{"name": "job-123-qg1/merged_results.out.gz", "size": 42}]
 
-    monkeypatch.setattr("api.services.storage_data.list_result_blobs", fake_list_result_blobs)
+    monkeypatch.setattr("api.services.storage.data.list_result_blobs", fake_list_result_blobs)
 
     result = blast._verify_split_child_result_artifacts(
         parent_job_id="job-123",
@@ -1969,10 +1970,10 @@ def test_write_split_parent_result_artifacts_concats_child_gzip_and_report(
         uploads[blob_path] = text.encode("utf-8")
         return f"https://example/{blob_path}"
 
-    monkeypatch.setattr("api.services.storage_data.stream_blob_bytes", fake_stream_blob_bytes)
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
-    monkeypatch.setattr("api.services.storage_data.upload_blob_bytes", fake_upload_blob_bytes)
-    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
+    monkeypatch.setattr("api.services.storage.data.stream_blob_bytes", fake_stream_blob_bytes)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.upload_blob_bytes", fake_upload_blob_bytes)
+    monkeypatch.setattr("api.services.storage.data.upload_blob_text", fake_upload_blob_text)
 
     result = blast._write_split_parent_result_artifacts(
         parent_job_id="job-123",
@@ -2087,10 +2088,10 @@ def test_write_split_parent_result_artifacts_merges_child_xml(
         uploads[blob_path] = text.encode("utf-8")
         return f"https://example/{blob_path}"
 
-    monkeypatch.setattr("api.services.storage_data.stream_blob_bytes", fake_stream_blob_bytes)
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
-    monkeypatch.setattr("api.services.storage_data.upload_blob_bytes", fake_upload_blob_bytes)
-    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
+    monkeypatch.setattr("api.services.storage.data.stream_blob_bytes", fake_stream_blob_bytes)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.upload_blob_bytes", fake_upload_blob_bytes)
+    monkeypatch.setattr("api.services.storage.data.upload_blob_text", fake_upload_blob_text)
 
     result = blast._write_split_parent_result_artifacts(
         parent_job_id="job-123",
@@ -2151,7 +2152,7 @@ def test_finalize_split_parent_results_waits_for_missing_child_artifacts(
             return [{"name": "job-123-qg2/merged_results.out.gz", "size": 42}]
         return []
 
-    monkeypatch.setattr("api.services.storage_data.list_result_blobs", fake_list_result_blobs)
+    monkeypatch.setattr("api.services.storage.data.list_result_blobs", fake_list_result_blobs)
     repo = _SplitChildrenRepo(
         [
             _split_child_state("job-123-qg1", "completed", phase="completed", group_id="qg1"),
@@ -2205,7 +2206,7 @@ def test_finalize_split_parent_results_completes_after_artifacts_written(
             {"name": f"{prefix}merge-report.json", "size": 120},
         ]
 
-    monkeypatch.setattr("api.services.storage_data.list_result_blobs", fake_list_result_blobs)
+    monkeypatch.setattr("api.services.storage.data.list_result_blobs", fake_list_result_blobs)
     monkeypatch.setattr(
         blast,
         "_write_split_parent_result_artifacts",
@@ -2255,7 +2256,7 @@ def test_finalize_split_parent_results_is_idempotent_when_parent_artifacts_exist
     )
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
-        "api.services.storage_data.list_result_blobs",
+        "api.services.storage.data.list_result_blobs",
         lambda *_args, **_kwargs: [
             {"name": "job-123/merged_results.out.gz", "size": 42},
             {"name": "job-123/merge-report.json", "size": 120},
@@ -2947,12 +2948,12 @@ def test_split_parent_storage_submit_to_finalize_e2e(
         uploaded_results[blob_path] = text.encode("utf-8")
         return f"https://example/{blob_path}"
 
-    monkeypatch.setattr("api.services.storage_data.upload_group_fasta", fake_upload_group_fasta)
-    monkeypatch.setattr("api.services.storage_data.read_blob_text", fake_read_blob_text)
-    monkeypatch.setattr("api.services.storage_data.list_result_blobs", fake_list_result_blobs)
-    monkeypatch.setattr("api.services.storage_data.stream_blob_bytes", fake_stream_blob_bytes)
-    monkeypatch.setattr("api.services.storage_data.upload_blob_bytes", fake_upload_blob_bytes)
-    monkeypatch.setattr("api.services.storage_data.upload_blob_text", fake_upload_blob_text)
+    monkeypatch.setattr("api.services.storage.data.upload_group_fasta", fake_upload_group_fasta)
+    monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
+    monkeypatch.setattr("api.services.storage.data.list_result_blobs", fake_list_result_blobs)
+    monkeypatch.setattr("api.services.storage.data.stream_blob_bytes", fake_stream_blob_bytes)
+    monkeypatch.setattr("api.services.storage.data.upload_blob_bytes", fake_upload_blob_bytes)
+    monkeypatch.setattr("api.services.storage.data.upload_blob_text", fake_upload_blob_text)
 
     split_result = blast._run_storage_query_split_parent_submission(
         parent_job_id="job-123",
@@ -3738,7 +3739,7 @@ def test_poll_running_status_returns_without_reschedule_on_terminal_status(monke
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
     monkeypatch.setattr(
-        "api.services.blast_job_state._refresh_running_blast_state",
+        "api.services.blast.job_state._refresh_running_blast_state",
         lambda *_args, **_kwargs: state_obj,
     )
 
@@ -3776,7 +3777,7 @@ def test_poll_running_status_reschedules_when_still_active(monkeypatch):
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
     monkeypatch.setattr(
-        "api.services.blast_job_state._refresh_running_blast_state",
+        "api.services.blast.job_state._refresh_running_blast_state",
         lambda *_args, **_kwargs: state_obj,
     )
 
@@ -3815,7 +3816,7 @@ def test_poll_running_status_stops_at_max_iterations(monkeypatch):
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
     monkeypatch.setattr(
-        "api.services.blast_job_state._refresh_running_blast_state",
+        "api.services.blast.job_state._refresh_running_blast_state",
         lambda *_args, **_kwargs: state_obj,
     )
 

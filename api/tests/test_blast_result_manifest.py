@@ -12,7 +12,7 @@ Validation: `uv run pytest -q api/tests/test_blast_result_manifest.py`.
 
 from __future__ import annotations
 
-from api.services.blast_result_manifest import build_result_manifest
+from api.services.blast.result_manifest import build_result_manifest
 
 
 def test_result_manifest_classifies_parseable_result_files() -> None:

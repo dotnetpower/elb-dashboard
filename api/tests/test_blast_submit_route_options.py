@@ -20,7 +20,7 @@ from api.routes._blast_shared import (
     _normalise_blast_submit_body,
     _submit_options_from_body,
 )
-from api.services.blast_submit_payload import canonical_execution_config
+from api.services.blast.submit_payload import canonical_execution_config
 
 
 def test_submit_options_forward_acr_fields() -> None:

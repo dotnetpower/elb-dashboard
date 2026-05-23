@@ -38,7 +38,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 def _patch_service_ip(monkeypatch: pytest.MonkeyPatch, ip: str | None) -> None:
     import api.services as services
-    from api.services import k8s_monitoring
+    from api.services.k8s import monitoring as k8s_monitoring
 
     monkeypatch.setattr(services, "get_credential", lambda: object())
     monkeypatch.setattr(k8s_monitoring, "k8s_get_service_ip", lambda *_args, **_kwargs: ip)
@@ -144,7 +144,7 @@ def test_openapi_proxy_uses_runtime_token_when_env_token_missing(
     _patch_service_ip(monkeypatch, "10.0.0.50")
     monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
 
-    from api.services import openapi_runtime
+    from api.services.openapi import runtime as openapi_runtime
 
     monkeypatch.setattr(openapi_runtime, "get_openapi_api_token", lambda: "runtime-token")
     calls: list[dict[str, Any]] = []

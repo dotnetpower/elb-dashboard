@@ -31,7 +31,7 @@ from api.tests._fakes import make_send_task_recorder
 
 def _patch_ready_warmup_nodes(monkeypatch, count: int) -> None:
     monkeypatch.setattr(
-        "api.services.k8s_monitoring.k8s_ready_warmup_node_names",
+        "api.services.k8s.monitoring.k8s_ready_warmup_node_names",
         lambda credential, subscription_id, resource_group, cluster_name: [
             f"aks-blast-{index:06d}" for index in range(count)
         ],
@@ -67,7 +67,7 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
         lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
     )
     monkeypatch.setattr(
-        "api.services.storage_data.list_databases",
+        "api.services.storage.data.list_databases",
         lambda credential, storage_account: [{"name": "core_nt"}],
     )
 
@@ -183,7 +183,7 @@ def test_reconcile_auto_warmup_enqueues_when_all_ready_workload_nodes(
         lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
     )
     monkeypatch.setattr(
-        "api.services.storage_data.list_databases",
+        "api.services.storage.data.list_databases",
         lambda credential, storage_account: [{"name": "core_nt"}],
     )
 
@@ -234,7 +234,7 @@ def test_reconcile_auto_warmup_skips_stale_downloaded_generation(
         lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
     )
     monkeypatch.setattr(
-        "api.services.storage_data.list_databases",
+        "api.services.storage.data.list_databases",
         lambda credential, storage_account: [
             {"name": "core_nt", "source_version": "2026-05-19-00-00-00"}
         ],
@@ -310,7 +310,7 @@ def test_reconcile_auto_warmup_reenqueues_stale_warm_generation(
         },
     )
     monkeypatch.setattr(
-        "api.services.storage_data.list_databases",
+        "api.services.storage.data.list_databases",
         lambda credential, storage_account: [
             {"name": "core_nt", "source_version": "2026-05-20-00-00-00"}
         ],
@@ -411,7 +411,7 @@ def test_reconcile_auto_warmup_reenqueues_when_db_not_warm(monkeypatch, tmp_path
         lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
     )
     monkeypatch.setattr(
-        "api.services.storage_data.list_databases",
+        "api.services.storage.data.list_databases",
         lambda credential, storage_account: [{"name": "core_nt"}],
     )
 
@@ -469,7 +469,7 @@ def test_reconcile_auto_warmup_inflight_lock_prevents_duplicate(monkeypatch, tmp
         lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
     )
     monkeypatch.setattr(
-        "api.services.storage_data.list_databases",
+        "api.services.storage.data.list_databases",
         lambda credential, storage_account: [{"name": "core_nt"}],
     )
 
@@ -503,7 +503,7 @@ def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
     monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
     monkeypatch.setattr(
-        "api.services.storage_data.list_databases",
+        "api.services.storage.data.list_databases",
         lambda credential, storage_account: [
             {
                 "name": "core_nt",
@@ -523,7 +523,7 @@ def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
         raise AssertionError("build_warmup_job_plan should not be called")
 
     monkeypatch.setattr(
-        "api.services.warmup_jobs.build_warmup_job_plan",
+        "api.services.warmup.jobs.build_warmup_job_plan",
         fake_build_warmup_job_plan,
     )
 

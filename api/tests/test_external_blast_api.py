@@ -313,7 +313,8 @@ def test_path_segment_is_percent_encoded() -> None:
 
 def test_external_blast_base_url_uses_runtime_cache(monkeypatch) -> None:
     monkeypatch.delenv("ELB_OPENAPI_BASE_URL", raising=False)
-    from api.services import external_blast, openapi_runtime
+    from api.services import external_blast
+    from api.services.openapi import runtime as openapi_runtime
 
     monkeypatch.setattr(openapi_runtime, "get_openapi_base_url", lambda: "http://10.0.0.4")
 
@@ -334,7 +335,7 @@ def test_external_blast_headers_include_api_and_internal_tokens(monkeypatch) -> 
 
 
 def test_openapi_runtime_round_trip() -> None:
-    from api.services import openapi_runtime
+    from api.services.openapi import runtime as openapi_runtime
 
     class FakeRedis:
         def __init__(self) -> None:
@@ -1075,7 +1076,7 @@ def test_canonical_local_result_file_id_must_match_job_prefix(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     from api.main import app
-    from api.services.storage_data import encode_blob_file_id
+    from api.services.storage.data import encode_blob_file_id
 
     client = TestClient(app)
     other_job_file_id = encode_blob_file_id("bbbbbbbbbbbb/batch_001.xml")
@@ -1090,7 +1091,7 @@ def test_canonical_local_result_file_id_must_match_job_prefix(monkeypatch):
 
 
 def test_local_blob_file_id_round_trips_and_rejects_traversal() -> None:
-    from api.services.storage_data import decode_blob_file_id, encode_blob_file_id
+    from api.services.storage.data import decode_blob_file_id, encode_blob_file_id
 
     file_id = encode_blob_file_id("aaaaaaaaaaaa/batch_001.xml")
 
