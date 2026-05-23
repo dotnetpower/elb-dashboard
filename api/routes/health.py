@@ -80,6 +80,14 @@ def _reset_storage_probe_cache() -> None:
     with _STORAGE_PROBE_CACHE_LOCK:
         _STORAGE_PROBE_CACHE = None
     with _TABLE_SERVICE_CLIENT_LOCK:
+        # Close any cached client before dropping the reference so the
+        # underlying HTTP session is released cleanly, not garbage-collected
+        # at some later interpreter pause.
+        if _TABLE_SERVICE_CLIENT is not None:
+            try:
+                _TABLE_SERVICE_CLIENT[1].close()
+            except Exception:  # noqa: S110 - close() is best-effort
+                pass
         _TABLE_SERVICE_CLIENT = None
 
 
@@ -93,6 +101,14 @@ def _get_table_service_client(endpoint: str) -> Any:
         cached = _TABLE_SERVICE_CLIENT
         if cached is not None and cached[0] == endpoint:
             return cached[1]
+        # Endpoint changed (rare — process restart only in practice).
+        # Close the stale client so its HTTP session is freed immediately
+        # instead of waiting for GC.
+        if cached is not None:
+            try:
+                cached[1].close()
+            except Exception:  # noqa: S110 - close() is best-effort
+                pass
         from azure.data.tables import TableServiceClient
 
         from api.services import get_credential
