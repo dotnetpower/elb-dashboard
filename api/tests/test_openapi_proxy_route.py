@@ -144,7 +144,7 @@ def test_openapi_proxy_uses_runtime_token_when_env_token_missing(
     _patch_service_ip(monkeypatch, "10.0.0.50")
     monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
 
-    from api.services import openapi_runtime
+    from api.services.openapi import runtime as openapi_runtime
 
     monkeypatch.setattr(openapi_runtime, "get_openapi_api_token", lambda: "runtime-token")
     calls: list[dict[str, Any]] = []

@@ -534,7 +534,7 @@ def _openapi_client_kwargs_from_cluster(
         if not ip:
             return {}
         try:
-            from api.services.openapi_runtime import save_openapi_base_url
+            from api.services.openapi.runtime import save_openapi_base_url
 
             save_openapi_base_url(
                 f"http://{ip}",

@@ -313,7 +313,8 @@ def test_path_segment_is_percent_encoded() -> None:
 
 def test_external_blast_base_url_uses_runtime_cache(monkeypatch) -> None:
     monkeypatch.delenv("ELB_OPENAPI_BASE_URL", raising=False)
-    from api.services import external_blast, openapi_runtime
+    from api.services import external_blast
+    from api.services.openapi import runtime as openapi_runtime
 
     monkeypatch.setattr(openapi_runtime, "get_openapi_base_url", lambda: "http://10.0.0.4")
 
@@ -334,7 +335,7 @@ def test_external_blast_headers_include_api_and_internal_tokens(monkeypatch) -> 
 
 
 def test_openapi_runtime_round_trip() -> None:
-    from api.services import openapi_runtime
+    from api.services.openapi import runtime as openapi_runtime
 
     class FakeRedis:
         def __init__(self) -> None:

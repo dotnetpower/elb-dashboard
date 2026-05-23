@@ -51,7 +51,7 @@ class StreamedFile:
 def _base_url(value: str | None = None) -> str:
     value = (value or os.environ.get(_BASE_URL_ENV, "")).strip().rstrip("/")
     if not value:
-        from api.services.openapi_runtime import get_openapi_base_url
+        from api.services.openapi.runtime import get_openapi_base_url
 
         value = get_openapi_base_url()
     if not value:
@@ -69,7 +69,7 @@ def _headers(*, api_token: str | None = None, internal_token: str | None = None)
     headers = {"Accept": "application/json"}
     api_token = (api_token or os.environ.get(_API_AUTH_ENV, "")).strip()
     if not api_token:
-        from api.services.openapi_runtime import get_openapi_api_token
+        from api.services.openapi.runtime import get_openapi_api_token
 
         api_token = get_openapi_api_token()
     if api_token:

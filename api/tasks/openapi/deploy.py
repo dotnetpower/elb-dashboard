@@ -115,7 +115,7 @@ def deploy_openapi_service(
 
     api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
     if not api_token:
-        from api.services.openapi_runtime import get_openapi_api_token
+        from api.services.openapi.runtime import get_openapi_api_token
 
         api_token = get_openapi_api_token()
 
@@ -172,7 +172,7 @@ def deploy_openapi_service(
 
     elapsed = int(time.time() - started)
     if external_ip:
-        from api.services.openapi_runtime import save_openapi_base_url
+        from api.services.openapi.runtime import save_openapi_base_url
 
         save_openapi_base_url(
             f"http://{external_ip}",
