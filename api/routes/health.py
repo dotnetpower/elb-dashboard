@@ -187,7 +187,7 @@ def _probe_storage_table() -> dict[str, Any]:
                 new_status,
                 result.get("error", result.get("reason", "")),
             )
-        except Exception:  # noqa: BLE001, S110 - intentional: cannot re-log a logging failure
+        except Exception:  # noqa: S110 - intentional: cannot re-log a logging failure
             pass
     return result
 
