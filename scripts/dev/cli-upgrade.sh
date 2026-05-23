@@ -36,7 +36,7 @@
 #   --branch <name>      After --pull, must be on this branch. Default:
 #                        whatever branch HEAD already points at.
 #   --tag <tag>          Override the timestamp tag for ACR build.
-#   --health-timeout <s> Seconds to wait for /api/health=200. Default: 180.
+#   --health-timeout <s> Seconds to wait for /api/health/ready=200. Default: 180.
 #   --no-auto-rollback   On health-check failure, DO NOT auto-rollback.
 #                        Print the rollback command instead.
 #   --yes                Skip the interactive "proceed?" prompt.
@@ -173,25 +173,36 @@ take_snapshot() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: poll /api/health for up to $HEALTH_TIMEOUT seconds.
-# Returns 0 on 200, non-zero on timeout.
+# Helper: poll /api/health/ready for up to $HEALTH_TIMEOUT seconds.
+# Returns 0 on 200, non-zero on timeout. On non-2xx the response body is
+# dumped to stderr (truncated) so the operator can see WHICH component is
+# down (redis / azure_credential / azure_storage / terminal_sidecar)
+# without opening another terminal.
 # ---------------------------------------------------------------------------
 poll_health() {
-  local url="https://$CONTAINER_APP_FQDN/api/health"
+  local url="https://$CONTAINER_APP_FQDN/api/health/ready"
   local deadline=$(( SECONDS + HEALTH_TIMEOUT ))
   local attempt=0 status=000
+  local body_file
+  body_file="$(mktemp -t elb-health-body.XXXXXX)"
+  trap "rm -f '$body_file'" RETURN
   ts "==> Polling $url (timeout ${HEALTH_TIMEOUT}s)"
   while (( SECONDS < deadline )); do
     attempt=$(( attempt + 1 ))
-    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || echo 000)"
+    status="$(curl -s -o "$body_file" -w '%{http_code}' --max-time 5 "$url" 2>/dev/null || echo 000)"
     if [[ "$status" == "200" ]]; then
-      ts "    ✓ /api/health → 200 (attempt $attempt)"
+      ts "    ✓ /api/health/ready → 200 (attempt $attempt)"
       return 0
     fi
     (( attempt % 4 == 0 )) && ts "    attempt $attempt: $status (sleeping 5s)"
     sleep 5
   done
   warn "Health check timed out — last status: $status"
+  if [[ -s "$body_file" ]]; then
+    printf '\033[33m--- last /api/health/ready body (truncated to 5KB) ---\033[0m\n' >&2
+    head -c 5120 "$body_file" >&2
+    printf '\n\033[33m--- end body ---\033[0m\n' >&2
+  fi
   return 1
 }
 
@@ -239,7 +250,7 @@ EOF
     ts "✓ Rollback complete. App is healthy."
     exit 0
   fi
-  die "Rollback PATCH applied but /api/health did not return 200 within ${HEALTH_TIMEOUT}s."
+  die "Rollback PATCH applied but /api/health/ready did not return 200 within ${HEALTH_TIMEOUT}s."
 fi
 
 # ---------------------------------------------------------------------------
@@ -284,7 +295,7 @@ CLI rolling-update plan
   Branch:      $CURRENT_BRANCH @ $HEAD_SHA $( $DO_PULL && echo "(after git pull --ff-only)")
   Tag:         $TAG
   Snapshot:    $SNAPSHOT
-  Health:      https://$CONTAINER_APP_FQDN/api/health  (timeout ${HEALTH_TIMEOUT}s)
+  Health:      https://$CONTAINER_APP_FQDN/api/health/ready  (timeout ${HEALTH_TIMEOUT}s)
   Auto-rollback on failure: $( $AUTO_ROLLBACK && echo yes || echo "no — manual recovery only")
   Dry-run:     $( $DRY_RUN && echo yes || echo no)
 ============================================================
@@ -345,7 +356,7 @@ if poll_health; then
   exit 0
 fi
 
-warn "==> /api/health did not return 200 within ${HEALTH_TIMEOUT}s."
+warn "==> /api/health/ready did not return 200 within ${HEALTH_TIMEOUT}s."
 if $AUTO_ROLLBACK; then
   warn "==> Auto-rollback enabled — restoring previous image refs from $SNAPSHOT"
   restore_from_snapshot "$SNAPSHOT"
@@ -353,7 +364,7 @@ if $AUTO_ROLLBACK; then
     ts "✓ Rollback complete. App is healthy again on the previous tag."
     die "Original upgrade failed health check. Investigate the new tag in ACR before retrying."
   fi
-  die "Rollback PATCH applied but /api/health still fails. Investigate immediately."
+  die "Rollback PATCH applied but /api/health/ready still fails. Investigate immediately."
 fi
 
 cat <<EOF >&2
