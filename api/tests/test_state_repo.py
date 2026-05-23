@@ -15,8 +15,8 @@ Validation: `uv run pytest -q api/tests/test_state_repo.py`.
 
 from __future__ import annotations
 
-from api.services import state_repo
-from api.services.state_repo import JobState, JobStateRepository
+from api.services.state import repository as state_repo
+from api.services.state.repository import JobState, JobStateRepository
 from azure.core.exceptions import ResourceNotFoundError
 
 
