@@ -157,18 +157,22 @@ def _probe_storage_table() -> dict[str, Any]:
         # Single atomic publish: readers never see (new_result, old_ts) or
         # (old_result, new_ts).
         prev_status = cached[0].get("status") if cached is not None else None
-        new_status = result.get("status")
-        if prev_status is not None and prev_status != new_status:
-            # State transition: log exactly once on the boundary so operators
-            # have a timestamped breadcrumb without log-spam every cache miss.
-            LOGGER.info(
-                "storage probe state transition: %s -> %s (%s)",
-                prev_status,
-                new_status,
-                result.get("error", result.get("reason", "")),
-            )
         _STORAGE_PROBE_CACHE = (result, time.monotonic())
-        return result
+
+    # Log state transitions OUTSIDE the lock — logging.Logger acquires its
+    # own handler lock and may block on I/O (stderr, file, journald). Doing
+    # that while holding `_STORAGE_PROBE_CACHE_LOCK` would create a
+    # lock-ordering footgun: any future code path that logs from inside
+    # another lock that wraps this function could deadlock.
+    new_status = result.get("status")
+    if prev_status is not None and prev_status != new_status:
+        LOGGER.info(
+            "storage probe state transition: %s -> %s (%s)",
+            prev_status,
+            new_status,
+            result.get("error", result.get("reason", "")),
+        )
+    return result
 
 
 router = APIRouter(tags=["health"])
