@@ -16,7 +16,7 @@ Validation: `uv run pytest -q api/tests/test_blast_compatibility.py`.
 
 from __future__ import annotations
 
-from api.services.blast_compatibility import build_compatibility_contract
+from api.services.blast.compatibility import build_compatibility_contract
 from api.services.sharding_precision import build_precision_report
 
 

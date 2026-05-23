@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 from urllib.parse import urlparse
 
-from api.services.blast_db_metadata import extract_db_name, resolve_db_metadata
+from api.services.blast.db_metadata import extract_db_name, resolve_db_metadata
 from api.services.storage.url_validation import (
     validate_storage_blob_reference as validate_storage_blob_reference,
 )
@@ -167,7 +167,7 @@ def build_config_content(
     options: Mapping[str, Any] | None = None,
     metadata_resolver: Callable[[str, str], Mapping[str, Any] | None] = resolve_db_metadata,
 ) -> str:
-    from api.services.blast_config import generate_config
+    from api.services.blast.config import generate_config
 
     params: dict[str, Any] = {
         "job_id": job_id,

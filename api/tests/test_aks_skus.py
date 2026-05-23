@@ -15,7 +15,7 @@ Validation: `uv run pytest -q api/tests/test_aks_skus.py`.
 from __future__ import annotations
 
 from api.services import aks_skus
-from api.services.blast_config import AZURE_VM_HOURLY_USD
+from api.services.blast.config import AZURE_VM_HOURLY_USD
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 

@@ -17,7 +17,7 @@ import threading
 import time
 from typing import Any
 
-from api.services.blast_db_metadata import database_display_metadata_from_info, extract_db_name
+from api.services.blast.db_metadata import database_display_metadata_from_info, extract_db_name
 
 
 def test_extract_db_name_handles_every_input_shape() -> None:
@@ -84,7 +84,7 @@ def test_resolve_database_display_metadata_caches_storage_lookups(monkeypatch) -
     Storage. Each job-detail page would otherwise trigger 2-4 blob downloads
     just to render the DB title / sequences / snapshot rows.
     """
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     blastdb_calls = {"n": 0}
     storage_calls = {"n": 0}
@@ -113,7 +113,7 @@ def test_invalidate_blast_db_metadata_cache_drops_one_db(monkeypatch) -> None:
     """``(account, db)`` invalidation MUST remove only that one key and let
     the next read re-fetch fresh metadata.
     """
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     calls = {"n": 0}
 
@@ -141,7 +141,7 @@ def test_invalidate_blast_db_metadata_cache_drops_whole_account(monkeypatch) -> 
     """``account`` only invalidation MUST sweep every db for that account but
     leave entries for other accounts untouched.
     """
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     calls = {"n": 0}
 
@@ -169,7 +169,7 @@ def test_invalidate_blast_db_metadata_cache_drops_whole_account(monkeypatch) -> 
 
 def test_invalidate_blast_db_metadata_cache_global_clear(monkeypatch) -> None:
     """Calling with no args MUST clear every cache entry."""
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     monkeypatch.setattr(
         blast_db_metadata, "resolve_blastdb_json_metadata", lambda *_a, **_kw: {"title": "v1"}
@@ -187,7 +187,7 @@ def test_publish_blast_db_metadata_invalidate_no_op_when_disabled(monkeypatch) -
     publish MUST short-circuit and never call Redis. Production sets it to
     false / unsets it.
     """
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     monkeypatch.setenv("BLAST_DB_METADATA_INVALIDATE_DISABLED", "true")
 
@@ -207,7 +207,7 @@ def test_publish_blast_db_metadata_invalidate_no_op_when_disabled(monkeypatch) -
 
 def test_publish_blast_db_metadata_invalidate_calls_redis_publish(monkeypatch) -> None:
     """When enabled, publish MUST send a JSON payload on the channel."""
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     monkeypatch.setenv("BLAST_DB_METADATA_INVALIDATE_DISABLED", "false")
 
@@ -244,7 +244,7 @@ def test_notify_blast_db_metadata_changed_invalidates_locally_and_publishes(
     """``notify_*`` MUST drop the local cache AND publish so peer sidecars
     drop theirs too.
     """
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     monkeypatch.setattr(
         blast_db_metadata, "resolve_blastdb_json_metadata", lambda *_a, **_kw: {"title": "v1"}
@@ -271,7 +271,7 @@ def test_resolve_display_metadata_returns_independent_copy_per_call(monkeypatch)
     """Mutating the returned dict MUST NOT poison the cache for subsequent
     callers. Defensive deepcopy on hit / miss.
     """
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     monkeypatch.setattr(
         blast_db_metadata,
@@ -293,7 +293,7 @@ def test_resolve_display_metadata_single_flight_on_cache_miss(monkeypatch) -> No
     Without single-flight, TTL boundary causes a thundering herd of Storage
     blob downloads.
     """
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     lookup_calls = {"n": 0}
     lookup_started = threading.Event()
@@ -338,7 +338,7 @@ def test_stop_invalidate_subscriber_signals_exit(monkeypatch) -> None:
     """The subscriber thread MUST honour stop_event within a couple of
     poll cycles (~1 s). Listen()'s old behaviour would block forever.
     """
-    from api.services import blast_db_metadata
+    from api.services.blast import db_metadata as blast_db_metadata
 
     monkeypatch.setenv("BLAST_DB_METADATA_INVALIDATE_DISABLED", "false")
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from api.routes._blast_shared import _local_to_blast_job, _split_child_summaries_from_repo
-from api.services import blast_job_state
+from api.services.blast import job_state as blast_job_state
 
 
 def _state(**kw):

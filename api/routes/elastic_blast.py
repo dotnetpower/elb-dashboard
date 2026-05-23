@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from api.auth import CallerIdentity, require_caller
 from api.services import external_blast
-from api.services.blast_submit_payload import (
+from api.services.blast.submit_payload import (
     canonical_submit_metadata,
     canonical_submit_snapshot,
     submit_contracts,
@@ -75,7 +75,7 @@ def submit_external_blast_job(
     payload.update(canonical_submit_metadata(payload, submission_source="external_api"))
     payload["canonical_request"] = canonical_submit_snapshot(payload)
     payload.update(submit_contracts(payload))
-    from api.services.blast_provenance import build_blast_provenance
+    from api.services.blast.provenance import build_blast_provenance
 
     payload["provenance"] = build_blast_provenance(
         job_id=str(payload["external_correlation_id"]),
@@ -126,7 +126,7 @@ def list_external_blast_job_events(
     LOGGER.info("external BLAST events requested caller_oid=%s job_id=%s", caller.object_id, job_id)
     del caller
     try:
-        from api.services.blast_events import canonical_job_events
+        from api.services.blast.events import canonical_job_events
         from api.services.state_repo import get_state_repo
 
         rows = get_state_repo().get_history(job_id, limit=200)
@@ -164,7 +164,7 @@ def get_external_blast_job_manifest(
     )
     del caller
     from api.routes._blast_shared import _external_result_files
-    from api.services.blast_result_manifest import build_result_manifest
+    from api.services.blast.result_manifest import build_result_manifest
 
     detail = external_blast.get_job(job_id)
     files = _external_result_files(detail)

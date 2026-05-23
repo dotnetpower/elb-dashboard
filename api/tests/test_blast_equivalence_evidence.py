@@ -12,7 +12,7 @@ Validation: `uv run pytest -q api/tests/test_blast_equivalence_evidence.py`.
 
 from __future__ import annotations
 
-from api.services.blast_equivalence_evidence import (
+from api.services.blast.equivalence_evidence import (
     evidence_registry_matrix,
     validate_evidence_registry,
 )

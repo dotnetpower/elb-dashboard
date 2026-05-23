@@ -198,7 +198,7 @@ def _write_db_metadata(
     # Redis pub/sub channel so the worker / beat sidecars (and any peer api
     # replica) drop their copies too.
     try:
-        from api.services.blast_db_metadata import notify_blast_db_metadata_changed
+        from api.services.blast.db_metadata import notify_blast_db_metadata_changed
 
         notify_blast_db_metadata_changed(account_name, db_name)
     except Exception as exc:

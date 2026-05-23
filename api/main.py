@@ -437,7 +437,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:  # pragma: no cover - defensive
         LOGGER.debug("credential warm-up scheduling skipped: %s", type(exc).__name__)
     try:
-        from api.services.blast_db_metadata import (
+        from api.services.blast.db_metadata import (
             start_invalidate_subscriber,
             stop_invalidate_subscriber,
         )

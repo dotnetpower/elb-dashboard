@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 from api.services import taxonomy as taxonomy_service
-from api.services.blast_result_analytics import (
+from api.services.blast.result_analytics import (
     enrich_taxonomy_with_lineage,
     extract_organism_from_stitle,
     rollup_taxonomy,

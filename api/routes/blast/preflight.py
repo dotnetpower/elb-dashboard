@@ -161,7 +161,7 @@ def blast_pre_flight(
         critical += 1
 
     try:
-        from api.services.blast_compatibility import build_compatibility_contract
+        from api.services.blast.compatibility import build_compatibility_contract
         from api.services.sharding_precision import build_precision_report
 
         query_metadata = None

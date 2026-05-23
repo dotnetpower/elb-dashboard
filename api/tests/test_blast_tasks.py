@@ -3739,7 +3739,7 @@ def test_poll_running_status_returns_without_reschedule_on_terminal_status(monke
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
     monkeypatch.setattr(
-        "api.services.blast_job_state._refresh_running_blast_state",
+        "api.services.blast.job_state._refresh_running_blast_state",
         lambda *_args, **_kwargs: state_obj,
     )
 
@@ -3777,7 +3777,7 @@ def test_poll_running_status_reschedules_when_still_active(monkeypatch):
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
     monkeypatch.setattr(
-        "api.services.blast_job_state._refresh_running_blast_state",
+        "api.services.blast.job_state._refresh_running_blast_state",
         lambda *_args, **_kwargs: state_obj,
     )
 
@@ -3816,7 +3816,7 @@ def test_poll_running_status_stops_at_max_iterations(monkeypatch):
 
     monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
     monkeypatch.setattr(
-        "api.services.blast_job_state._refresh_running_blast_state",
+        "api.services.blast.job_state._refresh_running_blast_state",
         lambda *_args, **_kwargs: state_obj,
     )
 
