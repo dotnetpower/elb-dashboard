@@ -152,7 +152,17 @@ def _probe_storage_table() -> dict[str, Any]:
                 next(svc.list_tables(results_per_page=1, timeout=3).by_page(), None)
                 result = {"status": "ok"}
             except Exception as exc:
-                result = {"status": "down", "error": str(exc)[:200]}
+                # `error_class` is an additive field for operator diagnosis;
+                # the existing `error` string keeps the same shape so any
+                # downstream parsing remains backwards-compatible. Common
+                # classes: HttpResponseError (RBAC / 403), ServiceRequestError
+                # (DNS / TCP / TLS), ClientAuthenticationError (token),
+                # TimeoutError (`timeout=3` tripped).
+                result = {
+                    "status": "down",
+                    "error": str(exc)[:200],
+                    "error_class": type(exc).__name__,
+                }
 
         # Single atomic publish: readers never see (new_result, old_ts) or
         # (old_result, new_ts).

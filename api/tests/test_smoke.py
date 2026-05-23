@@ -56,8 +56,18 @@ def test_request_id_echoed_when_supplied(client: TestClient) -> None:
 # Readiness probe — Storage component (Tier-1 gate for cli-upgrade.sh)
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
-def _reset_storage_probe_cache_between_tests() -> None:
-    """Drop the cached Storage probe result so each test starts fresh."""
+def _reset_storage_probe_cache_between_tests(
+    request: pytest.FixtureRequest,
+) -> None:
+    """Drop the cached Storage probe result before/after readiness tests only.
+
+    Scoped narrowly via `request.node.name` so unrelated tests in this file
+    (~80 of them) do not pay the import + lock-acquire cost just to keep
+    state clean for the four storage probe tests that actually need it.
+    """
+    if not request.node.name.startswith("test_readiness_storage"):
+        yield
+        return
     from api.routes.health import _reset_storage_probe_cache
 
     _reset_storage_probe_cache()
@@ -141,6 +151,8 @@ def test_readiness_storage_down_when_list_tables_raises(
     storage = body["components"]["azure_storage"]
     assert storage["status"] == "down"
     assert "simulated AuthorizationFailure" in storage["error"]
+    # Additive backwards-compatible field — operators can grep by class name.
+    assert storage["error_class"] == "RuntimeError"
     assert body["status"] == "not_ready"
 
 
