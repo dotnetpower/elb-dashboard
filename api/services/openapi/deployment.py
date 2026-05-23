@@ -15,7 +15,7 @@ from typing import Any
 
 from azure.core.credentials import TokenCredential
 
-from api.services.k8s_monitoring import _get_k8s_session
+from api.services.k8s.monitoring import _get_k8s_session
 
 OPENAPI_DEPLOYMENT_NAME = "elb-openapi"
 OPENAPI_CONTAINER_NAME = "openapi"

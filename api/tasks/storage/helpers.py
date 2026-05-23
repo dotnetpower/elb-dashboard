@@ -99,7 +99,7 @@ def wait_for_warmup_jobs(
     timeout_seconds: int,
     poll_seconds: int = 15,
 ) -> dict[str, Any]:
-    from api.services.k8s_monitoring import k8s_warmup_status
+    from api.services.k8s.monitoring import k8s_warmup_status
 
     deadline = time.monotonic() + timeout_seconds
     last_database: dict[str, Any] = {}

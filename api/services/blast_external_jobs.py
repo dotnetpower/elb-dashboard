@@ -518,7 +518,7 @@ def _openapi_client_kwargs_from_cluster(
             return dict(cached[1])
     try:
         from api.services import get_credential
-        from api.services.k8s_monitoring import (
+        from api.services.k8s.monitoring import (
             k8s_get_deployment_env_value,
             k8s_get_service_ip,
         )

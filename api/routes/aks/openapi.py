@@ -441,7 +441,7 @@ def aks_openapi_spec(
     """
 
     from api.services import get_credential
-    from api.services.k8s_monitoring import k8s_get_service_ip
+    from api.services.k8s.monitoring import k8s_get_service_ip
 
     sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
     cred = get_credential()
@@ -497,7 +497,7 @@ async def aks_openapi_proxy(
     import httpx
 
     from api.services import get_credential
-    from api.services.k8s_monitoring import k8s_get_service_ip
+    from api.services.k8s.monitoring import k8s_get_service_ip
 
     if not target_path.startswith("/") or target_path.startswith("//"):
         raise HTTPException(

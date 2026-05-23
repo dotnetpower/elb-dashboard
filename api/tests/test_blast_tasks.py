@@ -372,7 +372,8 @@ def test_persist_submit_log_events_chunks_after_stream(monkeypatch) -> None:
 
 
 def test_k8s_cancel_blast_job_deletes_only_scoped_jobs(monkeypatch) -> None:
-    from api.services import k8s_monitoring, monitoring
+    from api.services import monitoring
+    from api.services.k8s import monitoring as k8s_monitoring
 
     session = FakeK8sSession()
     monkeypatch.setattr(

@@ -31,7 +31,7 @@ from api.tests._fakes import make_send_task_recorder
 
 def _patch_ready_warmup_nodes(monkeypatch, count: int) -> None:
     monkeypatch.setattr(
-        "api.services.k8s_monitoring.k8s_ready_warmup_node_names",
+        "api.services.k8s.monitoring.k8s_ready_warmup_node_names",
         lambda credential, subscription_id, resource_group, cluster_name: [
             f"aks-blast-{index:06d}" for index in range(count)
         ],

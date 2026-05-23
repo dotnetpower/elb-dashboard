@@ -321,7 +321,7 @@ def test_warmup_release_calls_k8s_helper(
 
     monkeypatch.setattr("api.services.get_credential", lambda: object())
     monkeypatch.setattr(
-        "api.services.k8s_monitoring.k8s_release_warmup_cache",
+        "api.services.k8s.monitoring.k8s_release_warmup_cache",
         fake_release,
     )
 

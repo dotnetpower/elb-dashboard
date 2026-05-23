@@ -25,7 +25,7 @@ from celery import shared_task
 from api.services import get_credential
 from api.services.azure_clients import aks_client
 from api.services.image_tags import IMAGE_TAGS
-from api.services.k8s_monitoring import k8s_get_service_ip
+from api.services.k8s.monitoring import k8s_get_service_ip
 from api.tasks.openapi.helpers import blast_node_count, record_progress
 from api.tasks.openapi.kubectl import kubectl_apply
 from api.tasks.openapi.manifests import build_manifests

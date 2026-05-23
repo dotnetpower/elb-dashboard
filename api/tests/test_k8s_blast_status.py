@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from api.services import k8s_monitoring
+from api.services.k8s import monitoring as k8s_monitoring
 
 
 class _Response:
