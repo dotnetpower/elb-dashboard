@@ -1,0 +1,63 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - api/**
+      - pyproject.toml
+      - uv.lock
+      - pytest.ini
+      - .github/workflows/test.yml
+  pull_request:
+    paths:
+      - api/**
+      - pyproject.toml
+      - uv.lock
+      - pytest.ini
+      - .github/workflows/test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel in-flight runs for the same ref so a fresh push supersedes the old run.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: ruff + pytest (api/)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: ruff check
+        run: uv run ruff check api
+
+      - name: pytest (fast loop — parallel, slow/subprocess excluded)
+        # The default pytest.ini addopts already wire `-n auto`, the marker
+        # filter, and the `--timeout=60` safety net. Set CI=true so any
+        # CI-aware code paths (logging, color, etc.) behave correctly.
+        env:
+          CI: "true"
+          AUTH_DEV_BYPASS: "true"
+        run: uv run pytest -q api/tests
