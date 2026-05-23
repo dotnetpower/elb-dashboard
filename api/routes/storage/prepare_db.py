@@ -119,7 +119,7 @@ def _is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
 def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
     metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
     try:
-        from api.services.storage_data import read_metadata_blob_text
+        from api.services.storage.data import read_metadata_blob_text
 
         payload = read_metadata_blob_text(
             metadata_blob, max_bytes=4 * 1024 * 1024, label="db-metadata.json"
@@ -421,7 +421,7 @@ def prepare_db(
     # copy below can actually reach the data plane. In production the api
     # sidecar already reaches Storage via the private endpoint and this is a
     # no-op. See api/services/storage_public_access.py and project policy §9.
-    from api.services.storage_public_access import ensure_local_storage_access
+    from api.services.storage.public_access import ensure_local_storage_access
 
     access = ensure_local_storage_access(cred, sub, storage_rg, account_name)
     if access.get("action") == "failed":
@@ -479,7 +479,7 @@ def prepare_db(
     # returns a pooled BlobServiceClient keyed by (credential id, account)
     # so we don't pay credential re-validation per request.
     try:
-        from api.services.storage_data import _blob_service
+        from api.services.storage.data import _blob_service
 
         blob_svc = _blob_service(cred, account_name)
         container = blob_svc.get_container_client("blast-db")
@@ -536,7 +536,7 @@ def prepare_db(
         try:
             from azure.storage.blob import BlobServiceClient as _BSC
 
-            from api.services.storage_endpoint import blob_account_url as _url
+            from api.services.storage.endpoint import blob_account_url as _url
 
             local_svc = _BSC(account_url=_url(account_name), credential=cred)
             local_container = local_svc.get_container_client("blast-db")
@@ -894,11 +894,11 @@ def prepare_db_cancel(
     _check(db_name, _RE_DB_NAME, "db_name")
 
     cred = get_credential()
-    from api.services.storage_public_access import ensure_local_storage_access
+    from api.services.storage.public_access import ensure_local_storage_access
 
     ensure_local_storage_access(cred, sub, storage_rg, account_name)
 
-    from api.services.storage_data import _blob_service
+    from api.services.storage.data import _blob_service
 
     blob_svc = _blob_service(cred, account_name)
     container = blob_svc.get_container_client("blast-db")

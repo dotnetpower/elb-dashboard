@@ -1076,7 +1076,7 @@ def test_canonical_local_result_file_id_must_match_job_prefix(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     from api.main import app
-    from api.services.storage_data import encode_blob_file_id
+    from api.services.storage.data import encode_blob_file_id
 
     client = TestClient(app)
     other_job_file_id = encode_blob_file_id("bbbbbbbbbbbb/batch_001.xml")
@@ -1091,7 +1091,7 @@ def test_canonical_local_result_file_id_must_match_job_prefix(monkeypatch):
 
 
 def test_local_blob_file_id_round_trips_and_rejects_traversal() -> None:
-    from api.services.storage_data import decode_blob_file_id, encode_blob_file_id
+    from api.services.storage.data import decode_blob_file_id, encode_blob_file_id
 
     file_id = encode_blob_file_id("aaaaaaaaaaaa/batch_001.xml")
 

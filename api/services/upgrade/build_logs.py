@@ -206,7 +206,7 @@ class _AzureAppendBlobBackend:
     def read(self, name: str) -> bytes:
         blob = self._container().get_blob_client(name)
         try:
-            from api.services.storage_data import (
+            from api.services.storage.data import (
                 METADATA_BLOB_MAX_BYTES,
                 read_metadata_blob_bytes,
             )

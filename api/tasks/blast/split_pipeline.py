@@ -88,7 +88,7 @@ def _upload_split_query_files(
 ) -> list[dict[str, Any]]:
     """Upload split query FASTA payloads and return state-safe metadata."""
     from api.services import get_credential
-    from api.services.storage_data import read_blob_text, upload_group_fasta
+    from api.services.storage.data import read_blob_text, upload_group_fasta
 
     credential = get_credential()
     uploaded: list[dict[str, Any]] = []
@@ -413,7 +413,7 @@ def _run_storage_query_split_parent_submission(
     from azure.core.exceptions import ResourceNotFoundError
 
     from api.services import get_credential
-    from api.services.storage_data import read_blob_text
+    from api.services.storage.data import read_blob_text
 
     query_blob_path = _blast._query_blob_path_from_query_file(
         storage_account=storage_account,
@@ -620,7 +620,7 @@ def _result_blob_map(
         from api.services import get_credential
 
         credential = get_credential()
-    from api.services.storage_data import list_result_blobs
+    from api.services.storage.data import list_result_blobs
 
     return {
         str(blob.get("name")): blob
@@ -754,7 +754,7 @@ def _load_split_child_merge_reports(
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    from api.services.storage_data import read_blob_text
+    from api.services.storage.data import read_blob_text
 
     if not children:
         return []
@@ -887,7 +887,7 @@ def _iter_split_child_merged_result_chunks(
     children: list[Any],
     credential: Any,
 ) -> Iterator[bytes]:
-    from api.services.storage_data import stream_blob_bytes
+    from api.services.storage.data import stream_blob_bytes
 
     for child in children:
         child_job_id = str(getattr(child, "job_id", "") or "")
@@ -901,7 +901,7 @@ def _read_split_child_merged_result_bytes(
     child: Any,
     credential: Any,
 ) -> bytes:
-    from api.services.storage_data import stream_blob_bytes
+    from api.services.storage.data import stream_blob_bytes
 
     child_job_id = str(getattr(child, "job_id", "") or "")
     path = _blast._split_child_result_paths(child_job_id)["merged_result_path"]
@@ -1017,7 +1017,7 @@ def _iter_parent_split_xml_chunks(
     import zlib
     from gzip import GzipFile
 
-    from api.services.storage_data import stream_blob_bytes
+    from api.services.storage.data import stream_blob_bytes
 
     if not children:
         raise ValueError("no child XML results to merge")
@@ -1146,7 +1146,7 @@ def _write_split_parent_result_artifacts(
         from api.services import get_credential
 
         credential = get_credential()
-    from api.services.storage_data import upload_blob_bytes, upload_blob_text
+    from api.services.storage.data import upload_blob_bytes, upload_blob_text
 
     paths = _blast._parent_split_result_paths(parent_job_id)
     child_reports = _blast._load_split_child_merge_reports(

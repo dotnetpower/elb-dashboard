@@ -244,7 +244,7 @@ def _upload_inline_query_for_submit(
 ) -> tuple[str, dict[str, object]]:
     from api.services import get_credential
     from api.services.query_metadata import parse_fasta_metadata
-    from api.services.storage_data import upload_query_text
+    from api.services.storage.data import upload_query_text
 
     query_metadata = parse_fasta_metadata(query_data)
     blob_path = f"uploads/{job_id}/query.fa"

@@ -651,7 +651,7 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
         return ""
     try:
         from api.services import get_credential
-        from api.services.storage_data import _blob_service
+        from api.services.storage.data import _blob_service
 
         container = _blob_service(get_credential(), storage_account).get_container_client("results")
         prefix = f"{job_id}/job-"

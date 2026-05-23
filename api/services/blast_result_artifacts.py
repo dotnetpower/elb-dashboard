@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from api.services import get_credential, storage_data
+from api.services import get_credential
 from api.services.blast_result_analytics import (
     RESULTS_AGGREGATE_MAX_BYTES,
     RESULTS_ALIGNMENTS_MAX_BYTES,
@@ -36,6 +36,7 @@ from api.services.blast_result_analytics import (
 from api.services.blast_result_manifest import build_result_manifest
 from api.services.blast_results_parser import parse_blast_result_content
 from api.services.job_artifacts import upsert_artifact_state, write_result_analytics_artifact
+from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
 

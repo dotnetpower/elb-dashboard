@@ -19,7 +19,8 @@ import math
 import re
 from typing import Any
 
-from api.services import get_credential, storage_data
+from api.services import get_credential
+from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
 

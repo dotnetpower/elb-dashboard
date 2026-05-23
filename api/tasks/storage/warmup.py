@@ -115,7 +115,7 @@ def warmup_database(
     _update_state(job_id, "downloading", status="running")
 
     try:
-        from api.services.storage_data import list_databases
+        from api.services.storage.data import list_databases
 
         cred = get_credential()
         databases = list_databases(cred, storage_account)
@@ -148,7 +148,7 @@ def warmup_database(
                     ensure_shard_sets,
                 )
                 from api.services.sanitise import sanitise
-                from api.services.storage_data import _blob_service
+                from api.services.storage.data import _blob_service
 
                 # Mark in-progress before the long call so the SPA's
                 # chip strip can reflect the auto-shard step.
@@ -157,7 +157,7 @@ def warmup_database(
                 bc = cc.get_blob_client(f"{database_name}-metadata.json")
                 pre: dict[str, Any] = {}
                 try:
-                    from api.services.storage_data import read_metadata_blob_text
+                    from api.services.storage.data import read_metadata_blob_text
 
                     pre = json.loads(
                         read_metadata_blob_text(
@@ -186,7 +186,7 @@ def warmup_database(
                 # poll flips the chip to "sharded".
                 final: dict[str, Any] = {}
                 try:
-                    from api.services.storage_data import read_metadata_blob_text
+                    from api.services.storage.data import read_metadata_blob_text
 
                     final = json.loads(
                         read_metadata_blob_text(
@@ -240,7 +240,7 @@ def warmup_database(
 
                     from api.services.db.sharding import DEFAULT_CONTAINER as _DC
                     from api.services.sanitise import sanitise as _sanitise
-                    from api.services.storage_data import _blob_service as _bs
+                    from api.services.storage.data import _blob_service as _bs
 
                     cred2 = get_credential()
                     svc2 = _bs(cred2, storage_account)
@@ -249,7 +249,7 @@ def warmup_database(
                     )
                     err_meta: dict[str, Any] = {}
                     try:
-                        from api.services.storage_data import read_metadata_blob_text
+                        from api.services.storage.data import read_metadata_blob_text
 
                         err_meta = _json.loads(
                             read_metadata_blob_text(

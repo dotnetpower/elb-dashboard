@@ -207,7 +207,7 @@ class _AzureAppendHistoryBackend:
 
     def read_all(self) -> bytes:
         try:
-            from api.services.storage_data import (
+            from api.services.storage.data import (
                 METADATA_BLOB_MAX_BYTES,
                 read_metadata_blob_bytes,
             )

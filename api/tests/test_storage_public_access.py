@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from api.services import storage_public_access as spa
+from api.services.storage import public_access as spa
 
 
 @pytest.fixture(autouse=True)

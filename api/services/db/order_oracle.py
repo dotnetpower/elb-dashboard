@@ -68,7 +68,7 @@ def oracle_part_blob_path(db_name: str, run_id: str, shard: str) -> str:
 
 def oracle_part_url(storage_account: str, db_name: str, run_id: str, shard: str) -> str:
     _validate_storage_account(storage_account)
-    from api.services.storage_endpoint import blob_account_url
+    from api.services.storage.endpoint import blob_account_url
 
     return (
         f"{blob_account_url(storage_account)}/blast-db/"

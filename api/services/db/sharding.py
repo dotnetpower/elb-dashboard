@@ -23,7 +23,7 @@ from azure.core.credentials import TokenCredential
 from azure.core.exceptions import ResourceNotFoundError
 
 from api.services.aks_skus import SKU_BY_NAME
-from api.services.storage_data import _blob_service
+from api.services.storage.data import _blob_service
 
 LOGGER = logging.getLogger(__name__)
 
@@ -178,7 +178,7 @@ def read_blastdb_stats(
     cc = svc.get_container_client(container)
     bc = cc.get_blob_client(f"{db_name}/{db_name}.njs")
     try:
-        from api.services.storage_data import read_metadata_blob_bytes
+        from api.services.storage.data import read_metadata_blob_bytes
 
         raw = read_metadata_blob_bytes(bc, label="blast-db-njs")
     except ResourceNotFoundError:
@@ -418,7 +418,7 @@ def upload_shard_set(
                     # Manifest + .nal blobs are tiny (volume names only);
                     # cap the comparison read at 64 KiB so a corrupt
                     # oversized blob cannot OOM the worker.
-                    from api.services.storage_data import read_metadata_blob_text
+                    from api.services.storage.data import read_metadata_blob_text
 
                     existing = read_metadata_blob_text(
                         bc, max_bytes=64 * 1024, label="shard-manifest"
@@ -610,7 +610,7 @@ def partition_prefix_for(
     """
     _validate_db_name(db_name)
     _validate_shard_count(num_shards)
-    from api.services.storage_endpoint import blob_account_url
+    from api.services.storage.endpoint import blob_account_url
 
     return (
         f"{blob_account_url(account_name)}/{container}/"

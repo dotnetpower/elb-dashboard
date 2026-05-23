@@ -159,7 +159,7 @@ def _maybe_open_local_storage_access(
     """
     if not (subscription_id and resource_group and storage_account):
         return {"action": "noop", "reason": "missing storage ARM scope"}
-    from api.services.storage_public_access import ensure_local_storage_access
+    from api.services.storage.public_access import ensure_local_storage_access
 
     access = ensure_local_storage_access(
         credential,
