@@ -1087,7 +1087,7 @@ def test_build_split_child_submit_plan_rejects_incomplete_group() -> None:
 def test_dispatch_split_child_submits_creates_state_and_runs_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from api.services.state_repo import JobState
+    from api.services.state.job_state import JobState
 
     created: list[JobState] = []
     updates: list[tuple[str, dict[str, object]]] = []
@@ -1166,7 +1166,7 @@ def test_dispatch_split_child_submits_creates_state_and_runs_terminal(
 def test_dispatch_split_child_submits_records_terminal_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from api.services.state_repo import JobState
+    from api.services.state.job_state import JobState
 
     updates: list[tuple[str, dict[str, object]]] = []
 
@@ -1664,7 +1664,7 @@ def _split_child_state(
     error_code: str | None = None,
     group_id: str | None = None,
 ):
-    from api.services.state_repo import JobState
+    from api.services.state.job_state import JobState
 
     return JobState(
         job_id=job_id,
@@ -2808,7 +2808,7 @@ def test_merge_progress_payload_closes_runtime_while_results_pending(
 def test_split_parent_storage_submit_to_finalize_e2e(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from api.services.state_repo import JobState
+    from api.services.state.job_state import JobState
 
     states: dict[str, JobState] = {
         "job-123": JobState(

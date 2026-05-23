@@ -288,8 +288,8 @@ def blast_submit(
     try:
         from datetime import datetime
 
-        from api.services.state_repo import JobState
-        from api.services.state_repo import get_state_repo
+        from api.services.state.job_state import JobState
+        from api.services.state.repository import get_state_repo
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
         repo = get_state_repo()

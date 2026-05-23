@@ -127,7 +127,7 @@ def list_external_blast_job_events(
     del caller
     try:
         from api.services.blast.events import canonical_job_events
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         rows = get_state_repo().get_history(job_id, limit=200)
         if rows:

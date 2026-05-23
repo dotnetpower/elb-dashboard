@@ -79,7 +79,7 @@ async def blast_job_logs_ticket(
 ) -> dict[str, object]:
     """Validate job access and issue a short-lived single-use SSE ticket."""
 
-    from api.services.state_repo import get_state_repo
+    from api.services.state.repository import get_state_repo
 
     repo = get_state_repo()
     state = repo.get_summary(job_id)
@@ -159,7 +159,7 @@ async def blast_job_logs_events(
 
     async def emit_snapshot() -> None:
         try:
-            from api.services.state_repo import get_state_repo
+            from api.services.state.repository import get_state_repo
 
             state = await asyncio.to_thread(get_state_repo().get, job_id)
             if state is not None:
@@ -273,7 +273,7 @@ def _sse_frame(event_name: str, payload: dict[str, Any], *, event_id: str = "") 
 
 async def _load_state(job_id: str) -> Any | None:
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         return await asyncio.to_thread(get_state_repo().get, job_id)
     except Exception as exc:

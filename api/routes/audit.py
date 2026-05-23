@@ -32,7 +32,7 @@ def audit_log(
 ) -> dict[str, Any]:
     """Return recent audit events from the jobhistory table."""
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         # 1) List recent jobs for the caller (one Table query). The audit

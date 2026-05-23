@@ -97,7 +97,7 @@ def _queries_blob_path(value: Any) -> str:
 
 def _job_query_blob_path(job_id: str, caller: CallerIdentity) -> str:
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state.repository import JobStateRepository
 
         state = JobStateRepository().get(job_id)
     except Exception as exc:
@@ -129,7 +129,7 @@ def _blob_not_found(exc: BaseException) -> bool:
 
 def _job_payload_for_file_preview(job_id: str, caller: CallerIdentity) -> dict[str, Any]:
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state.repository import JobStateRepository
 
         state = JobStateRepository().get(job_id)
     except Exception as exc:
@@ -676,7 +676,7 @@ def _ensure_job_read_allowed(job_id: str, caller: CallerIdentity) -> None:
     """
     dev_bypass = os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true"
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state.repository import JobStateRepository
 
         state = JobStateRepository().get(job_id)
     except Exception as exc:
@@ -721,7 +721,7 @@ def _resolve_job_storage_account(job_id: str, supplied: str) -> str:
         return supplied
     dev_bypass = os.environ.get("AUTH_DEV_BYPASS", "").lower() == "true"
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state.repository import JobStateRepository
 
         state = JobStateRepository().get_summary(job_id)
     except Exception as exc:

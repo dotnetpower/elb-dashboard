@@ -86,8 +86,8 @@ def warmup_start(
     try:
         from datetime import datetime
 
-        from api.services.state_repo import JobState
-        from api.services.state_repo import get_state_repo
+        from api.services.state.job_state import JobState
+        from api.services.state.repository import get_state_repo
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
         repo = get_state_repo()
@@ -128,7 +128,7 @@ def warmup_start(
         caller_oid=caller.object_id,
     )
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         get_state_repo().update(job_id, task_id=result.id)
     except Exception as exc:

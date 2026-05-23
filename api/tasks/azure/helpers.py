@@ -27,7 +27,7 @@ def now_iso() -> str:
 def update_state(task_id: str, phase: str, status: str = "running", **extra: Any) -> None:
     """Best-effort state update to the job state repo."""
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state.repository import JobStateRepository
 
         repo = JobStateRepository()
         state = repo.get(task_id)

@@ -481,7 +481,15 @@ export function useBlastDb({
         message: summary,
       };
     } catch (e) {
-      const msg = formatApiError(e, "storage");
+      const apiError = e as { status?: number; body?: { detail?: unknown } };
+      const detail =
+        typeof apiError.body?.detail === "string" ? apiError.body.detail : null;
+      const msg =
+        apiError.status === 404
+          ? "Local API has not loaded the RBAC grant route yet. Restart the local API, then try again."
+          : apiError.status === 400 || apiError.status === 403
+            ? detail || formatApiError(e, "storage")
+            : formatApiError(e, "storage");
       setLocalDebugError(msg);
       return { ok: false, message: msg };
     } finally {

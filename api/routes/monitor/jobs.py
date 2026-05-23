@@ -28,7 +28,7 @@ def list_jobs(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         # Only summary fields are returned; ``include_payload=False`` skips the
@@ -60,7 +60,7 @@ def get_job(
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         state = repo.get(job_id)

@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 
 from api.auth import CallerIdentity, require_caller
 from api.celery_app import celery_app
-from api.services.state_repo import JobStateRepository
+from api.services.state.repository import JobStateRepository
 
 LOGGER = logging.getLogger(__name__)
 

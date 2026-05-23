@@ -20,8 +20,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from api.auth import CallerIdentity
-from api.services.state_repo import JobState
-from api.services.state_repo import get_state_repo
+from api.services.state.job_state import JobState
+from api.services.state.repository import get_state_repo
 
 LOGGER = logging.getLogger(__name__)
 

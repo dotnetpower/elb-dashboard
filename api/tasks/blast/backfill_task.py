@@ -195,7 +195,7 @@ def backfill_completed_runtime_metrics(
         "errors": 0,
     }
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state.repository import JobStateRepository
 
         repo = JobStateRepository()
         if job_id:

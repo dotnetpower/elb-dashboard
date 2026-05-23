@@ -60,7 +60,7 @@ def _update_state(
     """
 
     try:
-        from api.services.state_repo import JobStateRepository
+        from api.services.state.repository import JobStateRepository
 
         repo = JobStateRepository()
         stored_error_code = error_code or ""

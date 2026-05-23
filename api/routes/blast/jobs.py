@@ -200,7 +200,7 @@ def blast_jobs_list(
     jobs: list[dict[str, Any]] = []
     degraded: dict[str, Any] = {}
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         rows = [
@@ -372,7 +372,7 @@ def blast_job_execution_steps(
             build_execution_steps_snapshot,
             read_execution_steps_snapshot,
         )
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         summary = repo.get_summary(job_id)
@@ -443,7 +443,7 @@ def blast_job_get(
 ) -> dict[str, Any]:
     local_unavailable: Exception | None = None
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         state = repo.get(job_id)
@@ -504,7 +504,7 @@ def blast_job_events(
 ) -> dict[str, Any]:
     try:
         from api.services.blast.events import canonical_job_events
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         state = repo.get(job_id)
@@ -536,7 +536,7 @@ def blast_job_queue(
 ) -> dict[str, Any]:
     try:
         from api.services.blast.queue import queue_snapshot
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         state = repo.get(job_id)
@@ -568,7 +568,7 @@ def blast_job_cancel(
 
     request_body = dict(body or {})
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         state = get_state_repo().get(job_id)
         if state is not None:
@@ -614,7 +614,7 @@ def blast_job_delete(
 ) -> dict[str, Any]:
     """Delete a job record from the state repository."""
     try:
-        from api.services.state_repo import get_state_repo
+        from api.services.state.repository import get_state_repo
 
         repo = get_state_repo()
         state = repo.get(job_id)

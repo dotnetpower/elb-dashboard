@@ -56,7 +56,7 @@ def finalize_job_artifacts(
     }
     try:
         from api.services.job_artifacts import upsert_artifact_state, write_execution_steps_snapshot
-        from api.services.state_repo import JobStateRepository
+        from api.services.state.repository import JobStateRepository
 
         upsert_artifact_state(job_id, "artifact_finalizer", status="pending")
         repo = JobStateRepository()
