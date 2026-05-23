@@ -35,8 +35,10 @@ def audit_log(
         from api.services.state_repo import get_state_repo
 
         repo = get_state_repo()
-        # 1) List recent jobs for the caller (one Table query).
-        jobs = repo.list_for_owner(caller.object_id, limit=50)
+        # 1) List recent jobs for the caller (one Table query). The audit
+        # view never reads payload_json, only the job_id/type fields, so we
+        # skip pulling the per-row payload blob.
+        jobs = repo.list_for_owner(caller.object_id, limit=50, include_payload=False)
         job_window = jobs[:20]
         if not job_window:
             return {"events": []}
@@ -70,10 +72,12 @@ def audit_log(
         events.sort(key=lambda e: e.get("ts", ""), reverse=True)
         return {"events": events[:limit]}
     except Exception as exc:
-        # Sanitise the exception message before returning it to the
-        # browser: state-repo / Storage SDK errors routinely embed the
-        # account URL, request id, and sometimes a SAS query string in
-        # the message. The raw text is fine for the server-side log but
-        # never the HTTP body.
-        LOGGER.warning("audit_log failed: %s", exc)
-        return {"events": [], "error": sanitise(str(exc))[:200]}
+        # Sanitise the exception message before BOTH the server-side log
+        # and the response body. Azure SDK / Table errors routinely embed
+        # the account URL, request id, and sometimes SAS-style query
+        # strings; the server log is not a public surface but persists in
+        # Log Analytics and any operator query can leak those values into
+        # workbook screenshots / tickets.
+        safe_exc = sanitise(str(exc))[:300]
+        LOGGER.warning("audit_log failed: %s", safe_exc)
+        return {"events": [], "error": safe_exc[:200]}

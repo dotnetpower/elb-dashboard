@@ -31,7 +31,10 @@ def list_jobs(
         from api.services.state_repo import get_state_repo
 
         repo = get_state_repo()
-        rows = repo.list_for_owner(caller.object_id, limit=limit)
+        # Only summary fields are returned; ``include_payload=False`` skips the
+        # potentially-large payload_json column on the Table-Storage row so
+        # dashboard polls do not pull megabytes per refresh.
+        rows = repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
         return {
             "jobs": [
                 {

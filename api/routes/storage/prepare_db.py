@@ -475,16 +475,13 @@ def prepare_db(
 
     # Build the destination container client. The api sidecar reaches the
     # storage account over the private endpoint via the shared MI; no SAS
-    # is involved, no public network toggle is performed.
+    # is involved, no public network toggle is performed. ``_blob_service``
+    # returns a pooled BlobServiceClient keyed by (credential id, account)
+    # so we don't pay credential re-validation per request.
     try:
-        from azure.storage.blob import BlobServiceClient
+        from api.services.storage_data import _blob_service
 
-        from api.services.storage_endpoint import blob_account_url
-
-        blob_svc = BlobServiceClient(
-            account_url=blob_account_url(account_name),
-            credential=cred,
-        )
+        blob_svc = _blob_service(cred, account_name)
         container = blob_svc.get_container_client("blast-db")
 
         previous_metadata, _ = _download_blob_with_etag(container, db_name)
@@ -901,14 +898,9 @@ def prepare_db_cancel(
 
     ensure_local_storage_access(cred, sub, storage_rg, account_name)
 
-    from azure.storage.blob import BlobServiceClient
+    from api.services.storage_data import _blob_service
 
-    from api.services.storage_endpoint import blob_account_url
-
-    blob_svc = BlobServiceClient(
-        account_url=blob_account_url(account_name),
-        credential=cred,
-    )
+    blob_svc = _blob_service(cred, account_name)
     container = blob_svc.get_container_client("blast-db")
     meta, _etag = _download_blob_with_etag(container, db_name)
     copy_status = meta.get("copy_status") or {}

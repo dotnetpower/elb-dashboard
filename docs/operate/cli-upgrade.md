@@ -12,6 +12,37 @@ This page is the workstation-driven path for rolling out new code to a
 deployed dashboard. It is paired with the script
 [`scripts/dev/cli-upgrade.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/cli-upgrade.sh).
 
+!!! success "Quick rolling update (TL;DR)"
+
+    When your local tree is already the code you want to ship (either
+    `git pull` is done, or your uncommitted edits **are** the release),
+    deploy all six sidecars in one shot:
+
+    ```bash
+    # 1. Preview the plan — no build, no PATCH.
+    scripts/dev/cli-upgrade.sh full --allow-dirty --dry-run
+
+    # 2. Run it for real. Builds 3 images (elb-api, elb-frontend,
+    #    elb-terminal) and swaps the Container App template covering all
+    #    6 sidecars (api / worker / beat / frontend / terminal / redis).
+    scripts/dev/cli-upgrade.sh full --allow-dirty --yes
+    ```
+
+    - `full` triggers the full image rebuild + [`postprovision.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/postprovision.sh) template swap.
+    - `--allow-dirty` acknowledges that uncommitted edits are intentional.
+    - `--yes` skips the interactive confirm prompt.
+    - Omit `--pull`: the script refuses to `git pull` on a dirty tree, and
+      you already have the code you want to ship locally.
+    - Snapshot + `/api/health` poll + auto-rollback still run; tune the
+      budget with `--health-timeout 300` if the terminal sidecar was rebuilt.
+
+    Only edited `api/` code and nothing under `infra/` or `terminal/`?
+    Use the faster `api` scope instead (~60 s, one image):
+
+    ```bash
+    scripts/dev/cli-upgrade.sh api --allow-dirty --yes
+    ```
+
 !!! tip "Prefer the in-browser upgrade when possible"
 
     The browser-driven [In-app Upgrade](../user-guide/upgrades.md) does the

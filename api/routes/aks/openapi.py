@@ -440,8 +440,6 @@ def aks_openapi_spec(
     not yet reachable so the SPA's docs page does not crash.
     """
 
-    import httpx
-
     from api.services import get_credential
     from api.services.k8s_monitoring import k8s_get_service_ip
 
@@ -463,11 +461,13 @@ def aks_openapi_spec(
         }
 
     try:
-        with httpx.Client(timeout=10.0) as client:
-            for path in ("/openapi.json", "/docs/openapi.json"):
-                resp = client.get(f"http://{ip}{path}")
-                if resp.status_code == 200:
-                    return cast(dict[str, Any], resp.json())
+        from api.services.httpx_pool import get_pooled_client
+
+        client = get_pooled_client("aks-openapi-spec", timeout=10.0)
+        for path in ("/openapi.json", "/docs/openapi.json"):
+            resp = client.get(f"http://{ip}{path}")
+            if resp.status_code == 200:
+                return cast(dict[str, Any], resp.json())
     except Exception as exc:
         LOGGER.warning("openapi/spec: fetch failed for %s: %s", ip, exc)
 

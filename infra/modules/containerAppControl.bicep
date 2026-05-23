@@ -377,6 +377,24 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
         }
       ]
       scale: {
+        // Intentionally locked at 1/1: the in-revision Redis sidecar holds
+        // Celery broker state and Beat is a singleton (see file header).
+        // If maxReplicas is ever raised:
+        //   1. Move Redis to a managed cache (charter §3 forbids it today)
+        //      OR pin Beat to a separate Container App.
+        //   2. Add a KEDA rule (cpu @ 70% utilisation, 60s stabilisation),
+        //      e.g.:
+        //        rules: [
+        //          {
+        //            name: 'cpu-rule'
+        //            custom: {
+        //              type: 'cpu'
+        //              metadata: { type: 'Utilization', value: '70' }
+        //            }
+        //          }
+        //        ]
+        //   3. Verify the warmup beat schedule does not double-fire (Beat
+        //      must remain singleton across replicas).
         minReplicas: 1
         maxReplicas: 1
       }

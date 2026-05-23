@@ -464,6 +464,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await close_client()
         except Exception as exc:
             LOGGER.debug("frontend_proxy close skipped: %s", type(exc).__name__)
+        try:
+            from api.services.httpx_pool import close_all_clients
+
+            close_all_clients()
+        except Exception as exc:
+            LOGGER.debug("httpx_pool close skipped: %s", type(exc).__name__)
         if stop_invalidate_subscriber is not None:
             try:
                 stop_invalidate_subscriber()

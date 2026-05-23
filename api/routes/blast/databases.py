@@ -37,6 +37,15 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Module-level compiled validation patterns (called from blast_database_check_updates
+# and blast_database_preview). Previously these were re-compiled on every request.
+_DB_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+_SUBSCRIPTION_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_RESOURCE_GROUP_RE = re.compile(r"^[A-Za-z0-9._\-()]{1,90}$")
+_STORAGE_ACCOUNT_RE = re.compile(r"^[a-z0-9]{3,24}$")
+
 
 @router.get("/databases")
 def blast_databases(
@@ -129,7 +138,6 @@ def blast_database_shard(
         landing in the metadata blob or the response.
     """
     import json
-    import re
     import threading
     from datetime import UTC, datetime
 
@@ -152,20 +160,15 @@ def blast_database_shard(
             "subscription_id, resource_group, account_name required in body",
         )
     # Mirror the validation in /api/storage/prepare-db. Keep it tight —
-    # `db_name` flows straight to a blob path.
-    _re_db = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
-    _re_sub = re.compile(
-        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-    )
-    _re_rg = re.compile(r"^[A-Za-z0-9._\-()]{1,90}$")
-    _re_sa = re.compile(r"^[a-z0-9]{3,24}$")
-    if not _re_db.match(db_name):
+    # `db_name` flows straight to a blob path. Patterns are module-level
+    # (see top of file) so they are compiled once per process.
+    if not _DB_NAME_RE.match(db_name):
         raise HTTPException(400, "invalid db_name")
-    if not _re_sub.match(sub):
+    if not _SUBSCRIPTION_RE.match(sub):
         raise HTTPException(400, "invalid subscription_id")
-    if not _re_rg.match(storage_rg):
+    if not _RESOURCE_GROUP_RE.match(storage_rg):
         raise HTTPException(400, "invalid resource_group")
-    if not _re_sa.match(account_name):
+    if not _STORAGE_ACCOUNT_RE.match(account_name):
         raise HTTPException(400, "invalid account_name")
 
     cred = get_credential()
@@ -417,19 +420,13 @@ def blast_database_order_oracle(
             ),
         )
 
-    _re_db = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
-    _re_sub = re.compile(
-        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-    )
-    _re_rg = re.compile(r"^[A-Za-z0-9._\-()]{1,90}$")
-    _re_sa = re.compile(r"^[a-z0-9]{3,24}$")
-    if not _re_db.match(db_name):
+    if not _DB_NAME_RE.match(db_name):
         raise HTTPException(400, "invalid db_name")
-    if not _re_sub.match(sub):
+    if not _SUBSCRIPTION_RE.match(sub):
         raise HTTPException(400, "invalid subscription_id")
-    if not _re_rg.match(storage_rg):
+    if not _RESOURCE_GROUP_RE.match(storage_rg):
         raise HTTPException(400, "invalid resource_group")
-    if not _re_sa.match(account_name):
+    if not _STORAGE_ACCOUNT_RE.match(account_name):
         raise HTTPException(400, "invalid account_name")
 
     cred = get_credential()

@@ -251,12 +251,17 @@ def preview_database(db_name: str) -> dict[str, Any]:
     #     The HEADs run inside one Client so the TLS handshake amortises.
     #   * 1 representative volume — drives size estimate when the snapshot
     #     list does not carry sizes (it doesn't; only HEAD does).
-    with httpx.Client(timeout=_PREVIEW_CLIENT_TIMEOUT) as client:
-        for sig_key in signature_keys:
-            signature_heads.append((sig_key, _head_key(client, sig_key)))
-        size_probe_key = volume_keys[0] if volume_keys else keys[0]
-        if size_probe_key and size_probe_key not in signature_keys:
-            head_for_size_probe = _head_key(client, size_probe_key)
+    # Module-pooled client so the TLS handshake to NCBI S3 amortises across
+    # DB-preview requests (the SPA hits this 5+ times per page render when a
+    # user browses the catalogue).
+    from api.services.httpx_pool import get_pooled_client
+
+    client = get_pooled_client("ncbi-preview", timeout=_PREVIEW_CLIENT_TIMEOUT)
+    for sig_key in signature_keys:
+        signature_heads.append((sig_key, _head_key(client, sig_key)))
+    size_probe_key = volume_keys[0] if volume_keys else keys[0]
+    if size_probe_key and size_probe_key not in signature_keys:
+        head_for_size_probe = _head_key(client, size_probe_key)
 
     # Composite signature: hash all sampled (key, etag) pairs into one short
     # marker. Detects updates on later shards that a single-key signature

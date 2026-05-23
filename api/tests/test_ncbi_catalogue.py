@@ -86,6 +86,9 @@ def _stub_keys(
 def _stub_httpx_client(
     monkeypatch: pytest.MonkeyPatch, head_map: dict[str, _FakeHead]
 ) -> None:
+    """Inject a fake HEAD-only client both into the legacy ``ncbi_catalogue.httpx``
+    binding (back-compat) and into the new pooled-client helper so production
+    code that calls ``get_pooled_client`` still receives the fake."""
     monkeypatch.setattr(
         ncbi_catalogue,
         "httpx",
@@ -97,6 +100,12 @@ def _stub_httpx_client(
                 "HTTPError": ncbi_catalogue.httpx.HTTPError,
             },
         ),
+        raising=True,
+    )
+    fake_client = _FakeHttpxClient(head_map)
+    monkeypatch.setattr(
+        "api.services.httpx_pool.get_pooled_client",
+        lambda *_args, **_kwargs: fake_client,
         raising=True,
     )
 

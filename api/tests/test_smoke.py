@@ -1444,7 +1444,13 @@ def test_audit_log_payload_is_sanitised(
         type = "blast"
 
     class FakeRepo:
-        def list_for_owner(self, _oid: str, limit: int = 50) -> list[FakeJob]:
+        def list_for_owner(
+            self, _oid: str, limit: int = 50, *, include_payload: bool = True
+        ) -> list[FakeJob]:
+            # ``include_payload`` is accepted so the route signature matches
+            # ``state_repo.JobStateRepository.list_for_owner``; this fake never
+            # populates payload anyway.
+            del include_payload
             return [FakeJob()]
 
         def get_history(self, _job_id: str, limit: int = 20) -> list[dict[str, object]]:

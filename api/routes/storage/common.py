@@ -123,33 +123,35 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
     _breaker_check()
     # Hard cap at 50 pages x 1000 objects = 50k keys to bound surprise.
     try:
-        with httpx.Client(timeout=30.0) as client:
-            for _page in range(50):
-                list_url = f"{_NCBI_S3_BASE}?list-type=2&prefix={prefix}&max-keys=1000"
-                if continuation:
-                    list_url += f"&continuation-token={continuation}"
-                resp = client.get(list_url)
-                if resp.status_code == 403:
-                    _breaker_record_failure()
-                    raise NcbiAccessDenied(
-                        f"NCBI bucket returned 403 listing {prefix!r}: {resp.text[:200]}"
-                    )
-                if resp.status_code >= 500:
-                    _breaker_record_failure()
-                    raise NcbiUnavailable(
-                        f"NCBI bucket HTTP {resp.status_code} listing {prefix!r}"
-                    )
-                resp.raise_for_status()
-                root = ElementTree.fromstring(resp.content)  # noqa: S314 — NCBI public bucket, schema fixed
-                for el in root.findall(".//s3:Contents/s3:Key", _S3_LIST_NS):
-                    if el.text and not el.text.endswith("/"):
-                        keys.append(el.text)
-                is_truncated = root.findtext("s3:IsTruncated", "false", _S3_LIST_NS)
-                if is_truncated == "true":
-                    tok = root.find("s3:NextContinuationToken", _S3_LIST_NS)
-                    continuation = tok.text if tok is not None and tok.text else ""
-                else:
-                    break
+        from api.services.httpx_pool import get_pooled_client
+
+        client = get_pooled_client("ncbi-list", timeout=30.0)
+        for _page in range(50):
+            list_url = f"{_NCBI_S3_BASE}?list-type=2&prefix={prefix}&max-keys=1000"
+            if continuation:
+                list_url += f"&continuation-token={continuation}"
+            resp = client.get(list_url)
+            if resp.status_code == 403:
+                _breaker_record_failure()
+                raise NcbiAccessDenied(
+                    f"NCBI bucket returned 403 listing {prefix!r}: {resp.text[:200]}"
+                )
+            if resp.status_code >= 500:
+                _breaker_record_failure()
+                raise NcbiUnavailable(
+                    f"NCBI bucket HTTP {resp.status_code} listing {prefix!r}"
+                )
+            resp.raise_for_status()
+            root = ElementTree.fromstring(resp.content)  # noqa: S314 — NCBI public bucket, schema fixed
+            for el in root.findall(".//s3:Contents/s3:Key", _S3_LIST_NS):
+                if el.text and not el.text.endswith("/"):
+                    keys.append(el.text)
+            is_truncated = root.findtext("s3:IsTruncated", "false", _S3_LIST_NS)
+            if is_truncated == "true":
+                tok = root.find("s3:NextContinuationToken", _S3_LIST_NS)
+                continuation = tok.text if tok is not None and tok.text else ""
+            else:
+                break
     except httpx.HTTPError as exc:
         _breaker_record_failure()
         raise NcbiUnavailable(f"{type(exc).__name__}: {exc}") from exc

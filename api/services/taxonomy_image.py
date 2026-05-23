@@ -106,38 +106,41 @@ def _fetch_wikipedia_summary(name: str) -> dict[str, Any] | None:
     """Fetch the wiki summary; return ``None`` on any non-OK condition."""
     slug = quote(name.replace(" ", "_"), safe="")
     endpoint = f"/page/summary/{slug}"
+    from api.services.httpx_pool import get_pooled_client
+
+    client = get_pooled_client(
+        "taxonomy-wikipedia-summary",
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+        base_url=WIKIPEDIA_BASE_URL,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "elb-dashboard/1.0 (taxonomy image lookup)",
+        },
+    )
     try:
-        with httpx.Client(
-            base_url=WIKIPEDIA_BASE_URL,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "elb-dashboard/1.0 (taxonomy image lookup)",
-            },
-        ) as client:
-            with client.stream("GET", endpoint) as response:
-                if response.status_code == 404:
+        with client.stream("GET", endpoint) as response:
+            if response.status_code == 404:
+                return None
+            if response.status_code >= 400:
+                LOGGER.info(
+                    "taxonomy image upstream status=%s name=%s",
+                    response.status_code,
+                    name,
+                )
+                return None
+            buffer = bytearray()
+            for chunk in response.iter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) > MAX_BODY_BYTES:
+                    LOGGER.info("taxonomy image upstream exceeded size cap name=%s", name)
                     return None
-                if response.status_code >= 400:
-                    LOGGER.info(
-                        "taxonomy image upstream status=%s name=%s",
-                        response.status_code,
-                        name,
-                    )
-                    return None
-                buffer = bytearray()
-                for chunk in response.iter_bytes():
-                    buffer.extend(chunk)
-                    if len(buffer) > MAX_BODY_BYTES:
-                        LOGGER.info("taxonomy image upstream exceeded size cap name=%s", name)
-                        return None
-                try:
-                    parsed = json.loads(buffer)
-                except ValueError:
-                    return None
-                if not isinstance(parsed, dict):
-                    return None
-                return parsed
+            try:
+                parsed = json.loads(buffer)
+            except ValueError:
+                return None
+            if not isinstance(parsed, dict):
+                return None
+            return parsed
     except httpx.HTTPError as exc:
         LOGGER.info("taxonomy image network failure name=%s: %s", name, exc.__class__.__name__)
         return None

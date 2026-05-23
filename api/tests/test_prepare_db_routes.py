@@ -137,6 +137,11 @@ def test_concurrent_prepare_db_returns_409(
         lambda **_kw: _FakeBlobSvc(container),
     )
     monkeypatch.setattr(
+        "api.services.storage_data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+    monkeypatch.setattr(
         "api.services.db_ops_audit.record_db_op",
         lambda **_kw: "",
         raising=False,
@@ -178,6 +183,11 @@ def test_cancel_aborts_pending_copies(
         lambda **_kw: _FakeBlobSvc(container),
     )
     monkeypatch.setattr(
+        "api.services.storage_data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+    monkeypatch.setattr(
         "api.services.storage_public_access.ensure_local_storage_access",
         lambda *_a, **_kw: {"action": "noop"},
         raising=True,
@@ -215,6 +225,11 @@ def test_cancel_refuses_when_completed(
     monkeypatch.setattr(
         "azure.storage.blob.BlobServiceClient",
         lambda **_kw: _FakeBlobSvc(container),
+    )
+    monkeypatch.setattr(
+        "api.services.storage_data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
     )
     monkeypatch.setattr(
         "api.services.storage_public_access.ensure_local_storage_access",

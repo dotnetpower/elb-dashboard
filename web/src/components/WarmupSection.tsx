@@ -195,12 +195,14 @@ export function WarmupSection({
     },
   });
 
-  // Poll warmup orchestrator if one is active
+  // Poll warmup orchestrator if one is active. 10s cadence is enough to keep
+  // the timeline animated while halving the per-user request rate for a
+  // long-running (minutes-to-hours) warmup operation.
   const orchQuery = useQuery({
     queryKey: ["warmup-orch", warmupInstanceId],
     queryFn: () => monitoringApi.warmupOrchStatus(warmupInstanceId!),
     enabled: Boolean(warmupInstanceId),
-    refetchInterval: 5_000,
+    refetchInterval: 10_000,
     retry: 1, // fail fast on stale instance_id
   });
 
