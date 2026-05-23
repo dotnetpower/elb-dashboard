@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests/test_openapi_token.py`.
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import time
@@ -26,6 +27,7 @@ OPENAPI_DEPLOYMENT_NAME = "elb-openapi"
 OPENAPI_CONTAINER_NAME = "openapi"
 OPENAPI_TOKEN_ENV = "ELB_OPENAPI_API_TOKEN"  # noqa: S105 - env var name, not a token value.
 K8S_NAMESPACE = "default"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -260,9 +262,9 @@ def _sync_runtime_token(token: str, metadata: dict[str, Any]) -> None:
         from api.services.blast.external_jobs import _reset_external_jobs_cache
 
         _reset_external_jobs_cache()
-    except Exception:
+    except Exception as exc:
         # Cache reset is best-effort — never block token rotation.
-        pass
+        LOGGER.debug("openapi token cache reset skipped: %s", exc)
 
 
 def get_openapi_api_token_status(

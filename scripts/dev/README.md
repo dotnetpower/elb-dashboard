@@ -14,6 +14,7 @@
 | [`grant-local-rbac.sh`](./grant-local-rbac.sh) | One-shot: grant your `az login` user the minimum RBAC (Storage Blob Data Contributor, Storage Account Contributor, RG Reader, AcrPull) needed to drive a deployed environment from a local api sidecar. Idempotent; run once per fresh clone. |
 | [`storage-public-access.sh`](./storage-public-access.sh) | Manually flip a workload Storage account's `publicNetworkAccess` on (IP-allowlisted) / off for local debugging. The api also auto-opens it when `LOCAL_DEBUG_AUTO_OPEN_STORAGE=true` — see `api/services/storage_public_access.py`. |
 | [`local-run.sh`](./local-run.sh) | Direct terminal and VS Code task entrypoint for `api`, `worker`, `beat`, `web`, `redis`, `smoke`, `compose-full`, and `compose-local`; always routes through local logging. |
+| [`e2e-ui.sh`](./e2e-ui.sh) | One-command UI E2E session launcher. Starts local api + web in dev-bypass mode without Azure login, or delegates to `auth-on` for real MSAL login, then exports headed/headless scenario environment. |
 | [`run-with-log.sh`](./run-with-log.sh) | Lower-level wrapper that mirrors any local dev command's stdout/stderr into `.logs/local/latest/*.log` for warning/error review. |
 
 ---
@@ -76,6 +77,22 @@ scripts/dev/local-run.sh compose-full -- up -d --build
 scripts/dev/local-run.sh compose-local -- up --build
 scripts/dev/local-run.sh compose-local -- up -d --build
 ```
+
+UI E2E launcher examples:
+
+```bash
+scripts/dev/e2e-ui.sh bypass --headless
+scripts/dev/e2e-ui.sh bypass --headed
+scripts/dev/e2e-ui.sh login --ask-browser
+scripts/dev/e2e-ui.sh bypass --headless -- npm --prefix web run e2e:dashboard
+scripts/dev/e2e-ui.sh bypass --headless -- npm --prefix web run e2e:new-search
+```
+
+When no browser flag is supplied, `e2e-ui.sh` asks briefly on interactive
+terminals: pressing Enter opens a visible browser, while no response falls back
+to headless mode. In CI and non-interactive shells it chooses headless
+automatically. Real MSAL login still requires the user to complete Microsoft
+sign-in, MFA, or device-code prompts directly.
 
 Host-mode API startup keeps `127.0.0.1:8085` stable because the Vite dev
 server and smoke scripts expect that port. `local-run.sh api` takes a per-port

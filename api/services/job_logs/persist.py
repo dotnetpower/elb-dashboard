@@ -140,7 +140,7 @@ def persist_completed_job_pod_logs(
 
     try:
         from api.services.job_artifacts import write_execution_log_chunk
-        from api.services.state.repository import JobStateRepository
+        from api.services.state_repo import JobStateRepository
     except Exception as exc:  # pragma: no cover - import-time failure
         LOGGER.warning(
             "persist_completed_job_pod_logs: import failed job_id=%s: %s",

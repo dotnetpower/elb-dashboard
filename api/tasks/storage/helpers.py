@@ -65,7 +65,7 @@ def publish_db_metadata_invalidate(storage_account: str, database_name: str) -> 
 def update_state(job_id: str, phase: str, status: str = "running", **extra: Any) -> None:
     """Best-effort state update."""
     try:
-        from api.services.state.repository import JobStateRepository
+        from api.services.state_repo import JobStateRepository
 
         repo = JobStateRepository()
         payload = {"phase": phase, "status": status, **extra}

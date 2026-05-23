@@ -170,7 +170,7 @@ def reconcile_stale_jobs(
     }
 
     try:
-        from api.services.state.repository import JobStateRepository
+        from api.services.state_repo import JobStateRepository
 
         repo = JobStateRepository()
     except Exception as exc:

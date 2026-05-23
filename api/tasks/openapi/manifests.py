@@ -266,5 +266,12 @@ def build_manifests(
         },
     }
 
-    docs = [sa_manifest, role_manifest, binding_manifest, deploy_manifest, pdb_manifest, svc_manifest]
+    docs = [
+        sa_manifest,
+        role_manifest,
+        binding_manifest,
+        deploy_manifest,
+        pdb_manifest,
+        svc_manifest,
+    ]
     return "\n---\n".join(json.dumps(d) for d in docs)

@@ -46,7 +46,7 @@ def cancel(
     try:
         from api.services import get_credential
         from api.services.monitoring import k8s_cancel_blast_job
-        from api.services.state.repository import JobStateRepository
+        from api.services.state_repo import JobStateRepository
 
         credential = get_credential()
         repo = JobStateRepository()

@@ -226,7 +226,7 @@ def _dispatch_split_child_submits(
 ) -> list[dict[str, Any]]:
     """Create child state records and submit each child ElasticBLAST config."""
     from api.services.state.job_state import JobState
-    from api.services.state.repository import JobStateRepository
+    from api.services.state_repo import JobStateRepository
 
     if terminal_run is None:
         from api.services.terminal_exec import run as _terminal_run
@@ -511,7 +511,7 @@ def _aggregate_split_child_states(
         raise ValueError("child_limit must be positive")
 
     if repo is None:
-        from api.services.state.repository import JobStateRepository
+        from api.services.state_repo import JobStateRepository
 
         repo = JobStateRepository()
 
@@ -1226,7 +1226,7 @@ def _finalize_split_parent_results(
 ) -> dict[str, Any]:
     """Verify child finalizer artifacts and complete a split parent result."""
     if repo is None:
-        from api.services.state.repository import JobStateRepository
+        from api.services.state_repo import JobStateRepository
 
         repo = JobStateRepository()
     if credential is None:

@@ -12,19 +12,22 @@ Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
 
 from __future__ import annotations
 
-import atexit
 import logging
 import re
 import threading
 import time
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 from azure.core.credentials import TokenCredential
 
-from api.services.azure_clients import aks_client as aks_client
-from api.services.k8s import client as _k8s_client
+from api.services.k8s import credentials as _credentials
+from api.services.k8s.fanout import _k8s_fanout_pool
+from api.services.k8s.manifests import (
+    _ensure_job_manifests,
+    k8s_ensure_job_manifests,
+    k8s_ensure_warmup_scripts_configmap,
+)
 from api.services.k8s.metrics import k8s_top_nodes
 from api.services.k8s.nodes import (
     _candidate_warmup_node_names,
@@ -44,62 +47,12 @@ from api.services.k8s.timestamps import (
 from api.services.warmup.jobs import (
     DEFAULT_WARMUP_APP_LABEL,
     attach_pod_progress_to_database_status,
-    build_warmup_scripts_configmap,
     database_status_from_warmup_jobs,
 )
 
 LOGGER = logging.getLogger(__name__)
-
-# Shared thread pool for the K8s monitor fan-outs. Replaces the per-call
-# ``ThreadPoolExecutor(max_workers=...)`` blocks that used to spawn +
-# tear down 6-12 worker threads every monitor poll. One process-wide
-# executor (default 16 workers, env-overridable) lets the dashboard's
-# repeated polls reuse the same warm threads — saving the
-# pthread_create / start_new_thread cost per tick.
-_K8S_FANOUT_POOL_MAX_WORKERS = 16
-
-
-def _resolve_k8s_fanout_max_workers() -> int:
-    import os
-
-    raw = os.environ.get("K8S_FANOUT_POOL_MAX_WORKERS", "")
-    if raw:
-        try:
-            return max(1, min(int(raw), 128))
-        except ValueError:
-            return _K8S_FANOUT_POOL_MAX_WORKERS
-    return _K8S_FANOUT_POOL_MAX_WORKERS
-
-
-_K8S_FANOUT_POOL: ThreadPoolExecutor | None = None
-_K8S_FANOUT_POOL_LOCK = threading.Lock()
-
-
-def _k8s_fanout_pool() -> ThreadPoolExecutor:
-    """Return the process-shared executor for monitor fan-outs."""
-    global _K8S_FANOUT_POOL
-    pool = _K8S_FANOUT_POOL
-    if pool is not None:
-        return pool
-    with _K8S_FANOUT_POOL_LOCK:
-        if _K8S_FANOUT_POOL is None:
-            _K8S_FANOUT_POOL = ThreadPoolExecutor(
-                max_workers=_resolve_k8s_fanout_max_workers(),
-                thread_name_prefix="k8s-fanout",
-            )
-        return _K8S_FANOUT_POOL
-
-
-def _shutdown_k8s_fanout_pool() -> None:
-    global _K8S_FANOUT_POOL
-    with _K8S_FANOUT_POOL_LOCK:
-        pool = _K8S_FANOUT_POOL
-        _K8S_FANOUT_POOL = None
-    if pool is not None:
-        pool.shutdown(wait=False, cancel_futures=True)
-
-
-atexit.register(_shutdown_k8s_fanout_pool)
+aks_client = _credentials.aks_client
+reset_k8s_session_pool = _credentials.reset_k8s_session_pool
 
 _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,63}$")
 _SAFE_K8S_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
@@ -109,6 +62,7 @@ __all__ = [
     "_ensure_job_manifests",
     "_get_k8s_credential_material",
     "_get_k8s_session",
+    "aks_client",
     "k8s_cancel_blast_job",
     "k8s_check_blast_status",
     "k8s_check_namespace_exists",
@@ -130,14 +84,53 @@ __all__ = [
 ]
 
 
+def _get_k8s_session(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    *,
+    admin: bool = False,
+) -> tuple[Any, str]:
+    original = _credentials.aks_client
+    _credentials.aks_client = aks_client
+    try:
+        return _credentials._get_k8s_session(
+            credential,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            admin=admin,
+        )
+    finally:
+        _credentials.aks_client = original
+
+
+def _get_k8s_credential_material(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    *,
+    admin: bool,
+) -> Any:
+    original = _credentials.aks_client
+    _credentials.aks_client = aks_client
+    try:
+        return _credentials._get_k8s_credential_material(
+            credential,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            admin=admin,
+        )
+    finally:
+        _credentials.aks_client = original
+
+
 def reset_k8s_credential_cache() -> None:
-    _k8s_client.reset_k8s_credential_cache()
+    _credentials.reset_k8s_credential_cache()
     _reset_blast_status_cache()
-
-
-def reset_k8s_session_pool() -> None:
-    """Drop all pooled K8s sessions. Test-only re-export of the client helper."""
-    _k8s_client.reset_k8s_session_pool()
 
 
 # ---------------------------------------------------------------------------
@@ -230,50 +223,6 @@ def _container_terminated_state(container_status: dict[str, Any]) -> dict[str, A
     return None
 
 
-def _get_k8s_session(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    *,
-    admin: bool = False,
-) -> tuple[Any, str]:
-    original = _k8s_client.aks_client
-    _k8s_client.aks_client = aks_client
-    try:
-        return _k8s_client._get_k8s_session(
-            credential,
-            subscription_id,
-            resource_group,
-            cluster_name,
-            admin=admin,
-        )
-    finally:
-        _k8s_client.aks_client = original
-
-
-def _get_k8s_credential_material(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    *,
-    admin: bool,
-) -> Any:
-    original = _k8s_client.aks_client
-    _k8s_client.aks_client = aks_client
-    try:
-        return _k8s_client._get_k8s_credential_material(
-            credential,
-            subscription_id,
-            resource_group,
-            cluster_name,
-            admin=admin,
-        )
-    finally:
-        _k8s_client.aks_client = original
-
-
 def _namespace_or_default(session: Any, server: str, namespace: str) -> str:
     response = session.get(f"{server}/api/v1/namespaces/{namespace}", timeout=10)
     return "default" if response.status_code == 404 else namespace
@@ -298,129 +247,6 @@ def _owned_job_names(pods: list[dict[str, Any]]) -> set[str]:
 
 def _job_has_label_value(job: dict[str, Any], name: str, value: str) -> bool:
     return cast(bool, job.get("metadata", {}).get("labels", {}).get(name) == value)
-
-
-def k8s_ensure_job_manifests(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    jobs: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Create Kubernetes Jobs if missing, leaving existing Jobs untouched."""
-
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name, admin=True
-    )
-    try:
-        return _ensure_job_manifests(session, server, jobs)
-    finally:
-        session.close()
-
-def k8s_ensure_warmup_scripts_configmap(
-    credential: TokenCredential,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-) -> dict[str, Any]:
-    """Create or update the ConfigMap mounted by warmup Jobs."""
-
-    session, server = _get_k8s_session(
-        credential, subscription_id, resource_group, cluster_name, admin=True
-    )
-    try:
-        manifest = build_warmup_scripts_configmap()
-        return _ensure_configmap(session, server, manifest)
-    finally:
-        session.close()
-
-
-def _ensure_configmap(session: Any, server: str, manifest: dict[str, Any]) -> dict[str, Any]:
-    metadata = manifest.get("metadata", {}) or {}
-    namespace = str(metadata.get("namespace") or "default")
-    name = str(metadata.get("name") or "")
-    if not name:
-        raise ValueError("configmap name is required")
-    url = f"{server}/api/v1/namespaces/{namespace}/configmaps/{name}"
-    response = session.get(url, timeout=10)
-    if response.status_code == 404:
-        create = session.post(
-            f"{server}/api/v1/namespaces/{namespace}/configmaps",
-            json=manifest,
-            timeout=10,
-        )
-        if create.status_code not in {200, 201}:
-            return {"status": "error", "name": name, "status_code": create.status_code}
-        return {"status": "created", "name": name}
-    if response.status_code != 200:
-        return {"status": "error", "name": name, "status_code": response.status_code}
-
-    existing = response.json()
-    if existing.get("data") == manifest.get("data"):
-        return {"status": "unchanged", "name": name}
-    manifest = {
-        **manifest,
-        "metadata": {
-            **metadata,
-            "resourceVersion": existing.get("metadata", {}).get("resourceVersion"),
-        },
-    }
-    update = session.put(url, json=manifest, timeout=10)
-    if update.status_code not in {200, 201}:
-        return {"status": "error", "name": name, "status_code": update.status_code}
-    return {"status": "updated", "name": name}
-
-
-def _ensure_job_manifests(session: Any, server: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
-    created: list[str] = []
-    existing: list[str] = []
-    errors: list[dict[str, Any]] = []
-    for job in jobs:
-        metadata = job.get("metadata", {}) or {}
-        namespace = str(metadata.get("namespace") or "default")
-        name = str(metadata.get("name") or "")
-        if not _SAFE_K8S_NAME_RE.match(namespace) or not _SAFE_K8S_NAME_RE.match(name):
-            errors.append({"name": name, "namespace": namespace, "error": "invalid job identity"})
-            continue
-
-        url = f"{server}/apis/batch/v1/namespaces/{namespace}/jobs"
-        get_response = session.get(f"{url}/{name}", timeout=10)
-        if get_response.status_code == 200:
-            existing.append(name)
-            continue
-        if get_response.status_code not in (404,):
-            errors.append(
-                {
-                    "name": name,
-                    "namespace": namespace,
-                    "status_code": get_response.status_code,
-                    "error": get_response.text[:300],
-                }
-            )
-            continue
-
-        create_response = session.post(url, json=job, timeout=10)
-        if create_response.status_code in (200, 201, 202):
-            created.append(name)
-        elif create_response.status_code == 409:
-            existing.append(name)
-        else:
-            errors.append(
-                {
-                    "name": name,
-                    "namespace": namespace,
-                    "status_code": create_response.status_code,
-                    "error": create_response.text[:300],
-                }
-            )
-    return {
-        "created": created,
-        "existing": existing,
-        "errors": errors,
-        "created_count": len(created),
-        "existing_count": len(existing),
-        "error_count": len(errors),
-    }
 
 
 def k8s_check_blast_status(

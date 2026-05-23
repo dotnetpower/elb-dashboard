@@ -236,6 +236,8 @@ obj/
 # Test outputs
 coverage/
 .vitest-cache/
+web/playwright-report/
+web/test-results/
 .logs/
 
 # OS

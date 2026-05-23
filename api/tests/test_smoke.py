@@ -471,7 +471,9 @@ def test_storage_summary_preserves_hns_when_container_list_fails(
         ),
         blob_containers=BrokenBlobContainers(),
     )
-    monkeypatch.setattr("api.services.monitoring.storage.storage_client", lambda *_args: fake_client)
+    monkeypatch.setattr(
+        "api.services.monitoring.storage.storage_client", lambda *_args: fake_client
+    )
 
     body = get_storage_summary(object(), "sub", "rg", "stelb")
 
@@ -519,7 +521,9 @@ def test_storage_summary_includes_container_usage(
         ),
         blob_containers=FakeBlobContainers(),
     )
-    monkeypatch.setattr("api.services.monitoring.storage.storage_client", lambda *_args: fake_client)
+    monkeypatch.setattr(
+        "api.services.monitoring.storage.storage_client", lambda *_args: fake_client
+    )
     monkeypatch.setattr(
         "api.services.storage.usage_cache.storage_data.container_usage_summaries",
         lambda _credential, _account_name, _names, **_kwargs: {
@@ -601,7 +605,9 @@ def test_storage_summary_keeps_containers_when_usage_fails(
         ),
         blob_containers=FakeBlobContainers(),
     )
-    monkeypatch.setattr("api.services.monitoring.storage.storage_client", lambda *_args: fake_client)
+    monkeypatch.setattr(
+        "api.services.monitoring.storage.storage_client", lambda *_args: fake_client
+    )
 
     def raise_usage(*_args: object, **_kwargs: object) -> dict[str, dict[str, int]]:
         raise RuntimeError("usage unavailable")

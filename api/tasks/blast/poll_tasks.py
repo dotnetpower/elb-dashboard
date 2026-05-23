@@ -95,7 +95,7 @@ def check_status(
 
     del self
     try:
-        from api.services.state.repository import JobStateRepository
+        from api.services.state_repo import JobStateRepository
 
         repo = JobStateRepository()
         children = list(repo.list_children(job_id, limit=1000))
@@ -176,7 +176,7 @@ def poll_running_status(
             _K8S_REFRESH_PHASES,
             _refresh_running_blast_state,
         )
-        from api.services.state.repository import JobStateRepository
+        from api.services.state_repo import JobStateRepository
     except Exception as exc:
         LOGGER.warning("poll_running_status: dependency unavailable: %s", exc)
         return {**summary, "error": type(exc).__name__}

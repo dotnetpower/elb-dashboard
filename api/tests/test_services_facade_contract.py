@@ -52,6 +52,9 @@ _FLAT_SHIMS: tuple[tuple[str, str], ...] = (
     ("api.services.db_sharding", "api.services.db.sharding"),
     # k8s/
     ("api.services.k8s_client", "api.services.k8s.client"),
+    ("api.services.k8s_credentials", "api.services.k8s.credentials"),
+    ("api.services.k8s_fanout", "api.services.k8s.fanout"),
+    ("api.services.k8s_manifests", "api.services.k8s.manifests"),
     ("api.services.k8s_metrics", "api.services.k8s.metrics"),
     ("api.services.k8s_monitoring", "api.services.k8s.monitoring"),
     ("api.services.k8s_nodes", "api.services.k8s.nodes"),
@@ -63,9 +66,17 @@ _FLAT_SHIMS: tuple[tuple[str, str], ...] = (
     ("api.services.openapi_token", "api.services.openapi.token"),
     # storage/
     ("api.services.storage_data", "api.services.storage.data"),
+    ("api.services.storage_blob_ids", "api.services.storage.blob_ids"),
+    ("api.services.storage_blob_io", "api.services.storage.blob_io"),
+    ("api.services.storage_blob_paths", "api.services.storage.blob_paths"),
+    ("api.services.storage_client_pool", "api.services.storage.client_pool"),
+    ("api.services.storage_database_list", "api.services.storage.database_list"),
     ("api.services.storage_endpoint", "api.services.storage.endpoint"),
+    ("api.services.storage_failure_classifier", "api.services.storage.failure_classifier"),
+    ("api.services.storage_local_rbac", "api.services.storage.local_rbac"),
     ("api.services.storage_network", "api.services.storage.network"),
     ("api.services.storage_public_access", "api.services.storage.public_access"),
+    ("api.services.storage_usage", "api.services.storage.usage"),
     ("api.services.storage_url_validation", "api.services.storage.url_validation"),
     ("api.services.storage_usage_cache", "api.services.storage.usage_cache"),
     # warmup/

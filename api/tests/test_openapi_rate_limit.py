@@ -19,7 +19,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-def _build_client(monkeypatch: pytest.MonkeyPatch, *, limit: int, window: float = 60.0) -> TestClient:
+def _build_client(
+    monkeypatch: pytest.MonkeyPatch, *, limit: int, window: float = 60.0
+) -> TestClient:
     """Build a fresh FastAPI app with the rate-limit middleware tuned for tests."""
     monkeypatch.setenv("OPENAPI_RATE_LIMIT_REQUESTS_PER_WINDOW", str(limit))
     monkeypatch.setenv("OPENAPI_RATE_LIMIT_WINDOW_SECONDS", str(window))
