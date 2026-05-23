@@ -1,0 +1,235 @@
+"""Per-request id, timing, metrics, and inspector middleware.
+
+Responsibility: Stamp every request with X-Request-Id, log one-line completion,
+record into the latency/error ring buffer, and (when capture is enabled) buffer
+request/response body into the per-request DETAIL inspector.
+Edit boundaries: HTTP middleware only. Inspector-path rules live in
+`api.app.inspector`; jwt/IP helpers in `api.app.jwt_utils`. Do not import
+Azure SDK here — request_metrics + event_emitter are the only allowed sinks.
+Key entry points: `RequestIdMiddleware`.
+Risky contracts: Body buffering is capped at `INSPECTOR_MAX_BUFFER_BYTES`;
+SSE/WebSocket paths must already be excluded by `_inspector_should_capture`
+because a streaming response body cannot be safely buffered.
+Validation: `uv run pytest -q api/tests/test_request_metrics_detail.py`.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import secrets
+import time
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from fastapi import Request
+from fastapi.responses import Response
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from api.app.inspector import (
+    INSPECTOR_MAX_BUFFER_BYTES,
+    _inspector_should_capture,
+)
+from api.app.jwt_utils import _decode_jwt_upn, _extract_client_ip
+
+LOGGER = logging.getLogger("api.app.middleware")
+
+
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Stamp every request with an X-Request-Id (in & out) and log a one-line
+    completion record. Lets us correlate SPA errors with backend traces in
+    Application Insights without having to enable per-request body capture.
+    """
+
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        rid = request.headers.get("x-request-id") or secrets.token_hex(8)
+        request.state.request_id = rid
+        t0 = time.monotonic()
+        path = request.url.path
+        method = request.method
+
+        # Per-request DETAIL inspector — capture up to N bytes of the
+        # request body for the metrics buffer. Skipped for SSE/WebSocket/
+        # health/metrics and for high-volume polling GETs (see
+        # INSPECTOR_EXCLUDE_GET_PREFIXES).
+        #
+        # Memory contract: the previous version did
+        #   raw = await request.body()
+        #   captured_request_body = raw[:INSPECTOR_MAX_BUFFER_BYTES]
+        #   request._receive = closure-over-raw
+        # which kept *two* copies of the body in RAM (the captured slice
+        # and the raw closure body) for the lifetime of the route. We now
+        # keep a single ``raw_body`` and slice lazily only when the
+        # metrics emitter actually asks for it, so multi-MB uploads
+        # consume body-size + zero on the inspector side instead of 2x.
+        capture = os.environ.get(
+            "REQUEST_DETAIL_CAPTURE_ENABLED", "true"
+        ).lower() != "false" and _inspector_should_capture(path, method)
+        raw_body: bytes | None = None
+        if capture and method in {"POST", "PUT", "PATCH", "DELETE"}:
+            try:
+                raw_body = await request.body()
+
+                async def _replay_receive(_body: bytes = raw_body) -> dict[str, Any]:
+                    return {"type": "http.request", "body": _body, "more_body": False}
+
+                request._receive = _replay_receive  # type: ignore[attr-defined]
+            except Exception:
+                raw_body = None
+
+        def _captured_body_bytes() -> bytes | None:
+            if raw_body is None:
+                return None
+            if len(raw_body) <= INSPECTOR_MAX_BUFFER_BYTES:
+                return raw_body
+            return raw_body[:INSPECTOR_MAX_BUFFER_BYTES]
+
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            LOGGER.exception(
+                "req_failed rid=%s method=%s path=%s elapsed=%.0fms err=%s",
+                rid,
+                method,
+                path,
+                elapsed_ms,
+                type(exc).__name__,
+            )
+            try:
+                from api.services.request_metrics import metrics as _metrics
+
+                if (
+                    path.startswith("/api/")
+                    and path != "/api/health"
+                    and not path.startswith("/api/monitor/sidecars")
+                    and not path.startswith("/api/monitor/metrics")
+                ):
+                    _metrics().record(path=path, status=0, duration_ms=elapsed_ms)
+            except Exception:  # noqa: S110
+                pass
+            if capture:
+                try:
+                    from api.services.request_metrics import record_detail as _rd
+
+                    _rd(
+                        request_id=rid,
+                        method=method,
+                        path=path,
+                        status=0,
+                        duration_ms=elapsed_ms,
+                        caller=_decode_jwt_upn(request.headers.get("authorization")),
+                        client_ip=_extract_client_ip(request),
+                        request_headers=list(request.headers.items()),
+                        request_body=_captured_body_bytes(),
+                        request_content_type=request.headers.get("content-type"),
+                        response_headers=[],
+                        response_body=None,
+                        response_content_type=None,
+                        response_size_bytes=None,
+                    )
+                except Exception:  # noqa: S110
+                    pass
+            raise
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+
+        captured_response_body: bytes | None = None
+        captured_response_size: int | None = None
+        if capture:
+            try:
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode("utf-8")
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total > INSPECTOR_MAX_BUFFER_BYTES:
+                        break
+                if total > INSPECTOR_MAX_BUFFER_BYTES:
+                    async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+                        if isinstance(chunk, str):
+                            chunk = chunk.encode("utf-8")
+                        chunks.append(chunk)
+                full = b"".join(chunks)
+                captured_response_body = full[:INSPECTOR_MAX_BUFFER_BYTES]
+                captured_response_size = len(full)
+                headers = dict(response.headers)
+                headers.pop("content-length", None)
+                response = Response(
+                    content=full,
+                    status_code=response.status_code,
+                    headers=headers,
+                    media_type=response.media_type,
+                )
+            except Exception:
+                captured_response_body = None
+
+        response.headers["x-request-id"] = rid
+        if path != "/api/health":
+            log_level = logging.INFO
+            if response.status_code >= 500:
+                log_level = logging.ERROR
+            elif response.status_code >= 400:
+                log_level = logging.WARNING
+            LOGGER.log(
+                log_level,
+                "req rid=%s method=%s path=%s status=%d elapsed=%.0fms",
+                rid,
+                method,
+                path,
+                response.status_code,
+                elapsed_ms,
+            )
+        try:
+            if (
+                path.startswith("/api/")
+                and path != "/api/health"
+                and not path.startswith("/api/monitor/sidecars")
+                and not path.startswith("/api/monitor/metrics")
+            ):
+                from api.services.request_metrics import metrics as _metrics
+
+                _metrics().record(
+                    path=path,
+                    status=response.status_code,
+                    duration_ms=elapsed_ms,
+                )
+        except Exception:  # noqa: S110
+            pass
+        if capture:
+            try:
+                from api.services.request_metrics import record_detail as _rd
+
+                _rd(
+                    request_id=rid,
+                    method=method,
+                    path=path,
+                    status=response.status_code,
+                    duration_ms=elapsed_ms,
+                    caller=_decode_jwt_upn(request.headers.get("authorization")),
+                    client_ip=_extract_client_ip(request),
+                    request_headers=list(request.headers.items()),
+                    request_body=_captured_body_bytes(),
+                    request_content_type=request.headers.get("content-type"),
+                    response_headers=list(response.headers.items()),
+                    response_body=captured_response_body,
+                    response_content_type=response.headers.get("content-type"),
+                    response_size_bytes=captured_response_size,
+                )
+            except Exception:  # noqa: S110
+                pass
+        if path != "/api/health" and not path.startswith("/api/monitor/sidecars"):
+            from api.services.event_emitter import (
+                ROW_HTTP,
+                ROW_TERM,
+            )
+            from api.services.event_emitter import (
+                emit as _emit_event,
+            )
+
+            _emit_event(ROW_TERM if path.startswith("/api/terminal") else ROW_HTTP)
+        return response
