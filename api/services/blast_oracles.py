@@ -121,7 +121,7 @@ def db_order_oracle_part_urls(
     expected_source_version: str | None = None,
 ) -> list[str]:
     from api.services import get_credential
-    from api.services.db_order_oracle import ORACLE_PARTS_DIR, ORACLE_PREFIX_ROOT
+    from api.services.db.order_oracle import ORACLE_PARTS_DIR, ORACLE_PREFIX_ROOT
     from api.services.storage_data import _blob_service
 
     svc = _blob_service(get_credential(), storage_account)

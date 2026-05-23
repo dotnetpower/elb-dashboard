@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 from api.services.aks_skus import DEFAULT_SKU
-from api.services.db_sharding import (
+from api.services.db.sharding import (
     PRESET_SHARD_SETS,
     SAFE_SHARD_FRACTION_OF_NODE_RAM,
 )

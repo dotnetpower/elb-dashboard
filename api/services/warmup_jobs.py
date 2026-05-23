@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from api.services.db_sharding import DEFAULT_CONTAINER, MAX_SHARDS, partition_prefix_for
+from api.services.db.sharding import DEFAULT_CONTAINER, MAX_SHARDS, partition_prefix_for
 from api.services.warmup_scripts import (
     BLAST_VMTOUCH_AKS_SCRIPT as _BLAST_VMTOUCH_AKS_SCRIPT,
 )
@@ -128,7 +128,7 @@ def build_warmup_job_plan(
     """Build one Kubernetes Job per shard, pinned one-to-one onto nodes.
 
     The generated jobs mount a node-local hostPath at ``/blast/blastdb`` so the
-    shard ``.nal`` files produced by ``api.services.db_sharding`` point at the
+    shard ``.nal`` files produced by ``api.services.db.sharding`` point at the
     same paths BLAST sees inside the container.
     """
 

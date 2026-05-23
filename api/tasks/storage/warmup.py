@@ -143,7 +143,7 @@ def warmup_database(
                 import json
                 from datetime import datetime
 
-                from api.services.db_sharding import (
+                from api.services.db.sharding import (
                     DEFAULT_CONTAINER,
                     ensure_shard_sets,
                 )
@@ -238,7 +238,7 @@ def warmup_database(
                 try:
                     import json as _json
 
-                    from api.services.db_sharding import DEFAULT_CONTAINER as _DC
+                    from api.services.db.sharding import DEFAULT_CONTAINER as _DC
                     from api.services.sanitise import sanitise as _sanitise
                     from api.services.storage_data import _blob_service as _bs
 

@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
 from api.services.aks_skus import DEFAULT_SKU, SKU_BY_NAME
-from api.services.db_sharding import (
+from api.services.db.sharding import (
     PRESET_SHARD_SETS,
     SAFE_SHARD_FRACTION_OF_NODE_RAM,
     select_partitions_for_submit,

@@ -144,7 +144,7 @@ def blast_database_shard(
     from azure.core.exceptions import ResourceNotFoundError
 
     from api.services import get_credential
-    from api.services.db_sharding import (
+    from api.services.db.sharding import (
         DEFAULT_CONTAINER,
         ensure_shard_sets,
     )
@@ -256,7 +256,7 @@ def blast_database_shard(
     # Audit — records the sharding action against the caller so /api/audit/log
     # surfaces it alongside BLAST / warmup operations.
     try:
-        from api.services.db_ops_audit import record_db_op
+        from api.services.db.ops_audit import record_db_op
 
         record_db_op(
             op="shard",
@@ -389,7 +389,7 @@ def blast_database_order_oracle(
     from datetime import datetime
 
     from api.services import get_credential
-    from api.services.db_order_oracle import (
+    from api.services.db.order_oracle import (
         ORACLE_PARTS_DIR,
         ORACLE_PREFIX_ROOT,
         build_db_order_oracle_job_plan,
@@ -584,7 +584,7 @@ def blast_database_order_oracle(
     # Audit — capture run_id + expected_parts so a later /api/audit/log query
     # can correlate this oracle run with its part blobs.
     try:
-        from api.services.db_ops_audit import record_db_op
+        from api.services.db.ops_audit import record_db_op
 
         record_db_op(
             op="oracle",

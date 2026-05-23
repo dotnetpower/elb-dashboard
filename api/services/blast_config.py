@@ -210,7 +210,7 @@ def generate_config(params: dict[str, Any]) -> str:
         # dependency at import time (blast_config is also used in unit
         # tests that don't have azure-storage-blob installed by default
         # in some restricted environments).
-        from api.services.db_sharding import (
+        from api.services.db.sharding import (
             partition_prefix_for,
             select_partitions_for_submit,
         )

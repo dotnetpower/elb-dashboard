@@ -14,34 +14,77 @@ deployed dashboard. It is paired with the script
 
 !!! success "Quick rolling update (TL;DR)"
 
-    When your local tree is already the code you want to ship (either
-    `git pull` is done, or your uncommitted edits **are** the release),
-    deploy all six sidecars in one shot:
+    Pick the path that matches who you are. Both deploy all six sidecars
+    (api / worker / beat / frontend / terminal / redis) by rebuilding the
+    three custom images (`elb-api`, `elb-frontend`, `elb-terminal`) and
+    swapping the Container App template via [`postprovision.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/postprovision.sh).
 
-    ```bash
-    # 1. Preview the plan — no build, no PATCH.
-    scripts/dev/cli-upgrade.sh full --allow-dirty --dry-run
+    === "Operator (not editing code)"
 
-    # 2. Run it for real. Builds 3 images (elb-api, elb-frontend,
-    #    elb-terminal) and swaps the Container App template covering all
-    #    6 sidecars (api / worker / beat / frontend / terminal / redis).
-    scripts/dev/cli-upgrade.sh full --allow-dirty --yes
-    ```
+        You are deploying a tagged release from `origin/main` (or a
+        release branch) without local edits. This is the safest path —
+        the SPA header `vA.B.<build> · <short-sha>` will match exactly
+        what is in git, so future "what shipped?" questions are trivial.
 
-    - `full` triggers the full image rebuild + [`postprovision.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/postprovision.sh) template swap.
-    - `--allow-dirty` acknowledges that uncommitted edits are intentional.
-    - `--yes` skips the interactive confirm prompt.
-    - Omit `--pull`: the script refuses to `git pull` on a dirty tree, and
-      you already have the code you want to ship locally.
-    - Snapshot + `/api/health` poll + auto-rollback still run; tune the
-      budget with `--health-timeout 300` if the terminal sidecar was rebuilt.
+        ```bash
+        # 1. Land the release on your workstation.
+        git fetch --tags origin
+        git checkout main && git pull --ff-only
 
-    Only edited `api/` code and nothing under `infra/` or `terminal/`?
-    Use the faster `api` scope instead (~60 s, one image):
+        # 2. Preview the plan (no build, no PATCH).
+        scripts/dev/cli-upgrade.sh full --dry-run
 
-    ```bash
-    scripts/dev/cli-upgrade.sh api --allow-dirty --yes
-    ```
+        # 3. Deploy.
+        scripts/dev/cli-upgrade.sh full --yes
+        ```
+
+        - No `--allow-dirty`: the script refuses to proceed if the tree
+          is dirty, which is exactly the guardrail you want.
+        - `--pull` is intentionally **not** passed in step 3 — you
+          already pulled in step 1 and saw what landed.
+
+    === "Code contributor (deploying local edits)"
+
+        You are iterating on `api/`, `web/`, `terminal/`, or `infra/` and
+        want to ship the working tree. **Commit first** so the SPA header
+        SHA matches the deployed code (`az acr build` packages whatever
+        is on disk regardless of git state — see
+        [§ "Working tree, git, and the SPA header"](#working-tree-git-and-the-spa-header)).
+
+        ```bash
+        # 1. Commit (or stash, then unstash after deploy).
+        git add -A && git commit -m "feat(scope): summary"
+
+        # 2. Preview the plan.
+        scripts/dev/cli-upgrade.sh full --dry-run
+
+        # 3. Deploy.
+        scripts/dev/cli-upgrade.sh full --yes
+        ```
+
+        If you absolutely must deploy uncommitted edits (e.g. quick
+        production hotfix you will commit immediately after), add
+        `--allow-dirty` to acknowledge the SHA mismatch:
+
+        ```bash
+        scripts/dev/cli-upgrade.sh full --allow-dirty --yes
+        ```
+
+        Then **commit the same diff right after the deploy succeeds**,
+        and record the commit SHA in the per-feature change note under
+        `docs/features_change/`.
+
+        Only edited `api/` code (no `infra/`, `terminal/`, or sidecar
+        layout change)? The faster `api` scope rebuilds one image and
+        patches api+worker+beat in ~60 s:
+
+        ```bash
+        scripts/dev/cli-upgrade.sh api --yes
+        ```
+
+    For either path: snapshot + `/api/health` poll + auto-rollback still
+    run. Tune the budget with `--health-timeout 300` when the terminal
+    sidecar was rebuilt or the app was scaled to zero.
 
 !!! tip "Prefer the in-browser upgrade when possible"
 
@@ -83,6 +126,39 @@ flowchart TD
   health2 -- 200 --> rolled(["⚠ rolled back<br/>exit 1"])
   health2 -- timeout --> dead(["✗ rollback failed<br/>exit 1"])
 ```
+
+## Working tree, git, and the SPA header
+
+`az acr build` packages the **current working tree** (filtered by
+`.dockerignore`) as the build context. It does not care whether files
+are staged, committed, or pushed — whatever is on disk at build time
+goes into the image. `--allow-dirty` only suppresses the dirty-tree
+**guardrail**; it does not change what gets packaged.
+
+The SPA header `vA.B.<build> · <short-sha>` is resolved on the build
+host by [`scripts/dev/quick-deploy.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/quick-deploy.sh)
+and [`scripts/dev/postprovision.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/postprovision.sh)
+and passed to `az acr build` as `--build-arg`. The short-sha comes from
+`git rev-parse --short HEAD`, i.e. the last **commit**. Consequence:
+
+| Pre-deploy git state | Code shipped | SPA header SHA | Traceability |
+|----------------------|--------------|----------------|--------------|
+| Clean (committed)    | HEAD         | matches HEAD   | ✅ trivial — `git show <sha>` reproduces it |
+| Dirty (`--allow-dirty`) | working tree | matches **previous** HEAD | ⚠ header lies — diff exists only on your laptop |
+
+Verification when you want to confirm a specific file made it into the
+deployed image:
+
+```bash
+az containerapp exec \
+  --name "$CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
+  --container api --command "sha256sum /app/api/main.py"
+sha256sum api/main.py    # local comparison
+```
+
+Same hash → shipped as intended. Different → check
+[`.dockerignore`](https://github.com/dotnetpower/elb-dashboard/blob/main/.dockerignore)
+or whether a later build stage overwrote the file.
 
 ## Preflight checklist
 

@@ -142,7 +142,7 @@ def test_concurrent_prepare_db_returns_409(
         raising=True,
     )
     monkeypatch.setattr(
-        "api.services.db_ops_audit.record_db_op",
+        "api.services.db.ops_audit.record_db_op",
         lambda **_kw: "",
         raising=False,
     )
@@ -193,7 +193,7 @@ def test_cancel_aborts_pending_copies(
         raising=True,
     )
     monkeypatch.setattr(
-        "api.services.db_ops_audit.record_db_op",
+        "api.services.db.ops_audit.record_db_op",
         lambda **_kw: "",
         raising=False,
     )

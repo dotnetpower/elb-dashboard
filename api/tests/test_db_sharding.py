@@ -1,6 +1,6 @@
-"""Unit tests for api.services.db_sharding.
+"""Unit tests for api.services.db.sharding.
 
-Responsibility: Unit tests for api.services.db_sharding
+Responsibility: Unit tests for api.services.db.sharding
 Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
 Azure calls.
 Key entry points: `_FakeBlob`, `_FakeBlobClient`, `_FakeContainerClient`,
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
-from api.services import db_sharding as dbs
+from api.services.db import sharding as dbs
 
 
 # ---------------------------------------------------------------------------

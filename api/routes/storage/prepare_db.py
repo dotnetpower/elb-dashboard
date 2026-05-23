@@ -695,7 +695,7 @@ def prepare_db(
                 return
 
             # Phase 3: all copies succeeded — auto-shard, then promote.
-            from api.services.db_sharding import (
+            from api.services.db.sharding import (
                 PRESET_SHARD_SETS,
                 derive_volumes_from_keys,
                 upload_shard_set,
@@ -809,7 +809,7 @@ def prepare_db(
     # Audit — recorded after the lock + thread are set up so a 409 / 502
     # earlier in the route does NOT leak a phantom "started" event.
     try:
-        from api.services.db_ops_audit import record_db_op
+        from api.services.db.ops_audit import record_db_op
 
         audit_job_id = record_db_op(
             op="prepare_db",
@@ -960,7 +960,7 @@ def prepare_db_cancel(
         )
 
     try:
-        from api.services.db_ops_audit import record_db_op
+        from api.services.db.ops_audit import record_db_op
 
         record_db_op(
             op="prepare_db_cancel",
