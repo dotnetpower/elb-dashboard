@@ -39,6 +39,12 @@
 #   --health-timeout <s> Seconds to wait for /api/health/ready=200. Default: 180.
 #   --no-auto-rollback   On health-check failure, DO NOT auto-rollback.
 #                        Print the rollback command instead.
+#   --skip-parity-check  Skip the Storage isolation parity preflight that
+#                        rejects deploys when workload Storage is set to
+#                        publicNetworkAccess=Disabled while no Private
+#                        Endpoint exists (the workload could not reach
+#                        Storage at all). Use only when you know what
+#                        you're doing.
 #   --yes                Skip the interactive "proceed?" prompt.
 #   --dry-run            Print the plan, do not build or PATCH.
 #   --logs               Tail the api sidecar logs after a successful
@@ -80,6 +86,7 @@ TARGET_BRANCH=""
 TAG=""
 HEALTH_TIMEOUT=180
 AUTO_ROLLBACK=true
+SKIP_PARITY=false
 ASSUME_YES=false
 DRY_RUN=false
 TAIL_LOGS=false
@@ -93,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     --tag)               shift; TAG="${1:-}" ;;
     --health-timeout)    shift; HEALTH_TIMEOUT="${1:-180}" ;;
     --no-auto-rollback)  AUTO_ROLLBACK=false ;;
+    --skip-parity-check) SKIP_PARITY=true ;;
     --yes|-y)            ASSUME_YES=true ;;
     --dry-run)           DRY_RUN=true ;;
     --logs)              TAIL_LOGS=true; ASSUME_YES=true ;;
@@ -147,6 +155,62 @@ fi
 if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
   az account set --subscription "$AZURE_SUBSCRIPTION_ID" >/dev/null
 fi
+
+# ---------------------------------------------------------------------------
+# Preflight: Storage isolation parity check.
+#
+# Catches the silent failure mode where someone ran
+# `storage-public-access.sh off` (or local-run.sh storage-off/auth-off) in a
+# prior local-debug session, set publicNetworkAccess=Disabled, but the
+# deployment was never run with LOCKDOWN_PRIVATE_NETWORKING=true — so no
+# Private Endpoint exists for Storage. In that state the Container App has
+# no network path to Storage data plane and every Table/Blob call returns
+# `403 AuthorizationFailure` (Azure's misleading error code for network
+# policy block on a public endpoint hit).
+#
+# We only reject the deploy when the broken combination is detected; we do
+# not require LOCKDOWN_PRIVATE_NETWORKING to be set either way.
+# ---------------------------------------------------------------------------
+preflight_storage_parity() {
+  if $SKIP_PARITY; then
+    warn "skipping Storage isolation parity check (--skip-parity-check)"
+    return 0
+  fi
+  local acct public pe_count
+  acct="$(az storage account list -g "$AZURE_RESOURCE_GROUP" \
+    --query "[?starts_with(name,'st')].name" -o tsv 2>/dev/null | head -1)"
+  if [[ -z "$acct" ]]; then
+    warn "no workload Storage account found in $AZURE_RESOURCE_GROUP — skipping parity check"
+    return 0
+  fi
+  public="$(az storage account show -g "$AZURE_RESOURCE_GROUP" -n "$acct" \
+    --query publicNetworkAccess -o tsv 2>/dev/null || echo unknown)"
+  pe_count="$(az network private-endpoint list -g "$AZURE_RESOURCE_GROUP" \
+    --query "[?contains(privateLinkServiceConnections[0].privateLinkServiceId,'$acct')] | length(@)" \
+    -o tsv 2>/dev/null || echo 0)"
+  ts "==> Storage parity: account=$acct publicNetworkAccess=$public privateEndpoints=$pe_count"
+  if [[ "$public" == "Disabled" && "$pe_count" -eq 0 ]]; then
+    cat >&2 <<EOF
+
+ERROR: workload Storage '$acct' is unreachable from the Container App.
+       publicNetworkAccess=Disabled AND no Private Endpoint exists in
+       resource group '$AZURE_RESOURCE_GROUP'.
+
+Recovery options:
+  (A) Quick reopen (test / local-debug):
+      scripts/dev/storage-public-access.sh on --account $acct --rg $AZURE_RESOURCE_GROUP
+
+  (B) Proper production posture (creates the PEs via Bicep):
+      azd env set LOCKDOWN_PRIVATE_NETWORKING true && azd provision
+
+Override and deploy anyway (workload will keep failing on Storage):
+  --skip-parity-check
+EOF
+    return 1
+  fi
+  return 0
+}
+preflight_storage_parity || die "Storage parity preflight failed (see above)."
 
 SNAPSHOT="${ELB_UPGRADE_SNAPSHOT:-/tmp/elb-upgrade-snapshot-${CONTAINER_APP_NAME}.json}"
 
