@@ -38,9 +38,22 @@ LOGGER = logging.getLogger(__name__)
 # may be hit at high frequency by monitoring/CI; without a TTL cache each
 # request would fan out a real Storage Table data-plane call (DDoS
 # amplifier).
+#
+# Differential TTL on purpose:
+#   * `ok`           — cached for 15 s. This is the amplifier defense.
+#   * `down`/`skipped` — cached for 3 s only. A long TTL on a `down` would
+#     keep returning the old failure for up to 14 s after an operator
+#     opens Storage back up, making recovery look broken when it is not.
 _STORAGE_PROBE_CACHE: dict[str, Any] = {"value": None, "ts": 0.0}
 _STORAGE_PROBE_CACHE_LOCK = threading.Lock()
-_STORAGE_PROBE_CACHE_TTL_SECONDS = 15.0
+_STORAGE_PROBE_CACHE_TTL_OK_SECONDS = 15.0
+_STORAGE_PROBE_CACHE_TTL_BAD_SECONDS = 3.0
+
+
+def _ttl_for(result: dict[str, Any] | None) -> float:
+    if result is not None and result.get("status") == "ok":
+        return _STORAGE_PROBE_CACHE_TTL_OK_SECONDS
+    return _STORAGE_PROBE_CACHE_TTL_BAD_SECONDS
 
 
 def _reset_storage_probe_cache() -> None:
@@ -64,7 +77,7 @@ def _probe_storage_table() -> dict[str, Any]:
     with _STORAGE_PROBE_CACHE_LOCK:
         cached = _STORAGE_PROBE_CACHE["value"]
         cached_ts = _STORAGE_PROBE_CACHE["ts"]
-    if cached is not None and now - cached_ts < _STORAGE_PROBE_CACHE_TTL_SECONDS:
+    if cached is not None and now - cached_ts < _ttl_for(cached):
         return cached
 
     endpoint = os.environ.get("AZURE_TABLE_ENDPOINT", "")

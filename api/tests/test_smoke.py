@@ -189,6 +189,68 @@ def test_readiness_storage_probe_is_cached_within_ttl(
     )
 
 
+def test_readiness_storage_down_result_uses_short_ttl(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`down` results expire faster than `ok` so operators see recovery quickly.
+
+    Without differential TTL a transient failure would keep returning the
+    old `down` payload for the full TTL even after Storage was reopened.
+    """
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    call_count = 0
+
+    class _ExplodingService:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _ExplodingService:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def list_tables(self, *args: object, **kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("simulated AuthorizationFailure")
+
+    import api.services
+    import azure.data.tables
+
+    monkeypatch.setattr(azure.data.tables, "TableServiceClient", _ExplodingService)
+    monkeypatch.setattr(api.services, "get_credential", lambda: object())
+
+    # Drive a fake clock so we can advance past the BAD TTL without sleeping.
+    import api.routes.health as health_module
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(
+        health_module.time, "monotonic", lambda: fake_now[0], raising=True
+    )
+
+    # First call probes and caches `down` (call 1).
+    r = client.get("/api/health/ready")
+    assert r.json()["components"]["azure_storage"]["status"] == "down"
+    assert call_count == 1
+
+    # Within BAD TTL window: still cached, no new probe.
+    fake_now[0] += health_module._STORAGE_PROBE_CACHE_TTL_BAD_SECONDS / 2.0
+    r = client.get("/api/health/ready")
+    assert r.json()["components"]["azure_storage"]["status"] == "down"
+    assert call_count == 1, "cache hit should have prevented a second probe"
+
+    # Past BAD TTL: should re-probe (call 2). If the OK TTL of 15 s were used
+    # here, this assertion would fail — that is the regression this test pins.
+    fake_now[0] += health_module._STORAGE_PROBE_CACHE_TTL_BAD_SECONDS + 0.01
+    r = client.get("/api/health/ready")
+    assert r.json()["components"]["azure_storage"]["status"] == "down"
+    assert call_count == 2, (
+        f"down result should have expired and re-probed after "
+        f"{health_module._STORAGE_PROBE_CACHE_TTL_BAD_SECONDS}s; got call_count={call_count}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Auth gates
 # ---------------------------------------------------------------------------
@@ -330,7 +392,7 @@ def test_storage_summary_preserves_hns_when_container_list_fails(
         ),
         blob_containers=BrokenBlobContainers(),
     )
-    monkeypatch.setattr("api.services.monitoring.storage_client", lambda *_args: fake_client)
+    monkeypatch.setattr("api.services.monitoring.storage.storage_client", lambda *_args: fake_client)
 
     body = get_storage_summary(object(), "sub", "rg", "stelb")
 
@@ -378,7 +440,7 @@ def test_storage_summary_includes_container_usage(
         ),
         blob_containers=FakeBlobContainers(),
     )
-    monkeypatch.setattr("api.services.monitoring.storage_client", lambda *_args: fake_client)
+    monkeypatch.setattr("api.services.monitoring.storage.storage_client", lambda *_args: fake_client)
     monkeypatch.setattr(
         "api.services.storage.usage_cache.storage_data.container_usage_summaries",
         lambda _credential, _account_name, _names, **_kwargs: {
@@ -460,7 +522,7 @@ def test_storage_summary_keeps_containers_when_usage_fails(
         ),
         blob_containers=FakeBlobContainers(),
     )
-    monkeypatch.setattr("api.services.monitoring.storage_client", lambda *_args: fake_client)
+    monkeypatch.setattr("api.services.monitoring.storage.storage_client", lambda *_args: fake_client)
 
     def raise_usage(*_args: object, **_kwargs: object) -> dict[str, dict[str, int]]:
         raise RuntimeError("usage unavailable")
@@ -840,7 +902,7 @@ def test_blast_submit_persists_celery_task_id(
             updates.append((job_id, kwargs))
             return SimpleNamespace(job_id=job_id, **kwargs)
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepository)
     monkeypatch.setattr(
         "api.tasks.blast.submit.delay", lambda **_kwargs: AsyncResultStub("task-persisted")
     )
@@ -983,7 +1045,7 @@ def test_blast_submit_idempotency_key_reuses_existing_job(
         def create(self, state: object) -> object:
             raise AssertionError("idempotent retry must not create a new row")
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepository)
     monkeypatch.setattr("api.tasks.blast.submit.delay", fake_delay)
 
     r = client.post(
@@ -1025,7 +1087,7 @@ def test_blast_job_events_returns_canonical_history(
                 }
             ]
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepository)
 
     r = client.get("/api/blast/jobs/job-1/events")
 
@@ -1048,7 +1110,7 @@ def test_blast_job_queue_returns_position(
                 SimpleNamespace(job_id="job-2", status="queued", created_at="2"),
             ]
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepository)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepository)
 
     r = client.get("/api/blast/jobs/job-2/queue")
 
@@ -1084,7 +1146,7 @@ def test_blast_job_file_reads_uploaded_query_from_queries_container(
         assert max_bytes == 1000
         return ">q1\nACGT\n"
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepo)
     monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     r = client.get(
@@ -1111,7 +1173,7 @@ def test_blast_job_file_rejects_query_blob_outside_job(
                 payload={"query_file": f"queries/uploads/{job_id}/query.fa"},
             )
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepo)
 
     r = client.get(
         "/api/blast/jobs/job-123/file"
@@ -1148,7 +1210,7 @@ def test_blast_job_file_accepts_job_query_blob_url(
         reads.append((container, blob_path))
         return ">q1\nACGT\n"
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepo)
     monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     query_url = "https://elbstg01.blob.core.windows.net/queries/uploads/job-123/query.fa"
@@ -1190,7 +1252,7 @@ def test_blast_job_file_falls_back_to_uploads_query_path(
             return ">q1\nACGT\n"
         raise RuntimeError("BlobNotFound")
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepo)
     monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     r = client.get(
@@ -1240,7 +1302,7 @@ def test_blast_job_file_generates_config_preview_when_blob_missing(
         reads.append((container, blob_path))
         raise RuntimeError("BlobNotFound")
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepo)
     monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
     monkeypatch.setattr(
         "api.routes.blast._config_preview_from_payload",
@@ -1292,7 +1354,7 @@ def test_blast_job_file_config_preview_rejects_storage_account_mismatch(
         del container, blob_path, max_bytes
         raise RuntimeError("BlobNotFound")
 
-    monkeypatch.setattr("api.services.state_repo.JobStateRepository", FakeRepo)
+    monkeypatch.setattr("api.services.state.repository.JobStateRepository", FakeRepo)
     monkeypatch.setattr("api.services.storage.data.read_blob_text", fake_read_blob_text)
 
     r = client.get(
@@ -1620,7 +1682,7 @@ def test_audit_log_payload_is_sanitised(
             }
 
     monkeypatch.setattr(
-        "api.services.state_repo.get_state_repo",
+        "api.services.state.repository.get_state_repo",
         lambda: FakeRepo(),
         raising=True,
     )
@@ -1736,7 +1798,7 @@ def test_audit_log_error_branch_is_sanitised(
         raise RuntimeError(leaky_message)
 
     monkeypatch.setattr(
-        "api.services.state_repo.get_state_repo",
+        "api.services.state.repository.get_state_repo",
         _exploding_repo,
         raising=True,
     )
