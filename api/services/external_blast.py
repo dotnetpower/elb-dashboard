@@ -29,8 +29,22 @@ from api.services.sanitise import sanitise
 _BASE_URL_ENV = "ELB_OPENAPI_BASE_URL"
 _INTERNAL_AUTH_ENV = "ELB_OPENAPI_INTERNAL_TOKEN"
 _API_AUTH_ENV = "ELB_OPENAPI_API_TOKEN"
-_DEFAULT_TIMEOUT_SECONDS = 30.0
+# Submit is the slowest sibling call: it creates a ConfigMap + applies a
+# K8s Job + waits for the AKS API server to ack. Under cold cache /
+# AKS API server pressure 30 s is not enough — the request times out
+# locally but the sibling has already created the job on the cluster,
+# leaving an orphan job the dashboard does not know about. 90 s covers
+# the observed worst-case while keeping the user-perceived wait bounded.
+_DEFAULT_TIMEOUT_SECONDS = 90.0
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=300.0)
+# Submit retries on transient transport failures (connection refused /
+# reset / read timeout). Only applied when the payload carries an
+# idempotency_key so the sibling can dedupe a re-send; without it we
+# would risk creating duplicate jobs on the cluster. Override at the env
+# layer (``OPENAPI_SUBMIT_MAX_RETRIES=0``) to make a flaky test
+# deterministic without waiting for the backoff sleeps.
+_SUBMIT_MAX_TRANSPORT_RETRIES = int(os.environ.get("OPENAPI_SUBMIT_MAX_RETRIES", "2"))
+_SUBMIT_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.5)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -153,22 +167,78 @@ def submit_job(
     base_url: str | None = None,
     api_token: str | None = None,
 ) -> dict[str, Any]:
-    with httpx.Client(
-        base_url=_base_url(base_url),
-        timeout=_DEFAULT_TIMEOUT_SECONDS,
-        headers=_headers(api_token=api_token),
-    ) as client:
-        try:
-            resp = client.post("/api/v1/elastic-blast/submit", json=payload)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            _raise_upstream_error(exc)
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                503,
-                detail={"code": "openapi_unreachable", "message": str(exc)[:300]},
-            ) from exc
-        return cast(dict[str, Any], resp.json())
+    """POST the canonical submit body to the sibling OpenAPI service.
+
+    When ``payload`` carries an ``idempotency_key`` (server-derived from
+    ``external_correlation_id`` for dashboard submissions, or supplied by
+    the external caller for direct API hits) the sibling can safely dedupe
+    a re-send, so this client retries up to ``_SUBMIT_MAX_TRANSPORT_RETRIES``
+    times on transient transport failures (httpx.ConnectError /
+    httpx.ReadTimeout / etc.). Without an idempotency_key the call is
+    surfaced to the caller on the first failure to avoid creating duplicate
+    jobs on the cluster.
+    """
+    has_idempotency_key = bool(
+        isinstance(payload, dict)
+        and (
+            payload.get("idempotency_key")
+            or payload.get("external_correlation_id")
+        )
+    )
+    import time as _time
+
+    attempts = 1 + (_SUBMIT_MAX_TRANSPORT_RETRIES if has_idempotency_key else 0)
+    last_transport_exc: HTTPException | None = None
+    for attempt_index in range(attempts):
+        with httpx.Client(
+            base_url=_base_url(base_url),
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            headers=_headers(api_token=api_token),
+        ) as client:
+            try:
+                resp = client.post("/api/v1/elastic-blast/submit", json=payload)
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                # 4xx/5xx with a response body: surface immediately. The
+                # sibling already decided — retrying won't change it (and a
+                # 5xx may itself indicate a created-but-failed job).
+                _raise_upstream_error(exc)
+            except httpx.HTTPError as exc:
+                # Transport-level failure (connection refused / reset /
+                # read timeout). Retry only when idempotent.
+                transport_exc = HTTPException(
+                    503,
+                    detail={
+                        "code": "openapi_unreachable",
+                        "message": str(exc)[:300],
+                        "attempt": attempt_index + 1,
+                        "max_attempts": attempts,
+                    },
+                )
+                last_transport_exc = transport_exc
+                if attempt_index + 1 < attempts:
+                    backoff = _SUBMIT_RETRY_BACKOFF_SECONDS[
+                        min(attempt_index, len(_SUBMIT_RETRY_BACKOFF_SECONDS) - 1)
+                    ]
+                    LOGGER.info(
+                        "openapi submit transport failure attempt=%s/%s sleep=%ss reason=%s",
+                        attempt_index + 1,
+                        attempts,
+                        backoff,
+                        type(exc).__name__,
+                    )
+                    _time.sleep(backoff)
+                    continue
+                raise transport_exc from exc
+            return cast(dict[str, Any], resp.json())
+    # Defensive: the loop above always either returns or raises. If we
+    # somehow exit without doing either, surface the last transport error.
+    if last_transport_exc is not None:
+        raise last_transport_exc
+    raise HTTPException(
+        503,
+        detail={"code": "openapi_unreachable", "message": "submit failed without explicit error"},
+    )
 
 
 def get_job(

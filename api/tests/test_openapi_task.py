@@ -69,6 +69,48 @@ def test_build_manifests_preserves_openapi_api_token() -> None:
     assert env["ELB_OPENAPI_API_TOKEN"] == "generated-token"
 
 
+def test_build_manifests_hardens_for_ha() -> None:
+    """elb-openapi must roll out with replicas:2 + probes + PDB so a single
+    node restart cannot take the BLAST submit path down."""
+    manifest = openapi._build_manifests(
+        image="elbacr.azurecr.io/elb-openapi:4.9",
+        mi_client_id="mi-client-id",
+        cluster_name="elb-cluster",
+        resource_group="rg-elb",
+        storage_account="elbstg",
+        region="koreacentral",
+        tenant_id="tenant-id",
+        acr_name="elbacr",
+        acr_resource_group="rg-acr",
+        num_nodes=10,
+    )
+    docs = [json.loads(chunk) for chunk in manifest.split("\n---\n")]
+    kinds = [doc["kind"] for doc in docs]
+    assert "PodDisruptionBudget" in kinds, "PDB must ship with the deploy"
+
+    deployment = next(doc for doc in docs if doc["kind"] == "Deployment")
+    spec = deployment["spec"]
+    assert spec["replicas"] == 2
+
+    container = spec["template"]["spec"]["containers"][0]
+    assert container["readinessProbe"]["httpGet"]["path"] == "/healthz"
+    assert container["readinessProbe"]["httpGet"]["port"] == 8000
+    assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
+
+    # Rolling update must not drop below the running count.
+    assert spec["strategy"]["rollingUpdate"]["maxUnavailable"] == 0
+
+    # topologySpread keeps the two replicas on different nodes when possible
+    # but does not block scheduling on a single-node blast pool.
+    spread = spec["template"]["spec"]["topologySpreadConstraints"][0]
+    assert spread["topologyKey"] == "kubernetes.io/hostname"
+    assert spread["whenUnsatisfiable"] == "ScheduleAnyway"
+
+    pdb = next(doc for doc in docs if doc["kind"] == "PodDisruptionBudget")
+    assert pdb["spec"]["minAvailable"] == 1
+    assert pdb["spec"]["selector"]["matchLabels"] == {"app": "elb-openapi"}
+
+
 def test_kubectl_apply_logs_in_with_managed_identity_when_needed(monkeypatch) -> None:
     calls: list[list[str]] = []
 

@@ -1,7 +1,8 @@
 """Kubernetes manifest builder for the ``elb-openapi`` deploy.
 
 Responsibility: Produce the multi-document JSON payload (ServiceAccount + RBAC +
-    Deployment + Service) consumed by ``kubectl apply -f -`` in the kubectl module.
+    Deployment + PodDisruptionBudget + Service) consumed by ``kubectl apply -f -`` in
+    the kubectl module.
 Edit boundaries: Pure manifest construction — no Azure or Kubernetes I/O. If you need a
     new env var, label, or tolerations rule, edit it here and rely on the deploy task to
     pipe it through.
@@ -9,8 +10,12 @@ Key entry points: `build_manifests`.
 Risky contracts: The blast-pool toleration and `nodeSelector workload=blast` are load-
     bearing — without them the deployment lands on tainted system nodes and serves no
     traffic. `AZURE_CLIENT_ID` is deliberately NOT set in the pod env (workload-identity
-    webhook injects it from the annotated ServiceAccount).
-Validation: `uv run pytest -q api/tests/test_smoke.py`.
+    webhook injects it from the annotated ServiceAccount). The Deployment carries
+    `replicas: 2` + readiness/liveness probes on `/healthz` + a PodDisruptionBudget
+    (`minAvailable: 1`) so node drains, rollouts, and crashing pods cannot all take
+    the BLAST submit path down at once. Single-node blast pools still work because
+    `topologySpreadConstraints.whenUnsatisfiable` is `ScheduleAnyway`.
+Validation: `uv run pytest -q api/tests/test_smoke.py api/tests/test_openapi_task.py`.
 """
 
 from __future__ import annotations
@@ -79,8 +84,19 @@ def build_manifests(
         "kind": "Deployment",
         "metadata": {"name": "elb-openapi", "namespace": K8S_NAMESPACE},
         "spec": {
-            "replicas": 1,
+            # Two replicas + PDB(minAvailable=1, below) so a single node
+            # restart / cordon / pod eviction does not take the BLAST submit
+            # path down. The blast pool has 10 nodes; the topology spread
+            # constraint below prefers different nodes for the two replicas.
+            "replicas": 2,
             "selector": {"matchLabels": {"app": "elb-openapi"}},
+            # Surge one extra pod and never go below the running count so
+            # an image bump rolls smoothly even though the new pod must
+            # pass the readiness probe first.
+            "strategy": {
+                "type": "RollingUpdate",
+                "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1},
+            },
             "template": {
                 "metadata": {
                     "labels": {
@@ -115,6 +131,33 @@ def build_manifests(
                                 "requests": {"cpu": "100m", "memory": "256Mi"},
                                 "limits": {"cpu": "500m", "memory": "512Mi"},
                             },
+                            # Without probes the Service routes traffic to a
+                            # crashlooping pod and the dashboard sees only
+                            # 502/connection-reset. `/healthz` is the
+                            # sibling OpenAPI service's health endpoint
+                            # (same path the dashboard "Try it" allowlist
+                            # already proxies).
+                            "readinessProbe": {
+                                "httpGet": {"path": "/healthz", "port": 8000},
+                                "initialDelaySeconds": 5,
+                                "periodSeconds": 10,
+                                "timeoutSeconds": 3,
+                                "failureThreshold": 3,
+                            },
+                            "livenessProbe": {
+                                "httpGet": {"path": "/healthz", "port": 8000},
+                                "initialDelaySeconds": 30,
+                                "periodSeconds": 30,
+                                "timeoutSeconds": 5,
+                                "failureThreshold": 3,
+                            },
+                            # Drain in-flight submit requests before SIGTERM
+                            # to avoid orphan jobs on rollout.
+                            "lifecycle": {
+                                "preStop": {
+                                    "exec": {"command": ["sleep", "10"]},
+                                },
+                            },
                         }
                     ],
                     # Sibling repo `constants.py` (commit a2d2f0a) splits
@@ -137,8 +180,37 @@ def build_manifests(
                         },
                     ],
                     "nodeSelector": {"workload": "blast"},
+                    # Prefer different nodes for the two replicas so a
+                    # single node drain / restart cannot take both down.
+                    # ScheduleAnyway (not DoNotSchedule) keeps single-node
+                    # blast pools functional while still spreading on
+                    # multi-node pools.
+                    "topologySpreadConstraints": [
+                        {
+                            "maxSkew": 1,
+                            "topologyKey": "kubernetes.io/hostname",
+                            "whenUnsatisfiable": "ScheduleAnyway",
+                            "labelSelector": {
+                                "matchLabels": {"app": "elb-openapi"},
+                            },
+                        },
+                    ],
+                    "terminationGracePeriodSeconds": 30,
                 },
             },
+        },
+    }
+
+    # PodDisruptionBudget so AKS upgrades / node drains / `kubectl drain`
+    # cannot evict the last running elb-openapi pod, which would otherwise
+    # take the BLAST submit path down even with two replicas.
+    pdb_manifest = {
+        "apiVersion": "policy/v1",
+        "kind": "PodDisruptionBudget",
+        "metadata": {"name": "elb-openapi", "namespace": K8S_NAMESPACE},
+        "spec": {
+            "minAvailable": 1,
+            "selector": {"matchLabels": {"app": "elb-openapi"}},
         },
     }
 
@@ -194,5 +266,5 @@ def build_manifests(
         },
     }
 
-    docs = [sa_manifest, role_manifest, binding_manifest, deploy_manifest, svc_manifest]
+    docs = [sa_manifest, role_manifest, binding_manifest, deploy_manifest, pdb_manifest, svc_manifest]
     return "\n---\n".join(json.dumps(d) for d in docs)

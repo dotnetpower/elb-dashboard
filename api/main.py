@@ -116,6 +116,15 @@ def create_app() -> FastAPI:
     # it wraps guard-short-circuited 413 responses as well as route responses.
     app.add_middleware(RequestIdMiddleware)
 
+    # Per-token rate-limit for the OpenAPI BLAST submit surface. Default
+    # 2000 req / 60s sliding window, keyed by `X-ELB-API-Token` (or caller
+    # IP when the header is absent). Only `/api/v1/elastic-blast/*` and
+    # `/api/aks/openapi/proxy` are throttled — dashboard polling, health
+    # probes, monitor endpoints, etc. are unaffected.
+    from api.app.openapi_rate_limit import OpenApiRateLimitMiddleware
+
+    app.add_middleware(OpenApiRateLimitMiddleware)
+
     # CORS — only needed for local dev where SPA (:8090) and API (:8080)
     # run on different origins.  In production both live behind the same
     # ingress so this is a no-op.

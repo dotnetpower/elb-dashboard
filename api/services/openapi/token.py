@@ -251,6 +251,18 @@ def _sync_runtime_token(token: str, metadata: dict[str, Any]) -> None:
         return
     os.environ[OPENAPI_TOKEN_ENV] = token
     save_openapi_api_token(token, metadata=metadata)
+    # Invalidate caches that may hold a stale token / 401 negative entry.
+    # Without this the external jobs list keeps returning a cached 401 for
+    # up to 30 s after rotation, and the openapi-client-kwargs cache keeps
+    # serving the old token for up to 70 s. Both make the BLAST Jobs page
+    # appear broken right after the user clicks "Rotate".
+    try:
+        from api.services.blast.external_jobs import _reset_external_jobs_cache
+
+        _reset_external_jobs_cache()
+    except Exception:
+        # Cache reset is best-effort — never block token rotation.
+        pass
 
 
 def get_openapi_api_token_status(

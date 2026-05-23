@@ -23,6 +23,11 @@ sys.path.insert(0, str(ROOT))
 # connection. Individual tests that exercise the invalidation channel can
 # monkeypatch this env back to false.
 os.environ.setdefault("BLAST_DB_METADATA_INVALIDATE_DISABLED", "true")
+# Disable submit retry sleeps in tests. The retry path is exercised by a
+# dedicated retry test that re-imports the module with the env unset.
+# Without this, every test that mocks ``submit_job`` to raise a transport
+# error pays multiple seconds of real backoff sleep.
+os.environ.setdefault("OPENAPI_SUBMIT_MAX_RETRIES", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +79,14 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     from api.services.state_repo import reset_state_repo_cache
     from api.services.storage.data import reset_blob_service_pool
 
+    # Per-token rate-limit middleware keeps in-process counters; reset
+    # between tests so a burst-test doesn't leak its sliding window into
+    # the next test's first request.
+    try:
+        from api.app.openapi_rate_limit import reset_openapi_rate_limit_state
+    except Exception:
+        reset_openapi_rate_limit_state = lambda: None  # type: ignore[assignment]  # noqa: E731
+
     _reset()
     _reset_blast_jobs_list_cache()
     _reset_blast_db_metadata_cache()
@@ -87,6 +100,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()
     _reset_httpx_pool()
+    reset_openapi_rate_limit_state()
     yield
     _reset()
     _reset_blast_jobs_list_cache()
@@ -101,3 +115,4 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()
     _reset_httpx_pool()
+    reset_openapi_rate_limit_state()

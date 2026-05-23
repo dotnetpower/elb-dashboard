@@ -25,7 +25,7 @@ from celery import shared_task
 from api.services import get_credential
 from api.services.azure_clients import aks_client
 from api.services.image_tags import IMAGE_TAGS
-from api.services.k8s.monitoring import k8s_get_service_ip
+from api.services.k8s.monitoring import k8s_get_deployment_ready_replicas, k8s_get_service_ip
 from api.tasks.openapi.helpers import blast_node_count, record_progress
 from api.tasks.openapi.kubectl import kubectl_apply
 from api.tasks.openapi.manifests import build_manifests
@@ -170,6 +170,65 @@ def deploy_openapi_service(
             break
         time.sleep(10)
 
+    # ----- 4. Wait for at least one Ready pod -------------------------------
+    # An external IP only means the LoadBalancer was provisioned; it does not
+    # mean any pod is actually serving traffic. Without this gate the task
+    # returns ``status: succeeded`` even when the pod is stuck in
+    # ImagePullBackOff / CrashLoopBackOff / has no node to land on, and the
+    # user only discovers the failure on the first submit (502).
+    record_progress(self, "waiting_for_ready_replicas", image=image)
+    ready_replicas = 0
+    desired_replicas = 0
+    for _ in range(24):  # ~120 s additional
+        try:
+            ready_replicas, desired_replicas = k8s_get_deployment_ready_replicas(
+                cred,
+                subscription_id,
+                resource_group,
+                cluster_name,
+                "elb-openapi",
+            )
+        except Exception as exc:
+            LOGGER.warning("ready-replica probe transient error: %s", exc)
+            ready_replicas, desired_replicas = (0, 0)
+        if ready_replicas >= 1:
+            break
+        time.sleep(5)
+
+    if ready_replicas < 1:
+        elapsed = int(time.time() - started)
+        LOGGER.warning(
+            "openapi deploy: no Ready replica after probe window image=%s "
+            "external_ip=%s ready=%s desired=%s",
+            image,
+            external_ip or "<pending>",
+            ready_replicas,
+            desired_replicas,
+        )
+        return {
+            "status": "failed",
+            "cluster_name": cluster_name,
+            "resource_group": resource_group,
+            "workload_identity": wi_result,
+            "openapi_deploy": {
+                "status": "no_ready_replica",
+                "image": image,
+                "external_ip": external_ip,
+                "ready_replicas": ready_replicas,
+                "desired_replicas": desired_replicas,
+                "error": (
+                    "Deployment applied but no pod reached Ready. "
+                    "Common causes: ImagePullBackOff (verify AcrPull on the "
+                    "AKS kubelet identity), CrashLoopBackOff (check pod logs "
+                    "via the terminal sidecar: `kubectl logs -n default "
+                    "deploy/elb-openapi --previous`), or no schedulable node "
+                    "in the blast pool (taint/label mismatch)."
+                ),
+                "apply_output": apply_output[:1000],
+            },
+            "elapsed_seconds": elapsed,
+        }
+
     elapsed = int(time.time() - started)
     if external_ip:
         from api.services.openapi.runtime import save_openapi_base_url
@@ -199,6 +258,8 @@ def deploy_openapi_service(
             "status": "deployed",
             "image": image,
             "external_ip": external_ip,
+            "ready_replicas": ready_replicas,
+            "desired_replicas": desired_replicas,
             "apply_output": apply_output[:1000],
         },
         "elapsed_seconds": elapsed,

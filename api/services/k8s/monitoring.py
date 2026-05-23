@@ -1192,6 +1192,43 @@ def k8s_get_service_ip(
         session.close()
 
 
+def k8s_get_deployment_ready_replicas(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    deployment_name: str,
+    namespace: str = "default",
+) -> tuple[int, int]:
+    """Return ``(ready_replicas, desired_replicas)`` for a Deployment.
+
+    Returns ``(0, 0)`` when the Deployment is missing or unreachable. Used by
+    the OpenAPI deploy task to detect "Service has an IP but no pod actually
+    Ready" failure modes (ImagePullBackOff, RBAC denying the SA, taint
+    mismatch …) so the task can mark itself ``failed`` instead of returning
+    a misleading ``succeeded`` payload.
+    """
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        response = session.get(
+            f"{server}/apis/apps/v1/namespaces/{namespace}/deployments/{deployment_name}",
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return (0, 0)
+        body = response.json() if response.content else {}
+        status = body.get("status", {}) or {}
+        spec = body.get("spec", {}) or {}
+        ready = int(status.get("readyReplicas") or 0)
+        desired = int(spec.get("replicas") or 0)
+        return (ready, desired)
+    except Exception:
+        return (0, 0)
+    finally:
+        session.close()
+
+
 def k8s_get_deployment_env_value(
     credential: TokenCredential,
     subscription_id: str,

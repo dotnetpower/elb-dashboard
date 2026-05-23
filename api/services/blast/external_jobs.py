@@ -45,6 +45,31 @@ def _exception_reason(exc: Exception) -> str:
     return type(exc).__name__
 
 
+# Detail codes that signal the IP/base URL we're using is wrong (Service
+# was recreated, pod rescheduled, LB IP rotated). Treat these as a signal
+# to flush the IP cache so the next request goes through k8s_get_service_ip
+# again instead of replaying the bad IP for the full 70 s cache TTL.
+_OPENAPI_TRANSPORT_FAILURE_CODES = frozenset(
+    {
+        "openapi_unreachable",
+        "openapi_upstream_unreachable",
+    }
+)
+
+
+def _exception_is_transport_failure(exc: Exception) -> bool:
+    if not isinstance(exc, HTTPException):
+        return False
+    if exc.status_code != 503:
+        return False
+    detail = exc.detail
+    if isinstance(detail, dict):
+        code = detail.get("code")
+        if code in _OPENAPI_TRANSPORT_FAILURE_CODES:
+            return True
+    return False
+
+
 _EXTERNAL_NOT_ENABLED_REASONS = frozenset(
     {
         "openapi_not_configured",
@@ -113,7 +138,23 @@ def _external_list_jobs_cached(external_kwargs: dict[str, Any]) -> list[dict[str
                     _EXTERNAL_JOBS_CACHE.pop(oldest, None)
             return rows
         except HTTPException as exc:
-            expires_at = _time.monotonic() + _EXTERNAL_JOBS_NEG_CACHE_TTL_SECONDS
+            # `openapi_unreachable` (503) usually means the Service IP /
+            # base URL we cached is stale — Service was recreated, pod was
+            # rescheduled, LB IP rotated. Invalidate the IP cache so the
+            # next request triggers a fresh `k8s_get_service_ip` lookup
+            # instead of replaying the bad IP for up to 70 s. Auth /
+            # configuration errors (401, 503 `openapi_not_configured`)
+            # are NOT IP-related — leave their negative cache alone.
+            if _exception_is_transport_failure(exc):
+                with _EXTERNAL_JOBS_CACHE_LOCK:
+                    _OPENAPI_CLIENT_KWARGS_CACHE.clear()
+                # Shorter negative cache so the next /api/blast/jobs poll
+                # gets to retry instead of replaying the cached 503 for
+                # the full 30 s window.
+                neg_ttl = min(_EXTERNAL_JOBS_NEG_CACHE_TTL_SECONDS, 5.0)
+            else:
+                neg_ttl = _EXTERNAL_JOBS_NEG_CACHE_TTL_SECONDS
+            expires_at = _time.monotonic() + neg_ttl
             with _EXTERNAL_JOBS_CACHE_LOCK:
                 _EXTERNAL_JOBS_NEG_CACHE[key] = (expires_at, exc)
                 if len(_EXTERNAL_JOBS_NEG_CACHE) > 32:
@@ -516,6 +557,16 @@ def _openapi_client_kwargs_from_cluster(
         cached = _OPENAPI_CLIENT_KWARGS_CACHE.get(cache_key)
         if cached and cached[0] > now:
             return dict(cached[1])
+
+    # Public TLS endpoint, when configured, skips the K8s Service IP
+    # lookup entirely. The token still needs the cluster context to be
+    # read from the Deployment env, so fall through to the legacy path
+    # when reading it fails — that path is unchanged from before the TLS
+    # rollout, so the only behavioural difference here is the `base_url`
+    # scheme/host. Env unset = 100% legacy behaviour.
+    from api.services.openapi.runtime import get_public_tls_base_url
+
+    public_base_url = get_public_tls_base_url()
     try:
         from api.services import get_credential
         from api.services.k8s.monitoring import (
@@ -524,44 +575,64 @@ def _openapi_client_kwargs_from_cluster(
         )
 
         credential = get_credential()
-        ip = k8s_get_service_ip(
-            credential,
-            subscription_id,
-            resource_group,
-            cluster_name,
-            "elb-openapi",
-        )
-        if not ip:
-            return {}
-        try:
-            from api.services.openapi.runtime import save_openapi_base_url
-
-            save_openapi_base_url(
-                f"http://{ip}",
-                metadata={
-                    "subscription_id": subscription_id,
-                    "resource_group": resource_group,
-                    "cluster_name": cluster_name,
-                    "service_name": "elb-openapi",
-                },
+        base_url: str
+        if public_base_url:
+            # Skip the IP lookup; the public endpoint is the authoritative
+            # base. We still need the cluster to be reachable to read the
+            # token below, but a transient k8s_get_service_ip flake should
+            # not block the public endpoint from being used.
+            base_url = public_base_url
+        else:
+            ip = k8s_get_service_ip(
+                credential,
+                subscription_id,
+                resource_group,
+                cluster_name,
+                "elb-openapi",
             )
-        except Exception as exc:
-            LOGGER.debug("openapi runtime cache write skipped: %s", type(exc).__name__)
+            if not ip:
+                return {}
+            base_url = f"http://{ip}"
+            try:
+                from api.services.openapi.runtime import save_openapi_base_url
+
+                save_openapi_base_url(
+                    base_url,
+                    metadata={
+                        "subscription_id": subscription_id,
+                        "resource_group": resource_group,
+                        "cluster_name": cluster_name,
+                        "service_name": "elb-openapi",
+                    },
+                )
+            except Exception as exc:
+                LOGGER.debug("openapi runtime cache write skipped: %s", type(exc).__name__)
         api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
         if not api_token:
-            api_token = (
-                k8s_get_deployment_env_value(
-                    credential,
-                    subscription_id,
-                    resource_group,
-                    cluster_name,
-                    "elb-openapi",
-                    "ELB_OPENAPI_API_TOKEN",
-                    container_name="openapi",
+            try:
+                api_token = (
+                    k8s_get_deployment_env_value(
+                        credential,
+                        subscription_id,
+                        resource_group,
+                        cluster_name,
+                        "elb-openapi",
+                        "ELB_OPENAPI_API_TOKEN",
+                        container_name="openapi",
+                    )
+                    or ""
+                ).strip()
+            except Exception as exc:
+                # When using the public endpoint we don't have to fail the
+                # call just because the K8s API was momentarily unhappy —
+                # the caller already passes any cached token via env. Log
+                # and continue.
+                LOGGER.debug(
+                    "openapi token lookup via K8s skipped: %s",
+                    type(exc).__name__,
                 )
-                or ""
-            ).strip()
-        kwargs = {"base_url": f"http://{ip}"}
+                api_token = ""
+        kwargs = {"base_url": base_url}
         if api_token:
             kwargs["api_token"] = api_token
         with _EXTERNAL_JOBS_CACHE_LOCK:
@@ -572,6 +643,11 @@ def _openapi_client_kwargs_from_cluster(
         return kwargs
     except Exception as exc:
         LOGGER.info("openapi cluster context unavailable: %s", type(exc).__name__)
+        # When the public endpoint is configured we still want to attempt
+        # the call rather than degrade to an empty config — the public LB
+        # is reachable independently of the cluster's K8s API surface.
+        if public_base_url:
+            return {"base_url": public_base_url}
         return {}
 
 

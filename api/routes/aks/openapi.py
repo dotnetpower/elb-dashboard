@@ -436,40 +436,51 @@ def aks_openapi_spec(
     """Best-effort proxy for the deployed OpenAPI service's ``/openapi.json``.
 
     Resolves the LoadBalancer IP via the K8s API, then fetches the spec.
+    Prefers the operator-configured ``OPENAPI_PUBLIC_BASE_URL`` (HTTPS
+    endpoint) over the cluster IP when set; that hook is no-op when the
+    env is empty, preserving the legacy IP-based fetch path 1:1.
     Returns a degraded ``openapi:"3.0.0"`` placeholder when the service is
     not yet reachable so the SPA's docs page does not crash.
     """
 
     from api.services import get_credential
     from api.services.k8s.monitoring import k8s_get_service_ip
+    from api.services.openapi.runtime import get_public_tls_base_url
 
     sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
     cred = get_credential()
-    try:
-        ip = k8s_get_service_ip(cred, sub, resource_group, cluster_name, "elb-openapi")
-    except Exception as exc:
-        ip = None
-        LOGGER.warning("openapi/spec: k8s_get_service_ip failed: %s", exc)
+    public_base = get_public_tls_base_url()
 
-    if not ip:
-        return {
-            "openapi": "3.0.0",
-            "info": {"title": "elb-openapi (not yet deployed)", "version": "0.0.0"},
-            "paths": {},
-            "degraded": True,
-            "degraded_reason": "openapi_service_not_reachable",
-        }
+    base_url: str = ""
+    if public_base:
+        base_url = public_base
+    else:
+        try:
+            ip = k8s_get_service_ip(cred, sub, resource_group, cluster_name, "elb-openapi")
+        except Exception as exc:
+            ip = None
+            LOGGER.warning("openapi/spec: k8s_get_service_ip failed: %s", exc)
+
+        if not ip:
+            return {
+                "openapi": "3.0.0",
+                "info": {"title": "elb-openapi (not yet deployed)", "version": "0.0.0"},
+                "paths": {},
+                "degraded": True,
+                "degraded_reason": "openapi_service_not_reachable",
+            }
+        base_url = f"http://{ip}"
 
     try:
         from api.services.httpx_pool import get_pooled_client
 
         client = get_pooled_client("aks-openapi-spec", timeout=10.0)
         for path in ("/openapi.json", "/docs/openapi.json"):
-            resp = client.get(f"http://{ip}{path}")
+            resp = client.get(f"{base_url}{path}")
             if resp.status_code == 200:
                 return cast(dict[str, Any], resp.json())
     except Exception as exc:
-        LOGGER.warning("openapi/spec: fetch failed for %s: %s", ip, exc)
+        LOGGER.warning("openapi/spec: fetch failed for %s: %s", base_url, exc)
 
     return {
         "openapi": "3.0.0",
@@ -498,6 +509,7 @@ async def aks_openapi_proxy(
 
     from api.services import get_credential
     from api.services.k8s.monitoring import k8s_get_service_ip
+    from api.services.openapi.runtime import get_public_tls_base_url
 
     if not target_path.startswith("/") or target_path.startswith("//"):
         raise HTTPException(
@@ -517,57 +529,69 @@ async def aks_openapi_proxy(
 
     sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
     cred = get_credential()
-    try:
-        ip = k8s_get_service_ip(cred, sub, resource_group, cluster_name, "elb-openapi")
-    except Exception as exc:
-        ip = None
-        LOGGER.warning("openapi/proxy: k8s_get_service_ip failed: %s", exc)
 
-    if not ip:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "openapi_service_not_reachable",
-                "message": "The elb-openapi service is not reachable yet.",
-                "retryable": True,
-            },
-        )
+    # Pick the upstream base URL. The TLS-terminated public endpoint, when
+    # configured, is always safe for admin-token injection because the
+    # transit is encrypted end-to-end. When the env is unset we fall back
+    # to the historical IP path with all its safety gates intact.
+    public_base = get_public_tls_base_url()
+    use_public_tls = bool(public_base and public_base.lower().startswith("https://"))
 
-    # Refuse to forward when the resolved Service IP is *not* private:
-    # the api sidecar would otherwise send the admin ``X-ELB-API-Token``
-    # over plain HTTP to a public LoadBalancer, exposing the token to
-    # any MITM between the sidecar and the LB. The legitimate deployment
-    # exposes elb-openapi inside the AKS VNet (Service type LoadBalancer
-    # with internal annotation, or ClusterIP), so the IP is RFC1918.
-    # Operators that intentionally run elb-openapi behind a public LB
-    # (and accept the plain-HTTP-to-public-IP exposure) can opt in by
-    # setting ``OPENAPI_ALLOW_PUBLIC_LB=true`` on the api sidecar.
-    if not _is_private_ipv4(ip) and not _public_lb_allowed():
-        LOGGER.warning(
-            "openapi/proxy: refusing to forward admin token to non-private IP %s "
-            "(use an internal LoadBalancer, terminate TLS in front of the service, "
-            "or set OPENAPI_ALLOW_PUBLIC_LB=true to opt in)",
-            ip,
-        )
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "code": "openapi_unsafe_transport",
-                "message": (
-                    "Refusing to send the admin token to a non-private IP. "
-                    "Expose elb-openapi via an internal LoadBalancer (RFC1918), "
-                    "terminate TLS in front of the public endpoint, "
-                    "or set OPENAPI_ALLOW_PUBLIC_LB=true to opt in."
-                ),
-            },
-        )
-    if not _is_private_ipv4(ip):
-        LOGGER.warning(
-            "openapi/proxy: forwarding admin token to non-private IP %s "
-            "because OPENAPI_ALLOW_PUBLIC_LB is set; this exposes the token "
-            "over plain HTTP between the api sidecar and the public LB",
-            ip,
-        )
+    if use_public_tls:
+        upstream_base = public_base
+    else:
+        try:
+            ip = k8s_get_service_ip(cred, sub, resource_group, cluster_name, "elb-openapi")
+        except Exception as exc:
+            ip = None
+            LOGGER.warning("openapi/proxy: k8s_get_service_ip failed: %s", exc)
+
+        if not ip:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "openapi_service_not_reachable",
+                    "message": "The elb-openapi service is not reachable yet.",
+                    "retryable": True,
+                },
+            )
+
+        # Refuse to forward when the resolved Service IP is *not* private:
+        # the api sidecar would otherwise send the admin ``X-ELB-API-Token``
+        # over plain HTTP to a public LoadBalancer, exposing the token to
+        # any MITM between the sidecar and the LB. The legitimate deployment
+        # exposes elb-openapi inside the AKS VNet (Service type LoadBalancer
+        # with internal annotation, or ClusterIP), so the IP is RFC1918.
+        # Operators that intentionally run elb-openapi behind a public LB
+        # (and accept the plain-HTTP-to-public-IP exposure) can opt in by
+        # setting ``OPENAPI_ALLOW_PUBLIC_LB=true`` on the api sidecar.
+        if not _is_private_ipv4(ip) and not _public_lb_allowed():
+            LOGGER.warning(
+                "openapi/proxy: refusing to forward admin token to non-private IP %s "
+                "(use an internal LoadBalancer, terminate TLS in front of the service, "
+                "or set OPENAPI_ALLOW_PUBLIC_LB=true to opt in)",
+                ip,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "openapi_unsafe_transport",
+                    "message": (
+                        "Refusing to send the admin token to a non-private IP. "
+                        "Expose elb-openapi via an internal LoadBalancer (RFC1918), "
+                        "terminate TLS in front of the public endpoint, "
+                        "or set OPENAPI_ALLOW_PUBLIC_LB=true to opt in."
+                    ),
+                },
+            )
+        if not _is_private_ipv4(ip):
+            LOGGER.warning(
+                "openapi/proxy: forwarding admin token to non-private IP %s "
+                "because OPENAPI_ALLOW_PUBLIC_LB is set; this exposes the token "
+                "over plain HTTP between the api sidecar and the public LB",
+                ip,
+            )
+        upstream_base = f"http://{ip}"
 
     headers = {
         key: value
@@ -605,14 +629,16 @@ async def aks_openapi_proxy(
     try:
         upstream_req = client.build_request(
             request.method,
-            f"http://{ip}{target_path}",
+            f"{upstream_base}{target_path}",
             headers=headers,
             content=body if body else None,
         )
         upstream = await client.send(upstream_req, stream=True)
     except httpx.RequestError as exc:
         await client.aclose()
-        LOGGER.warning("openapi/proxy: upstream request failed for %s: %s", ip, exc)
+        LOGGER.warning(
+            "openapi/proxy: upstream request failed for %s: %s", upstream_base, exc
+        )
         raise HTTPException(
             status_code=502,
             detail={

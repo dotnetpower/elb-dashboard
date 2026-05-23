@@ -8,7 +8,10 @@ Edit boundaries: All identity / role assignment writes live here. The manifests 
 Key entry points: `assign_role_idempotent`, `setup_workload_identity`.
 Risky contracts: `setup_workload_identity` must remain idempotent — re-running the
     deploy task should never produce duplicate MI or federated credentials. Role
-    assignments are best-effort (Conflict / RoleAssignmentExists is treated as success).
+    assignments treat `RoleAssignmentExists` / `Conflict` as success (re-deploy is the
+    common case); permission / scope / transient errors propagate as a single
+    ``RuntimeError`` so the deploy task can return ``status: failed`` instead of
+    "succeeded but pod has no permissions".
 Validation: `uv run pytest -q api/tests/test_smoke.py`.
 """
 
@@ -38,8 +41,16 @@ def assign_role_idempotent(
     principal_id: str,
     role_definition_id: str,
     label: str,
-) -> bool:
-    """Create a role assignment; return True on create / already-exists."""
+) -> tuple[bool, str]:
+    """Create a role assignment; return ``(ok, reason)``.
+
+    ``ok=True`` when the assignment was created or already exists.
+    ``ok=False`` with a short ``reason`` string when the assignment genuinely
+    failed (permission denied, invalid scope, transient API error). Callers
+    must propagate ``ok=False`` instead of swallowing it — a "deploy
+    succeeded but the pod can't call ARM/Storage" outcome is the worst kind
+    of silent failure for the BLAST submit path.
+    """
 
     role_def = f"{scope}/providers/Microsoft.Authorization/roleDefinitions/{role_definition_id}"
     name = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_definition_id}"))
@@ -59,14 +70,14 @@ def assign_role_idempotent(
             principal_id[:8],
             scope.split("/")[-1],
         )
-        return True
+        return (True, "created")
     except Exception as exc:
         msg = str(exc)
         if "RoleAssignmentExists" in msg or "Conflict" in msg:
             LOGGER.info("RBAC role=%s already assigned", label)
-            return True
+            return (True, "exists")
         LOGGER.warning("RBAC role=%s failed: %s", label, msg[:200])
-        return False
+        return (False, msg[:300])
 
 
 def setup_workload_identity(
@@ -79,7 +90,13 @@ def setup_workload_identity(
     storage_account: str,
     storage_resource_group: str,
 ) -> dict[str, Any]:
-    """Create MI + Federated Credential + role assignments. Idempotent."""
+    """Create MI + Federated Credential + role assignments.
+
+    Idempotent. Raises ``RuntimeError`` when a role assignment fails so the
+    deploy task can return ``status: failed`` instead of marking the pod
+    "deployed" while it lacks the permissions to call ARM/Storage. The
+    return shape (``mi_client_id`` etc.) is unchanged.
+    """
 
     from azure.mgmt.authorization import AuthorizationManagementClient
     from azure.mgmt.msi import ManagedServiceIdentityClient
@@ -122,16 +139,20 @@ def setup_workload_identity(
         },
     )
 
-    # 4. Role assignments (best-effort — never fatal).
+    # 4. Role assignments — RoleAssignmentExists / Conflict is success; any
+    # other failure is fatal. The pod cannot perform its job without these
+    # roles, and surfacing "succeeded" while the pod 403s on first call is
+    # the failure mode this branch exists to prevent.
     auth = AuthorizationManagementClient(cred, subscription_id)
     roles_assigned: list[str] = []
-    roles_failed: list[str] = []
+    roles_failed: list[tuple[str, str]] = []
 
     def _try(scope: str, role_id: str, label: str) -> None:
-        if assign_role_idempotent(auth, scope, mi.principal_id, role_id, label):
+        ok, reason = assign_role_idempotent(auth, scope, mi.principal_id, role_id, label)
+        if ok:
             roles_assigned.append(label)
         else:
-            roles_failed.append(label)
+            roles_failed.append((label, reason))
 
     _try(
         f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}",
@@ -157,6 +178,15 @@ def setup_workload_identity(
         "AzureKubernetesServiceClusterUserRole",
     )
 
+    if roles_failed:
+        failed_labels = ", ".join(f"{label} ({reason})" for label, reason in roles_failed)
+        raise RuntimeError(
+            "Workload Identity setup failed at role assignment: "
+            f"{failed_labels}. The elb-openapi pod cannot call ARM/Storage "
+            "without these roles. Verify the deployer has User Access "
+            "Administrator on the target scope, then re-run."
+        )
+
     return {
         "mi_name": MI_NAME,
         "mi_client_id": mi.client_id,
@@ -164,5 +194,5 @@ def setup_workload_identity(
         "oidc_issuer": oidc_url,
         "federated_credential": FED_CRED_NAME,
         "roles_assigned": roles_assigned,
-        "roles_failed": roles_failed,
+        "roles_failed": [label for label, _ in roles_failed],
     }
