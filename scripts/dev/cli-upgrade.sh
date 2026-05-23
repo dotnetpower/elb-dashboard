@@ -87,16 +87,16 @@ record_history() {
   # The trap may fire BEFORE flag parsing initializes DRY_RUN, so default
   # defensively here ("set -u" would otherwise kill the trap).
   "${DRY_RUN:-false}" && return 0
-  local result="${1:-unknown}" message="${2:-}"
-  local history_file="${ELB_UPGRADE_HISTORY:-$HOME/.elb-upgrade-history.jsonl}"
-  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  local elapsed=$SECONDS
   # jq is the only safe JSON serializer we can rely on for arbitrary
   # message content (newlines, backslashes, control chars). The script
   # already hard-requires jq for restore_from_snapshot; treat history
   # the same way. Without jq, silently drop the history entry rather
-  # than write invalid JSONL.
+  # than write invalid JSONL. Fast-skip BEFORE we do any work.
   command -v jq >/dev/null 2>&1 || return 0
+  local result="${1:-unknown}" message="${2:-}"
+  local history_file="${ELB_UPGRADE_HISTORY:-$HOME/.elb-upgrade-history.jsonl}"
+  local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local elapsed=$SECONDS
   local line
   line="$(jq -nc \
     --arg ts "$now" \

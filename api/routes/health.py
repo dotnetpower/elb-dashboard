@@ -174,14 +174,21 @@ def _probe_storage_table() -> dict[str, Any]:
     # that while holding `_STORAGE_PROBE_CACHE_LOCK` would create a
     # lock-ordering footgun: any future code path that logs from inside
     # another lock that wraps this function could deadlock.
+    #
+    # Wrap in try/except so a broken handler (disk full, journald down,
+    # custom handler raising) never bubbles up to fail the readiness
+    # response itself — the cache is already published at this point.
     new_status = result.get("status")
     if prev_status is not None and prev_status != new_status:
-        LOGGER.info(
-            "storage probe state transition: %s -> %s (%s)",
-            prev_status,
-            new_status,
-            result.get("error", result.get("reason", "")),
-        )
+        try:
+            LOGGER.info(
+                "storage probe state transition: %s -> %s (%s)",
+                prev_status,
+                new_status,
+                result.get("error", result.get("reason", "")),
+            )
+        except Exception:  # noqa: BLE001, S110 - intentional: cannot re-log a logging failure
+            pass
     return result
 
 
