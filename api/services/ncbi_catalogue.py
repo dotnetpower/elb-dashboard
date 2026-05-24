@@ -93,6 +93,8 @@ _SIGNATURE_SAMPLE_COUNT = int(os.environ.get("NCBI_SIGNATURE_SAMPLE_COUNT", "8")
 # (slow TLS handshake from a fresh sidecar) do not 5s-default themselves
 # into a NcbiUnavailable.
 _PREVIEW_CLIENT_TIMEOUT = float(os.environ.get("NCBI_PREVIEW_HTTP_TIMEOUT", "30.0"))
+if _PREVIEW_CLIENT_TIMEOUT < 10.0:
+    raise ValueError("NCBI_PREVIEW_HTTP_TIMEOUT must be >= 10 seconds")
 
 _PREVIEW_CACHE_TTL_SECONDS = float(os.environ.get("NCBI_PREVIEW_CACHE_TTL", "1800.0"))
 _PREVIEW_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}

@@ -1,3 +1,4 @@
+import { memo, useMemo, type CSSProperties } from "react";
 import { CheckCircle2, Clock, Copy } from "lucide-react";
 
 import { ElapsedTimer } from "@/components/BlastFilePreview";
@@ -19,7 +20,7 @@ interface BlastJobDetailsGridProps {
  * The Copy-to-clipboard interaction is owned by the parent (so the toast +
  * timeout state lives next to other actions) and threaded in via props.
  */
-export function BlastJobDetailsGrid({
+function BlastJobDetailsGridComponent({
   job,
   effectivePhase,
   effectiveColor,
@@ -29,16 +30,28 @@ export function BlastJobDetailsGrid({
 }: BlastJobDetailsGridProps) {
   const config = job.config_snapshot as Record<string, unknown> | undefined;
   const infra = job.infrastructure as Record<string, unknown> | undefined;
+  const gridStyle = useMemo<CSSProperties>(
+    () => ({
+      display: "grid",
+      gridTemplateColumns: "140px 1fr",
+      gap: "var(--space-2) var(--space-4)",
+      fontSize: 13,
+    }),
+    [],
+  );
+  const statusDotStyle = useMemo<CSSProperties>(
+    () => ({
+      width: 8,
+      height: 8,
+      borderRadius: 999,
+      background: effectiveColor,
+      boxShadow: `0 0 8px ${effectiveColor}`,
+    }),
+    [effectiveColor],
+  );
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "140px 1fr",
-        gap: "var(--space-2) var(--space-4)",
-        fontSize: 13,
-      }}
-    >
+    <div style={gridStyle}>
       <span className="muted">Job ID</span>
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <code className="code-val">{job.job_id}</code>
@@ -56,15 +69,7 @@ export function BlastJobDetailsGrid({
       <span style={{ wordBreak: "break-all" }}>{job.db}</span>
       <span className="muted">Status</span>
       <span style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
-        <span
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: 999,
-            background: effectiveColor,
-            boxShadow: `0 0 8px ${effectiveColor}`,
-          }}
-        />
+        <span style={statusDotStyle} />
         {effectivePhase === "submit_failed" ? "failed" : effectivePhase}
       </span>
       <span className="muted">Created</span>
@@ -112,6 +117,8 @@ export function BlastJobDetailsGrid({
     </div>
   );
 }
+
+export const BlastJobDetailsGrid = memo(BlastJobDetailsGridComponent);
 
 function formatDuration(ms: number): string {
   const s = Math.floor(ms / 1000);

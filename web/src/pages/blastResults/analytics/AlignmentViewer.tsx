@@ -278,7 +278,7 @@ function SequenceAlignment({
       }}
     >
       {blocks.map((block, index) => (
-        <div key={index} style={{ marginBottom: 8 }}>
+        <div key={`${block.qpos}-${block.spos}-${index}`} style={{ marginBottom: 8 }}>
           <div style={{ display: "flex" }}>
             <span
               className="muted"
@@ -289,7 +289,7 @@ function SequenceAlignment({
             <span>
               {block.q.split("").map((char, charIndex) => (
                 <span
-                  key={charIndex}
+                  key={`${index}-q-${charIndex}`}
                   style={{
                     color: BASE_COLORS[char.toUpperCase()] ?? "var(--text-primary)",
                   }}
@@ -313,7 +313,7 @@ function SequenceAlignment({
             <span>
               {block.s.split("").map((char, charIndex) => (
                 <span
-                  key={charIndex}
+                  key={`${index}-s-${charIndex}`}
                   style={{
                     color: BASE_COLORS[char.toUpperCase()] ?? "var(--text-primary)",
                   }}

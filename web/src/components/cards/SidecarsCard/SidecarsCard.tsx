@@ -162,7 +162,7 @@ export function SidecarsCard() {
             title={
               inspectorOpen
                 ? "HTTP request inspector is open"
-                : "Inspect every HTTP request flowing through the api sidecar"
+                : "Inspect recent non-streaming HTTP requests flowing through the api sidecar"
             }
             style={{
               display: "inline-flex",

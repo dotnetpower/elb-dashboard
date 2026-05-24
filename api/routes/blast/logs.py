@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -135,7 +136,9 @@ async def blast_job_logs_events(
     """
 
     entry = await _consume_log_ticket(job_id, ticket)
-    queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=256)
+    queue: asyncio.Queue[str | None] = asyncio.Queue(
+        maxsize=max(1, int(os.environ.get("BLAST_LOG_SSE_QUEUE_MAXSIZE", "256")))
+    )
     stop_async = asyncio.Event()
     follower_stops: list[threading.Event] = []
 

@@ -91,5 +91,11 @@ def test_api_routes_registered_before_frontend_catchall() -> None:
         ("POST", "/api/storage/local-debug/open"),
         ("GET", "/api/monitor/aks"),
         ("GET", "/api/monitor/sidecars"),
+        ("GET", "/api/settings/app-insights"),
+        ("POST", "/api/settings/app-insights/lookup"),
+        ("POST", "/api/settings/app-insights/provision"),
+        ("GET", "/api/settings/aks-observability"),
+        ("POST", "/api/settings/aks-observability/enable"),
+        ("POST", "/api/settings/aks-observability/disable"),
     ):
         assert routes[(method, path)] < frontend

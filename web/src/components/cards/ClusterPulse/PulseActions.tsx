@@ -6,13 +6,14 @@
 import { Info, Loader2, Play, Square, Trash2 } from "lucide-react";
 
 import type { AksClusterSummary } from "@/api/endpoints";
+import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
 import { isAksProvisioned } from "@/utils/aksStatus";
 
 import { ActionBtn } from "./atoms";
 
 interface Props {
   cluster: AksClusterSummary;
-  trans?: "starting" | "stopping";
+  trans?: ClusterTransitionKind;
   actionLoading: string | null;
   onStartStop: (name: string, action: "start" | "stop") => void;
   onDelete: (name: string) => void;

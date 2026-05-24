@@ -82,7 +82,7 @@ export function useBlastResultActions({
       document.body.append(anchor);
       anchor.click();
       anchor.remove();
-      toast(`Exported ${format.toUpperCase()} report.`, "success");
+      toast(`Exported ${blastExportFormatLabel(format)} report.`, "success");
     } catch (e) {
       toast(`Export failed: ${(e as Error).message}`, "error");
     } finally {
@@ -119,4 +119,21 @@ export function useBlastResultActions({
     handleExport,
     cancelMutation,
   };
+}
+
+function blastExportFormatLabel(format: BlastExportFormat): string {
+  switch (format) {
+    case "hit-table-text":
+      return "Hit Table (text)";
+    case "hit-table-csv":
+      return "Hit Table (CSV)";
+    case "json-seqalign":
+      return "JSON Seq-align";
+    case "xml":
+      return "XML";
+    case "text":
+      return "Text";
+    default:
+      return format.toUpperCase();
+  }
 }

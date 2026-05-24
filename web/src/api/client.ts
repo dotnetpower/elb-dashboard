@@ -101,9 +101,12 @@ async function getAccessToken(options: FetchApiOptions = {}): Promise<string | n
         await msalInstance.acquireTokenRedirect({ ...apiLoginRequest, account });
         throw err;
       }
-      // Exponential backoff: 1s, 2s, 4s
+      // Exponential backoff: 1s, 2s, 4s; capped so future retry-count changes
+      // cannot strand the UI behind a many-minute silent token refresh wait.
       if (attempt < 2) {
-        await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
+        await new Promise((r) =>
+          setTimeout(r, Math.min(1000 * Math.pow(2, attempt), 30_000)),
+        );
       }
     }
   }

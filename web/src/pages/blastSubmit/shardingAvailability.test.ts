@@ -205,6 +205,33 @@ describe("reconcileShardingSelection", () => {
     expect(result).toBe(form);
   });
 
+  it("promotes Auto warm databases to sharded throughput when ready", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: true,
+      outfmt: 5,
+    });
+
+    const result = reconcileShardingSelection({
+      form: {
+        ...INITIAL,
+        enable_warmup: true,
+        sharding_mode: "off",
+        db_auto_partition: false,
+        disable_sharding: true,
+      },
+      availability,
+      isDbAlreadyWarm: true,
+      autoWarmupSelected: true,
+    });
+
+    expect(result.enable_warmup).toBe(true);
+    expect(result.sharding_mode).toBe("precise");
+    expect(result.db_auto_partition).toBe(true);
+    expect(result.disable_sharding).toBe(false);
+  });
+
   it("falls back when a selected sharded mode becomes unavailable", () => {
     const availability = deriveShardingAvailability({
       cluster,

@@ -10,6 +10,11 @@ import {
   formatNcbiVersion,
 } from "@/components/cards/storageDbCatalog";
 import { BlastDbCustomInput } from "@/components/cards/storage/BlastDbCustomInput";
+import {
+  BlastDbClusterConfirm,
+  type BlastDbClusterTopology,
+  shouldConfirmDownloadBeforeAks,
+} from "@/components/cards/storage/BlastDbClusterConfirm";
 import { BlastDbLargeConfirm } from "@/components/cards/storage/BlastDbLargeConfirm";
 import { BlastDbRow } from "@/components/cards/storage/BlastDbRow";
 import { BlastDbUpdateConfirm } from "@/components/cards/storage/BlastDbUpdateConfirm";
@@ -24,7 +29,13 @@ const CATEGORIES = ["Small / Test", "Medium", "Large"] as const;
 
 interface BlastDbModalProps {
   state: UseBlastDbReturn;
+  clusterTopology?: BlastDbClusterTopology;
   onClose: () => void;
+}
+
+interface PendingDownloadConfirm {
+  dbValue: string;
+  isLarge: boolean;
 }
 
 /**
@@ -35,7 +46,10 @@ interface BlastDbModalProps {
  * All lifecycle state (download/in-progress/completed) is owned by the parent
  * via `useBlastDb`; this component is the rendering layer for the modal only.
  */
-export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
+export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalProps) {
+  const [confirmClusterDb, setConfirmClusterDb] = useState<PendingDownloadConfirm | null>(
+    null,
+  );
   const [confirmLargeDb, setConfirmLargeDb] = useState<string | null>(null);
   const [confirmUpdateDb, setConfirmUpdateDb] = useState<string | null>(null);
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
@@ -48,6 +62,7 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         onClose();
+        setConfirmClusterDb(null);
         setConfirmLargeDb(null);
         setConfirmUpdateDb(null);
       }
@@ -118,12 +133,30 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
 
   const startDownload = (name: string) => {
     void handleDownload(name);
+    setConfirmClusterDb(null);
     setConfirmLargeDb(null);
     setConfirmUpdateDb(null);
   };
 
+  const requestDownload = (name: string, isLarge: boolean) => {
+    if (shouldConfirmDownloadBeforeAks(clusterTopology)) {
+      setConfirmClusterDb({ dbValue: name, isLarge });
+      setConfirmLargeDb(null);
+      setConfirmUpdateDb(null);
+      return;
+    }
+    if (isLarge) {
+      setConfirmLargeDb(name);
+      setConfirmClusterDb(null);
+      setConfirmUpdateDb(null);
+      return;
+    }
+    startDownload(name);
+  };
+
   const startUpdate = (name: string) => {
     void state.handleUpdate(name);
+    setConfirmClusterDb(null);
     setConfirmUpdateDb(null);
     setConfirmLargeDb(null);
   };
@@ -212,9 +245,7 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                 </span>
                 {readyDbs.length > 0 && (
                   <span>
-                    {formatBytes(
-                      readyDbs.reduce((s, d) => s + (d.total_bytes ?? 0), 0),
-                    )}{" "}
+                    {formatBytes(readyDbs.reduce((s, d) => s + (d.total_bytes ?? 0), 0))}{" "}
                     used
                   </span>
                 )}
@@ -451,10 +482,10 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
                         autoWarmupDisabled={
                           !isDownloaded || hasUpdate || !!meta?.update_in_progress
                         }
-                        onDownload={() => startDownload(db.value)}
+                        onDownload={() => requestDownload(db.value, false)}
                         onUpdate={() => setConfirmUpdateDb(db.value)}
                         onBuildOracle={() => void handleBuildOracle(db.value)}
-                        onConfirmLarge={() => setConfirmLargeDb(db.value)}
+                        onConfirmLarge={() => requestDownload(db.value, true)}
                         onCancel={() => void handleCancel(db.value)}
                         onToggleAutoWarmup={(checked) =>
                           toggleAutoWarmup(db.value, checked)
@@ -470,9 +501,19 @@ export function BlastDbModal({ state, onClose }: BlastDbModalProps) {
           <div style={{ marginTop: "var(--space-2)" }}>
             <BlastDbCustomInput
               disabled={downloading !== null}
-              onDownload={(name) => startDownload(name)}
+              onDownload={(name) => requestDownload(name, false)}
             />
           </div>
+
+          {confirmClusterDb && (
+            <BlastDbClusterConfirm
+              dbValue={confirmClusterDb.dbValue}
+              isLarge={confirmClusterDb.isLarge}
+              topology={clusterTopology}
+              onConfirm={() => startDownload(confirmClusterDb.dbValue)}
+              onCancel={() => setConfirmClusterDb(null)}
+            />
+          )}
 
           {confirmLargeDb && (
             <BlastDbLargeConfirm

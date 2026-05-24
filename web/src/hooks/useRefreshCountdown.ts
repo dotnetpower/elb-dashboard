@@ -20,6 +20,7 @@ export function useRefreshCountdown(
     }
 
     const tick = () => {
+      if (document.hidden) return;
       const elapsed = Date.now() - dataUpdatedAt;
       const left = Math.max(0, Math.ceil((intervalMs - elapsed) / 1000));
       setRemaining(left);
@@ -27,7 +28,11 @@ export function useRefreshCountdown(
 
     tick();
     const timer = setInterval(tick, 1000);
-    return () => clearInterval(timer);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [dataUpdatedAt, intervalMs]);
 
   return remaining;

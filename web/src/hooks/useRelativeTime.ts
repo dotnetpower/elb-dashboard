@@ -9,8 +9,15 @@ export function useRelativeTime(timestamp: number | null | undefined): string {
 
   useEffect(() => {
     if (!timestamp) return;
-    const interval = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(interval);
+    const tick = () => {
+      if (!document.hidden) setTick((t) => t + 1);
+    };
+    const interval = setInterval(tick, 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [timestamp]);
 
   if (!timestamp) return "";

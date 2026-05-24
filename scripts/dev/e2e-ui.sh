@@ -23,6 +23,8 @@ Browser options:
   --prompt-timeout N   Seconds to wait for --ask-browser. Default: 5.
   --no-open            Do not xdg-open the local UI in headed mode without a scenario command.
   --open               Open the local UI in headed mode without a scenario command. Default.
+  --fullstack          Start redis, api, worker, beat, web, and terminal-exec.
+  --api-web            Start only api + web. Default.
 
 Session options:
   --url URL            SPA URL. Default: http://localhost:8090
@@ -75,6 +77,7 @@ base_url="${E2E_BASE_URL:-http://localhost:8090}"
 api_url="${E2E_API_URL:-http://127.0.0.1:8085}"
 open_visible=1
 skip_restart=0
+service_profile="${E2E_SERVICE_PROFILE:-api-web}"
 auth_args=()
 scenario=()
 
@@ -117,6 +120,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-restart)
       skip_restart=1
+      shift
+      ;;
+    --fullstack)
+      service_profile="fullstack"
+      shift
+      ;;
+    --api-web)
+      service_profile="api-web"
       shift
       ;;
     --auth-arg)
@@ -168,6 +179,24 @@ apply_bypass_env() {
   upsert_env_line "$web_env_file" "VITE_AUTH_DEV_BYPASS" "true"
 }
 
+apply_e2e_runtime_env() {
+  if [[ -n "${E2E_STORAGE_ACCOUNT:-}" && -z "${ELB_LOCAL_STORAGE_ACCOUNT:-}" ]]; then
+    export ELB_LOCAL_STORAGE_ACCOUNT="$E2E_STORAGE_ACCOUNT"
+  elif [[ -n "${STORAGE_ACCOUNT_NAME:-}" && -z "${ELB_LOCAL_STORAGE_ACCOUNT:-}" ]]; then
+    export ELB_LOCAL_STORAGE_ACCOUNT="$STORAGE_ACCOUNT_NAME"
+  fi
+  if [[ -n "${E2E_STORAGE_RESOURCE_GROUP:-}" && -z "${ELB_LOCAL_STORAGE_RG:-}" ]]; then
+    export ELB_LOCAL_STORAGE_RG="$E2E_STORAGE_RESOURCE_GROUP"
+  elif [[ -n "${E2E_AZURE_RESOURCE_GROUP:-}" && -z "${ELB_LOCAL_STORAGE_RG:-}" ]]; then
+    export ELB_LOCAL_STORAGE_RG="$E2E_AZURE_RESOURCE_GROUP"
+  elif [[ -n "${AZURE_RESOURCE_GROUP:-}" && -z "${ELB_LOCAL_STORAGE_RG:-}" ]]; then
+    export ELB_LOCAL_STORAGE_RG="$AZURE_RESOURCE_GROUP"
+  fi
+  if [[ "$service_profile" == "fullstack" && -z "${PREPARE_DB_COPY_POLL_BATCH_SIZE:-}" ]]; then
+    export PREPARE_DB_COPY_POLL_BATCH_SIZE="${E2E_PREPARE_DB_COPY_POLL_BATCH_SIZE:-512}"
+  fi
+}
+
 stop_local_services() {
   ts "Stopping local api + web if they are running..."
   pkill -TERM -f 'uvicorn api.main:app --host 127.0.0.1 --port 8085' 2>/dev/null || true
@@ -191,11 +220,48 @@ start_local_services() {
   )
 }
 
+start_background_service() {
+  local service="$1"
+  (
+    cd "$project_root"
+    setsid nohup env ELB_SKIP_AZURE_CONTEXT_CHECK=true bash "$local_run" "$service" </dev/null >/dev/null 2>&1 &
+  )
+}
+
+stop_fullstack_services() {
+  stop_local_services
+  ts "Stopping local worker + beat + terminal-exec if they are running..."
+  pkill -TERM -f 'api/run_celery_workers\.py' 2>/dev/null || true
+  pkill -TERM -f 'python3 -m celery -A api\.celery_app:celery_app worker' 2>/dev/null || true
+  pkill -TERM -f 'celery -A api\.celery_app beat' 2>/dev/null || true
+  pkill -TERM -f 'terminal/exec_server\.py' 2>/dev/null || true
+  pkill -TERM -f 'scripts/dev/run-with-log.sh (worker|beat|terminal-exec)' 2>/dev/null || true
+  sleep 2
+  pkill -KILL -f 'api/run_celery_workers\.py' 2>/dev/null || true
+  pkill -KILL -f 'python3 -m celery -A api\.celery_app:celery_app worker' 2>/dev/null || true
+  pkill -KILL -f 'celery -A api\.celery_app beat' 2>/dev/null || true
+  pkill -KILL -f 'terminal/exec_server\.py' 2>/dev/null || true
+}
+
+start_fullstack_services() {
+  ts "Ensuring local redis..."
+  (
+    cd "$project_root"
+    env ELB_SKIP_AZURE_CONTEXT_CHECK=true bash "$local_run" redis
+  )
+  ts "Starting local api + worker + beat + web + terminal-exec..."
+  start_background_service terminal-exec
+  start_background_service worker
+  start_background_service beat
+  start_background_service api
+  start_background_service web
+}
+
 wait_for_endpoint() {
-  local url="$1" label="$2" attempts="${3:-20}"
+  local url="$1" label="$2" attempts="${3:-20}" curl_timeout="${4:-2}"
   local index
   for ((index = 1; index <= attempts; index++)); do
-    if curl -fsS --max-time 2 "$url" -o /dev/null 2>/dev/null; then
+    if curl -fsS --max-time "$curl_timeout" "$url" -o /dev/null 2>/dev/null; then
       green "  $label ready: $url"
       return 0
     fi
@@ -206,8 +272,8 @@ wait_for_endpoint() {
 }
 
 require_endpoint() {
-  local url="$1" label="$2" attempts="${3:-30}"
-  if wait_for_endpoint "$url" "$label" "$attempts"; then
+  local url="$1" label="$2" attempts="${3:-30}" curl_timeout="${4:-2}"
+  if wait_for_endpoint "$url" "$label" "$attempts" "$curl_timeout"; then
     return 0
   fi
   die "$label is not ready at $url. Check .logs/local/latest/${label}.log."
@@ -216,6 +282,12 @@ require_endpoint() {
 require_e2e_targets() {
   require_endpoint "$api_url/api/health" "api" 35
   require_endpoint "$base_url/" "web" 45
+}
+
+require_fullstack_targets() {
+  require_e2e_targets
+  require_endpoint "http://127.0.0.1:7682/healthz" "terminal-exec" 35
+  require_endpoint "$api_url/api/health/celery" "api" 12 20
 }
 
 resolve_browser_mode() {
@@ -291,6 +363,7 @@ print_summary() {
   cyan "-- e2e-ui session ----------------------------------------"
   echo "  auth mode:     $ACTION"
   echo "  browser mode:  $E2E_BROWSER_MODE"
+  echo "  services:      $service_profile"
   echo "  ui url:        $base_url"
   echo "  api url:       $api_url"
   if [[ "${#scenario[@]}" -gt 0 ]]; then
@@ -316,16 +389,27 @@ case "$ACTION" in
     E2E_BROWSER_MODE="$(resolve_browser_mode "$browser_choice")"
     export_scenario_env
     ts "Preparing local dev-bypass UI session..."
+    apply_e2e_runtime_env
     apply_bypass_env
     green "  AUTH_DEV_BYPASS=true written to local env files"
     if [[ "$skip_restart" -eq 0 ]]; then
-      stop_local_services
-      start_local_services
-      require_e2e_targets
+      if [[ "$service_profile" == "fullstack" ]]; then
+        stop_fullstack_services
+        start_fullstack_services
+        require_fullstack_targets
+      else
+        stop_local_services
+        start_local_services
+        require_e2e_targets
+      fi
     else
       yellow "  restart skipped; existing services must already match the selected env"
       if [[ "${#scenario[@]}" -gt 0 ]]; then
-        require_e2e_targets
+        if [[ "$service_profile" == "fullstack" ]]; then
+          require_fullstack_targets
+        else
+          require_e2e_targets
+        fi
       fi
     fi
     print_summary
@@ -337,8 +421,16 @@ case "$ACTION" in
     E2E_BROWSER_MODE="$(resolve_browser_mode "$browser_choice")"
     export_scenario_env
     ts "Preparing local MSAL login UI session..."
+    apply_e2e_runtime_env
     "$local_run" auth-on "${auth_args[@]}"
-    require_e2e_targets
+    if [[ "$service_profile" == "fullstack" ]]; then
+      start_background_service terminal-exec
+      start_background_service worker
+      start_background_service beat
+      require_fullstack_targets
+    else
+      require_e2e_targets
+    fi
     print_summary
     open_ui_if_requested
     run_scenario_if_present

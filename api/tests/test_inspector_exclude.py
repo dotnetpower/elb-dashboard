@@ -15,6 +15,7 @@ Validation: `uv run pytest -q api/tests/test_inspector_exclude.py`.
 from __future__ import annotations
 
 import pytest
+from api.app.inspector import _inspector_should_record
 from api.main import _inspector_should_capture
 
 
@@ -36,6 +37,7 @@ from api.main import _inspector_should_capture
 )
 def test_get_polling_paths_excluded(path: str) -> None:
     assert _inspector_should_capture(path, "GET") is False
+    assert _inspector_should_record(path) is True
 
 
 @pytest.mark.parametrize(
@@ -55,6 +57,11 @@ def test_sse_and_health_paths_excluded_for_all_methods() -> None:
     assert _inspector_should_capture("/api/blast/logs/job-1/events", "GET") is False
     assert _inspector_should_capture("/api/terminal/ws", "GET") is False
     assert _inspector_should_capture("/api/health", "GET") is False
+    assert _inspector_should_record("/api/monitor/sidecars") is False
+    assert _inspector_should_record("/api/monitor/sidecars/events") is False
+    assert _inspector_should_record("/api/blast/logs/job-1/events") is False
+    assert _inspector_should_record("/api/terminal/ws") is False
+    assert _inspector_should_record("/api/health") is False
     # Backwards-compat — single-arg call sites treat path as non-GET and
     # should still hit the path-only excludes.
     assert _inspector_should_capture("/api/blast/logs/job-1/events") is False

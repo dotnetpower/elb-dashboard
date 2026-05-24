@@ -12,6 +12,7 @@
 import { useId, useState } from "react";
 
 import type { AksClusterSummary } from "@/api/endpoints";
+import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
 import { isAksProvisioning, isAksWorkloadReady } from "@/utils/aksStatus";
 
 import { JobsSection } from "./JobsSection";
@@ -34,7 +35,7 @@ interface Props {
   cluster: AksClusterSummary;
   subscriptionId: string;
   resourceGroup: string;
-  trans?: "starting" | "stopping";
+  trans?: ClusterTransitionKind;
   actionLoading: string | null;
   onStartStop: (name: string, action: "start" | "stop") => void;
   onDelete: (name: string) => void;

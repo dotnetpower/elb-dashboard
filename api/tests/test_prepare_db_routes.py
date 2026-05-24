@@ -77,6 +77,14 @@ class _FakeBlob:
         return None
 
 
+class _FakeListedBlob:
+    def __init__(self, name: str, status: str) -> None:
+        self.name = name
+        self.copy = type(
+            "_Copy", (), {"status": status, "id": "copy-1", "status_description": ""}
+        )
+
+
 class _FakeContainer:
     def __init__(self, statuses: dict[str, str]) -> None:
         self._statuses = statuses
@@ -111,11 +119,12 @@ class _FakeContainer:
             return _Meta()
         return _FakeBlob(self._statuses.get(name, "success"))
 
-    def list_blobs(self, name_starts_with: str | None = None) -> Any:
+    def list_blobs(self, name_starts_with: str | None = None, include: Any = None) -> Any:
+        del include
         prefix = name_starts_with or ""
-        for name in self._statuses:
+        for name, status in self._statuses.items():
             if name.startswith(prefix):
-                yield type("_B", (), {"name": name})
+                yield _FakeListedBlob(name, status)
 
 
 class _FakeBlobSvc:

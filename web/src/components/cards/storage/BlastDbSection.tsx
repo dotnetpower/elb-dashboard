@@ -3,6 +3,7 @@ import { Database, Loader2, Lock, Maximize2, ShieldCheck, Unlock } from "lucide-
 
 import { useToast } from "@/components/Toast";
 import { DB_CATALOG } from "@/components/cards/storageDbCatalog";
+import type { BlastDbClusterTopology } from "@/components/cards/storage/BlastDbClusterConfirm";
 import { BlastDbModal } from "@/components/cards/storage/BlastDbModal";
 import { useBlastDb } from "@/components/cards/storage/useBlastDb";
 
@@ -12,6 +13,7 @@ interface BlastDbSectionProps {
   accountName: string;
   clusterName: string;
   acrName?: string;
+  clusterTopology?: BlastDbClusterTopology;
   /** Bubbles "anything in flight?" up to the parent card so it can shimmer. */
   onDownloadingChange?: (db: string | null) => void;
 }
@@ -29,6 +31,7 @@ export function BlastDbSection({
   accountName,
   clusterName,
   acrName,
+  clusterTopology,
   onDownloadingChange,
 }: BlastDbSectionProps) {
   const enabled = Boolean(subscriptionId && resourceGroup && accountName);
@@ -225,7 +228,13 @@ export function BlastDbSection({
         </div>
       )}
 
-      {showPopup && <BlastDbModal state={state} onClose={() => setShowPopup(false)} />}
+      {showPopup && (
+        <BlastDbModal
+          state={state}
+          clusterTopology={clusterTopology}
+          onClose={() => setShowPopup(false)}
+        />
+      )}
     </div>
   );
 }

@@ -102,8 +102,15 @@ export function useSidecarMetrics(): UseSidecarMetricsResult {
   sourceRef.current = source;
 
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 5_000);
-    return () => clearInterval(timer);
+    const tick = () => {
+      if (!document.hidden) setNow(Date.now());
+    };
+    const timer = setInterval(tick, 5_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, []);
 
   // Snapshot fetcher — initial load + polling fallback when SSE is down.

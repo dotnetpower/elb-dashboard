@@ -14,6 +14,7 @@ import { DatabaseChipStrip } from "./DatabaseChipStrip";
 import { StartEstimatePanel } from "./StartEstimatePanel";
 import { useClusterDbChips } from "./useClusterDbChips";
 import { useClusterShardMutation } from "./useClusterShardMutation";
+import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
 
 // ClusterItem — per-cluster row, driven by <ClusterPulse>.
 //
@@ -43,7 +44,7 @@ export function ClusterItem({
   terminalVmName,
 }: {
   cluster: AksClusterSummary;
-  transitioning: Map<string, "starting" | "stopping">;
+  transitioning: Map<string, ClusterTransitionKind>;
   actionLoading: string | null;
   onStartStop: (name: string, action: "start" | "stop") => void;
   onDelete: (name: string) => void;

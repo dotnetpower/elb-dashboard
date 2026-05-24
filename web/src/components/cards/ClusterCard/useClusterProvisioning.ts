@@ -2,13 +2,18 @@ import { useEffect, useState } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 
 import { aksApi, tasksApi } from "@/api/endpoints";
-import type { CeleryTaskStatus } from "@/api/tasks";
+import type { AksPreflightResponse, CeleryTaskStatus } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import type { AksClusterSummary } from "@/api/endpoints";
 import {
   DEFAULT_AKS_SKU,
   DEFAULT_AKS_SYSTEM_SKU,
 } from "@/hooks/useAksSkus";
+
+import {
+  clearLastFailedProvision,
+  saveLastFailedProvision,
+} from "./lastFailedProvision";
 
 const DEFAULT_NODE_COUNT = 10;
 const DEFAULT_SYSTEM_NODE_COUNT = 1;
@@ -90,6 +95,10 @@ export function useClusterProvisioning(args: {
    *  Used to warn the user before they submit a duplicate name. */
   existingResourceGroupNames?: string[];
   closeModal: () => void;
+  /** Whether the provision modal is currently mounted. The live
+   *  preflight effect (P2-1) is gated on this so we do not hammer
+   *  `/api/aks/preflight` while the modal is closed. */
+  modalOpen?: boolean;
   query: UseQueryResult<ClustersQueryData>;
 }) {
   const {
@@ -102,6 +111,7 @@ export function useClusterProvisioning(args: {
     defaultSystemSku,
     existingResourceGroupNames,
     closeModal,
+    modalOpen = false,
     query,
   } = args;
   // `args.resourceGroup` is the dashboard-wide workload RG; the provision
@@ -110,7 +120,14 @@ export function useClusterProvisioning(args: {
 
   const [clusterName, setClusterName] = useState("elb-cluster-01");
   const [nodeSku, setNodeSku] = useState(DEFAULT_AKS_SKU);
-  const [nodeCount, setNodeCount] = useState(DEFAULT_NODE_COUNT);
+  const [nodeCount, _setNodeCount] = useState(DEFAULT_NODE_COUNT);
+  // Track whether the user has manually touched the node count so the
+  // P2-2 smart-default effect doesn't override an intentional pick.
+  const [nodeCountUserTouched, setNodeCountUserTouched] = useState(false);
+  const setNodeCount = (n: number) => {
+    setNodeCountUserTouched(true);
+    _setNodeCount(n);
+  };
   const [systemVmSize, setSystemVmSize] = useState(DEFAULT_AKS_SYSTEM_SKU);
   const [systemNodeCount, setSystemNodeCount] = useState(DEFAULT_SYSTEM_NODE_COUNT);
   // Modal-local overrides so the user can pick a different region / RG for
@@ -172,6 +189,22 @@ export function useClusterProvisioning(args: {
    *  "arm_create_or_update", "ensuring_rbac"). Surfaced in the banner so the
    *  user can tell live progress from a stuck timer. */
   const [taskPhase, setTaskPhase] = useState<string | null>(null);
+  /** Richer progress payload published by `provision_aks` via
+   *  `task.update_state(meta=…)`. Carries `step`/`total_steps`,
+   *  `message`, `cluster_state`, `pools[]`, `arm_elapsed_seconds`,
+   *  `rg_visibility_attempt`/`rg_visibility_total`, etc. The banner
+   *  reads whatever keys are present; anything missing degrades to the
+   *  basic "phase + elapsed" UX. */
+  const [taskProgress, setTaskProgress] = useState<Record<string, unknown> | null>(null);
+  /** "idle" before the user hits Create on the current input set;
+   *  "checking" while `POST /api/aks/preflight` is in flight;
+   *  "done" once results are in. Reset to "idle" whenever inputs that
+   *  affect the result change (region, RG, SKUs, counts). */
+  const [preflightStatus, setPreflightStatus] = useState<
+    "idle" | "checking" | "done"
+  >("idle");
+  const [preflightResult, setPreflightResult] =
+    useState<AksPreflightResponse | null>(null);
 
   // Adopt the backend's system-pool default the first time it loads.
   useEffect(() => {
@@ -190,6 +223,117 @@ export function useClusterProvisioning(args: {
     );
     return () => clearInterval(timer);
   }, [provStatus, provStart]);
+
+  // Any input change that affects pre-flight result must invalidate the
+  // cached pre-flight so the user has to re-run it before Create. This
+  // prevents the "I fixed the SKU but the modal still shows the old
+  // failure" footgun. We also kick off an *auto* preflight 500 ms after
+  // the user stops typing/clicking so they get live feedback while
+  // tuning node count etc., instead of having to keep clicking Create.
+  useEffect(() => {
+    if (preflightStatus === "idle" && !preflightResult) return;
+    setPreflightStatus("idle");
+    setPreflightResult(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    provisionRegion,
+    provisionResourceGroup,
+    nodeSku,
+    nodeCount,
+    systemVmSize,
+    systemNodeCount,
+  ]);
+
+  // Live (debounced) preflight: any time the form has the minimum
+  // fields filled and the modal is in an editable state, kick off a
+  // preflight in the background so the check list stays accurate as
+  // the user adjusts node count etc. The debounce keeps us from
+  // hammering `/api/aks/preflight` on every keystroke. We skip while
+  // provisioning is in flight to avoid masking the live progress
+  // panel with a "checking…" indicator.
+  useEffect(() => {
+    if (!modalOpen) return;
+    if (provStatus === "creating") return;
+    if (!subscriptionId || !provisionRegion || !clusterName) return;
+    if (!resourceGroupNameValid(provisionResourceGroup)) return;
+    if (preflightStatus === "checking") return;
+    if (preflightResult) return; // already have a fresh result
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setPreflightStatus("checking");
+        try {
+          const res = await aksApi.preflight({
+            subscription_id: subscriptionId,
+            resource_group: provisionResourceGroup,
+            region: provisionRegion,
+            cluster_name: clusterName,
+            node_sku: nodeSku,
+            node_count: nodeCount,
+            system_vm_size: systemVmSize,
+            system_node_count: systemNodeCount,
+          });
+          setPreflightResult(res);
+        } catch {
+          // Live preflight failure is silent — the Create flow will
+          // re-run preflight inline and surface any real outage there.
+        } finally {
+          setPreflightStatus("done");
+        }
+      })();
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [
+    provStatus,
+    modalOpen,
+    subscriptionId,
+    provisionRegion,
+    provisionResourceGroup,
+    // `clusterName` is intentionally **excluded** — it has no effect on
+    // SKU / quota / RG checks (those only use sub + region + SKUs + RG),
+    // so retyping the name should not re-trigger preflight on every
+    // keystroke.
+    nodeSku,
+    nodeCount,
+    systemVmSize,
+    systemNodeCount,
+    preflightStatus,
+    preflightResult,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ]);
+
+  // P2-2 smart default: when the modal first opens and the live
+  // preflight comes back with a quota-fail that *does* have a workable
+  // fit, auto-apply the recommended `max_blast_nodes_fit` so the user
+  // is not greeted with a red "Compute quota" row out of the box. Only
+  // runs while the user has not manually touched the node count — once
+  // they pick a value (Apply N nodes button included) we respect it.
+  useEffect(() => {
+    if (!modalOpen) return;
+    if (nodeCountUserTouched) return;
+    if (preflightStatus !== "done") return;
+    if (!preflightResult || preflightResult.ok) return;
+    const quota = preflightResult.checks.find((c) => c.name === "quota");
+    if (!quota || quota.status !== "fail") return;
+    const maxFit = Number(
+      (quota.details as { max_blast_nodes_fit?: number } | undefined)
+        ?.max_blast_nodes_fit ?? 0,
+    );
+    if (maxFit >= 1 && maxFit !== nodeCount) {
+      // Use the internal setter so we don't trip `nodeCountUserTouched`
+      // — this is a system-driven default, not a user choice.
+      _setNodeCount(maxFit);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalOpen, preflightStatus, preflightResult]);
+
+  // Reset the smart-default "touched" flag when the modal closes so the
+  // next time the user opens it, the auto-fit kicks in again against
+  // the (possibly different) free quota.
+  useEffect(() => {
+    if (!modalOpen) {
+      setNodeCountUserTouched(false);
+    }
+  }, [modalOpen]);
 
   // Hard timeout. AKS provisioning normally finishes in 5–10 minutes. If we
   // are still "creating" after 20 minutes and the cluster never appeared in
@@ -220,18 +364,33 @@ export function useClusterProvisioning(args: {
       try {
         const res = await tasksApi.status(taskId);
         if (cancelled) return;
-        const phase = (res.progress?.phase as string | undefined) ?? null;
+        const progress = (res.progress ?? null) as Record<string, unknown> | null;
+        const phase = (progress?.phase as string | undefined) ?? null;
         if (phase) setTaskPhase(phase);
+        if (progress) setTaskProgress(progress);
         const status: CeleryTaskStatus = res.status;
         if (status === "FAILURE" || status === "REVOKED") {
           setProvStatus("error");
-          setProvError(
-            res.error?.trim()
-              ? `Provisioning task failed: ${res.error}`
-              : status === "REVOKED"
-                ? "Provisioning task was cancelled before it finished."
-                : "Provisioning task failed without an error message. Check worker logs.",
-          );
+          const errMsg = res.error?.trim()
+            ? `Provisioning task failed: ${res.error}`
+            : status === "REVOKED"
+              ? "Provisioning task was cancelled before it finished."
+              : "Provisioning task failed without an error message. Check worker logs.";
+          setProvError(errMsg);
+          // P3-2: persist the failure so a browser reload still shows
+          // a "Last attempt failed" banner. Only saves on real
+          // FAILURE — REVOKED was a deliberate user cancel and does
+          // not deserve a sticky banner on reload.
+          if (status === "FAILURE") {
+            saveLastFailedProvision({
+              raw: errMsg,
+              clusterName,
+              region: provisionRegion,
+              resourceGroup: provisionResourceGroup,
+              subscriptionId,
+              when: Date.now(),
+            });
+          }
         }
       } catch {
         // Transient — swallow one poll error so a 500 doesn't kill the
@@ -261,35 +420,106 @@ export function useClusterProvisioning(args: {
     return () => clearInterval(t);
   }, [provStatus, query]);
 
-  // Flip to "done" the moment the named cluster appears in the list.
+  // Flip to "done" the moment the named cluster appears in the list
+  // *or* the task reports it visible in ARM (cluster_state set). Both
+  // signal "ARM accepted the create" so the modal can safely close;
+  // the dashboard banner picks up the long tail of provisioning.
   useEffect(() => {
-    if (provStatus !== "creating" || !query.data?.clusters) return;
-    const found = query.data.clusters.find((c) => c.name === clusterName);
-    if (found) {
+    if (provStatus !== "creating") return;
+    const found = query.data?.clusters?.find((c) => c.name === clusterName);
+    const armVisible = Boolean(
+      (taskProgress?.cluster_state as string | undefined) &&
+        ["Creating", "Updating", "Succeeded"].includes(
+          (taskProgress?.cluster_state as string) ?? "",
+        ),
+    );
+    if (found || armVisible) {
       setProvStatus("done");
+      closeModal();
+      // P3-2: any "last attempt failed" sticky note becomes stale the
+      // moment a new attempt succeeds — clear it so the dashboard
+      // doesn't keep nagging the user about a problem they fixed.
+      clearLastFailedProvision();
     }
-  }, [provStatus, query.data, clusterName]);
+  }, [provStatus, query.data, clusterName, taskProgress, closeModal]);
 
   const handleProvision = async () => {
     if (!provisionRegion) return;
     if (!resourceGroupNameValid(provisionResourceGroup)) return;
-    // Defense in depth: the Create button is also disabled on conflict, but
-    // a programmatic invocation (keyboard, future code path) must not slip
-    // a duplicate RG into ARM.
-    const conflict = (existingResourceGroupNames ?? []).some(
-      (n) => n.toLowerCase() === provisionResourceGroup.toLowerCase(),
-    );
-    if (conflict) return;
+    // Reusing an existing resource group is intentional: a single RG can
+    // host multiple AKS clusters, and `provision_aks` calls
+    // `rc.resource_groups.get` idempotently before creating the cluster.
+    // We surface the "exists" state purely as an info note in the modal.
+
+    // Two-stage flow: run preflight first when we have no fresh result.
+    // The preflight call returns SKU / quota / RG check rows, blocking
+    // submit only on `fail` rows. If we already have a passing result
+    // from a previous click (no inputs changed since), skip straight to
+    // the provision PUT.
+    const preflightPayload = {
+      subscription_id: subscriptionId,
+      resource_group: provisionResourceGroup,
+      region: provisionRegion,
+      cluster_name: clusterName,
+      node_sku: nodeSku,
+      node_count: nodeCount,
+      system_vm_size: systemVmSize,
+      system_node_count: systemNodeCount,
+    };
+    if (preflightStatus !== "done" || !preflightResult) {
+      setPreflightStatus("checking");
+      setProvError(null);
+      try {
+        const res = await aksApi.preflight(preflightPayload);
+        setPreflightResult(res);
+        setPreflightStatus("done");
+        if (!res.ok) {
+          // Stop here; the modal renders the failing rows. Don't enqueue
+          // the Celery task — the user has to fix the inputs first.
+          return;
+        }
+      } catch (e) {
+        setPreflightStatus("done");
+        // Preflight outage is non-fatal: fall through to the provision
+        // call so the canonical ARM error still reaches the user.
+        setPreflightResult({
+          ok: true,
+          checks: [
+            {
+              name: "skus",
+              status: "warn",
+              message:
+                "Could not run pre-flight (network/auth). Submitting anyway; " +
+                "Azure will validate at provision time.",
+            },
+          ],
+          portal_url: null,
+        });
+        // eslint-disable-next-line no-console
+        console.warn("aks preflight failed", e);
+      }
+    } else if (!preflightResult.ok) {
+      // Defensive — the disabled button + form guard already prevent
+      // reaching this branch, but keep the early return just in case.
+      return;
+    }
+
     setProvStatus("creating");
     setProvError(null);
     setProvStart(Date.now());
     setTaskId(null);
     setTaskPhase(null);
-    // Do NOT close the modal here. If the ARM request fails (auth, quota,
-    // RegionNotAllowed, …) the user would lose every field they typed and
-    // only see an error banner outside. Close only after the API accepts
-    // the request — by that point a "provisioning" record exists and the
-    // banner can take over.
+    setTaskProgress(null);
+    // **Do not** close the modal here — the previous behaviour closed
+    // as soon as the Celery task accepted the enqueue, which left the
+    // user staring at a tiny "Provisioning…" banner outside while ARM
+    // spent ~70 s validating. If ARM then rejected with quota or SKU
+    // errors the user had lost every input value. The modal stays open
+    // until either (a) the task publishes `cluster_state` for the
+    // first time (= ARM accepted) or (b) the cluster appears in the
+    // list — both signalled by the useEffect above. On task FAILURE the
+    // modal stays open so the user can see the error inline and edit
+    // the form to retry.
     try {
       const response = await aksApi.provision({
         subscription_id: subscriptionId,
@@ -314,12 +544,11 @@ export function useClusterProvisioning(args: {
       const tid =
         response?.task_id ?? response?.instance_id ?? response?.id ?? null;
       if (tid) setTaskId(tid);
-      closeModal();
     } catch (e) {
       setProvError(formatApiError(e, "aks"));
       setProvStatus("error");
       // Modal intentionally stays open so the user can see the error in
-      // the sticky footer and either fix the form or click Cancel.
+      // the structured error card and either fix the form or click Cancel.
     }
   };
 
@@ -338,12 +567,38 @@ export function useClusterProvisioning(args: {
     setRgUserTouched(false);
   };
 
+  // P3-2 retry helper: hydrate the form from the persisted
+  // `LastFailedProvision` slot so an Edit & retry from the dashboard
+  // banner doesn't drop the user on a blank form. We mark RG and
+  // region as user-touched so the auto-sync effects do not immediately
+  // overwrite the values we just restored.
+  const applyLastFailedContext = (ctx: {
+    clusterName: string;
+    region: string;
+    resourceGroup: string;
+  }) => {
+    if (ctx.clusterName) setClusterName(ctx.clusterName);
+    if (ctx.region) {
+      setRegionUserTouched(true);
+      setProvisionRegionState(ctx.region);
+    }
+    if (ctx.resourceGroup) {
+      setRgUserTouched(true);
+      setProvisionResourceGroupState(ctx.resourceGroup);
+    }
+  };
+
   const clusterNameValid = CLUSTER_NAME_RE.test(clusterName);
 
   const provisionResourceGroupValid = resourceGroupNameValid(provisionResourceGroup);
-  // Conflict = an existing resource group already uses this exact name.
-  // Case-insensitive because Azure RG names are case-insensitive.
-  const provisionResourceGroupConflict = (existingResourceGroupNames ?? []).some(
+  // Whether an RG with this exact name already exists in the subscription.
+  // **Not** a blocker — Azure happily hosts multiple AKS clusters in a
+  // single RG, and the backend `provision_aks` task is idempotent
+  // (`rc.resource_groups.get` first, only `create_or_update` on miss).
+  // The modal surfaces this purely as an info note so the user knows the
+  // existing RG will be reused rather than recreated. Case-insensitive
+  // because Azure RG names are case-insensitive.
+  const provisionResourceGroupExists = (existingResourceGroupNames ?? []).some(
     (n) => n.toLowerCase() === provisionResourceGroup.toLowerCase(),
   );
 
@@ -365,8 +620,9 @@ export function useClusterProvisioning(args: {
     provisionResourceGroup,
     setProvisionResourceGroup,
     resetProvisionResourceGroupTracking,
+    applyLastFailedContext,
     provisionResourceGroupValid,
-    provisionResourceGroupConflict,
+    provisionResourceGroupExists,
     // status
     provStatus,
     setProvStatus,
@@ -376,7 +632,47 @@ export function useClusterProvisioning(args: {
     /** Phase reported by the Celery task; null while we wait for the first
      *  poll to come back. Banner shows this so a stuck task looks stuck. */
     taskPhase,
+    /** Full progress payload (step / total_steps / message / pools / …)
+     *  for the banner to render rich sub-progress. */
+    taskProgress,
+    /** Pre-flight UI state — drives the modal's check list and the
+     *  Create button label/disabled state. */
+    preflightStatus,
+    preflightResult,
     clusterNameValid,
     handleProvision,
+    /** Clear a previously-reported provisioning error and return the
+     *  modal to "edit the form" state. Wired to the error card's
+     *  Dismiss / Edit-&-retry buttons. Safe to call from "done" /
+     *  "idle" too — it just resets to "idle" + clears the error.
+     *
+     *  Also invalidates the cached preflight result: an ARM rejection
+     *  proves the world has changed since our last preflight (or the
+     *  preflight missed something), so the next Create click must
+     *  re-run preflight from scratch instead of replaying the stale
+     *  "ok" answer. */
+    resetError: () => {
+      setProvError(null);
+      setProvStatus("idle");
+      setPreflightStatus("idle");
+      setPreflightResult(null);
+    },
+    /** Cancel an in-flight provision task. Sends `terminate=True` so
+     *  the worker SIGTERMs out of the ARM poll loop. Worker may take
+     *  up to one ARM poll interval (~20 s) to honor the signal — the
+     *  banner keeps the spinner until the poller reports REVOKED, at
+     *  which point the usual error path renders. No-op when there is
+     *  no taskId or when the task is not currently running. */
+    cancelProvision: async (): Promise<void> => {
+      if (!taskId || provStatus !== "creating") return;
+      try {
+        await aksApi.cancelProvision(taskId);
+        // Optimistic state — the poller will land the canonical REVOKED
+        // shortly after. Until then the banner shows "Cancelling…".
+        setProvError("Cancellation requested. Waiting for the worker to stop…");
+      } catch (e) {
+        setProvError(formatApiError(e, "aks"));
+      }
+    },
   };
 }

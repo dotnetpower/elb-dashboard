@@ -40,6 +40,7 @@ def _step_key_for_phase(phase: str) -> str:
     return {
         "queued": "preparing",
         "preparing": "preparing",
+        "database_unavailable": "preparing",
         "configuring": "configuring",
         "warmup_ready": "warming_up",
         "waiting_for_warmup": "warming_up",

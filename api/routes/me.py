@@ -17,6 +17,9 @@ Validation: `uv run pytest -q api/tests/test_route_contracts.py api/tests/test_m
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -29,6 +32,18 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(tags=["identity"])
 
+_SUBSCRIPTION_CACHE_TTL_SECONDS = float(os.environ.get("ME_SUBSCRIPTIONS_TTL_SECONDS", "60"))
+_SUBSCRIPTION_LIST_LIMIT = max(1, int(os.environ.get("ME_SUBSCRIPTIONS_LIST_LIMIT", "100")))
+_SUBSCRIPTION_CACHE_LOCK = threading.Lock()
+_SUBSCRIPTION_CACHE: tuple[float, tuple[list[dict[str, Any]], str | None]] | None = None
+
+
+def reset_subscription_cache_for_tests() -> None:
+    """Clear the process-local subscription cache used by `/api/me` tests."""
+    global _SUBSCRIPTION_CACHE
+    with _SUBSCRIPTION_CACHE_LOCK:
+        _SUBSCRIPTION_CACHE = None
+
 
 def _list_visible_subscriptions() -> tuple[list[dict[str, Any]], str | None]:
     """Best-effort list of subscriptions visible to the api MI / dev az login.
@@ -37,6 +52,13 @@ def _list_visible_subscriptions() -> tuple[list[dict[str, Any]], str | None]:
     on failure ``subscriptions`` is empty and ``error`` is a short sanitised
     string suitable for the SPA to render as a hint.
     """
+    global _SUBSCRIPTION_CACHE
+    now = time.monotonic()
+    with _SUBSCRIPTION_CACHE_LOCK:
+        if _SUBSCRIPTION_CACHE is not None and _SUBSCRIPTION_CACHE[0] > now:
+            subs, error = _SUBSCRIPTION_CACHE[1]
+            return [dict(item) for item in subs], error
+
     try:
         from azure.mgmt.resource import SubscriptionClient
     except Exception as exc:  # pragma: no cover - import guard
@@ -56,7 +78,14 @@ def _list_visible_subscriptions() -> tuple[list[dict[str, Any]], str | None]:
                     "state": state.value if hasattr(state, "value") else str(state or "Unknown"),
                 }
             )
+            if len(subs) >= _SUBSCRIPTION_LIST_LIMIT:
+                break
         subs.sort(key=lambda x: (x.get("displayName") or "").lower())
+        with _SUBSCRIPTION_CACHE_LOCK:
+            _SUBSCRIPTION_CACHE = (
+                time.monotonic() + _SUBSCRIPTION_CACHE_TTL_SECONDS,
+                ([dict(item) for item in subs], None),
+            )
         return subs, None
     except Exception as exc:
         LOGGER.warning(

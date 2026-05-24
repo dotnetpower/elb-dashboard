@@ -86,13 +86,16 @@ scripts/dev/e2e-ui.sh bypass --headed
 scripts/dev/e2e-ui.sh login --ask-browser
 scripts/dev/e2e-ui.sh bypass --headless -- npm --prefix web run e2e:dashboard
 scripts/dev/e2e-ui.sh bypass --headless -- npm --prefix web run e2e:new-search
+scripts/dev/e2e-ui.sh bypass --fullstack --headless -- npm --prefix web run e2e:azure-core-nt-lifecycle
 ```
 
 When no browser flag is supplied, `e2e-ui.sh` asks briefly on interactive
 terminals: pressing Enter opens a visible browser, while no response falls back
 to headless mode. In CI and non-interactive shells it chooses headless
 automatically. Real MSAL login still requires the user to complete Microsoft
-sign-in, MFA, or device-code prompts directly.
+sign-in, MFA, or device-code prompts directly. Use `--fullstack` for scenarios
+that enqueue Celery work or call the terminal exec sidecar; it starts redis,
+api, worker, beat, web, and terminal-exec before running the scenario.
 
 Host-mode API startup keeps `127.0.0.1:8085` stable because the Vite dev
 server and smoke scripts expect that port. `local-run.sh api` takes a per-port

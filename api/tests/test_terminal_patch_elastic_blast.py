@@ -7,6 +7,7 @@ Key entry points: `_load_patch_module`,
 `test_patch_init_shard_script_writes_hardened_cache_skip`,
 `test_patch_init_shard_script_is_idempotent`,
 `test_patch_init_shard_script_updates_installed_package_copy`,
+`test_patch_azure_traits_adds_dashboard_v7_skus`,
 `test_patch_azure_cli_glue_clears_cleanup_stack_for_json_submit_success`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
@@ -44,8 +45,7 @@ def test_patch_init_shard_script_writes_hardened_cache_skip(tmp_path: Path) -> N
     assert "CLEANUP partial downloads" in text
     assert "find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +" in text
     assert "[ -f .download-complete ]" in text
-    assert "[ ! -s taxdb.btd ]" in text
-    assert "[ ! -s taxdb.bti ]" in text
+    assert "TAXDB_SKIP taxdb files not present in DB prefix" in text
     assert "CACHE_INCOMPLETE missing ${volume}.${payload_ext}" in text
     assert "CACHE_STALE source-version mismatch" in text
     assert "Resolving DB source version: ${METADATA_URL}" in text
@@ -101,6 +101,41 @@ def test_patch_init_shard_script_updates_installed_package_copy(tmp_path: Path) 
         assert "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}" in text
         assert "source legacy" not in text
         assert "installed legacy" not in text
+
+
+def test_patch_azure_traits_adds_dashboard_v7_skus(tmp_path: Path) -> None:
+    patch_module = _load_patch_module()
+    source_dir = tmp_path / "src" / "elastic_blast"
+    installed_dir = (
+        tmp_path
+        / "venv"
+        / "lib"
+        / "python3.12"
+        / "site-packages"
+        / "elastic_blast"
+    )
+    source_dir.mkdir(parents=True)
+    installed_dir.mkdir(parents=True)
+    base_text = (
+        "AZURE_HPC_MACHINES = {\n"
+        "    'Standard_D8s_v3': {'cpu': 8, 'memory': 32},  # 8 vCPU, 32 GB RAM\n"
+        "}\n"
+        "AZURE_VM_HOURLY_PRICES = {\n"
+        "    'Standard_D64s_v3': 3.072,\n"
+        "}\n"
+    )
+    for target in (source_dir / "azure_traits.py", installed_dir / "azure_traits.py"):
+        target.write_text(base_text)
+
+    patch_module.patch_azure_traits(tmp_path)
+    patch_module.patch_azure_traits(tmp_path)
+
+    for target in (source_dir / "azure_traits.py", installed_dir / "azure_traits.py"):
+        text = target.read_text()
+        assert text.count("Standard_E32as_v7") == 2
+        assert "'Standard_E32as_v7': {'cpu': 32, 'memory': 256}" in text
+        assert "'Standard_D2as_v7': {'cpu': 2, 'memory': 8}" in text
+        assert "'Standard_E48as_v7': 3.024" in text
 
 
 def test_patch_azure_cli_glue_clears_cleanup_stack_for_json_submit_success(

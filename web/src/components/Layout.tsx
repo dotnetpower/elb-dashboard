@@ -1,17 +1,18 @@
 import { type PropsWithChildren, useState, useRef, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import { useMsal } from "@azure/msal-react";
-import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, Sun, Moon, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn, Dna } from "lucide-react";
+import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, HelpCircle, Code2, ArrowRightLeft, UserPlus, Database, AlertTriangle, LogIn, Dna, Settings as SettingsIcon } from "lucide-react";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { LatestJobChip } from "@/components/LatestJobChip";
 import { UpgradeBadge } from "@/components/UpgradeBadge";
-import { useTheme } from "@/hooks/useTheme";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { apiLoginRequest } from "@/auth/msal";
 import { subscribeAuthSessionIssues, type AuthSessionIssue } from "@/auth/sessionEvents";
 import { useClusterReadiness, useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
+import { useSettingsPanel } from "@/hooks/useSettingsPanel";
+import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { isFeatureEnabled } from "@/config/runtime";
 
 import "./Layout.css";
@@ -184,12 +185,12 @@ export function Layout({ children }: PropsWithChildren) {
 
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const { showHelp, setShowHelp } = useKeyboardShortcuts();
+  const settingsPanel = useSettingsPanel();
   const autoRefreshMs = useAutoRefreshInterval();
   const autoRefreshLabel = autoRefreshMs >= 1000 ? `${Math.round(autoRefreshMs / 1000)}s` : `${autoRefreshMs}ms`;
-  const { theme, toggle: toggleTheme } = useTheme();
   const cluster = useClusterReadiness();
-  const customDbEnabled = isFeatureEnabled("customDb");
-  const labToolsEnabled = isFeatureEnabled("labTools");
+  const customDbEnabled = usePreviewFeatureEnabled("customDb");
+  const labToolsEnabled = usePreviewFeatureEnabled("labTools");
   const terminalEnabled = isFeatureEnabled("terminal");
   const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
   const newSearchBlocked = !cluster.hasRunningCluster;
@@ -326,14 +327,14 @@ export function Layout({ children }: PropsWithChildren) {
           <HelpCircle size={14} />
         </button>
 
-        {/* #50 Theme toggle */}
+        {/* Settings */}
         <button
           className="cfg-gear"
-          onClick={toggleTheme}
-          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          onClick={settingsPanel.open}
+          title="Settings"
           style={{ marginLeft: 0 }}
         >
-          {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
+          <SettingsIcon size={14} />
         </button>
 
         <UserMenuDropdown

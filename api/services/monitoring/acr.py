@@ -10,6 +10,8 @@ Validation: `uv run pytest -q api/tests`.
 from __future__ import annotations
 
 import logging
+import os
+from itertools import islice
 from typing import Any
 
 from azure.core.credentials import TokenCredential
@@ -18,6 +20,7 @@ from api.services.azure_clients import acr_client
 from api.services.image_tags import IMAGE_TAGS
 
 LOGGER = logging.getLogger(__name__)
+_ACR_RUNS_LIST_LIMIT = max(1, int(os.environ.get("ACR_RUNS_LIST_LIMIT", "100")))
 
 
 def _collect_succeeded_acr_images(actual_tags: dict[str, list[str]], images: list[Any]) -> None:
@@ -91,7 +94,9 @@ def list_acr_repositories(
         preview = ContainerRegistryManagementClient(
             credential, subscription_id, api_version="2019-06-01-preview"
         )
-        for run in preview.runs.list(resource_group, registry_name):
+        for run in islice(
+            preview.runs.list(resource_group, registry_name), _ACR_RUNS_LIST_LIMIT
+        ):
             status = run.status or ""
             run_id = run.run_id or ""
             if status == "Succeeded":

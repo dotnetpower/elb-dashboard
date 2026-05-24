@@ -10,10 +10,8 @@
 import { useMemo } from "react";
 
 import type { AksClusterSummary } from "@/api/endpoints";
-import {
-  getAksProvisioningLabel,
-  isAksProvisioningFailed,
-} from "@/utils/aksStatus";
+import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
+import { getAksProvisioningLabel, isAksProvisioningFailed } from "@/utils/aksStatus";
 
 import { fmtMs, type HealthTone } from "./helpers";
 
@@ -22,7 +20,7 @@ export interface ClusterHealthInput {
   isRunning: boolean;
   isTransitioning: boolean;
   provisioningBusy: boolean;
-  trans?: "starting" | "stopping";
+  trans?: ClusterTransitionKind;
   cpuPct: number | null;
   memPct: number | null;
   apiP95: number | null;
@@ -40,9 +38,7 @@ export interface ClusterHealthVerdict {
   statusTone: HealthTone;
 }
 
-export function useClusterHealth(
-  input: ClusterHealthInput,
-): ClusterHealthVerdict {
+export function useClusterHealth(input: ClusterHealthInput): ClusterHealthVerdict {
   const {
     cluster: c,
     isRunning,
@@ -101,6 +97,9 @@ export function useClusterHealth(
     if (trans === "stopping") {
       return { statusLine: "Stopping cluster…", statusTone: "transitioning" };
     }
+    if (trans === "deleting") {
+      return { statusLine: "Deleting cluster…", statusTone: "transitioning" };
+    }
     if (provisioningBusy) {
       const label = getAksProvisioningLabel(c);
       return {
@@ -120,8 +119,7 @@ export function useClusterHealth(
         parts.push(`CPU ${Math.round(cpuPct * 100)}%`);
       if (memPct != null && memPct >= 0.85)
         parts.push(`Mem ${Math.round(memPct * 100)}%`);
-      if (apiP95 != null && apiP95 > 2000)
-        parts.push(`API p95 ${fmtMs(apiP95)}`);
+      if (apiP95 != null && apiP95 > 2000) parts.push(`API p95 ${fmtMs(apiP95)}`);
       if (apiErrors > 0) parts.push(`${apiErrors} errors / 15m`);
       if (nodeNotReady > 0) parts.push(`${nodeNotReady} node not ready`);
       return {
@@ -133,8 +131,7 @@ export function useClusterHealth(
       return { statusLine: "Metrics not yet available", statusTone: "unknown" };
     }
     const softParts: string[] = [];
-    if (apiP95 != null && apiP95 > 2000)
-      softParts.push(`API p95 ${fmtMs(apiP95)}`);
+    if (apiP95 != null && apiP95 > 2000) softParts.push(`API p95 ${fmtMs(apiP95)}`);
     if (apiErrors > 0) softParts.push(`${apiErrors} errors / 15m`);
     if (softParts.length > 0) {
       return { statusLine: softParts.join(" · "), statusTone: "degraded" };

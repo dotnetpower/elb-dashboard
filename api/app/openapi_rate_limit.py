@@ -67,6 +67,8 @@ def _max_requests_per_window() -> int:
 # cannot grow this dict without bound. LRU-style eviction is good enough
 # here — the bucket reset on eviction is the same outcome as a TTL.
 _MAX_KEYS = int(os.environ.get("OPENAPI_RATE_LIMIT_MAX_KEYS", "1024"))
+if _MAX_KEYS < 256:
+    raise ValueError("OPENAPI_RATE_LIMIT_MAX_KEYS must be at least 256")
 
 # Disable bypass for tests and ops debugging without recompiling.
 _DISABLED_VALUES = {"", "0", "false", "no", "off"}

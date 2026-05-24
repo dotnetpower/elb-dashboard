@@ -43,6 +43,12 @@ hooks:
         bash ./scripts/dev/resolve-resource-group.sh --environment "$AZURE_ENV_NAME"
       fi
       bash ./scripts/dev/azd-progress.sh done 2 "Resource group choice"
+      bash ./scripts/dev/azd-progress.sh note "Checking for compatible soft-deleted Key Vaults before Bicep starts."
+      if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
+        bash ./scripts/dev/recover-deleted-keyvault.sh --environment "$AZURE_ENV_NAME" --subscription "$AZURE_SUBSCRIPTION_ID"
+      else
+        bash ./scripts/dev/recover-deleted-keyvault.sh --environment "$AZURE_ENV_NAME"
+      fi
       bash ./scripts/dev/azd-progress.sh step 3 "Bicep provision" "azd runs infra/main.bicep next; this is the main Azure resource creation phase."
       if [ -z "${API_CLIENT_ID:-}" ]; then
         bash ./scripts/dev/azd-progress.sh note "API_CLIENT_ID is not set yet. Step 4 will create/reuse the App Registration and persist it."

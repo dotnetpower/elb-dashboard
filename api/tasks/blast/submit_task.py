@@ -90,12 +90,35 @@ def submit(
         options=options,
     )
     effective_options = _blast._expand_strict_tie_order_candidate_pool(effective_options)
+    db_name_for_warmup = extract_db_name(database)
+    try:
+        _blast._validate_blast_database_available(
+            storage_account=storage_account,
+            database=database,
+        )
+    except _blast.BlastDatabaseAvailabilityError as exc:
+        error = _blast._snippet(exc)
+        _blast._progress(self, "database_unavailable", database=db_name_for_warmup)
+        _blast._update_state(
+            job_id,
+            "database_unavailable",
+            status="failed",
+            error_code=exc.code,
+            output=error,
+            last_output=error,
+        )
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "phase": "database_unavailable",
+            "error": error,
+            "error_code": exc.code,
+        }
 
     from concurrent.futures import Future, ThreadPoolExecutor
 
     from api.services.terminal_exec import run as terminal_run
 
-    db_name_for_warmup = extract_db_name(database)
     will_split_parent = _blast._requires_split_parent_submission(effective_options)
 
     _blast._progress(self, "warming_up", database=db_name_for_warmup)
@@ -544,6 +567,42 @@ def submit(
             "k8s": k8s_status,
             "output": _blast._snippet(submit_output, _blast.STDOUT_SNIPPET_CHARS),
         }
+
+    if elastic_blast_job_id:
+        phase, status, k8s_status = _blast._refresh_submit_terminal_status(
+            job_id=job_id,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            k8s_job_id=elastic_blast_job_id,
+        )
+        if status in {"running", "completed"}:
+            phase, status = _blast._gate_completed_submit_on_results(
+                job_id=job_id,
+                storage_account=storage_account,
+                phase=phase,
+                status=status,
+            )
+            _blast._update_state(
+                job_id,
+                phase,
+                status=status,
+                elastic_blast_job_id=elastic_blast_job_id,
+                k8s=k8s_status,
+                output=_blast._snippet(submit_output, _blast.STDOUT_SNIPPET_CHARS),
+                warning=_blast._snippet(submit_output, _blast.ERROR_SNIPPET_CHARS),
+                exit_code=exit_code,
+                elastic_blast_submit_duration_ms=result.get("duration_ms"),
+                timed_out=result.get("timed_out"),
+            )
+            return {
+                "job_id": job_id,
+                "status": status,
+                "phase": phase,
+                "decision": "accepted",
+                "k8s": k8s_status,
+                "output": _blast._snippet(submit_output, _blast.STDOUT_SNIPPET_CHARS),
+            }
 
     error = _blast._result_error(result, payload)
     if _blast._is_retryable_result(result, payload):

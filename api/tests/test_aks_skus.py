@@ -53,6 +53,15 @@ SIBLING_AZURE_HPC_MACHINES = (
     "Standard_L80as_v3",
 )
 
+DASHBOARD_AZURE_HPC_EXTRAS = (
+    # Subscription-availability fallback for environments where E v5 is
+    # restricted but E as v7 is available. Track upstream separately before
+    # removing this dashboard-side compatibility extension.
+    "Standard_E16as_v7",
+    "Standard_E32as_v7",
+    "Standard_E48as_v7",
+)
+
 
 def test_default_sku_in_allow_list() -> None:
     assert aks_skus.DEFAULT_SKU in aks_skus.ALLOWED_SKUS
@@ -75,7 +84,7 @@ def test_allowed_skus_match_sibling_azure_hpc_machines() -> None:
     # and reasonable upgrades) that elastic-blast itself never schedules on,
     # so they are intentionally extra.
     blast_only = {sku for sku, entry in aks_skus.SKU_BY_NAME.items() if entry.role != "system"}
-    assert blast_only == set(SIBLING_AZURE_HPC_MACHINES)
+    assert blast_only == set(SIBLING_AZURE_HPC_MACHINES) | set(DASHBOARD_AZURE_HPC_EXTRAS)
     # Every system-only SKU must be allowed too.
     system_only = {sku for sku, entry in aks_skus.SKU_BY_NAME.items() if entry.role == "system"}
     assert system_only.issubset(set(aks_skus.ALLOWED_SKUS))
@@ -127,6 +136,20 @@ def test_is_allowed_rejects_unknown() -> None:
 
 def test_is_allowed_accepts_default() -> None:
     assert aks_skus.is_allowed(aks_skus.DEFAULT_SKU)
+
+
+def test_is_allowed_accepts_subscription_fallback_v7_skus() -> None:
+    assert aks_skus.is_allowed("Standard_D2as_v7")
+    assert aks_skus.SKU_BY_NAME["Standard_D2as_v7"].role == "system"
+    assert aks_skus.is_allowed("Standard_E32as_v7")
+    assert aks_skus.SKU_BY_NAME["Standard_E32as_v7"].memory_gib == 256
+
+
+def test_normalize_sku_name_accepts_azure_variants() -> None:
+    assert aks_skus.normalize_sku_name("E32as_v7") == "Standard_E32as_v7"
+    assert aks_skus.normalize_sku_name(" standard_e32as_v7 ") == "Standard_E32as_v7"
+    assert aks_skus.is_allowed("E32as_v7")
+    assert aks_skus.normalize_sku_name("NotARealSku") == "NotARealSku"
 
 
 def test_aks_skus_route_returns_compatible_default_fields(

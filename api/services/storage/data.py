@@ -159,9 +159,13 @@ def list_result_blobs(
     account_name: str,
     container: str = "results",
     prefix: str = "",
+    *,
+    max_results: int | None = None,
 ) -> list[dict[str, Any]]:
     _sync_patch_surface()
-    return _blob_io.list_result_blobs(credential, account_name, container, prefix)
+    return _blob_io.list_result_blobs(
+        credential, account_name, container, prefix, max_results=max_results
+    )
 
 
 def list_databases(

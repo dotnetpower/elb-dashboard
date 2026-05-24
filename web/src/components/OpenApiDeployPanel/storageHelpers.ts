@@ -61,8 +61,12 @@ export function formatDeployPhase(phase?: string): string {
   switch (phase) {
     case "setup_workload_identity":
       return "Setting up workload identity";
-    case "deploying_openapi":
-      return "Deploying OpenAPI service";
+    case "applying_manifests":
+      return "Applying OpenAPI manifests";
+    case "waiting_for_external_ip":
+      return "Waiting for OpenAPI LoadBalancer IP";
+    case "waiting_for_ready_replicas":
+      return "Waiting for OpenAPI pod readiness";
     default:
       return phase ?? "Deploying OpenAPI";
   }

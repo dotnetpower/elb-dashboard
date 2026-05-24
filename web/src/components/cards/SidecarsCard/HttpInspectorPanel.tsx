@@ -146,9 +146,16 @@ export function HttpInspectorPanel() {
   useEffect(() => {
     void fetchOnce();
     const id = window.setInterval(() => {
-      void fetchOnce();
+      if (!document.hidden) void fetchOnce();
     }, REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(id);
+    const onVisible = () => {
+      if (!document.hidden) void fetchOnce();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [fetchOnce]);
 
   const subtitle = useMemo(() => {
@@ -236,8 +243,9 @@ export function HttpInspectorPanel() {
             textAlign: "center",
           }}
         >
-          No requests captured yet. The inspector buffer is per-process — it
-          starts populating as soon as traffic flows through the api sidecar.
+          No requests captured yet. The inspector buffer is per-process and
+          filters streaming/self-inspection routes; it starts populating when
+          non-streaming API traffic flows through this api process.
         </div>
       )}
 

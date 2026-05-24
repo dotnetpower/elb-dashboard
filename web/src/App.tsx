@@ -18,6 +18,7 @@ import { AksCardMockupsPremium } from "@/pages/mockups/AksCardMockupsPremium";
 import { AksCardMockupsSimple } from "@/pages/mockups/AksCardMockupsSimple";
 import { SidecarInspectorMockups } from "@/pages/mockups/SidecarInspectorMockups";
 import { configValue, isDevBypassEnabled, isFeatureEnabled, isUsableClientId } from "@/config/runtime";
+import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 
 const DEV_BYPASS = isDevBypassEnabled();
 const CLIENT_ID_MISSING = !isUsableClientId(configValue("VITE_AZURE_CLIENT_ID")) && !DEV_BYPASS;
@@ -82,8 +83,8 @@ function TerminalLoadUnavailable({ error }: { error: unknown }) {
 }
 
 function AppRoutes() {
-  const customDbEnabled = isFeatureEnabled("customDb");
-  const labToolsEnabled = isFeatureEnabled("labTools");
+  const customDbEnabled = usePreviewFeatureEnabled("customDb");
+  const labToolsEnabled = usePreviewFeatureEnabled("labTools");
   const terminalEnabled = isFeatureEnabled("terminal");
 
   return (

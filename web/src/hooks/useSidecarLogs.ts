@@ -7,10 +7,9 @@
  *      - `event: line` per log line
  *      - `event: drop` when the server-side ring buffer dropped frames
  *      - `:` heartbeat every ~25s
- *   3. On 404 / 410 / connect failure we fall back to a *local mock generator*
- *      so the Live Wall renders something before the backend route exists.
- *      Real failures (5xx, network) instead drive the "polling" state and
- *      retry the ticket with bounded backoff.
+ *   3. On 404 / 410 / connect failure we show polling/no-activity in the
+ *      real app and retry with bounded backoff. The local mock generator is
+ *      enabled only for VITE_DOCS_MOCK_PREVIEW screenshots.
  *
  * The hook keeps a bounded in-memory ring (default 60 lines per tile) so a
  * chatty sidecar can't blow up React. Tile UI shows the last ~6 lines —
@@ -27,6 +26,7 @@ import {
 
 const MAX_BUFFER = 60;
 const SSE_RETRY_DELAYS_MS = [4_000, 10_000, 30_000];
+const DOCS_MOCK_PREVIEW = import.meta.env.VITE_DOCS_MOCK_PREVIEW === "true";
 
 export type SidecarLogsSource = "connecting" | "live" | "polling" | "mock";
 
@@ -77,10 +77,9 @@ export function useSidecarLogs(
       if (!Number.isNaN(t)) setLastLineTs(t);
     };
 
-    // ---- Mock generator -------------------------------------------------
-    // The backend route doesn't exist yet — when ticket fails with 404/410,
-    // we run a local generator so the Live Wall is demonstrable. Replace
-    // entirely once /api/monitor/logs/{c}/events lands.
+    // ---- Docs mock generator -------------------------------------------
+    // Only active for documentation screenshots. The production dashboard
+    // must never invent operational logs when the backend stream is missing.
     const startMock = () => {
       if (cancelled || mockTimer) return;
       setSource("mock");
@@ -88,6 +87,7 @@ export function useSidecarLogs(
       let i = Math.floor(Math.random() * seed.length);
       const emit = () => {
         if (cancelled) return;
+        if (document.hidden) return;
         const sample = seed[i % seed.length];
         i += 1;
         push({
@@ -112,7 +112,8 @@ export function useSidecarLogs(
 
     const scheduleReconnect = () => {
       if (cancelled) return;
-      const delay = SSE_RETRY_DELAYS_MS[Math.min(attempt, SSE_RETRY_DELAYS_MS.length - 1)];
+      const delay =
+        SSE_RETRY_DELAYS_MS[Math.min(attempt, SSE_RETRY_DELAYS_MS.length - 1)];
       attempt += 1;
       reconnectTimer = setTimeout(connect, delay);
     };
@@ -125,6 +126,7 @@ export function useSidecarLogs(
         stopMock();
         const url = sidecarLogsStreamUrl(container, ticket.ticket);
         es = new EventSource(url, { withCredentials: false });
+        es.onopen = () => setSource("live");
 
         es.addEventListener("line", (ev) => {
           try {
@@ -154,7 +156,8 @@ export function useSidecarLogs(
         const status = (err as { status?: number }).status ?? 0;
         // 404 / 410 ⇒ backend not deployed yet → fall back to mock.
         if (status === 404 || status === 410) {
-          startMock();
+          if (DOCS_MOCK_PREVIEW) startMock();
+          else setSource("polling");
           return;
         }
         setSource("polling");
@@ -205,13 +208,33 @@ const MOCK_SEEDS: Record<SidecarContainer, MockSeed[]> = {
     { stream: "stdout", level: "INFO", text: "200  GET  /api/me                    6ms" },
   ],
   worker: [
-    { stream: "stdout", level: "INFO", text: "task api.tasks.blast.submit[job-218] received" },
-    { stream: "stdout", level: "INFO", text: "staging queries.fa → stelbwork/job-218/queries.fa" },
-    { stream: "stderr", level: "WARN", text: "k8s connection reset by peer (attempt 1/3)" },
-    { stream: "stderr", level: "ERR",  text: "ResourceNotFoundError: container=results not found" },
+    {
+      stream: "stdout",
+      level: "INFO",
+      text: "task api.tasks.blast.submit[job-218] received",
+    },
+    {
+      stream: "stdout",
+      level: "INFO",
+      text: "staging queries.fa → stelbwork/job-218/queries.fa",
+    },
+    {
+      stream: "stderr",
+      level: "WARN",
+      text: "k8s connection reset by peer (attempt 1/3)",
+    },
+    {
+      stream: "stderr",
+      level: "ERR",
+      text: "ResourceNotFoundError: container=results not found",
+    },
     { stream: "stdout", level: "INFO", text: "retry scheduled in 30s (attempt 2/5)" },
-    { stream: "stdout", level: "OK",   text: "k8s job-218 first shard pod Ready" },
-    { stream: "stdout", level: "INFO", text: "task blast.submit[job-218] retry succeeded" },
+    { stream: "stdout", level: "OK", text: "k8s job-218 first shard pod Ready" },
+    {
+      stream: "stdout",
+      level: "INFO",
+      text: "task blast.submit[job-218] retry succeeded",
+    },
   ],
   beat: [
     { stream: "stdout", level: "INFO", text: "tick  monitor.refresh_sidecars" },
@@ -230,7 +253,7 @@ const MOCK_SEEDS: Record<SidecarContainer, MockSeed[]> = {
   terminal: [
     { stream: "stdout", level: "INFO", text: "exec  azcopy copy ./queries.fa <dst>" },
     { stream: "stderr", level: "WARN", text: "azcopy: throughput 0.4 MiB/s < 2 MiB/s" },
-    { stream: "stdout", level: "OK",   text: "azcopy completed (8.2 MiB)" },
+    { stream: "stdout", level: "OK", text: "azcopy completed (8.2 MiB)" },
     { stream: "stdout", level: "INFO", text: "exec  elastic-blast status --cfg job-218" },
     { stream: "stderr", level: "WARN", text: "kubectl: 1 pod CrashLoopBackOff" },
   ],

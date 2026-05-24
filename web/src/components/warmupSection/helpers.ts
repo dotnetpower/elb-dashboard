@@ -135,6 +135,7 @@ export function buildWarmupRows({
       const candidate = WARMUP_CANDIDATES.find((item) => item.value === name);
       const plan = planByName.get(name);
       const downloaded = Boolean(db);
+      const storageReady = downloaded || warm != null;
       const sharded = Boolean(db?.sharded && (db.shard_sets?.length ?? 0) > 0);
       const warmReady = warm?.status === "Ready";
       const warming = warm?.status === "Loading";
@@ -150,25 +151,25 @@ export function buildWarmupRows({
         plan != null && plan.feasible === false && plan.status !== "no_db_size";
       const pressure = capacity.memoryPressure && (warmReady || warming);
 
-      let cacheLabel = "Not warm";
+      let cacheLabel = "AKS cache not warm";
       let cacheTone: WarmupRow["cacheTone"] = "neutral";
       if (pressure) {
-        cacheLabel = `Memory pressure · ${warm?.nodes_ready ?? 0}/${warm?.total_jobs ?? "?"}`;
+        cacheLabel = `AKS cache pressure · ${warm?.nodes_ready ?? 0}/${warm?.total_jobs ?? "?"}`;
         cacheTone = "pressure";
       } else if (warmReady) {
-        cacheLabel = `Warm · ${warm.nodes_ready}/${warm.total_jobs} nodes`;
+        cacheLabel = `AKS cache ready · ${warm.nodes_ready}/${warm.total_jobs}`;
         cacheTone = "ready";
       } else if (warming) {
-        cacheLabel = `${shortWarmupPhase(warm)} · ${warm.nodes_ready}/${warm.total_jobs} nodes`;
+        cacheLabel = `AKS cache ${shortWarmupPhase(warm).toLowerCase()} · ${warm.nodes_ready}/${warm.total_jobs}`;
         cacheTone = "loading";
       } else if (partial) {
-        cacheLabel = `Partial · ${warm!.nodes_ready}/${warm!.total_jobs} nodes`;
+        cacheLabel = `AKS cache partial · ${warm!.nodes_ready}/${warm!.total_jobs}`;
         cacheTone = "pressure";
       } else if (failed) {
-        cacheLabel = `Failed · ${warm!.nodes_failed}/${warm!.total_jobs} nodes`;
+        cacheLabel = `AKS cache failed · ${warm!.nodes_failed}/${warm!.total_jobs}`;
         cacheTone = "blocked";
       } else if (blocked) {
-        cacheLabel = "Blocked";
+        cacheLabel = "AKS cache blocked";
         cacheTone = "blocked";
       }
 
@@ -182,15 +183,19 @@ export function buildWarmupRows({
             ? "warm"
             : "none";
       const shardLabel = sharded
-        ? `${db!.shard_sets!.join("/")}-way shards`
+        ? `Shard layouts · ${db!.shard_sets!.join("/")}`
         : db?.sharding_in_progress
-          ? "Sharding"
-          : "Not sharded";
+          ? "Shard layouts building"
+          : warm
+            ? `AKS cache shards · ${warm.shards?.length || warm.total_jobs}`
+            : "Shard layouts unknown";
       const detail = plan
         ? `Needs about ${plan.per_node_gib.toFixed(1)} GiB per node; safe budget ${plan.safe_node_budget_gib.toFixed(1)} GiB.`
         : downloaded
           ? "Warmup fit has not been estimated for this cluster yet."
-          : "Download the database before warming it on AKS nodes.";
+          : warm
+            ? "AKS warmup is running; Storage catalogue details are not available in this panel yet."
+            : "Prepare this database in Storage before warming it on AKS nodes.";
       const warmupProgress = warm ? formatWarmupProgress(warm) : undefined;
 
       return {
@@ -199,7 +204,7 @@ export function buildWarmupRows({
         sizeLabel: db?.total_bytes
           ? formatBytes(db.total_bytes)
           : (candidate?.size ?? "—"),
-        storageLabel: downloaded ? "Downloaded" : "Not downloaded",
+        storageLabel: storageReady ? "Storage DB ready" : "Storage DB not ready",
         shardLabel,
         cacheLabel,
         cacheTone,
@@ -211,12 +216,12 @@ export function buildWarmupRows({
         primaryAction,
         blockedReason: blocked
           ? plan!.message
-          : downloaded
+          : storageReady
             ? undefined
-            : "Database is not downloaded.",
+            : "Storage DB is not ready.",
       };
     })
-    .filter((row) => row.storageLabel === "Downloaded" || row.warm != null)
+    .filter((row) => row.storageLabel === "Storage DB ready" || row.warm != null)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

@@ -171,6 +171,21 @@ def _make_app(monkeypatch):
     return app
 
 
+def _make_app_with_default_inspector(monkeypatch):
+    """Build the app with the production default inspector mode.
+
+    The default records request metadata but avoids body buffering unless
+    REQUEST_DETAIL_CAPTURE_ENABLED is explicitly true.
+    """
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.delenv("REQUEST_DETAIL_CAPTURE_ENABLED", raising=False)
+    monkeypatch.setenv("SIDECAR_REPORTER_DISABLED", "true")
+    from api import main as _main
+
+    app = _main.create_app()
+    return app
+
+
 @pytest.mark.slow
 def test_middleware_captures_post_body_and_route_returns_it(monkeypatch):
     rm.reset_details_for_tests()
@@ -190,6 +205,42 @@ def test_middleware_captures_post_body_and_route_returns_it(monkeypatch):
     assert s["request_body"] is not None and "hello" in s["request_body"]
     # request_id should round-trip into the response and the buffer.
     assert s["request_id"]
+
+
+def test_middleware_records_polling_get_metadata_by_default(monkeypatch):
+    rm.reset_details_for_tests()
+    app = _make_app_with_default_inspector(monkeypatch)
+    client = TestClient(app)
+
+    response = client.get("/api/me/_inspector_probe")
+
+    assert response.status_code == 404
+    items = rm.details().list_recent(limit=10)
+    matches = [
+        sample
+        for sample in items
+        if sample["method"] == "GET" and sample["path"] == "/api/me/_inspector_probe"
+    ]
+    assert matches
+    assert matches[0]["request_id"]
+    assert matches[0]["request_body"] is None
+    assert matches[0]["response_body"] is None
+
+
+def test_middleware_can_disable_detail_buffer(monkeypatch):
+    rm.reset_details_for_tests()
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("REQUEST_DETAIL_CAPTURE_ENABLED", "false")
+    monkeypatch.setenv("SIDECAR_REPORTER_DISABLED", "true")
+    from api import main as _main
+
+    app = _main.create_app()
+    client = TestClient(app)
+
+    response = client.post("/api/resources/_inspector_disabled", json={"k": 1})
+
+    assert response.status_code in (404, 405, 422, 503)
+    assert rm.details().list_recent(limit=10) == []
 
 
 def test_sidecar_requests_route_returns_redacted_payload(monkeypatch):

@@ -191,6 +191,17 @@
     0 6px 18px rgba(20, 20, 20, 0.06);
 }
 
+@media (max-width: 768px) {
+  [data-theme="light"] {
+    --glass-blur: 4px;
+  }
+
+  [data-theme="light"] .layout__topbar {
+    backdrop-filter: blur(8px) saturate(160%);
+    -webkit-backdrop-filter: blur(8px) saturate(160%);
+  }
+}
+
 /* Logo gradient is intentionally theme-locked to the dark palette
    (see Layout.css .layout__logo-icon). Do not add a light-theme override. */
 
@@ -1391,6 +1402,116 @@ textarea.form-input {
 .db-row:hover {
   background: rgba(255, 255, 255, 0.02) !important;
   border-color: var(--border-weak) !important;
+}
+
+.blast-db-large-confirm {
+  margin-top: var(--space-2);
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  font-size: var(--font-size-small);
+  scroll-margin-block: var(--space-4);
+}
+
+.blast-db-large-confirm__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: var(--warning);
+  font-weight: 650;
+}
+
+.blast-db-large-confirm__copy {
+  margin-bottom: 10px;
+  font-size: 11px;
+}
+
+.blast-db-large-confirm__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.blast-db-large-confirm__actions .glass-button {
+  font-size: 11px;
+}
+
+.blast-db-large-confirm__primary {
+  background: color-mix(in srgb, var(--warning) 82%, var(--bg-canvas));
+  border-color: color-mix(in srgb, var(--warning) 86%, white 8%);
+  color: #111217;
+  font-weight: 700;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 28%, transparent);
+}
+
+.blast-db-large-confirm__primary:hover {
+  background: color-mix(in srgb, var(--warning) 92%, white 8%);
+  border-color: color-mix(in srgb, var(--warning) 92%, white 8%);
+}
+
+.blast-db-large-confirm__primary:focus-visible {
+  outline-color: var(--warning);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--warning) 35%, transparent),
+    0 0 0 5px color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
+[data-theme="light"] .blast-db-large-confirm__primary {
+  color: #ffffff;
+}
+
+.blast-db-cluster-confirm-backdrop {
+  z-index: 1120;
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.blast-db-cluster-confirm {
+  width: min(500px, calc(100vw - 32px));
+  padding: 22px 24px;
+  text-align: left;
+}
+
+.blast-db-cluster-confirm__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  margin-bottom: 12px;
+}
+
+.blast-db-cluster-confirm__title {
+  margin: 0 0 8px;
+  color: var(--text-primary);
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.blast-db-cluster-confirm__copy {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.blast-db-cluster-confirm__copy strong {
+  color: var(--warning);
+  font-weight: 650;
+}
+
+.blast-db-cluster-confirm__actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.blast-db-cluster-confirm__primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .kv:last-child {
@@ -5077,7 +5198,7 @@ button.blast-db-table__row:focus-visible {
 }
 .step-log-text--error {
   color: var(--danger);
-  background: rgba(224, 123, 138, 0.10);
+  background: rgba(224, 123, 138, 0.1);
 }
 .step-log-text--ok {
   color: var(--success);
@@ -5113,7 +5234,7 @@ button.blast-db-table__row:focus-visible {
   color: #6a4ec9;
 }
 [data-theme="light"] .step-log-text--error {
-  background: rgba(196, 60, 79, 0.10);
+  background: rgba(196, 60, 79, 0.1);
 }
 
 /* ══════════════════════════════════════════════════════════════════════

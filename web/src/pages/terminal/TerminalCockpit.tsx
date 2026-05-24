@@ -134,9 +134,19 @@ export function TerminalCockpit({
     () => evaluateDiagnosticMaturity(command, diagnosticContext, blastTriage),
     [blastTriage, command, diagnosticContext],
   );
-  const failedHardeningReview = hardeningReview.filter((item) => !item.passed);
-  const blockerCount = failedHardeningReview.filter((item) => item.severity === "blocker").length;
-  const warningCount = failedHardeningReview.filter((item) => item.severity === "warning").length;
+  const hardeningCounts = useMemo(() => {
+    const failed = hardeningReview.filter((item) => !item.passed);
+    let blockers = 0;
+    let warnings = 0;
+    for (const item of failed) {
+      if (item.severity === "blocker") blockers += 1;
+      if (item.severity === "warning") warnings += 1;
+    }
+    return { failed, blockers, warnings };
+  }, [hardeningReview]);
+  const failedHardeningReview = hardeningCounts.failed;
+  const blockerCount = hardeningCounts.blockers;
+  const warningCount = hardeningCounts.warnings;
   const passedHardeningCount = hardeningReview.length - failedHardeningReview.length;
   const cockpitGuards = useMemo(
     () => [

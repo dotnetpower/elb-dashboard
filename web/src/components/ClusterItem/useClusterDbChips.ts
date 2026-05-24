@@ -44,7 +44,15 @@ export function useClusterDbChips(args: {
       monitoringApi.warmupStatus(subscriptionId, resourceGroup, clusterName),
     enabled: isRunning && !isTransitioning,
     staleTime: 30_000,
-    refetchInterval: isRunning ? 60_000 : false,
+    refetchInterval: (query) => {
+      if (!isRunning) return false;
+      const databases = (query.state.data as { databases?: WarmupDbInfo[] } | undefined)
+        ?.databases;
+      const anyChanging =
+        databases?.some((db) => db.status === "Loading" || db.status === "Stale") ??
+        false;
+      return anyChanging ? 5_000 : 60_000;
+    },
     retry: 1,
   });
   const warmupDbs: WarmupDbInfo[] = warmupQuery.data?.databases ?? [];

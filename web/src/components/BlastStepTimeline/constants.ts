@@ -49,6 +49,7 @@ export const FAILURE_PHASES = new Set([
   "submit_failed",
   "split_submit_invalid",
   "split_results_merge_invalid",
+  "database_unavailable",
   "warmup_failed",
   "warmup_not_ready",
 ]);
@@ -59,6 +60,7 @@ export const PHASE_TO_STEP: Record<string, string> = {
   checking_vm: "preparing",
   enabling_storage: "preparing",
   uploading: "preparing",
+  database_unavailable: "preparing",
   warmup_ready: "warming_up",
   waiting_for_warmup: "warming_up",
   submit_failed: "submitting",
@@ -89,6 +91,7 @@ export const PHASE_MESSAGES: Record<string, string> = {
   checking_vm: "Preparing the BLAST run...",
   enabling_storage: "Preparing the BLAST run...",
   uploading: "Preparing the BLAST run...",
+  database_unavailable: "Selected BLAST database is not available in Storage.",
   configuring: "Generating ElasticBLAST configuration...",
   warming_up: "Checking node-local DB warmup readiness...",
   warmup_failed: "Cluster warmup failed.",

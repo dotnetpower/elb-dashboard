@@ -23,7 +23,9 @@ terminal_base_hash() {
     sha256sum "$REPO_ROOT/terminal/patch_elastic_blast.py"
     printf '\n-- merge-sharded-results.sh --\n'
     sha256sum "$REPO_ROOT/terminal/merge-sharded-results.sh"
-    printf '\n-- ELASTIC_BLAST_REF=%s\n' "${ELASTIC_BLAST_REF:-master}"
+    printf '\n-- KUBECTL_VERSION=%s\n' "${KUBECTL_VERSION:-v1.34.2}"
+    printf '\n-- TTYD_VERSION=%s\n' "${TTYD_VERSION:-1.7.7}"
+    printf '\n-- ELASTIC_BLAST_REF=%s\n' "${ELASTIC_BLAST_REF:-f4b8b734a82285a18a2ca9aadcbe02759d13f903}"
   } | sha256sum | awk '{print substr($1, 1, 16)}'
 }
 

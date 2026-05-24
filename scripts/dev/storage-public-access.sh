@@ -159,11 +159,19 @@ EOF
             --ip-address "$prev_ip" -o none 2>/dev/null || true
       done <<< "$existing_ips"
     fi
-    # Restore the production defaultAction (Deny) and disable the public surface.
+    # Restore the production posture in one ARM update. Splitting these into
+    # separate updates can leave some API versions reporting Enabled/Allow.
     az storage account update "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
-        --default-action Deny -o none
-    az storage account update "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
-        --public-network-access Disabled -o none
+      --public-network-access Disabled --default-action Deny -o none
+
+    state="$(az storage account show "${SUB_FLAG[@]}" -g "$RG" -n "$ACCOUNT" \
+      --query '{public:publicNetworkAccess,defaultAction:networkRuleSet.defaultAction}' \
+      -o json)"
+    public_state="$(echo "$state" | jq -r '.public')"
+    default_action="$(echo "$state" | jq -r '.defaultAction')"
+    if [[ "$public_state" != "Disabled" || "$default_action" != "Deny" ]]; then
+      die "failed to close storage network; state=$(echo "$state" | jq -c .)"
+    fi
 
     green "CLOSED — storage account '$ACCOUNT' is back to publicNetworkAccess=Disabled"
     print_state

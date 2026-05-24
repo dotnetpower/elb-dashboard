@@ -37,8 +37,15 @@ export function StartEstimatePanel({
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
+    const tick = () => {
+      if (!document.hidden) setNow(Date.now());
+    };
+    const timer = window.setInterval(tick, 1_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, []);
 
   const elapsedSeconds = startedAt
@@ -76,8 +83,8 @@ export function StartEstimatePanel({
       },
       {
         icon: Network,
-        title: "What is happening now",
-        body: `Nodes come back first, then the OpenAPI service is checked, then warmup jobs can touch database files on each node. ${clusterName} will keep polling while that catches up.`,
+        title: "Expected sequence",
+        body: `Typical order: nodes come back first, then the OpenAPI service is checked, then warmup jobs can touch database files on each node. ${clusterName} will keep polling for actual state changes.`,
       },
       {
         icon: Lightbulb,
@@ -135,7 +142,7 @@ export function StartEstimatePanel({
         >
           <strong style={{ fontSize: 12 }}>{activeTip.title}</strong>
           <span className="muted" style={{ fontSize: 11 }}>
-            elapsed {formatDuration(elapsedSeconds)} · API ready in about{" "}
+            elapsed {formatDuration(elapsedSeconds)} · estimated API readiness{" "}
             {formatDuration(apiRemaining)}
           </span>
         </div>

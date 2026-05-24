@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { AlertTriangle, Download } from "lucide-react";
 
 import {
@@ -22,43 +23,45 @@ export function BlastDbLargeConfirm({
   onCancel,
 }: BlastDbLargeConfirmProps) {
   const db: BlastDbCatalogItem | undefined = DB_CATALOG.find((d) => d.value === dbValue);
+  const confirmRef = useRef<HTMLDivElement>(null);
+  const startButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      confirmRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+        inline: "nearest",
+      });
+      startButtonRef.current?.focus({ preventScroll: true });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [dbValue]);
+
   return (
     <div
-      style={{
-        marginTop: "var(--space-2)",
-        padding: "10px 14px",
-        borderRadius: 8,
-        fontSize: 12,
-        background: "rgba(240,198,116,0.08)",
-        border: "1px solid rgba(240,198,116,0.25)",
-      }}
+      ref={confirmRef}
+      className="blast-db-large-confirm"
     >
-      <div
-        style={{
-          color: "var(--warning)",
-          fontWeight: 600,
-          marginBottom: 6,
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-        }}
-      >
+      <div className="blast-db-large-confirm__title">
         <AlertTriangle size={14} /> Download {db?.label ?? dbValue}?
       </div>
-      <div className="muted" style={{ fontSize: 11, marginBottom: 8 }}>
+      <div className="muted blast-db-large-confirm__copy">
         This database is <strong>{db?.size}</strong> and may take hours to copy from
         NCBI. Ensure your storage account has sufficient space and that the control
         plane can reach it through the private endpoint.
       </div>
-      <div style={{ display: "flex", gap: "var(--space-2)" }}>
+      <div className="blast-db-large-confirm__actions">
         <button
-          className="glass-button glass-button--primary"
+          ref={startButtonRef}
+          type="button"
+          className="glass-button glass-button--primary blast-db-large-confirm__primary"
           onClick={onConfirm}
-          style={{ fontSize: 11 }}
         >
-          <Download size={10} /> Start Download
+          <Download size={12} /> Start Download
         </button>
-        <button className="glass-button" onClick={onCancel} style={{ fontSize: 11 }}>
+        <button type="button" className="glass-button" onClick={onCancel}>
           Cancel
         </button>
       </div>

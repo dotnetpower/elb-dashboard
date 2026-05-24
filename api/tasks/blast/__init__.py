@@ -136,6 +136,7 @@ from api.tasks.blast.cli_parsing import (  # noqa: E402,F401
     _submit_success_status,
 )
 from api.tasks.blast.config_shims import (  # noqa: E402,F401
+    BlastDatabaseAvailabilityError,
     _build_config_content,
     _disable_sharding_options,
     _ensure_node_warmup_ready_for_submit,
@@ -150,6 +151,7 @@ from api.tasks.blast.config_shims import (  # noqa: E402,F401
     _storage_url,
     _submit_requires_node_warmup,
     _suppress_sharding_for_unsharded_database,
+    _validate_blast_database_available,
 )
 from api.tasks.blast.poll_tasks import (  # noqa: E402,F401
     _POLL_RUNNING_ELIGIBLE_PHASES,

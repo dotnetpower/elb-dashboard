@@ -67,6 +67,18 @@ load_local_azure_env() {
   done < "$env_file"
 }
 
+azd_env_value() {
+  local name=$1
+  command -v azd >/dev/null 2>&1 || return 1
+  azd env get-values 2>/dev/null | awk -F= -v key="$name" '
+    $1 == key {
+      gsub(/"/, "", $2)
+      print $2
+      exit
+    }
+  '
+}
+
 validate_azure_cli_context() {
   case "${ELB_SKIP_AZURE_CONTEXT_CHECK:-}" in
     1|true|TRUE|yes|YES)
@@ -114,7 +126,11 @@ with_celery_env() {
 }
 
 with_local_storage_env() {
-  local storage_account=${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}
+  local storage_account=${ELB_LOCAL_STORAGE_ACCOUNT:-}
+  if [[ -z "$storage_account" ]]; then
+    storage_account=$(azd_env_value STORAGE_ACCOUNT_NAME || true)
+  fi
+  storage_account=${storage_account:-elbstg01}
   export AZURE_TABLE_ENDPOINT=${AZURE_TABLE_ENDPOINT:-https://${storage_account}.table.core.windows.net}
   export AZURE_BLOB_ENDPOINT=${AZURE_BLOB_ENDPOINT:-https://${storage_account}.blob.core.windows.net}
   export LOCAL_DEBUG_AUTO_OPEN_STORAGE=${LOCAL_DEBUG_AUTO_OPEN_STORAGE:-true}
@@ -123,8 +139,16 @@ with_local_storage_env() {
 run_storage_public_access() {
   local action=$1
   shift || true
-  local storage_account=${ELB_LOCAL_STORAGE_ACCOUNT:-elbstg01}
-  local storage_rg=${ELB_LOCAL_STORAGE_RG:-rg-elb-01}
+  local storage_account=${ELB_LOCAL_STORAGE_ACCOUNT:-}
+  local storage_rg=${ELB_LOCAL_STORAGE_RG:-}
+  if [[ -z "$storage_account" ]]; then
+    storage_account=$(azd_env_value STORAGE_ACCOUNT_NAME || true)
+  fi
+  if [[ -z "$storage_rg" ]]; then
+    storage_rg=$(azd_env_value AZURE_RESOURCE_GROUP || true)
+  fi
+  storage_account=${storage_account:-elbstg01}
+  storage_rg=${storage_rg:-rg-elb-01}
   exec "$script_dir/storage-public-access.sh" "$action" \
     --account "$storage_account" \
     --rg "$storage_rg" \
@@ -164,6 +188,12 @@ api_health_ready() {
     && curl -fsS --max-time 1 "$base_url/api/health" >/dev/null 2>&1
 }
 
+http_health_ready() {
+  local url=$1
+  command -v curl >/dev/null 2>&1 \
+    && curl -fsS --max-time 1 "$url" >/dev/null 2>&1
+}
+
 wait_for_api_health() {
   local base_url=$1
   for _attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -177,6 +207,20 @@ describe_api_port_owner() {
   local port=$1
   echo "ERROR: 127.0.0.1:$port is already in use, but it is not the local API health endpoint." >&2
   echo "Stop the process below, or choose a matching API_PORT/VITE_API_BASE_URL pair." >&2
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :$port" >&2 || true
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >&2 || true
+  else
+    echo "Install 'ss' or 'lsof' to inspect the listener." >&2
+  fi
+}
+
+describe_port_owner() {
+  local port=$1
+  local service_name=$2
+  echo "ERROR: 127.0.0.1:$port is already in use, but it is not the expected $service_name endpoint." >&2
+  echo "Stop the process below, or choose a different port for $service_name." >&2
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp "sport = :$port" >&2 || true
   elif command -v lsof >/dev/null 2>&1; then
@@ -323,6 +367,17 @@ case "$service" in
         fi
       fi
     fi
+    web_port=${WEB_PORT:-8090}
+    web_url="http://127.0.0.1:$web_port/"
+    if api_port_is_listening "$web_port"; then
+      if http_health_ready "$web_url"; then
+        echo "web already running at $web_url." >&2
+        echo "Stop the existing web task/process first if you need a fresh Vite process." >&2
+        exit 0
+      fi
+      describe_port_owner "$web_port" "web"
+      exit 1
+    fi
     cd "$project_root/web"
     exec "$run_with_log" web -- npm run dev "$@"
     ;;
@@ -366,6 +421,17 @@ case "$service" in
         exit 1
       fi
     done
+    exec_port=${EXEC_PORT:-7682}
+    exec_url="http://127.0.0.1:$exec_port/healthz"
+    if api_port_is_listening "$exec_port"; then
+      if http_health_ready "$exec_url"; then
+        echo "terminal-exec already running at $exec_url." >&2
+        echo "Stop the existing terminal-exec task/process first if you need a fresh exec server." >&2
+        exit 0
+      fi
+      describe_port_owner "$exec_port" "terminal-exec"
+      exit 1
+    fi
     cd "$project_root"
     exec "$run_with_log" terminal-exec -- python3 terminal/exec_server.py "$@"
     ;;

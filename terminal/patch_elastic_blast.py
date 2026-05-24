@@ -120,6 +120,51 @@ def patch_azure_cli_glue(root: Path) -> None:
         "Dashboard JSON submit has its own log/state collectors",
     )
 
+def _azure_traits_paths(root: Path) -> list[Path]:
+    paths = [root / "src/elastic_blast/azure_traits.py"]
+    for pattern in (
+        "venv/lib/python*/site-packages/elastic_blast/azure_traits.py",
+        ".venv/lib/python*/site-packages/elastic_blast/azure_traits.py",
+    ):
+        paths.extend(root.glob(pattern))
+    return sorted({path for path in paths if path.exists()})
+
+
+def patch_azure_traits(root: Path) -> None:
+    machine_entries = (
+        "    # D/E-series v7 AMD (dashboard availability fallback)\n"
+        "    'Standard_D2as_v7': {'cpu': 2, 'memory': 8},\n"
+        "    'Standard_D4as_v7': {'cpu': 4, 'memory': 16},\n"
+        "    'Standard_E16as_v7': {'cpu': 16, 'memory': 128},\n"
+        "    'Standard_E32as_v7': {'cpu': 32, 'memory': 256},\n"
+        "    'Standard_E48as_v7': {'cpu': 48, 'memory': 384},\n"
+    )
+    price_entries = (
+        "    # D/E-series v7 AMD (dashboard availability fallback)\n"
+        "    'Standard_D2as_v7': 0.096,\n"
+        "    'Standard_D4as_v7': 0.192,\n"
+        "    'Standard_E16as_v7': 1.008,\n"
+        "    'Standard_E32as_v7': 2.016,\n"
+        "    'Standard_E48as_v7': 3.024,\n"
+    )
+    for path in _azure_traits_paths(root):
+        _replace_once_unless_present(
+            path,
+            "    'Standard_D8s_v3': {'cpu': 8, 'memory': 32},  # 8 vCPU, 32 GB RAM\n",
+            (
+                "    'Standard_D8s_v3': {'cpu': 8, 'memory': 32},  # 8 vCPU, 32 GB RAM\n"
+                f"{machine_entries}"
+            ),
+            "'Standard_E32as_v7': {'cpu': 32, 'memory': 256}",
+        )
+        _replace_once_unless_present(
+            path,
+            "    'Standard_D64s_v3': 3.072,\n",
+            "    'Standard_D64s_v3': 3.072,\n" f"{price_entries}",
+            "'Standard_E32as_v7': 2.016",
+            allow_absent=True,
+        )
+
 
 def patch_finalizer_template(root: Path) -> None:
     path = root / "src/elastic_blast/templates/elb-finalizer-aks.yaml.template"
@@ -444,11 +489,6 @@ if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
     find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
 fi
 
-if [ -f .download-complete ] && { [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; }; then
-    echo "CACHE_INCOMPLETE missing taxdb files"
-    rm -f .download-complete
-fi
-
 payload_ext="nsq"
 if [ "${ELB_DB_MOL_TYPE:-nucl}" = "prot" ]; then
     payload_ext="psq"
@@ -508,8 +548,7 @@ if [ "$payload_count" = "0" ]; then
     exit 1
 fi
 if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
-    echo "ERROR: taxdb files missing after download"
-    exit 1
+    echo "TAXDB_SKIP taxdb files not present in DB prefix"
 fi
 
 write_volpaths
@@ -652,6 +691,7 @@ def main() -> int:
 
     patch_azure_py(root)
     patch_azure_cli_glue(root)
+    patch_azure_traits(root)
     patch_finalizer_template(root)
     patch_finalizer_script(root, merge_script_source)
     patch_init_shard_script(root)

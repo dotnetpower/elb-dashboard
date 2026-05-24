@@ -170,8 +170,25 @@ def normalise_preference(value: dict[str, Any]) -> AutoWarmupPreference:
     return pref
 
 
+def _use_table_backend() -> bool:
+    """Return True when the Azure Tables backend should be used.
+
+    Requires both ``AZURE_TABLE_ENDPOINT`` *and* ``CONTAINER_APP_NAME``.
+    The Container App guard is the local-dev escape hatch: a workstation
+    `az login` identity often lacks Storage Table RBAC on the platform
+    account, so every preference read would 403 and crash the
+    `reconcile_auto_warmup` Celery tick. When not in a deployed Container
+    App we silently fall back to the file backend so the worker stays
+    healthy. Production (CONTAINER_APP_NAME set by ACA) keeps using
+    Azure Tables.
+    """
+    return bool(
+        os.environ.get(_TABLE_ENDPOINT_ENV) and os.environ.get("CONTAINER_APP_NAME")
+    )
+
+
 def save_auto_warmup_preference(pref: AutoWarmupPreference) -> AutoWarmupPreference:
-    if os.environ.get(_TABLE_ENDPOINT_ENV):
+    if _use_table_backend():
         _save_table(pref)
     else:
         _save_file(pref)
@@ -184,13 +201,13 @@ def get_auto_warmup_preference(
     cluster_name: str,
 ) -> AutoWarmupPreference | None:
     key = preference_key(subscription_id, resource_group, cluster_name)
-    if os.environ.get(_TABLE_ENDPOINT_ENV):
+    if _use_table_backend():
         return _get_table(key)
     return _get_file(key)
 
 
 def list_auto_warmup_preferences(limit: int = 100) -> list[AutoWarmupPreference]:
-    if os.environ.get(_TABLE_ENDPOINT_ENV):
+    if _use_table_backend():
         return _list_table(limit)
     return _list_file(limit)
 

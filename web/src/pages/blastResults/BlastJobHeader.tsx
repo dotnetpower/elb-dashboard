@@ -14,7 +14,11 @@ import {
 
 import { ElapsedTimer } from "@/components/BlastFilePreview";
 import { useToast } from "@/components/Toast";
-import type { BlastDatabaseMetadata, BlastExportFormat } from "@/api/endpoints";
+import type {
+  BlastDatabaseMetadata,
+  BlastExportFormat,
+  BlastResultFile,
+} from "@/api/endpoints";
 import { BlastHelpMenu } from "@/pages/blastResults/BlastHelpMenu";
 import {
   buildConfigFilename,
@@ -49,6 +53,7 @@ interface BlastJobHeaderProps {
   exportingFormat: BlastExportFormat | null;
   onExport: (format: BlastExportFormat) => void;
   hasExportTargets: boolean;
+  resultFiles?: BlastResultFile[];
 }
 
 /**
@@ -83,6 +88,7 @@ export function BlastJobHeader({
   exportingFormat,
   onExport,
   hasExportTargets,
+  resultFiles = [],
 }: BlastJobHeaderProps) {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -103,6 +109,8 @@ export function BlastJobHeader({
   const region = pickString(infrastructure, ["region"]);
   const evalue = pickString(configSnapshot, ["evalue"]);
   const maxTargets = pickString(configSnapshot, ["max_target_seqs"]);
+  const submittedOutfmt =
+    pickNumber(configSnapshot, ["outfmt"]) ?? pickNumber(jobPayload, ["outfmt"]);
   const dbSequenceCount = formatCount(databaseMetadata?.number_of_sequences);
   const dbLetterCount = formatCount(databaseMetadata?.number_of_letters);
   const timingMetrics = buildTimingMetrics({ createdAt, updatedAt, customStatus });
@@ -312,6 +320,8 @@ export function BlastJobHeader({
                 }}
                 open={showDownloadMenu}
                 setOpen={setShowDownloadMenu}
+                submittedOutfmt={submittedOutfmt}
+                resultFiles={resultFiles}
               />
             )}
           </span>
@@ -459,6 +469,17 @@ interface DownloadAllMenuProps {
   onExport: (format: BlastExportFormat) => void;
   open: boolean;
   setOpen: (value: boolean) => void;
+  submittedOutfmt: number | null;
+  resultFiles: BlastResultFile[];
+}
+
+interface DownloadAllOption {
+  key: string;
+  label: string;
+  detail: string;
+  format?: BlastExportFormat;
+  disabled?: boolean;
+  title?: string;
 }
 
 function DownloadAllMenu({
@@ -466,8 +487,11 @@ function DownloadAllMenu({
   onExport,
   open,
   setOpen,
+  submittedOutfmt,
+  resultFiles,
 }: DownloadAllMenuProps) {
   const containerRef = useRef<HTMLSpanElement | null>(null);
+  const options = buildDownloadAllOptions(submittedOutfmt, resultFiles);
 
   // Mirror the BlastHelpMenu pattern: clicking outside or pressing Esc
   // closes the menu. Without this the menu hangs open after the user
@@ -523,7 +547,7 @@ function DownloadAllMenu({
             right: 0,
             marginTop: 4,
             zIndex: 10,
-            minWidth: 200,
+            minWidth: 280,
             background: "var(--bg-secondary)",
             border: "1px solid var(--glass-border)",
             borderRadius: 6,
@@ -531,13 +555,14 @@ function DownloadAllMenu({
             padding: 4,
           }}
         >
-          {(["csv", "tsv", "json"] as const).map((format) => (
+          {options.map((option) => (
             <button
-              key={format}
+              key={option.key}
               type="button"
               role="menuitem"
-              onClick={() => onExport(format)}
-              disabled={exportingFormat !== null}
+              onClick={() => option.format && onExport(option.format)}
+              disabled={exportingFormat !== null || option.disabled || !option.format}
+              title={option.title}
               style={{
                 display: "block",
                 width: "100%",
@@ -546,24 +571,21 @@ function DownloadAllMenu({
                 textAlign: "left",
                 background: "transparent",
                 border: 0,
-                color: "var(--text-primary)",
-                cursor: "pointer",
+                color: option.disabled ? "var(--text-muted)" : "var(--text-primary)",
+                cursor: option.disabled ? "not-allowed" : "pointer",
                 borderRadius: 4,
+                opacity: option.disabled ? 0.62 : 1,
               }}
               onMouseEnter={(event) => {
-                event.currentTarget.style.background = "var(--glass-bg)";
+                if (!option.disabled) event.currentTarget.style.background = "var(--glass-bg)";
               }}
               onMouseLeave={(event) => {
                 event.currentTarget.style.background = "transparent";
               }}
             >
-              <strong>{format.toUpperCase()}</strong>
+              <strong>{option.label}</strong>
               <span className="muted" style={{ marginLeft: 8, fontSize: 11 }}>
-                {format === "csv"
-                  ? "Comma-separated"
-                  : format === "tsv"
-                    ? "Tab-separated"
-                    : "Newline-delimited JSON"}
+                {option.detail}
               </span>
             </button>
           ))}
@@ -571,6 +593,105 @@ function DownloadAllMenu({
       )}
     </span>
   );
+}
+
+function buildDownloadAllOptions(
+  submittedOutfmt: number | null,
+  resultFiles: BlastResultFile[],
+): DownloadAllOption[] {
+  const hasFiles = resultFiles.length > 0;
+  const xmlCaptured = hasFiles
+    ? resultFiles.some((file) => resultFileLooksXml(file))
+    : submittedOutfmt === 5;
+  const textCaptured = submittedOutfmt === 0;
+  const rawOnlyTitle = "Captured only when the search is submitted with this output format.";
+  return [
+    {
+      key: "text",
+      label: "Text",
+      detail: textCaptured ? "Captured pairwise report" : "Submit with outfmt 0",
+      format: textCaptured ? "text" : undefined,
+      disabled: !textCaptured,
+      title: textCaptured ? "Download the captured pairwise text report" : rawOnlyTitle,
+    },
+    {
+      key: "xml",
+      label: "XML",
+      detail: xmlCaptured ? "Captured BLAST XML" : "Submit with outfmt 5",
+      format: xmlCaptured ? "xml" : undefined,
+      disabled: !xmlCaptured,
+      title: xmlCaptured ? "Download the captured BLAST XML result" : rawOnlyTitle,
+    },
+    {
+      key: "asn1",
+      label: "ASN.1",
+      detail: "Submit with outfmt 11",
+      disabled: true,
+      title: rawOnlyTitle,
+    },
+    {
+      key: "json-seqalign",
+      label: "JSON Seq-align",
+      detail: "Derived from parsed HSPs",
+      format: "json-seqalign",
+      title: "Download parsed alignments as JSON",
+    },
+    {
+      key: "hit-table-text",
+      label: "Hit Table (text)",
+      detail: "Tab-separated",
+      format: "hit-table-text",
+      title: "Download parsed hits as a tab-separated table",
+    },
+    {
+      key: "hit-table-csv",
+      label: "Hit Table (CSV)",
+      detail: "Comma-separated",
+      format: "hit-table-csv",
+      title: "Download parsed hits as a CSV table",
+    },
+    {
+      key: "multi-xml2",
+      label: "Multiple-file XML2",
+      detail: "Submit with outfmt 14",
+      disabled: true,
+      title: rawOnlyTitle,
+    },
+    {
+      key: "single-xml2",
+      label: "Single-file XML2",
+      detail: "Submit with outfmt 16",
+      disabled: true,
+      title: rawOnlyTitle,
+    },
+    {
+      key: "multi-json",
+      label: "Multiple-file JSON",
+      detail: "Submit with outfmt 13",
+      disabled: true,
+      title: rawOnlyTitle,
+    },
+    {
+      key: "single-json",
+      label: "Single-file JSON",
+      detail: "Submit with outfmt 15",
+      disabled: true,
+      title: rawOnlyTitle,
+    },
+    {
+      key: "sam",
+      label: "SAM",
+      detail: "Submit with outfmt 17",
+      disabled: true,
+      title: rawOnlyTitle,
+    },
+  ];
+}
+
+function resultFileLooksXml(file: BlastResultFile): boolean {
+  const format = String(file.format ?? "").toLowerCase();
+  const name = file.name.toLowerCase();
+  return format === "blast_xml" || format === "xml" || name.endsWith(".xml") || name.endsWith(".xml.gz");
 }
 
 function Term({ label }: { label: string }) {

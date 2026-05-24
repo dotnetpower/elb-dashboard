@@ -1,4 +1,5 @@
 import type { AksAgentPool, AksClusterSummary } from "@/api/endpoints";
+import { normalizeSkuName } from "@/utils/dbSharding";
 
 const BLAST_POOL_NAME = "blastpool";
 
@@ -11,7 +12,8 @@ export function selectWorkloadPool(cluster: AksClusterSummary): AksAgentPool | u
 }
 
 export function getWorkloadNodeSku(cluster: AksClusterSummary): string | null {
-  return selectWorkloadPool(cluster)?.vm_size ?? cluster.node_sku;
+  const sku = selectWorkloadPool(cluster)?.vm_size ?? cluster.node_sku;
+  return normalizeSkuName(sku) || null;
 }
 
 export function getWorkloadNodeCount(cluster: AksClusterSummary): number | null {

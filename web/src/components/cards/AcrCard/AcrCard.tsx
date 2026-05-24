@@ -11,6 +11,7 @@ import { BuildConfirmDialog } from "./BuildConfirmDialog";
 import {
   BuildDoneBanner,
   BuildErrorBanner,
+  BuildQueuedBanner,
   BuildingBanner,
   ServerBuildingBanner,
 } from "./BuildStatusBanners";
@@ -22,11 +23,7 @@ export interface AcrCardProps {
   registryName: string;
 }
 
-export function AcrCard({
-  subscriptionId,
-  resourceGroup,
-  registryName,
-}: AcrCardProps) {
+export function AcrCard({ subscriptionId, resourceGroup, registryName }: AcrCardProps) {
   const state = useAcrBuilds({ subscriptionId, resourceGroup, registryName });
   const {
     enabled,
@@ -62,40 +59,41 @@ export function AcrCard({
   return (
     <MonitorCard
       title="Azure Container Registry"
-      subtitle={
-        enabled ? `${registryName} · ${resourceGroup}` : "Configure ACR name"
-      }
+      subtitle={enabled ? `${registryName} · ${resourceGroup}` : "Configure ACR name"}
       status={
-        buildStatus === "building" || hasServerBuilding ? "loading" : status
+        buildStatus === "queued" || buildStatus === "building" || hasServerBuilding
+          ? "loading"
+          : status
       }
       statusOverride={statusOverride}
       fetching={query.isFetching}
-      lastRefreshed={
-        query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null
-      }
+      lastRefreshed={query.dataUpdatedAt ? new Date(query.dataUpdatedAt) : null}
       onRefresh={() => query.refetch()}
       accentColor="acr"
       collapsible
       rightSlot={
         enabled && (
-          <div className="dashboard-hide-mobile" style={{ display: "flex", gap: 4, alignItems: "center" }}>
-            {buildStatus !== "building" && !hasServerBuilding && (
-              <button
-                className="glass-button glass-button--primary"
-                onClick={() => setShowConfirm(true)}
-                style={{ fontSize: 10 }}
-              >
-                <Hammer size={11} strokeWidth={1.5} /> Build
-              </button>
-            )}
+          <div
+            className="dashboard-hide-mobile"
+            style={{ display: "flex", gap: 4, alignItems: "center" }}
+          >
+            {buildStatus !== "queued" &&
+              buildStatus !== "building" &&
+              !hasServerBuilding && (
+                <button
+                  className="glass-button glass-button--primary"
+                  onClick={() => setShowConfirm(true)}
+                  style={{ fontSize: 10 }}
+                >
+                  <Hammer size={11} strokeWidth={1.5} /> Build
+                </button>
+              )}
           </div>
         )
       }
     >
       {!enabled && (
-        <div className="muted">
-          Set Subscription ID, ACR RG, and ACR Name above.
-        </div>
+        <div className="muted">Set Subscription ID, ACR RG, and ACR Name above.</div>
       )}
       {query.isError && (
         <div className="muted" style={{ color: "var(--danger)" }}>
@@ -118,15 +116,10 @@ export function AcrCard({
             buildResults={buildResults}
             buildStatus={buildStatus}
             singleBuilding={singleBuilding}
-            onToggleError={(img) =>
-              setExpandedError(expandedError === img ? null : img)
-            }
+            onToggleError={(img) => setExpandedError(expandedError === img ? null : img)}
             onBuildSingle={handleBuildSingle}
           />
-          <ExpandedErrorBlock
-            expandedError={expandedError}
-            buildResults={buildResults}
-          />
+          <ExpandedErrorBlock expandedError={expandedError} buildResults={buildResults} />
         </>
       )}
 
@@ -139,7 +132,9 @@ export function AcrCard({
         />
       )}
 
-      {buildStatus === "building" && (
+      {buildStatus === "queued" && <BuildQueuedBanner elapsed={elapsed} />}
+
+      {buildStatus === "building" && !hasServerBuilding && (
         <BuildingBanner elapsed={elapsed} singleBuilding={singleBuilding} />
       )}
 

@@ -102,8 +102,10 @@ export function usePrefetchApiReference(cfg: PrefetchInput): void {
           queryFn: () => aksApi.proxyOpenApiSpec(sub, rg, clusterName),
           staleTime: 60_000,
         });
-      } catch {
-        /* swallow — page will retry on demand */
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          console.debug("OpenAPI spec prefetch skipped", error);
+        }
       }
     };
 

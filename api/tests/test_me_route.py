@@ -67,6 +67,43 @@ def test_me_returns_subscriptions(monkeypatch: pytest.MonkeyPatch, client: TestC
     assert "subscriptions_error" not in body
 
 
+def test_list_visible_subscriptions_uses_short_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    import api.routes.me as me_module
+
+    calls = 0
+
+    class _FakeState:
+        value = "Enabled"
+
+    class _FakeSub:
+        subscription_id = "sub-1"
+        display_name = "Demo"
+        tenant_id = "tenant-1"
+        state = _FakeState()
+
+    class _FakeSubscriptions:
+        def list(self):
+            nonlocal calls
+            calls += 1
+            return [_FakeSub()]
+
+    class _FakeClient:
+        def __init__(self, _credential: object) -> None:
+            self.subscriptions = _FakeSubscriptions()
+
+    me_module.reset_subscription_cache_for_tests()
+    monkeypatch.setattr(me_module, "get_credential", lambda: object())
+    monkeypatch.setattr("azure.mgmt.resource.SubscriptionClient", _FakeClient, raising=True)
+
+    first, first_error = me_module._list_visible_subscriptions()
+    second, second_error = me_module._list_visible_subscriptions()
+
+    assert first_error is None
+    assert second_error is None
+    assert first == second
+    assert calls == 1
+
+
 def test_me_requires_caller(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without AUTH_DEV_BYPASS, anonymous requests must be rejected.
 

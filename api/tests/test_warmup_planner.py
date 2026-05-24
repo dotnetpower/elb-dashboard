@@ -221,6 +221,19 @@ def test_unknown_sku_returns_ok_unknown_sku_with_fallback_ram() -> None:
     assert "not in the catalog" in plan.message
 
 
+def test_warmup_planner_normalizes_azure_sku_aliases() -> None:
+    plan = compute_warmup_feasibility(
+        db_total_bytes=int(175.5 * GIB),
+        num_nodes=3,
+        machine_type="E32as_v7",
+    )
+    assert plan.feasible is True
+    assert plan.status == "ok"
+    assert plan.machine_type == "Standard_E32as_v7"
+    assert plan.node_ram_gib == 256.0
+    assert plan.safe_node_budget_gib == 128.0
+
+
 # ---------------------------------------------------------------------------
 # Serialisation
 # ---------------------------------------------------------------------------

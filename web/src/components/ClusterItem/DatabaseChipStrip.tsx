@@ -81,16 +81,19 @@ export function DatabaseChipStrip({
       ) : (
         <>
           {warmChips.length > 0 ? (
-            <div className="dv3-warmup-strip" style={{ marginTop: 0 }}>
-              {warmChips.map((db) => (
-                <DbChipNode
-                  key={db.name}
-                  db={db}
-                  shardMutation={shardMutation}
-                  shardingDb={shardingDb}
-                />
-              ))}
-            </div>
+            <>
+              <div className="dv3-warmup-strip" style={{ marginTop: 0 }}>
+                {warmChips.map((db) => (
+                  <DbChipNode
+                    key={db.name}
+                    db={db}
+                    shardMutation={shardMutation}
+                    shardingDb={shardingDb}
+                  />
+                ))}
+              </div>
+              <DbChipStatusMessages dbChips={warmChips} shardingDb={shardingDb} />
+            </>
           ) : (
             <div className="muted" style={{ fontSize: 10, paddingLeft: 2 }}>
               No warmed databases yet. Mark databases for Auto warm in BLAST Databases, or
@@ -113,6 +116,73 @@ export function DatabaseChipStrip({
       )}
     </div>
   );
+}
+
+function DbChipStatusMessages({
+  dbChips,
+  shardingDb,
+}: {
+  dbChips: DbChip[];
+  shardingDb: string | null;
+}) {
+  const messages = dbChips
+    .map((db) => dbChipVisibleStatusMessage(db, shardingDb))
+    .filter((message): message is string => Boolean(message));
+  if (messages.length === 0) return null;
+  return (
+    <div
+      className="muted"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+        paddingLeft: 2,
+        fontSize: 10,
+        lineHeight: 1.45,
+      }}
+    >
+      {messages.map((message) => (
+        <span key={message}>· {message}</span>
+      ))}
+    </div>
+  );
+}
+
+export function dbChipVisibleStatusMessage(
+  db: DbChip,
+  shardingDb: string | null,
+): string | null {
+  const w = db.warm;
+  const isReady = w?.status === "Ready";
+  const isLoading = w?.status === "Loading";
+  const isFailed = w?.status === "Failed";
+  const isStale = db.warmStale || w?.status === "Stale";
+  const isShardingNow = db.shardingInProgress || shardingDb === db.name;
+  if (isShardingNow) {
+    return `${db.name}: building prepared shard layouts for faster sharded submits.`;
+  }
+  if (isLoading && w) {
+    const phase = shortWarmupPhase(w);
+    const progress = `${w.nodes_ready}/${w.total_jobs} nodes ready`;
+    const remaining =
+      w.estimated_remaining_seconds != null
+        ? `, about ${formatCompactDuration(w.estimated_remaining_seconds)} left`
+        : w.elapsed_seconds != null
+          ? `, running ${formatCompactDuration(w.elapsed_seconds)}`
+          : "";
+    const message = (w.active_message ?? w.active_phase_label ?? "").trim();
+    return `${db.name}: ${phase} DB cache (${progress}${remaining})${message ? ` - ${message}` : ""}.`;
+  }
+  if (isStale) {
+    return `${db.name}: warm cache is stale and should be refreshed before sharded throughput runs.`;
+  }
+  if (isFailed && w) {
+    return `${db.name}: warmup failed on ${w.nodes_failed}/${w.total_jobs} nodes.`;
+  }
+  if (w && !isReady && w.nodes_ready > 0) {
+    return `${db.name}: warm cache is only partially ready (${w.nodes_ready}/${w.total_jobs} nodes).`;
+  }
+  return null;
 }
 
 function DbChipNode({

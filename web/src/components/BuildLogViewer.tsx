@@ -58,9 +58,16 @@ export function BuildLogViewer({ jobId, component, active }: Props) {
     void fetchOnce();
     const interval = active ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS;
     const id = window.setInterval(() => {
-      void fetchOnce();
+      if (!document.hidden) void fetchOnce();
     }, interval);
-    return () => window.clearInterval(id);
+    const onVisible = () => {
+      if (!document.hidden) void fetchOnce();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [fetchOnce, active, jobId]);
 
   useEffect(() => {

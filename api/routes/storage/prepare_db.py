@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from datetime import UTC, datetime
@@ -73,7 +74,7 @@ _PREPARE_DB_STALE_SECONDS = 2 * 60 * 60
 # update failed with timed_out reason so the SPA shows an honest state.
 _COPY_POLL_INTERVAL_SECONDS = 60.0
 _COPY_POLL_MAX_SECONDS = 24 * 60 * 60
-_COPY_POLL_BATCH_SIZE = 32
+_COPY_POLL_BATCH_SIZE = max(32, int(os.environ.get("PREPARE_DB_COPY_POLL_BATCH_SIZE", "256")))
 
 
 def _prepare_db_lock(account_name: str, db_name: str) -> threading.Lock:
@@ -286,11 +287,27 @@ def _poll_copy_completion(
     failed_files: list[dict[str, str]] = []
     deadline = time.monotonic() + _COPY_POLL_MAX_SECONDS
     while pending and time.monotonic() < deadline:
+        prefix = f"{db_name}/"
+        copy_include_supported = True
+        try:
+            try:
+                blobs = container.list_blobs(name_starts_with=prefix, include=["copy"])
+            except TypeError:
+                copy_include_supported = False
+                blobs = container.list_blobs(name_starts_with=prefix)
+            copy_by_name = {str(blob.name): getattr(blob, "copy", None) for blob in blobs}
+        except Exception as exc:
+            LOGGER.debug(
+                "copy status batch probe failed db=%s: %s",
+                db_name,
+                type(exc).__name__,
+            )
+            copy_by_name = None
         # Iterate in deterministic order so logs stay diff-friendly.
         for name in sorted(pending)[:_COPY_POLL_BATCH_SIZE]:
-            try:
-                props = container.get_blob_client(name).get_blob_properties()
-            except ResourceNotFoundError:
+            if copy_by_name is None:
+                continue
+            if name not in copy_by_name:
                 # The destination blob disappeared (eg an admin deleted the
                 # container mid-flight). Surface as a copy failure rather
                 # than hanging forever.
@@ -300,15 +317,29 @@ def _poll_copy_completion(
                 )
                 pending.discard(name)
                 continue
-            except Exception as exc:
-                LOGGER.debug(
-                    "copy status probe failed db=%s blob=%s: %s",
-                    db_name,
-                    name,
-                    type(exc).__name__,
-                )
-                continue
-            copy = getattr(props, "copy", None)
+            copy = copy_by_name[name]
+            if copy is None and not copy_include_supported:
+                try:
+                    copy = getattr(
+                        container.get_blob_client(name).get_blob_properties(),
+                        "copy",
+                        None,
+                    )
+                except ResourceNotFoundError:
+                    failed += 1
+                    failed_files.append(
+                        {"blob": name, "status": "missing", "reason": "blob not found"}
+                    )
+                    pending.discard(name)
+                    continue
+                except Exception as exc:
+                    LOGGER.debug(
+                        "copy status fallback probe failed db=%s blob=%s: %s",
+                        db_name,
+                        name,
+                        type(exc).__name__,
+                    )
+                    continue
             status = ""
             description = ""
             if copy is not None:
@@ -912,11 +943,18 @@ def prepare_db_cancel(
     aborted = 0
     skipped = 0
     errors = 0
-    for blob in container.list_blobs(name_starts_with=f"{db_name}/"):
+    copy_include_supported = True
+    try:
+        blobs = container.list_blobs(name_starts_with=f"{db_name}/", include=["copy"])
+    except TypeError:
+        copy_include_supported = False
+        blobs = container.list_blobs(name_starts_with=f"{db_name}/")
+    for blob in blobs:
         try:
             bc = container.get_blob_client(blob.name)
-            props = bc.get_blob_properties()
-            copy_props = getattr(props, "copy", None)
+            copy_props = getattr(blob, "copy", None)
+            if copy_props is None and not copy_include_supported:
+                copy_props = getattr(bc.get_blob_properties(), "copy", None)
             status = str(getattr(copy_props, "status", "") or "").lower()
             cid = str(getattr(copy_props, "id", "") or "")
             if status == "pending" and cid:

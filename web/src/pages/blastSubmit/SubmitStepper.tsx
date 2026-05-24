@@ -23,13 +23,50 @@ const ICON_SIZE = 14;
 const ICON_STROKE = 1.5;
 
 export const STEPS: StepDef[] = [
-  { step: 1, label: "Program",          group: "input",   icon: <FlaskConical size={ICON_SIZE} strokeWidth={ICON_STROKE} /> },
-  { step: 2, label: "Query sequence",   group: "input",   icon: <FileText size={ICON_SIZE} strokeWidth={ICON_STROKE} /> },
-  { step: 3, label: "Search set",       group: "input",   icon: <Database size={ICON_SIZE} strokeWidth={ICON_STROKE} /> },
-  { step: 4, label: "Taxonomy filter",  group: "input",   optional: true, icon: <Bug size={ICON_SIZE} strokeWidth={ICON_STROKE} /> },
-  { step: 5, label: "Task profile",     group: "runtime", icon: <Gauge size={ICON_SIZE} strokeWidth={ICON_STROKE} /> },
-  { step: 6, label: "Execution profile",group: "runtime", icon: <Server size={ICON_SIZE} strokeWidth={ICON_STROKE} /> },
-  { step: 7, label: "Algorithm params", group: "runtime", optional: true, icon: <SlidersHorizontal size={ICON_SIZE} strokeWidth={ICON_STROKE} /> },
+  {
+    step: 1,
+    label: "Program",
+    group: "input",
+    icon: <FlaskConical size={ICON_SIZE} strokeWidth={ICON_STROKE} />,
+  },
+  {
+    step: 2,
+    label: "Search set",
+    group: "input",
+    icon: <Database size={ICON_SIZE} strokeWidth={ICON_STROKE} />,
+  },
+  {
+    step: 3,
+    label: "Query sequence",
+    group: "input",
+    icon: <FileText size={ICON_SIZE} strokeWidth={ICON_STROKE} />,
+  },
+  {
+    step: 4,
+    label: "Taxonomy filter",
+    group: "input",
+    optional: true,
+    icon: <Bug size={ICON_SIZE} strokeWidth={ICON_STROKE} />,
+  },
+  {
+    step: 5,
+    label: "Task profile",
+    group: "runtime",
+    icon: <Gauge size={ICON_SIZE} strokeWidth={ICON_STROKE} />,
+  },
+  {
+    step: 6,
+    label: "Execution profile",
+    group: "runtime",
+    icon: <Server size={ICON_SIZE} strokeWidth={ICON_STROKE} />,
+  },
+  {
+    step: 7,
+    label: "Algorithm params",
+    group: "runtime",
+    optional: true,
+    icon: <SlidersHorizontal size={ICON_SIZE} strokeWidth={ICON_STROKE} />,
+  },
 ];
 
 /* ─── Stepper component ──────────────────────────────────────────── */
@@ -42,7 +79,11 @@ export interface SubmitStepperProps {
   onStepClick: (step: number) => void;
 }
 
-export function SubmitStepper({ readySteps, activeStep, onStepClick }: SubmitStepperProps) {
+export function SubmitStepper({
+  readySteps,
+  activeStep,
+  onStepClick,
+}: SubmitStepperProps) {
   const activeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -53,14 +94,22 @@ export function SubmitStepper({ readySteps, activeStep, onStepClick }: SubmitSte
   // Taxonomy is optional: an empty filter is ready, while an invalid filter is not.
   const stepDone = (s: StepDef): boolean => {
     switch (s.step) {
-      case 1: return true; // program is always selected
-      case 2: return readySteps[1]?.ok ?? false; // Sequence
-      case 3: return readySteps[2]?.ok ?? false; // Database
-      case 4: return readySteps[3]?.ok ?? true; // Taxonomy
-      case 5: return true; // optimize always has a default
-      case 6: return readySteps[4]?.ok ?? false; // Cluster
-      case 7: return true; // params always have defaults
-      default: return false;
+      case 1:
+        return true; // program is always selected
+      case 2:
+        return readySteps[2]?.ok ?? false; // Database
+      case 3:
+        return readySteps[1]?.ok ?? false; // Sequence
+      case 4:
+        return readySteps[3]?.ok ?? true; // Taxonomy
+      case 5:
+        return true; // optimize always has a default
+      case 6:
+        return readySteps[4]?.ok ?? false; // Cluster
+      case 7:
+        return true; // params always have defaults
+      default:
+        return false;
     }
   };
 
@@ -73,9 +122,10 @@ export function SubmitStepper({ readySteps, activeStep, onStepClick }: SubmitSte
     <nav className="bsl-stepper" aria-label="Search steps">
       {/* Input group */}
       <div className="bsl-stepper__group-hd bsl-stepper__group-hd--input">
-        <span className="bsl-stepper__swatch bsl-stepper__swatch--input" />
-        ① Input
-        <span className="bsl-stepper__count">{inputDone}/{inputSteps.length}</span>
+        <span className="bsl-stepper__swatch bsl-stepper__swatch--input" />① Input
+        <span className="bsl-stepper__count">
+          {inputDone}/{inputSteps.length}
+        </span>
       </div>
       {inputSteps.map((s) => (
         <button
@@ -90,7 +140,11 @@ export function SubmitStepper({ readySteps, activeStep, onStepClick }: SubmitSte
           onClick={() => onStepClick(s.step)}
           aria-current={s.step === activeStep ? "step" : undefined}
         >
-          <span className={"bsl-stepper__num" + (stepDone(s) ? " bsl-stepper__num--done" : "")}>
+          <span
+            className={
+              "bsl-stepper__num" + (stepDone(s) ? " bsl-stepper__num--done" : "")
+            }
+          >
             {stepDone(s) ? "✓" : s.step}
           </span>
           {s.label}
@@ -100,9 +154,10 @@ export function SubmitStepper({ readySteps, activeStep, onStepClick }: SubmitSte
 
       {/* Runtime group */}
       <div className="bsl-stepper__group-hd bsl-stepper__group-hd--runtime">
-        <span className="bsl-stepper__swatch bsl-stepper__swatch--runtime" />
-        ② Runtime
-        <span className="bsl-stepper__count">{runtimeDone}/{runtimeSteps.length}</span>
+        <span className="bsl-stepper__swatch bsl-stepper__swatch--runtime" />② Runtime
+        <span className="bsl-stepper__count">
+          {runtimeDone}/{runtimeSteps.length}
+        </span>
       </div>
       {runtimeSteps.map((s) => (
         <button
@@ -117,10 +172,12 @@ export function SubmitStepper({ readySteps, activeStep, onStepClick }: SubmitSte
           onClick={() => onStepClick(s.step)}
           aria-current={s.step === activeStep ? "step" : undefined}
         >
-          <span className={
-            "bsl-stepper__num bsl-stepper__num--runtime" +
-            (stepDone(s) ? " bsl-stepper__num--done" : "")
-          }>
+          <span
+            className={
+              "bsl-stepper__num bsl-stepper__num--runtime" +
+              (stepDone(s) ? " bsl-stepper__num--done" : "")
+            }
+          >
             {stepDone(s) ? "✓" : s.step}
           </span>
           {s.label}

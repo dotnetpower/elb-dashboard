@@ -41,10 +41,20 @@ celery_app = Celery(
 celery_app.set_default()
 celery_app.set_current()
 
+_TASK_SOFT_TIME_LIMIT = int(os.environ.get("CELERY_TASK_SOFT_TIME_LIMIT", "3300"))
+_TASK_TIME_LIMIT = int(os.environ.get("CELERY_TASK_TIME_LIMIT", "3600"))
+if _TASK_SOFT_TIME_LIMIT >= _TASK_TIME_LIMIT:
+    raise ValueError("CELERY_TASK_SOFT_TIME_LIMIT must be < CELERY_TASK_TIME_LIMIT")
+_RESULT_EXPIRES_SECONDS = int(os.environ.get("CELERY_RESULT_EXPIRES", "3600"))
+if _RESULT_EXPIRES_SECONDS > 7200:
+    raise ValueError("CELERY_RESULT_EXPIRES must be <= 7200 seconds")
+
 celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
-    worker_prefetch_multiplier=1,
+    worker_prefetch_multiplier=max(
+        1, int(os.environ.get("CELERY_WORKER_PREFETCH_MULTIPLIER", "4"))
+    ),
     # Recycle worker children every N tasks so allocator fragmentation +
     # one-shot leaks in long-running deps (xml parsers, gzip buffers, K8s
     # clients, Azure SDK pipelines) cannot accumulate into a GB-sized RSS
@@ -65,13 +75,13 @@ celery_app.conf.update(
     # (poll, reconcile) finish in seconds so this never trips for them.
     # The BLAST submit task itself is wrapped in its own retry loop so a
     # soft-timeout pushes the work to the retry, not a dead end.
-    task_soft_time_limit=int(os.environ.get("CELERY_TASK_SOFT_TIME_LIMIT", "3300")),
-    task_time_limit=int(os.environ.get("CELERY_TASK_TIME_LIMIT", "3600")),
+    task_soft_time_limit=_TASK_SOFT_TIME_LIMIT,
+    task_time_limit=_TASK_TIME_LIMIT,
     # Drop Celery result payloads after one hour so the result Redis db
     # does not retain GB of stale dicts. Routes that need a result poll
     # ``AsyncResult(...)`` within the first hour; anything older has been
     # reflected into ``state_repo`` already.
-    result_expires=int(os.environ.get("CELERY_RESULT_EXPIRES", "3600")),
+    result_expires=_RESULT_EXPIRES_SECONDS,
     # Silence the Celery 6.0 deprecation warning by opting in explicitly.
     # We want broker connection retries on startup so the worker comes up
     # gracefully even if Redis takes a few seconds to become reachable.
@@ -90,7 +100,7 @@ celery_app.conf.update(
     beat_schedule={
         "auto-warmup-reconcile": {
             "task": "api.tasks.storage.reconcile_auto_warmup",
-            "schedule": 60.0,
+            "schedule": float(os.environ.get("CELERY_BEAT_AUTO_WARMUP_SECONDS", "120")),
             "options": {"queue": "storage"},
         },
         # Periodic stale-job reconciliation. Catches rows whose worker
@@ -99,7 +109,7 @@ celery_app.conf.update(
         # the decision tree it follows.
         "blast-reconcile-stale-jobs": {
             "task": "api.tasks.blast.reconcile_stale_jobs",
-            "schedule": 60.0,
+            "schedule": float(os.environ.get("CELERY_BEAT_BLAST_RECONCILE_SECONDS", "90")),
             "options": {"queue": "blast"},
         },
         "blast-backfill-completed-runtime-metrics": {
@@ -118,7 +128,7 @@ celery_app.conf.update(
         # post-PATCH revision. Cheap when state != rolling_out.
         "upgrade-reconcile-rolling-out": {
             "task": "api.tasks.upgrade.reconcile_rolling_out",
-            "schedule": 60.0,
+            "schedule": float(os.environ.get("CELERY_BEAT_UPGRADE_RECONCILE_SECONDS", "180")),
             "options": {"queue": "default"},
         },
         # Retry orphan ACR tag deletes recorded by `_fail_pre` when the
@@ -175,11 +185,27 @@ from celery.signals import (  # noqa: E402 — keep near user
 
 @worker_init.connect  # type: ignore[untyped-decorator]
 def _on_worker_init(**_kwargs: object) -> None:
+    try:
+        from api.app.telemetry import init_telemetry
+
+        init_telemetry(role="worker")
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).debug("worker telemetry init skipped", exc_info=True)
     _start_reporter("worker")
 
 
 @beat_init.connect  # type: ignore[untyped-decorator]
 def _on_beat_init(**_kwargs: object) -> None:
+    try:
+        from api.app.telemetry import init_telemetry
+
+        init_telemetry(role="beat")
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).debug("beat telemetry init skipped", exc_info=True)
     _start_reporter("beat")
 
 

@@ -1,15 +1,16 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
 import { armProxyApi } from "@/api/armProxy";
+import { aksApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { ClusterItem } from "@/components/ClusterItem";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { MonitorCard } from "@/components/MonitorCard";
 import { degradedStatusOverride } from "@/components/cards/cardStatusOverride";
-import { useAksSkus } from "@/hooks/useAksSkus";
+import { useAksAvailableSkus, useAksSkus } from "@/hooks/useAksSkus";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 import { isAksProvisioning, isAksProvisioningFailed } from "@/utils/aksStatus";
 import { getDegradedInfo } from "@/utils/monitorDegraded";
@@ -18,6 +19,12 @@ import { AddClusterButton } from "./AddClusterButton";
 import { ClusterListSkeleton } from "./ClusterListSkeleton";
 import { ProvisionDoneBanner, ProvisioningBanner } from "./ProvisioningBanner";
 import { ProvisionModal } from "./ProvisionModal";
+import { ProvisionErrorCard } from "./ProvisionErrorCard";
+import {
+  clearLastFailedProvision,
+  loadLastFailedProvision,
+  type LastFailedProvision,
+} from "./lastFailedProvision";
 import { useClusterActions } from "./useClusterActions";
 import {
   nextElbClusterName,
@@ -92,6 +99,72 @@ export function ClusterCard({
   // Role assignment result (shown after provision completes).
   const [roleResult] = useState<string[] | null>(null);
   const [showProvision, setShowProvision] = useState(false);
+  // P3-2: persist the last failed provision in localStorage so a
+  // browser reload still surfaces a "Last attempt failed" banner
+  // (with retry button) instead of dropping the error on the floor.
+  // R-1: server-side source via /api/aks/recent-failed-provisions
+  // takes precedence — it survives cross-browser sessions while
+  // localStorage is per-browser. Hydrated once on mount; the server
+  // query is best-effort (any error falls back to localStorage).
+  // Cleared on Dismiss or when a new attempt succeeds (handled
+  // inside `useClusterProvisioning`).
+  const [lastFailed, setLastFailed] = useState<LastFailedProvision | null>(
+    null,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    // Localstorage hydration is synchronous and provides instant UI;
+    // the async server fetch then overrides if it returns a newer
+    // (or first) row.
+    const fromLocal = loadLastFailedProvision();
+    if (fromLocal) setLastFailed(fromLocal);
+    if (!enabled) return;
+    (async () => {
+      try {
+        const res = await aksApi.recentFailedProvisions(24, 1);
+        if (cancelled) return;
+        if (res.degraded || res.jobs.length === 0) return;
+        const top = res.jobs[0];
+        const whenMs = top.updated_at
+          ? new Date(top.updated_at).getTime()
+          : Date.now();
+        // Backend wins when it has a strictly-newer entry; otherwise
+        // we keep the local snapshot so a recent in-browser failure
+        // is not overwritten by a stale server row.
+        if (
+          !fromLocal ||
+          (Number.isFinite(whenMs) && whenMs > fromLocal.when)
+        ) {
+          setLastFailed({
+            raw: top.error_code ?? "Provisioning failed.",
+            clusterName: top.cluster_name ?? "",
+            region: top.region ?? "",
+            resourceGroup: top.resource_group ?? "",
+            subscriptionId: top.subscription_id ?? "",
+            when: whenMs,
+          });
+        }
+      } catch {
+        // Server fetch is best-effort. localStorage source remains.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled]);
+
+  // R-2: cross-tab sync. The `storage` event fires on *other* tabs
+  // when localStorage changes; this lets a failure in Tab A become
+  // visible on Tab B without requiring a manual refresh. We re-read
+  // the slot on any change to our key so add/clear both propagate.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== "elb_last_failed_provision_v1" && e.key !== null) return;
+      setLastFailed(loadLastFailedProvision());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   const {
     skus: skuOptions,
@@ -111,7 +184,18 @@ export function ClusterCard({
     defaultSystemSku,
     existingResourceGroupNames,
     closeModal: () => setShowProvision(false),
+    modalOpen: showProvision,
     query,
+  });
+
+  // Per-region SKU availability — used by the modal to grey out SKUs
+  // the user's subscription cannot deploy in `prov.provisionRegion`.
+  // Fetched lazily (only after the modal is opened) since the answer
+  // is per-region and most users only ever try one or two.
+  const availability = useAksAvailableSkus({
+    subscriptionId,
+    region: showProvision ? prov.provisionRegion : undefined,
+    allSkus: skuOptions,
   });
 
   const actions = useClusterActions({
@@ -212,6 +296,10 @@ export function ClusterCard({
           skuOptions={skuOptions}
           groupLabels={groupLabels}
           groupOrder={groupOrder}
+          availableSkusSet={availability.availableSet}
+          unavailableSkusMap={availability.unavailableMap}
+          availabilityLoading={availability.isLoading || availability.isFetching}
+          availabilityDegraded={availability.degraded}
           region={prov.provisionRegion}
           setRegion={prov.setProvisionRegion}
           availableLocations={availableLocations}
@@ -219,12 +307,20 @@ export function ClusterCard({
           resourceGroup={prov.provisionResourceGroup}
           setResourceGroup={prov.setProvisionResourceGroup}
           resourceGroupValid={prov.provisionResourceGroupValid}
-          resourceGroupConflict={prov.provisionResourceGroupConflict}
+          resourceGroupExists={prov.provisionResourceGroupExists}
           resourceGroupsLoading={rgListQuery.isLoading}
+          preflightStatus={prov.preflightStatus}
+          preflightResult={prov.preflightResult}
+          taskPhase={prov.taskPhase}
+          taskProgress={prov.taskProgress}
+          elapsed={prov.elapsed}
+          subscriptionId={subscriptionId}
           provStatus={prov.provStatus}
           provError={prov.provError}
           onSubmit={prov.handleProvision}
           onClose={() => setShowProvision(false)}
+          onErrorReset={prov.resetError}
+          onCancel={prov.cancelProvision}
         />
       )}
 
@@ -237,16 +333,67 @@ export function ClusterCard({
           systemNodeCount={prov.systemNodeCount}
           systemVmSize={prov.systemVmSize}
           taskPhase={prov.taskPhase}
+          taskProgress={prov.taskProgress}
+          onCancel={prov.cancelProvision}
         />
       )}
       {prov.provStatus === "done" && (
         <ProvisionDoneBanner clusterName={prov.clusterName} roleResult={roleResult} />
       )}
-      {prov.provError && (
-        <div
-          style={{ fontSize: 12, color: "var(--danger)", marginBottom: "var(--space-3)" }}
-        >
-          <AlertTriangle size={12} style={{ verticalAlign: "middle" }} /> {prov.provError}
+      {prov.provError && !showProvision && (
+        <div style={{ marginBottom: "var(--space-3)" }}>
+          <ProvisionErrorCard
+            raw={prov.provError}
+            context={{
+              subscriptionId,
+              region: prov.provisionRegion,
+              resourceGroup: prov.provisionResourceGroup,
+            }}
+            // R-3: if the task was cancelled (REVOKED) *after* the
+            // cluster ARM resource was already visible, surface a
+            // direct portal link so the user can verify and delete
+            // the partial cluster.
+            extraPortalUrl={
+              prov.provError.includes("cancelled") &&
+              typeof prov.taskProgress?.portal_url === "string"
+                ? (prov.taskProgress?.portal_url as string)
+                : undefined
+            }
+            onDismiss={prov.resetError}
+            onRetry={() => {
+              prov.resetError();
+              setShowProvision(true);
+            }}
+          />
+        </div>
+      )}
+      {/* P3-2: sticky "Last attempt failed" banner — only when the
+          modal is closed and there is no live error already rendered
+          above (we never want to show the same failure twice). */}
+      {lastFailed && !showProvision && !prov.provError && (
+        <div style={{ marginBottom: "var(--space-3)" }}>
+          <ProvisionErrorCard
+            raw={lastFailed.raw}
+            context={{
+              subscriptionId: lastFailed.subscriptionId,
+              region: lastFailed.region,
+              resourceGroup: lastFailed.resourceGroup,
+            }}
+            onDismiss={() => {
+              clearLastFailedProvision();
+              setLastFailed(null);
+            }}
+            onRetry={() => {
+              prov.applyLastFailedContext({
+                clusterName: lastFailed.clusterName,
+                region: lastFailed.region,
+                resourceGroup: lastFailed.resourceGroup,
+              });
+              clearLastFailedProvision();
+              setLastFailed(null);
+              setShowProvision(true);
+            }}
+          />
         </div>
       )}
 

@@ -9,7 +9,7 @@ import type { DatabaseSectionProps } from "@/pages/blastSubmit/types";
 import { SectionHeader, Tip } from "@/pages/blastSubmit/ui";
 import { formatBytes } from "@/components/cards/storageDbCatalog";
 
-type SearchSetCategory = "standard" | "rna" | "genomic" | "custom";
+export type SearchSetCategory = "standard" | "rna" | "genomic" | "custom";
 
 const SEARCH_SET_CATEGORIES: Array<{ value: SearchSetCategory; label: string }> = [
   { value: "standard", label: "Standard databases" },
@@ -34,6 +34,14 @@ function databaseCategoryByName(name: string, source?: string): SearchSetCategor
 
 function databaseCategory(database: BlastDatabase): SearchSetCategory {
   return databaseCategoryByName(database.name, database.source ?? undefined);
+}
+
+export function firstDatabasePathForCategory(
+  databases: BlastDatabase[] | undefined,
+  category: SearchSetCategory,
+): string {
+  const first = databases?.find((database) => databaseCategory(database) === category);
+  return first ? buildDatabasePath(first) : "";
 }
 
 function deriveCategoryFromForm(
@@ -101,17 +109,21 @@ export function DatabaseSection({
 
   // Clicking a different category radio should follow NCBI behaviour: the
   // dropdown switches to that category's options and the previous selection
-  // is dropped if it does not belong to the new category. Without this the
-  // dropdown would prepend an off-category "current" entry, masking the
-  // category swap and leaving the impression that the database is locked.
+  // is replaced by the first downloaded database in the new category. Without
+  // this the next Query step can stay disabled even though the category has
+  // usable databases.
   const handleCategoryChange = (next: SearchSetCategory) => {
-    if (next === category) return;
-    setCategory(next);
-    if (!databases || !form.db) return;
-    const current = databases.find((database) => buildDatabasePath(database) === form.db);
-    if (current && databaseCategory(current) !== next) {
-      set("db", "");
+    if (!databases) {
+      setCategory(next);
+      return;
     }
+    const current = form.db
+      ? databases.find((database) => buildDatabasePath(database) === form.db)
+      : undefined;
+    if (next === category && current && databaseCategory(current) === next) return;
+    setCategory(next);
+    if (current && databaseCategory(current) === next) return;
+    set("db", firstDatabasePathForCategory(databases, next));
   };
 
   const visibleDatabases = useMemo(() => {
@@ -127,7 +139,7 @@ export function DatabaseSection({
       className={`glass-card blast-section bsl-input${form.db ? " bsl-done" : ""}`}
     >
       <SectionHeader
-        step={3}
+        step={2}
         icon={<Database size={16} strokeWidth={1.5} />}
         title="Choose Search Set"
         subtitle="Select a BLAST database from your storage"

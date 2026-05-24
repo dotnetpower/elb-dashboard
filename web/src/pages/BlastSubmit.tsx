@@ -35,11 +35,18 @@ import {
 import { useWarmupStatus } from "@/pages/blastSubmit/useWarmupStatus";
 import { parsePositiveTaxid, PROGRAMS } from "@/pages/blastSubmitModel";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
+import {
+  AUTO_WARMUP_PREFS_EVENT,
+  readAutoWarmupDbs,
+} from "@/components/cards/storage/autoWarmupPrefs";
 
 export function BlastSubmit() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { form, setForm, set, reset, clearDraft, lastSavedAt } = useDraftForm();
   const [showParams, setShowParams] = useState(false);
+  const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
+    readAutoWarmupDbs(),
+  );
   const [activeStep, setActiveStep] = useState(2); // default focus on Query
   const [now, setNow] = useState(() => Date.now());
   const sectionRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -112,6 +119,17 @@ export function BlastSubmit() {
       selectedCluster,
       formDb: form.db,
     });
+  const autoWarmupSelected = autoWarmupDbs.has(selectedDbShortName);
+
+  useEffect(() => {
+    const refreshAutoWarmupDbs = () => setAutoWarmupDbs(readAutoWarmupDbs());
+    window.addEventListener(AUTO_WARMUP_PREFS_EVENT, refreshAutoWarmupDbs);
+    window.addEventListener("storage", refreshAutoWarmupDbs);
+    return () => {
+      window.removeEventListener(AUTO_WARMUP_PREFS_EVENT, refreshAutoWarmupDbs);
+      window.removeEventListener("storage", refreshAutoWarmupDbs);
+    };
+  }, []);
 
   // Database listing + warmup-feasibility plan, scoped to the selected
   // cluster's topology. See `useDbWithWarmupPlan` for the contract.
@@ -156,9 +174,16 @@ export function BlastSubmit() {
         form: current,
         availability: shardingAvailability,
         isDbAlreadyWarm,
+        autoWarmupSelected,
       }),
     );
-  }, [isDbAlreadyWarm, runtimeDataLoading, setForm, shardingAvailability]);
+  }, [
+    autoWarmupSelected,
+    isDbAlreadyWarm,
+    runtimeDataLoading,
+    setForm,
+    shardingAvailability,
+  ]);
 
   const submitMutation = useSubmitMutation({ navigate, toast, clearDraft });
 
@@ -272,8 +297,15 @@ export function BlastSubmit() {
 
   // Re-render the "Saved Ns ago" label every 15s.
   useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), 15_000);
-    return () => window.clearInterval(t);
+    const tick = () => {
+      if (!document.hidden) setNow(Date.now());
+    };
+    const t = window.setInterval(tick, 15_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, []);
 
   const scrollToStep = (step: number) => {
@@ -324,23 +356,6 @@ export function BlastSubmit() {
             }}
             onFocus={() => setActiveStep(2)}
           >
-            <QuerySection
-              form={form}
-              set={set}
-              fileInputRef={fileInputRef}
-              toast={toast}
-              isFasta={validation.seqStats.isFasta}
-              seqCount={validation.seqStats.seqCount}
-              charCount={validation.seqStats.charCount}
-            />
-          </div>
-
-          <div
-            ref={(el) => {
-              sectionRefs.current[3] = el;
-            }}
-            onFocus={() => setActiveStep(3)}
-          >
             <DatabaseSection
               form={form}
               set={set}
@@ -352,6 +367,23 @@ export function BlastSubmit() {
               dbWarning={validation.dbWarning}
               dbMissingFromStorage={validation.dbMissingFromStorage}
               dbBaseName={validation.dbBaseName}
+            />
+          </div>
+
+          <div
+            ref={(el) => {
+              sectionRefs.current[3] = el;
+            }}
+            onFocus={() => setActiveStep(3)}
+          >
+            <QuerySection
+              form={form}
+              set={set}
+              fileInputRef={fileInputRef}
+              toast={toast}
+              isFasta={validation.seqStats.isFasta}
+              seqCount={validation.seqStats.seqCount}
+              charCount={validation.seqStats.charCount}
             />
           </div>
 

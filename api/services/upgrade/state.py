@@ -327,10 +327,33 @@ def set_backend(backend: _Backend | None) -> None:
 
 
 def _backend() -> _Backend:
+    global _BACKEND
     if _BACKEND is not None:
         return _BACKEND
     with _BACKEND_LOCK:
         if _BACKEND is not None:
+            return _BACKEND
+        # Local-dev escape hatch: when not running inside a deployed
+        # Container App (`CONTAINER_APP_NAME` unset), default to the
+        # in-memory backend so a workstation that lacks Storage Table RBAC
+        # on the platform account doesn't 500 every `/api/upgrade/status`
+        # poll and crash every `reconcile_rolling_out` Celery tick. The
+        # upgrade flow is not interesting in local dev anyway; the in-mem
+        # row stays IDLE and routes / tasks behave as if the upgrade
+        # system is quiescent. Production (CONTAINER_APP_NAME set by ACA)
+        # keeps the Azure Tables backend unchanged.
+        if not os.environ.get("CONTAINER_APP_NAME"):
+            LOGGER.info(
+                "upgrade.state: defaulting to InMemoryBackend (local dev; "
+                "CONTAINER_APP_NAME unset)"
+            )
+            # InMemoryBackend self-guards with this env var so a misconfig
+            # in production cannot silently lose state. We opt-in inside
+            # the same CONTAINER_APP_NAME guard so the production path
+            # still trips the RuntimeError if anyone tries to short-circuit
+            # it from inside ACA.
+            os.environ.setdefault("ELB_ALLOW_INMEMORY_UPGRADE_STATE", "true")
+            _BACKEND = InMemoryBackend()
             return _BACKEND
         return _AzureTablesBackend()
 

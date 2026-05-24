@@ -9,6 +9,7 @@ export function ElapsedTimer({ startTime }: { startTime: string }) {
   useEffect(() => {
     const start = new Date(startTime).getTime();
     const tick = () => {
+      if (document.hidden) return;
       const diff = Math.max(0, Date.now() - start);
       const s = Math.floor(diff / 1000);
       const m = Math.floor(s / 60);
@@ -19,7 +20,11 @@ export function ElapsedTimer({ startTime }: { startTime: string }) {
     };
     tick();
     const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [startTime]);
   return <span style={{ fontVariantNumeric: "tabular-nums" }}>{elapsed}</span>;
 }

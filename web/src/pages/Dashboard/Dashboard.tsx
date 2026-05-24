@@ -1,9 +1,9 @@
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 
 import { GettingStartedGuide } from "@/components/GettingStartedGuide";
-import { SettingsPanel } from "@/components/SettingsPanel";
 import { clearConfig, SetupWizard, type ResourceConfig } from "@/components/SetupWizard";
 import { WorkspaceDiagnosticsBanner } from "@/components/WorkspaceDiagnosticsBanner";
+import { useSettingsPanel } from "@/hooks/useSettingsPanel";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 import { DashboardGrid } from "./DashboardGrid";
@@ -28,7 +28,7 @@ export function Dashboard() {
     setDiscoveredWorkspaces,
   } = useWorkspaceDiscovery();
 
-  const [showSettings, setShowSettings] = useState(false);
+  const { open: openSettings } = useSettingsPanel();
 
   const {
     showGettingStarted,
@@ -53,7 +53,6 @@ export function Dashboard() {
 
   const handleRerunWizard = useCallback(() => {
     clearConfig();
-    setShowSettings(false);
     setShowWizard(true);
     setDiscoveredWorkspaces([]);
   }, [setShowWizard, setDiscoveredWorkspaces]);
@@ -88,7 +87,7 @@ export function Dashboard() {
         setConfig={setConfig}
         gettingStartedDismissed={gettingStartedDismissed}
         onReopenGettingStarted={reopenGettingStarted}
-        onOpenSettings={() => setShowSettings(true)}
+        onOpenSettings={openSettings}
       />
 
       <WorkspaceDiagnosticsBanner
@@ -97,13 +96,6 @@ export function Dashboard() {
       />
 
       <DashboardGrid config={config} />
-
-      <SettingsPanel
-        open={showSettings}
-        config={config}
-        onClose={() => setShowSettings(false)}
-        onRerunWizard={handleRerunWizard}
-      />
 
       {showGettingStarted && (
         <GettingStartedGuide

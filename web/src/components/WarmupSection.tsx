@@ -202,7 +202,12 @@ export function WarmupSection({
     queryKey: ["warmup-orch", warmupInstanceId],
     queryFn: () => monitoringApi.warmupOrchStatus(warmupInstanceId!),
     enabled: Boolean(warmupInstanceId),
-    refetchInterval: 10_000,
+    refetchInterval: (query) => {
+      const status = query.state.data?.runtime_status;
+      return status === "Completed" || status === "Failed" || status === "Terminated"
+        ? false
+        : 10_000;
+    },
     retry: 1, // fail fast on stale instance_id
   });
 
@@ -290,6 +295,9 @@ export function WarmupSection({
 
   const orchPhase = orchQuery.data?.custom_status?.phase;
   const orchDb = orchQuery.data?.custom_status?.db;
+  const orchProgress = orchQuery.data?.custom_status as
+    | ({ nodes_ready?: number; total_jobs?: number } & Record<string, unknown>)
+    | undefined;
   const orchFinished =
     orchQuery.data?.runtime_status === "Completed" ||
     orchQuery.data?.runtime_status === "Failed";
@@ -404,17 +412,23 @@ export function WarmupSection({
           {orchFinished && !orchSuccess && <AlertTriangle size={12} strokeWidth={1.5} />}
           <div>
             <strong>Warmup {orchDb ? `(${orchDb})` : ""}</strong>:{" "}
-            {orchPhase === "enabling_storage"
-              ? "Enabling storage access..."
-              : orchPhase === "configuring"
-                ? "Preparing..."
-                : orchPhase === "warming_up"
-                  ? `Loading DB to nodes... (${(orchQuery.data?.custom_status?.steps?.warming_up as Record<string, number> | undefined)?.ready ?? 0}/${(orchQuery.data?.custom_status?.steps?.warming_up as Record<string, number> | undefined)?.total ?? "?"})`
-                  : orchPhase === "completed"
-                    ? "Completed"
-                    : orchPhase === "failed"
-                      ? `Failed: ${orchQuery.data?.output?.error?.slice(0, 100) ?? "unknown"}`
-                      : (orchPhase ?? orchQuery.data.runtime_status)}
+            {orchPhase === "starting"
+              ? "Starting task..."
+              : orchPhase === "checking_storage"
+                ? "Checking prepared database in storage..."
+                : orchPhase === "sharding"
+                  ? "Building shard layouts..."
+                  : orchPhase === "planning_node_warmup"
+                    ? "Planning node-local warmup jobs..."
+                    : orchPhase === "applying_warmup_jobs"
+                      ? "Applying warmup jobs to AKS..."
+                      : orchPhase === "warming_nodes"
+                        ? `Loading DB to nodes... (${orchProgress?.nodes_ready ?? 0}/${orchProgress?.total_jobs ?? "?"})`
+                        : orchPhase === "completed"
+                          ? "Completed"
+                          : orchPhase === "failed"
+                            ? `Failed: ${orchQuery.data?.output?.error?.slice(0, 100) ?? "unknown"}`
+                            : (orchPhase ?? orchQuery.data.runtime_status)}
           </div>
         </div>
       )}
@@ -603,11 +617,11 @@ function WarmupDbRow({
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", fontSize: 10 }}>
           <StatusPill
             label={row.storageLabel}
-            tone={row.storageLabel === "Downloaded" ? "ok" : "neutral"}
+            tone={row.storageLabel === "Storage DB ready" ? "ok" : "neutral"}
           />
           <StatusPill
             label={row.shardLabel}
-            tone={row.shardLabel === "Not sharded" ? "neutral" : "accent"}
+            tone={row.shardLabel === "Shard layouts unknown" ? "neutral" : "accent"}
           />
           <StatusPill label={row.cacheLabel} toneColor={toneColor} />
         </div>
@@ -665,7 +679,10 @@ function WarmupDbRow({
 
 function WarmupRowsSkeleton() {
   return (
-    <div aria-label="Loading database cache candidates" style={{ display: "grid", gap: 8 }}>
+    <div
+      aria-label="Loading database cache candidates"
+      style={{ display: "grid", gap: 8 }}
+    >
       {[0, 1, 2].map((idx) => (
         <div
           key={idx}
@@ -806,6 +823,7 @@ function WarmupProgressBar({ warm }: { warm: WarmupDbInfo }) {
         }}
       >
         <span>{phase}</span>
+        {pct > 0 && pct < 100 && <span>{pct.toFixed(1)}% copied</span>}
         <span>
           {warm.nodes_ready}/{warm.total_jobs} ready
         </span>
@@ -856,4 +874,3 @@ function StatusPill({
     </span>
   );
 }
-

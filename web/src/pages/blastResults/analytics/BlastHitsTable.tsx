@@ -190,13 +190,13 @@ export function BlastHitsTable({
             </tr>
           </thead>
           <tbody>
-            {hits.map((hit, index) => {
+            {hits.map((hit) => {
               const key = hitKey(hit);
               const checked = selectedHits.has(key);
               const aggregate = subjectAggregates.get(hit.sseqid);
               return (
                 <tr
-                  key={`${key}-${index}`}
+                  key={key}
                   style={{
                     background: checked
                       ? "color-mix(in srgb, var(--accent) 8%, transparent)"

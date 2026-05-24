@@ -466,6 +466,36 @@ def test_export_tsv_uses_tab_delimiter(patched_storage):
     assert "," not in first_line
 
 
+def test_export_hit_table_text_alias_uses_tab_delimiter(patched_storage):
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job123/results/export",
+        params={"storage_account": "stelb", "format": "hit-table-text"},
+    )
+    assert response.status_code == 200
+    assert "tab-separated" in response.headers["content-type"]
+    first_line = response.text.splitlines()[0]
+    assert "\t" in first_line
+    assert "," not in first_line
+
+
+def test_export_hit_table_csv_alias_has_rows(patched_storage):
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job123/results/export",
+        params={"storage_account": "stelb", "format": "hit-table-csv"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert len(rows) == 3
+    assert rows[0]["qseqid"] == "queryA"
+
+
 def test_export_json_returns_hits_array(patched_storage):
     from api.main import app
 
@@ -479,6 +509,23 @@ def test_export_json_returns_hits_array(patched_storage):
     assert payload["job_id"] == "job123"
     assert payload["total"] == 3
     assert len(payload["hits"]) == 3
+
+
+def test_export_json_seqalign_returns_seq_alignments(patched_storage):
+    patched_storage["content"] = _OUTFMT5_XML
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job123/results/export",
+        params={"storage_account": "stelb", "format": "json-seqalign"},
+    )
+    assert response.status_code == 200
+    payload = json.loads(response.text)
+    assert payload["format"] == "json-seqalign"
+    assert payload["total"] == 1
+    assert payload["seq_alignments"][0]["qseq"] == "ACGT"
+    assert payload["seq_alignments"][0]["midline"] == "||||"
 
 
 def test_export_csv_converts_xml_to_rows(patched_storage):
@@ -502,13 +549,42 @@ def test_export_csv_converts_xml_to_rows(patched_storage):
     assert rows[0]["source_blob"] == "job123/merged_results.out.gz"
 
 
-def test_export_rejects_unknown_format(patched_storage):
+def test_export_xml_returns_captured_blast_xml(patched_storage):
+    patched_storage["blobs"] = [{"name": "job123/merged_results.out.gz", "size": 123}]
+    patched_storage["content"] = _OUTFMT5_XML
     from api.main import app
 
     client = TestClient(app)
     response = client.get(
         "/api/blast/jobs/job123/results/export",
         params={"storage_account": "stelb", "format": "xml"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/xml")
+    assert response.headers["content-disposition"].endswith('filename="job123_results.xml"')
+    assert "<BlastOutput>" in response.text
+    assert "<Iteration_query-ID>queryXml</Iteration_query-ID>" in response.text
+
+
+def test_export_xml_reports_format_not_captured_for_tabular_job(patched_storage):
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job123/results/export",
+        params={"storage_account": "stelb", "format": "xml"},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "format_not_captured"
+
+
+def test_export_rejects_unknown_format(patched_storage):
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job123/results/export",
+        params={"storage_account": "stelb", "format": "sam"},
     )
     assert response.status_code == 422
 

@@ -5,7 +5,8 @@ import { formatApiError } from "@/api/client";
 import { monitoringApi } from "@/api/endpoints";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 
-export type BuildStatus = "idle" | "building" | "done" | "error";
+export type BuildStatus = "idle" | "queued" | "building" | "done" | "error";
+const BUILD_QUEUE_TIMEOUT_SECONDS = 5 * 60;
 
 export interface BuildResult {
   image: string;
@@ -34,15 +35,13 @@ export function useAcrBuilds({
 
   const query = useQuery({
     queryKey: ["acr", subscriptionId, resourceGroup, registryName],
-    queryFn: () =>
-      monitoringApi.acr(subscriptionId, resourceGroup, registryName),
+    queryFn: () => monitoringApi.acr(subscriptionId, resourceGroup, registryName),
     enabled,
     refetchInterval: (q) => {
       const data = q.state.data;
       // Keep a fast 10s poll while a build is active so progress is visible.
-      if (buildStatus === "building") return 10_000;
-      if (data?.building_images && data.building_images.length > 0)
-        return 10_000;
+      if (buildStatus === "queued" || buildStatus === "building") return 10_000;
+      if (data?.building_images && data.building_images.length > 0) return 10_000;
       // Otherwise honour the user's chosen dashboard refresh cadence.
       return idleRefetchInterval;
     },
@@ -66,9 +65,9 @@ export function useAcrBuilds({
   const [buildStartTime, setBuildStartTime] = useState<number | null>(null);
   const [singleBuilding, setSingleBuilding] = useState<string | null>(null);
 
-  // Elapsed timer — runs whenever buildStatus === "building"
+  // Elapsed timer — runs while the task is queued or an ACR run is active.
   useEffect(() => {
-    if (buildStatus !== "building") {
+    if (buildStatus !== "queued" && buildStatus !== "building") {
       return;
     }
     const start = buildStartTime ?? Date.now();
@@ -88,9 +87,21 @@ export function useAcrBuilds({
     return () => clearTimeout(t);
   }, [buildStatus]);
 
-  // Transition building → done when all scheduled builds complete in ACR
+  // If the API accepted the build request but no ACR run ever appears, stop
+  // claiming that a build is underway. This is usually a worker/broker problem.
   useEffect(() => {
-    if (buildStatus !== "building" || !buildResults.length) return;
+    if (buildStatus !== "queued" || hasServerBuilding) return;
+    if (elapsed < BUILD_QUEUE_TIMEOUT_SECONDS) return;
+    setBuildStatus("error");
+    setBuildError(
+      "Build task was queued, but no ACR run appeared within 5 minutes. Check the worker sidecar and ACR task logs before retrying.",
+    );
+  }, [buildStatus, elapsed, hasServerBuilding]);
+
+  // Transition queued/building → done when all scheduled builds complete in ACR.
+  useEffect(() => {
+    if ((buildStatus !== "queued" && buildStatus !== "building") || !buildResults.length)
+      return;
     const allScheduled = buildResults.every(
       (r) => r.status === "scheduled" || r.status === "success",
     );
@@ -108,9 +119,9 @@ export function useAcrBuilds({
     }
   }, [buildStatus, buildResults, query.data]);
 
-  // Auto-sync: if server shows builds in progress after page refresh, adopt the state
+  // Auto-sync: if server shows builds in progress after page refresh, adopt the state.
   useEffect(() => {
-    if (hasServerBuilding && buildStatus === "idle") {
+    if (hasServerBuilding && (buildStatus === "idle" || buildStatus === "queued")) {
       setBuildStatus("building");
       if (!buildStartTime) setBuildStartTime(Date.now());
     }
@@ -131,7 +142,7 @@ export function useAcrBuilds({
 
   const handleBuild = async () => {
     setShowConfirm(false);
-    setBuildStatus("building");
+    setBuildStatus("queued");
     setBuildError(null);
     setBuildResults([]);
     setBuildStartTime(Date.now());
@@ -146,7 +157,7 @@ export function useAcrBuilds({
         (r) => r.status === "success" || r.status === "scheduled",
       );
       if (allScheduled) {
-        setBuildStatus("building");
+        setBuildStatus("queued");
       } else {
         setBuildStatus(
           resp.results.every((r) => r.status === "success") ? "done" : "error",
@@ -161,7 +172,7 @@ export function useAcrBuilds({
 
   const handleBuildSingle = async (imageName: string) => {
     setSingleBuilding(imageName);
-    setBuildStatus("building");
+    setBuildStatus("queued");
     setBuildError(null);
     setBuildStartTime(Date.now());
     try {
@@ -176,7 +187,7 @@ export function useAcrBuilds({
         return [...filtered, ...resp.results];
       });
       if (resp.results.some((r) => r.status === "scheduled")) {
-        setBuildStatus("building");
+        setBuildStatus("queued");
       } else {
         setBuildStatus(
           resp.results.every((r) => r.status === "success") ? "done" : "error",

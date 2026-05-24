@@ -68,10 +68,9 @@ def test_e16_x10_plan_pins_one_core_nt_shard_per_node() -> None:
         assert container["volumeMounts"][0]["mountPath"] == DEFAULT_CONTAINER_DB_PATH
         assert "source /tmp/shard_volpaths.txt" not in container["args"][0]
         assert "CLEANUP partial downloads" in container["args"][0]
-        assert "CACHE_INCOMPLETE missing taxdb files" in container["args"][0]
         assert "CACHE_INCOMPLETE missing nucleotide volume files" in container["args"][0]
         assert "CACHE_STALE missing source-version marker" in container["args"][0]
-        assert "ERROR taxdb files missing after download" in container["args"][0]
+        assert "TAXDB_SKIP taxdb files not present in DB prefix" in container["args"][0]
         assert "valid_nsq_count=" in container["args"][0]
         assert "printf '%s' ok > .download-complete" in container["args"][0]
         assert "blast-vmtouch-aks.sh" in container["args"][0]
@@ -116,12 +115,14 @@ def test_warmup_scripts_configmap_contains_job_scripts() -> None:
     assert "taxdb.btd;taxdb.bti" in manifest["data"]["init-db-shard-aks.sh"]
     assert 'cd "${ELB_BLASTDB_DIR:-/blast/blastdb}"' in manifest["data"]["init-db-shard-aks.sh"]
     assert "CLEANUP partial downloads" in manifest["data"]["init-db-shard-aks.sh"]
-    assert "CACHE_INCOMPLETE missing taxdb files" in manifest["data"]["init-db-shard-aks.sh"]
     assert (
         "CACHE_INCOMPLETE missing nucleotide volume files"
         in manifest["data"]["init-db-shard-aks.sh"]
     )
-    assert "ERROR: taxdb files missing after download" in manifest["data"]["init-db-shard-aks.sh"]
+    assert (
+        "TAXDB_SKIP taxdb files not present in DB prefix"
+        in manifest["data"]["init-db-shard-aks.sh"]
+    )
     assert "CACHE_STALE missing source-version marker" in manifest["data"]["init-db-shard-aks.sh"]
     assert (
         "DOWNLOAD_SKIP existing shard=${ELB_SHARD_IDX}" in manifest["data"]["init-db-shard-aks.sh"]
@@ -401,6 +402,25 @@ def test_infer_warmup_pod_phase_detects_copying_from_logs() -> None:
         assert status["message"] == "Downloading shard files with azcopy"
 
 
+    def test_infer_warmup_pod_phase_treats_azcopy_percent_as_copying() -> None:
+        pod = {
+            "metadata": {"name": "warm-core-nt-00-x", "labels": {"shard": "00"}},
+            "spec": {"nodeName": "aks-blast-000001"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{"name": "warmup", "state": {"running": {}}}],
+            },
+        }
+
+        status = infer_warmup_pod_phase(
+            pod,
+            "47.1 %, 233 Done, 0 Failed, 31 Pending, 0 Skipped",
+        )
+
+        assert status["phase"] == "copying_files"
+        assert status["message"] == "47.1 %, 233 Done, 0 Failed, 31 Pending, 0 Skipped"
+
+
 def test_attach_pod_progress_to_database_status_adds_phase_counts() -> None:
     databases = [
         {
@@ -561,6 +581,48 @@ def test_attach_pod_progress_counts_log_completed_shards() -> None:
     assert databases[0]["nodes_ready"] == 1
     assert databases[0]["nodes_active"] == 1
     assert databases[0]["progress_pct"] == 50
+
+
+def test_attach_pod_progress_uses_azcopy_percent_before_node_completes() -> None:
+    databases = [
+        {
+            "name": "core_nt",
+            "nodes_ready": 0,
+            "nodes_failed": 0,
+            "nodes_active": 3,
+            "total_jobs": 3,
+            "status": "Loading",
+            "progress_pct": 0,
+        }
+    ]
+    pods = [
+        {
+            "metadata": {
+                "name": f"warm-core-nt-0{idx}-a",
+                "creationTimestamp": "2026-05-16T16:35:57Z",
+                "labels": {"db": "core_nt", "shard": f"0{idx}"},
+            },
+            "spec": {"nodeName": f"aks-blast-00000{idx}"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{"name": "warmup", "state": {"running": {}}}],
+            },
+        }
+        for idx in range(3)
+    ]
+
+    attach_pod_progress_to_database_status(
+        databases,
+        pods,
+        {
+            "warm-core-nt-00-a": "Running: 21.7 %, 228 Done, 0 Failed, 36 Pending",
+            "warm-core-nt-01-a": "Running: 20.0 %, 210 Done, 0 Failed, 54 Pending",
+            "warm-core-nt-02-a": "Running: 22.3 %, 236 Done, 0 Failed, 28 Pending",
+        },
+    )
+
+    assert databases[0]["nodes_ready"] == 0
+    assert databases[0]["progress_pct"] == 21.3
 
 
 def test_infer_warmup_pod_phase_detects_partial_download_failure() -> None:

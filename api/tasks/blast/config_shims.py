@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from api.services import blast_task_config as _blast_task_config
+from api.services.blast_task_config import BlastDatabaseAvailabilityError
 from api.tasks import blast as _blast
 from api.tasks.blast.split_constants import STRICT_TIE_ORDER_MIN_TARGET_SEQS
 
@@ -52,6 +53,15 @@ def _query_blob_path_from_query_file(*, storage_account: str, query_file: str) -
 
 def _normalise_database_url(storage_account: str, database: str) -> str:
     return _blast_task_config.normalise_database_url(storage_account, database)
+
+
+def _validate_blast_database_available(
+    *, storage_account: str, database: str
+) -> dict[str, str]:
+    return _blast_task_config.validate_blast_database_available(
+        storage_account=storage_account,
+        database=database,
+    )
 
 
 def _results_job_url(storage_account: str, job_id: str) -> str:
@@ -156,6 +166,7 @@ def _ensure_node_warmup_ready_for_submit(
 
 
 __all__ = (
+    "BlastDatabaseAvailabilityError",
     "_build_config_content",
     "_disable_sharding_options",
     "_ensure_node_warmup_ready_for_submit",
@@ -170,4 +181,5 @@ __all__ = (
     "_storage_url",
     "_submit_requires_node_warmup",
     "_suppress_sharding_for_unsharded_database",
+    "_validate_blast_database_available",
 )

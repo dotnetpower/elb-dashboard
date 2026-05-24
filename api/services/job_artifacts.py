@@ -34,6 +34,9 @@ LOGGER = logging.getLogger(__name__)
 
 ARTIFACTS_CONTAINER = os.environ.get("JOB_ARTIFACTS_CONTAINER", "job-artifacts")
 ARTIFACTS_TABLE = os.environ.get("JOB_ARTIFACTS_TABLE", "jobartifactstate")
+# Snapshot caps bound Storage read cost for dashboard artifact previews. Keep
+# them comfortably below route response caps; raise only with evidence from
+# real result sizes because every extra MiB is a metered blob read.
 _EXECUTION_STEPS_MAX_BYTES = int(os.environ.get("EXECUTION_STEPS_SNAPSHOT_MAX_BYTES", "4194304"))
 
 # Process-shared pooled TableClient for the artifact state table — see

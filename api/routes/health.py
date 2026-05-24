@@ -56,8 +56,12 @@ LOGGER = logging.getLogger(__name__)
 # ts from a different probe).
 _STORAGE_PROBE_CACHE: tuple[dict[str, Any], float] | None = None
 _STORAGE_PROBE_CACHE_LOCK = threading.Lock()
-_STORAGE_PROBE_CACHE_TTL_OK_SECONDS = 15.0
-_STORAGE_PROBE_CACHE_TTL_BAD_SECONDS = 3.0
+_STORAGE_PROBE_CACHE_TTL_OK_SECONDS = float(
+    os.environ.get("STORAGE_PROBE_CACHE_TTL_OK_SECONDS", "15.0")
+)
+_STORAGE_PROBE_CACHE_TTL_BAD_SECONDS = float(
+    os.environ.get("STORAGE_PROBE_CACHE_TTL_BAD_SECONDS", "3.0")
+)
 
 # TableServiceClient is designed for long-lived reuse (internal connection
 # pool, TLS keep-alive). Recreating it per probe pays a fresh TLS handshake
@@ -77,6 +81,7 @@ def _ttl_for(result: dict[str, Any] | None) -> float:
 def _reset_storage_probe_cache() -> None:
     """Test helper: drop the cached result so the next call re-probes."""
     global _STORAGE_PROBE_CACHE, _TABLE_SERVICE_CLIENT
+    LOGGER.info("storage probe cache reset")
     with _STORAGE_PROBE_CACHE_LOCK:
         _STORAGE_PROBE_CACHE = None
     with _TABLE_SERVICE_CLIENT_LOCK:
@@ -214,16 +219,23 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, str | bool]:
     """Liveness probe — return 200 if the process can answer.
 
     Container Apps uses HTTP probes against this path. Keep the response
     cheap — no Azure SDK calls, no Storage reads, no token validation.
+
+    `app_insights_configured` is a boolean indicating whether the deployment
+    provided `APPLICATIONINSIGHTS_CONNECTION_STRING`. The connection string
+    itself is exposed under the auth-gated `/api/settings/app-insights`.
     """
     return {
         "status": "ok",
         "version": __version__,
         "revision": os.environ.get("CONTAINER_APP_REVISION", "local"),
+        "app_insights_configured": bool(
+            (os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING") or "").strip()
+        ),
     }
 
 
@@ -517,11 +529,16 @@ def azure_discovery_probe(
     # 3. Resource group list — proves Reader/Contributor at sub scope.
     try:
         rc = resource_client(cred, sub_id)
-        rg_count = sum(1 for _ in rc.resource_groups.list())
+        rg_count = 0
+        for _rg in rc.resource_groups.list():
+            rg_count += 1
+            if rg_count >= 2:
+                break
         out["resource_groups_list"] = {
             "status": "ok",
             "subscription_id": sanitise(sub_id),
             "count": rg_count,
+            "count_capped_at_2": rg_count >= 2,
         }
         if rg_count == 0:
             out["hint"] = (

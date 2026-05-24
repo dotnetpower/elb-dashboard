@@ -6,7 +6,7 @@ export const DRAFT_SCHEMA_VERSION = 5;
 export const DRAFT_KEY = "elb-blast-draft";
 export const OUTFMT_PREFERENCE_KEY = "elb-blast-outfmt";
 
-const SUPPORTED_OUTFMT_VALUES = new Set([0, 5, 6, 7, 11]);
+const SUPPORTED_OUTFMT_VALUES = new Set([0, 5, 6, 7, 11, 12, 13, 14, 15, 16, 17]);
 
 type ReadableStorage = Pick<Storage, "getItem">;
 type WritableStorage = Pick<Storage, "setItem">;

@@ -245,6 +245,15 @@ def test_select_partitions_unknown_machine_falls_back_to_64gib() -> None:
     assert chosen == 10
 
 
+def test_select_partitions_normalizes_azure_sku_aliases() -> None:
+    chosen = dbs.select_partitions_for_submit(
+        db_total_bytes=269 * 1024**3,
+        num_nodes=3,
+        machine_type="E32as_v7",
+    )
+    assert chosen == 3
+
+
 def test_select_partitions_caps_at_largest_preset() -> None:
     # 1000 GB DB on tiny E16 with 1 node → memory floor would be ~16,
     # which is the last preset.

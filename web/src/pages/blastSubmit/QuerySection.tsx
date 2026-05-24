@@ -23,8 +23,10 @@ import {
 } from "@/pages/blastSubmit/fastaUtils";
 import {
   QUERY_EXAMPLE_TEMPLATES,
+  queryExamplesForDatabase,
   type QueryExampleTemplate,
 } from "@/pages/blastSubmit/queryExamples";
+import { getDbBaseName } from "@/pages/blastSubmit/helpers";
 import { buildGeneratedJobTitle } from "@/pages/blastSubmitModel";
 import type { QuerySectionProps } from "@/pages/blastSubmit/types";
 import { SectionHeader, Tip } from "@/pages/blastSubmit/ui";
@@ -142,27 +144,67 @@ export function QuerySection({
 
   const loadExample = (example: QueryExampleTemplate) => {
     set("query_data", example.fasta);
-    set("program", "blastn");
+    set("program", example.blastProgram);
+    set("query_from", "");
+    set("query_to", "");
     if (!form.job_title.trim()) set("job_title", buildGeneratedJobTitle(example.label));
     setExampleModalOpen(false);
   };
 
+  // Step 2 (Search set) must precede step 3 (Query). When no database is
+  // selected we disable every input on this section and surface a one-line
+  // notice instead. This guarantees
+  // the example picker can always render hits scoped to a real DB.
+  const selectedDbName = getDbBaseName(form.db);
+  const dbSelected = Boolean(selectedDbName);
+
   return (
     <section className="glass-card glass-card--strong blast-section bsl-input">
       <SectionHeader
-        step={2}
+        step={3}
         icon={<Dna size={16} strokeWidth={1.5} />}
         title="Enter Query Sequence"
         subtitle="Paste FASTA sequence(s) or upload a file"
       />
 
+      {!dbSelected && (
+        <div
+          className="glass-card"
+          role="status"
+          style={{
+            padding: "10px 12px",
+            marginBottom: 12,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            background: "rgba(255,255,255,0.04)",
+            color: "var(--text-muted)",
+            fontSize: 12,
+          }}
+        >
+          <AlertTriangle
+            size={13}
+            strokeWidth={1.5}
+            style={{ color: "var(--warning)" }}
+          />
+          <span>
+            Pick a database in <strong>Step 2 · Search set</strong> first. Examples are
+            filtered to the DB you choose.
+          </span>
+        </div>
+      )}
+
       <div
         className={`blast-textarea-wrap${dragActive ? " blast-textarea-wrap--drag" : ""}`}
+        aria-disabled={!dbSelected}
+        style={!dbSelected ? { opacity: 0.55, pointerEvents: "none" } : undefined}
         onDragEnter={(event) => {
+          if (!dbSelected) return;
           event.preventDefault();
           if (event.dataTransfer.types.includes("Files")) setDragActive(true);
         }}
         onDragOver={(event) => {
+          if (!dbSelected) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
         }}
@@ -171,6 +213,7 @@ export function QuerySection({
           setDragActive(false);
         }}
         onDrop={(event) => {
+          if (!dbSelected) return;
           event.preventDefault();
           setDragActive(false);
           const file = event.dataTransfer.files?.[0];
@@ -182,8 +225,11 @@ export function QuerySection({
           rows={10}
           value={form.query_data}
           onChange={(event) => set("query_data", event.target.value)}
+          disabled={!dbSelected}
           placeholder={
-            ">sequence_id description\nATCGATCG...\n\nPaste FASTA, drop a .fasta file, or click 'Load example' below."
+            dbSelected
+              ? ">sequence_id description\nATCGATCG...\n\nPaste FASTA, drop a .fasta file, or click 'Load example' below."
+              : "Select a database in Step 2 first, then paste FASTA here."
           }
           spellCheck={false}
         />
@@ -238,13 +284,19 @@ export function QuerySection({
       <div className="blast-query-actions">
         <label
           className="glass-button blast-action-btn blast-action-btn--upload"
-          style={{ cursor: "pointer" }}
+          style={{
+            cursor: dbSelected ? "pointer" : "not-allowed",
+            opacity: dbSelected ? 1 : 0.5,
+          }}
+          aria-disabled={!dbSelected}
+          title={dbSelected ? undefined : "Select a database in Step 2 first."}
         >
           <Upload size={13} strokeWidth={1.5} /> Upload file
           <input
             ref={fileInputRef}
             type="file"
             accept=".fa,.fasta,.fna,.faa"
+            disabled={!dbSelected}
             style={{ display: "none" }}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -257,6 +309,8 @@ export function QuerySection({
           className="glass-button blast-action-btn blast-action-btn--example"
           onClick={() => setExampleModalOpen(true)}
           type="button"
+          disabled={!dbSelected}
+          title={dbSelected ? undefined : "Select a database in Step 2 first."}
         >
           <Dna size={13} /> Load example
         </button>
@@ -265,6 +319,7 @@ export function QuerySection({
             className="glass-button blast-action-btn blast-action-btn--transform"
             onClick={handleReverseComplement}
             type="button"
+            disabled={!dbSelected}
             title="Replace each sequence with its reverse complement (5'→3' becomes 3'→5'). Useful for primer-pair sanity checks."
           >
             <RefreshCw size={13} strokeWidth={1.5} /> Reverse complement
@@ -275,6 +330,7 @@ export function QuerySection({
             className="glass-button blast-action-btn blast-action-btn--dedupe"
             onClick={handleDeduplicate}
             type="button"
+            disabled={!dbSelected}
             title="Remove sequences that are exact duplicates of an earlier record."
           >
             <Copy size={13} strokeWidth={1.5} /> Deduplicate
@@ -285,13 +341,18 @@ export function QuerySection({
             className="glass-button blast-action-btn blast-action-btn--clear"
             onClick={() => set("query_data", "")}
             type="button"
+            disabled={!dbSelected}
           >
             <X size={13} strokeWidth={1.5} /> Clear
           </button>
         )}
       </div>
 
-      <div className="blast-subrange-row">
+      <div
+        className="blast-subrange-row"
+        aria-disabled={!dbSelected}
+        style={!dbSelected ? { opacity: 0.55 } : undefined}
+      >
         <span
           className="glass-label"
           style={{ fontSize: 11, minWidth: "fit-content", marginBottom: 0 }}
@@ -305,6 +366,7 @@ export function QuerySection({
           placeholder="From"
           type="number"
           min={1}
+          disabled={!dbSelected}
         />
         <ArrowRight size={12} style={{ color: "var(--text-faint)" }} />
         <input
@@ -314,6 +376,7 @@ export function QuerySection({
           placeholder="To"
           type="number"
           min={1}
+          disabled={!dbSelected}
         />
       </div>
 
@@ -331,6 +394,7 @@ export function QuerySection({
       {exampleModalOpen && (
         <QueryExampleDialog
           examples={QUERY_EXAMPLE_TEMPLATES}
+          selectedDbName={selectedDbName}
           onClose={() => setExampleModalOpen(false)}
           onSelect={loadExample}
         />
@@ -341,13 +405,17 @@ export function QuerySection({
 
 function QueryExampleDialog({
   examples,
+  selectedDbName,
   onClose,
   onSelect,
 }: {
   examples: QueryExampleTemplate[];
+  selectedDbName: string;
   onClose: () => void;
   onSelect: (example: QueryExampleTemplate) => void;
 }) {
+  const visible = queryExamplesForDatabase(examples, selectedDbName);
+
   return (
     <div className="glass-dialog-backdrop" onClick={onClose}>
       <div
@@ -361,6 +429,17 @@ function QueryExampleDialog({
           <div>
             <div className="glass-badge">FASTA templates</div>
             <h3 id="query-example-dialog-title">Load Query Example</h3>
+            <div
+              style={{
+                marginTop: 4,
+                fontSize: 11,
+                color: "var(--text-muted)",
+              }}
+            >
+              {visible.length > 0
+                ? `Showing examples that hit ${selectedDbName} (${visible.length}/${examples.length}).`
+                : `No curated examples match ${selectedDbName}.`}
+            </div>
           </div>
           <button
             className="glass-button"
@@ -371,30 +450,49 @@ function QueryExampleDialog({
             <X size={14} strokeWidth={1.5} />
           </button>
         </div>
-        <div className="query-example-grid">
-          {examples.map((example) => (
-            <button
-              key={example.id}
-              type="button"
-              className="query-example-card"
-              onClick={() => onSelect(example)}
-            >
-              <div className="query-example-card__topline">
-                <span>{example.group}</span>
-                <span>{example.length.toLocaleString()} bp</span>
-              </div>
-              <div className="query-example-card__title">
-                <FileText size={13} strokeWidth={1.5} />
-                {example.label}
-              </div>
-              <p>{example.description}</p>
-              <div className="query-example-card__meta">
-                <span>{example.sequenceCount} sequence</span>
-                {example.recommendedDb && <span>{example.recommendedDb}</span>}
-              </div>
-            </button>
-          ))}
-        </div>
+        {visible.length === 0 ? (
+          <div
+            className="glass-card"
+            role="status"
+            style={{
+              padding: 14,
+              background: "rgba(255,255,255,0.04)",
+              color: "var(--text-muted)",
+              fontSize: 12,
+            }}
+          >
+            This database does not have a curated query example yet.
+          </div>
+        ) : (
+          <div className="query-example-grid">
+            {visible.map((example) => (
+              <button
+                key={example.id}
+                type="button"
+                className="query-example-card"
+                onClick={() => onSelect(example)}
+              >
+                <div className="query-example-card__topline">
+                  <span>{example.group}</span>
+                  <span>
+                    {example.length.toLocaleString()}
+                    {example.blastProgram === "blastp" ? " aa" : " bp"}
+                  </span>
+                </div>
+                <div className="query-example-card__title">
+                  <FileText size={13} strokeWidth={1.5} />
+                  {example.label}
+                </div>
+                <p>{example.description}</p>
+                <div className="query-example-card__meta">
+                  <span>{example.sequenceCount} sequence</span>
+                  <span>{example.blastProgram}</span>
+                  {example.recommendedDb && <span>{example.recommendedDb}</span>}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

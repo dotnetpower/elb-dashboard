@@ -389,14 +389,17 @@ def blast_job_results_export(
     subscription_id: str = Query(default=""),
     resource_group: str = Query(default=""),
     storage_account: str = Query(...),
-    format: str = Query(default="csv", pattern=r"^(csv|tsv|json)$"),
+    format: str = Query(
+        default="csv",
+        pattern=r"^(csv|tsv|json|hit-table-text|hit-table-csv|json-seqalign|xml|text)$",
+    ),
     caller: CallerIdentity = Depends(require_caller),
 ) -> StreamingResponse:
-    """Export all parsed hits for a job as CSV / TSV / JSON.
+    """Export all parsed hits or captured raw reports for a job.
 
-    Researchers paste the CSV into Excel / R / Python for downstream
-    analysis, so the column set matches BLAST `-outfmt 6` plus the extras
-    captured from `# Fields:` headers when available.
+    Hit-table exports are generated from parsed BLAST XML / tabular output.
+    Raw `xml` / `text` exports stream the report format captured at submit
+    time; the route does not try to synthesize pairwise text from XML.
     """
     _ensure_job_read_allowed(job_id, caller)
     storage_account = _resolve_job_storage_account(job_id, storage_account)
@@ -430,6 +433,16 @@ def blast_job_results_export(
             detail={"code": "storage_unreachable", "message": "Could not list result blobs."},
         ) from exc
 
+    export_format = _normalise_results_export_format(format)
+    if export_format in {"xml", "text"}:
+        return _export_raw_result_text(
+            job_id=job_id,
+            export_format=export_format,
+            result_blobs=result_blobs,
+            cred=cred,
+            storage_account=storage_account,
+        )
+
     all_hits: list[dict[str, Any]] = []
     read_failures = 0
     for blob_info in result_blobs[:RESULTS_MAX_FILES]:
@@ -460,18 +473,23 @@ def blast_job_results_export(
             },
         )
 
-    if format == "json":
-        body = json.dumps({"job_id": job_id, "hits": all_hits, "total": len(all_hits)}, default=str)
+    if export_format in {"json", "json-seqalign"}:
+        key = "seq_alignments" if export_format == "json-seqalign" else "hits"
+        body = json.dumps(
+            {"job_id": job_id, "format": export_format, key: all_hits, "total": len(all_hits)},
+            default=str,
+        )
+        filename = f"{job_id}_{'seqalign' if export_format == 'json-seqalign' else 'results'}.json"
         return StreamingResponse(
             iter([body.encode("utf-8")]),
             media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{job_id}_results.json"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
     # CSV / TSV. Include extra columns only when at least one hit has them so
     # the file does not get a bunch of blank trailing columns for vanilla
     # `-outfmt 6` output.
-    delimiter = "\t" if format == "tsv" else ","
+    delimiter = "\t" if export_format == "tsv" else ","
     extras_present = [col for col in EXPORT_EXTRA_COLUMNS if any(col in hit for hit in all_hits)]
     columns = list(EXPORT_DEFAULT_COLUMNS) + extras_present
     buf = io.StringIO()
@@ -479,13 +497,104 @@ def blast_job_results_export(
     writer.writeheader()
     for hit in all_hits:
         writer.writerow(hit)
-    ext = "tsv" if format == "tsv" else "csv"
-    mime = "text/tab-separated-values" if format == "tsv" else "text/csv"
+    ext = "tsv" if export_format == "tsv" else "csv"
+    mime = "text/tab-separated-values" if export_format == "tsv" else "text/csv"
     return StreamingResponse(
         iter([buf.getvalue().encode("utf-8")]),
         media_type=mime,
         headers={"Content-Disposition": f'attachment; filename="{job_id}_results.{ext}"'},
     )
+
+
+def _normalise_results_export_format(format_value: str) -> str:
+    aliases = {
+        "hit-table-text": "tsv",
+        "hit-table-csv": "csv",
+    }
+    return aliases.get(format_value, format_value)
+
+
+def _export_raw_result_text(
+    *,
+    job_id: str,
+    export_format: str,
+    result_blobs: list[dict[str, Any]],
+    cred: Any,
+    storage_account: str,
+) -> StreamingResponse:
+    from api.services.storage.data import read_result_blob_text
+
+    contents: list[tuple[str, str]] = []
+    read_failures = 0
+    for blob_info in result_blobs[:RESULTS_MAX_FILES]:
+        blob_name = str(blob_info.get("name") or "")
+        if not blob_name:
+            continue
+        try:
+            content = read_result_blob_text(
+                cred,
+                storage_account,
+                "results",
+                blob_name,
+                max_bytes=RESULTS_EXPORT_MAX_BYTES,
+            )
+            if export_format == "xml" and not _looks_like_blast_xml(content):
+                continue
+            if export_format == "text" and _looks_like_blast_xml(content):
+                continue
+            contents.append((blob_name, content))
+        except Exception:
+            read_failures += 1
+            LOGGER.debug("results raw export: failed to read blob", exc_info=True)
+
+    if not contents:
+        if read_failures:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "all_reads_failed",
+                    "message": f"Failed to read any of {read_failures} result file(s).",
+                },
+            )
+        raise HTTPException(
+            409,
+            detail={
+                "code": "format_not_captured",
+                "message": f"This job did not capture {export_format.upper()} output.",
+            },
+        )
+
+    if export_format == "xml" and len(contents) > 1:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "multiple_xml_reports",
+                "message": (
+                    "XML export requires one merged XML result; download files individually."
+                ),
+            },
+        )
+
+    if len(contents) == 1:
+        body = contents[0][1]
+    else:
+        sections: list[str] = []
+        for blob_name, content in contents:
+            sections.append(f"# source_blob: {blob_name}\n{content.rstrip()}\n")
+        body = "\n".join(sections)
+
+    suffix = "xml" if export_format == "xml" else "txt"
+    media_type = "application/xml" if export_format == "xml" else "text/plain"
+    return StreamingResponse(
+        iter([body.encode("utf-8")]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{job_id}_results.{suffix}"'},
+    )
+
+
+def _looks_like_blast_xml(content: str) -> bool:
+    stripped = content.lstrip("\ufeff \t\r\n")
+    return stripped.startswith("<?xml") or stripped.startswith("<BlastOutput")
 
 
 @router.get("/jobs/{job_id}/results/{file_id}")

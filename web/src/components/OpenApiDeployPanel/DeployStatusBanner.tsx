@@ -25,8 +25,8 @@ export function ImageNotBuiltBanner({ imageBuilt }: ImageNotBuiltBannerProps) {
       }}
     >
       <Package size={12} style={{ color: "var(--purple)" }} />
-      The <code style={{ fontFamily: "var(--font-mono)" }}>elb-openapi</code>{" "}
-      image must be built first — open the ACR card on the Dashboard.
+      The <code style={{ fontFamily: "var(--font-mono)" }}>elb-openapi</code> image must
+      be built first — open the ACR card on the Dashboard.
     </div>
   );
 }
@@ -64,11 +64,13 @@ export function DeployStatusBanner({
       >
         <Loader2 size={13} className="spin" />
         <span>
-          Deployed — waiting for pod to start ({waitElapsed}s).
-          {waitElapsed < 30 && " This usually takes 30–90 seconds."}
-          {waitElapsed >= 30 && waitElapsed < 90 && " Almost there..."}
+          Deployment ready — refreshing service discovery ({waitElapsed}s).
+          {waitElapsed < 30 && " The ready pod is already verified."}
+          {waitElapsed >= 30 &&
+            waitElapsed < 90 &&
+            " Waiting for the dashboard to observe the service."}
           {waitElapsed >= 90 &&
-            " Taking longer than usual — the pod may be pulling the image."}
+            " Taking longer than usual — refresh the cluster detail if the endpoint is still missing."}
         </span>
       </div>
     );

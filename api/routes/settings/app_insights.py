@@ -1,0 +1,163 @@
+"""Application Insights settings routes.
+
+Responsibility: Read the deployment-injected connection string, look up
+existing Application Insights components, and enqueue a Celery task to create
+a new component (with a backing Log Analytics workspace).
+Edit boundaries: HTTP shaping only. SDK work lives in
+`api.services.app_insights_provisioning`. Long-running provision runs through
+`api.tasks.azure.provision_app_insights`.
+Key entry points: `get_status`, `lookup`, `provision`.
+Risky contracts: Every route enforces `require_caller`. The deployment
+connection string is returned verbatim because it is a write-only telemetry
+credential (Microsoft pattern); routes never log it.
+Validation: `uv run pytest -q api/tests/test_settings_app_insights.py`.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
+from fastapi import APIRouter, Body, Depends, HTTPException
+
+from api.auth import CallerIdentity, require_caller
+from api.routes._blast_shared import _safe_delay
+from api.services import get_credential
+from api.services.app_insights_provisioning import (
+    deployment_connection_string,
+    find_application_insights_by_name,
+    get_application_insights,
+)
+from api.services.sanitise import sanitise
+
+LOGGER = logging.getLogger(__name__)
+
+router = APIRouter()
+
+_RE_SUB = re.compile(r"^[0-9a-fA-F-]{36}$")
+_RE_RG = re.compile(r"^[-\w._()]{1,90}$")
+_RE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._\-]{1,254}$")
+_RE_REGION = re.compile(r"^[a-z][a-z0-9]{2,29}$")
+
+
+def _require(value: Any, pattern: re.Pattern[str], label: str) -> str:
+    if not isinstance(value, str) or not pattern.match(value):
+        raise HTTPException(400, f"invalid {label}: '{sanitise(str(value)[:40])}'")
+    return value
+
+
+@router.get("")
+def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
+    """Return the deployment-injected connection string (or empty when unset).
+
+    The SPA `useAppInsights` hook combines this with a user-supplied value in
+    `localStorage["elb-prefs"].appInsightsConnectionString`. User-supplied
+    takes precedence; if both are empty the SDK is not initialised.
+    """
+    cs = deployment_connection_string()
+    return {
+        "deployment_connection_string": cs,
+        "deployment_configured": bool(cs),
+    }
+
+
+@router.post("/lookup")
+def lookup(
+    body: dict[str, Any] = Body(...),
+    _caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Look up an existing Application Insights component without creating one.
+
+    Used by the Settings panel to populate the connection string field when
+    the user types an existing resource name instead of clicking "Provision".
+    """
+    subscription_id = _require(body.get("subscription_id"), _RE_SUB, "subscription_id")
+    resource_group_raw = body.get("resource_group")
+    resource_group = (
+        _require(resource_group_raw, _RE_RG, "resource_group")
+        if resource_group_raw
+        else ""
+    )
+    component_name = _require(body.get("component_name"), _RE_NAME, "component_name")
+
+    cred = get_credential()
+    try:
+        if resource_group:
+            component = get_application_insights(
+                cred, subscription_id, resource_group, component_name
+            )
+        else:
+            matches = find_application_insights_by_name(cred, subscription_id, component_name)
+            if len(matches) > 1:
+                raise HTTPException(
+                    409,
+                    {
+                        "code": "multiple_components_found",
+                        "message": (
+                            "multiple App Insights resources match this name; "
+                            "specify a resource group"
+                        ),
+                        "matches": [m.get("id") for m in matches],
+                    },
+                )
+            component = matches[0] if matches else None
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        LOGGER.warning(
+            "app_insights lookup failed sub=%s rg=%s name=%s err=%s",
+            subscription_id,
+            resource_group or "*",
+            component_name,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            500, f"failed to look up application insights: {sanitise(str(exc))[:200]}"
+        ) from exc
+    if component is None:
+        raise HTTPException(404, "application insights component not found")
+    return {"component": component}
+
+
+@router.post("/provision")
+def provision(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Enqueue the provision_app_insights Celery task and return the task id."""
+    subscription_id = _require(body.get("subscription_id"), _RE_SUB, "subscription_id")
+    resource_group = _require(body.get("resource_group"), _RE_RG, "resource_group")
+    component_name = _require(body.get("component_name"), _RE_NAME, "component_name")
+    region = _require(body.get("region"), _RE_REGION, "region")
+    workspace_name = _require(body.get("workspace_name"), _RE_NAME, "workspace_name")
+    workspace_rg_raw = body.get("workspace_resource_group")
+    workspace_rg = (
+        _require(workspace_rg_raw, _RE_RG, "workspace_resource_group")
+        if workspace_rg_raw
+        else None
+    )
+
+    from api.tasks.azure import provision_app_insights
+
+    result = _safe_delay(
+        provision_app_insights,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        component_name=component_name,
+        region=region,
+        workspace_name=workspace_name,
+        workspace_resource_group=workspace_rg,
+    )
+    LOGGER.info(
+        "app_insights provision enqueued by oid=%s sub=%s rg=%s name=%s",
+        caller.object_id,
+        subscription_id,
+        resource_group,
+        component_name,
+    )
+    return {
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/tasks/{result.id}",
+        "status": "queued",
+    }

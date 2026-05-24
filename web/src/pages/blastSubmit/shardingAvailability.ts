@@ -33,6 +33,7 @@ export interface ReconcileShardingSelectionArgs {
   form: FormState;
   availability: ShardingAvailability;
   isDbAlreadyWarm: boolean;
+  autoWarmupSelected?: boolean;
 }
 
 function isMergeCompatibleOutfmt(outfmt: number): boolean {
@@ -150,13 +151,14 @@ export function reconcileShardingSelection({
   form,
   availability,
   isDbAlreadyWarm,
+  autoWarmupSelected = false,
 }: ReconcileShardingSelectionArgs): FormState {
   const selectedMode = availability.options[form.sharding_mode];
   const shouldFallbackFromUnavailable =
     form.sharding_mode !== "off" && !selectedMode.enabled;
   const shouldPreferShardedMode =
     form.sharding_mode === "off" &&
-    !form.disable_sharding &&
+    (!form.disable_sharding || autoWarmupSelected) &&
     availability.preferredMode !== "off" &&
     availability.options[availability.preferredMode].enabled;
   const nextShardingMode =

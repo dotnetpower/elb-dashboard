@@ -36,6 +36,7 @@ _API_AUTH_ENV = "ELB_OPENAPI_API_TOKEN"
 # leaving an orphan job the dashboard does not know about. 90 s covers
 # the observed worst-case while keeping the user-perceived wait bounded.
 _DEFAULT_TIMEOUT_SECONDS = 90.0
+_LIST_TIMEOUT_SECONDS = float(os.environ.get("OPENAPI_LIST_TIMEOUT_SECONDS", "5.0"))
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 # Submit retries on transient transport failures (connection refused /
 # reset / read timeout). Only applied when the payload carries an
@@ -275,7 +276,7 @@ def list_jobs(*, base_url: str | None = None, api_token: str | None = None) -> d
 
     with httpx.Client(
         base_url=_base_url(base_url),
-        timeout=_DEFAULT_TIMEOUT_SECONDS,
+        timeout=_LIST_TIMEOUT_SECONDS,
         headers=_headers(api_token=api_token),
     ) as client:
         try:

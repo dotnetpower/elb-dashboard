@@ -55,8 +55,10 @@ class SkuListResponse(TypedDict):
 # them as <optgroup label=...> so they are user-visible.
 SKU_GROUP_LABELS: dict[str, str] = {
     "system": "System pool (D-series, 2-4 vCPU)",
+    "system-as-v7": "System pool (D as v7, 2-4 vCPU)",
     "hpc": "HPC — InfiniBand (HB / HC)",
     "memory-v5": "Memory-optimised — E v5",
+    "memory-as-v7": "Memory-optimised — E as v7",
     "memory-bs-v5": "Memory-optimised + NVMe — E bs v5",
     "memory-v3": "Memory-optimised — E v3",
     "general": "General purpose — D v3",
@@ -68,8 +70,10 @@ SKU_GROUP_LABELS: dict[str, str] = {
 # here is appended in catalog order.
 SKU_GROUP_ORDER: tuple[str, ...] = (
     "system",
+    "system-as-v7",
     "hpc",
     "memory-v5",
+    "memory-as-v7",
     "memory-bs-v5",
     "memory-v3",
     "general",
@@ -139,6 +143,26 @@ SKU_CATALOG: tuple[SkuCatalogEntry, ...] = (
     # --- System pool SKUs (small, low-cost, CriticalAddonsOnly) -----------
     _sku("Standard_D2s_v3", 2, 8, "general", "D-v3", 0.096, role="system", group="system"),
     _sku("Standard_D4s_v3", 4, 16, "general", "D-v3", 0.192, role="system", group="system"),
+    _sku(
+        "Standard_D2as_v7",
+        2,
+        8,
+        "general",
+        "D-as-v7",
+        0.096,
+        role="system",
+        group="system-as-v7",
+    ),
+    _sku(
+        "Standard_D4as_v7",
+        4,
+        16,
+        "general",
+        "D-as-v7",
+        0.192,
+        role="system",
+        group="system-as-v7",
+    ),
     # --- Blast pool SKUs ---------------------------------------------------
     _sku("Standard_HB120rs_v3", 120, 480, "hpc", "HB-v3", 3.600, group="hpc"),
     _sku("Standard_HC44rs", 44, 352, "hpc", "HC", 3.168, group="hpc"),
@@ -156,6 +180,9 @@ SKU_CATALOG: tuple[SkuCatalogEntry, ...] = (
     _sku("Standard_E48s_v5", 48, 384, "memory", "E-v5", 3.024, group="memory-v5"),
     _sku("Standard_E64s_v5", 64, 512, "memory", "E-v5", 4.032, group="memory-v5"),
     _sku("Standard_E96s_v5", 96, 672, "memory", "E-v5", 6.048, group="memory-v5"),
+    _sku("Standard_E16as_v7", 16, 128, "memory", "E-as-v7", 1.008, group="memory-as-v7"),
+    _sku("Standard_E32as_v7", 32, 256, "memory", "E-as-v7", 2.016, group="memory-as-v7"),
+    _sku("Standard_E48as_v7", 48, 384, "memory", "E-as-v7", 3.024, group="memory-as-v7"),
     _sku("Standard_E16bs_v5", 16, 128, "memory-nvme", "E-v5-bs", 1.192, group="memory-bs-v5"),
     _sku("Standard_E32bs_v5", 32, 256, "memory-nvme", "E-v5-bs", 2.432, group="memory-bs-v5"),
     _sku("Standard_E48bs_v5", 48, 384, "memory-nvme", "E-v5-bs", 3.576, group="memory-bs-v5"),
@@ -176,16 +203,40 @@ SKU_CATALOG: tuple[SkuCatalogEntry, ...] = (
 )
 
 SKU_BY_NAME: dict[str, SkuCatalogEntry] = {sku.name: sku for sku in SKU_CATALOG}
+_SKU_BY_CASEFOLD_NAME: dict[str, str] = {sku.name.casefold(): sku.name for sku in SKU_CATALOG}
 
 # Backwards-compatible public module constants.
 ALLOWED_SKUS: dict[str, SkuSpec] = {sku.name: sku.to_public() for sku in SKU_CATALOG}
 AZURE_VM_HOURLY_USD: dict[str, float] = {sku.name: sku.hourly_usd for sku in SKU_CATALOG}
 
 
+def normalize_sku_name(sku: str | None) -> str:
+    """Return the catalog spelling for a SKU when it is recognisable."""
+
+    raw = (sku or "").strip()
+    if not raw:
+        return ""
+    if raw in SKU_BY_NAME:
+        return raw
+
+    folded = raw.casefold()
+    canonical = _SKU_BY_CASEFOLD_NAME.get(folded)
+    if canonical is not None:
+        return canonical
+
+    if not folded.startswith("standard_"):
+        with_prefix = f"Standard_{raw}"
+        canonical = _SKU_BY_CASEFOLD_NAME.get(with_prefix.casefold())
+        if canonical is not None:
+            return canonical
+
+    return raw
+
+
 def is_allowed(sku: str) -> bool:
     """Return True if ``sku`` is in the elastic-blast allow-list."""
 
-    return sku in SKU_BY_NAME
+    return normalize_sku_name(sku) in SKU_BY_NAME
 
 
 def list_skus() -> list[SkuSpec]:

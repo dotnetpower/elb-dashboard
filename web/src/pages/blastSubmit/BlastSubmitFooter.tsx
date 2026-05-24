@@ -69,8 +69,15 @@ export function BlastSubmitFooter({
   // while the user idles on the form.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), 15_000);
-    return () => window.clearInterval(t);
+    const tick = () => {
+      if (!document.hidden) setNow(Date.now());
+    };
+    const t = window.setInterval(tick, 15_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, []);
 
   // N2: block the actual Run BLAST button if pre-flight was run and failed.

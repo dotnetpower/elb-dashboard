@@ -99,6 +99,36 @@ load_azd_env() {
   done <<< "$values"
 }
 
+provider_registration_marker() {
+  printf '%s/.logs/provider-registration.%s.ok' "$REPO_ROOT" "${AZURE_SUBSCRIPTION_ID:-default}"
+}
+
+ensure_provider_registration_once() {
+  local marker max_age now mtime age
+  if [[ "${SKIP_PROVIDER_REGISTRATION:-false}" == "true" ]]; then
+    ts "Skipping provider registration (SKIP_PROVIDER_REGISTRATION=true)"
+    return 0
+  fi
+  marker="$(provider_registration_marker)"
+  max_age="${PROVIDER_REGISTRATION_MARKER_TTL_SECONDS:-3600}"
+  if [[ -f "$marker" && "$max_age" =~ ^[0-9]+$ ]]; then
+    now="$(date +%s)"
+    mtime="$(stat -c %Y "$marker" 2>/dev/null || printf '0')"
+    age=$(( now - mtime ))
+    if [[ "$age" -ge 0 && "$age" -lt "$max_age" ]]; then
+      ts "Skipping provider registration (cached ${age}s ago)"
+      return 0
+    fi
+  fi
+  mkdir -p "$(dirname "$marker")"
+  if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
+    bash "$REPO_ROOT/scripts/dev/register-providers.sh" --subscription "$AZURE_SUBSCRIPTION_ID"
+  else
+    bash "$REPO_ROOT/scripts/dev/register-providers.sh"
+  fi
+  : > "$marker"
+}
+
 load_simple_env_file "$REPO_ROOT/.env"
 load_simple_env_file "$REPO_ROOT/.env.local"
 load_simple_env_file "$REPO_ROOT/web/.env.production"
@@ -140,10 +170,8 @@ for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME; do
 done
 if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
   az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-  bash "$REPO_ROOT/scripts/dev/register-providers.sh" --subscription "$AZURE_SUBSCRIPTION_ID"
-else
-  bash "$REPO_ROOT/scripts/dev/register-providers.sh"
 fi
+ensure_provider_registration_once
 
 NEW_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${TAG}"
 API_CLIENT_ID_VAL="${VITE_AZURE_CLIENT_ID:-${API_CLIENT_ID:-}}"

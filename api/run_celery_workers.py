@@ -22,8 +22,8 @@ MAIN_QUEUES = os.environ.get(
     "default,acr,azure,blast,storage",
 )
 ARTIFACT_QUEUES = os.environ.get("CELERY_ARTIFACT_QUEUES", "blast-artifacts")
-MAIN_CONCURRENCY = os.environ.get("CELERY_MAIN_CONCURRENCY", "2")
-ARTIFACT_CONCURRENCY = os.environ.get("CELERY_ARTIFACT_CONCURRENCY", "1")
+MAIN_CONCURRENCY = os.environ.get("CELERY_MAIN_CONCURRENCY", "4")
+ARTIFACT_CONCURRENCY = os.environ.get("CELERY_ARTIFACT_CONCURRENCY", "2")
 _QUEUE_RE = re.compile(r"^[A-Za-z0-9_,.-]+$")
 _CONCURRENCY_RE = re.compile(r"^[1-9][0-9]{0,2}$")
 

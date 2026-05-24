@@ -11,6 +11,12 @@ const OUTPUT_FORMAT_OPTIONS = [
   { value: 6, label: "6 — Tabular" },
   { value: 7, label: "7 — Tabular + comments" },
   { value: 11, label: "11 — ASN.1 (archive)" },
+  { value: 12, label: "12 — JSON Seq-align" },
+  { value: 13, label: "13 — Multiple-file BLAST JSON" },
+  { value: 14, label: "14 — Multiple-file BLAST XML2" },
+  { value: 15, label: "15 — Single-file BLAST JSON" },
+  { value: 16, label: "16 — Single-file BLAST XML2" },
+  { value: 17, label: "17 — SAM" },
 ];
 
 const GAP_COST_OPTIONS = [

@@ -49,6 +49,14 @@ class _FakeBlobClient:
         return self._props
 
 
+class _FakeBlobItem:
+    def __init__(self, name: str, status: str, description: str = "") -> None:
+        self.name = name
+        self.copy = type(
+            "_Copy", (), {"status": status, "status_description": description}
+        )
+
+
 class _FakeContainerClient:
     def __init__(self, statuses: dict[str, tuple[str, str]]) -> None:
         self._statuses = statuses
@@ -56,6 +64,14 @@ class _FakeContainerClient:
     def get_blob_client(self, name: str) -> _FakeBlobClient:
         status, description = self._statuses.get(name, ("success", ""))
         return _FakeBlobClient(status, description)
+
+    def list_blobs(self, *, name_starts_with: str = "", include: Any = None) -> list[_FakeBlobItem]:
+        del include
+        return [
+            _FakeBlobItem(name, status, description)
+            for name, (status, description) in self._statuses.items()
+            if name.startswith(name_starts_with)
+        ]
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +129,35 @@ def test_poll_returns_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     out = prepare_db_module._poll_copy_completion(container, ["nt/a"], db_name="nt")
     assert out["timed_out"] is True
     assert out["pending"] >= 1
+
+
+def test_poll_falls_back_when_list_copy_include_is_unsupported() -> None:
+    class _FallbackContainer(_FakeContainerClient):
+        def list_blobs(
+            self, *, name_starts_with: str = "", include: Any = None
+        ) -> list[Any]:
+            if include is not None:
+                raise TypeError("include is not supported")
+            return [
+                type("_Listed", (), {"name": name})()
+                for name in self._statuses
+                if name.startswith(name_starts_with)
+            ]
+
+    container = _FallbackContainer(
+        {
+            "swissprot/a": ("success", ""),
+            "swissprot/b": ("failed", "source 404"),
+        }
+    )
+    out = prepare_db_module._poll_copy_completion(
+        container,
+        ["swissprot/a", "swissprot/b"],
+        db_name="swissprot",
+    )
+    assert out["success"] == 1
+    assert out["failed"] == 1
+    assert out["timed_out"] is False
 
 
 def test_stale_marker_recovers() -> None:

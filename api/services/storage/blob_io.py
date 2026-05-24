@@ -211,7 +211,7 @@ def stream_blob_bytes(
 ) -> Iterator[bytes]:
     """Stream a blob through the api sidecar without issuing browser SAS.
 
-    Wraps every active download in a bounded semaphore (default 4 permits,
+    Wraps every active download in a bounded semaphore (default 8 permits,
     env ``STORAGE_STREAM_MAX_CONCURRENCY``). Without this cap, ten
     simultaneous browser tab opens could each pin one BlobServiceClient
     HTTP connection AND the api/worker thread serving them, starving every
@@ -234,10 +234,10 @@ def stream_blob_bytes(
 
 
 _STREAM_DOWNLOAD_MAX_CONCURRENCY = max(
-    1, int(os.environ.get("STORAGE_STREAM_MAX_CONCURRENCY", "4"))
+    1, int(os.environ.get("STORAGE_STREAM_MAX_CONCURRENCY", "8"))
 )
 _STREAM_DOWNLOAD_ACQUIRE_TIMEOUT_SECONDS = float(
-    os.environ.get("STORAGE_STREAM_ACQUIRE_TIMEOUT_SECONDS", "30")
+    os.environ.get("STORAGE_STREAM_ACQUIRE_TIMEOUT_SECONDS", "60")
 )
 _STREAM_DOWNLOAD_SEMAPHORE = threading.BoundedSemaphore(_STREAM_DOWNLOAD_MAX_CONCURRENCY)
 
@@ -247,11 +247,16 @@ def list_result_blobs(
     account_name: str,
     container: str,
     prefix: str,
+    *,
+    max_results: int | None = None,
 ) -> list[dict[str, Any]]:
     """List blobs under a results prefix."""
     svc = _blob_service(credential, account_name)
     cc = svc.get_container_client(container)
     blobs: list[dict[str, Any]] = []
+    limit = max_results
+    if limit is None:
+        limit = max(1, int(os.environ.get("STORAGE_RESULT_BLOB_LIST_LIMIT", "5000")))
     for blob in cc.list_blobs(name_starts_with=prefix):
         blobs.append(
             {
@@ -261,4 +266,6 @@ def list_result_blobs(
                 "last_modified": blob.last_modified.isoformat() if blob.last_modified else None,
             }
         )
+        if len(blobs) >= limit:
+            break
     return blobs

@@ -46,6 +46,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies
         run: uv sync --all-groups
@@ -59,5 +60,4 @@ jobs:
         # CI-aware code paths (logging, color, etc.) behave correctly.
         env:
           CI: "true"
-          AUTH_DEV_BYPASS: "true"
         run: uv run pytest -q api/tests

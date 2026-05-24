@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 
 import { dbVersionApi } from "@/api/endpoints";
 import { loadSavedConfig } from "@/components/SetupWizard";
-import { isFeatureEnabled } from "@/config/runtime";
+import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { SectionHeader, SetupRequired } from "@/pages/tools/ToolLayout";
 import type { TabMeta } from "@/pages/tools/toolsPageModel";
 
@@ -16,7 +16,7 @@ export function DbVersionsTab({
   hasConfig: boolean;
 }) {
   const cfg = loadSavedConfig();
-  const customDbEnabled = isFeatureEnabled("customDb");
+  const customDbEnabled = usePreviewFeatureEnabled("customDb");
   const listQuery = useQuery({
     queryKey: ["db-versions", cfg?.storageAccountName],
     queryFn: () =>

@@ -35,6 +35,7 @@ from api import __version__
 # default Celery app and the produced message lands in a queue the worker
 # doesn't subscribe to → tasks silently never run. See `api/tasks/__init__.py`.
 from api import celery_app as _celery_app  # noqa: F401
+from api.app.global_exception_logging import install_global_exception_hooks
 from api.app.inspector import _inspector_should_capture  # noqa: F401  - back-compat re-export
 from api.app.lifespan import _lifespan
 from api.app.middleware import RequestIdMiddleware
@@ -52,6 +53,7 @@ from api.routes import (
     monitor,
     operations,
     resources,
+    settings,
     storage,
     tasks,
     terminal_legacy,
@@ -85,6 +87,18 @@ for _name in (
 
 
 def create_app() -> FastAPI:
+    install_global_exception_hooks()
+    # Best-effort Azure Monitor OpenTelemetry init. No-op when
+    # APPLICATIONINSIGHTS_CONNECTION_STRING is unset; safe to call
+    # before any FastAPI route is registered so the FastAPI
+    # instrumentor sees every endpoint.
+    try:
+        from api.app.telemetry import init_telemetry
+
+        init_telemetry(role=os.environ.get("SIDECAR_NAME", "api"))
+    except Exception:  # pragma: no cover - defensive
+        LOGGER.debug("telemetry init skipped", exc_info=True)
+
     app = FastAPI(
         title="ElasticBLAST Control Plane API",
         version=__version__,
@@ -99,10 +113,13 @@ def create_app() -> FastAPI:
     # handlers.  Streaming uploads (query files) bypass this because they
     # use chunked transfer encoding and never buffer the full body.
     _MAX_BODY = int(os.environ.get("MAX_REQUEST_BODY_BYTES", str(10 * 1024 * 1024)))
+    if _MAX_BODY > 100 * 1024 * 1024:
+        raise ValueError("MAX_REQUEST_BODY_BYTES must be <= 100 MiB")
 
     @app.middleware("http")
     async def body_size_guard(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]],
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         cl = request.headers.get("content-length")
         if cl and int(cl) > _MAX_BODY:
@@ -186,6 +203,7 @@ def create_app() -> FastAPI:
     app.include_router(audit.audit_router)
     app.include_router(client_log.router)
     app.include_router(upgrade.router)
+    app.include_router(settings.settings_router)
 
     # ---- Catch-all reverse proxy to the `frontend` sidecar ----
     app.include_router(frontend_proxy.router)
@@ -207,6 +225,21 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse({"detail": exc.errors()}, status_code=422)
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        rid = getattr(request.state, "request_id", "-")
+        LOGGER.exception(
+            "unhandled_request_exception rid=%s method=%s path=%s err=%s",
+            rid,
+            request.method,
+            request.url.path,
+            type(exc).__name__,
+        )
+        return JSONResponse(
+            {"detail": "internal server error", "request_id": rid},
+            status_code=500,
+        )
 
     # Background cgroup reporter — publishes this sidecar's CPU/MEM into
     # the in-revision Redis (db 2) every REPORT_INTERVAL seconds. The

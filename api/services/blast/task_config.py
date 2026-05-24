@@ -32,6 +32,12 @@ class WarmupNotReadyError(RuntimeError):
         self.retryable = retryable
 
 
+class BlastDatabaseAvailabilityError(RuntimeError):
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def snippet(value: object, limit: int = ERROR_SNIPPET_CHARS) -> str:
     return str(value or "")[:limit]
 
@@ -122,6 +128,87 @@ def normalise_database_url(storage_account: str, database: str) -> str:
         storage_account,
         "blast-db",
         f"{db_name}/{db_name}",
+    )
+
+
+_BLAST_DB_READY_SUFFIXES = (".nsq", ".psq", ".nal", ".pal")
+
+
+def validate_blast_database_available(
+    *,
+    storage_account: str,
+    database: str,
+) -> dict[str, str]:
+    """Fail fast unless the selected BLAST database prefix exists in Storage."""
+
+    if not storage_account:
+        raise BlastDatabaseAvailabilityError(
+            "Storage account is required before submitting a BLAST job.",
+            code="storage_account_required",
+        )
+    if not database:
+        raise BlastDatabaseAvailabilityError(
+            "A BLAST database must be selected before submitting a BLAST job.",
+            code="database_required",
+        )
+
+    try:
+        db_url = normalise_database_url(storage_account, database)
+    except ValueError as exc:
+        raise BlastDatabaseAvailabilityError(str(exc), code="invalid_database_reference") from exc
+
+    parsed = urlparse(db_url)
+    parts = parsed.path.lstrip("/").split("/", 1)
+    if len(parts) != 2 or parts[0] != "blast-db" or not parts[1].strip("/"):
+        raise BlastDatabaseAvailabilityError(
+            "Database URL must point to a blob prefix in the blast-db container.",
+            code="invalid_database_reference",
+        )
+
+    container_name = parts[0]
+    blob_prefix = parts[1].strip("/")
+    try:
+        from api.services import get_credential
+        from api.services.storage.data import _blob_service
+
+        container = _blob_service(get_credential(), storage_account).get_container_client(
+            container_name
+        )
+        # BLAST DB values are prefixes, e.g. ``core_nt/core_nt``. A valid
+        # nucleotide/protein DB has either sequence-volume files under that
+        # prefix (``.nsq`` / ``.psq``) or an alias file (``.nal`` / ``.pal``).
+        for blob in container.list_blobs(name_starts_with=blob_prefix):
+            name = str(getattr(blob, "name", "") or "")
+            if name == blob_prefix and name.endswith(_BLAST_DB_READY_SUFFIXES):
+                return {
+                    "container": container_name,
+                    "blob_prefix": blob_prefix,
+                    "marker_blob": name,
+                }
+            if not name.startswith(f"{blob_prefix}."):
+                continue
+            if name.endswith(_BLAST_DB_READY_SUFFIXES):
+                return {
+                    "container": container_name,
+                    "blob_prefix": blob_prefix,
+                    "marker_blob": name,
+                }
+    except BlastDatabaseAvailabilityError:
+        raise
+    except Exception as exc:
+        db_label = extract_db_name(database) or database
+        raise BlastDatabaseAvailabilityError(
+            f"Could not verify BLAST database '{db_label}' in Storage: "
+            f"{type(exc).__name__}.",
+            code="database_check_unavailable",
+        ) from exc
+
+    db_name = extract_db_name(database) or database
+    raise BlastDatabaseAvailabilityError(
+        f"BLAST database '{db_name}' is not available in Storage. "
+        f"Expected BLAST DB files under blast-db/{blob_prefix}*. "
+        "Download or prepare this database before submitting.",
+        code="database_not_found",
     )
 
 

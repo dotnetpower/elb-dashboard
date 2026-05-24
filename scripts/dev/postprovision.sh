@@ -37,7 +37,8 @@ REQUIRED_VARS=(
 )
 for v in "${REQUIRED_VARS[@]}"; do
   if [ -z "${!v:-}" ]; then
-    echo "FATAL: required env var $v not set. Did azd provision finish successfully?" >&2
+    echo "FATAL: required env var $v not set. azd provision may have failed or the azd env was not loaded." >&2
+    echo "       Re-run 'azd provision' or inspect 'azd env get-values' before postprovision." >&2
     exit 1
   fi
 done
@@ -290,7 +291,6 @@ tag_workspace_resource_group() {
   ts "    ✓ RG tags include workload=$AZURE_RESOURCE_GROUP acr=$ACR_NAME storage=$STORAGE_ACCOUNT_NAME"
 }
 
-tag_workspace_resource_group
 progress "done" 5 "Resource validation"
 
 # ---------------------------------------------------------------------------
@@ -538,6 +538,7 @@ echo
 echo "============================================================"
 if [ "$ok" = "1" ]; then
   ts "✓ Deployment OK."
+  tag_workspace_resource_group
   progress "done" 8 "Health check"
 else
   ts "⚠ Container App deployed but /api/health did not respond 200 within 180s."

@@ -1,0 +1,24 @@
+"""/api/settings/* route package.
+
+Responsibility: Top-level router that aggregates Settings-panel HTTP routes
+(App Insights provisioning, AKS Container Insights enablement).
+Edit boundaries: Keep this `__init__.py` a thin aggregator. HTTP shaping for
+each section lives in a sibling module.
+Key entry points: `settings_router`.
+Risky contracts: Every route under this prefix must enforce `require_caller`.
+Validation: `uv run pytest -q api/tests/test_settings_app_insights.py
+api/tests/test_settings_aks_observability.py api/tests/test_route_contracts.py`.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+
+from api.routes.settings import aks_observability as _aks_observability_routes
+from api.routes.settings import app_insights as _app_insights_routes
+
+settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
+settings_router.include_router(_app_insights_routes.router, prefix="/app-insights")
+settings_router.include_router(
+    _aks_observability_routes.router, prefix="/aks-observability"
+)

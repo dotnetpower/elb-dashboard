@@ -38,7 +38,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         import asyncio
 
+        from api.app.global_exception_logging import install_asyncio_exception_handler
         from api.services import get_credential
+
+        install_asyncio_exception_handler(asyncio.get_running_loop())
 
         async def _prime() -> None:
             try:
@@ -48,9 +51,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                     "https://management.azure.com/.default",
                 )
             except Exception as exc:
-                LOGGER.debug(
-                    "credential warm-up skipped: %s", type(exc).__name__
-                )
+                LOGGER.debug("credential warm-up skipped: %s", type(exc).__name__)
 
         # Keep a reference so the task is not GC'd while pending — ruff
         # RUF006 catches the "fire-and-forget without retention" pattern
@@ -79,19 +80,19 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
             await _SIDECAR_BROADCASTER.close()
         except Exception as exc:
-            LOGGER.warning("sidecar broadcaster shutdown failed: %s", exc)
+            LOGGER.warning("sidecar broadcaster shutdown failed: %s", exc, exc_info=True)
         try:
             from api.routes.frontend_proxy import close_client
 
             await close_client()
         except Exception as exc:
-            LOGGER.debug("frontend_proxy close skipped: %s", type(exc).__name__)
+            LOGGER.debug("frontend_proxy close skipped: %s", type(exc).__name__, exc_info=True)
         try:
             from api.services.httpx_pool import close_all_clients
 
             close_all_clients()
         except Exception as exc:
-            LOGGER.debug("httpx_pool close skipped: %s", type(exc).__name__)
+            LOGGER.debug("httpx_pool close skipped: %s", type(exc).__name__, exc_info=True)
         if stop_invalidate_subscriber is not None:
             try:
                 stop_invalidate_subscriber()
@@ -99,4 +100,5 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 LOGGER.debug(
                     "blast db metadata invalidate subscriber stop failed: %s",
                     type(exc).__name__,
+                    exc_info=True,
                 )

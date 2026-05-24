@@ -9,3 +9,4 @@ export * from "@/api/blastTools";
 export * from "@/api/storage";
 export * from "@/api/clientLog";
 export * from "@/api/tasks";
+export * from "@/api/settings";

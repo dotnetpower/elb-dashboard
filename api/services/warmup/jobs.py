@@ -373,7 +373,12 @@ def attach_pod_progress_to_database_status(
             info["nodes_ready"] = completed
             info["nodes_failed"] = failed
             info["nodes_active"] = active
-            info["progress_pct"] = round(((completed + failed) / total) * 100, 1)
+            log_progress = _aggregate_pod_progress_pct(pod_details, total=total)
+            info["progress_pct"] = (
+                log_progress
+                if log_progress is not None
+                else round(((completed + failed) / total) * 100, 1)
+            )
             if completed == total:
                 info["status"] = "Ready"
             elif failed > 0:
@@ -469,6 +474,7 @@ def _phase_from_warmup_log(log_text: str) -> str:
         or "shard download:" in text
         or "azcopy" in text
         or "download_skip" in text
+        or _azcopy_progress_pct(text) is not None
     ):
         return "copying_files"
     if "start shard=" in text:
@@ -493,9 +499,52 @@ def _warmup_log_message(log_text: str) -> str:
         return "Manifest download failed"
     if "downloading with pattern" in text and "log file is located at:" in text:
         return "Downloading shard files with azcopy"
+    if _azcopy_progress_pct(text) is not None:
+        return _last_meaningful_log_line(log_text)
     if "retrying in" in text and "azcopy" in text:
         return _last_meaningful_log_line(log_text)
     return ""
+
+
+def _aggregate_pod_progress_pct(
+    pod_details: list[dict[str, Any]],
+    *,
+    total: int,
+) -> float | None:
+    if total <= 0:
+        return None
+    values: list[float] = []
+    for detail in pod_details:
+        phase = str(detail.get("phase") or "")
+        if phase == "completed":
+            values.append(100.0)
+            continue
+        if phase == "failed":
+            values.append(100.0)
+            continue
+        progress = _azcopy_progress_pct(
+            str(detail.get("message") or ""),
+            str(detail.get("last_log") or ""),
+        )
+        values.append(progress if progress is not None else 0.0)
+    if not values:
+        return None
+    if len(values) < total:
+        values.extend([0.0] * (total - len(values)))
+    return round(sum(values[:total]) / total, 1)
+
+
+def _azcopy_progress_pct(*texts: str) -> float | None:
+    for text in texts:
+        matches = re.findall(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*%", text or "")
+        for raw in reversed(matches):
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if 0 <= value <= 100:
+                return value
+    return None
 
 
 def _last_meaningful_log_line(log_text: str) -> str:

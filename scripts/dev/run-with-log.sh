@@ -103,8 +103,27 @@ cleanup_old_sessions() {
     | sort -rn \
     | awk -v keep="$keep_sessions" 'NR > keep {print substr($0, index($0, $2))}' \
     | while IFS= read -r old_session; do
-        [[ -n $old_session ]] && rm -rf -- "$old_session"
+        [[ -n $old_session ]] || continue
+        if session_has_live_process "$old_session"; then
+          continue
+        fi
+        rm -rf -- "$old_session"
       done
+}
+
+session_has_live_process() {
+  local session_dir=$1
+  local marker pid
+  for marker in "$session_dir"/.active.*; do
+    [[ -e $marker ]] || continue
+    pid=""
+    read -r pid < "$marker" || true
+    if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    rm -f -- "$marker"
+  done
+  return 1
 }
 
 select_session() {
@@ -143,11 +162,14 @@ select_session() {
 acquire_lock
 trap release_lock EXIT
 select_session
+session_dir="$log_base/$session"
+mkdir -p "$session_dir"
+active_marker="$session_dir/.active.$service_name.$$"
+printf '%s\n' "$$" > "$active_marker"
 cleanup_old_sessions
 release_lock
 trap - EXIT
 
-session_dir="$log_base/$session"
 log_file="$session_dir/$service_name.log"
 
 find "$session_dir" -maxdepth 1 -type f -name "$service_name.log.*" -printf '%f\n' \
@@ -175,17 +197,65 @@ if [[ -e $current_log_file ]]; then
   initial_bytes=$(wc -c < "$current_log_file")
 fi
 
-set +e
-{
-  printf "==> local log session: %s\n" "$session"
-  printf "==> local log file: %s\n" "$current_log_file"
-  printf "==> local log max bytes: %s\n" "$max_bytes"
-  printf "==> local log max chunks: %s\n" "$max_chunks"
-  printf "==> command:"
-  printf " %q" "$@"
-  printf "\n"
-  "$@" 2>&1
-} | LC_ALL=C awk \
+run_pipe_dir=$(mktemp -d "$log_base/.run-with-log.$service_name.XXXXXX")
+run_pipe="$run_pipe_dir/output.fifo"
+mkfifo "$run_pipe"
+exec {run_pipe_guard_fd}<>"$run_pipe"
+cmd_pid=""
+log_pid=""
+used_setsid=false
+
+cleanup_pipe() {
+  rm -rf -- "$run_pipe_dir"
+}
+
+cleanup_active_marker() {
+  rm -f -- "${active_marker:-}"
+}
+
+terminate_wrapped_command() {
+  local signal=${1:-TERM}
+  trap - INT TERM HUP
+  if [[ -n "${cmd_pid:-}" ]] && kill -0 "$cmd_pid" 2>/dev/null; then
+    if [[ "$used_setsid" == true ]]; then
+      kill -"$signal" -- "-$cmd_pid" 2>/dev/null || true
+    else
+      kill -"$signal" -- "$cmd_pid" 2>/dev/null || true
+    fi
+    for _attempt in 1 2 3 4 5; do
+      kill -0 "$cmd_pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$cmd_pid" 2>/dev/null; then
+      if [[ "$used_setsid" == true ]]; then
+        kill -KILL -- "-$cmd_pid" 2>/dev/null || true
+      else
+        kill -KILL -- "$cmd_pid" 2>/dev/null || true
+      fi
+    fi
+  fi
+}
+
+handle_signal() {
+  local signal=$1
+  terminate_wrapped_command "$signal"
+  wait "${cmd_pid:-}" 2>/dev/null || true
+  wait "${log_pid:-}" 2>/dev/null || true
+  cleanup_pipe
+  cleanup_active_marker
+  case "$signal" in
+    INT) exit 130 ;;
+    HUP) exit 129 ;;
+    *) exit 143 ;;
+  esac
+}
+
+trap cleanup_pipe EXIT
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
+trap 'handle_signal HUP' HUP
+
+LC_ALL=C awk \
   -v base="$log_file" \
   -v max="$max_bytes" \
   -v max_chunks="$max_chunks" \
@@ -246,8 +316,44 @@ set +e
   END {
     fflush(file)
   }
-'
-exit_code=${PIPESTATUS[0]}
+' < "$run_pipe" {run_pipe_guard_fd}>&- &
+log_pid=$!
+
+set +e
+if command -v setsid >/dev/null 2>&1; then
+  {
+    printf "==> local log session: %s\n" "$session"
+    printf "==> local log file: %s\n" "$current_log_file"
+    printf "==> local log max bytes: %s\n" "$max_bytes"
+    printf "==> local log max chunks: %s\n" "$max_chunks"
+    printf "==> command:"
+    printf " %q" "$@"
+    printf "\n"
+    exec setsid "$@"
+  } > "$run_pipe" 2>&1 {run_pipe_guard_fd}>&- &
+  used_setsid=true
+else
+  {
+    printf "==> local log session: %s\n" "$session"
+    printf "==> local log file: %s\n" "$current_log_file"
+    printf "==> local log max bytes: %s\n" "$max_bytes"
+    printf "==> local log max chunks: %s\n" "$max_chunks"
+    printf "==> command:"
+    printf " %q" "$@"
+    printf "\n"
+    exec "$@"
+  } > "$run_pipe" 2>&1 {run_pipe_guard_fd}>&- &
+fi
+cmd_pid=$!
+exec {run_pipe_guard_fd}>&-
+
+wait "$cmd_pid"
+exit_code=$?
+wait "$log_pid" 2>/dev/null || true
 set -e
+
+trap - INT TERM HUP EXIT
+cleanup_pipe
+cleanup_active_marker
 
 exit "$exit_code"

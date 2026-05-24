@@ -32,24 +32,10 @@ os.environ.setdefault("OPENAPI_SUBMIT_MAX_RETRIES", "0")
 def _env_baseline(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    """Force a clean environment for every test.
-
-    Two motivations, both seen in recurring failures:
-
-    * ``AZURE_TABLE_ENDPOINT`` — when set (e.g. by ``scripts/dev/local-run.sh``)
-      the state-repo tries to write to a real Azure Table during unit tests,
-      causing ``AzureError: tenant must be specified`` warnings, slow
-      retries, and the cross-test state pollution we saw in the 2026-05-22
-      facade-refactor failure cascade. Tests that need a Table backend
-      monkeypatch it back inside the test body — that override wins because
-      ``monkeypatch.setenv`` inside the test body re-applies AFTER this
-      autouse setup.
-    * ``ELB_LOCAL_STATE_DIR`` — when unset the state-repo's local JSON
-      fallback writes to the repo root. Default it to a per-test temp dir
-      so stray writes never pollute the workspace and concurrent runs do
-      not collide on the same file.
-    """
+    """Force clean per-test environment state."""
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    # Tests that need dev auth bypass opt in explicitly; ambient CI/local env must not leak.
+    monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path_factory.mktemp("elb_state")))
 
 

@@ -40,6 +40,7 @@ const APP_VERSION = process.env.APP_VERSION?.trim() || readPkgVersion();
 const APP_BUILD_NUMBER = process.env.APP_BUILD_NUMBER?.trim() || readBuildNumber();
 const APP_COMMIT = process.env.GIT_COMMIT?.trim() || tryGit(["rev-parse", "--short", "HEAD"]) || "dev";
 const APP_BUILD_TIME = process.env.BUILD_TIME?.trim() || new Date().toISOString();
+const ENABLE_PRODUCTION_SOURCEMAPS = process.env.VITE_ENABLE_PRODUCTION_SOURCEMAPS === "true";
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -84,6 +85,31 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    sourcemap: true,
+    sourcemap: ENABLE_PRODUCTION_SOURCEMAPS,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/react") || id.includes("node_modules/react-dom") || id.includes("node_modules/react-router-dom")) {
+            return "vendor-react";
+          }
+          if (id.includes("node_modules/@tanstack/react-query")) {
+            return "vendor-query";
+          }
+          if (id.includes("node_modules/@xterm/")) {
+            return "vendor-xterm";
+          }
+          if (id.includes("/src/pages/blastResults/") || id.includes("/src/pages/BlastJobs/")) {
+            return "blast-results";
+          }
+          if (id.includes("/src/pages/blastSubmit/") || id.includes("/src/pages/BlastSubmit")) {
+            return "blast-submit";
+          }
+          if (id.includes("/src/pages/terminal/") || id.includes("RemoteTerminal")) {
+            return "terminal";
+          }
+          return undefined;
+        },
+      },
+    },
   },
 });

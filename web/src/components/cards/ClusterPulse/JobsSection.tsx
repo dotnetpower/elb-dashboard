@@ -245,8 +245,15 @@ function useTickWhenActive(enabled: boolean): number {
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     if (!enabled) return;
-    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(id);
+    const tick = () => {
+      if (!document.hidden) setNowMs(Date.now());
+    };
+    const id = window.setInterval(tick, 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [enabled]);
   return nowMs;
 }

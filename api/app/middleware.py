@@ -7,9 +7,11 @@ Edit boundaries: HTTP middleware only. Inspector-path rules live in
 `api.app.inspector`; jwt/IP helpers in `api.app.jwt_utils`. Do not import
 Azure SDK here — request_metrics + event_emitter are the only allowed sinks.
 Key entry points: `RequestIdMiddleware`.
-Risky contracts: Body buffering is capped at `INSPECTOR_MAX_BUFFER_BYTES`;
-SSE/WebSocket paths must already be excluded by `_inspector_should_capture`
-because a streaming response body cannot be safely buffered.
+Risky contracts: The response `X-Request-Id` header must match the completion
+log `rid` field for client/operator correlation. Body buffering is capped at
+`INSPECTOR_MAX_BUFFER_BYTES`; SSE/WebSocket paths must already be excluded by
+`_inspector_should_capture` because a streaming response body cannot be safely
+buffered.
 Validation: `uv run pytest -q api/tests/test_request_metrics_detail.py`.
 """
 
@@ -29,6 +31,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from api.app.inspector import (
     INSPECTOR_MAX_BUFFER_BYTES,
     _inspector_should_capture,
+    _inspector_should_record,
 )
 from api.app.jwt_utils import _decode_jwt_upn, _extract_client_ip
 
@@ -50,10 +53,11 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         method = request.method
 
-        # Per-request DETAIL inspector — capture up to N bytes of the
-        # request body for the metrics buffer. Skipped for SSE/WebSocket/
-        # health/metrics and for high-volume polling GETs (see
-        # INSPECTOR_EXCLUDE_GET_PREFIXES).
+        # Per-request DETAIL inspector — always record lightweight request
+        # metadata by default, but only buffer request/response bodies when
+        # REQUEST_DETAIL_CAPTURE_ENABLED is explicitly true. SSE/WebSocket/
+        # health/self-poll paths are skipped entirely; high-volume polling GETs
+        # record metadata only.
         #
         # Memory contract: the previous version did
         #   raw = await request.body()
@@ -64,9 +68,17 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         # keep a single ``raw_body`` and slice lazily only when the
         # metrics emitter actually asks for it, so multi-MB uploads
         # consume body-size + zero on the inspector side instead of 2x.
-        capture = os.environ.get(
-            "REQUEST_DETAIL_CAPTURE_ENABLED", "true"
-        ).lower() != "false" and _inspector_should_capture(path, method)
+        detail_capture_setting = os.environ.get("REQUEST_DETAIL_CAPTURE_ENABLED")
+        detail_capture_value = (detail_capture_setting or "metadata").lower()
+        record_detail_sample = (
+            detail_capture_value not in {"0", "false", "no", "off"}
+            and _inspector_should_record(path)
+        )
+        capture = (
+            record_detail_sample
+            and detail_capture_value in {"1", "true", "yes", "on"}
+            and _inspector_should_capture(path, method)
+        )
         raw_body: bytes | None = None
         if capture and method in {"POST", "PUT", "PATCH", "DELETE"}:
             try:
@@ -110,7 +122,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                     _metrics().record(path=path, status=0, duration_ms=elapsed_ms)
             except Exception:  # noqa: S110
                 pass
-            if capture:
+            if record_detail_sample:
                 try:
                     from api.services.request_metrics import record_detail as _rd
 
@@ -200,7 +212,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                 )
         except Exception:  # noqa: S110
             pass
-        if capture:
+        if record_detail_sample:
             try:
                 from api.services.request_metrics import record_detail as _rd
 

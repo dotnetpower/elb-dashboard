@@ -3,3 +3,11 @@
 **/.git
 **/.venv
 **/node_modules
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.eggs
+*.egg-info
+*.log
+*.tar.gz
+*.tgz

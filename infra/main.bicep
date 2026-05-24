@@ -136,7 +136,10 @@ var allowedOriginsArray = empty(allowedOrigins) ? [] : split(allowedOrigins, ','
 resource platformRg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: rgName
   location: location
-  tags: workspaceTags
+  // Keep discovery tags off the resource group until postprovision has built
+  // images, swapped the six-sidecar template, and observed a healthy API.
+  // Child resources still receive workspaceTags for cost/ownership tracing.
+  tags: tags
 }
 
 // ---------------------------------------------------------------------------

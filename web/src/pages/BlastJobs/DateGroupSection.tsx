@@ -27,10 +27,17 @@ export function DateGroupSection({
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    if (runningCount === 0) return undefined;
-    const interval = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(interval);
-  }, [runningCount]);
+    if (!open || runningCount === 0) return undefined;
+    const tick = () => {
+      if (!document.hidden) setNow(Date.now());
+    };
+    const interval = window.setInterval(tick, 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [open, runningCount]);
 
   return (
     <div>

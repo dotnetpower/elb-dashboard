@@ -22,7 +22,7 @@ from typing import Any
 from azure.core.credentials import TokenCredential
 from azure.core.exceptions import ResourceNotFoundError
 
-from api.services.aks_skus import SKU_BY_NAME
+from api.services.aks_skus import SKU_BY_NAME, normalize_sku_name
 from api.services.storage.data import _blob_service
 
 LOGGER = logging.getLogger(__name__)
@@ -566,6 +566,7 @@ def select_partitions_for_submit(
         raise ValueError(f"num_nodes must be >= 1, got {num_nodes}")
     if db_total_bytes < 0:
         raise ValueError(f"db_total_bytes must be non-negative, got {db_total_bytes}")
+    machine_type = normalize_sku_name(machine_type)
     sku = SKU_BY_NAME.get(machine_type)
     if sku is None:
         # Unknown machine type — assume modest 64 GiB. Caller can override

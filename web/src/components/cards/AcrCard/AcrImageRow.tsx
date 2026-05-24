@@ -28,7 +28,8 @@ export function AcrImageRow({
 }: AcrImageRowProps) {
   const result = buildResults.find((r) => r.image === `${img}:${tag}`);
   const isBuilt = actualTags.includes(tag);
-  const isBuilding = buildStatus === "building" || Boolean(buildDetail);
+  const isQueued = result?.status === "scheduled" && !buildDetail;
+  const isBuilding = Boolean(buildDetail);
   const shortName = SHORT_NAMES[img] || img.split("/").pop() || img;
   const isFailed = result?.status === "failed";
   const isCore = CORE_IMAGES.has(img);
@@ -46,7 +47,10 @@ export function AcrImageRow({
       <div className="td repo" title={img}>
         <strong>{shortName}</strong>
         {!isCore && (
-          <span className="muted acr-optional-tag" style={{ fontSize: 11, marginLeft: 4 }}>
+          <span
+            className="muted acr-optional-tag"
+            style={{ fontSize: 11, marginLeft: 4 }}
+          >
             (optional)
           </span>
         )}
@@ -55,6 +59,18 @@ export function AcrImageRow({
       <div className="td action">
         {isBuilt ? (
           <span className="dv3-pill dv3-pill-success">Built</span>
+        ) : isQueued ? (
+          <span
+            style={{
+              color: "var(--warning)",
+              fontSize: 12,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <Loader2 size={11} className="spin" /> Queued
+          </span>
         ) : (isBuilding || liveStatus) && liveStatus !== "Failed" ? (
           <span
             style={{
@@ -101,7 +117,9 @@ export function AcrImageRow({
             style={{ fontSize: 11, padding: "3px 9px", gap: 4 }}
             onClick={() => onBuildSingle(img)}
             disabled={
-              buildStatus === "building" || singleBuilding !== null
+              buildStatus === "queued" ||
+              buildStatus === "building" ||
+              singleBuilding !== null
             }
             title={`Build ${shortName}`}
           >

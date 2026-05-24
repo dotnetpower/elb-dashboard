@@ -1,10 +1,11 @@
 """Inspector capture rules — which paths/methods are recorded in the metrics buffer.
 
 Responsibility: Hold the static path lists and the predicate used by the
-RequestIdMiddleware to decide whether to buffer request/response bodies.
+RequestIdMiddleware to decide whether to record request metadata or buffer bodies.
 Edit boundaries: Pure data + a single predicate; do not add Azure SDK calls,
 HTTP work, or logging here.
-Key entry points: `_inspector_should_capture`, `INSPECTOR_MAX_BUFFER_BYTES`.
+Key entry points: `_inspector_should_record`, `_inspector_should_capture`,
+`INSPECTOR_MAX_BUFFER_BYTES`.
 Risky contracts: SSE / WebSocket paths MUST stay in the exclude list — buffering
 a never-ending response body would leak memory until the worker is killed.
 Validation: `uv run pytest -q api/tests/test_inspector_exclude.py`.
@@ -12,11 +13,12 @@ Validation: `uv run pytest -q api/tests/test_inspector_exclude.py`.
 
 from __future__ import annotations
 
-# Paths excluded from BOTH the aggregate metrics buffer AND the per-request
-# DETAIL inspector buffer. SSE/WebSocket cannot be safely body-buffered (the
-# response never ends). High-volume self-poll paths would self-amplify.
+# Paths excluded from the per-request DETAIL inspector entirely. SSE/WebSocket
+# cannot be safely body-buffered (the response never ends). High-volume
+# self-poll paths would self-amplify.
 INSPECTOR_EXCLUDE_PREFIXES: tuple[str, ...] = (
     "/api/monitor/sidecars",  # SSE topology + high-volume snapshot
+    "/api/monitor/logs",  # SSE sidecar log stream
     "/api/monitor/metrics",  # would self-amplify
     "/api/monitor/sidecar-requests",  # would self-amplify
     "/api/blast/logs",  # SSE job log stream
@@ -24,13 +26,12 @@ INSPECTOR_EXCLUDE_PREFIXES: tuple[str, ...] = (
 )
 INSPECTOR_EXCLUDE_EXACT: frozenset[str] = frozenset({"/api/health"})
 
-# High-volume polling GETs whose response body is buffered into memory by
-# the middleware on every dashboard tick (30 s default, 5 s minimum). The
-# inspector value of these reads is low — the dashboard refetches them
-# constantly so the same payload is captured over and over, pushing more
-# interesting one-shot calls (POST submit, DELETE) out of the ring buffer.
-# Non-GET methods on the same paths (e.g. POST /api/blast/jobs submit)
-# are still captured.
+# High-volume polling GETs whose response body must not be buffered into
+# memory on every dashboard tick (30 s default, 5 s minimum). Metadata rows are
+# still recorded so the inspector explains the same traffic as the topology
+# counter without paying the body-buffering cost.
+# Non-GET methods on the same paths (e.g. POST /api/blast/jobs submit) can
+# still capture bodies when the body-capture env switch is enabled.
 INSPECTOR_EXCLUDE_GET_PREFIXES: tuple[str, ...] = (
     "/api/monitor/aks",
     "/api/monitor/storage",
@@ -52,7 +53,7 @@ INSPECTOR_MAX_BUFFER_BYTES = 64 * 1024
 
 
 def _inspector_should_capture(path: str, method: str = "POST") -> bool:
-    """True iff the per-request DETAIL inspector should record this path.
+    """True iff the per-request DETAIL inspector may buffer bodies for this path.
 
     ``method`` defaults to a non-GET verb to preserve the historical
     single-arg call sites (treat as "is this path ever capturable?").
@@ -63,12 +64,21 @@ def _inspector_should_capture(path: str, method: str = "POST") -> bool:
     """
     if not path.startswith("/api/"):
         return False
-    if path in INSPECTOR_EXCLUDE_EXACT:
-        return False
-    if any(path.startswith(p) for p in INSPECTOR_EXCLUDE_PREFIXES):
+    if not _inspector_should_record(path):
         return False
     if (method or "POST").upper() == "GET" and any(
         path.startswith(p) for p in INSPECTOR_EXCLUDE_GET_PREFIXES
     ):
+        return False
+    return True
+
+
+def _inspector_should_record(path: str) -> bool:
+    """True iff the inspector should record request metadata for this path."""
+    if not path.startswith("/api/"):
+        return False
+    if path in INSPECTOR_EXCLUDE_EXACT:
+        return False
+    if any(path.startswith(p) for p in INSPECTOR_EXCLUDE_PREFIXES):
         return False
     return True

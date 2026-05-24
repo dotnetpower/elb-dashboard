@@ -1,7 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "../fixtures/uiTest";
 
 import { assertNoErrorBoundary, installClientIssueCollector } from "./helpers/assertions";
-import { seedWorkspaceConfig } from "./helpers/workspace";
 
 const coreRoutes = [
   { path: "/", marker: "Control Plane" },
@@ -10,11 +9,7 @@ const coreRoutes = [
   { path: "/docs", marker: "API" },
 ];
 
-test.beforeEach(async ({ page }) => {
-  await seedWorkspaceConfig(page);
-});
-
-test("core dashboard routes render without client errors or API 5xx", async ({ page }) => {
+test("core dashboard routes render without client errors or API 5xx", async ({ uiPage: page }) => {
   const collector = installClientIssueCollector(page);
 
   for (const route of coreRoutes) {

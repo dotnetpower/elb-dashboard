@@ -27,6 +27,11 @@ from api.services.azure_clients import (
     resource_client,
     storage_client,
 )
+from api.tasks.azure.aks_observability import (
+    disable_aks_container_insights,
+    enable_aks_container_insights,
+)
+from api.tasks.azure.app_insights import provision_app_insights
 from api.tasks.azure.cluster_params import build_cluster_params as _build_cluster_params
 from api.tasks.azure.diagnostics import diag_noop
 from api.tasks.azure.helpers import (
@@ -62,8 +67,11 @@ __all__ = (
     "assign_aks_roles",
     "delete_aks",
     "diag_noop",
+    "disable_aks_container_insights",
+    "enable_aks_container_insights",
     "get_credential",
     "provision_aks",
+    "provision_app_insights",
     "resource_client",
     "start_aks",
     "stop_aks",

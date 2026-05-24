@@ -14,9 +14,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from api.routes.aks import cancel as _cancel_routes
 from api.routes.aks import lifecycle as _lifecycle_routes
 from api.routes.aks import openapi as _openapi_routes
+from api.routes.aks import preflight as _preflight_routes
 from api.routes.aks import provision as _provision_routes
+from api.routes.aks import recent_failures as _recent_failures_routes
 from api.routes.aks import roles as _roles_routes
 from api.routes.aks import skus as _skus_routes
 from api.routes.aks.common import _invalidate_aks_monitor_cache as _invalidate_aks_monitor_cache
@@ -56,7 +59,10 @@ from api.routes.aks.skus import aks_skus as aks_skus
 
 aks_router = APIRouter(prefix="/api/aks", tags=["aks"])
 aks_router.include_router(_skus_routes.router)
+aks_router.include_router(_preflight_routes.router)
 aks_router.include_router(_provision_routes.router)
+aks_router.include_router(_cancel_routes.router)
+aks_router.include_router(_recent_failures_routes.router)
 aks_router.include_router(_openapi_routes.router)
 aks_router.include_router(_lifecycle_routes.router)
 aks_router.include_router(_roles_routes.router)

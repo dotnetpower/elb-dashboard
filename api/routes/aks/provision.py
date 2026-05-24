@@ -12,7 +12,9 @@ api/tests/test_route_contracts.py`.
 
 from __future__ import annotations
 
+import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends
@@ -20,6 +22,8 @@ from fastapi import APIRouter, Body, Depends
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _safe_delay
 from api.services.aks_skus import DEFAULT_SKU, DEFAULT_SYSTEM_SKU
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -32,13 +36,62 @@ def aks_provision(
     from api.tasks.azure import provision_aks
 
     job_id = str(uuid.uuid4())
+    region = body.get("region", "koreacentral")
+    cluster_name = body.get("cluster_name", "elb-cluster")
+    resource_group = body.get("resource_group", "")
+
+    # Create the JobState row up front so:
+    #   * `helpers.update_state` calls from the task body have something
+    #     to update (previously the row was missing and every state
+    #     write silently no-op'd against the table),
+    #   * `/api/aks/recent-failed-provisions` can list this row when the
+    #     task ends in `failed`,
+    #   * `/api/aks/cancel-provision/{task_id}` and `/api/tasks/{id}`
+    #     can verify `owner_oid` before exposing or revoking the task.
+    # Failure to write is logged + ignored so the route still enqueues
+    # the work — the worker fallback to "Last attempt failed" via
+    # localStorage handles the no-state-row degraded case.
+    try:
+        from api.services.state.job_state import JobState
+        from api.services.state_repo import get_state_repo
+
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        repo = get_state_repo()
+        repo.create(
+            JobState(
+                job_id=job_id,
+                type="aks_provision",
+                status="queued",
+                phase="queued",
+                owner_oid=caller.object_id,
+                tenant_id=caller.tenant_id,
+                subscription_id=body.get("subscription_id", ""),
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+                created_at=now,
+                updated_at=now,
+                payload={
+                    "subscription_id": body.get("subscription_id", ""),
+                    "resource_group": resource_group,
+                    "region": region,
+                    "cluster_name": cluster_name,
+                    "node_sku": body.get("node_sku", DEFAULT_SKU),
+                    "node_count": body.get("node_count", 3),
+                    "system_vm_size": body.get("system_vm_size", DEFAULT_SYSTEM_SKU),
+                    "system_node_count": body.get("system_node_count", 1),
+                },
+            )
+        )
+    except Exception as exc:
+        LOGGER.warning("failed to create aks_provision job state: %s", exc)
+
     result = _safe_delay(
         provision_aks,
         job_id=job_id,
         subscription_id=body.get("subscription_id", ""),
-        resource_group=body.get("resource_group", ""),
-        region=body.get("region", "koreacentral"),
-        cluster_name=body.get("cluster_name", "elb-cluster"),
+        resource_group=resource_group,
+        region=region,
+        cluster_name=cluster_name,
         node_sku=body.get("node_sku", DEFAULT_SKU),
         node_count=body.get("node_count", 3),
         # Sibling repo's two-pool layout: small system pool + workload pool.
@@ -51,6 +104,18 @@ def aks_provision(
         storage_account=body.get("storage_account", ""),
         caller_oid=caller.object_id,
     )
+
+    # Now that we have a task id from Celery, write it back so
+    # ownership lookup by `task_id` (used by cancel + tasks routes)
+    # resolves to this row. Failure is best-effort — the task itself
+    # still runs.
+    try:
+        from api.services.state_repo import get_state_repo
+
+        get_state_repo().update(job_id, task_id=result.id)
+    except Exception as exc:
+        LOGGER.warning("failed to stamp task_id on aks_provision row: %s", exc)
+
     return {
         "id": job_id,
         "job_id": job_id,

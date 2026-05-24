@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { memo } from "react";
 import { Server, Trash2 } from "lucide-react";
 
 import type { BlastJobSummary } from "@/api/endpoints";
@@ -42,7 +43,7 @@ function runtimeLabel(job: BlastJobSummary, active: boolean, now: number) {
   };
 }
 
-export function JobRow({ job, onDelete, deleting, now = Date.now() }: JobRowProps) {
+function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowProps) {
   const view = toJobRowView(job);
   const phase = view.state;
   const color = statusColor(phase.toLowerCase());
@@ -196,3 +197,5 @@ export function JobRow({ job, onDelete, deleting, now = Date.now() }: JobRowProp
     </tr>
   );
 }
+
+export const JobRow = memo(JobRowComponent);

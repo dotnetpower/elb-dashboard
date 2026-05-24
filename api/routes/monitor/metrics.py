@@ -67,11 +67,12 @@ def sidecar_requests(
 ) -> dict[str, Any]:
     """Return the most recent captured requests (newest first).
 
-    Capture happens in `api.main.RequestIdMiddleware` and is opt-out via
-    the `REQUEST_DETAIL_CAPTURE_ENABLED=false` environment variable. The
-    buffer is per-process (no replication), and sensitive headers
-    (`Authorization`, `Cookie`, `X-Api-Key`, …) are redacted at capture
-    time — see
+    Capture happens in `api.main.RequestIdMiddleware`. When
+    `REQUEST_DETAIL_CAPTURE_ENABLED` is unset, the middleware records
+    lightweight metadata only; `true` also captures capped request/response
+    bodies, and `false` disables this detail buffer. The buffer is per-process
+    (no replication), and sensitive headers (`Authorization`, `Cookie`,
+    `X-Api-Key`, …) are redacted at capture time — see
     [api/services/request_metrics.py](../services/request_metrics.py)
     `DETAIL_REDACT_HEADERS`.
     """

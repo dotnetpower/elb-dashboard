@@ -2,17 +2,20 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import {
+  AlertCircle,
   AlertTriangle,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Cpu,
   Loader2,
   Plus,
   Settings2,
+  Square,
   X,
 } from "lucide-react";
 
-import type { AksSku } from "@/api/endpoints";
+import type { AksPreflightResponse, AksSku } from "@/api/endpoints";
 import type { ArmLocation } from "@/api/armProxy";
 import { AZURE_REGIONS } from "@/constants";
 import {
@@ -22,6 +25,8 @@ import {
 } from "@/hooks/useAksSkus";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
+import { ProvisionErrorCard } from "./ProvisionErrorCard";
+import type { ProvisionProgress } from "./ProvisioningBanner";
 import { MAX_SYSTEM_NODE_COUNT } from "./useClusterProvisioning";
 
 export function ProvisionModal({
@@ -41,6 +46,11 @@ export function ProvisionModal({
   skuOptions,
   groupLabels,
   groupOrder,
+  // sku availability (region-filtered)
+  availableSkusSet,
+  unavailableSkusMap,
+  availabilityLoading,
+  availabilityDegraded,
   // context (editable)
   region,
   setRegion,
@@ -49,14 +59,25 @@ export function ProvisionModal({
   resourceGroup,
   setResourceGroup,
   resourceGroupValid,
-  resourceGroupConflict,
+  resourceGroupExists,
   resourceGroupsLoading,
+  // preflight
+  preflightStatus,
+  preflightResult,
+  // live provisioning state
+  taskPhase,
+  taskProgress,
+  elapsed,
+  // identity context (read-only)
+  subscriptionId,
   // status
   provStatus,
   provError,
   // actions
   onSubmit,
   onClose,
+  onErrorReset,
+  onCancel,
 }: {
   clusterName: string;
   setClusterName: (v: string) => void;
@@ -72,6 +93,20 @@ export function ProvisionModal({
   skuOptions: AksSku[];
   groupLabels: Record<string, string>;
   groupOrder: string[];
+  /** Set of SKU names actually deployable in the chosen `region` for
+   *  the current subscription. SKUs not in this set are still listed
+   *  in the dropdown but rendered as `disabled` so the user can see
+   *  *why* their preferred SKU is unavailable. */
+  availableSkusSet: Set<string>;
+  /** SKU name → human reason (e.g. `NotAvailableForSubscription`) for
+   *  every disabled SKU. Used as the `<option>` title attribute. */
+  unavailableSkusMap: Map<string, string>;
+  /** `availableSkusSet` is still loading from `/api/aks/available-skus`. */
+  availabilityLoading: boolean;
+  /** Azure listing failed entirely — the SPA shows everything (so the
+   *  user is not blocked by a backend outage) and surfaces a small
+   *  hint instead. */
+  availabilityDegraded: boolean;
   region: string;
   setRegion: (v: string) => void;
   availableLocations: ArmLocation[];
@@ -79,21 +114,68 @@ export function ProvisionModal({
   resourceGroup: string;
   setResourceGroup: (v: string) => void;
   resourceGroupValid: boolean;
-  resourceGroupConflict: boolean;
+  /** True when an RG with the typed name already exists in the
+   *  subscription. **Informational only** — reusing an existing RG
+   *  for additional AKS clusters is supported (a single RG can host
+   *  multiple clusters, and `provision_aks` is idempotent on RG
+   *  ensure). The modal renders a neutral "will reuse" note when
+   *  this is true. */
+  resourceGroupExists: boolean;
   resourceGroupsLoading: boolean;
+  /** "idle" before the user has clicked Create; "checking" while the
+   *  preflight HTTP call is in flight; "done" once results are in. */
+  preflightStatus: "idle" | "checking" | "done";
+  /** Result payload from the latest `/api/aks/preflight` call. */
+  preflightResult: AksPreflightResponse | null;
+  /** Celery phase string (e.g. `arm_create_or_update`) once the
+   *  provision task starts publishing progress. The modal renders a
+   *  compact "live provisioning" panel that mirrors the dashboard
+   *  banner while the modal is still open. */
+  taskPhase: string | null;
+  /** Rich progress payload published by `provision_aks`. Carries step
+   *  counters, pool states, ARM elapsed seconds and the Azure portal
+   *  deep link once the cluster is visible. */
+  taskProgress: ProvisionProgress | null;
+  /** Seconds since `handleProvision` was called. Mirrors the elapsed
+   *  counter the dashboard banner uses, kept here so the modal can
+   *  show the same live counter without re-deriving it. */
+  elapsed: number;
+  /** Subscription id the modal is operating against. Used only to
+   *  scope the Azure portal deep links the error card surfaces
+   *  (quota blade, RG overview). */
+  subscriptionId: string;
   provStatus: string;
   provError: string | null;
   onSubmit: () => void;
   onClose: () => void;
+  /** Clear the provisioning error so the form becomes editable again
+   *  (used by the error card's Dismiss + Edit-&-retry buttons). */
+  onErrorReset: () => void;
+  /** Cancel the in-flight provisioning task. Surfaced as a "Stop"
+   *  button on the live progress panel; omitted (button hidden) when
+   *  the parent doesn't wire one. */
+  onCancel?: () => Promise<void> | void;
 }) {
-  // ESC to close.
+  // ESC to close. Mirrors the backdrop-click confirm so an accidental
+  // ESC during provisioning doesn't yank the live progress panel out
+  // from under the user.
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      if (provStatus === "creating") {
+        if (
+          !window.confirm(
+            "Provisioning is still running in the background. Close this dialog?",
+          )
+        ) {
+          return;
+        }
+      }
+      onClose();
     };
     window.addEventListener("keydown", handleEsc);
     return () => window.removeEventListener("keydown", handleEsc);
-  }, [onClose]);
+  }, [onClose, provStatus]);
 
   // System pool is collapsed by default — 95% of users keep the defaults
   // (D-series × 1 node), and showing the full panel inflates the modal.
@@ -104,6 +186,16 @@ export function ProvisionModal({
   const [systemPoolExpanded, setSystemPoolExpanded] = useState(
     !systemUsesDefaults,
   );
+  const [showPreflightChecking, setShowPreflightChecking] = useState(false);
+
+  useEffect(() => {
+    if (preflightStatus !== "checking") {
+      setShowPreflightChecking(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowPreflightChecking(true), 300);
+    return () => window.clearTimeout(timer);
+  }, [preflightStatus]);
 
   // Trap keyboard focus inside the dialog while it is open so Tab cycles
   // through the form fields and never escapes to the dashboard behind.
@@ -132,7 +224,18 @@ export function ProvisionModal({
     resourceGroup !== initialSnapshot.current.resourceGroup;
   const handleBackdropClick = (e: ReactMouseEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return;
-    if (
+    // While the Celery task is in flight the modal carries live
+    // progress that the user may need to see; confirm before throwing
+    // it away. The dashboard banner will still pick up the long tail.
+    if (provStatus === "creating") {
+      if (
+        !window.confirm(
+          "Provisioning is still running in the background. Close this dialog?",
+        )
+      ) {
+        return;
+      }
+    } else if (
       isDirty &&
       !window.confirm("Discard changes and close this dialog?")
     ) {
@@ -247,7 +350,8 @@ export function ProvisionModal({
         style={{
           width: "min(880px, calc(100vw - 32px))",
           maxWidth: "min(880px, calc(100vw - 32px))",
-          maxHeight: "90vh",
+          height: "min(760px, 90vh)",
+          maxHeight: "min(760px, 90vh)",
           // Card itself does not scroll — only the body wrapper below does,
           // so the header (title) and footer (Cancel/Create) stay pinned.
           overflow: "hidden",
@@ -286,10 +390,11 @@ export function ProvisionModal({
             // press in any field can't bypass validation.
             if (
               provStatus === "creating" ||
+              preflightStatus === "checking" ||
               !region ||
               !clusterNameValid ||
               !resourceGroupValid ||
-              resourceGroupConflict
+              preflightResult?.ok === false
             ) {
               return;
             }
@@ -379,16 +484,43 @@ export function ProvisionModal({
                 >
                   {blastGroups.map((group) => (
                     <optgroup key={group.id} label={`── ${group.label} ──`}>
-                      {group.skus.map((option) => (
-                        <option key={option.name} value={option.name}>
-                          {formatAksSkuOption(option)}
-                        </option>
-                      ))}
+                      {group.skus.map((option) => {
+                        const blocked = !availableSkusSet.has(option.name);
+                        const reason = unavailableSkusMap.get(option.name);
+                        return (
+                          <option
+                            key={option.name}
+                            value={option.name}
+                            disabled={blocked}
+                            title={
+                              blocked
+                                ? `Not available in ${region || "this region"}${
+                                    reason ? ` · ${reason}` : ""
+                                  }`
+                                : undefined
+                            }
+                          >
+                            {formatAksSkuOption(option)}
+                            {blocked
+                              ? ` — not available in ${region || "region"}`
+                              : ""}
+                          </option>
+                        );
+                      })}
                     </optgroup>
                   ))}
                 </select>
                 <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
                   {describeAksSku(selectedSku)}
+                  {selectedSku && nodeCount > 0
+                    ? ` · ${nodeCount} × ${selectedSku.vCPUs} = ${nodeCount * selectedSku.vCPUs} cores total`
+                    : ""}
+                  {availabilityLoading && region
+                    ? ` · Checking availability in ${region}…`
+                    : ""}
+                  {availabilityDegraded
+                    ? " · Could not verify region availability; pre-flight will catch any issues."
+                    : ""}
                 </div>
               </div>
               <div>
@@ -519,11 +651,29 @@ export function ProvisionModal({
                           key={group.id}
                           label={`── ${group.label} ──`}
                         >
-                          {group.skus.map((option) => (
-                            <option key={option.name} value={option.name}>
-                              {formatAksSkuOption(option)}
-                            </option>
-                          ))}
+                          {group.skus.map((option) => {
+                            const blocked = !availableSkusSet.has(option.name);
+                            const reason = unavailableSkusMap.get(option.name);
+                            return (
+                              <option
+                                key={option.name}
+                                value={option.name}
+                                disabled={blocked}
+                                title={
+                                  blocked
+                                    ? `Not available in ${region || "this region"}${
+                                        reason ? ` · ${reason}` : ""
+                                      }`
+                                    : undefined
+                                }
+                              >
+                                {formatAksSkuOption(option)}
+                                {blocked
+                                  ? ` — not available in ${region || "region"}`
+                                  : ""}
+                              </option>
+                            );
+                          })}
                         </optgroup>
                       ))}
                     </select>
@@ -649,11 +799,7 @@ export function ProvisionModal({
                 style={{
                   width: "100%",
                   fontSize: 13,
-                  borderColor: !resourceGroupValid
-                    ? "var(--danger)"
-                    : resourceGroupConflict
-                      ? "var(--warning)"
-                      : undefined,
+                  borderColor: !resourceGroupValid ? "var(--danger)" : undefined,
                 }}
                 placeholder="rg-elb-cluster"
                 spellCheck={false}
@@ -665,20 +811,21 @@ export function ProvisionModal({
                   cannot end with a period.
                 </div>
               )}
-              {resourceGroupValid && resourceGroupConflict && (
-                <div style={{ fontSize: 10, color: "var(--warning)", marginTop: 3 }}>
-                  A resource group named{" "}
+              {resourceGroupValid && resourceGroupExists && (
+                <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+                  Resource group{" "}
                   <code style={{ ...panelChipStyle, padding: "0 4px" }}>
                     {resourceGroup}
                   </code>{" "}
-                  already exists in this subscription. Pick a different name.
+                  already exists — it will be reused. Multiple AKS clusters
+                  can share a single resource group.
                 </div>
               )}
-              {resourceGroupValid && !resourceGroupConflict && (
+              {resourceGroupValid && !resourceGroupExists && (
                 <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
                   {resourceGroupsLoading
                     ? "Checking existing resource groups…"
-                    : "Name is available."}
+                    : "New resource group will be created."}
                 </div>
               )}
             </div>
@@ -699,18 +846,246 @@ export function ProvisionModal({
             gap: 8,
           }}
         >
-          {provError && (
+          {/* Pre-flight progress list. The user sees one row per check
+              (skus / quota / resource_group) with an icon + message.
+              Renders only after the first Create click so the modal
+              stays clean on first open. `fail` rows block submit (the
+              button below switches to "Re-check"); `warn` rows pass
+              through. */}
+          {preflightStatus === "checking" && showPreflightChecking && (
             <div
               style={{
                 fontSize: 12,
-                color: "var(--danger)",
+                color: "var(--text-muted)",
                 display: "flex",
                 alignItems: "center",
                 gap: 6,
               }}
             >
-              <AlertTriangle size={12} strokeWidth={1.5} /> {provError}
+              <Loader2 size={12} strokeWidth={1.5} className="spin" />
+              Validating with Azure (SKU availability, quota, resource group)…
             </div>
+          )}
+          {preflightStatus === "done" && preflightResult && (
+            <div
+              style={{
+                fontSize: 11,
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: `1px solid ${
+                  preflightResult.ok
+                    ? "rgba(106,214,163,0.3)"
+                    : "rgba(255,107,107,0.35)"
+                }`,
+                background: preflightResult.ok
+                  ? "rgba(106,214,163,0.06)"
+                  : "rgba(255,107,107,0.06)",
+              }}
+            >
+              {preflightResult.checks.map((c) => {
+                const color =
+                  c.status === "ok"
+                    ? "var(--success)"
+                    : c.status === "warn"
+                      ? "var(--warning)"
+                      : "var(--danger)";
+                const Icon =
+                  c.status === "ok"
+                    ? CheckCircle2
+                    : c.status === "warn"
+                      ? AlertTriangle
+                      : AlertCircle;
+                const labelById: Record<string, string> = {
+                  skus: "VM SKU availability",
+                  quota: "Compute quota",
+                  resource_group: "Resource group",
+                  region: "Region",
+                };
+                // The quota row carries a recommended `max_blast_nodes_fit`
+                // when it fails. If that number is >= 1 and differs from
+                // the user's current pick, render an inline "Apply N
+                // nodes" button so the user can fit-to-quota in one
+                // click. `max_blast_nodes_fit === 0` means the
+                // requested SKU's per-node core count already exceeds
+                // the available headroom — in that case there is no
+                // useful fit and we show no button (only the message).
+                const isQuotaFail = c.name === "quota" && c.status === "fail";
+                const maxFit = isQuotaFail
+                  ? Number(
+                      (c.details as { max_blast_nodes_fit?: number } | undefined)
+                        ?.max_blast_nodes_fit ?? 0,
+                    )
+                  : 0;
+                const canApply =
+                  isQuotaFail && maxFit >= 1 && maxFit !== nodeCount;
+                return (
+                  <div
+                    key={c.name}
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 6,
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    <Icon
+                      size={12}
+                      strokeWidth={1.5}
+                      style={{ color, marginTop: 1, flexShrink: 0 }}
+                    />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <span style={{ fontWeight: 600 }}>
+                        {labelById[c.name] ?? c.name}
+                      </span>{" "}
+                      <span style={{ color: "var(--text-muted)" }}>
+                        — {c.message}
+                      </span>
+                      {canApply && (
+                        <button
+                          type="button"
+                          onClick={() => setNodeCount(maxFit)}
+                          className="glass-button"
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 4,
+                            fontSize: 10,
+                            padding: "2px 8px",
+                            marginLeft: 8,
+                            color: "var(--accent)",
+                          }}
+                          title={`Set Node Count to ${maxFit} to fit your current quota`}
+                        >
+                          Apply {maxFit} nodes
+                        </button>
+                      )}
+                      {isQuotaFail && maxFit === 0 && (
+                        <span
+                          style={{
+                            display: "inline-block",
+                            marginLeft: 8,
+                            fontSize: 10,
+                            color: "var(--warning)",
+                          }}
+                        >
+                          (no node count fits — switch SKU or request quota)
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Live provisioning panel — visible while the Celery task is
+              creating the cluster but ARM has not yet accepted it. Once
+              ARM accepts (`taskProgress.cluster_state` is set), the
+              parent `useClusterProvisioning` closes the modal and the
+              dashboard banner takes over. Until then the user keeps
+              this view, so if ARM rejects (quota / SKU / RG) the modal
+              is still here to show the error inline with their inputs
+              intact. */}
+          {provStatus === "creating" && (
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--text-primary)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid rgba(110,159,255,0.3)",
+                background: "rgba(110,159,255,0.06)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  justifyContent: "space-between",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                  <Loader2 size={12} strokeWidth={1.5} className="spin" />
+                  <span style={{ fontWeight: 600 }}>
+                    {taskProgress?.step && taskProgress?.total_steps
+                      ? `Step ${taskProgress.step}/${taskProgress.total_steps}`
+                      : "Provisioning"}
+                  </span>
+                  <span style={{ color: "var(--text-muted)" }}>
+                    · {taskPhase ?? "in progress"} ·{" "}
+                    {Math.floor(elapsed / 60)}m {elapsed % 60}s
+                  </span>
+                </div>
+                {onCancel && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          "Stop provisioning? The cluster create may already be in flight on Azure; you may still need to delete a partial cluster manually.",
+                        )
+                      ) {
+                        void onCancel();
+                      }
+                    }}
+                    className="glass-button"
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      fontSize: 11,
+                      padding: "3px 8px",
+                      color: "var(--warning)",
+                      whiteSpace: "nowrap",
+                    }}
+                    title="Send a cancel signal to the Celery worker"
+                  >
+                    <Square size={11} strokeWidth={1.5} />
+                    Stop
+                  </button>
+                )}
+              </div>
+              {taskProgress?.message && (
+                <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                  {taskProgress.message}
+                </div>
+              )}
+              <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
+                The modal will close automatically as soon as Azure accepts
+                the cluster create. If validation fails, the error will
+                appear here with your inputs preserved.
+              </div>
+            </div>
+          )}
+
+          {(provStatus === "error" || provError) && (
+            <ProvisionErrorCard
+              raw={provError ?? "Provisioning failed."}
+              context={{
+                subscriptionId,
+                region,
+                resourceGroup,
+              }}
+              // R-3: if cancellation landed after the cluster ARM
+              // resource was already visible, surface a direct
+              // portal link so the user can verify/delete the
+              // partial cluster from the modal too.
+              extraPortalUrl={
+                (provError ?? "").includes("cancelled") &&
+                typeof taskProgress?.portal_url === "string"
+                  ? (taskProgress?.portal_url as string)
+                  : undefined
+              }
+              onDismiss={onErrorReset}
+              onRetry={onErrorReset}
+            />
           )}
 
           <div
@@ -783,10 +1158,14 @@ export function ProvisionModal({
                 className="glass-button glass-button--primary"
                 disabled={
                   provStatus === "creating" ||
+                  preflightStatus === "checking" ||
                   !region ||
                   !clusterNameValid ||
                   !resourceGroupValid ||
-                  resourceGroupConflict
+                  // A `fail` row in the most recent preflight blocks
+                  // submit until the user changes inputs (which clears
+                  // the preflight result back to idle).
+                  preflightResult?.ok === false
                 }
                 style={{ fontSize: 12, padding: "8px 20px" }}
               >
@@ -794,6 +1173,15 @@ export function ProvisionModal({
                   <>
                     <Loader2 size={12} strokeWidth={1.5} className="spin" />{" "}
                     Creating...
+                  </>
+                ) : preflightStatus === "checking" && showPreflightChecking ? (
+                  <>
+                    <Loader2 size={12} strokeWidth={1.5} className="spin" />{" "}
+                    Validating...
+                  </>
+                ) : preflightResult?.ok === false ? (
+                  <>
+                    <AlertCircle size={12} strokeWidth={1.5} /> Fix errors above
                   </>
                 ) : (
                   <>

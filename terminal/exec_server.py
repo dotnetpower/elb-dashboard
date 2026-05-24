@@ -681,6 +681,13 @@ def main() -> None:
             flush=True,
         )
         sys.exit(2)
+    if len(EXEC_TOKEN) > 1024:
+        print(
+            json.dumps({"error": "EXEC_TOKEN env var too long (<= 1024 chars)"}),
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(2)
 
     httpd = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), _Handler)
     httpd.daemon_threads = True

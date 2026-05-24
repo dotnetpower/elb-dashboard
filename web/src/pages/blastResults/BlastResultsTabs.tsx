@@ -69,6 +69,13 @@ const RESULT_TABS = new Set<BlastResultsTab>([
   "files",
 ]);
 
+const RESULT_ANALYTICS_TABS = new Set<BlastResultsTab>([
+  "descriptions",
+  "graphic",
+  "alignments",
+  "taxonomy",
+]);
+
 export const DEFAULT_BLAST_TAB: BlastResultsTab = "descriptions";
 
 export function resolveBlastResultsTab(value: string | null): BlastResultsTab {
@@ -83,6 +90,13 @@ export function resolveBlastResultsTab(value: string | null): BlastResultsTab {
     default:
       return DEFAULT_BLAST_TAB;
   }
+}
+
+export function shouldOpenRunDetailsForFailedJob(
+  activeTab: BlastResultsTab,
+  effectiveIsFailed: boolean,
+): boolean {
+  return effectiveIsFailed && RESULT_ANALYTICS_TABS.has(activeTab);
 }
 
 export interface BlastResultsTabsProps {

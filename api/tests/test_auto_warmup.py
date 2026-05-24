@@ -619,6 +619,7 @@ def test_auto_warmup_table_store_uses_dedicated_table(monkeypatch) -> None:
             created_tables.append(table_name)
 
     monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
     monkeypatch.setattr(auto_warmup, "TableClient", RecordingTableClient)
     monkeypatch.setattr(auto_warmup, "TableServiceClient", RecordingTableService)
     monkeypatch.setattr(auto_warmup, "get_credential", lambda: object())

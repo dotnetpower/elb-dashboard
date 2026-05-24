@@ -56,10 +56,15 @@ export function UpgradeBadge() {
       }
     };
     void tick();
-    const id = window.setInterval(tick, POLL_INTERVAL_MS);
+    const gatedTick = () => {
+      if (!document.hidden) void tick();
+    };
+    const id = window.setInterval(gatedTick, POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", gatedTick);
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      document.removeEventListener("visibilitychange", gatedTick);
       channel?.close();
     };
   }, []);

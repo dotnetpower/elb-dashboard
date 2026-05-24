@@ -20,7 +20,7 @@ from api.services.storage import usage_cache as storage_usage_cache
 
 LOGGER = logging.getLogger(__name__)
 
-_STORAGE_USAGE_DEFAULT_MAX_BLOBS = 50_000
+_STORAGE_USAGE_DEFAULT_MAX_BLOBS = 10_000
 _STORAGE_USAGE_HARD_MAX_BLOBS = 500_000
 
 

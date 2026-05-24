@@ -6,6 +6,19 @@ const STAGING_DB_INDEX = 3;
 const SUBMITTING_INDEX = 4;
 
 describe("BLAST step state", () => {
+  it("maps missing database failures to Prepare Run", () => {
+    expect(resolveActiveStepIndex("database_unavailable", {})).toBe(0);
+    expect(
+      getTimelineStepState({
+        phase: "database_unavailable",
+        idx: 0,
+        key: "preparing",
+        stepsData: { preparing: { status: "failed" } },
+        failedStepIdx: 0,
+      }),
+    ).toBe("error");
+  });
+
   it("advances the active pointer past skipped staging", () => {
     const stepsData = {
       staging_db: { status: "skipped", skipped: true },

@@ -13,6 +13,7 @@ Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -33,6 +34,29 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/arm", tags=["arm"])
 
 ELB_TAG_PREFIX = "elb-"
+_DISCOVERY_CACHE_TTL_SECONDS = 60.0
+_DISCOVERY_CACHE: dict[tuple[str, str, str], tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _cached_discovery(kind: str, subscription_id: str, rg: str) -> list[dict[str, Any]] | None:
+    cached = _DISCOVERY_CACHE.get((kind, subscription_id, rg))
+    if cached is None:
+        return None
+    expires_at, value = cached
+    if expires_at <= time.monotonic():
+        _DISCOVERY_CACHE.pop((kind, subscription_id, rg), None)
+        return None
+    return [dict(item) for item in value]
+
+
+def _store_discovery(
+    kind: str, subscription_id: str, rg: str, value: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    _DISCOVERY_CACHE[(kind, subscription_id, rg)] = (
+        time.monotonic() + _DISCOVERY_CACHE_TTL_SECONDS,
+        [dict(item) for item in value],
+    )
+    return value
 
 # Azure ARM tag limits (Microsoft Learn):
 # - Tag name: 1..512 characters; cannot contain ``<>%&\?/``
@@ -247,6 +271,9 @@ def list_storage_accounts(
     rg: str = Path(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> list[dict[str, Any]]:
+    cached = _cached_discovery("storage", subscription_id, rg)
+    if cached is not None:
+        return cached
     cred = get_credential()
     try:
         client = storage_client(cred, subscription_id)
@@ -259,7 +286,7 @@ def list_storage_accounts(
             for a in client.storage_accounts.list_by_resource_group(rg)
         ]
         accounts.sort(key=lambda x: x["name"])
-        return accounts
+        return _store_discovery("storage", subscription_id, rg, accounts)
     except Exception as exc:
         LOGGER.warning(
             "list_storage_accounts failed: %s: %s",
@@ -276,6 +303,9 @@ def list_acrs(
     rg: str = Path(...),
     caller: CallerIdentity = Depends(require_caller),
 ) -> list[dict[str, Any]]:
+    cached = _cached_discovery("acr", subscription_id, rg)
+    if cached is not None:
+        return cached
     cred = get_credential()
     try:
         client = acr_client(cred, subscription_id)
@@ -284,7 +314,7 @@ def list_acrs(
             for r in client.registries.list_by_resource_group(rg)
         ]
         registries.sort(key=lambda x: x["name"])
-        return registries
+        return _store_discovery("acr", subscription_id, rg, registries)
     except Exception as exc:
         LOGGER.warning(
             "list_acrs failed: %s: %s",

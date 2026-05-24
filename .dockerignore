@@ -16,6 +16,11 @@
 .mypy_cache
 **/node_modules
 **/.python_packages
+web/dist
+web/.next
+api/build
+coverage
+test-results
 docs
 legacy
 *.zip

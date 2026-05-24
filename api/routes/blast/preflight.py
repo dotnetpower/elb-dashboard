@@ -139,7 +139,34 @@ def blast_pre_flight(
         )
         critical += 1
 
-    if db:
+    if db and storage:
+        try:
+            from api.services.blast_task_config import validate_blast_database_available
+
+            availability = validate_blast_database_available(
+                storage_account=str(storage),
+                database=str(db),
+            )
+            checks.append(
+                {
+                    "id": "database",
+                    "status": "pass",
+                    "title": "BLAST Database",
+                    "detail": f"Database '{db}' is available ({availability['marker_blob']})",
+                }
+            )
+        except Exception as exc:
+            checks.append(
+                {
+                    "id": "database",
+                    "status": "fail",
+                    "title": "BLAST Database",
+                    "detail": str(exc)[:300],
+                    "severity": "critical",
+                }
+            )
+            critical += 1
+    elif db:
         checks.append(
             {
                 "id": "database",

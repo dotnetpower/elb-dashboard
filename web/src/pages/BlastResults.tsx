@@ -6,6 +6,7 @@ import { BlastJobHeader } from "@/pages/blastResults/BlastJobHeader";
 import {
   BlastResultsTabs,
   resolveBlastResultsTab,
+  shouldOpenRunDetailsForFailedJob,
 } from "@/pages/blastResults/BlastResultsTabs";
 import { ExecutionStepsCard } from "@/pages/blastResults/ExecutionStepsCard";
 import { JobDetailsCard } from "@/pages/blastResults/JobDetailsCard";
@@ -45,6 +46,7 @@ export function BlastResults() {
   const justSubmitted = searchParams.get("submitted") === "1";
   const canRequestCancel =
     isRunning || Boolean(justSubmitted && jobId && !job && state.jobQuery.isFetching);
+  const failedTabRedirectRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!canRequestCancel || hasExplicitTab) return;
@@ -52,6 +54,16 @@ export function BlastResults() {
     next.set("tab", "run");
     setSearchParams(next, { replace: true });
   }, [canRequestCancel, hasExplicitTab, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (!jobId || failedTabRedirectRef.current === jobId) return;
+    if (!state.effectiveIsFailed) return;
+    failedTabRedirectRef.current = jobId;
+    if (!shouldOpenRunDetailsForFailedJob(tab, state.effectiveIsFailed)) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", "run");
+    setSearchParams(next, { replace: true });
+  }, [jobId, tab, state.effectiveIsFailed, searchParams, setSearchParams]);
 
   // When the job transitions to `completed` while the user is still on the
   // execution-timeline tab, auto-switch to the Descriptions analytics tab.
@@ -109,6 +121,7 @@ export function BlastResults() {
         exportingFormat={actions.exportingFormat}
         onExport={actions.handleExport}
         hasExportTargets={state.showCompletedMetrics}
+        resultFiles={state.resultFiles}
       />
 
       <BlastResultsTabs active={tab} resultsPending={isRunning} />

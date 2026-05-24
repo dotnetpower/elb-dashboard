@@ -10,6 +10,9 @@ import { installClientErrorHandlers, reportUnknownClientError } from "@/api/clie
 import { App } from "@/App";
 import { ToastProvider } from "@/components/Toast";
 import { AutoRefreshProvider } from "@/hooks/useAutoRefresh";
+import { PreferencesProvider } from "@/hooks/usePreferences";
+import { AppInsightsProvider } from "@/hooks/useAppInsights";
+import { SettingsPanelProvider } from "@/hooks/useSettingsPanel";
 import { isDevBypassEnabled } from "@/config/runtime";
 import { initDocsMockPreview } from "@/mocks/docsPreview";
 import "@/theme/glass.css";
@@ -92,13 +95,19 @@ async function bootstrap() {
     <StrictMode>
       <MsalProvider instance={msalInstance}>
         <QueryClientProvider client={queryClient}>
-          <AutoRefreshProvider>
-            <Router>
-              <ToastProvider>
-                <App />
-              </ToastProvider>
-            </Router>
-          </AutoRefreshProvider>
+          <PreferencesProvider>
+            <AppInsightsProvider>
+              <AutoRefreshProvider>
+                <Router>
+                  <SettingsPanelProvider>
+                    <ToastProvider>
+                      <App />
+                    </ToastProvider>
+                  </SettingsPanelProvider>
+                </Router>
+              </AutoRefreshProvider>
+            </AppInsightsProvider>
+          </PreferencesProvider>
         </QueryClientProvider>
       </MsalProvider>
     </StrictMode>,

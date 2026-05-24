@@ -25,7 +25,8 @@ from jwt import PyJWKClient
 LOGGER = logging.getLogger(__name__)
 
 _JWKS_CACHE: dict[str, tuple[float, PyJWKClient]] = {}
-_JWKS_TTL_SECONDS = 3600
+_JWKS_TTL_SECONDS = int(os.environ.get("AUTH_JWKS_TTL_SECONDS", "43200"))
+_JWKS_CACHE_MAX_TENANTS = max(1, int(os.environ.get("AUTH_JWKS_CACHE_MAX_TENANTS", "100")))
 # Single-flight coordination for the JWKS fetch — see `_get_jwks_client`.
 _JWKS_INFLIGHT: dict[str, threading.Event] = {}
 _JWKS_INFLIGHT_LOCK = threading.Lock()
@@ -92,7 +93,8 @@ def _get_jwks_client(tenant_id: str) -> PyJWKClient:
         # Wait briefly for the leader to populate the cache, then retry.
         # On timeout we fall through to elect ourselves instead of
         # blocking forever — covers the case where the leader crashed.
-        event.wait(timeout=15.0)
+        if not event.wait(timeout=15.0):
+            LOGGER.info("jwks single-flight wait timed out for tenant=%s", tenant_id)
         cached = _JWKS_CACHE.get(tenant_id)
         if cached and cached[0] > time.time():
             return cached[1]
@@ -108,6 +110,8 @@ def _get_jwks_client(tenant_id: str) -> PyJWKClient:
         oidc = client.get(_discovery_url(tenant_id)).raise_for_status().json()
         jwks_uri = oidc["jwks_uri"]
         new_client = PyJWKClient(jwks_uri, cache_keys=True, lifespan=_JWKS_TTL_SECONDS)
+        if len(_JWKS_CACHE) >= _JWKS_CACHE_MAX_TENANTS:
+            _JWKS_CACHE.pop(next(iter(_JWKS_CACHE)), None)
         _JWKS_CACHE[tenant_id] = (now + _JWKS_TTL_SECONDS, new_client)
         return new_client
     finally:

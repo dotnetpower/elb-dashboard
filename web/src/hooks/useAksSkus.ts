@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { aksApi, type AksSku } from "@/api/endpoints";
+import { aksApi, type AksSku, type AksAvailableSkusResponse } from "@/api/endpoints";
 
 export const DEFAULT_AKS_SKU = "Standard_E16s_v5";
 /** Mirrors sibling repo constants.py::ELB_DFLT_AZURE_SYSTEM_VM_SIZE. */
@@ -135,5 +135,68 @@ export function useAksSkus({ enabled = true }: { enabled?: boolean } = {}) {
     defaultSystemSku,
     groupLabels,
     groupOrder,
+  };
+}
+
+/** Per-region availability snapshot for the AKS SKU dropdown.
+ *
+ * The static allow-list (`useAksSkus`) is the universe of SKUs
+ * `elastic-blast` understands. This hook intersects that with the live
+ * Azure listing for `(subscriptionId, region)` so the dropdown can grey
+ * out anything blocked by `NotAvailableForSubscription` / `QuotaId` /
+ * etc. *before* the user wastes a 70 s ARM round trip discovering it
+ * the hard way.
+ *
+ * Returns:
+ * - `availableSet`: `Set<string>` of SKU names usable in the region.
+ *   When `degraded` is true, the set contains every allow-list SKU
+ *   (so the dropdown is permissive, not over-restrictive — better to
+ *   fall through to the canonical ARM error than to hide everything).
+ * - `unavailableMap`: SKU name → reason (e.g. `NotAvailableForSubscription`)
+ *   so the dropdown option can render a tooltip explaining *why* a row
+ *   is disabled.
+ * - `isLoading`/`isFetching`: forward from the underlying query so the
+ *   modal can show a "Checking availability…" hint while the user picks.
+ */
+export function useAksAvailableSkus(args: {
+  subscriptionId: string | undefined;
+  region: string | undefined;
+  /** SKUs to fall back to when no region/subscription is known yet. */
+  allSkus: AksSku[];
+}) {
+  const { subscriptionId, region, allSkus } = args;
+  const enabled = Boolean(subscriptionId && region);
+  const query = useQuery({
+    queryKey: ["aks-available-skus", subscriptionId ?? "", region ?? ""],
+    queryFn: () =>
+      aksApi.availableSkus(subscriptionId ?? "", region ?? ""),
+    enabled,
+    // Region SKU availability changes very rarely (Azure rolls SKUs out
+    // by region quarterly at most). Long stale time keeps the dropdown
+    // snappy as the user opens/closes the modal.
+    staleTime: 600_000,
+  });
+
+  const data: AksAvailableSkusResponse | undefined = query.data;
+  // Default permissive: when we don't have data yet (or the API
+  // degraded), allow every allow-listed SKU.
+  const availableSet = new Set<string>(
+    data && !data.degraded
+      ? data.available
+      : allSkus.map((s) => s.name),
+  );
+  const unavailableMap = new Map<string, string>();
+  if (data) {
+    for (const row of data.unavailable) {
+      unavailableMap.set(row.name, row.reason ?? "Restricted");
+    }
+  }
+  return {
+    availableSet,
+    unavailableMap,
+    degraded: data?.degraded ?? false,
+    isLoading: query.isLoading,
+    isFetching: query.isFetching,
+    refetch: query.refetch,
   };
 }

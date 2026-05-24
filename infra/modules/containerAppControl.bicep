@@ -159,7 +159,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'api'
           image: apiImage
           resources: {
-            cpu: json('0.5')
+            cpu: json('1.0')
             memory: '1.0Gi'
           }
           env: [
@@ -252,7 +252,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             '/app/api/run_celery_workers.py'
           ]
           resources: {
-            cpu: json('0.5')
+            cpu: json('1.0')
             memory: '1.0Gi'
           }
           env: [
@@ -319,6 +319,8 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           args: [
             '--save', ''
             '--appendonly', 'no'
+            '--maxmemory', '384mb'
+            '--maxmemory-policy', 'allkeys-lru'
             '--bind', '127.0.0.1'
             '--protected-mode', 'no'
           ]

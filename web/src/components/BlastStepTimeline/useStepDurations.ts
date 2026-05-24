@@ -60,8 +60,15 @@ export function useStepDurations(args: {
 
   // Tick every second to update active step timer.
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
+    const tick = () => {
+      if (!document.hidden) setTick((t) => t + 1);
+    };
+    const id = setInterval(tick, 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, []);
 
   const getStepDuration = (key: string, state: StepState): string | null => {

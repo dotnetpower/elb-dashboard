@@ -11,6 +11,7 @@ api/tests/test_blast_tasks.py`.
 """
 
 from api.services.blast.task_config import (
+    BlastDatabaseAvailabilityError,
     WarmupNotReadyError,
     build_config_content,
     disable_sharding_options,
@@ -26,10 +27,12 @@ from api.services.blast.task_config import (
     storage_url,
     submit_requires_node_warmup,
     suppress_sharding_for_unsharded_database,
+    validate_blast_database_available,
     validate_storage_blob_reference,
 )
 
 __all__ = [
+    "BlastDatabaseAvailabilityError",
     "WarmupNotReadyError",
     "build_config_content",
     "disable_sharding_options",
@@ -45,5 +48,6 @@ __all__ = [
     "storage_url",
     "submit_requires_node_warmup",
     "suppress_sharding_for_unsharded_database",
+    "validate_blast_database_available",
     "validate_storage_blob_reference",
 ]

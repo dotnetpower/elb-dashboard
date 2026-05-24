@@ -2,15 +2,44 @@ import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 
 import { formatTime } from "./constants";
 
+export interface BuildQueuedBannerProps {
+  elapsed: number;
+}
+
+export function BuildQueuedBanner({ elapsed }: BuildQueuedBannerProps) {
+  return (
+    <div
+      style={{
+        marginTop: "var(--space-3)",
+        padding: "6px 10px",
+        background: "rgba(240,198,116,0.06)",
+        border: "1px solid rgba(240,198,116,0.18)",
+        borderRadius: 6,
+        fontSize: 11,
+        color: "var(--warning)",
+      }}
+    >
+      <Loader2
+        size={11}
+        className="spin"
+        style={{
+          display: "inline",
+          verticalAlign: "middle",
+          marginRight: 4,
+        }}
+      />
+      Build task queued; waiting for the worker to start an ACR run...{" "}
+      {formatTime(elapsed)}
+    </div>
+  );
+}
+
 export interface BuildingBannerProps {
   elapsed: number;
   singleBuilding: string | null;
 }
 
-export function BuildingBanner({
-  elapsed,
-  singleBuilding,
-}: BuildingBannerProps) {
+export function BuildingBanner({ elapsed, singleBuilding }: BuildingBannerProps) {
   return (
     <div
       style={{
@@ -34,7 +63,7 @@ export function BuildingBanner({
       />
       {singleBuilding
         ? `Building ${singleBuilding.split("/").pop()}... ${formatTime(elapsed)}`
-        : `Building via ACR... ${formatTime(elapsed)}`}
+        : `ACR run active... ${formatTime(elapsed)}`}
     </div>
   );
 }
@@ -52,8 +81,8 @@ export function BuildDoneBanner({ elapsed }: BuildDoneBannerProps) {
         color: "var(--success)",
       }}
     >
-      <CheckCircle2 size={11} style={{ verticalAlign: "middle" }} /> All images
-      built in {formatTime(elapsed)}
+      <CheckCircle2 size={11} style={{ verticalAlign: "middle" }} /> All images built in{" "}
+      {formatTime(elapsed)}
     </div>
   );
 }
@@ -106,14 +135,10 @@ export function ServerBuildingBanner({
           marginRight: 4,
         }}
       />
-      Building in ACR... {formatTime(elapsed)}
+      ACR run active... {formatTime(elapsed)}
       {buildingImages && (
         <span style={{ marginLeft: 8, color: "var(--text-faint)" }}>
-          (
-          {buildingImages
-            .map((s) => s.split(":")[0].split("/").pop())
-            .join(", ")}
-          )
+          ({buildingImages.map((s) => s.split(":")[0].split("/").pop()).join(", ")})
         </span>
       )}
     </div>

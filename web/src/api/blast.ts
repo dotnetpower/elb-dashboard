@@ -525,7 +525,15 @@ export interface BlastAggregateStats {
   total_files?: number;
 }
 
-export type BlastExportFormat = "csv" | "tsv" | "json";
+export type BlastExportFormat =
+  | "csv"
+  | "tsv"
+  | "json"
+  | "hit-table-text"
+  | "hit-table-csv"
+  | "json-seqalign"
+  | "xml"
+  | "text";
 
 function filenameFromDisposition(value: string | null): string | null {
   if (!value) return null;

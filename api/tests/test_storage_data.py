@@ -61,6 +61,22 @@ class FakeUsageBlobService:
         return FakeUsageContainerClient(self.containers[container])
 
 
+class FakeResultContainerClient:
+    def __init__(self, blobs: list[SimpleNamespace]) -> None:
+        self.blobs = blobs
+
+    def list_blobs(self, *, name_starts_with: str) -> list[SimpleNamespace]:
+        return [blob for blob in self.blobs if blob.name.startswith(name_starts_with)]
+
+
+class FakeResultBlobService:
+    def __init__(self, blobs: list[SimpleNamespace]) -> None:
+        self.blobs = blobs
+
+    def get_container_client(self, _container: str) -> FakeResultContainerClient:
+        return FakeResultContainerClient(self.blobs)
+
+
 def test_upload_group_fasta_writes_queries_blob(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_service = FakeBlobService()
     monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: fake_service)
@@ -75,6 +91,23 @@ def test_upload_group_fasta_writes_queries_blob(monkeypatch: pytest.MonkeyPatch)
     assert url == "https://elbstg01.blob.core.windows.net/queries/split/job-123/qg1/query.fa"
     blob = fake_service.blobs[("queries", "split/job-123/qg1/query.fa")]
     assert blob.uploads == [(b">q1\nAAAA\n", True)]
+
+
+def test_list_result_blobs_caps_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_service = FakeResultBlobService(
+        [
+            SimpleNamespace(name="job-1/a.out", size=10, last_modified=None),
+            SimpleNamespace(name="job-1/b.out", size=20, last_modified=None),
+            SimpleNamespace(name="job-1/c.out", size=30, last_modified=None),
+        ]
+    )
+    monkeypatch.setattr(storage_data, "_blob_service", lambda *_args: fake_service)
+
+    blobs = storage_data.list_result_blobs(
+        object(), "elbstg01", "results", "job-1/", max_results=2
+    )
+
+    assert [blob["name"] for blob in blobs] == ["job-1/a.out", "job-1/b.out"]
 
 
 def test_container_usage_summaries_caps_large_containers(

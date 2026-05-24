@@ -31,10 +31,6 @@ if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
     log "CLEANUP partial downloads"
     find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
 fi
-if [ -f .download-complete ] && { [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; }; then
-    log "CACHE_INCOMPLETE missing taxdb files"
-    rm -f .download-complete
-fi
 valid_nsq_count=$(find . -maxdepth 1 -name '*.nsq' ! -name '.azDownload-*' | wc -l)
 if [ -f .download-complete ] && [ "$valid_nsq_count" = "0" ]; then
     log "CACHE_INCOMPLETE missing nucleotide volume files"
@@ -62,8 +58,7 @@ if [ ! -f .download-complete ]; then
     exit 1
   fi
     if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
-        log "ERROR taxdb files missing after download"
-        exit 1
+        log "TAXDB_SKIP taxdb files not present in DB prefix"
     fi
     printf '%s' ok > .download-complete
     if [ -n "$EXPECTED_SOURCE_VERSION" ]; then
@@ -91,10 +86,6 @@ EXPECTED_SOURCE_VERSION="${ELB_DB_SOURCE_VERSION:-}"
 if find . -maxdepth 1 -name '.azDownload-*' | grep -q .; then
     echo "CLEANUP partial downloads"
     find . -maxdepth 1 -name '.azDownload-*' -exec rm -rf {} +
-fi
-if [ -f .download-complete ] && { [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; }; then
-    echo "CACHE_INCOMPLETE missing taxdb files"
-    rm -f .download-complete
 fi
 valid_nsq_count=$(find . -maxdepth 1 -name '*.nsq' ! -name '.azDownload-*' | wc -l)
 if [ -f .download-complete ] && [ "$valid_nsq_count" = "0" ]; then
@@ -182,8 +173,7 @@ if [ "$nsq_count" = "0" ]; then
     exit 1
 fi
 if [ ! -s taxdb.btd ] || [ ! -s taxdb.bti ]; then
-    echo "ERROR: taxdb files missing after download"
-    exit 1
+    echo "TAXDB_SKIP taxdb files not present in DB prefix"
 fi
 
 VOLPATHS=""

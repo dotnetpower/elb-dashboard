@@ -43,7 +43,7 @@ def _float_env(name: str, default: float, *, minimum: float) -> float:
     return max(minimum, value)
 
 
-def _int_env(name: str, default: int, *, minimum: int) -> int:
+def _int_env(name: str, default: int, *, minimum: int, maximum: int | None = None) -> int:
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -52,13 +52,17 @@ def _int_env(name: str, default: int, *, minimum: int) -> int:
     except ValueError:
         LOGGER.warning("event_emitter: invalid %s=%r; using %d", name, raw, default)
         return default
-    return max(minimum, value)
+    value = max(minimum, value)
+    if maximum is not None and value > maximum:
+        LOGGER.warning("event_emitter: %s=%d exceeds cap %d; capping", name, value, maximum)
+        return maximum
+    return value
 
 
 _CONNECT_TIMEOUT_SECONDS = _float_env("EVENT_EMIT_CONNECT_TIMEOUT_SECONDS", 0.05, minimum=0.001)
 _SOCKET_TIMEOUT_SECONDS = _float_env("EVENT_EMIT_SOCKET_TIMEOUT_SECONDS", 0.05, minimum=0.001)
 _FAILURE_COOLDOWN_SECONDS = _float_env("EVENT_EMIT_FAILURE_COOLDOWN_SECONDS", 5.0, minimum=0.0)
-_MAX_COUNT = _int_env("EVENT_EMIT_MAX_COUNT", 1000, minimum=1)
+_MAX_COUNT = _int_env("EVENT_EMIT_MAX_COUNT", 1000, minimum=1, maximum=100_000)
 
 _lock = threading.Lock()
 _client: redis.Redis | None = None

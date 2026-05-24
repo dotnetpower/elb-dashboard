@@ -94,14 +94,132 @@ export interface OpenApiDeploymentStatus {
   image_tag: string;
 }
 
+export interface AksAvailableSkusResponse {
+  region: string;
+  /** SKU names that the subscription can actually deploy in this region.
+   *  The dropdown should treat anything missing from this list as
+   *  ineligible regardless of whether it appears in the allow-list. */
+  available: string[];
+  /** Per-SKU reason rows for everything in the allow-list that is
+   *  *not* deployable here. Used by the dropdown to render a tooltip
+   *  with the Azure restriction code (e.g. NotAvailableForSubscription). */
+  unavailable: {
+    name: string;
+    available: false;
+    reason: string | null;
+    location_restricted?: boolean;
+  }[];
+  /** True when the Azure listing failed entirely — the SPA should not
+   *  filter the dropdown in that case (better to allow + hit the live
+   *  BadRequest than to silently hide everything). */
+  degraded: boolean;
+}
+
+export interface AksPreflightRequest {
+  subscription_id: string;
+  resource_group: string;
+  region: string;
+  cluster_name: string;
+  node_sku: string;
+  node_count: number;
+  system_vm_size: string;
+  system_node_count: number;
+}
+
+export interface AksPreflightCheck {
+  /** Stable id — `region` | `skus` | `quota` | `resource_group`. */
+  name: string;
+  /** `ok` | `warn` | `fail`. The modal renders these with green / amber /
+   *  red icons respectively. `fail` blocks submit; `warn` does not. */
+  status: "ok" | "warn" | "fail";
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface AksPreflightResponse {
+  /** False whenever at least one `checks[]` row has `status="fail"`. */
+  ok: boolean;
+  checks: AksPreflightCheck[];
+  /** Azure portal deep link to the cluster's overview blade. Surfaced
+   *  in the banner once provisioning starts and the resource is
+   *  visible. */
+  portal_url: string | null;
+}
+
+export interface AksLifecycleResponse {
+  cluster_name?: string;
+  task_id?: string;
+  status: string;
+}
+
+export interface AksCancelProvisionResponse {
+  task_id: string;
+  job_id: string | null;
+  /** Celery status the task was in when the request arrived. */
+  previous_status: string;
+  /** True when the task was still running (PENDING/RECEIVED/STARTED/RETRY)
+   *  and the revoke signal was actually sent. False on a noop cancel of
+   *  an already-terminal task. */
+  was_running: boolean;
+  cancelled: boolean;
+  /** Approximate wait before the worker honors SIGTERM and the dashboard
+   *  banner clears. Surfaced in the toast so the user understands the
+   *  brief delay. */
+  settle_after_seconds: number;
+}
+
+export interface AksRecentFailedProvision {
+  job_id: string;
+  task_id: string | null;
+  status: string;
+  phase: string | null;
+  /** Raw Azure / Celery error string, truncated to 500 chars by the
+   *  task. Feeds the dashboard's `armErrorClassifier` so the banner
+   *  can render a friendly headline + portal link. */
+  error_code: string | null;
+  cluster_name: string | null;
+  region: string | null;
+  resource_group: string | null;
+  subscription_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface AksRecentFailedProvisionsResponse {
+  jobs: AksRecentFailedProvision[];
+  /** True when the state-repo query failed entirely. The FE should
+   *  fall back to the localStorage source rather than treat an empty
+   *  list as "no failures". */
+  degraded: boolean;
+}
+
 export const aksApi = {
   listSkus: () => api.get<AksSkuListResponse>("/aks/skus"),
+
+  availableSkus: (subscriptionId: string, region: string) =>
+    api.get<AksAvailableSkusResponse>(
+      `/aks/available-skus?subscription_id=${encodeURIComponent(subscriptionId)}&region=${encodeURIComponent(region)}`,
+    ),
+
+  preflight: (req: AksPreflightRequest) =>
+    api.post<AksPreflightResponse>("/aks/preflight", req),
 
   provision: (req: AksProvisionRequest) =>
     api.post<AksProvisionResponse>("/aks/provision", req),
 
+  cancelProvision: (taskId: string) =>
+    api.post<AksCancelProvisionResponse>(
+      `/aks/cancel-provision/${encodeURIComponent(taskId)}`,
+      {},
+    ),
+
+  recentFailedProvisions: (hours: number = 24, limit: number = 10) =>
+    api.get<AksRecentFailedProvisionsResponse>(
+      `/aks/recent-failed-provisions?hours=${hours}&limit=${limit}`,
+    ),
+
   delete: (subscriptionId: string, rg: string, clusterName: string) =>
-    api.post<{ cluster_name: string; status: string }>("/aks/delete", {
+    api.post<AksLifecycleResponse>("/aks/delete", {
       subscription_id: subscriptionId,
       resource_group: rg,
       cluster_name: clusterName,
@@ -113,7 +231,7 @@ export const aksApi = {
     clusterName: string,
     autoWarmup?: Partial<AutoWarmupPreference>,
   ) =>
-    api.post<{ cluster_name: string; status: string }>("/aks/start", {
+    api.post<AksLifecycleResponse>("/aks/start", {
       subscription_id: subscriptionId,
       resource_group: rg,
       cluster_name: clusterName,
@@ -121,7 +239,7 @@ export const aksApi = {
     }),
 
   stop: (subscriptionId: string, rg: string, clusterName: string) =>
-    api.post<{ cluster_name: string; status: string }>("/aks/stop", {
+    api.post<AksLifecycleResponse>("/aks/stop", {
       subscription_id: subscriptionId,
       resource_group: rg,
       cluster_name: clusterName,

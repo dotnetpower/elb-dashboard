@@ -334,6 +334,34 @@ def test_external_blast_headers_include_api_and_internal_tokens(monkeypatch) -> 
     }
 
 
+def test_external_blast_list_uses_short_timeout(monkeypatch) -> None:
+    from api.services import external_blast
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _path: str) -> object:
+            raise httpx.ReadTimeout("slow list endpoint")
+
+    monkeypatch.setattr(external_blast.httpx, "Client", FakeClient)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.list_jobs(base_url="http://openapi")
+
+    assert captured["timeout"] == external_blast._LIST_TIMEOUT_SECONDS
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "openapi_unreachable"
+
+
 def test_openapi_runtime_round_trip() -> None:
     from api.services.openapi import runtime as openapi_runtime
 

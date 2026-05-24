@@ -16,7 +16,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
-from api.services.aks_skus import DEFAULT_SKU, SKU_BY_NAME
+from api.services.aks_skus import DEFAULT_SKU, SKU_BY_NAME, normalize_sku_name
 from api.services.db.sharding import (
     PRESET_SHARD_SETS,
     SAFE_SHARD_FRACTION_OF_NODE_RAM,
@@ -116,6 +116,7 @@ def compute_warmup_feasibility(
     if num_nodes < 0:
         raise ValueError(f"num_nodes must be non-negative, got {num_nodes}")
 
+    machine_type = normalize_sku_name(machine_type)
     sku = SKU_BY_NAME.get(machine_type)
     sku_known = sku is not None
     node_ram_gib_raw = sku.memory_gib if sku is not None else _FALLBACK_NODE_RAM_GIB
