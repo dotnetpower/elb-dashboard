@@ -15,7 +15,7 @@ Validation: `uv run pytest -q api/tests/test_upgrade_aca_template.py`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -23,9 +23,17 @@ from api.services.upgrade import aca_template
 
 
 @dataclass
+class _EnvVar:
+    name: str
+    value: str
+    secret_ref: str | None = None
+
+
+@dataclass
 class _Container:
     name: str
     image: str
+    env: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -117,10 +125,18 @@ def test_read_current_images_extracts_per_role() -> None:
 
 
 def test_read_current_images_raises_when_required_container_missing() -> None:
-    client = _FakeClient(_AppResource(properties=_Properties(template=_Template(containers=[
-        _Container("api", "x:1"),
-        _Container("frontend", "y:1"),
-    ]))))
+    client = _FakeClient(
+        _AppResource(
+            properties=_Properties(
+                template=_Template(
+                    containers=[
+                        _Container("api", "x:1"),
+                        _Container("frontend", "y:1"),
+                    ]
+                )
+            )
+        )
+    )
     with pytest.raises(aca_template.TemplateError):
         aca_template.read_current_images(client=client)
 
@@ -165,3 +181,42 @@ def test_apply_images_writes_explicit_refs() -> None:
         if container.name in {"api", "worker", "beat"}:
             assert container.image == "myacr.azurecr.io/elb-api:v0.2.1"
     assert app.properties.template.revision_suffix == "rb-20260522"
+
+
+def test_apply_app_insights_connection_string_updates_server_sidecars_only() -> None:
+    app = _make_app("v0.3.0")
+    app.properties.template.containers[0].env = [
+        _EnvVar(
+            name=aca_template.APPLICATIONINSIGHTS_CONNECTION_STRING_ENV,
+            value="old",
+            secret_ref="old-secret",
+        )
+    ]
+    app.properties.template.containers[3].env = [
+        _EnvVar(name=aca_template.APPLICATIONINSIGHTS_CONNECTION_STRING_ENV, value="frontend-old")
+    ]
+    client = _FakeClient(app)
+
+    poller = aca_template.apply_app_insights_connection_string(
+        connection_string="InstrumentationKey=abc;IngestionEndpoint=https://example.local/",
+        revision_suffix="telemetry-test",
+        client=client,
+    )
+
+    assert poller == "poller-handle"
+    assert len(client.update_calls) == 1
+    for container in app.properties.template.containers:
+        ai_entries = [
+            entry
+            for entry in container.env
+            if getattr(entry, "name", "") == aca_template.APPLICATIONINSIGHTS_CONNECTION_STRING_ENV
+        ]
+        if container.name in {"api", "worker", "beat"}:
+            assert len(ai_entries) == 1
+            assert ai_entries[0].value.startswith("InstrumentationKey=abc")
+            assert getattr(ai_entries[0], "secret_ref", None) is None
+        elif container.name == "frontend":
+            assert ai_entries[0].value == "frontend-old"
+        elif container.name == "redis":
+            assert ai_entries == []
+    assert app.properties.template.revision_suffix == "telemetry-test"

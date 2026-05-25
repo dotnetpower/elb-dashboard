@@ -228,6 +228,7 @@ def test_submit_task_helpers_are_reexported_on_blast_package() -> None:
         "_stream_submit_command",
         "_build_config_content",
         "_ensure_terminal_azure_cli_login",
+        "_ensure_terminal_kubeconfig_context",
         "_ensure_node_warmup_ready_for_submit",
         "_retry_or_fail",
         "_result_error",
@@ -243,6 +244,7 @@ def test_submit_task_helpers_are_reexported_on_blast_package() -> None:
         "LIVE_OUTPUT_SNIPPET_CHARS",
         "STDOUT_SNIPPET_CHARS",
         "TerminalAzureLoginError",
+        "TerminalKubeconfigError",
     }
     missing = sorted(name for name in required if not hasattr(blast, name))
     assert not missing, f"submit_task expects these on api.tasks.blast: {missing}"
@@ -1263,6 +1265,67 @@ def test_ensure_terminal_azure_cli_login_raises_when_identity_login_fails(
 
     with pytest.raises(blast.TerminalAzureLoginError, match="identity unavailable"):
         blast._ensure_terminal_azure_cli_login(fake_terminal_run)
+
+
+def test_ensure_terminal_kubeconfig_context_runs_get_credentials() -> None:
+    calls: list[list[str]] = []
+
+    def fake_terminal_run(*, argv: list[str], timeout_seconds: int, **_kwargs: object):
+        calls.append(argv)
+        assert timeout_seconds == 90
+        return {"exit_code": 0, "stdout": "Merged \"cluster\" as current context.", "stderr": ""}
+
+    blast._ensure_terminal_kubeconfig_context(
+        fake_terminal_run,
+        subscription_id="sub-1",
+        resource_group="rg-1",
+        cluster_name="aks-1",
+    )
+
+    assert calls == [
+        [
+            "az",
+            "aks",
+            "get-credentials",
+            "--subscription",
+            "sub-1",
+            "--resource-group",
+            "rg-1",
+            "--name",
+            "aks-1",
+            "--overwrite-existing",
+            "--only-show-errors",
+        ]
+    ]
+
+
+def test_ensure_terminal_kubeconfig_context_raises_on_failure() -> None:
+    def fake_terminal_run(**_kwargs: object):
+        return {
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "ResourceNotFound: aks-deleted is gone",
+        }
+
+    with pytest.raises(blast.TerminalKubeconfigError, match="aks-deleted is gone"):
+        blast._ensure_terminal_kubeconfig_context(
+            fake_terminal_run,
+            subscription_id="sub-1",
+            resource_group="rg-1",
+            cluster_name="aks-deleted",
+        )
+
+
+def test_ensure_terminal_kubeconfig_context_skips_when_identifiers_missing() -> None:
+    def fake_terminal_run(**_kwargs: object):  # pragma: no cover - must not be called
+        raise AssertionError("terminal_run must not run when identifiers are blank")
+
+    blast._ensure_terminal_kubeconfig_context(
+        fake_terminal_run,
+        subscription_id="",
+        resource_group="rg-1",
+        cluster_name="aks-1",
+    )
 
 
 def test_run_split_parent_submission_dispatches_children_without_raw_fasta(

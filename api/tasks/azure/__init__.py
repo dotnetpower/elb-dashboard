@@ -31,7 +31,10 @@ from api.tasks.azure.aks_observability import (
     disable_aks_container_insights,
     enable_aks_container_insights,
 )
-from api.tasks.azure.app_insights import provision_app_insights
+from api.tasks.azure.app_insights import (
+    apply_app_insights_to_deployment,
+    provision_app_insights,
+)
 from api.tasks.azure.cluster_params import build_cluster_params as _build_cluster_params
 from api.tasks.azure.diagnostics import diag_noop
 from api.tasks.azure.helpers import (
@@ -64,6 +67,7 @@ __all__ = (
     "_update_state",
     "acr_client",
     "aks_client",
+    "apply_app_insights_to_deployment",
     "assign_aks_roles",
     "delete_aks",
     "diag_noop",

@@ -19,10 +19,10 @@ import {
   type ReactNode,
 } from "react";
 
-import { isFeatureEnabled } from "@/config/runtime";
+import { isFeatureEnabled, type FeatureFlag } from "@/config/runtime";
 
 export type ThemeMode = "light" | "dark" | "system";
-export type PreviewFeature = "customDb" | "labTools";
+export type PreviewFeature = "customDb" | "labTools" | "liveWall";
 
 export interface Preferences {
   __v: 1;
@@ -42,6 +42,8 @@ export interface Preferences {
   previewCustomDbEnabled: boolean;
   /** Preview opt-in: show Lab Tools surfaces when the runtime flag allows it. */
   previewLabToolsEnabled: boolean;
+  /** Preview opt-in: show the Live Wall monitor route. */
+  previewLiveWallEnabled: boolean;
 }
 
 const STORAGE_KEY = "elb-prefs";
@@ -55,6 +57,18 @@ const DEFAULT_PREFERENCES: Preferences = {
   appInsightsWorkspaceResourceId: "",
   previewCustomDbEnabled: false,
   previewLabToolsEnabled: false,
+  previewLiveWallEnabled: false,
+};
+
+const PREVIEW_PREF_KEYS = {
+  customDb: "previewCustomDbEnabled",
+  labTools: "previewLabToolsEnabled",
+  liveWall: "previewLiveWallEnabled",
+} satisfies Record<PreviewFeature, keyof Preferences>;
+
+const PREVIEW_RUNTIME_FLAGS: Partial<Record<PreviewFeature, FeatureFlag>> = {
+  customDb: "customDb",
+  labTools: "labTools",
 };
 
 function safeReadJson<T>(key: string): T | null {
@@ -145,10 +159,9 @@ export function usePreferences(): PreferencesContextValue {
 
 export function usePreviewFeatureEnabled(feature: PreviewFeature): boolean {
   const { prefs } = usePreferences();
-  if (!isFeatureEnabled(feature)) return false;
-  return feature === "customDb"
-    ? prefs.previewCustomDbEnabled
-    : prefs.previewLabToolsEnabled;
+  const runtimeFlag = PREVIEW_RUNTIME_FLAGS[feature];
+  if (runtimeFlag && !isFeatureEnabled(runtimeFlag)) return false;
+  return Boolean(prefs[PREVIEW_PREF_KEYS[feature]]);
 }
 
 export const PREFERENCES_DEFAULTS = DEFAULT_PREFERENCES;

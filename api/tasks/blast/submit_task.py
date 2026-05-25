@@ -433,6 +433,15 @@ def submit(
             # Azure CLI login was warmed up alongside the warmup poll; retry
             # here only if the cached identity expired between then and now.
             _blast._ensure_terminal_azure_cli_login(terminal_run)
+            # Refresh the terminal sidecar's kubeconfig for the target cluster.
+            # A stale default context (e.g. previously deleted AKS) silently
+            # makes elastic-blast exit 0 while kubectl fails NXDOMAIN.
+            _blast._ensure_terminal_kubeconfig_context(
+                terminal_run,
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+            )
             result = _blast._stream_submit_command(
                 job_id=job_id,
                 task=self,
@@ -456,6 +465,14 @@ def submit(
             phase="terminal_az_login_failed",
             exc=exc,
             error_code="terminal_az_login_failed",
+        )
+    except _blast.TerminalKubeconfigError as exc:
+        return _blast._retry_or_fail(
+            self,
+            job_id=job_id,
+            phase="terminal_kubeconfig_failed",
+            exc=exc,
+            error_code="terminal_kubeconfig_failed",
         )
 
     submit_log_events = result.pop("_log_events", [])

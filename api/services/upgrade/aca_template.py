@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from api.services import get_credential
@@ -33,6 +34,7 @@ CONTAINER_APP_NAME_ENV = "CONTAINER_APP_NAME"
 AZURE_RESOURCE_GROUP_ENV = "AZURE_RESOURCE_GROUP"
 AZURE_SUBSCRIPTION_ID_ENV = "AZURE_SUBSCRIPTION_ID"
 PLATFORM_ACR_NAME_ENV = "PLATFORM_ACR_NAME"
+APPLICATIONINSIGHTS_CONNECTION_STRING_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
 
 # Which container names the upgrade flow rewrites. Order matches the
 # bundled `ca-elb-dashboard` template (`api`, `worker`, `beat` all run
@@ -44,6 +46,7 @@ _SIDECAR_TO_IMAGE: dict[str, str] = {
     "frontend": "elb-frontend",
     "terminal": "elb-terminal",
 }
+_SERVER_TELEMETRY_CONTAINERS = {"api", "worker", "beat"}
 
 
 class TemplateError(RuntimeError):
@@ -162,6 +165,36 @@ def apply_images(
         raise TemplateError(f"begin_update failed: {exc}") from exc
 
 
+def apply_app_insights_connection_string(
+    *,
+    connection_string: str,
+    revision_suffix: str | None = None,
+    client: Any | None = None,
+) -> Any:
+    """Patch api / worker / beat with the App Insights connection string."""
+    value = connection_string.strip()
+    if not value:
+        raise TemplateError("application insights connection string is empty")
+
+    rg = _env(AZURE_RESOURCE_GROUP_ENV)
+    name = _env(CONTAINER_APP_NAME_ENV)
+    cli = client or _client()
+    app = read_app_template(client=cli)
+    changed = _apply_env_var_to_containers(
+        app,
+        container_names=_SERVER_TELEMETRY_CONTAINERS,
+        env_name=APPLICATIONINSIGHTS_CONNECTION_STRING_ENV,
+        env_value=value,
+    )
+    if changed != len(_SERVER_TELEMETRY_CONTAINERS):
+        raise TemplateError("container app template is missing api/worker/beat containers")
+    _set_revision_suffix(app, revision_suffix or _telemetry_revision_suffix())
+    try:
+        return cli.container_apps.begin_update(rg, name, app)
+    except Exception as exc:
+        raise TemplateError(f"begin_update failed: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # Template inspection / mutation helpers (kept private so tests can drive
 # them through the public API).
@@ -242,6 +275,75 @@ def _apply_explicit_images_to_template(app: Any, images: SidecarImages) -> None:
         role = _role_for(cname)
         if role in role_to_image and cname in _SIDECAR_TO_IMAGE:
             container.image = role_to_image[role]
+
+
+def _apply_env_var_to_containers(
+    app: Any,
+    *,
+    container_names: set[str],
+    env_name: str,
+    env_value: str,
+) -> int:
+    changed = 0
+    for container in _template_containers(app):
+        cname = getattr(container, "name", "") or ""
+        if cname not in container_names:
+            continue
+        env = _ensure_env_list(container)
+        entry = _find_env_entry(env, env_name)
+        if entry is None:
+            env.append(_new_env_entry(env, env_name, env_value))
+        else:
+            _set_env_entry_value(entry, env_value)
+        changed += 1
+    return changed
+
+
+def _ensure_env_list(container: Any) -> list[Any]:
+    env = getattr(container, "env", None)
+    if env is None:
+        env = []
+        container.env = env
+    return env
+
+
+def _find_env_entry(env: list[Any], name: str) -> Any | None:
+    for entry in env:
+        entry_name = entry.get("name") if isinstance(entry, dict) else getattr(entry, "name", None)
+        if entry_name == name:
+            return entry
+    return None
+
+
+def _new_env_entry(env: list[Any], name: str, value: str) -> Any:
+    for entry in env:
+        if isinstance(entry, dict):
+            continue
+        try:
+            return entry.__class__(name=name, value=value)
+        except TypeError:
+            break
+    try:
+        from azure.mgmt.appcontainers.models import EnvironmentVar
+
+        return EnvironmentVar(name=name, value=value)
+    except Exception:
+        return {"name": name, "value": value}
+
+
+def _set_env_entry_value(entry: Any, value: str) -> None:
+    if isinstance(entry, dict):
+        entry["value"] = value
+        entry.pop("secretRef", None)
+        entry.pop("secret_ref", None)
+        return
+    entry.value = value
+    if hasattr(entry, "secret_ref"):
+        entry.secret_ref = None
+
+
+def _telemetry_revision_suffix() -> str:
+    return "telemetry-" + datetime.now(UTC).strftime("%Y%m%d%H%M%S")
 
 
 def _set_revision_suffix(app: Any, suffix: str) -> None:

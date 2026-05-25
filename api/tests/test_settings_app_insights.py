@@ -116,9 +116,7 @@ def test_provision_enqueues_celery_task_and_returns_id(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls, fake_delay = make_delay_recorder("ai-task-1")
-    monkeypatch.setattr(
-        "api.tasks.azure.provision_app_insights.delay", fake_delay, raising=True
-    )
+    monkeypatch.setattr("api.tasks.azure.provision_app_insights.delay", fake_delay, raising=True)
     r = client.post(
         "/api/settings/app-insights/provision",
         json={
@@ -137,6 +135,34 @@ def test_provision_enqueues_celery_task_and_returns_id(
     assert calls[0]["workspace_name"] == "log-elb"
 
 
+def test_apply_enqueues_celery_task_and_returns_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, fake_delay = make_delay_recorder("ai-apply-1")
+    monkeypatch.setattr(
+        "api.tasks.azure.apply_app_insights_to_deployment.delay", fake_delay, raising=True
+    )
+    r = client.post(
+        "/api/settings/app-insights/apply",
+        json={
+            "connection_string": "InstrumentationKey=abc;IngestionEndpoint=https://example.local/",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["task_id"] == "ai-apply-1"
+    assert body["status"] == "queued"
+    assert calls and calls[0]["connection_string"].startswith("InstrumentationKey=abc")
+
+
+def test_apply_rejects_invalid_connection_string(client: TestClient) -> None:
+    r = client.post(
+        "/api/settings/app-insights/apply",
+        json={"connection_string": "not-a-connection-string"},
+    )
+    assert r.status_code == 400
+
+
 def test_routes_reject_anonymous_when_bypass_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
     monkeypatch.setenv("AZURE_TENANT_ID", "common")
@@ -148,6 +174,7 @@ def test_routes_reject_anonymous_when_bypass_off(monkeypatch: pytest.MonkeyPatch
         ("GET", "/api/settings/app-insights"),
         ("POST", "/api/settings/app-insights/lookup"),
         ("POST", "/api/settings/app-insights/provision"),
+        ("POST", "/api/settings/app-insights/apply"),
     ):
         resp = bare_client.request(method, path, json={})
         assert resp.status_code == 401, f"{method} {path} returned {resp.status_code}"

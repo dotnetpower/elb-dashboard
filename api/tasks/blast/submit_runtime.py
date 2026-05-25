@@ -6,7 +6,8 @@ a completed phase is safe to surface to the UI.
 Edit boundaries: All Celery state writes go through ``_blast._update_state`` / ``_blast._progress``
 so test monkeypatches on the package propagate. Symbols are re-exported from ``api.tasks.blast``
 so tests can ``monkeypatch.setattr(blast, "_has_parseable_result_artifact", …)``.
-Key entry points: ``TerminalAzureLoginError``, ``_ensure_terminal_azure_cli_login``,
+Key entry points: ``TerminalAzureLoginError``, ``TerminalKubeconfigError``,
+``_ensure_terminal_azure_cli_login``, ``_ensure_terminal_kubeconfig_context``,
 ``_stream_submit_command``, ``_refresh_submit_terminal_status``, ``_has_parseable_result_artifact``,
 ``_discover_elastic_blast_job_id``, ``_gate_completed_submit_on_results``,
 ``_exception_detail_snippet``.
@@ -47,6 +48,10 @@ class TerminalAzureLoginError(RuntimeError):
     """Raised when the terminal sidecar cannot acquire an Azure CLI identity."""
 
 
+class TerminalKubeconfigError(RuntimeError):
+    """Raised when the terminal sidecar cannot refresh its kubeconfig context."""
+
+
 def _exception_detail_snippet(exc: Exception, *, limit: int = ERROR_SNIPPET_CHARS) -> str:
     detail = getattr(exc, "detail", None)
     if detail not in (None, ""):
@@ -80,6 +85,47 @@ def _ensure_terminal_azure_cli_login(terminal_run: Any) -> None:
     if int(login.get("exit_code", 1) or 0) != 0:
         error = _result_error(login, None)
         raise TerminalAzureLoginError(error)
+
+
+def _ensure_terminal_kubeconfig_context(
+    terminal_run: Any,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> None:
+    """Refresh the terminal sidecar's kubeconfig for the target AKS cluster.
+
+    elastic-blast invokes ``kubectl`` against the default context in
+    ``~/.kube/config``; a stale context from a previously deleted cluster
+    yields ``Unable to connect to the server`` mid-submit while elastic-blast
+    still exits 0, leaving the dashboard with a phantom ``submitted`` row.
+    ``~/.kube/config`` is shared per terminal sidecar; the per-(cluster,
+    namespace) submit lock prevents same-cluster races, but unrelated
+    cross-cluster submits could interleave. Acceptable trade-off pending a
+    per-job ``--kubeconfig`` plumbing.
+    """
+    if not (subscription_id and resource_group and cluster_name):
+        return
+    result = terminal_run(
+        argv=[
+            "az",
+            "aks",
+            "get-credentials",
+            "--subscription",
+            subscription_id,
+            "--resource-group",
+            resource_group,
+            "--name",
+            cluster_name,
+            "--overwrite-existing",
+            "--only-show-errors",
+        ],
+        timeout_seconds=90,
+    )
+    if int(result.get("exit_code", 1) or 0) != 0:
+        error = _result_error(result, None)
+        raise TerminalKubeconfigError(error)
 
 
 def _stream_submit_command(
@@ -262,8 +308,10 @@ __all__ = (
     "STDOUT_SNIPPET_CHARS",
     "SUBMIT_LIVE_STATE_UPDATE_INTERVAL_SECONDS",
     "TerminalAzureLoginError",
+    "TerminalKubeconfigError",
     "_discover_elastic_blast_job_id",
     "_ensure_terminal_azure_cli_login",
+    "_ensure_terminal_kubeconfig_context",
     "_exception_detail_snippet",
     "_gate_completed_submit_on_results",
     "_has_parseable_result_artifact",

@@ -1,12 +1,13 @@
 """Application Insights settings routes.
 
 Responsibility: Read the deployment-injected connection string, look up
-existing Application Insights components, and enqueue a Celery task to create
-a new component (with a backing Log Analytics workspace).
+existing Application Insights components, and enqueue Celery tasks to create
+a new component or apply an existing connection string to server sidecars.
 Edit boundaries: HTTP shaping only. SDK work lives in
 `api.services.app_insights_provisioning`. Long-running provision runs through
-`api.tasks.azure.provision_app_insights`.
-Key entry points: `get_status`, `lookup`, `provision`.
+`api.tasks.azure.provision_app_insights` and
+`api.tasks.azure.apply_app_insights_to_deployment`.
+Key entry points: `get_status`, `lookup`, `provision`, `apply_to_deployment`.
 Risky contracts: Every route enforces `require_caller`. The deployment
 connection string is returned verbatim because it is a write-only telemetry
 credential (Microsoft pattern); routes never log it.
@@ -39,6 +40,17 @@ _RE_SUB = re.compile(r"^[0-9a-fA-F-]{36}$")
 _RE_RG = re.compile(r"^[-\w._()]{1,90}$")
 _RE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._\-]{1,254}$")
 _RE_REGION = re.compile(r"^[a-z][a-z0-9]{2,29}$")
+
+
+def _require_connection_string(value: Any) -> str:
+    if not isinstance(value, str):
+        raise HTTPException(400, "invalid connection_string")
+    connection_string = value.strip()
+    if not connection_string or len(connection_string) > 4096:
+        raise HTTPException(400, "invalid connection_string")
+    if "InstrumentationKey=" not in connection_string:
+        raise HTTPException(400, "invalid connection_string")
+    return connection_string
 
 
 def _require(value: Any, pattern: re.Pattern[str], label: str) -> str:
@@ -75,9 +87,7 @@ def lookup(
     subscription_id = _require(body.get("subscription_id"), _RE_SUB, "subscription_id")
     resource_group_raw = body.get("resource_group")
     resource_group = (
-        _require(resource_group_raw, _RE_RG, "resource_group")
-        if resource_group_raw
-        else ""
+        _require(resource_group_raw, _RE_RG, "resource_group") if resource_group_raw else ""
     )
     component_name = _require(body.get("component_name"), _RE_NAME, "component_name")
 
@@ -133,9 +143,7 @@ def provision(
     workspace_name = _require(body.get("workspace_name"), _RE_NAME, "workspace_name")
     workspace_rg_raw = body.get("workspace_resource_group")
     workspace_rg = (
-        _require(workspace_rg_raw, _RE_RG, "workspace_resource_group")
-        if workspace_rg_raw
-        else None
+        _require(workspace_rg_raw, _RE_RG, "workspace_resource_group") if workspace_rg_raw else None
     )
 
     from api.tasks.azure import provision_app_insights
@@ -155,6 +163,31 @@ def provision(
         subscription_id,
         resource_group,
         component_name,
+    )
+    return {
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/tasks/{result.id}",
+        "status": "queued",
+    }
+
+
+@router.post("/apply")
+def apply_to_deployment(
+    body: dict[str, Any] = Body(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Enqueue a task that applies an App Insights string to server sidecars."""
+    connection_string = _require_connection_string(body.get("connection_string"))
+
+    from api.tasks.azure import apply_app_insights_to_deployment
+
+    result = _safe_delay(
+        apply_app_insights_to_deployment,
+        connection_string=connection_string,
+    )
+    LOGGER.info(
+        "app_insights deployment apply enqueued by oid=%s",
+        caller.object_id,
     )
     return {
         "task_id": result.id,

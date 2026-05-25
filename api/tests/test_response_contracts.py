@@ -66,6 +66,14 @@ def test_preflight_returns_admission_decision(
             {"name": "elb-cluster", "power_state": "Running", "node_count": 3}
         ],
     )
+    monkeypatch.setattr(
+        "api.services.blast_task_config.validate_blast_database_available",
+        lambda *, storage_account, database: {
+            "container": "blast-db",
+            "blob_prefix": f"{database}/{database}",
+            "marker_blob": f"{database}/{database}.nsq",
+        },
+    )
     monkeypatch.setattr(celery_app, "connection", lambda: FakeConnection())
 
     response = client.post(

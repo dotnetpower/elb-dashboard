@@ -85,6 +85,7 @@ function TerminalLoadUnavailable({ error }: { error: unknown }) {
 function AppRoutes() {
   const customDbEnabled = usePreviewFeatureEnabled("customDb");
   const labToolsEnabled = usePreviewFeatureEnabled("labTools");
+  const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
   const terminalEnabled = isFeatureEnabled("terminal");
 
   return (
@@ -95,9 +96,9 @@ function AppRoutes() {
           <Route
             path="/monitor/live-wall"
             element={
-              <Suspense fallback={<RouteLoadingSkeleton />}>
+              <OptionalFeatureRoute enabled={liveWallEnabled}>
                 <LiveWall />
-              </Suspense>
+              </OptionalFeatureRoute>
             }
           />
           <Route

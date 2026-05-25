@@ -4,6 +4,7 @@
  * Used by the SettingsPanel and `useAppInsights` to:
  *   - read the deployment-injected App Insights connection string,
  *   - look up or provision an Application Insights component,
+ *   - apply a connection string to the server sidecars,
  *   - read AKS Container Insights state and enable it.
  *
  * Provision/enable endpoints return Celery task ids. Poll status via the
@@ -41,6 +42,10 @@ export interface AppInsightsProvisionRequest {
   region: string;
   workspace_name: string;
   workspace_resource_group?: string;
+}
+
+export interface AppInsightsApplyRequest {
+  connection_string: string;
 }
 
 export interface AppInsightsTaskQueuedResponse {
@@ -92,6 +97,12 @@ export const settingsApi = {
   provisionAppInsights: (body: AppInsightsProvisionRequest) =>
     api.post<AppInsightsTaskQueuedResponse>(
       "/settings/app-insights/provision",
+      body,
+    ),
+
+  applyAppInsightsToDeployment: (body: AppInsightsApplyRequest) =>
+    api.post<AppInsightsTaskQueuedResponse>(
+      "/settings/app-insights/apply",
       body,
     ),
 

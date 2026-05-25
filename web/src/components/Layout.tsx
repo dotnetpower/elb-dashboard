@@ -191,6 +191,7 @@ export function Layout({ children }: PropsWithChildren) {
   const cluster = useClusterReadiness();
   const customDbEnabled = usePreviewFeatureEnabled("customDb");
   const labToolsEnabled = usePreviewFeatureEnabled("labTools");
+  const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
   const terminalEnabled = isFeatureEnabled("terminal");
   const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
   const newSearchBlocked = !cluster.hasRunningCluster;
@@ -252,9 +253,11 @@ export function Layout({ children }: PropsWithChildren) {
           <NavLink to="/" end className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <Activity size={14} strokeWidth={1.5} /> Dashboard
           </NavLink>
-          <NavLink to="/monitor/live-wall" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
-            <Activity size={14} strokeWidth={1.5} /> Live Wall
-          </NavLink>
+          {liveWallEnabled && (
+            <NavLink to="/monitor/live-wall" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+              <Activity size={14} strokeWidth={1.5} /> Live Wall
+            </NavLink>
+          )}
           <span className="layout__nav-sep" />
           <span className="layout__nav-group-label">BLAST</span>
           <NavLink

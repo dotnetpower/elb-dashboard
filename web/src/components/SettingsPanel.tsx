@@ -104,6 +104,7 @@ export function SettingsPanel({ open, onClose }: Props) {
   const [active, setActive] = useState<SectionId>("appearance");
   const { reset } = usePreferences();
   const config = useMemo<ResourceConfig | null>(() => (open ? loadSavedConfig() : null), [open]);
+  const showFooterActions = active !== "preview";
 
   useEffect(() => {
     if (!open) return;
@@ -216,22 +217,24 @@ export function SettingsPanel({ open, onClose }: Props) {
           <span style={{ color: "var(--text-faint)", fontSize: 11 }}>
             Stored locally · <code>elb-prefs</code>
           </span>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              className="glass-button"
-              onClick={() => {
-                if (window.confirm("Reset theme, preview features, telemetry, and connection string preferences?")) {
-                  reset();
-                }
-              }}
-              style={{ fontSize: 12 }}
-            >
-              Reset
-            </button>
-            <button className="glass-button glass-button--primary" onClick={onClose} style={{ fontSize: 12 }}>
-              Done
-            </button>
-          </div>
+          {showFooterActions && (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="glass-button"
+                onClick={() => {
+                  if (window.confirm("Reset theme, preview features, telemetry, and connection string preferences?")) {
+                    reset();
+                  }
+                }}
+                style={{ fontSize: 12 }}
+              >
+                Reset
+              </button>
+              <button className="glass-button glass-button--primary" onClick={onClose} style={{ fontSize: 12 }}>
+                Done
+              </button>
+            </div>
+          )}
         </footer>
       </aside>
     </>
@@ -291,6 +294,17 @@ function PreviewSection() {
             />
           }
         />
+        <Row
+          label="Live Wall"
+          hint="Show the Live Wall monitor route and navigation entry. Disabled by default."
+          control={
+            <Toggle
+              checked={prefs.previewLiveWallEnabled}
+              onChange={(value) => setPref("previewLiveWallEnabled", value)}
+              label="Live Wall preview"
+            />
+          }
+        />
       </Group>
       <StatusLine kind="info">
         Preview selections are stored in this browser only and take effect immediately.
@@ -306,7 +320,9 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
   const [testMessage, setTestMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [task, setTask] = useState<TaskState | null>(null);
+  const [applyTask, setApplyTask] = useState<TaskState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [form, setForm] = useState<ProvisionFormState>(() => defaultProvisionForm(config));
 
   useEffect(() => {
@@ -324,6 +340,7 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
       connection_string?: string;
       component?: { workspace_resource_id?: string };
       workspace?: { id?: string };
+      deployment_apply?: { status?: string; reason?: string };
     } | null;
     if (result?.connection_string) {
       setPref("appInsightsConnectionString", result.connection_string);
@@ -334,9 +351,47 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
       setPref("appInsightsWorkspaceResourceId", workspaceId);
     }
     if (result?.connection_string || workspaceId) {
-      setTask((prev) => prev && { ...prev, message: "App Insights and workspace applied." });
+      const serverApplied = result?.deployment_apply?.status === "applied";
+      setTask((prev) => prev && { ...prev, message: serverApplied ? "App Insights, workspace, and server telemetry applied." : "App Insights and workspace applied." });
     }
   });
+
+  usePollTask(applyTask, setApplyTask, (status) => {
+    if (status.status !== "SUCCESS") return;
+    const result = status.result as { deployment_apply?: { status?: string; reason?: string; revision?: string | null } } | null;
+    const applyStatus = result?.deployment_apply?.status;
+    const revision = result?.deployment_apply?.revision;
+    setApplyTask((prev) => prev && {
+      ...prev,
+      message: applyStatus === "applied"
+        ? `Server telemetry applied${revision ? ` (${revision})` : ""}.`
+        : `Server telemetry not applied (${result?.deployment_apply?.reason ?? "skipped"}).`,
+    });
+  });
+
+  const applyToDeployment = useCallback(async (connectionString?: string) => {
+    const value = (connectionString ?? prefs.appInsightsConnectionString).trim();
+    if (!value) {
+      setApplyError("Enter an Application Insights connection string first.");
+      return;
+    }
+    setApplyError(null);
+    setApplyTask(null);
+    try {
+      const response = await settingsApi.applyAppInsightsToDeployment({ connection_string: value });
+      setApplyTask({ taskId: response.task_id, status: "PENDING", message: "Applying server telemetry" });
+    } catch (err) {
+      setApplyError(formatApiError(err, "arm"));
+    }
+  }, [prefs.appInsightsConnectionString]);
+
+  const handleTelemetryToggle = useCallback((enabled: boolean) => {
+    setPref("telemetryEnabled", enabled);
+    const userConnectionString = prefs.appInsightsConnectionString.trim();
+    if (enabled && userConnectionString) {
+      void applyToDeployment(userConnectionString);
+    }
+  }, [applyToDeployment, prefs.appInsightsConnectionString, setPref]);
 
   const sendTest = useCallback(() => {
     if (!ai.active) {
@@ -366,9 +421,9 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
     <Section heading="Telemetry">
       <Group>
         <Row
-          label="Send browser telemetry to App Insights"
-          hint="Page views and unhandled browser errors. No auth tokens or request bodies are sent."
-          control={<Toggle checked={prefs.telemetryEnabled} onChange={(v) => setPref("telemetryEnabled", v)} label="Browser telemetry" />}
+          label="Send application telemetry to App Insights"
+          hint="Browser telemetry starts immediately. When a user connection string is present, enabling also applies it to api, worker, and beat."
+          control={<Toggle checked={prefs.telemetryEnabled} onChange={handleTelemetryToggle} label="Application telemetry" />}
         />
         <Row
           label="Effective source"
@@ -396,7 +451,12 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
         </Field>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", paddingBottom: 14 }}>
           <button className="glass-button" onClick={sendTest} style={{ fontSize: 12 }}>Send test event</button>
+          <button className="glass-button" onClick={() => void applyToDeployment()} disabled={!prefs.appInsightsConnectionString.trim() || isRunningTask(applyTask)} style={{ fontSize: 12 }}>
+            {isRunningTask(applyTask) ? <Loader2 size={13} /> : <Activity size={13} />} Apply to server
+          </button>
           {testMessage && <StatusLine kind={testMessage.kind}>{testMessage.text}</StatusLine>}
+          {applyError && <StatusLine kind="error">{applyError}</StatusLine>}
+          {applyTask && <TaskStatusLine task={applyTask} />}
         </div>
       </Group>
 
