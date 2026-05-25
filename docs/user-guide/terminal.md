@@ -39,7 +39,7 @@ The browser cannot send `Authorization` headers on a WebSocket upgrade, so the p
 1. `POST /api/terminal/ticket` — the api sidecar validates your MSAL bearer and returns a short-lived single-use ticket.
 2. `WebSocket /api/terminal/ws?ticket=<ticket>` — the api proxies bytes to the `terminal` sidecar's loopback ttyd (`127.0.0.1:7681`).
 
-The `terminal` sidecar ships with the validated ElasticBLAST toolchain (`elastic-blast`, `kubectl`, `azcopy`, `az`, `BLAST+`). `$HOME` is persisted on an Azure Files share, so scripts, history, and `az login` state survive Container App revisions. The terminal is never exposed directly to the internet — only the api sidecar can reach it.
+The `terminal` sidecar ships with the validated ElasticBLAST toolchain (`elastic-blast`, `kubectl`, `azcopy`, `az`, `BLAST+`). `$HOME` (`/home/azureuser`) is **ephemeral** — user files do not survive a Container App revision swap, so stage data to workload Storage via `azcopy` and reuse short-lived `az` device-code sign-ins per session. The terminal is never exposed directly to the internet — only the api sidecar can reach it.
 
 ## Sign In For Azure Commands
 

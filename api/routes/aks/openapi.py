@@ -66,6 +66,10 @@ _OPENAPI_PROXY_DENIED_PATH_TOKENS: tuple[str, ...] = (
     "/debug?",
 )
 
+_OPENAPI_K8S_NAMESPACE = "default"
+_OPENAPI_SERVICE_NAME = "elb-openapi"
+_OPENAPI_SERVICE_PORT = 80
+
 
 def _is_private_ipv4(value: str) -> bool:
     """Return True if ``value`` parses as a private / loopback / link-local IPv4.
@@ -110,6 +114,47 @@ def _public_lb_allowed() -> bool:
         "yes",
         "on",
     }
+
+
+def _k8s_service_proxy_url(server: str, path: str) -> str:
+    target = path.lstrip("/")
+    return (
+        f"{server}/api/v1/namespaces/{_OPENAPI_K8S_NAMESPACE}/services/"
+        f"http:{_OPENAPI_SERVICE_NAME}:{_OPENAPI_SERVICE_PORT}/proxy/{target}"
+    )
+
+
+def _fetch_openapi_spec_via_k8s_proxy(
+    cred: Any,
+    sub: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any] | None:
+    """Fetch the OpenAPI spec through the Kubernetes service proxy.
+
+    This fallback keeps local development usable after `elb-openapi` moves to
+    an internal LoadBalancer that only the deployed Container App VNet can
+    route to directly.
+    """
+
+    from api.services.k8s.monitoring import _get_k8s_session
+
+    session, server = _get_k8s_session(
+        cred,
+        sub,
+        resource_group,
+        cluster_name,
+        admin=True,
+    )
+    try:
+        for path in ("/openapi.json", "/docs/openapi.json"):
+            resp = session.get(_k8s_service_proxy_url(server, path), timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data if isinstance(data, dict) else None
+    finally:
+        session.close()
+    return None
 
 
 class OpenApiTokenRequest(BaseModel):
@@ -481,6 +526,14 @@ def aks_openapi_spec(
                 return cast(dict[str, Any], resp.json())
     except Exception as exc:
         LOGGER.warning("openapi/spec: fetch failed for %s: %s", base_url, exc)
+
+    if not public_base:
+        try:
+            proxied = _fetch_openapi_spec_via_k8s_proxy(cred, sub, resource_group, cluster_name)
+            if proxied is not None:
+                return proxied
+        except Exception as exc:
+            LOGGER.warning("openapi/spec: k8s service proxy fetch failed: %s", exc)
 
     return {
         "openapi": "3.0.0",

@@ -227,7 +227,13 @@ export function ClusterCard({
   // RG-scoped sub-queries. The reload-safe `recentAttempt` slot used to
   // exist purely to bridge "I just provisioned a cluster into a different
   // RG"; that gap is closed by the sub-wide list itself.
-  const clusters = query.data?.clusters ?? [];
+  // Memoise so the `?? []` fallback does not create a fresh array reference
+  // on every render — otherwise downstream `useMemo` / `useEffect` blocks
+  // keyed off `clusters` re-fire on every parent render.
+  const clusters = useMemo(
+    () => query.data?.clusters ?? [],
+    [query.data?.clusters],
+  );
   const noClusters = clusters.length === 0;
   const hasProvisioningCluster = clusters.some(isAksProvisioning);
   const hasFailedProvisioningCluster = clusters.some(isAksProvisioningFailed);

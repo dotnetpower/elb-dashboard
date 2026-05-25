@@ -446,6 +446,42 @@ ts "==> All 3 images built and pushed"
 progress "done" 6 "Image builds"
 
 # ---------------------------------------------------------------------------
+# 1b. Mirror the redis broker image into the workload ACR.
+#     `redis:7-alpine` is otherwise pulled from Docker Hub on every revision
+#     start; unauthenticated pulls hit HTTP 429 (TOOMANYREQUESTS), the redis
+#     sidecar stays ImagePullBackOff, and the whole replica stays NotRunning
+#     -> Container Apps keeps routing traffic to the previous revision.
+#     Mirroring once (idempotent) lets the sidecar pull via MI from ACR.
+# ---------------------------------------------------------------------------
+ts "==> Mirroring redis:7-alpine into ACR (idempotent)"
+if az acr repository show \
+    -n "$ACR_NAME" --image "library/redis:7-alpine" \
+    --only-show-errors >/dev/null 2>&1; then
+  ts "    ✓ ACR already has library/redis:7-alpine; skipping import"
+else
+  if az acr import \
+      -n "$ACR_NAME" \
+      --source "docker.io/library/redis:7-alpine" \
+      --image "library/redis:7-alpine" \
+      --only-show-errors >/dev/null 2>&1; then
+    ts "    ✓ Imported redis:7-alpine into $ACR_NAME"
+  else
+    cat >&2 <<EOF
+FATAL: az acr import for docker.io/library/redis:7-alpine failed.
+
+The redis sidecar in the six-sidecar template pulls from
+'$ACR_LOGIN_SERVER/library/redis:7-alpine'. Without this mirror, redis pulls
+from Docker Hub unauthenticated and hits HTTP 429 rate limits, leaving the
+replica in NotRunning state and pinning traffic to the previous revision.
+
+Retry after a short wait, or run manually:
+  az acr import -n $ACR_NAME --source docker.io/library/redis:7-alpine --image library/redis:7-alpine
+EOF
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Swap the Container App template to the six-sidecar layout.
 #    `az containerapp update --yaml` is much faster than redeploying the
 #    Bicep module because it skips template compilation and what-if.

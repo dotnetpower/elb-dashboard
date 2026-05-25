@@ -127,6 +127,9 @@ def main() -> int:
         mem_max if mem_max is not None else "unbounded",
     )
 
+    # Suppress redis-connection-refused warnings while the redis sidecar is still warming.
+    grace_ticks = max(0, int(os.environ.get("CGROUP_REDIS_GRACE_TICKS", "12")))
+    consecutive_redis_failures = 0
     while True:
         time.sleep(interval)
         try:
@@ -148,8 +151,22 @@ def main() -> int:
             }
             client.setex(f"{KEY_PREFIX}{name}", ttl, json.dumps(payload))
             prev_cpu, prev_ts = cur_cpu, cur_ts
+            if consecutive_redis_failures:
+                log.info(
+                    "redis recovered after %d failed ticks", consecutive_redis_failures
+                )
+            consecutive_redis_failures = 0
         except redis.RedisError as exc:
-            log.warning("redis error: %s", exc)
+            consecutive_redis_failures += 1
+            if consecutive_redis_failures <= grace_ticks:
+                log.debug(
+                    "redis warming (attempt %d/%d): %s",
+                    consecutive_redis_failures,
+                    grace_ticks,
+                    exc,
+                )
+            else:
+                log.warning("redis error: %s", exc)
         except Exception as exc:
             log.warning("tick failed: %s", exc)
 

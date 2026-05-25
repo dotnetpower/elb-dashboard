@@ -217,7 +217,13 @@ def build_manifests(
     svc_manifest = {
         "apiVersion": "v1",
         "kind": "Service",
-        "metadata": {"name": "elb-openapi", "namespace": K8S_NAMESPACE},
+        "metadata": {
+            "name": "elb-openapi",
+            "namespace": K8S_NAMESPACE,
+            "annotations": {
+                "service.beta.kubernetes.io/azure-load-balancer-internal": "true",
+            },
+        },
         "spec": {
             "type": "LoadBalancer",
             "selector": {"app": "elb-openapi"},

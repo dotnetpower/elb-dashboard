@@ -52,7 +52,7 @@ The active tab is encoded in `?tab=…` so deep links survive a reload and brows
 | `Search failed during the <step> step.` | The job ended in a failed state. | Open **Run details** for diagnostics; use the terminal only if you need to inspect logs directly. |
 | `Running` placeholder | The job is still executing and no result file has been published yet. | Stay on the page — it polls automatically and switches to the result view when artefacts appear. |
 | `Cannot load results — missing Azure configuration.` | No subscription or storage account is selected. | Open the Dashboard and finish the setup wizard. |
-| Storage locked panel | `publicNetworkAccess` is `Disabled` and the browser is outside the platform VNet (typical for a developer laptop). | This is the expected production posture. Either run the operation from inside the deployed Container App or use the local-debug helper documented in [Storage Network Isolation](../../../.github/copilot-instructions.md#9-storage-network-isolation-hard-requirement). |
+| Storage locked panel | `publicNetworkAccess` is `Disabled` and the browser is outside the platform VNet (typical for a developer laptop). | This is the expected production posture. Either run the operation from inside the deployed Container App or use the local-debug helper documented in [Storage Network Isolation & Browser ↔ Storage Proxy](../architecture/storage-contract.md). |
 | `No result files` | The run completed without publishing any usable artefacts. | Check **Run details** for shard-level errors; consider re-submitting with a smaller query. |
 
 Failed runs still expose **Edit search** and **Duplicate** in the header so you can re-submit with a tweaked configuration.

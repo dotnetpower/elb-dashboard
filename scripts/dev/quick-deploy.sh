@@ -82,7 +82,11 @@ load_simple_env_file() {
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     [[ -z "${SKIP[$key]:-}" ]] || continue
     value="$(strip_quotes "${value:-}")"
-    if [[ -z "${!key:-}" ]]; then
+    # Treat empty-string export (VAR='') as an explicit value, not unset.
+    # Without this guard a caller's deliberate empty value (e.g. unsetting
+    # VITE_API_BASE_URL before a cloud frontend deploy) silently gets
+    # overwritten by web/.env.local — see 2026-05-25 validation note.
+    if [[ -z "${!key+x}" ]]; then
       export "$key=$value"
     fi
   done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" || true)
@@ -137,10 +141,14 @@ load_simple_env_file "$REPO_ROOT/.env"
 load_simple_env_file "$REPO_ROOT/.env.local"
 load_simple_env_file "$REPO_ROOT/web/.env.production"
 # web/.env.local exists for local-dev (vite dev server + local-run.sh web)
-# and pins VITE_API_BASE_URL=http://localhost:8085. That value must NEVER
-# end up in a cloud frontend's runtime-config.js — see the guard below and
-# docs/features_change/2026-05/2026-05-21-frontend-api-base-url-guard.md.
-load_simple_env_file "$REPO_ROOT/web/.env.local" VITE_API_BASE_URL
+# and pins VITE_API_BASE_URL=http://localhost:8085 plus local-debug toggles
+# (VITE_AUTH_DEV_BYPASS, AUTH_DEV_BYPASS). Those values must NEVER end up
+# in a cloud frontend's runtime-config.js or container env — see the guard
+# below and docs/features_change/2026-05/2026-05-25-frontend-env-leak-hardening.md.
+load_simple_env_file "$REPO_ROOT/web/.env.local" \
+  VITE_API_BASE_URL \
+  VITE_AUTH_DEV_BYPASS \
+  AUTH_DEV_BYPASS
 if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${ACR_NAME:-}" || -z "${ACR_LOGIN_SERVER:-}" || -z "${CONTAINER_APP_NAME:-}" ]]; then
   load_azd_env
 fi
@@ -228,6 +236,13 @@ if [[ "$SIDECAR" == "frontend" ]]; then
   if [[ -n "$VITE_API_BASE_URL_VAL" ]] && \
      [[ "$VITE_API_BASE_URL_VAL" =~ ^https?://(localhost|127\.|0\.0\.0\.0|\[::1\]) ]]; then
     die "VITE_API_BASE_URL='$VITE_API_BASE_URL_VAL' points at the local host — refusing to bake that into the cloud frontend. Run 'unset VITE_API_BASE_URL' (or export VITE_API_BASE_URL='') and retry."
+  fi
+  # Guard: VITE_AUTH_DEV_BYPASS=true makes the SPA skip MSAL while the api
+  # sidecar still enforces bearer tokens — users hit a sea of 401s. The flag
+  # is meant for local-debug only. Escape hatch (intentionally undocumented
+  # in the help text): ELB_ALLOW_AUTH_BYPASS_IN_CLOUD=1.
+  if [[ "$VITE_AUTH_DEV_BYPASS_VAL" == "true" && "${ELB_ALLOW_AUTH_BYPASS_IN_CLOUD:-0}" != "1" ]]; then
+    die "VITE_AUTH_DEV_BYPASS=true — refusing to deploy a cloud frontend that skips MSAL while the api enforces bearer tokens. Run 'unset VITE_AUTH_DEV_BYPASS' (or export VITE_AUTH_DEV_BYPASS=false) and retry."
   fi
   # Version stamp: ACR builds run without .git in context, so resolve on host.
   APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"

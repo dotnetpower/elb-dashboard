@@ -30,6 +30,9 @@ DEFAULT_INTERVAL = 5.0
 DEFAULT_TTL = 30
 DEFAULT_DB = 2  # Reserve db 0 for Celery broker, db 1 for results, db 2 for ops metrics.
 REDIS_KEY_PREFIX = "sidecar:metrics:"
+# Suppress redis-connection-refused warnings while the redis sidecar is still warming.
+# Default 12 ticks * 5s = ~60s of startup grace before warnings surface.
+_REDIS_FAILURE_GRACE_TICKS = max(0, int(os.environ.get("CGROUP_REDIS_GRACE_TICKS", "12")))
 
 # Linux clock-tick rate. Used to convert /proc/<pid>/stat utime+stime jiffies
 # to microseconds so the procfs fallback can reuse `compute_cpu_pct` unchanged.
@@ -208,6 +211,7 @@ def report_loop(
         mem_max if mem_max is not None else "unbounded",
     )
 
+    consecutive_redis_failures = 0
     while True:
         if stop_event is not None and stop_event.wait(timeout=interval):
             LOGGER.info("cgroup_reporter[%s]: stop requested", name)
@@ -230,8 +234,25 @@ def report_loop(
             }
             _publish(client, name, payload, ttl)
             prev = cur
+            if consecutive_redis_failures:
+                LOGGER.info(
+                    "cgroup_reporter[%s]: redis recovered after %d failed ticks",
+                    name,
+                    consecutive_redis_failures,
+                )
+            consecutive_redis_failures = 0
         except redis.RedisError as exc:
-            LOGGER.warning("cgroup_reporter[%s]: redis error: %s", name, exc)
+            consecutive_redis_failures += 1
+            if consecutive_redis_failures <= _REDIS_FAILURE_GRACE_TICKS:
+                LOGGER.debug(
+                    "cgroup_reporter[%s]: redis warming (attempt %d/%d): %s",
+                    name,
+                    consecutive_redis_failures,
+                    _REDIS_FAILURE_GRACE_TICKS,
+                    exc,
+                )
+            else:
+                LOGGER.warning("cgroup_reporter[%s]: redis error: %s", name, exc)
             # Don't update prev so the next successful publish reflects the
             # true CPU window since the last good reading.
         except Exception as exc:

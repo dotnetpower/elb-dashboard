@@ -297,6 +297,7 @@ export function useClusterProvisioning(args: {
       })();
     }, 500);
     return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     provStatus,
     modalOpen,
@@ -313,7 +314,6 @@ export function useClusterProvisioning(args: {
     systemNodeCount,
     preflightStatus,
     preflightResult,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   ]);
 
   // Hard timeout. AKS provisioning normally finishes in 5–10 minutes. If we
@@ -385,7 +385,19 @@ export function useClusterProvisioning(args: {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [provStatus, taskId]);
+    // `clusterName`, `provisionRegion`, `provisionResourceGroup`, and
+    // `subscriptionId` are stable for the lifetime of a single "creating"
+    // transition (the modal disables those inputs once the task is
+    // queued), so adding them to the dep array is safe and silences
+    // react-hooks/exhaustive-deps without changing runtime behaviour.
+  }, [
+    provStatus,
+    taskId,
+    clusterName,
+    provisionRegion,
+    provisionResourceGroup,
+    subscriptionId,
+  ]);
 
   // Auto-dismiss provStatus after 10 s
   useEffect(() => {
@@ -499,7 +511,6 @@ export function useClusterProvisioning(args: {
           ],
           portal_url: null,
         });
-        // eslint-disable-next-line no-console
         console.warn("aks preflight failed", e);
       }
     } else if (!preflightResult.ok) {

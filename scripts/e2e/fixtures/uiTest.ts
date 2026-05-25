@@ -26,6 +26,7 @@ export const test = base.extend<UiFixtures>({
           appInsightsWorkspaceResourceId: "",
           previewCustomDbEnabled: true,
           previewLabToolsEnabled: true,
+          previewLiveWallEnabled: true,
         }),
       );
       for (const key of Object.keys(window.localStorage)) {

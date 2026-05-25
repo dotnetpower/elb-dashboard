@@ -110,6 +110,12 @@ def test_build_manifests_hardens_for_ha() -> None:
     assert pdb["spec"]["minAvailable"] == 1
     assert pdb["spec"]["selector"]["matchLabels"] == {"app": "elb-openapi"}
 
+    service = next(doc for doc in docs if doc["kind"] == "Service")
+    assert service["spec"]["type"] == "LoadBalancer"
+    assert service["metadata"]["annotations"] == {
+        "service.beta.kubernetes.io/azure-load-balancer-internal": "true"
+    }
+
 
 def test_kubectl_apply_logs_in_with_managed_identity_when_needed(monkeypatch) -> None:
     calls: list[list[str]] = []

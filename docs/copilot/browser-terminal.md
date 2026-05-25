@@ -23,7 +23,7 @@ The `terminal` image is built by `az acr build` during `postprovision.sh`. It mu
 
 ## Persistence
 
-`/home/azureuser` is mounted from the `terminal-home` Azure Files share. That keeps the `~/.azure/` profile, kubeconfig, ssh known_hosts, and any staged query files across revisions and restarts.
+`/home/azureuser` is **ephemeral**. The earlier design mounted a `terminal-home` Azure Files share, but SMB mounts in Container Apps require a Storage account key, which conflicts with the platform Storage account's `allowSharedKeyAccess: false` invariant. The control plane is designed to tolerate ephemeral terminal state: user query/result files stage to workload Storage via `azcopy`, and `az login --use-device-code` is re-run per session (or per revision swap).
 
 ## Browser path
 
@@ -35,5 +35,4 @@ The `terminal` image is built by `az acr build` during `postprovision.sh`. It mu
 
 There is no "Destroy Remote Terminal" action because there is no VM. The lifecycle controls reduce to:
 
-* **Restart terminal** — restart the `terminal` sidecar process (`ttyd`) without rolling the revision.
-* **Reset home** — clear `/home/azureuser` on the Files share (must require explicit confirmation; this drops the cached `az login`).
+* **Restart terminal** — restart the `terminal` sidecar process (`ttyd`) without rolling the revision. A new revision (or sidecar restart) already discards `/home/azureuser` because it is ephemeral.

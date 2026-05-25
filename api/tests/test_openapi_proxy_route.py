@@ -679,6 +679,69 @@ def test_openapi_proxy_allows_openapi_spec_and_docs(
     assert r2.status_code == 200
 
 
+def test_openapi_spec_falls_back_to_k8s_service_proxy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local developers cannot route to the internal LoadBalancer IP, but
+    the dashboard should still render docs by reading the spec through the
+    Kubernetes service proxy."""
+
+    _patch_service_ip(monkeypatch, "10.224.0.15")
+    calls: list[str] = []
+
+    class BrokenClient:
+        def get(self, url: str) -> httpx.Response:
+            calls.append(url)
+            raise httpx.ConnectTimeout("no route to internal lb")
+
+    class FakeK8sResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "openapi": "3.1.0",
+                "info": {"title": "ElasticBLAST on Azure", "version": "3.6.0"},
+                "paths": {"/healthz": {"get": {}}},
+            }
+
+    class FakeK8sSession:
+        closed = False
+
+        def get(self, url: str, timeout: int) -> FakeK8sResponse:
+            calls.append(url)
+            assert timeout == 10
+            assert url.endswith(
+                "/api/v1/namespaces/default/services/http:elb-openapi:80/proxy/openapi.json"
+            )
+            return FakeK8sResponse()
+
+        def close(self) -> None:
+            self.closed = True
+
+    from api.services import httpx_pool
+    from api.services.k8s import monitoring as k8s_monitoring
+
+    fake_session = FakeK8sSession()
+    monkeypatch.setattr(httpx_pool, "get_pooled_client", lambda *_args, **_kwargs: BrokenClient())
+    monkeypatch.setattr(
+        k8s_monitoring,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (fake_session, "https://k8s.example"),
+    )
+
+    response = client.get(
+        "/api/aks/openapi/spec",
+        params={"resource_group": "rg-elb", "cluster_name": "aks-elb"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["paths"] == {"/healthz": {"get": {}}}
+    assert fake_session.closed is True
+    assert calls[0] == "http://10.224.0.15/openapi.json"
+    assert calls[1].endswith("/proxy/openapi.json")
+
+
 # Hardening pass (same-day self-critique)
 def test_openapi_proxy_rejects_admin_path_case_insensitively(client: TestClient) -> None:
     """Mixed-case ``/Admin/...`` must not slip past the case-sensitive

@@ -108,7 +108,7 @@ export const settingsApi = {
 
   getAksObservabilityStatus: (q: AksObservabilityStatusQuery) =>
     api.get<AksObservabilityStatus>(
-      `/settings/aks-observability?${querystring(q as unknown as Record<string, string>)}`,
+      `/settings/aks-observability?${querystring({ ...q })}`,
     ),
 
   enableAksObservability: (body: AksObservabilityEnableRequest) =>

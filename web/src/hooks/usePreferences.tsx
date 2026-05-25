@@ -60,7 +60,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   previewLiveWallEnabled: false,
 };
 
-const PREVIEW_PREF_KEYS = {
+export const PREVIEW_PREF_KEYS = {
   customDb: "previewCustomDbEnabled",
   labTools: "previewLabToolsEnabled",
   liveWall: "previewLiveWallEnabled",

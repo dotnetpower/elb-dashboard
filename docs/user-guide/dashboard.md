@@ -113,7 +113,7 @@ The **Sidecar runtime** band shows the six containers that make up `ca-elb-dashb
 - **`api`** — FastAPI / uvicorn on `:8080`; the only sidecar with public ingress.
 - **`worker`** — Celery worker for long-running tasks (BLAST submit, ACR build, AKS work, warmup).
 - **`beat`** — Celery scheduler for periodic tasks.
-- **`redis`** — the Celery broker, AOF-persisted on an Azure Files share.
+- **`redis`** — the Celery broker, ephemeral (`--save '' --appendonly no`). The queue is rebuilt from the `jobstate` table by the beat reconciler on revision restart.
 - **`terminal`** — `ttyd` on loopback `:7681` plus the `elastic-blast`, `kubectl`, `azcopy`, and `az` toolchain.
 
 Each row shows CPU, memory, restart count, and time since last update. Data is pushed from `/api/monitor/sidecars/events` (SSE) every ~5 s and falls back to a 30 s poll of `/api/monitor/sidecars` if the SSE stream drops. A `degraded` row usually means the sidecar is still running but the metrics endpoint is throttled — wait a refresh cycle before treating it as down.

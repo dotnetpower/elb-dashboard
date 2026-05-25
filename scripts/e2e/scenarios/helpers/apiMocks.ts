@@ -133,6 +133,9 @@ export async function installNewSearchApiMocks(page: Page): Promise<MockSubmitCa
       namespaces: ["default"],
     }),
   );
+  await page.route("**/api/aks/recent-failed-provisions**", (route) =>
+    jsonResponse(route, { jobs: [], degraded: false }),
+  );
   await page.route("**/api/blast/databases?**", (route) =>
     jsonResponse(route, { databases: mockDatabases, public_access_disabled: true }),
   );

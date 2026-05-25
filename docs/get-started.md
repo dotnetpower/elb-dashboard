@@ -42,7 +42,7 @@ jsonld: |
         "position": 3,
         "name": "Deploy with the helper",
         "url": "https://dotnetpower.github.io/elb-dashboard/get-started/#deploy-with-the-helper",
-        "text": "Run scripts/dev/deploy.sh. It registers required providers, picks or creates a resource group, runs azd up, and applies the six-sidecar Container App template via postprovision.sh."
+        "text": "Run ./deploy.sh from the repository root. It registers required providers, picks or creates a resource group, runs azd up, and applies the six-sidecar Container App template via postprovision.sh."
       },
       {
         "@type": "HowToStep",
@@ -77,11 +77,11 @@ Get from a fresh clone to a working ElasticBLAST dashboard on Azure.
 
 !!! tip "TL;DR"
 
-    Sign in to Azure, run `scripts/dev/deploy.sh` (which calls `azd up`),
-    then open the printed Container App URL and sign in with MSAL. The
-    helper provisions the Bicep stack, builds container images via
-    `az acr build`, and applies the six-sidecar Container App template.
-    Expect ~30–45 minutes for a cold deployment.
+    Sign in to Azure, run `./deploy.sh` from the repository root (which
+    calls `azd up`), then open the printed Container App URL and sign in
+    with MSAL. The helper provisions the Bicep stack, builds container
+    images via `az acr build`, and applies the six-sidecar Container App
+    template. Expect ~30–45 minutes for a cold deployment.
 
 Most research teams should use the guided deployment helper. It checks Azure sign-in, prepares the Azure Developer CLI environment, registers the required providers, handles the default resource-group choice, runs `azd up`, and opens the deployed dashboard when it is ready.
 

@@ -16,6 +16,10 @@ export interface UiMockState {
 }
 
 const now = new Date("2026-05-24T10:00:00.000Z").toISOString();
+// The fixture job's timestamps must stay inside the user's local "today" so
+// the Recent searches view always renders a "Today" group button. Using a
+// fixed `now` placed the job in "Yesterday" once enough hours had passed.
+const recentNow = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
 export const e2eCluster = {
   name: "aks-e2e",
@@ -112,8 +116,8 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
     db: "blast-db/core_nt/core_nt",
     status: "completed",
     phase: "completed",
-    created_at: now,
-    updated_at: now,
+    created_at: recentNow,
+    updated_at: recentNow,
     query_label: "e2e_16s",
     owner_upn: "researcher@example.test",
     payload: {
@@ -324,6 +328,12 @@ export async function installCoreUiMocks(page: Page): Promise<UiMockState> {
   );
   await page.route("**/api/monitor/aks/service-ip?**", (route) =>
     jsonResponse(route, { service_name: "elb-openapi", external_ip: "127.0.0.1" }),
+  );
+  // ClusterCard hydrates the "Provisioning failed." banner from this endpoint;
+  // without a stub the real local api answers from a long-lived jobstate row
+  // and every safe-scenario trips assertNoErrorBoundary on getByRole('alert').
+  await page.route("**/api/aks/recent-failed-provisions**", (route) =>
+    jsonResponse(route, { jobs: [], degraded: false }),
   );
   await page.route("**/api/monitor/storage?**", (route) =>
     jsonResponse(route, {

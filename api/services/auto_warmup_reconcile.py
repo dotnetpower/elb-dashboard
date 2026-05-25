@@ -189,7 +189,11 @@ def reconcile_auto_warmup_preferences(
     if preference is not None:
         prefs = [AutoWarmupPreference.from_dict(preference)]
     else:
-        prefs = list_auto_warmup_preferences(limit=max(1, min(int(limit or 100), 500)))
+        try:
+            prefs = list_auto_warmup_preferences(limit=max(1, min(int(limit or 100), 500)))
+        except Exception as exc:
+            LOGGER.warning("auto warm preferences list failed: %s", type(exc).__name__)
+            return {"status": "list_failed", "error": type(exc).__name__, "reconciled": []}
 
     reconciled: list[dict[str, Any]] = []
     for pref in prefs:

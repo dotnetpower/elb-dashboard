@@ -25,7 +25,6 @@ This tab is for **platform maintainers and administrators** who deploy, configur
 - **[Deployment Reference](../deployment-reference.md)** — Bicep modules, `azd` workflow, post-provision steps, AKS sizing, six-sidecar template swap.
 - **[CLI Rolling Update](cli-upgrade.md)** — the `git pull` + build + rolling-update wrapper around `quick-deploy.sh` / `postprovision.sh` for non-browser upgrades and emergency rollback.
 - **Architecture** — `docs/architecture/` — the durable system map, container app topology, and authentication design.
-- **Architecture** — `docs/architecture/` — the durable system map, container app topology, and authentication design.
 - **Research Notes** — `docs/research/` — investigations that informed BLAST search-space + Web BLAST compatibility decisions. *Not user-facing documentation.*
 
 For day-to-day researcher workflow, see the [User Guide](../user-guide/index.md). For codebase-level orientation (agent reference, repo layout), see the [Contributor](../contributor-guide/index.md) tab.

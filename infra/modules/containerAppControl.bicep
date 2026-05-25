@@ -313,10 +313,14 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
         // -------------------------------------------------------------------
         // 5. redis sidecar  (broker, ephemeral — queue is rebuilt from
         // Storage state by the beat reconciler if the revision restarts)
+        // Image is pulled from the workload ACR mirror to avoid Docker Hub
+        // unauthenticated pull rate limits (HTTP 429 ImagePullBackOff would
+        // otherwise hold the whole replica in NotRunning state). The mirror
+        // is seeded by postprovision.sh / quick-deploy.sh via `az acr import`.
         // -------------------------------------------------------------------
         {
           name: 'redis'
-          image: 'redis:7-alpine'
+          image: '${acrLoginServer}/library/redis:7-alpine'
           command: [ 'redis-server' ]
           args: [
             '--save', ''

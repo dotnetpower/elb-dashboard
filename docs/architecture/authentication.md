@@ -283,8 +283,7 @@ All data-plane and mutation operations are performed by the MI.
 
 > **No SAS issuance.** Browser uploads/downloads are streamed through the api
 > sidecar over the private endpoint. `Storage Blob Delegator` is intentionally
-> NOT in the role list — see `docs/container-apps-migration.md` §"Browser ↔
-> Storage Proxy".
+> NOT in the role list — see [Storage Isolation & Browser ↔ Storage Proxy](storage-contract.md#browser-storage-proxy-no-sas-to-the-browser).
 
 ### Azure Container Registry
 

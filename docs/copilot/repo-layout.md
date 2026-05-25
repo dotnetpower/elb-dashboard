@@ -41,9 +41,11 @@ Create directories on demand; do not scaffold empty folders speculatively.
 ├── scripts/
 │   └── dev/                     # Local dev helpers + postprovision.sh (runs `az acr build` and swaps the Container App template)
 ├── docs/
-│   ├── auth.md
-│   ├── container-apps-migration.md  # Authoritative target architecture
+│   ├── architecture/            # Authoritative architecture references (container-apps, runtime-plan, storage-contract, authentication)
 │   ├── copilot/                 # On-demand detail for Copilot instructions (this folder)
+│   ├── operate/                 # Operator-facing references (cli-upgrade, …)
+│   ├── user-guide/              # End-user documentation
+│   ├── research/                # Research notes that informed design decisions
 │   └── features_change/         # Per-change notes
 ├── tests/                       # Cross-cutting tests; per-component tests live next to their code
 ├── azure.yaml                   # azd manifest (Bicep provider + pre/postprovision hooks)

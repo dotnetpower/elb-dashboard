@@ -15,7 +15,9 @@ import time
 
 host = os.environ.get("REDIS_HOST", "127.0.0.1")
 port = int(os.environ.get("REDIS_PORT", "6379"))
-timeout = int(os.environ.get("REDIS_WAIT_TIMEOUT", "120"))
+# Default bumped 120 -> 180s: cold-start of the in-revision redis sidecar can exceed 2 min
+# on Container Apps when it competes with five other sidecars for CPU during activation.
+timeout = int(os.environ.get("REDIS_WAIT_TIMEOUT", "180"))
 max_attempts = max(1, int(os.environ.get("REDIS_WAIT_MAX_ATTEMPTS", "300")))
 
 deadline = time.monotonic() + timeout
