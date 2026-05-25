@@ -33,6 +33,21 @@ from celery.signals import (
 
 LOGGER = logging.getLogger(__name__)
 
+# Mirror api.main's azure SDK silencer for worker/beat. Without this the
+# Azure SDK http_logging_policy dumps full request/response headers on every
+# Table/Blob/ARM call at INFO, drowning LAW (~750k lines / 24h observed in
+# rg-elb-dashboard). Override with AZURE_LOG_LEVEL=DEBUG when debugging.
+_azure_log_level = os.environ.get("AZURE_LOG_LEVEL", "WARNING").upper()
+for _name in (
+    "azure.core.pipeline.policies.http_logging_policy",
+    "azure.identity",
+    "azure.identity._internal.decorators",
+    "azure.identity._credentials.default",
+    "urllib3.connectionpool",
+    "httpx",
+):
+    logging.getLogger(_name).setLevel(_azure_log_level)
+
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://127.0.0.1:6379/1")
 
