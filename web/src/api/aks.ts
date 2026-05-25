@@ -277,6 +277,7 @@ export const aksApi = {
     clusterName: string,
     acrName?: string,
     storageAccount?: string,
+    storageResourceGroup?: string,
   ) =>
     api.post<{ id: string; statusQueryGetUri?: string }>("/aks/openapi/deploy", {
       subscription_id: subscriptionId,
@@ -284,6 +285,7 @@ export const aksApi = {
       cluster_name: clusterName,
       acr_name: acrName,
       storage_account: storageAccount,
+      storage_resource_group: storageResourceGroup,
     }),
 
   openApiDeployStatus: (instanceId: string) =>

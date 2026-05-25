@@ -12,6 +12,7 @@ export interface OpenApiDeployPanelProps {
   clusterName: string;
   acrName: string;
   storageAccount: string;
+  storageResourceGroup: string;
   imageBuilt: boolean;
   onRetry: () => void;
   retrying: boolean;
@@ -35,6 +36,7 @@ export function OpenApiDeployPanel({
   clusterName,
   acrName,
   storageAccount,
+  storageResourceGroup,
   imageBuilt,
   onRetry,
   retrying,
@@ -58,6 +60,7 @@ export function OpenApiDeployPanel({
     clusterName,
     acrName,
     storageAccount,
+    storageResourceGroup,
     imageBuilt,
     onRetry,
   });

@@ -4,7 +4,7 @@
  *
  * The /docs (ApiReference) page chains four queries before it can render
  * the spec:
- *   1) monitoringApi.aks(sub, rg)              — find the AKS cluster
+ *   1) monitoringApi.aks(sub)                  — find the AKS cluster
  *   2) monitoringApi.acr(sub, acrRg, acrName)  — confirm elb-openapi tag
  *   3) monitoringApi.serviceIp(...)            — find the LoadBalancer IP
  *   4) aksApi.proxyOpenApiSpec(...)            — fetch openapi.json
@@ -21,19 +21,113 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { aksApi, monitoringApi } from "@/api/endpoints";
+import { aksApi, monitoringApi, type AksClusterSummary } from "@/api/endpoints";
+import { resolveApiReferenceClusterContext } from "@/pages/apiReference/clusterContext";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 interface PrefetchInput {
   /** Active subscription. Empty string skips the prefetch. */
   subscriptionId: string;
-  /** Workload RG (where the AKS cluster lives). */
+  /** Dashboard anchor RG. The AKS cluster may live in a different RG. */
   workloadResourceGroup: string;
   /** ACR RG (may differ from workload RG). Optional — skips ACR prefetch when empty. */
   acrResourceGroup: string;
   /** ACR registry name. Optional — skips ACR prefetch when empty. */
   acrName: string;
+}
+
+interface ApiReferencePrefetchClient {
+  prefetchQuery: (options: {
+    queryKey: unknown[];
+    queryFn: () => unknown;
+    staleTime?: number;
+    retry?: number;
+  }) => Promise<unknown>;
+  getQueryData: <T>(queryKey: unknown[]) => T | undefined;
+}
+
+export async function prefetchApiReferenceQueries(
+  qc: ApiReferencePrefetchClient,
+  cfg: PrefetchInput,
+  isCancelled: () => boolean = () => false,
+): Promise<void> {
+  const { subscriptionId: sub, workloadResourceGroup: rg, acrResourceGroup: acrRg, acrName } = cfg;
+  if (!sub || !rg) return;
+
+  // 1) AKS cluster list — subscription-wide so clusters outside the
+  // dashboard anchor RG are still discovered.
+  const clustersPromise = qc.prefetchQuery({
+    queryKey: ["aks", sub, "sub"],
+    queryFn: () => monitoringApi.aks(sub),
+    staleTime: 300_000,
+  });
+
+  // 2) ACR tags — independent of the cluster name, fire in parallel.
+  const acrPromise =
+    acrRg && acrName
+      ? qc.prefetchQuery({
+          queryKey: ["acr", sub, acrRg, acrName],
+          queryFn: () => monitoringApi.acr(sub, acrRg, acrName),
+          staleTime: 300_000,
+        })
+      : Promise.resolve();
+
+  try {
+    await Promise.allSettled([clustersPromise, acrPromise]);
+  } catch {
+    return;
+  }
+  if (isCancelled()) return;
+
+  // After (1) lands the cluster name shows up in the cache; chain
+  // (3) and (4) onto it so they can run before the user navigates.
+  const clustersData = qc.getQueryData<{ clusters?: AksClusterSummary[] }>([
+    "aks",
+    sub,
+    "sub",
+  ]);
+  const { cluster, clusterName, resourceGroup: clusterRg } = resolveApiReferenceClusterContext({
+    clusters: clustersData?.clusters ?? [],
+    anchorResourceGroup: rg,
+  });
+  const clusterRunning = isAksWorkloadReady(cluster);
+  if (!clusterName || !clusterRunning) return;
+
+  try {
+    await qc.prefetchQuery({
+      queryKey: ["openapi-svc", sub, clusterRg, clusterName],
+      queryFn: () => monitoringApi.serviceIp(sub, clusterRg, clusterName, SVC_NAME),
+      staleTime: 300_000,
+      retry: 1,
+    });
+  } catch {
+    return;
+  }
+  if (isCancelled()) return;
+
+  // Only fire the spec fetch if the service IP actually resolved — otherwise
+  // the page will surface its own "service not found" UX and a prefetch error
+  // here would just pollute the cache.
+  const svcData = qc.getQueryData<{ external_ip?: string }>([
+    "openapi-svc",
+    sub,
+    clusterRg,
+    clusterName,
+  ]);
+  if (!svcData?.external_ip) return;
+
+  try {
+    await qc.prefetchQuery({
+      queryKey: ["openapi-spec", sub, clusterRg, clusterName],
+      queryFn: () => aksApi.proxyOpenApiSpec(sub, clusterRg, clusterName),
+      staleTime: 60_000,
+    });
+  } catch (error) {
+    if (import.meta.env.DEV) {
+      console.debug("OpenAPI spec prefetch skipped", error);
+    }
+  }
 }
 
 export function usePrefetchApiReference(cfg: PrefetchInput): void {
@@ -44,73 +138,14 @@ export function usePrefetchApiReference(cfg: PrefetchInput): void {
     if (!sub || !rg) return;
     let cancelled = false;
 
-    const run = async () => {
-      // 1) AKS cluster list — needed to learn the cluster name.
-      const clustersPromise = qc.prefetchQuery({
-        queryKey: ["aks", sub, rg],
-        queryFn: () => monitoringApi.aks(sub, rg),
-        staleTime: 300_000,
-      });
-
-      // 2) ACR tags — independent of the cluster name, fire in parallel.
-      const acrPromise =
-        acrRg && acrName
-          ? qc.prefetchQuery({
-              queryKey: ["acr", sub, acrRg, acrName],
-              queryFn: () => monitoringApi.acr(sub, acrRg, acrName),
-              staleTime: 300_000,
-            })
-          : Promise.resolve();
-
-      try {
-        await Promise.allSettled([clustersPromise, acrPromise]);
-      } catch {
-        return;
-      }
-      if (cancelled) return;
-
-      // After (1) lands the cluster name shows up in the cache; chain
-      // (3) and (4) onto it so they can run before the user navigates.
-      const clustersData = qc.getQueryData<{
-        clusters?: { name: string; power_state?: string; provisioning_state?: string }[];
-      }>(["aks", sub, rg]);
-      const clusterName = clustersData?.clusters?.[0]?.name;
-      const clusterRunning = isAksWorkloadReady(clustersData?.clusters?.[0]);
-      if (!clusterName || !clusterRunning) return;
-
-      try {
-        await qc.prefetchQuery({
-          queryKey: ["openapi-svc", sub, rg, clusterName],
-          queryFn: () => monitoringApi.serviceIp(sub, rg, clusterName, SVC_NAME),
-          staleTime: 300_000,
-          retry: 1,
-        });
-      } catch {
-        return;
-      }
-      if (cancelled) return;
-
-      // Only fire the spec fetch if the service IP actually resolved —
-      // otherwise the page will surface its own "service not found" UX
-      // and a prefetch error here would just pollute the cache.
-      const svcData = qc.getQueryData<{ external_ip?: string }>(["openapi-svc", sub, rg, clusterName]);
-      if (!svcData?.external_ip) return;
-
-      try {
-        await qc.prefetchQuery({
-          queryKey: ["openapi-spec", sub, rg, clusterName],
-          queryFn: () => aksApi.proxyOpenApiSpec(sub, rg, clusterName),
-          staleTime: 60_000,
-        });
-      } catch (error) {
-        if (import.meta.env.DEV) {
-          console.debug("OpenAPI spec prefetch skipped", error);
-        }
-      }
-    };
-
     // Defer so we don't compete with the dashboard's own initial paint.
-    const handle = window.setTimeout(run, 250);
+    const handle = window.setTimeout(() => {
+      void prefetchApiReferenceQueries(
+        qc,
+        { subscriptionId: sub, workloadResourceGroup: rg, acrResourceGroup: acrRg, acrName },
+        () => cancelled,
+      );
+    }, 250);
     return () => {
       cancelled = true;
       window.clearTimeout(handle);

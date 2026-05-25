@@ -11,6 +11,7 @@ import { ApiHero } from "@/pages/apiReference/ApiHero";
 import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
 import { ApiResponseContractPanel } from "@/pages/apiReference/ApiResponseContractPanel";
 import { ApiTokenPanel } from "@/pages/apiReference/ApiTokenPanel";
+import { resolveApiReferenceClusterContext } from "@/pages/apiReference/clusterContext";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { parseSpec } from "@/pages/apiReference/spec";
 import { TagSection } from "@/pages/apiReference/TagSection";
@@ -24,18 +25,24 @@ export function ApiReference() {
   const [savedConfig] = useState(() => loadSavedConfig());
 
   const sub = savedConfig?.subscriptionId ?? "";
-  const rg = savedConfig?.workloadResourceGroup ?? "";
-  const enabled = Boolean(sub && rg);
+  const anchorRg = savedConfig?.workloadResourceGroup ?? "";
+  const enabled = Boolean(sub && anchorRg);
 
   const clustersQuery = useQuery({
-    queryKey: ["aks", sub, rg],
-    queryFn: () => monitoringApi.aks(sub, rg),
-    enabled,
+    queryKey: ["aks", sub, "sub"],
+    queryFn: () => monitoringApi.aks(sub),
+    enabled: Boolean(sub),
     staleTime: 300_000,
   });
-  const clusterName = clustersQuery.data?.clusters?.[0]?.name ?? "";
   const clusters = clustersQuery.data?.clusters ?? [];
-  const firstCluster = clusters[0];
+  const {
+    cluster: firstCluster,
+    clusterName,
+    resourceGroup: clusterRg,
+  } = resolveApiReferenceClusterContext({
+    clusters,
+    anchorResourceGroup: anchorRg,
+  });
   const clusterStopped = firstCluster && !isAksWorkloadReady(firstCluster);
 
   const acrRg = savedConfig?.acrResourceGroup ?? "";
@@ -51,8 +58,8 @@ export function ApiReference() {
     : false;
 
   const svcQuery = useQuery({
-    queryKey: ["openapi-svc", sub, rg, clusterName],
-    queryFn: () => monitoringApi.serviceIp(sub, rg, clusterName, SVC_NAME),
+    queryKey: ["openapi-svc", sub, clusterRg, clusterName],
+    queryFn: () => monitoringApi.serviceIp(sub, clusterRg, clusterName, SVC_NAME),
     enabled: enabled && Boolean(clusterName),
     staleTime: 300_000,
     retry: 1,
@@ -60,15 +67,15 @@ export function ApiReference() {
   const baseUrl = svcQuery.data ? `http://${svcQuery.data.external_ip}` : null;
 
   const specQuery = useQuery({
-    queryKey: ["openapi-spec", sub, rg, clusterName],
-    queryFn: () => aksApi.proxyOpenApiSpec(sub, rg, clusterName),
+    queryKey: ["openapi-spec", sub, clusterRg, clusterName],
+    queryFn: () => aksApi.proxyOpenApiSpec(sub, clusterRg, clusterName),
     enabled: Boolean(baseUrl),
     staleTime: 60_000,
   });
 
   const deploymentQuery = useQuery({
-    queryKey: ["openapi-deployment", sub, rg, clusterName],
-    queryFn: () => aksApi.openApiDeployment(sub, rg, clusterName),
+    queryKey: ["openapi-deployment", sub, clusterRg, clusterName],
+    queryFn: () => aksApi.openApiDeployment(sub, clusterRg, clusterName),
     enabled: Boolean(baseUrl && hasOpenApiImage && clusterName),
     staleTime: 60_000,
     retry: 1,
@@ -139,10 +146,11 @@ export function ApiReference() {
       {svcQuery.isError && !clusterStopped && (
         <OpenApiDeployPanel
           subscriptionId={sub}
-          resourceGroup={rg}
+          resourceGroup={clusterRg}
           clusterName={clusterName}
           acrName={acrName}
           storageAccount={savedConfig?.storageAccountName ?? ""}
+          storageResourceGroup={anchorRg}
           imageBuilt={hasOpenApiImage}
           onRetry={() => svcQuery.refetch()}
           retrying={svcQuery.isFetching}
@@ -169,10 +177,11 @@ export function ApiReference() {
             <OpenApiDeployPanel
               variant="update"
               subscriptionId={sub}
-              resourceGroup={rg}
+              resourceGroup={clusterRg}
               clusterName={clusterName}
               acrName={acrName}
               storageAccount={savedConfig?.storageAccountName ?? ""}
+              storageResourceGroup={anchorRg}
               imageBuilt={hasOpenApiImage}
               onRetry={() => {
                 svcQuery.refetch();
@@ -197,7 +206,7 @@ export function ApiReference() {
       {baseUrl && hasOpenApiImage && clusterName && (
         <ApiTokenPanel
           subscriptionId={sub}
-          resourceGroup={rg}
+          resourceGroup={clusterRg}
           clusterName={clusterName}
         />
       )}
@@ -226,7 +235,7 @@ export function ApiReference() {
                 tag={tag}
                 endpoints={endpoints}
                 baseUrl={spec.baseUrl}
-                proxyInfo={{ sub, rg, clusterName }}
+                proxyInfo={{ sub, rg: clusterRg, clusterName }}
               />
             ))}
           </div>

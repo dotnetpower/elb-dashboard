@@ -22,6 +22,7 @@ export interface UseDeployTaskArgs {
   clusterName: string;
   acrName: string;
   storageAccount: string;
+  storageResourceGroup: string;
   imageBuilt: boolean;
   onRetry: () => void;
 }
@@ -38,6 +39,7 @@ export function useDeployTask({
   clusterName,
   acrName,
   storageAccount,
+  storageResourceGroup,
   imageBuilt,
   onRetry,
 }: UseDeployTaskArgs) {
@@ -220,6 +222,7 @@ export function useDeployTask({
         clusterName,
         acrName,
         storageAccount,
+        storageResourceGroup,
       );
       const startedAt = Date.now();
       setDeployStartedAt(startedAt);

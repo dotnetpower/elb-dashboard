@@ -22,15 +22,19 @@
 # Usage:
 #   scripts/dev/quick-deploy.sh <sidecar> [tag]
 #
-# Sidecars: api | worker | beat | frontend | terminal
+# Sidecars: api | worker | beat | frontend | terminal | all
 #   (worker and beat reuse the api image — passing either rebuilds api
 #    and points the worker / beat container at the new tag.)
+#   (all deploys api, frontend, and terminal in sequence; api also patches
+#    worker and beat.)
 #
 # Examples:
 #   scripts/dev/quick-deploy.sh api
+#   scripts/dev/quick-deploy.sh all
 #   scripts/dev/quick-deploy.sh terminal
 #   scripts/dev/quick-deploy.sh frontend custom-tag-123
 #   scripts/dev/quick-deploy.sh api --logs        # tail after deploy
+#   scripts/dev/quick-deploy.sh all --logs        # tail api logs after all deploys
 #   scripts/dev/quick-deploy.sh terminal --rebuild-terminal-base
 #
 # Required env (export them or `source /tmp/azd-env.sh`):
@@ -141,7 +145,7 @@ if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${ACR_NAME:-}" || -z "${ACR_LOGIN_SE
   load_azd_env
 fi
 
-[[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal> [tag] [--logs] [--rebuild-terminal-base]"
+[[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal|all> [tag] [--logs] [--rebuild-terminal-base]"
 
 SIDECAR="$1"; shift || true
 TAG=""
@@ -158,11 +162,38 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$TAG" ]] || TAG="$(date +%Y%m%d%H%M%S)"
 
+if [[ "$SIDECAR" == "all" ]]; then
+  ts "==> Deploying all quick-deploy targets with tag: $TAG"
+  for target in api frontend terminal; do
+    ts "==> Dispatching quick deploy target: $target"
+    if [[ "$target" == "terminal" && "$REBUILD_TERMINAL_BASE" == "true" ]]; then
+      "$REPO_ROOT/scripts/dev/quick-deploy.sh" "$target" "$TAG" --rebuild-terminal-base
+    else
+      "$REPO_ROOT/scripts/dev/quick-deploy.sh" "$target" "$TAG"
+    fi
+  done
+  if $TAIL_LOGS; then
+    for v in AZURE_RESOURCE_GROUP CONTAINER_APP_NAME; do
+      [[ -n "${!v:-}" ]] || die "$v is unset (try: source /tmp/azd-env.sh)"
+    done
+    ts "==> Tailing logs (Ctrl-C to exit) for container 'api'"
+    az containerapp logs show \
+      --name "$CONTAINER_APP_NAME" \
+      --resource-group "$AZURE_RESOURCE_GROUP" \
+      --container api \
+      --follow \
+      --tail 20
+  fi
+  ts "==> Done. Tag was: $TAG"
+  ts "    To roll back all fast-deployed images, rerun: scripts/dev/quick-deploy.sh all <previous-tag>"
+  exit 0
+fi
+
 case "$SIDECAR" in
   api|worker|beat) IMAGE_NAME="elb-api";       DOCKERFILE="api/Dockerfile";       BUILD_CTX="." ;;
   frontend)        IMAGE_NAME="elb-frontend";  DOCKERFILE="web/Dockerfile";       BUILD_CTX="." ;;
   terminal)        IMAGE_NAME="elb-terminal";  DOCKERFILE="terminal/Dockerfile.runtime";  BUILD_CTX="terminal/" ;;
-  *) die "unknown sidecar '$SIDECAR' (expected: api|worker|beat|frontend|terminal)" ;;
+  *) die "unknown sidecar '$SIDECAR' (expected: api|worker|beat|frontend|terminal|all)" ;;
 esac
 
 for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME; do

@@ -8,9 +8,11 @@
  *   sidecar (ttyd loopback at 127.0.0.1:7681) is reachable. Used to gate
  *   "Open Terminal" / "Check Terminal" entry points.
  *
- * Both hooks load configuration via loadSavedConfig() and share React
- * Query cache keys with the corresponding cards, so a single network
- * call serves the whole page.
+ * Both hooks load configuration via loadSavedConfig() and share React Query
+ * cache keys with the corresponding cards, so a single network call serves the
+ * whole page. Cluster readiness intentionally uses the subscription-wide AKS
+ * envelope because ElasticBLAST workload clusters may live outside the
+ * dashboard anchor resource group.
  */
 import { useQuery } from "@tanstack/react-query";
 
@@ -33,12 +35,11 @@ export interface ClusterReadiness {
 export function useClusterReadiness(): ClusterReadiness {
   const config = loadSavedConfig();
   const subId = config?.subscriptionId ?? "";
-  const workloadRg = config?.workloadResourceGroup ?? "";
-  const enabled = Boolean(subId && workloadRg);
+  const enabled = Boolean(subId);
 
   const query = useQuery({
-    queryKey: ["aks", subId, workloadRg],
-    queryFn: () => monitoringApi.aks(subId, workloadRg),
+    queryKey: ["aks", subId, "sub"],
+    queryFn: () => monitoringApi.aks(subId),
     enabled,
     refetchInterval: 30_000,
     staleTime: 15_000,

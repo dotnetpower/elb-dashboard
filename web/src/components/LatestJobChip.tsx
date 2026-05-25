@@ -11,12 +11,12 @@ import { formatRelativeTime } from "@/lib/relativeTime";
 import "./LatestJobChip.css";
 
 /**
- * Topbar chip that surfaces the most recent BLAST job at a glance.
+ * Topbar chip that surfaces the relevant BLAST job at a glance.
  *
  * Researcher's first question every morning is "did my last search
  * finish?". This chip answers that without making them open the Jobs
- * page first. Clicking opens the job detail (results when finished,
- * progress otherwise).
+ * page first. On a job detail page it mirrors the active job instead,
+ * so the topbar never contradicts the run the user is watching.
  *
  * When the tenant has no jobs yet, the chip becomes a one-click
  * shortcut to start a new search instead of disappearing — keeps the

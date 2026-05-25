@@ -35,7 +35,7 @@ export function describeBlastJob(job: BlastJobSummary): BlastJobView {
       Icon: CheckCircle2,
       label: "Completed",
       tone: "ok",
-      tooltip: `Latest result: ${job.program} · ${shortDb(job.db)}`,
+      tooltip: `Completed: ${job.program} · ${shortDb(job.db)}`,
     };
   }
   if (status.includes("fail") || status === "error") {
@@ -43,7 +43,7 @@ export function describeBlastJob(job: BlastJobSummary): BlastJobView {
       Icon: AlertTriangle,
       label: "Failed",
       tone: "fail",
-      tooltip: `Last job failed: ${job.error ?? job.status}`,
+      tooltip: `Failed: ${job.error ?? job.status}`,
     };
   }
   if (status.includes("queue") || status.includes("pending")) {
