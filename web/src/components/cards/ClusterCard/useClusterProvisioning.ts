@@ -4,6 +4,7 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import { aksApi, tasksApi } from "@/api/endpoints";
 import type { AksPreflightResponse, CeleryTaskStatus } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
+import { reportClientError } from "@/api/clientLog";
 import type { AksClusterSummary } from "@/api/endpoints";
 import {
   DEFAULT_AKS_SKU,
@@ -11,7 +12,7 @@ import {
 } from "@/hooks/useAksSkus";
 
 import {
-  clearLastFailedProvision,
+  dismissLastFailedProvision,
   saveLastFailedProvision,
 } from "./lastFailedProvision";
 
@@ -20,6 +21,20 @@ const DEFAULT_SYSTEM_NODE_COUNT = 1;
 
 export const MAX_SYSTEM_NODE_COUNT = 3;
 export const CLUSTER_NAME_RE = /^[a-zA-Z][a-zA-Z0-9-]{1,62}$/;
+
+/** Free-form cluster classification label written to the `elb-tier` ARM tag.
+ *  The dashboard's cluster card surfaces this as a chip so a multi-cluster
+ *  deployment ("heavy" / "light" / "gpu") stays readable at a glance.
+ *  Empty string == leave the tag off entirely. */
+export type ClusterTier = "" | "heavy" | "light" | "gpu" | "general";
+
+export const CLUSTER_TIER_OPTIONS: { value: ClusterTier; label: string }[] = [
+  { value: "", label: "(unspecified)" },
+  { value: "heavy", label: "heavy — large BLAST jobs / GB-scale queries" },
+  { value: "light", label: "light — quick smoke / dev jobs" },
+  { value: "gpu", label: "gpu — GPU-backed workloads" },
+  { value: "general", label: "general — mixed workloads" },
+];
 
 const CLUSTER_NAME_PREFIX = "elb-cluster";
 const ELB_CLUSTER_NAME_RE = new RegExp(`^${CLUSTER_NAME_PREFIX}-(\\d+)$`);
@@ -120,16 +135,16 @@ export function useClusterProvisioning(args: {
 
   const [clusterName, setClusterName] = useState("elb-cluster-01");
   const [nodeSku, setNodeSku] = useState(DEFAULT_AKS_SKU);
-  const [nodeCount, _setNodeCount] = useState(DEFAULT_NODE_COUNT);
-  // Track whether the user has manually touched the node count so the
-  // P2-2 smart-default effect doesn't override an intentional pick.
-  const [nodeCountUserTouched, setNodeCountUserTouched] = useState(false);
-  const setNodeCount = (n: number) => {
-    setNodeCountUserTouched(true);
-    _setNodeCount(n);
-  };
+  // Node count is fully user-controlled. The preflight quota check surfaces
+  // `max_blast_nodes_fit` in the modal as a warning with an explicit
+  // "Apply N nodes" button — we never mutate the input on the user's behalf.
+  const [nodeCount, setNodeCount] = useState(DEFAULT_NODE_COUNT);
   const [systemVmSize, setSystemVmSize] = useState(DEFAULT_AKS_SYSTEM_SKU);
   const [systemNodeCount, setSystemNodeCount] = useState(DEFAULT_SYSTEM_NODE_COUNT);
+  /** Free-form cluster classification — written to the `elb-tier` ARM tag
+   *  so the dashboard can group multi-cluster deployments. Empty string =
+   *  leave the tag off. The picker is optional in the UI. */
+  const [tier, setTier] = useState<ClusterTier>("");
   // Modal-local overrides so the user can pick a different region / RG for
   // *this* AKS cluster without touching the dashboard-wide selectors at the
   // top of the page. Defaults: region falls back to the dashboard's region;
@@ -301,40 +316,6 @@ export function useClusterProvisioning(args: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ]);
 
-  // P2-2 smart default: when the modal first opens and the live
-  // preflight comes back with a quota-fail that *does* have a workable
-  // fit, auto-apply the recommended `max_blast_nodes_fit` so the user
-  // is not greeted with a red "Compute quota" row out of the box. Only
-  // runs while the user has not manually touched the node count — once
-  // they pick a value (Apply N nodes button included) we respect it.
-  useEffect(() => {
-    if (!modalOpen) return;
-    if (nodeCountUserTouched) return;
-    if (preflightStatus !== "done") return;
-    if (!preflightResult || preflightResult.ok) return;
-    const quota = preflightResult.checks.find((c) => c.name === "quota");
-    if (!quota || quota.status !== "fail") return;
-    const maxFit = Number(
-      (quota.details as { max_blast_nodes_fit?: number } | undefined)
-        ?.max_blast_nodes_fit ?? 0,
-    );
-    if (maxFit >= 1 && maxFit !== nodeCount) {
-      // Use the internal setter so we don't trip `nodeCountUserTouched`
-      // — this is a system-driven default, not a user choice.
-      _setNodeCount(maxFit);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modalOpen, preflightStatus, preflightResult]);
-
-  // Reset the smart-default "touched" flag when the modal closes so the
-  // next time the user opens it, the auto-fit kicks in again against
-  // the (possibly different) free quota.
-  useEffect(() => {
-    if (!modalOpen) {
-      setNodeCountUserTouched(false);
-    }
-  }, [modalOpen]);
-
   // Hard timeout. AKS provisioning normally finishes in 5–10 minutes. If we
   // are still "creating" after 20 minutes and the cluster never appeared in
   // the AKS list, something is wrong (worker died, ARM never got the call,
@@ -420,26 +401,41 @@ export function useClusterProvisioning(args: {
     return () => clearInterval(t);
   }, [provStatus, query]);
 
-  // Flip to "done" the moment the named cluster appears in the list
-  // *or* the task reports it visible in ARM (cluster_state set). Both
-  // signal "ARM accepted the create" so the modal can safely close;
-  // the dashboard banner picks up the long tail of provisioning.
+  // Two-stage state transition while creating:
+  //   1) As soon as ARM accepts the create (`cluster_state` set to
+  //      Creating/Updating/Succeeded), close the modal so the user can
+  //      watch the in-card progress banner. We do NOT mark provStatus
+  //      "done" yet — the "is ready" banner is reserved for real
+  //      readiness, otherwise we lie to the user about a cluster that
+  //      is still 5–10 minutes from being usable.
+  //   2) Only flip to "done" when either (a) the list query returns the
+  //      named cluster with `provisioning_state === "Succeeded"`, or
+  //      (b) the task itself reports `cluster_state === "Succeeded"`.
+  //      While neither holds, provStatus stays "creating" so the list
+  //      polling keeps refreshing and the progress banner keeps
+  //      rendering.
   useEffect(() => {
     if (provStatus !== "creating") return;
+    const armState = String(taskProgress?.cluster_state ?? "");
+    const armAccepted = ["Creating", "Updating", "Succeeded"].includes(armState);
+    if (armAccepted) {
+      closeModal();
+    }
     const found = query.data?.clusters?.find((c) => c.name === clusterName);
-    const armVisible = Boolean(
-      (taskProgress?.cluster_state as string | undefined) &&
-        ["Creating", "Updating", "Succeeded"].includes(
-          (taskProgress?.cluster_state as string) ?? "",
-        ),
-    );
-    if (found || armVisible) {
+    const foundSucceeded =
+      !!found &&
+      String(found.provisioning_state ?? "").toLowerCase() === "succeeded";
+    const armSucceeded = armState === "Succeeded";
+    if (foundSucceeded || armSucceeded) {
       setProvStatus("done");
       closeModal();
       // P3-2: any "last attempt failed" sticky note becomes stale the
       // moment a new attempt succeeds — clear it so the dashboard
       // doesn't keep nagging the user about a problem they fixed.
-      clearLastFailedProvision();
+      // Use dismiss (not plain clear) so the same row in the server's
+      // 24 h recent-failed-provisions window cannot re-hydrate the
+      // banner on the next reload.
+      dismissLastFailedProvision(Date.now());
     }
   }, [provStatus, query.data, clusterName, taskProgress, closeModal]);
 
@@ -466,6 +462,14 @@ export function useClusterProvisioning(args: {
       system_vm_size: systemVmSize,
       system_node_count: systemNodeCount,
     };
+    reportClientError({
+      level: "info",
+      source: "cluster.provision.intent",
+      message:
+        `Create cluster clicked cluster=${clusterName} rg=${provisionResourceGroup} ` +
+        `region=${provisionRegion} sku=${nodeSku} nodes=${nodeCount} ` +
+        `system_sku=${systemVmSize} system_nodes=${systemNodeCount} tier=${tier || "none"}`,
+    });
     if (preflightStatus !== "done" || !preflightResult) {
       setPreflightStatus("checking");
       setProvError(null);
@@ -537,6 +541,7 @@ export function useClusterProvisioning(args: {
         acr_name: acrName || "",
         storage_resource_group: storageResourceGroup || provisionResourceGroup,
         storage_account: storageAccount || "",
+        tier,
       });
       // Capture the Celery task id so the poller above can drive the
       // banner. The api route returns several aliases (task_id /
@@ -614,6 +619,8 @@ export function useClusterProvisioning(args: {
     setSystemVmSize,
     systemNodeCount,
     setSystemNodeCount,
+    tier,
+    setTier,
     provisionRegion,
     setProvisionRegion,
     resetProvisionRegionToDashboard,

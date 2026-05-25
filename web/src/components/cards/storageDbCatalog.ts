@@ -350,6 +350,17 @@ export function formatNcbiVersion(v: string | null | undefined): string {
   return `${match[1]} ${match[2]}:${match[3]}:${match[4]}`;
 }
 
+const NCBI_BLAST_DB_V5_FTP = "https://ftp.ncbi.nlm.nih.gov/blast/db/v5/";
+
+export function ncbiBlastDbFtpUrl(
+  dbName: string | null | undefined,
+  dbType: "nucl" | "prot" | null | undefined,
+): string {
+  if (!dbName || !dbType) return NCBI_BLAST_DB_V5_FTP;
+  if (!/^[A-Za-z0-9_.-]+$/.test(dbName)) return NCBI_BLAST_DB_V5_FTP;
+  return `${NCBI_BLAST_DB_V5_FTP}${encodeURIComponent(dbName)}-${dbType}-metadata.json`;
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;

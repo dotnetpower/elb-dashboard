@@ -46,6 +46,18 @@ _STREAM_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 # deterministic without waiting for the backoff sleeps.
 _SUBMIT_MAX_TRANSPORT_RETRIES = int(os.environ.get("OPENAPI_SUBMIT_MAX_RETRIES", "2"))
 _SUBMIT_RETRY_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.5)
+# Truncation policy for sibling-derived error messages we surface in 503
+# ``openapi_unreachable`` responses. Kept at 300 chars verbatim from the
+# pre-refactor sites; named so the policy is visible in one place.
+_TRANSPORT_DETAIL_MAX_CHARS = 300
+# Sanitise-detail truncation policy (kept verbatim from the pre-refactor
+# inline literals so observable behaviour does not change).
+_SANITISE_DETAIL_STRING_MAX_CHARS = 1000
+_SANITISE_DETAIL_KEY_MAX_CHARS = 100
+_SANITISE_DETAIL_LIST_LIMIT = 20
+# Safe-filename cap. FAT32/NTFS allow up to 255 but the SPA + Storage
+# manifest reserve the rest for path/extension prefixes.
+_SAFE_FILENAME_MAX_LENGTH = 128
 LOGGER = logging.getLogger(__name__)
 
 
@@ -98,7 +110,7 @@ def _headers(*, api_token: str | None = None, internal_token: str | None = None)
 def _safe_filename(value: str) -> str:
     name = value.strip().strip('"') or "blast_result.xml"
     name = name.split("/", 1)[-1].split("\\", 1)[-1]
-    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:128]
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:_SAFE_FILENAME_MAX_LENGTH]
     return name or "blast_result.xml"
 
 
@@ -108,11 +120,14 @@ def _path_segment(value: str) -> str:
 
 def _sanitise_detail(value: Any) -> Any:
     if isinstance(value, str):
-        return sanitise(value[:1000])
+        return sanitise(value[:_SANITISE_DETAIL_STRING_MAX_CHARS])
     if isinstance(value, dict):
-        return {str(k)[:100]: _sanitise_detail(v) for k, v in value.items()}
+        return {
+            str(k)[:_SANITISE_DETAIL_KEY_MAX_CHARS]: _sanitise_detail(v)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [_sanitise_detail(v) for v in value[:20]]
+        return [_sanitise_detail(v) for v in value[:_SANITISE_DETAIL_LIST_LIMIT]]
     return value
 
 
@@ -211,7 +226,7 @@ def submit_job(
                     503,
                     detail={
                         "code": "openapi_unreachable",
-                        "message": str(exc)[:300],
+                        "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
                         "attempt": attempt_index + 1,
                         "max_attempts": attempts,
                     },
@@ -261,7 +276,10 @@ def get_job(
         except httpx.HTTPError as exc:
             raise HTTPException(
                 503,
-                detail={"code": "openapi_unreachable", "message": str(exc)[:300]},
+                detail={
+                    "code": "openapi_unreachable",
+                    "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+                },
             ) from exc
         return cast(dict[str, Any], resp.json())
 
@@ -287,7 +305,10 @@ def list_jobs(*, base_url: str | None = None, api_token: str | None = None) -> d
         except httpx.HTTPError as exc:
             raise HTTPException(
                 503,
-                detail={"code": "openapi_unreachable", "message": str(exc)[:300]},
+                detail={
+                    "code": "openapi_unreachable",
+                    "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+                },
             ) from exc
         return cast(dict[str, Any], resp.json())
 
@@ -312,7 +333,10 @@ def download_file(
         except httpx.HTTPError as exc:
             raise HTTPException(
                 503,
-                detail={"code": "openapi_unreachable", "message": str(exc)[:300]},
+                detail={
+                    "code": "openapi_unreachable",
+                    "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+                },
             ) from exc
     content_disposition = resp.headers.get("content-disposition", "")
     filename = "blast_result.xml"
@@ -349,7 +373,10 @@ def stream_file(
         client.close()
         raise HTTPException(
             503,
-            detail={"code": "openapi_unreachable", "message": str(exc)[:300]},
+            detail={
+                "code": "openapi_unreachable",
+                "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+            },
         ) from exc
 
     content_disposition = resp.headers.get("content-disposition", "")

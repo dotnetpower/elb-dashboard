@@ -7,21 +7,24 @@ import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 export interface UseClusterSelectionArgs {
   subId: string;
-  workloadRg: string;
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
 }
 
 export function useClusterSelection({
   subId,
-  workloadRg,
   form,
   setForm,
 }: UseClusterSelectionArgs) {
+  // Subscription-wide list (every ELB-managed cluster the caller can see)
+  // — same envelope the dashboard's ClusterCard uses. The anchor RG is
+  // intentionally unused here so the submit page surfaces multi-cluster
+  // fleets (heavy / light / gpu / general) regardless of which RG each
+  // cluster lives in.
   const clusterQuery = useQuery({
-    queryKey: ["aks", subId, workloadRg],
-    queryFn: () => monitoringApi.aks(subId, workloadRg),
-    enabled: Boolean(subId && workloadRg),
+    queryKey: ["aks", subId, "sub"],
+    queryFn: () => monitoringApi.aks(subId),
+    enabled: Boolean(subId),
     refetchInterval: 30_000,
   });
 

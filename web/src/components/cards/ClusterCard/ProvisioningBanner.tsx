@@ -96,6 +96,8 @@ export function ProvisioningBanner({
   taskPhase,
   taskProgress,
   onCancel,
+  targetResourceGroup,
+  targetRegion,
 }: {
   clusterName: string;
   elapsed: number;
@@ -115,6 +117,15 @@ export function ProvisioningBanner({
    *  doesn't wire one — keeps the banner usable in read-only
    *  contexts like the cluster detail page. */
   onCancel?: () => Promise<void> | void;
+  /** Target Azure resource group the cluster is being created in.
+   *  Surfaced under the cluster name so the user can see when the
+   *  cluster is landing in a RG that differs from the dashboard's
+   *  Workload RG (a common source of "my cluster disappeared"
+   *  confusion). */
+  targetResourceGroup?: string;
+  /** Target Azure region the cluster is being created in. Shown next
+   *  to `targetResourceGroup` for the same reason. */
+  targetRegion?: string;
 }) {
   const phase = prettifyPhase(taskPhase);
   const step = taskProgress?.step ?? null;
@@ -170,6 +181,21 @@ export function ProvisioningBanner({
             >
               {clusterName}
             </div>
+            {(targetResourceGroup || targetRegion) && (
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "var(--text-muted)",
+                  marginTop: 2,
+                }}
+              >
+                {targetResourceGroup ? (
+                  <span>rg: <strong>{targetResourceGroup}</strong></span>
+                ) : null}
+                {targetResourceGroup && targetRegion ? " · " : ""}
+                {targetRegion ? <span>region: <strong>{targetRegion}</strong></span> : null}
+              </div>
+            )}
             <div style={{ fontSize: 11, color: "var(--accent)" }}>
               {step && totalSteps ? `Step ${step}/${totalSteps} · ` : ""}
               {phase ?? "Provisioning..."}

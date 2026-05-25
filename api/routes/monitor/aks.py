@@ -32,19 +32,42 @@ router = APIRouter()
 @router.get("/aks")
 def list_aks(
     subscription_id: str = Query(default=""),
-    resource_group: str = Query(...),
+    resource_group: str = Query(default=""),
+    include_unmanaged: bool = Query(default=False),
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, Any]:
+    """List AKS clusters. When `resource_group` is empty, returns every
+    ElasticBLAST-managed cluster in the subscription (filtered by ARM tags
+    `managedBy=elb-dashboard` / `app=elastic-blast`, or the legacy `blastpool`
+    agent-pool fingerprint). Pass `include_unmanaged=true` to disable the
+    filter — diagnostics only; the dashboard never sets this in normal use
+    because foreign clusters would surface BLAST controls on unrelated
+    workloads. When `resource_group` is provided, returns the RG-scoped list
+    unchanged (every cluster in that RG, no tag filter)."""
     sub = subscription_id or _sub_default()
     if not sub:
         raise HTTPException(400, "subscription_id required")
     from api.routes import monitor as monitor_package
 
     cred = monitor_package.get_credential()
+    if resource_group:
+        try:
+            return cached_snapshot(
+                _cache_key("monitor", "aks", sub, resource_group),
+                lambda: {"clusters": monitoring_svc.list_aks_clusters(cred, sub, resource_group)},
+            )
+        except Exception as exc:
+            return cast(dict[str, Any], _graceful("aks_list", exc, empty={"clusters": []}))
+    # Subscription-wide path.
     try:
         return cached_snapshot(
-            _cache_key("monitor", "aks", sub, resource_group),
-            lambda: {"clusters": monitoring_svc.list_aks_clusters(cred, sub, resource_group)},
+            _cache_key("monitor", "aks", sub, "sub", str(include_unmanaged)),
+            lambda: {
+                "clusters": monitoring_svc.list_aks_clusters_in_subscription(
+                    cred, sub, include_unmanaged=include_unmanaged
+                ),
+                "scope": "subscription",
+            },
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_list", exc, empty={"clusters": []}))

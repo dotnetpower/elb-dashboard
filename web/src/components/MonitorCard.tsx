@@ -1,4 +1,4 @@
-import { type PropsWithChildren, type ReactNode, useState, useCallback } from "react";
+import { type PropsWithChildren, type ReactNode, useState, useCallback, Children } from "react";
 import { ChevronDown, RefreshCw } from "lucide-react";
 import { useMinDuration } from "@/hooks/useMinDuration";
 import { useRelativeTime } from "@/hooks/useRelativeTime";
@@ -25,6 +25,15 @@ interface Props {
     tone: "warning" | "danger" | "muted";
     title?: string;
   } | null;
+  /**
+   * Card-specific animated skeleton rendered while `status === "loading"`.
+   * Replaces `children` for the duration of the loading state so each card
+   * gets a layout-shaped placeholder. When omitted, MonitorCard falls back
+   * to a generic 3-line shimmer (only if `children` is empty), preserving
+   * the legacy behaviour for cards that already render their own banner
+   * inside `children` while loading.
+   */
+  loadingFallback?: ReactNode;
 }
 
 const STATUS_TAG: Record<
@@ -72,6 +81,7 @@ export function MonitorCard({
   collapsible = false,
   defaultCollapsed = false,
   statusOverride = null,
+  loadingFallback,
   children,
 }: PropsWithChildren<Props>) {
   const tag = STATUS_TAG[status];
@@ -162,8 +172,21 @@ export function MonitorCard({
           {rightSlot && <div onClick={(e) => e.stopPropagation()}>{rightSlot}</div>}
         </div>
       </div>
-      {/* #8 Skeleton loading */}
-      {status === "loading" && !children ? (
+      {/* #8 Skeleton loading.
+         - `loadingFallback` (when provided) always wins while `status === "loading"`
+           so each card gets a layout-shaped shimmer.
+         - Otherwise we fall back to a generic 3-line shimmer, but only when
+           `children` is effectively empty. Cards that render a long-running
+           banner inside `children` while loading (e.g. ClusterCard's
+           ProvisioningBanner, AcrCard's BuildingBanner) keep showing those.
+         - `Children.toArray` strips null/false/undefined nodes so the
+           {flag && <X/>} fragment idiom is correctly treated as "empty". */}
+      {status === "loading" && loadingFallback ? (
+        <div className={`panel-bd${collapsed ? " panel-bd--collapsed" : ""}`}>
+          {loadingFallback}
+        </div>
+      ) : status === "loading" &&
+        Children.toArray(children).filter(Boolean).length === 0 ? (
         <div className="panel-bd">
           <div className="skeleton skeleton-line" style={{ width: "85%" }} />
           <div className="skeleton skeleton-line" style={{ width: "70%" }} />

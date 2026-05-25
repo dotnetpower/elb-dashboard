@@ -19,7 +19,6 @@ type SlowerProfile = "baseline" | "warmed";
 
 export function ComputeSection({
   subId,
-  workloadRg,
   clusters,
   selectedCluster,
   clusterLoading,
@@ -34,7 +33,6 @@ export function ComputeSection({
   shardingAvailability,
 }: {
   subId: string;
-  workloadRg: string;
   clusters: AksClusterSummary[];
   selectedCluster?: AksClusterSummary;
   clusterLoading: boolean;
@@ -124,7 +122,7 @@ export function ComputeSection({
       {subId && clusterLoading && <ClusterLoadingSkeleton />}
       {subId && clusters.length === 0 && !clusterLoading && (
         <div className="muted">
-          No AKS clusters in <strong>{workloadRg}</strong>.{" "}
+          No ELB-managed AKS clusters found in this subscription.{" "}
           <Link to="/" style={{ color: "var(--accent)" }}>
             Create one on the Dashboard
           </Link>
@@ -140,11 +138,18 @@ export function ComputeSection({
             style={{ marginBottom: 12 }}
           >
             <option value="">— Select cluster —</option>
-            {clusters.map((cluster) => (
-              <option key={cluster.name} value={cluster.name}>
-                {cluster.name} — {cluster.region} ({cluster.power_state ?? "?"})
-              </option>
-            ))}
+            {clusters.map((cluster) => {
+              const parts: string[] = [];
+              if (cluster.region) parts.push(cluster.region);
+              if (cluster.tier) parts.push(cluster.tier);
+              if (cluster.resource_group) parts.push(cluster.resource_group);
+              const meta = parts.length > 0 ? ` — ${parts.join(" · ")}` : "";
+              return (
+                <option key={`${cluster.resource_group}/${cluster.name}`} value={cluster.name}>
+                  {cluster.name}{meta} ({cluster.power_state ?? "?"})
+                </option>
+              );
+            })}
           </select>
           {selectedCluster && <ClusterInfo cluster={selectedCluster} />}
         </>

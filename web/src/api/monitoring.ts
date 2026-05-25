@@ -25,6 +25,15 @@ export interface AksClusterSummary {
   agent_pools?: AksAgentPool[];
   network_plugin?: string | null;
   fqdn?: string | null;
+  /** Raw ARM tag map (empty when the cluster has no tags). */
+  tags?: Record<string, string>;
+  /** Convenience accessor for the `elb-tier` ARM tag. `null` when unset. */
+  tier?: string | null;
+  /** True when the cluster carries the ElasticBLAST identification surface
+   *  (`managedBy=elb-dashboard` / `app=elastic-blast` tag, or the legacy
+   *  `blastpool` + `workload=blast` taint shape). Subscription-wide list
+   *  responses filter to managed clusters by default. */
+  managed_by_elb?: boolean;
 }
 
 export interface WarmupDbInfo {
@@ -214,14 +223,24 @@ export interface K8sNodeMetrics {
 }
 
 export const monitoringApi = {
-  aks: (subscriptionId: string, rg: string) =>
-    api.get<{
+  /**
+   * List AKS clusters. When `rg` is omitted (or empty), the backend returns
+   * every ElasticBLAST-managed cluster in the subscription — filtered by ARM
+   * tag `managedBy=elb-dashboard` / `app=elastic-blast` with a `blastpool`
+   * legacy fallback, so foreign workloads in the same subscription are not
+   * pulled in. Pass `rg` explicitly to constrain to a single resource group
+   * (the legacy RG-scoped behaviour; no tag filter).
+   */
+  aks: (subscriptionId: string, rg?: string) => {
+    const params = new URLSearchParams({ subscription_id: subscriptionId });
+    if (rg) params.set("resource_group", rg);
+    return api.get<{
       clusters: AksClusterSummary[];
+      scope?: "subscription";
       degraded?: boolean;
       degraded_reason?: string;
-    }>(
-      `/monitor/aks?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}`,
-    ),
+    }>(`/monitor/aks?${params.toString()}`);
+  },
 
   storage: (subscriptionId: string, rg: string, accountName: string) =>
     api.get<StorageSummary>(

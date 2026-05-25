@@ -249,7 +249,13 @@ export function useClusterActions(args: {
     setActionError(null);
     setActionLoading(`delete-${name}`);
     try {
-      const response = await aksApi.delete(subscriptionId, resourceGroup, name);
+      // Sub-wide list: a cluster's actual RG may differ from the card's
+      // anchor RG (`resourceGroup` prop). Route the delete to the row's
+      // own RG, falling back to the anchor RG only if the row vanished
+      // between render and click.
+      const cluster = query.data?.clusters.find((item) => item.name === name);
+      const targetRg = cluster?.resource_group || resourceGroup;
+      const response = await aksApi.delete(subscriptionId, targetRg, name);
       rememberTransition(name, "deleting", response.task_id);
       query.refetch();
     } catch (e) {
@@ -264,8 +270,10 @@ export function useClusterActions(args: {
     setActionError(null);
     setActionLoading(`${action}-${name}`);
     try {
+      // Per-row RG (see handleDelete above for the same reasoning).
+      const cluster = query.data?.clusters.find((item) => item.name === name);
+      const targetRg = cluster?.resource_group || resourceGroup;
       if (action === "start") {
-        const cluster = query.data?.clusters.find((item) => item.name === name);
         const databases = [...readAutoWarmupDbs()];
         const programs = Object.fromEntries(
           databases.map((dbName) => {
@@ -273,12 +281,12 @@ export function useClusterActions(args: {
             return [dbName, catalog?.type === "prot" ? "blastp" : "blastn"];
           }),
         );
-        const response = await aksApi.start(subscriptionId, resourceGroup, name, {
+        const response = await aksApi.start(subscriptionId, targetRg, name, {
           subscription_id: subscriptionId,
-          resource_group: resourceGroup,
+          resource_group: targetRg,
           cluster_name: name,
           storage_account: storageAccount || "",
-          storage_resource_group: storageResourceGroup || resourceGroup,
+          storage_resource_group: storageResourceGroup || targetRg,
           region: region || cluster?.region || "",
           databases,
           programs,
@@ -292,7 +300,7 @@ export function useClusterActions(args: {
         });
         rememberTransition(name, "starting", response.task_id);
       } else {
-        const response = await aksApi.stop(subscriptionId, resourceGroup, name);
+        const response = await aksApi.stop(subscriptionId, targetRg, name);
         rememberTransition(name, "stopping", response.task_id);
       }
     } catch (e) {

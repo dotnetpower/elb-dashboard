@@ -449,6 +449,60 @@ def test_monitor_aks_uses_snapshot_cache(
     monitor_cache.reset_monitor_snapshot_cache()
 
 
+def test_monitor_aks_subscription_wide_when_rg_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty `resource_group` query param routes to the sub-wide path,
+    which calls `list_aks_clusters_in_subscription` (not the RG-scoped
+    helper) and returns `scope=subscription` so the SPA knows which
+    list it received."""
+
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.services import monitor_cache
+
+    monitor_cache.reset_monitor_snapshot_cache()
+    rg_calls = 0
+    sub_calls = 0
+
+    def fake_rg_scoped(*_args: object, **_kwargs: object):
+        nonlocal rg_calls
+        rg_calls += 1
+        return [{"name": "should-not-be-called"}]
+
+    def fake_sub_wide(
+        _credential: object,
+        _subscription_id: str,
+        *,
+        include_unmanaged: bool = False,
+    ) -> list[dict[str, object]]:
+        nonlocal sub_calls
+        sub_calls += 1
+        return [
+            {
+                "name": "aks-elb-heavy",
+                "resource_group": "rg-blast-heavy",
+                "tier": "heavy",
+                "managed_by_elb": True,
+            }
+        ]
+
+    monkeypatch.setattr("api.routes.monitor.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.monitoring.list_aks_clusters", fake_rg_scoped)
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters_in_subscription",
+        fake_sub_wide,
+    )
+
+    response = client.get("/api/monitor/aks?subscription_id=sub")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope"] == "subscription"
+    assert payload["clusters"][0]["resource_group"] == "rg-blast-heavy"
+    assert payload["clusters"][0]["tier"] == "heavy"
+    assert sub_calls == 1 and rg_calls == 0
+    monitor_cache.reset_monitor_snapshot_cache()
+
+
 def test_storage_summary_preserves_hns_when_container_list_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

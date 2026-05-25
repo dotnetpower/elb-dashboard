@@ -124,6 +124,8 @@ export function ClusterPulse({
     >
       <PulseRowSummary
         clusterName={c.name}
+        tier={c.tier ?? null}
+        resourceGroup={c.resource_group}
         tone={health.tone}
         statusTone={health.statusTone}
         statusLine={health.statusLine}

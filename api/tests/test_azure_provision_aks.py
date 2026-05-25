@@ -474,3 +474,76 @@ def test_provision_aks_publishes_step_progress_with_pool_states(
     # ResourceNotFoundError-on-list path is exercised by other tests; just
     # confirm we did not crash here when both pools were visible.
     _ = ResourceNotFoundError  # silence import-unused
+
+
+def test_provision_aks_retries_in_progress_cluster_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.tasks.azure as azure
+    from api.tasks.azure import provision_aks
+    from api.tasks.azure.provision import _AKS_OPERATION_CONFLICT_RETRY_SECONDS
+    from azure.core.exceptions import ResourceExistsError
+
+    class RetryRequested(Exception):
+        pass
+
+    class FakeResourceGroups:
+        def get(self, _rg: str) -> object:
+            return object()
+
+    class FakeRc:
+        resource_groups = FakeResourceGroups()
+
+    class FakeManagedClusters:
+        def begin_create_or_update(self, _rg: str, _name: str, _params: object) -> object:
+            raise ResourceExistsError(
+                message=(
+                    "(OperationNotAllowed) Operation is not allowed because there's an "
+                    "in progress create managed cluster operation."
+                )
+            )
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    publishes: list[dict[str, Any]] = []
+    retry_calls: list[dict[str, Any]] = []
+
+    def _capture(state: str, meta: dict[str, Any] | None = None, **_kw: Any) -> None:
+        publishes.append({"state": state, "meta": dict(meta or {})})
+
+    def _retry(**kwargs: Any) -> None:
+        retry_calls.append(kwargs)
+        raise RetryRequested()
+
+    monkeypatch.setattr(provision_aks, "update_state", _capture)
+    monkeypatch.setattr(provision_aks, "retry", _retry)
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setattr(azure, "resource_client", lambda _cred, _sub: FakeRc())
+
+    with pytest.raises(RetryRequested):
+        provision_aks.run(
+            job_id="job-conflict",
+            subscription_id="sub-1",
+            resource_group="rg-elb-cluster",
+            region="eastus2",
+            cluster_name="elb-cluster-01",
+            node_sku="Standard_D8s_v3",
+            node_count=1,
+            system_vm_size="Standard_D2s_v3",
+            system_node_count=1,
+            acr_resource_group="",
+            acr_name="",
+            storage_resource_group="",
+            storage_account="",
+            caller_oid="caller-1",
+        )
+
+    assert retry_calls
+    assert retry_calls[0]["countdown"] == _AKS_OPERATION_CONFLICT_RETRY_SECONDS
+    phases = [p["meta"].get("phase") for p in publishes]
+    assert phases[-1] == "arm_create_or_update"
+    assert publishes[-1]["meta"]["status"] == "running"
+    assert publishes[-1]["meta"]["error_code"] == "aks_operation_in_progress"
+    assert "failed" not in phases

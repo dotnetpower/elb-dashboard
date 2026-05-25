@@ -18,6 +18,11 @@ export interface AksProvisionRequest {
   acr_name?: string;
   storage_resource_group?: string;
   storage_account?: string;
+  /** Free-form cluster classification ("heavy" / "light" / "gpu" /
+   *  "general" / ""). Written to ARM as the `elb-tier` tag so the
+   *  dashboard can group multi-cluster deployments. Empty string =
+   *  do not write the tag. */
+  tier?: string;
 }
 
 export interface AksProvisionResponse {

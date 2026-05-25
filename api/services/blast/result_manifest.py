@@ -45,10 +45,13 @@ def _manifest_entry(file: dict[str, Any], index: int) -> dict[str, Any]:
     name = str(file.get("name") or file.get("filename") or file.get("file_id") or f"file-{index}")
     file_id = str(file.get("file_id") or name)
     result_format = str(file.get("format") or _format_from_name(name))
+    size = file.get("size") if file.get("size") is not None else file.get("size_bytes")
     return {
         "file_id": file_id,
+        "filename": str(file.get("filename") or name.rsplit("/", 1)[-1] or name),
         "name": name,
-        "size": file.get("size") if file.get("size") is not None else file.get("size_bytes"),
+        "size": size,
+        "size_bytes": size,
         "last_modified": file.get("last_modified"),
         "format": result_format,
         "parseable": result_format in {"blast_xml", "blast_tabular", "xml", "tabular"},

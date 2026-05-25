@@ -159,7 +159,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'api'
           image: apiImage
           resources: {
-            cpu: json('1.0')
+            cpu: json('0.5')
             memory: '1.0Gi'
           }
           env: [
@@ -252,7 +252,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             '/app/api/run_celery_workers.py'
           ]
           resources: {
-            cpu: json('1.0')
+            cpu: json('0.5')
             memory: '1.0Gi'
           }
           env: [
@@ -268,6 +268,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_BLOB_ENDPOINT', value: blobEndpoint }
             { name: 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', value: platformPrivateEndpointSubnetId }
             { name: 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', value: platformResourceGroupName }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
             // Worker calls api.services.terminal_exec which needs the same
@@ -303,6 +304,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
           env: [
             { name: 'SIDECAR_NAME', value: 'beat' }
             { name: 'OPS_REDIS_URL', value: 'redis://127.0.0.1:6379/2' }
+            { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
             { name: 'LOG_LEVEL', value: 'INFO' }

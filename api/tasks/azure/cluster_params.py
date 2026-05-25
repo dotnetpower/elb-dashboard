@@ -9,7 +9,10 @@ Risky contracts: The pool names (`systempool`, `blastpool`), the
     `workload=blast` label, the `workload=blast:NoSchedule` taint, and the
     `CriticalAddonsOnly=true:NoSchedule` system taint must stay byte-identical to
     `elastic-blast-azure` `src/elastic_blast/constants.py` — kubectl manifests rendered
-    by other parts of the system reference these strings.
+    by other parts of the system reference these strings. The base tag set
+    (`app=elastic-blast`, `managedBy=elb-dashboard`) is the ground-truth filter used
+    by the subscription-wide cluster list — drop or rename either tag and the
+    dashboard will stop recognising clusters it provisioned.
 Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py`.
 """
 
@@ -27,8 +30,15 @@ def build_cluster_params(
     blast_sku: str,
     blast_count: int,
     caller_oid: str,
+    tier: str | None = None,
 ) -> Any:
-    """Build the AKS managed cluster model used by the provision task."""
+    """Build the AKS managed cluster model used by the provision task.
+
+    `tier` is a free-form classification label (e.g. "heavy", "light", "gpu")
+    written to the `elb-tier` ARM tag so the dashboard can group multi-cluster
+    deployments. Empty / whitespace tier values are dropped so we never store
+    `elb-tier=""` on the cluster.
+    """
     from azure.mgmt.containerservice.models import (
         ManagedCluster,
         ManagedClusterAgentPoolProfile,
@@ -45,6 +55,17 @@ def build_cluster_params(
     BLAST_LABEL_VALUE = "blast"
     BLAST_TAINT = f"{BLAST_LABEL_KEY}={BLAST_LABEL_VALUE}:NoSchedule"
     SYSTEM_TAINT = "CriticalAddonsOnly=true:NoSchedule"
+
+    tags: dict[str, str] = {
+        "app": "elastic-blast",
+        "managedBy": "elb-dashboard",
+        "owner": caller_oid or "unknown",
+        "elb-system-pool": SYSTEM_POOL_NAME,
+        "elb-blast-pool": BLAST_POOL_NAME,
+    }
+    tier_clean = (tier or "").strip()
+    if tier_clean:
+        tags["elb-tier"] = tier_clean
 
     return ManagedCluster(
         location=region,
@@ -76,11 +97,5 @@ def build_cluster_params(
                 node_taints=[BLAST_TAINT],
             ),
         ],
-        tags={
-            "app": "elastic-blast",
-            "managedBy": "elb-dashboard",
-            "owner": caller_oid or "unknown",
-            "elb-system-pool": SYSTEM_POOL_NAME,
-            "elb-blast-pool": BLAST_POOL_NAME,
-        },
+        tags=tags,
     )

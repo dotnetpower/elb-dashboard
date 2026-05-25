@@ -88,17 +88,6 @@ for _name in (
 
 def create_app() -> FastAPI:
     install_global_exception_hooks()
-    # Best-effort Azure Monitor OpenTelemetry init. No-op when
-    # APPLICATIONINSIGHTS_CONNECTION_STRING is unset; safe to call
-    # before any FastAPI route is registered so the FastAPI
-    # instrumentor sees every endpoint.
-    try:
-        from api.app.telemetry import init_telemetry
-
-        init_telemetry(role=os.environ.get("SIDECAR_NAME", "api"))
-    except Exception:  # pragma: no cover - defensive
-        LOGGER.debug("telemetry init skipped", exc_info=True)
-
     app = FastAPI(
         title="ElasticBLAST Control Plane API",
         version=__version__,
@@ -106,6 +95,16 @@ def create_app() -> FastAPI:
         redoc_url=None,
         lifespan=_lifespan,
     )
+
+    # Best-effort Azure Monitor OpenTelemetry init. No-op when
+    # APPLICATIONINSIGHTS_CONNECTION_STRING is unset; safe to call before
+    # routes are registered so FastAPI instrumentation sees every endpoint.
+    try:
+        from api.app.telemetry import init_telemetry
+
+        init_telemetry(role=os.environ.get("SIDECAR_NAME", "api"), app=app)
+    except Exception:  # pragma: no cover - defensive
+        LOGGER.debug("telemetry init skipped", exc_info=True)
 
     # Body size limit — reject payloads > 10 MiB.  Uvicorn's
     # --limit-concurrency and --limit-max-requests handle connection-level
@@ -224,7 +223,14 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
-        return JSONResponse({"detail": exc.errors()}, status_code=422)
+        errors: list[dict[str, object]] = []
+        for error in exc.errors():
+            item = dict(error)
+            ctx = item.get("ctx")
+            if isinstance(ctx, dict):
+                item["ctx"] = {str(key): str(value) for key, value in ctx.items()}
+            errors.append(item)
+        return JSONResponse({"detail": errors}, status_code=422)
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

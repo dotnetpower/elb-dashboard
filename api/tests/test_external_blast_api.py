@@ -68,8 +68,11 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
 
     assert response.status_code == 202
     assert response.json()["job_id"] == "aaaaaaaaaaaa"
+    assert response.json()["status"] == "queued"
+    assert response.json()["submission_source"] == "external_api"
+    assert response.json()["external_correlation_id"] == "caller-supplied"
     assert captured["submission_source"] == "external_api"
-    assert captured["external_correlation_id"] != "caller-supplied"
+    assert captured["external_correlation_id"] == "caller-supplied"
     assert captured["idempotency_key"] == "req-1"
     assert captured["canonical_request"]["metadata"]["submission_source"] == "external_api"
     assert captured["compatibility_contract"]["mode"] == "precise"
@@ -188,6 +191,55 @@ def test_external_blast_rejects_invalid_program(monkeypatch):
     assert response.status_code == 422
 
 
+def test_external_blast_rejects_invalid_fasta(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={"query_fasta": "ATGC", "db": "core_nt"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_external_blast_defaults_taxid_to_inclusive(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    captured = {}
+
+    def fake_submit(payload):
+        captured.update(payload)
+        return {"job_id": "aaaaaaaaaaaa", "status": "queued"}
+
+    monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={"query_fasta": ">q1\nATGC", "db": "core_nt", "taxid": 3431483},
+    )
+
+    assert response.status_code == 202
+    assert captured["is_inclusive"] is True
+
+
+def test_external_blast_rejects_inclusive_without_taxid(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={"query_fasta": ">q1\nATGC", "db": "core_nt", "is_inclusive": True},
+    )
+
+    assert response.status_code == 422
+
+
 def test_external_blast_rejects_string_priority(monkeypatch):
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
@@ -283,6 +335,80 @@ def test_external_blast_status_forwards(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["progress_pct"] == 45
+
+
+def test_external_blast_status_normalises_contract(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    monkeypatch.setattr(
+        external_blast,
+        "get_job",
+        lambda job_id: {
+            "job_id": job_id,
+            "status": "completed",
+            "db": "core_nt",
+            "result": {
+                "files": [
+                    {
+                        "file_id": "result-001",
+                        "name": "batch_001.xml.gz",
+                        "size": 123,
+                    }
+                ]
+            },
+        },
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/v1/elastic-blast/jobs/aaaaaaaaaaaa")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["db_name"] == "core_nt"
+    assert body["result"]["files"][0] == {
+        "file_id": "result-001",
+        "filename": "batch_001.xml.gz",
+        "name": "batch_001.xml.gz",
+        "format": "blast_xml",
+        "size_bytes": 123,
+        "size": 123,
+    }
+
+
+def test_external_blast_submit_backfills_empty_upstream_metadata(monkeypatch):
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    monkeypatch.setattr(
+        external_blast,
+        "submit_job",
+        lambda _payload: {
+            "job_id": "aaaaaaaaaaaa",
+            "status": "accepted",
+            "submission_source": None,
+            "external_correlation_id": "",
+        },
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGC",
+            "db": "core_nt",
+            "external_correlation_id": "notebook-run-42",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["submission_source"] == "external_api"
+    assert body["external_correlation_id"] == "notebook-run-42"
 
 
 def test_external_blast_rejects_unsafe_job_id(monkeypatch):

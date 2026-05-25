@@ -145,3 +145,53 @@ export function estimateEtaSec(args: {
   const perSplit = elapsedSec / splitsDone;
   return Math.max(1, Math.round(perSplit * (splitsTotal - splitsDone)));
 }
+
+/**
+ * Tier pill tone.
+ *
+ * The Dashboard's ClusterCard now lists subscription-wide ELB-managed
+ * AKS clusters. Operators of a typical heavy / light / gpu / general
+ * fleet need to recognise each tier at a glance without expanding the
+ * row. Stay inside the calm glassmorphic palette — these colours are
+ * deliberately low-saturation, sub-12% alpha backgrounds, with text
+ * tinted just enough to differentiate against the deep-navy surface.
+ *
+ * Unknown / empty tiers fall back to the neutral surface tone so the
+ * UI never paints a foreign cluster with a fleet colour.
+ */
+export interface TierTone {
+  background: string;
+  color: string;
+  border: string;
+}
+
+const TIER_TONES: Record<string, TierTone> = {
+  heavy: {
+    background: "rgba(99, 145, 209, 0.18)",
+    color: "rgba(178, 200, 234, 0.95)",
+    border: "1px solid rgba(99, 145, 209, 0.30)",
+  },
+  gpu: {
+    background: "rgba(170, 130, 220, 0.18)",
+    color: "rgba(214, 195, 240, 0.95)",
+    border: "1px solid rgba(170, 130, 220, 0.30)",
+  },
+  light: {
+    background: "rgba(120, 180, 160, 0.16)",
+    color: "rgba(190, 220, 210, 0.95)",
+    border: "1px solid rgba(120, 180, 160, 0.28)",
+  },
+  general: {
+    background: "var(--surface-2, rgba(255,255,255,0.06))",
+    color: "var(--text-secondary)",
+    border: "1px solid var(--border-subtle, rgba(255,255,255,0.08))",
+  },
+};
+
+const TIER_TONE_FALLBACK: TierTone = TIER_TONES.general;
+
+export function tierTone(tier: string | null | undefined): TierTone {
+  if (!tier) return TIER_TONE_FALLBACK;
+  const key = tier.trim().toLowerCase();
+  return TIER_TONES[key] ?? TIER_TONE_FALLBACK;
+}

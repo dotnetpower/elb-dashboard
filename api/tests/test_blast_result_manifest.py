@@ -28,6 +28,8 @@ def test_result_manifest_classifies_parseable_result_files() -> None:
     assert manifest["file_count"] == 2
     assert manifest["parseable_count"] == 1
     assert manifest["files"][0]["format"] == "blast_xml"
+    assert manifest["files"][0]["filename"] == "results.xml"
+    assert manifest["files"][0]["size_bytes"] == 123
 
 
 def test_result_manifest_distinguishes_no_result_files_from_degraded() -> None:

@@ -274,3 +274,54 @@ describe("blast submit navigation", () => {
     expect(buildSubmittedJobUrl({}, request)).toBe("/blast/jobs");
   });
 });
+
+describe("blast submit cross-RG cluster picker", () => {
+  // Subscription-wide cluster list means the picker may surface clusters
+  // outside the workspace anchor RG. The submit payload must carry the
+  // *cluster's* RG so backend `list_aks_clusters(cred, sub, rg)` lookups
+  // resolve cleanly — the caller passes `selectedCluster.resource_group`
+  // as `workloadRg`. See web/src/pages/BlastSubmit.tsx handleSubmit.
+  it("emits the selected cluster's RG in the submit payload", () => {
+    const heavyCluster: AksClusterSummary = {
+      ...cluster,
+      name: "aks-elb-heavy",
+      resource_group: "rg-blast-heavy",
+    };
+
+    const request = buildSubmitRequest({
+      form: makeForm({ selectedCluster: heavyCluster.name }),
+      selectedCluster: heavyCluster,
+      subId: "sub-1",
+      workloadRg: heavyCluster.resource_group,
+      storageAccount: "stelb",
+      acrRg: "rg-elbacr",
+      acrName: "acrelb",
+      region: "koreacentral",
+    });
+
+    expect(request.resource_group).toBe("rg-blast-heavy");
+    expect(request.aks_cluster_name).toBe("aks-elb-heavy");
+  });
+
+  it("uses the cluster's region in the submit payload", () => {
+    const remoteCluster: AksClusterSummary = {
+      ...cluster,
+      name: "aks-elb-gpu",
+      resource_group: "rg-blast-gpu",
+      region: "westus2",
+    };
+
+    const request = buildSubmitRequest({
+      form: makeForm({ selectedCluster: remoteCluster.name }),
+      selectedCluster: remoteCluster,
+      subId: "sub-1",
+      workloadRg: remoteCluster.resource_group,
+      storageAccount: "stelb",
+      acrRg: "rg-elbacr",
+      acrName: "acrelb",
+      region: "koreacentral",
+    });
+
+    expect(request.region).toBe("westus2");
+  });
+});

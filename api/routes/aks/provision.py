@@ -79,6 +79,7 @@ def aks_provision(
                     "node_count": body.get("node_count", 3),
                     "system_vm_size": body.get("system_vm_size", DEFAULT_SYSTEM_SKU),
                     "system_node_count": body.get("system_node_count", 1),
+                    "tier": str(body.get("tier", "") or ""),
                 },
             )
         )
@@ -103,6 +104,11 @@ def aks_provision(
         storage_resource_group=body.get("storage_resource_group", ""),
         storage_account=body.get("storage_account", ""),
         caller_oid=caller.object_id,
+        # Free-form tier label written to ARM as `elb-tier=<value>`. The
+        # SPA uses it to group multi-cluster deployments (heavy / light /
+        # gpu). Empty / whitespace values are dropped inside
+        # `build_cluster_params` so we never store `elb-tier=""`.
+        tier=str(body.get("tier", "") or ""),
     )
 
     # Now that we have a task id from Celery, write it back so

@@ -19,6 +19,7 @@ from fastapi import APIRouter, Body, Depends, Request
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _apply_web_blast_searchsp_default
 from api.services.response_contracts import build_admission, build_meta, request_id_from_scope
+from api.services.sanitise import sanitise
 
 router = APIRouter()
 
@@ -161,7 +162,7 @@ def blast_pre_flight(
                     "id": "database",
                     "status": "fail",
                     "title": "BLAST Database",
-                    "detail": str(exc)[:300],
+                    "detail": sanitise(str(exc))[:300],
                     "severity": "critical",
                 }
             )

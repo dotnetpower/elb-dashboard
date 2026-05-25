@@ -31,6 +31,53 @@ function shouldOpenInspectorFromUrl(): boolean {
 }
 
 /**
+ * Sidecar topology skeleton shown while the first SSE/poll snapshot has not
+ * arrived yet. Matches the 4-row grid layout (HTTP/queue/beat/cache) of the
+ * real card so the swap from skeleton → live data does not reflow the page.
+ */
+function SidecarsTopologySkeleton() {
+  const labelStyle: CSSProperties = {
+    fontSize: 10,
+    color: "var(--text-faint)",
+    textAlign: "right",
+  };
+  const gridStyle: CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: `90px minmax(40px, 1fr) ${NODE_W}px minmax(40px, 1fr) ${NODE_W}px`,
+    alignItems: "center",
+    columnGap: 8,
+    padding: "8px 4px",
+  };
+  const node = (
+    <div className="skeleton" style={{ width: NODE_W, height: 56, borderRadius: 8 }} />
+  );
+  const arrow = (
+    <div
+      className="skeleton"
+      style={{ width: "100%", height: 2, borderRadius: 2, opacity: 0.6 }}
+    />
+  );
+  return (
+    <div role="status" aria-live="polite" aria-label="Loading sidecar topology">
+      {[1, 2, 3, 4].map((row) => (
+        <div key={row} style={gridStyle}>
+          <div style={labelStyle}>
+            <div
+              className="skeleton"
+              style={{ width: 70, height: 10, marginLeft: "auto" }}
+            />
+          </div>
+          {arrow}
+          {node}
+          {arrow}
+          {node}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
  * Control Plane Sidecars card — topology view of the in-revision sidecars
  * (frontend, api, worker, beat, redis, terminal) with near-real-time
  * CPU/MEM and an animated traffic pulse along each healthy data path.
@@ -146,6 +193,7 @@ export function SidecarsCard() {
       onRefresh={() => {}}
       accentColor="terminal"
       collapsible
+      loadingFallback={<SidecarsTopologySkeleton />}
       rightSlot={
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <NearRealtimeLabel source={source} />

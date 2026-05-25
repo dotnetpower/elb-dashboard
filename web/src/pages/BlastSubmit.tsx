@@ -107,7 +107,6 @@ export function BlastSubmit() {
 
   const { clusterQuery, clusters, selectedCluster } = useClusterSelection({
     subId,
-    workloadRg,
     form,
     setForm,
   });
@@ -115,7 +114,12 @@ export function BlastSubmit() {
   const { warmupQuery, warmDbs, selectedDbShortName, isDbAlreadyWarm, warmDbInfo } =
     useWarmupStatus({
       subId,
-      workloadRg,
+      // The k8s warmup-status endpoint resolves the cluster via
+      // `list_aks_clusters(cred, sub, rg)`. The cluster picker is
+      // subscription-wide, so we must send the cluster's *actual* RG —
+      // not the workspace anchor RG — otherwise the lookup fails when
+      // the user picks a tier living outside the anchor.
+      workloadRg: selectedCluster?.resource_group || workloadRg,
       selectedCluster,
       formDb: form.db,
     });
@@ -191,7 +195,12 @@ export function BlastSubmit() {
     toast,
     payload: () => ({
       subscription_id: subId,
-      resource_group: workloadRg,
+      // The cluster picker is subscription-wide, so the selected cluster
+      // may live outside the workspace anchor RG. Backend preflight uses
+      // this value to locate the cluster (`list_aks_clusters(cred, sub,
+      // rg)`); falling back to the anchor RG only when no cluster is
+      // selected keeps the empty-form behaviour stable.
+      resource_group: selectedCluster?.resource_group || workloadRg,
       acr_resource_group: acrRg || undefined,
       acr_name: acrName || undefined,
       storage_account: storageAccount,
@@ -260,7 +269,9 @@ export function BlastSubmit() {
           form,
           selectedCluster,
           subId,
-          workloadRg,
+          // Selected cluster's actual RG — see preflight payload comment
+          // above. The workspace anchor RG is only used as a fallback.
+          workloadRg: selectedCluster.resource_group || workloadRg,
           storageAccount,
           acrRg,
           acrName,
@@ -421,7 +432,6 @@ export function BlastSubmit() {
           >
             <ComputeSection
               subId={subId}
-              workloadRg={workloadRg}
               clusters={clusters}
               selectedCluster={selectedCluster}
               clusterLoading={clusterQuery.isLoading}

@@ -1,17 +1,37 @@
 """Celery application configuration for worker and beat sidecars.
 
-Responsibility: Celery application configuration for worker and beat sidecars
-Edit boundaries: Keep changes scoped to this module responsibility and update nearby tests.
-Key entry points: `_start_reporter`, `_on_worker_init`, `_on_beat_init`
-Risky contracts: Keep imports lightweight and preserve existing public contracts.
+Responsibility: Celery app configuration, sidecar startup hooks, and terminal
+task-failure visibility for worker and beat sidecars.
+Edit boundaries: Keep changes scoped to Celery app wiring/signals and update
+nearby tests.
+Key entry points: `_start_reporter`, `_on_worker_init`,
+`_on_worker_process_init`, `_on_beat_init`, `_on_task_failure`,
+`_on_task_revoked`.
+Risky contracts: Failure signal handlers must never raise; task crashes must
+still leave a log entry and, when a JobState row can be found, a user-visible
+failed/cancelled state.
 Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+from datetime import UTC, datetime
+from typing import Any
 
 from celery import Celery
+from celery.signals import (
+    beat_init,
+    before_task_publish,
+    task_failure,
+    task_internal_error,
+    task_revoked,
+    worker_init,
+    worker_process_init,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://127.0.0.1:6379/1")
@@ -37,7 +57,7 @@ celery_app = Celery(
 # Celery app first. Without this, `shared_task.delay()` from the api
 # sidecar would resolve `current_app` to a phantom default Celery app
 # (broker=amqp://, queue="celery", routes={}) and the task would land in
-# a queue the worker doesn't subscribe to → tasks silently never run.
+# a queue the worker doesn't subscribe to -> tasks silently never run.
 celery_app.set_default()
 celery_app.set_current()
 
@@ -55,36 +75,12 @@ celery_app.conf.update(
     worker_prefetch_multiplier=max(
         1, int(os.environ.get("CELERY_WORKER_PREFETCH_MULTIPLIER", "4"))
     ),
-    # Recycle worker children every N tasks so allocator fragmentation +
-    # one-shot leaks in long-running deps (xml parsers, gzip buffers, K8s
-    # clients, Azure SDK pipelines) cannot accumulate into a GB-sized RSS
-    # over thousands of BLAST submits. 200 tasks is a comfortable cadence —
-    # high enough that the cold-start cost (Python interpreter + Celery
-    # import) stays amortised, low enough that the steady-state RSS is
-    # bounded. Override via env if a particular sidecar wants a tighter or
-    # looser bound.
     worker_max_tasks_per_child=int(
         os.environ.get("CELERY_WORKER_MAX_TASKS_PER_CHILD", "200")
     ),
-    # Hard ceiling on every task — guards against a stuck terminal_exec
-    # stream, hung Storage call, or runaway Kubernetes wait blocking a
-    # worker slot forever. Soft limit fires SoftTimeLimitExceeded so the
-    # task can checkpoint / clean up; hard limit kills the worker child if
-    # the soft handler hangs too. The 1-hour ceiling matches the longest
-    # legit submit we have observed (sharded prepare-db); shorter tasks
-    # (poll, reconcile) finish in seconds so this never trips for them.
-    # The BLAST submit task itself is wrapped in its own retry loop so a
-    # soft-timeout pushes the work to the retry, not a dead end.
     task_soft_time_limit=_TASK_SOFT_TIME_LIMIT,
     task_time_limit=_TASK_TIME_LIMIT,
-    # Drop Celery result payloads after one hour so the result Redis db
-    # does not retain GB of stale dicts. Routes that need a result poll
-    # ``AsyncResult(...)`` within the first hour; anything older has been
-    # reflected into ``state_repo`` already.
     result_expires=_RESULT_EXPIRES_SECONDS,
-    # Silence the Celery 6.0 deprecation warning by opting in explicitly.
-    # We want broker connection retries on startup so the worker comes up
-    # gracefully even if Redis takes a few seconds to become reachable.
     broker_connection_retry_on_startup=True,
     task_default_queue="default",
     task_routes={
@@ -93,8 +89,6 @@ celery_app.conf.update(
         "api.tasks.blast.artifacts.*": {"queue": "blast-artifacts"},
         "api.tasks.blast.*": {"queue": "blast"},
         "api.tasks.storage.*": {"queue": "storage"},
-        # OpenAPI deploys talk to AKS / MSI / Authorization, same as
-        # `provision_aks` — share the azure queue.
         "api.tasks.openapi.*": {"queue": "azure"},
     },
     beat_schedule={
@@ -103,10 +97,6 @@ celery_app.conf.update(
             "schedule": float(os.environ.get("CELERY_BEAT_AUTO_WARMUP_SECONDS", "120")),
             "options": {"queue": "storage"},
         },
-        # Periodic stale-job reconciliation. Catches rows whose worker
-        # died mid-flight, broker dropped the message, or external plane
-        # silently advanced. See docstring on reconcile_stale_jobs for
-        # the decision tree it follows.
         "blast-reconcile-stale-jobs": {
             "task": "api.tasks.blast.reconcile_stale_jobs",
             "schedule": float(os.environ.get("CELERY_BEAT_BLAST_RECONCILE_SECONDS", "90")),
@@ -117,36 +107,30 @@ celery_app.conf.update(
             "schedule": 300.0,
             "options": {"queue": "blast"},
         },
-        # Discover release tags on the configured `UPGRADE_GIT_REMOTE`.
-        # Inert when the env is unset; bounded HTTP call otherwise.
         "upgrade-check-latest": {
             "task": "api.tasks.upgrade.check_latest",
             "schedule": 1800.0,
             "options": {"queue": "default"},
         },
-        # Reconcile `rolling_out` to `succeeded`/`failed_rollout` on the
-        # post-PATCH revision. Cheap when state != rolling_out.
         "upgrade-reconcile-rolling-out": {
             "task": "api.tasks.upgrade.reconcile_rolling_out",
             "schedule": float(os.environ.get("CELERY_BEAT_UPGRADE_RECONCILE_SECONDS", "180")),
             "options": {"queue": "default"},
         },
-        # Retry orphan ACR tag deletes recorded by `_fail_pre` when the
-        # MI didn't have `acrDelete` at the time of failure. Daily is
-        # plenty — most operators add the role within hours of seeing
-        # the audit row, and the retry is idempotent.
         "upgrade-purge-orphan-tags": {
             "task": "api.tasks.upgrade.purge_orphan_acr_tags",
             "schedule": 24 * 60 * 60.0,
             "options": {"queue": "default"},
         },
-        # Compact the upgrade-history append blob weekly: drop events
-        # older than the read-time age cap so the blob doesn't grow
-        # unboundedly even if the deployment runs for years.
         "upgrade-compact-history": {
             "task": "api.tasks.upgrade.compact_history",
             "schedule": 7 * 24 * 60 * 60.0,
             "options": {"queue": "default"},
+        },
+        "aks-reconcile-stale-provisions": {
+            "task": "api.tasks.azure.reconcile_stale_aks_provisions",
+            "schedule": float(os.environ.get("CELERY_BEAT_AKS_PROVISION_RECONCILE_SECONDS", "300")),
+            "options": {"queue": "azure"},
         },
     },
     timezone="UTC",
@@ -154,13 +138,8 @@ celery_app.conf.update(
 )
 
 
-# ---------------------------------------------------------------------------
-# Sidecar metrics reporter — fires from worker_init / beat_init signals so
-# both Celery sidecars publish their cgroup CPU/MEM into Redis db 2 next to
-# the api sidecar's snapshots. The /api/monitor/sidecars endpoint reads
-# all six.
-# ---------------------------------------------------------------------------
 def _start_reporter(sender_name: str) -> None:
+    """Start the sidecar cgroup reporter for worker or beat."""
     if os.environ.get("SIDECAR_REPORTER_DISABLED", "").lower() == "true":
         return
     try:
@@ -169,31 +148,96 @@ def _start_reporter(sender_name: str) -> None:
         name = os.environ.get("SIDECAR_NAME", sender_name)
         start_in_thread(name)
     except Exception:
-        import logging
-
-        logging.getLogger(__name__).warning(
+        LOGGER.warning(
             "cgroup reporter failed to start in %s", sender_name, exc_info=True
         )
 
 
-from celery.signals import (  # noqa: E402 — keep near user
-    beat_init,
-    before_task_publish,
-    worker_init,
-)
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _task_job_id(kwargs: dict[str, Any] | None) -> str:
+    value = (kwargs or {}).get("job_id")
+    return str(value) if value else ""
+
+
+def _task_name(sender: Any) -> str:
+    return str(getattr(sender, "name", None) or sender or "unknown")
+
+
+def _record_task_terminal_state(
+    *,
+    task_id: str | None,
+    task_name: str,
+    status: str,
+    phase: str,
+    message: str,
+    error_code: str,
+    job_id: str = "",
+) -> None:
+    """Best-effort JobState update for Celery terminal signals."""
+    if not task_id and not job_id:
+        return
+    try:
+        from api.services.state_repo import JobStateRepository
+
+        repo = JobStateRepository()
+        state = repo.get(job_id) if job_id else None
+        if state is None and task_id:
+            state = repo.find_by_task_id(task_id)
+        if state is None:
+            return
+        payload = dict(getattr(state, "payload", {}) or {})
+        payload["terminal_task_event"] = {
+            "task_id": task_id or "",
+            "task_name": task_name,
+            "phase": phase,
+            "status": status,
+            "message": message[:500],
+            "error_code": error_code[:128],
+            "recorded_at": _now_iso(),
+        }
+        repo.update(
+            state.job_id,
+            status=status,
+            phase=phase,
+            error_code=error_code[:128],
+            payload=payload,
+        )
+        repo.append_history(
+            state.job_id,
+            phase,
+            {
+                "status": status,
+                "task_id": task_id or "",
+                "task_name": task_name,
+                "message": message[:1000],
+                "error_code": error_code[:128],
+            },
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "celery terminal state record failed task_id=%s task=%s err=%s",
+            task_id,
+            task_name,
+            type(exc).__name__,
+        )
 
 
 @worker_init.connect  # type: ignore[untyped-decorator]
 def _on_worker_init(**_kwargs: object) -> None:
+    _start_reporter("worker")
+
+
+@worker_process_init.connect  # type: ignore[untyped-decorator]
+def _on_worker_process_init(**_kwargs: object) -> None:
     try:
         from api.app.telemetry import init_telemetry
 
         init_telemetry(role="worker")
     except Exception:
-        import logging
-
-        logging.getLogger(__name__).debug("worker telemetry init skipped", exc_info=True)
-    _start_reporter("worker")
+        LOGGER.debug("worker telemetry init skipped", exc_info=True)
 
 
 @beat_init.connect  # type: ignore[untyped-decorator]
@@ -203,19 +247,110 @@ def _on_beat_init(**_kwargs: object) -> None:
 
         init_telemetry(role="beat")
     except Exception:
-        import logging
-
-        logging.getLogger(__name__).debug("beat telemetry init skipped", exc_info=True)
+        LOGGER.debug("beat telemetry init skipped", exc_info=True)
     _start_reporter("beat")
 
 
-# ---------------------------------------------------------------------------
-# UI animation events — the SidecarsCard topology graph fires a particle
-# along Row 2 (api → redis → worker) every time the api enqueues a task
-# and along Row 3 (beat → redis) every time beat does. before_task_publish
-# fires in the *producer* process, so the SIDECAR_NAME env decides which
-# row gets the credit. Failures are swallowed inside event_emitter.emit.
-# ---------------------------------------------------------------------------
+@task_failure.connect  # type: ignore[untyped-decorator]
+def _on_task_failure(
+    sender: Any = None,
+    task_id: str | None = None,
+    exception: BaseException | None = None,
+    kwargs: dict[str, Any] | None = None,
+    einfo: Any = None,
+    **_signal_kwargs: Any,
+) -> None:
+    task_name = _task_name(sender)
+    job_id = _task_job_id(kwargs)
+    exc_name = type(exception).__name__ if exception is not None else "TaskFailure"
+    message = str(exception or exc_name)
+    LOGGER.error(
+        "celery_task_failed task_id=%s task=%s job_id=%s exc=%s message=%s",
+        task_id,
+        task_name,
+        job_id or "-",
+        exc_name,
+        message[:500],
+        exc_info=getattr(einfo, "exc_info", None),
+    )
+    _record_task_terminal_state(
+        task_id=task_id,
+        task_name=task_name,
+        job_id=job_id,
+        status="failed",
+        phase="celery_task_failed",
+        message=message,
+        error_code=exc_name,
+    )
+
+
+@task_internal_error.connect  # type: ignore[untyped-decorator]
+def _on_task_internal_error(
+    sender: Any = None,
+    task_id: str | None = None,
+    exception: BaseException | None = None,
+    kwargs: dict[str, Any] | None = None,
+    **_signal_kwargs: Any,
+) -> None:
+    task_name = _task_name(sender)
+    job_id = _task_job_id(kwargs)
+    exc_name = type(exception).__name__ if exception is not None else "TaskInternalError"
+    message = str(exception or exc_name)
+    LOGGER.error(
+        "celery_task_internal_error task_id=%s task=%s job_id=%s exc=%s message=%s",
+        task_id,
+        task_name,
+        job_id or "-",
+        exc_name,
+        message[:500],
+    )
+    _record_task_terminal_state(
+        task_id=task_id,
+        task_name=task_name,
+        job_id=job_id,
+        status="failed",
+        phase="celery_internal_error",
+        message=message,
+        error_code=exc_name,
+    )
+
+
+@task_revoked.connect  # type: ignore[untyped-decorator]
+def _on_task_revoked(
+    sender: Any = None,
+    request: Any = None,
+    terminated: bool = False,
+    expired: bool = False,
+    signum: int | None = None,
+    **_signal_kwargs: Any,
+) -> None:
+    task_id = str(getattr(request, "id", "") or "") or None
+    task_name = _task_name(sender or getattr(request, "task", None))
+    kwargs = getattr(request, "kwargs", None)
+    job_id = _task_job_id(kwargs if isinstance(kwargs, dict) else None)
+    status = "failed" if expired else "cancelled"
+    phase = "celery_task_expired" if expired else "celery_task_revoked"
+    message = f"Task revoked terminated={terminated} expired={expired} signum={signum}"
+    LOGGER.warning(
+        "celery_task_revoked task_id=%s task=%s job_id=%s terminated=%s expired=%s signum=%s",
+        task_id,
+        task_name,
+        job_id or "-",
+        terminated,
+        expired,
+        signum,
+    )
+    _record_task_terminal_state(
+        task_id=task_id,
+        task_name=task_name,
+        job_id=job_id,
+        status=status,
+        phase=phase,
+        message=message,
+        error_code=phase,
+    )
+
+
 _PRODUCER_ROLE = os.environ.get("SIDECAR_NAME", "api")
 
 

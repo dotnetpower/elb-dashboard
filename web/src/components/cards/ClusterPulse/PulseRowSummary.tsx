@@ -8,7 +8,7 @@
 import { Activity, ChevronDown, ChevronRight, Flame, Send } from "lucide-react";
 
 import { HealthDot, PulseStat } from "./atoms";
-import type { HealthTone } from "./helpers";
+import { tierTone, type HealthTone } from "./helpers";
 
 interface Props {
   clusterName: string;
@@ -24,6 +24,11 @@ interface Props {
   onToggle: () => void;
   /** id of the panel this button controls (for `aria-controls`). */
   panelId?: string;
+  /** Optional `elb-tier` ARM tag (heavy / light / gpu / general). */
+  tier?: string | null;
+  /** Optional cluster resource group — shown next to the name when the
+   * card is operating sub-wide and clusters may live in different RGs. */
+  resourceGroup?: string;
 }
 
 export function PulseRowSummary({
@@ -39,6 +44,8 @@ export function PulseRowSummary({
   open,
   onToggle,
   panelId,
+  tier,
+  resourceGroup,
 }: Props) {
   const statusColor =
     statusTone === "healthy"
@@ -92,9 +99,60 @@ export function PulseRowSummary({
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            minWidth: 0,
           }}
         >
-          {clusterName}
+          <span
+            style={{
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+            }}
+          >
+            {clusterName}
+          </span>
+          {tier ? (
+            <span
+              title={`elb-tier: ${tier}`}
+              style={{
+                flexShrink: 0,
+                fontSize: 9,
+                fontWeight: 600,
+                lineHeight: 1,
+                padding: "2px 6px",
+                borderRadius: 999,
+                background: tierTone(tier).background,
+                color: tierTone(tier).color,
+                border: tierTone(tier).border,
+                textTransform: "lowercase",
+                letterSpacing: 0.2,
+              }}
+            >
+              {tier}
+            </span>
+          ) : null}
+          {resourceGroup ? (
+            <span
+              title={`Resource group: ${resourceGroup}`}
+              style={{
+                flexShrink: 0,
+                fontSize: 9,
+                fontWeight: 500,
+                lineHeight: 1,
+                color: "var(--text-faint)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                maxWidth: 160,
+              }}
+            >
+              {resourceGroup}
+            </span>
+          ) : null}
         </span>
         <span
           title={statusLine}

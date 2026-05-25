@@ -41,7 +41,7 @@ from api.tasks.azure.helpers import (
     update_state as _update_state,
 )
 from api.tasks.azure.lifecycle import delete_aks, start_aks, stop_aks
-from api.tasks.azure.provision import provision_aks
+from api.tasks.azure.provision import provision_aks, reconcile_stale_aks_provisions
 from api.tasks.azure.rbac import (
     assign_aks_roles,
 )
@@ -72,6 +72,7 @@ __all__ = (
     "get_credential",
     "provision_aks",
     "provision_app_insights",
+    "reconcile_stale_aks_provisions",
     "resource_client",
     "start_aks",
     "stop_aks",

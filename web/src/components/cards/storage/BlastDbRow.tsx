@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Circle,
   Download,
+  ExternalLink,
   ListOrdered,
   Loader2,
   RefreshCw,
@@ -13,6 +14,7 @@ import {
   formatBytes,
   formatNcbiVersion,
   formatStorageDate,
+  ncbiBlastDbFtpUrl,
 } from "@/components/cards/storageDbCatalog";
 import type { DownloadedDbMeta } from "@/components/cards/storage/useBlastDb";
 import type { DbPreviewMeta } from "@/components/cards/storage/useDbPreviews";
@@ -101,6 +103,7 @@ export function BlastDbRow({
   // unsupported badge carries clearer wording + the real source URL.
   const previewUnavailable =
     !isUnsupported && preview ? preview.available === false : false;
+  const ncbiFtpUrl = ncbiBlastDbFtpUrl(db.value, db.type);
   const downloadBlocked =
     isUnsupported ||
     (downloadDisabled && !isPartial) ||
@@ -273,17 +276,11 @@ export function BlastDbRow({
                       : ""}
                   </span>
                   {preview.snapshot && (
-                    <code
-                      style={{
-                        fontSize: 10,
-                        background: "var(--bg-tertiary)",
-                        padding: "1px 5px",
-                        borderRadius: 3,
-                      }}
-                      title={`Current NCBI snapshot: ${preview.snapshot}`}
-                    >
-                      v:{formatNcbiVersion(preview.snapshot)}
-                    </code>
+                    <NcbiVersionBadge
+                      version={preview.snapshot}
+                      href={ncbiFtpUrl}
+                      title={`Open ${db.value} metadata on the NCBI BLAST DB FTP server`}
+                    />
                   )}
                 </>
               ) : preview && preview.available === false ? (
@@ -420,16 +417,11 @@ export function BlastDbRow({
                 <span>{formatStorageDate(meta.last_modified)}</span>
               ) : null}
               {meta.source_version && (
-                <code
-                  style={{
-                    fontSize: 10,
-                    background: "var(--bg-tertiary)",
-                    padding: "1px 5px",
-                    borderRadius: 3,
-                  }}
-                >
-                  v:{formatNcbiVersion(meta.source_version)}
-                </code>
+                <NcbiVersionBadge
+                  version={meta.source_version}
+                  href={ncbiFtpUrl}
+                  title={`Open ${db.value} metadata on the NCBI BLAST DB FTP server`}
+                />
               )}
               {meta.sharded && (meta.shard_sets?.length ?? 0) > 0 && (
                 <span
@@ -672,5 +664,50 @@ export function BlastDbRow({
         )}
       </div>
     </div>
+  );
+}
+
+function NcbiVersionBadge({
+  version,
+  href,
+  title,
+}: {
+  version: string;
+  href: string;
+  title: string;
+}) {
+  const content = (
+    <>
+      <code
+        style={{
+          fontSize: 10,
+          background: "var(--bg-tertiary)",
+          padding: "1px 5px",
+          borderRadius: 3,
+        }}
+      >
+        v:{formatNcbiVersion(version)}
+      </code>
+      <ExternalLink size={10} strokeWidth={1.5} aria-hidden="true" />
+    </>
+  );
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={title}
+      aria-label={`Open NCBI BLAST DB metadata for ${formatNcbiVersion(version)} in a new tab`}
+      onClick={(event) => event.stopPropagation()}
+      style={{
+        color: "inherit",
+        textDecoration: "none",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 3,
+      }}
+    >
+      {content}
+    </a>
   );
 }

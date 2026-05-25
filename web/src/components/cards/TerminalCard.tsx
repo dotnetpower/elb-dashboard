@@ -69,6 +69,31 @@ export function TerminalCard() {
       lastRefreshed={health.dataUpdatedAt ? new Date(health.dataUpdatedAt) : null}
       onRefresh={() => health.refetch()}
       fetching={health.isFetching}
+      loadingFallback={
+        <div
+          role="status"
+          aria-live="polite"
+          aria-label="Loading terminal sidecar status"
+          style={{ display: "flex", flexDirection: "column", gap: 14 }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              className="skeleton"
+              style={{ width: 10, height: 10, borderRadius: "50%", flexShrink: 0 }}
+            />
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div className="skeleton" style={{ width: "55%", height: 14 }} />
+              <div className="skeleton" style={{ width: "75%", height: 11 }} />
+            </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div className="skeleton" style={{ width: "90%", height: 10 }} />
+            <div className="skeleton" style={{ width: "80%", height: 10 }} />
+            <div className="skeleton" style={{ width: "70%", height: 10 }} />
+          </div>
+          <div className="skeleton" style={{ width: 140, height: 32, borderRadius: 8 }} />
+        </div>
+      }
     >
       <div style={{ display: "flex", flexDirection: "column" }}>
         <div className="dv3-terminal-status">

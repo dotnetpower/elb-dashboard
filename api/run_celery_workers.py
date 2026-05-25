@@ -37,7 +37,7 @@ def _validated(value: str, pattern: re.Pattern[str], label: str) -> str:
 def _worker_command(name: str, queues: str, concurrency: str) -> list[str]:
     queues = _validated(queues, _QUEUE_RE, "queues")
     concurrency = _validated(concurrency, _CONCURRENCY_RE, "concurrency")
-    return [
+    command = [
         sys.executable,
         "-m",
         "celery",
@@ -52,6 +52,14 @@ def _worker_command(name: str, queues: str, concurrency: str) -> list[str]:
         "--concurrency",
         concurrency,
     ]
+    if os.environ.get("CELERY_WORKER_GOSSIP", "false").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        command.extend(["--without-gossip", "--without-mingle", "--without-heartbeat"])
+    return command
 
 
 def _terminate(processes: list[subprocess.Popen[bytes]]) -> None:
@@ -80,6 +88,8 @@ def main() -> int:
 
     def _handle_signal(signum: int, _frame: object) -> None:
         nonlocal stopping
+        if stopping:
+            return
         stopping = True
         _terminate(processes)
         raise SystemExit(128 + signum)

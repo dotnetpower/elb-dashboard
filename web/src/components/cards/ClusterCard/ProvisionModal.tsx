@@ -27,7 +27,8 @@ import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 import { ProvisionErrorCard } from "./ProvisionErrorCard";
 import type { ProvisionProgress } from "./ProvisioningBanner";
-import { MAX_SYSTEM_NODE_COUNT } from "./useClusterProvisioning";
+import { MAX_SYSTEM_NODE_COUNT, CLUSTER_TIER_OPTIONS } from "./useClusterProvisioning";
+import type { ClusterTier } from "./useClusterProvisioning";
 
 export function ProvisionModal({
   // form state
@@ -42,6 +43,8 @@ export function ProvisionModal({
   setSystemVmSize,
   systemNodeCount,
   setSystemNodeCount,
+  tier,
+  setTier,
   // sku catalog
   skuOptions,
   groupLabels,
@@ -61,6 +64,7 @@ export function ProvisionModal({
   resourceGroupValid,
   resourceGroupExists,
   resourceGroupsLoading,
+  workloadResourceGroup,
   // preflight
   preflightStatus,
   preflightResult,
@@ -90,6 +94,10 @@ export function ProvisionModal({
   setSystemVmSize: (v: string) => void;
   systemNodeCount: number;
   setSystemNodeCount: (v: number) => void;
+  /** Free-form cluster classification — written to ARM as the
+   *  `elb-tier` tag. Empty string == leave the tag off (the default). */
+  tier: ClusterTier;
+  setTier: (v: ClusterTier) => void;
   skuOptions: AksSku[];
   groupLabels: Record<string, string>;
   groupOrder: string[];
@@ -122,6 +130,13 @@ export function ProvisionModal({
    *  this is true. */
   resourceGroupExists: boolean;
   resourceGroupsLoading: boolean;
+  /** The dashboard's workload Resource Group (the one the card is
+   *  currently listing clusters for). When this differs from the
+   *  modal's `resourceGroup`, the new cluster will land in a RG that
+   *  the card is not currently scoped to. The modal surfaces a soft
+   *  inline note so the user understands why they may need to switch
+   *  the dashboard's Workload RG later to manage the cluster. */
+  workloadResourceGroup?: string;
   /** "idle" before the user has clicked Create; "checking" while the
    *  preflight HTTP call is in flight; "done" once results are in. */
   preflightStatus: "idle" | "checking" | "done";
@@ -446,6 +461,39 @@ export function ProvisionModal({
                 chars.
               </div>
             )}
+          </div>
+
+          <div>
+            <label
+              htmlFor="provision-tier"
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                display: "block",
+                marginBottom: 4,
+              }}
+            >
+              Cluster classification (optional)
+            </label>
+            <select
+              id="provision-tier"
+              value={tier}
+              onChange={(e) => setTier(e.target.value as ClusterTier)}
+              className="glass-input"
+              style={{ width: "100%", fontSize: 13 }}
+            >
+              {CLUSTER_TIER_OPTIONS.map((option) => (
+                <option key={option.value || "_unset"} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+              Stored as the <code>elb-tier</code> ARM tag so the dashboard can
+              group multi-cluster fleets at a glance. Leave unspecified if the
+              cluster fits no obvious bucket — you can always edit the tag
+              later from the Azure Portal.
+            </div>
           </div>
 
           <section style={workloadPanelStyle}>
@@ -828,6 +876,32 @@ export function ProvisionModal({
                     : "New resource group will be created."}
                 </div>
               )}
+              {resourceGroupValid &&
+                workloadResourceGroup &&
+                resourceGroup !== workloadResourceGroup && (
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "var(--warning, var(--text-muted))",
+                      marginTop: 3,
+                    }}
+                  >
+                    Cluster will land in{" "}
+                    <code style={{ ...panelChipStyle, padding: "0 4px" }}>
+                      {resourceGroup}
+                    </code>
+                    , not the dashboard's Workload RG{" "}
+                    <code style={{ ...panelChipStyle, padding: "0 4px" }}>
+                      {workloadResourceGroup}
+                    </code>
+                    . The card will keep tracking it during provisioning; to
+                    manage it later, switch the dashboard's Workload RG to{" "}
+                    <code style={{ ...panelChipStyle, padding: "0 4px" }}>
+                      {resourceGroup}
+                    </code>
+                    .
+                  </div>
+                )}
             </div>
           </div>
         </div>

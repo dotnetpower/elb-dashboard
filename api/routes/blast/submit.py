@@ -41,6 +41,15 @@ LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Shared truncation policy for HTTPException ``detail.message`` payloads. The
+# 500-char cap is what every error path here used historically (kept verbatim);
+# this constant just makes the policy visible in one place instead of repeated
+# magic numbers.
+_EXCEPTION_DETAIL_MAX_CHARS = 500
+# Retry-After header value (seconds) advertised when a submit is accepted or
+# an idempotency replay is returned. SPA polling assumes this cadence.
+_SUBMIT_RETRY_AFTER_SECONDS = 5
+
 
 def _submit_job_id(body: dict[str, Any], caller: CallerIdentity) -> str:
     idempotency_key = body.get("idempotency_key")
@@ -105,7 +114,11 @@ def _submit_response(
         "admission": build_admission(
             decision="accepted",
             reason=admission_reason,
-            queue={"state": "accepted", "depth_bucket": "unknown", "poll_after_seconds": 5},
+            queue={
+                "state": "accepted",
+                "depth_bucket": "unknown",
+                "poll_after_seconds": _SUBMIT_RETRY_AFTER_SECONDS,
+            },
         ),
         "meta": build_meta(request_id=request_id),
     }
@@ -121,7 +134,10 @@ def _validate_submit_contracts(body: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(
             422,
-            detail={"code": "sharding_precision_invalid", "message": str(exc)[:500]},
+            detail={
+                "code": "sharding_precision_invalid",
+                "message": str(exc)[:_EXCEPTION_DETAIL_MAX_CHARS],
+            },
         ) from exc
 
     precision = contracts["precision"]
@@ -176,7 +192,10 @@ def blast_submit(
     except Exception as exc:
         raise HTTPException(
             422,
-            detail={"code": "validation_error", "message": str(exc)[:500]},
+            detail={
+                "code": "validation_error",
+                "message": str(exc)[:_EXCEPTION_DETAIL_MAX_CHARS],
+            },
         ) from exc
 
     # Precision gate: exact/precise sharding claims must be validated before a
@@ -234,7 +253,10 @@ def blast_submit(
     except Exception as exc:
         raise HTTPException(
             422,
-            detail={"code": "sharding_precision_invalid", "message": str(exc)[:500]},
+            detail={
+                "code": "sharding_precision_invalid",
+                "message": str(exc)[:_EXCEPTION_DETAIL_MAX_CHARS],
+            },
         ) from exc
 
     # Keep submit latency low: ARM cluster readiness checks run in the worker
@@ -298,7 +320,7 @@ def blast_submit(
             if existing is not None:
                 operation_id = existing.task_id or job_id
                 response.headers["Location"] = f"/api/operations/{operation_id}"
-                response.headers["Retry-After"] = "5"
+                response.headers["Retry-After"] = str(_SUBMIT_RETRY_AFTER_SECONDS)
                 return _submit_response(
                     job_id,
                     existing.task_id,
@@ -373,7 +395,7 @@ def blast_submit(
                 )
         raise exc
     response.headers["Location"] = f"/api/operations/{task_id or job_id}"
-    response.headers["Retry-After"] = "5"
+    response.headers["Retry-After"] = str(_SUBMIT_RETRY_AFTER_SECONDS)
     return _submit_response(
         job_id,
         task_id,
@@ -405,18 +427,31 @@ def blast_job_submit(
             return delegate(body, caller)
         return delegate(request, response, body, caller)
 
-    from api.routes.elastic_blast import ExternalBlastSubmitRequest
+    from api.routes.elastic_blast import ExternalBlastSubmitRequest, _normalise_external_job_payload
     from api.services import external_blast
 
+    # Bind the parsed model to a distinct name so the FastAPI ``request``
+    # parameter remains usable below for ``request_id_from_scope`` — earlier
+    # revisions shadowed it and silently lost the per-request id.
     try:
-        request = ExternalBlastSubmitRequest(**body)
+        submit_request = ExternalBlastSubmitRequest(**body)
     except Exception as exc:
         raise HTTPException(
-            422, detail={"code": "validation_error", "message": str(exc)[:500]}
+            422,
+            detail={
+                "code": "validation_error",
+                "message": str(exc)[:_EXCEPTION_DETAIL_MAX_CHARS],
+            },
         ) from exc
 
-    payload = request.model_dump(exclude_none=True)
-    payload.update(canonical_submit_metadata(payload, submission_source="external_api"))
+    payload = submit_request.model_dump(exclude_none=True)
+    payload.update(
+        canonical_submit_metadata(
+            payload,
+            submission_source="external_api",
+            correlation_id=submit_request.external_correlation_id,
+        )
+    )
     payload["canonical_request"] = canonical_submit_snapshot(payload)
     payload.update(submit_contracts(payload))
     from api.services.blast.provenance import build_blast_provenance
@@ -428,14 +463,17 @@ def blast_job_submit(
     LOGGER.info(
         "canonical external BLAST submit accepted caller_oid=%s db=%s program=%s",
         caller.object_id,
-        request.db,
-        request.program,
+        submit_request.db,
+        submit_request.program,
     )
-    upstream = external_blast.submit_job(payload)
+    upstream = _normalise_external_job_payload(
+        external_blast.submit_job(payload),
+        request_payload=payload,
+    )
     openapi_job_id = str(upstream.get("job_id") or "")
     dashboard_job_id = str(payload["external_correlation_id"])
     response.headers["Location"] = f"/api/blast/jobs/{dashboard_job_id}"
-    response.headers["Retry-After"] = "5"
+    response.headers["Retry-After"] = str(_SUBMIT_RETRY_AFTER_SECONDS)
     return {
         **upstream,
         "status": upstream.get("status") or "accepted",
@@ -466,7 +504,11 @@ def blast_job_submit(
         "admission": build_admission(
             decision="accepted",
             reason="accepted_by_openapi_execution_plane",
-            queue={"state": "accepted", "depth_bucket": "unknown", "poll_after_seconds": 5},
+            queue={
+                "state": "accepted",
+                "depth_bucket": "unknown",
+                "poll_after_seconds": _SUBMIT_RETRY_AFTER_SECONDS,
+            },
         ),
         "meta": build_meta(request_id=request_id_from_scope(request)),
     }

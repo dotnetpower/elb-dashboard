@@ -42,6 +42,7 @@ from api.services.blast.result_analytics import (
     annotate_result_hit,
     list_parseable_result_blobs,
 )
+from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ def blast_job_file(
                             422,
                             detail={
                                 "code": "invalid_config_payload",
-                                "message": str(exc)[:500],
+                                "message": sanitise(str(exc))[:500],
                             },
                         ) from exc
             if not selected_blob:

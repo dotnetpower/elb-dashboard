@@ -16,10 +16,12 @@ Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py
 from __future__ import annotations
 
 import logging
+import os
 import time
+from datetime import UTC, datetime
 from typing import Any
 
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from celery import shared_task
 
 import api.tasks.azure as _facade
@@ -41,6 +43,9 @@ _RG_VISIBILITY_DELAY_SECONDS = 5.0
 # per-AgentPool.provisioning_state so the FE banner can show "systempool
 # Succeeded · blastpool Creating" instead of a 5-10 minute blank wait.
 _ARM_POLL_INTERVAL_SECONDS = 20.0
+_AKS_OPERATION_CONFLICT_RETRY_SECONDS = 60
+_STALE_QUEUED_SECONDS = int(os.environ.get("AKS_PROVISION_STALE_QUEUED_SECONDS", "900"))
+_STALE_RUNNING_SECONDS = int(os.environ.get("AKS_PROVISION_STALE_RUNNING_SECONDS", "2700"))
 
 # Ordered list of (machine_phase, human_label, step_number). `total_steps`
 # is `len(_PROVISION_STEPS)` and is shipped with every progress tick so
@@ -174,6 +179,41 @@ def _poll_arm_create(
         time.sleep(_ARM_POLL_INTERVAL_SECONDS)
 
 
+def _is_in_progress_aks_operation(exc: BaseException) -> bool:
+    if not isinstance(exc, ResourceExistsError):
+        return False
+    message = str(exc)
+    return (
+        "OperationNotAllowed" in message
+        and "in progress" in message
+        and "managed cluster operation" in message
+    )
+
+
+def _retry_in_progress_aks_operation(
+    task: Any,
+    *,
+    job_id: str,
+    cluster_name: str,
+    exc: BaseException,
+) -> None:
+    _publish(
+        task,
+        job_id,
+        "arm_create_or_update",
+        status="running",
+        message="Azure is still finishing a previous AKS operation; retrying shortly.",
+        cluster_name=cluster_name,
+        retry_after_seconds=_AKS_OPERATION_CONFLICT_RETRY_SECONDS,
+        error_code="aks_operation_in_progress",
+        transient_error=str(exc)[:500],
+    )
+    raise task.retry(
+        exc=exc,
+        countdown=_AKS_OPERATION_CONFLICT_RETRY_SECONDS,
+    )
+
+
 @shared_task(
     name="api.tasks.azure.provision_aks",
     bind=True,
@@ -201,6 +241,7 @@ def provision_aks(
     storage_resource_group: str = "",
     storage_account: str = "",
     caller_oid: str = "",
+    tier: str = "",
 ) -> dict[str, Any]:
     """Provision an AKS cluster with the sibling repo's two-pool layout.
 
@@ -303,6 +344,7 @@ def provision_aks(
         blast_sku=blast_sku,
         blast_count=blast_count,
         caller_oid=caller_oid,
+        tier=tier,
     )
 
     portal_url = None
@@ -366,6 +408,13 @@ def provision_aks(
             blast_count,
         )
     except Exception as exc:
+        if _is_in_progress_aks_operation(exc):
+            _retry_in_progress_aks_operation(
+                self,
+                job_id=job_id,
+                cluster_name=cluster_name,
+                exc=exc,
+            )
         _publish(
             self,
             job_id,
@@ -420,3 +469,119 @@ def provision_aks(
             {"name": BLAST_POOL_NAME, "mode": "User", "vm_size": blast_sku, "count": blast_count},
         ],
     }
+
+
+def _parse_state_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _stale_limit_seconds(status: str) -> int:
+    return _STALE_QUEUED_SECONDS if status in {"queued", "pending"} else _STALE_RUNNING_SECONDS
+
+
+@shared_task(  # type: ignore[misc]
+    name="api.tasks.azure.reconcile_stale_aks_provisions",
+    bind=True,
+    max_retries=0,
+)
+def reconcile_stale_aks_provisions(self: Any, *, limit: int = 200) -> dict[str, int]:
+    """Fail AKS provision JobState rows that stopped making progress.
+
+    This catches the class of failures where the route enqueued a Celery task
+    but no worker consumed it, a worker child died before task-specific error
+    handling ran, or Redis lost the task result while the dashboard still has a
+    queued/running JobState row. Active ARM creates publish progress roughly
+    every 20 seconds, so the default 45 minute running threshold is deliberately
+    conservative.
+    """
+    del self
+    from api.services.state_repo import JobStateRepository
+
+    repo = JobStateRepository()
+    now = datetime.now(UTC)
+    result = {"scanned": 0, "failed": 0, "skipped": 0, "errors": 0}
+    try:
+        rows = repo.list_active(job_type="aks_provision", limit=limit)
+    except Exception as exc:
+        LOGGER.warning("aks stale provision reconcile list failed: %s", type(exc).__name__)
+        result["errors"] += 1
+        return result
+
+    for row in rows:
+        result["scanned"] += 1
+        status = str(getattr(row, "status", "") or "").lower()
+        updated_at = _parse_state_timestamp(
+            getattr(row, "updated_at", None) or getattr(row, "created_at", None)
+        )
+        if updated_at is None:
+            result["skipped"] += 1
+            continue
+        age_seconds = int((now - updated_at).total_seconds())
+        limit_seconds = _stale_limit_seconds(status)
+        if age_seconds < limit_seconds:
+            result["skipped"] += 1
+            continue
+
+        phase = (
+            "aks_provision_queue_stalled"
+            if status in {"queued", "pending"}
+            else "aks_provision_stalled"
+        )
+        message = (
+            f"AKS provisioning made no progress for {age_seconds}s "
+            f"(threshold {limit_seconds}s)."
+        )
+        payload = dict(getattr(row, "payload", {}) or {})
+        payload["terminal_task_event"] = {
+            "task_id": getattr(row, "task_id", "") or "",
+            "task_name": "api.tasks.azure.provision_aks",
+            "phase": phase,
+            "status": "failed",
+            "message": message,
+            "error_code": phase,
+            "recorded_at": now.isoformat(timespec="seconds"),
+        }
+        try:
+            repo.update(
+                row.job_id,
+                status="failed",
+                phase=phase,
+                error_code=phase,
+                payload=payload,
+            )
+            repo.append_history(
+                row.job_id,
+                phase,
+                {
+                    "status": "failed",
+                    "task_id": getattr(row, "task_id", "") or "",
+                    "message": message,
+                    "age_seconds": age_seconds,
+                    "threshold_seconds": limit_seconds,
+                },
+            )
+            LOGGER.error(
+                "aks_provision_stale job_id=%s task_id=%s status=%s age=%ss phase=%s",
+                row.job_id,
+                getattr(row, "task_id", "") or "-",
+                status,
+                age_seconds,
+                phase,
+            )
+            result["failed"] += 1
+        except Exception as exc:
+            LOGGER.warning(
+                "aks stale provision mark failed job_id=%s err=%s",
+                getattr(row, "job_id", ""),
+                type(exc).__name__,
+            )
+            result["errors"] += 1
+    return result

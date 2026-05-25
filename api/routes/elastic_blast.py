@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Path
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from api.auth import CallerIdentity, require_caller
 from api.services import external_blast
@@ -61,9 +61,127 @@ class ExternalBlastSubmitRequest(BaseModel):
     priority: int = Field(50, ge=0, le=100)
     batch_len: int | None = Field(None, ge=1, le=1_000_000_000)
     idempotency_key: str | None = Field(None, min_length=1, max_length=256)
+    external_correlation_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    )
     resource_profile: str = Field(
         "standard", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$"
     )
+
+    @model_validator(mode="after")
+    def validate_query_and_taxonomy(self) -> ExternalBlastSubmitRequest:
+        from api.services.query_metadata import parse_fasta_metadata
+
+        try:
+            parse_fasta_metadata(self.query_fasta)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if self.taxid is None and self.is_inclusive is not None:
+            raise ValueError("is_inclusive requires taxid")
+        if self.taxid is not None and self.is_inclusive is None:
+            self.is_inclusive = True
+        return self
+
+
+_QUEUED_STATUSES = frozenset({"accepted", "created", "pending", "queued", "scheduled"})
+_RUNNING_STATUSES = frozenset(
+    {
+        "dispatching",
+        "finalizing",
+        "in_progress",
+        "inprogress",
+        "reducing",
+        "running",
+        "splitting",
+        "submitted",
+        "submitting",
+    }
+)
+_SUCCESS_STATUSES = frozenset({"complete", "completed", "success", "succeeded"})
+_FAILED_STATUSES = frozenset({"canceled", "cancelled", "error", "failed", "failure", "timeout"})
+
+
+def _public_status(value: Any, *, default: str = "queued") -> str:
+    status = str(value or "").strip().casefold()
+    if status in _QUEUED_STATUSES:
+        return "queued"
+    if status in _RUNNING_STATUSES:
+        return "running"
+    if status in _SUCCESS_STATUSES:
+        return "success"
+    if status in _FAILED_STATUSES:
+        return "failed"
+    return default
+
+
+def _normalise_result_file(item: dict[str, Any], index: int) -> dict[str, Any]:
+    filename = str(item.get("filename") or item.get("name") or f"blast_result_{index + 1}.xml")
+    file_id = str(item.get("file_id") or item.get("id") or f"result-{index + 1:03d}")
+    result_format = str(item.get("format") or _format_from_filename(filename))
+    size_bytes = item.get("size_bytes") if item.get("size_bytes") is not None else item.get("size")
+    out = dict(item)
+    out.update(
+        {
+            "file_id": file_id,
+            "filename": filename,
+            "name": str(item.get("name") or filename),
+            "format": result_format,
+            "size_bytes": size_bytes,
+            "size": size_bytes,
+        }
+    )
+    return out
+
+
+def _normalise_result_files(job: dict[str, Any]) -> None:
+    result = job.get("result")
+    if not isinstance(result, dict):
+        return
+    files = result.get("files")
+    if not isinstance(files, list):
+        result["files"] = []
+        return
+    result["files"] = [
+        _normalise_result_file(item, index)
+        for index, item in enumerate(files)
+        if isinstance(item, dict)
+    ]
+
+
+def _format_from_filename(filename: str) -> str:
+    lowered = filename.lower()
+    if lowered.endswith((".xml", ".xml.gz")):
+        return "blast_xml"
+    if lowered.endswith((".out", ".out.gz", ".tsv", ".txt")):
+        return "blast_tabular"
+    return "unknown"
+
+
+def _normalise_external_job_payload(
+    upstream: dict[str, Any],
+    *,
+    request_payload: dict[str, Any] | None = None,
+    default_status: str = "queued",
+) -> dict[str, Any]:
+    payload = request_payload or {}
+    out = dict(upstream)
+    out["status"] = _public_status(out.get("status"), default=default_status)
+    if out.get("submission_source") in (None, ""):
+        out["submission_source"] = payload.get("submission_source") or "external_api"
+    if out.get("external_correlation_id") in (None, ""):
+        out["external_correlation_id"] = payload.get("external_correlation_id")
+    if out.get("db_name") in (None, ""):
+        out["db_name"] = out.get("db") or payload.get("db") or payload.get("database")
+    if out.get("program") in (None, ""):
+        out["program"] = payload.get("program")
+    out.setdefault("blast_version", None)
+    out.setdefault("db_version", None)
+    _normalise_result_files(out)
+    return out
 
 
 @router.post("/submit", status_code=202)
@@ -72,7 +190,13 @@ def submit_external_blast_job(
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
     payload = request.model_dump(exclude_none=True)
-    payload.update(canonical_submit_metadata(payload, submission_source="external_api"))
+    payload.update(
+        canonical_submit_metadata(
+            payload,
+            submission_source="external_api",
+            correlation_id=request.external_correlation_id,
+        )
+    )
     payload["canonical_request"] = canonical_submit_snapshot(payload)
     payload.update(submit_contracts(payload))
     from api.services.blast.provenance import build_blast_provenance
@@ -88,7 +212,8 @@ def submit_external_blast_job(
         request.program,
     )
     del caller
-    return external_blast.submit_job(payload)
+    upstream = external_blast.submit_job(payload)
+    return _normalise_external_job_payload(upstream, request_payload=payload)
 
 
 @router.get("/jobs")
@@ -115,7 +240,10 @@ def get_external_blast_job(
 ) -> dict[str, Any]:
     LOGGER.info("external BLAST status requested caller_oid=%s job_id=%s", caller.object_id, job_id)
     del caller
-    return external_blast.get_job(job_id)
+    return _normalise_external_job_payload(
+        external_blast.get_job(job_id),
+        default_status="running",
+    )
 
 
 @router.get("/jobs/{job_id}/events")

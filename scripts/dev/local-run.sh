@@ -330,10 +330,16 @@ case "$service" in
     # randomly on stale instances that still hold the pre-fix module code,
     # silently re-introducing already-fixed bugs (see
     # docs/features_change/2026-05/2026-05-22-blast-submit-pipeline-hardening.md).
-    pkill -TERM -f 'python3 -m celery -A api\.celery_app:celery_app worker' 2>/dev/null || true
+    pkill -TERM -f 'run-with-log\.sh worker -- uv run python api/run_celery_workers\.py' 2>/dev/null || true
     pkill -TERM -f 'api/run_celery_workers\.py' 2>/dev/null || true
-    sleep 1
+    for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      if ! pgrep -f 'api/run_celery_workers\.py|python3 -m celery -A api\.celery_app:celery_app worker' >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
     pkill -KILL -f 'python3 -m celery -A api\.celery_app:celery_app worker' 2>/dev/null || true
+    pkill -KILL -f 'api/run_celery_workers\.py' 2>/dev/null || true
     exec "$run_with_log" worker -- uv run python api/run_celery_workers.py "$@"
     ;;
   beat)

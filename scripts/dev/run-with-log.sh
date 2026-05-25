@@ -217,14 +217,10 @@ terminate_wrapped_command() {
   local signal=${1:-TERM}
   trap - INT TERM HUP
   if [[ -n "${cmd_pid:-}" ]] && kill -0 "$cmd_pid" 2>/dev/null; then
-    if [[ "$used_setsid" == true ]]; then
-      kill -"$signal" -- "-$cmd_pid" 2>/dev/null || true
-    else
-      kill -"$signal" -- "$cmd_pid" 2>/dev/null || true
-    fi
-    for _attempt in 1 2 3 4 5; do
+    kill -"$signal" -- "$cmd_pid" 2>/dev/null || true
+    for _attempt in 1 2 3 4 5 6 7 8 9 10; do
       kill -0 "$cmd_pid" 2>/dev/null || break
-      sleep 0.2
+      sleep 0.5
     done
     if kill -0 "$cmd_pid" 2>/dev/null; then
       if [[ "$used_setsid" == true ]]; then

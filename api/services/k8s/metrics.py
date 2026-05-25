@@ -3,7 +3,7 @@
 Responsibility: Kubernetes metrics API helpers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
-Key entry points: `k8s_top_nodes`, `_node_capacity`, `_node_capacity_with_meta`
+Key entry points: `k8s_top_nodes`, `k8s_top_pods`, `_node_capacity`, `_node_capacity_with_meta`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
 Validation: `uv run pytest -q api/tests/test_k8s_list_events.py`.
 """
@@ -134,4 +134,70 @@ def _parse_memory_ki(raw: str) -> int:
     return int(value) // 1024
 
 
-__all__ = ["k8s_top_nodes"]
+def k8s_top_pods(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    *,
+    namespace: str | None = None,
+    label_selector: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return per-pod / per-container resource usage from the Kubernetes metrics API.
+
+    Mirrors ``kubectl top pod --containers`` output but as structured data.
+    Used for BLAST workload right-sizing (memory peak detection) and for the
+    admission-control slot manager. Filters by namespace and/or labelSelector
+    when provided so callers can scope to BLAST job pods only.
+    """
+
+    from api.services.k8s.monitoring import _get_k8s_session
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        if namespace:
+            url = f"{server}/apis/metrics.k8s.io/v1beta1/namespaces/{namespace}/pods"
+        else:
+            url = f"{server}/apis/metrics.k8s.io/v1beta1/pods"
+        params: dict[str, str] = {}
+        if label_selector:
+            params["labelSelector"] = label_selector
+        response = session.get(url, params=params or None, timeout=10)
+        response.raise_for_status()
+        pods: list[dict[str, Any]] = []
+        for item in response.json().get("items", []):
+            meta = item.get("metadata", {}) or {}
+            containers_out: list[dict[str, Any]] = []
+            pod_cpu_m = 0
+            pod_mem_ki = 0
+            for container in item.get("containers", []) or []:
+                usage = container.get("usage", {}) or {}
+                cpu_m = _parse_cpu_millicores(usage.get("cpu", "0"))
+                mem_ki = _parse_memory_ki(usage.get("memory", "0"))
+                pod_cpu_m += cpu_m
+                pod_mem_ki += mem_ki
+                containers_out.append(
+                    {
+                        "name": container.get("name", ""),
+                        "cpu_m": cpu_m,
+                        "mem_ki": mem_ki,
+                    }
+                )
+            pods.append(
+                {
+                    "namespace": meta.get("namespace", ""),
+                    "name": meta.get("name", ""),
+                    "window": item.get("window", ""),
+                    "timestamp": item.get("timestamp", ""),
+                    "cpu_m": pod_cpu_m,
+                    "mem_ki": pod_mem_ki,
+                    "mem_mi": pod_mem_ki // 1024,
+                    "containers": containers_out,
+                }
+            )
+        return pods
+    finally:
+        session.close()
+
+
+__all__ = ["k8s_top_nodes", "k8s_top_pods"]

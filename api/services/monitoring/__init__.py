@@ -53,6 +53,18 @@ def list_aks_clusters(
     return _aks_module.list_aks_clusters(credential, subscription_id, resource_group)
 
 
+def list_aks_clusters_in_subscription(
+    credential: TokenCredential,
+    subscription_id: str,
+    *,
+    include_unmanaged: bool = False,
+) -> list[dict[str, Any]]:
+    _aks_module.aks_client = aks_client
+    return _aks_module.list_aks_clusters_in_subscription(
+        credential, subscription_id, include_unmanaged=include_unmanaged
+    )
+
+
 def list_acr_repositories(
     credential: TokenCredential,
     subscription_id: str,
@@ -136,6 +148,7 @@ __all__ = [
     "k8s_warmup_status",
     "list_acr_repositories",
     "list_aks_clusters",
+    "list_aks_clusters_in_subscription",
     "set_storage_public_access",
     "storage_client",
 ]

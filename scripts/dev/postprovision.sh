@@ -504,8 +504,10 @@ while kill -0 "$SWAP_PID" 2>/dev/null; do
   sleep 10
   ts "    swap deployment $DEPLOY_NAME still running ..."
 done
+set +e
 wait "$SWAP_PID"
 SWAP_RC=$?
+set -e
 if [ "$SWAP_RC" != "0" ]; then
   ts "✗ swap deployment failed (rc=$SWAP_RC). Last lines:"
   tail -30 "$LOG_DIR/swap.log" | sed 's/^/      /'

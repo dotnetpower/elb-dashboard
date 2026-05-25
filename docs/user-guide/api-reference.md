@@ -127,7 +127,7 @@ The example below uses the same `core_nt` monkeypox query shown in the result XM
     "max_target_seqs": 100,
     "outfmt": "5"
   },
-  "priority": "normal",
+  "priority": 50,
   "idempotency_key": "core-nt-monkeypox-smoke-001",
   "resource_profile": "core_nt_safe"
 }

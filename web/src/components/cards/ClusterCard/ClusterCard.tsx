@@ -21,7 +21,8 @@ import { ProvisionDoneBanner, ProvisioningBanner } from "./ProvisioningBanner";
 import { ProvisionModal } from "./ProvisionModal";
 import { ProvisionErrorCard } from "./ProvisionErrorCard";
 import {
-  clearLastFailedProvision,
+  dismissLastFailedProvision,
+  loadDismissThreshold,
   loadLastFailedProvision,
   type LastFailedProvision,
 } from "./lastFailedProvision";
@@ -33,6 +34,11 @@ import {
 
 interface Props {
   subscriptionId: string;
+  // Anchor RG kept in props for parent compatibility (storage / ACR / terminal
+  // sidecar still derive workload defaults from it). The cluster list itself
+  // is now subscription-wide — see queryKey below — so the card surfaces
+  // every ElasticBLAST-managed cluster the caller can see regardless of
+  // which RG hosts it.
   resourceGroup: string;
   region?: string;
   acrResourceGroup?: string;
@@ -54,19 +60,21 @@ export function ClusterCard({
   terminalResourceGroup,
   terminalVmName,
 }: Props) {
-  const enabled = Boolean(subscriptionId && resourceGroup);
+  // Subscription-wide list — needs only the subscription id. The card no
+  // longer hides clusters that live outside the dashboard's anchor RG, so
+  // a multi-cluster deployment (heavy + light + gpu) renders inline.
+  const enabled = Boolean(subscriptionId);
   const refetchInterval = useAutoRefreshInterval();
   const query = useQuery({
-    queryKey: ["aks", subscriptionId, resourceGroup],
-    queryFn: () => monitoringApi.aks(subscriptionId, resourceGroup),
+    queryKey: ["aks", subscriptionId, "sub"],
+    // Empty RG arg => backend uses subscription-wide path with ElasticBLAST
+    // tag filter (managedBy=elb-dashboard OR app=elastic-blast OR the legacy
+    // blastpool+`workload=blast` taint fingerprint). Foreign clusters in
+    // the same subscription are intentionally excluded.
+    queryFn: () => monitoringApi.aks(subscriptionId),
     enabled,
     refetchInterval,
   });
-
-  const noClusters = query.data?.clusters.length === 0;
-  const clusters = query.data?.clusters ?? [];
-  const hasProvisioningCluster = clusters.some(isAksProvisioning);
-  const hasFailedProvisioningCluster = clusters.some(isAksProvisioningFailed);
 
   // Existing resource group names — fed into the provision modal so the user
   // can be warned before they submit a duplicate name. Fetched lazily; the
@@ -128,6 +136,16 @@ export function ClusterCard({
         const whenMs = top.updated_at
           ? new Date(top.updated_at).getTime()
           : Date.now();
+        // Dismiss threshold (set by Dismiss / Retry / Success) wins
+        // over server hydration. Without this, a user can dismiss the
+        // banner, reload the page, and the same server-side jobstate
+        // row (24 h window) re-surfaces the banner — exactly the bug
+        // the user reported.
+        if (
+          Number.isFinite(whenMs) &&
+          whenMs <= loadDismissThreshold()
+        )
+          return;
         // Backend wins when it has a strictly-newer entry; otherwise
         // we keep the local snapshot so a recent in-browser failure
         // is not overwritten by a stale server row.
@@ -166,6 +184,11 @@ export function ClusterCard({
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
+  // Stale-failure detection moves below, after `prov` is initialised, so it
+  // can see clusters in *both* the dashboard's workload RG and the RG the
+  // user just provisioned into (which may differ — modal RG defaults to
+  // `rg-<clusterBase>`, see useClusterProvisioning).
+
   const {
     skus: skuOptions,
     defaultSystemSku,
@@ -198,6 +221,39 @@ export function ClusterCard({
     allSkus: skuOptions,
   });
 
+  // Subscription-wide list — the backend filters to ElasticBLAST-managed
+  // clusters by ARM tag (with the blastpool+taint legacy fallback) so we
+  // can render the dashboard's full multi-cluster fleet without juggling
+  // RG-scoped sub-queries. The reload-safe `recentAttempt` slot used to
+  // exist purely to bridge "I just provisioned a cluster into a different
+  // RG"; that gap is closed by the sub-wide list itself.
+  const clusters = query.data?.clusters ?? [];
+  const noClusters = clusters.length === 0;
+  const hasProvisioningCluster = clusters.some(isAksProvisioning);
+  const hasFailedProvisioningCluster = clusters.some(isAksProvisioningFailed);
+  const clusterFetchHasSettled = query.dataUpdatedAt > 0 || query.errorUpdatedAt > 0;
+  const showInitialClusterSkeleton =
+    enabled && query.isLoading && !clusterFetchHasSettled;
+  const showEmptyClusterState =
+    enabled && !showInitialClusterSkeleton && !query.isError && noClusters;
+  const showErrorClusterAction =
+    enabled && !showInitialClusterSkeleton && query.isError && noClusters;
+
+  // Stale-failure detection: once the cluster shows up in the list (any
+  // `provisioning_state`) the lingering "Last attempt failed" banner is
+  // redundant. We record a dismiss threshold so server hydration on the
+  // next reload doesn't bring it back.
+  const lastFailedIsStale = useMemo(() => {
+    if (!lastFailed?.clusterName) return false;
+    return clusters.some((c) => c.name === lastFailed.clusterName);
+  }, [lastFailed, clusters]);
+  useEffect(() => {
+    if (!lastFailedIsStale) return;
+    if (!lastFailed) return;
+    dismissLastFailedProvision(lastFailed.when);
+    setLastFailed(null);
+  }, [lastFailedIsStale, lastFailed]);
+
   const actions = useClusterActions({
     subscriptionId,
     resourceGroup,
@@ -225,7 +281,7 @@ export function ClusterCard({
 
   const status = !enabled
     ? "idle"
-    : query.isLoading
+    : showInitialClusterSkeleton
       ? "loading"
       : query.isError
         ? "error"
@@ -243,7 +299,11 @@ export function ClusterCard({
   return (
     <MonitorCard
       title="Azure Kubernetes Service Cluster"
-      subtitle={enabled ? resourceGroup : "Configure subscription / RG"}
+      subtitle={
+        enabled
+          ? `Subscription-wide${resourceGroup ? ` · anchor: ${resourceGroup}` : ""}`
+          : "Configure subscription / RG"
+      }
       status={prov.provStatus === "creating" ? "loading" : status}
       statusOverride={statusOverride}
       fetching={query.isFetching}
@@ -254,12 +314,15 @@ export function ClusterCard({
         query.refetch();
       }}
       rightSlot={
-        enabled && !query.isLoading && !noClusters ? (
+        enabled && !showInitialClusterSkeleton && !noClusters ? (
           <AddClusterButton variant="pill" onClick={openProvision} />
         ) : null
       }
       accentColor="cluster"
       collapsible
+      loadingFallback={
+        showInitialClusterSkeleton ? <ClusterListSkeleton /> : undefined
+      }
     >
       {!enabled && (
         <div className="muted">Set Subscription ID and Workload RG above.</div>
@@ -269,10 +332,11 @@ export function ClusterCard({
           Failed to load clusters: {formatApiError(query.error, "aks")}
         </div>
       )}
+      {showErrorClusterAction && (
+        <AddClusterButton variant="dashed" onClick={openProvision} />
+      )}
 
-      {enabled && query.isLoading && <ClusterListSkeleton />}
-
-      {query.data?.clusters.length === 0 &&
+      {showEmptyClusterState &&
         prov.provStatus !== "creating" &&
         prov.provStatus !== "done" && (
           <div className="muted">
@@ -293,6 +357,8 @@ export function ClusterCard({
           setSystemVmSize={prov.setSystemVmSize}
           systemNodeCount={prov.systemNodeCount}
           setSystemNodeCount={prov.setSystemNodeCount}
+          tier={prov.tier}
+          setTier={prov.setTier}
           skuOptions={skuOptions}
           groupLabels={groupLabels}
           groupOrder={groupOrder}
@@ -309,6 +375,7 @@ export function ClusterCard({
           resourceGroupValid={prov.provisionResourceGroupValid}
           resourceGroupExists={prov.provisionResourceGroupExists}
           resourceGroupsLoading={rgListQuery.isLoading}
+          workloadResourceGroup={resourceGroup}
           preflightStatus={prov.preflightStatus}
           preflightResult={prov.preflightResult}
           taskPhase={prov.taskPhase}
@@ -335,6 +402,8 @@ export function ClusterCard({
           taskPhase={prov.taskPhase}
           taskProgress={prov.taskProgress}
           onCancel={prov.cancelProvision}
+          targetResourceGroup={prov.provisionResourceGroup}
+          targetRegion={prov.provisionRegion}
         />
       )}
       {prov.provStatus === "done" && (
@@ -369,8 +438,10 @@ export function ClusterCard({
       )}
       {/* P3-2: sticky "Last attempt failed" banner — only when the
           modal is closed and there is no live error already rendered
-          above (we never want to show the same failure twice). */}
-      {lastFailed && !showProvision && !prov.provError && (
+          above (we never want to show the same failure twice). Also
+          suppressed when a retry has already landed a Succeeded cluster
+          with the same name in this RG (stale record). */}
+      {lastFailed && !lastFailedIsStale && !showProvision && !prov.provError && (
         <div style={{ marginBottom: "var(--space-3)" }}>
           <ProvisionErrorCard
             raw={lastFailed.raw}
@@ -380,7 +451,7 @@ export function ClusterCard({
               resourceGroup: lastFailed.resourceGroup,
             }}
             onDismiss={() => {
-              clearLastFailedProvision();
+              dismissLastFailedProvision(lastFailed.when);
               setLastFailed(null);
             }}
             onRetry={() => {
@@ -389,7 +460,7 @@ export function ClusterCard({
                 region: lastFailed.region,
                 resourceGroup: lastFailed.resourceGroup,
               });
-              clearLastFailedProvision();
+              dismissLastFailedProvision(lastFailed.when);
               setLastFailed(null);
               setShowProvision(true);
             }}
@@ -406,16 +477,22 @@ export function ClusterCard({
           gap: "var(--space-2)",
         }}
       >
-        {query.data?.clusters.map((c) => (
+        {clusters.map((c) => (
           <ClusterItem
-            key={c.name}
+            key={`${c.resource_group}/${c.name}`}
             cluster={c}
             transitioning={actions.transitioning}
             actionLoading={actions.actionLoading}
             onStartStop={actions.handleStartStop}
             onDelete={actions.setDeleteTarget}
             subscriptionId={subscriptionId}
-            resourceGroup={resourceGroup}
+            // Per-row RG so autoWarmup / start / stop / delete payloads
+            // target the cluster's *actual* RG instead of the card's
+            // anchor RG. Multi-cluster fleets (heavy + light) land in
+            // different RGs by default; using the prop RG everywhere
+            // would silently misroute the action to a non-existent
+            // cluster name in the anchor RG.
+            resourceGroup={c.resource_group}
             storageAccount={storageAccount}
             storageResourceGroup={storageResourceGroup}
             acrResourceGroup={acrResourceGroup}
@@ -428,7 +505,7 @@ export function ClusterCard({
       </ul>
 
       {/* Big dashed "Add Cluster" CTA only when the list is empty. */}
-      {enabled && !query.isLoading && noClusters && (
+      {showEmptyClusterState && (
         <AddClusterButton variant="dashed" onClick={openProvision} />
       )}
 
