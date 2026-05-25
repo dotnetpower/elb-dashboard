@@ -45,6 +45,13 @@
 #                        Endpoint exists (the workload could not reach
 #                        Storage at all). Use only when you know what
 #                        you're doing.
+#   --skip-rbac-grant    Skip the runtime-RBAC preflight that grants the
+#                        deployed dashboard MI Contributor +
+#                        User Access Administrator on the AKS cluster RG
+#                        (needed so the OpenAPI deploy task can create
+#                        `id-elb-openapi` + federated creds). Skip only
+#                        when the caller lacks UAA on the cluster RG and
+#                        the grant was already applied out-of-band.
 #   --yes                Skip the interactive "proceed?" prompt.
 #   --dry-run            Print the plan, do not build or PATCH.
 #   --logs               Tail the api sidecar logs after a successful
@@ -150,6 +157,7 @@ TAG=""
 HEALTH_TIMEOUT=180
 AUTO_ROLLBACK=true
 SKIP_PARITY=false
+SKIP_RBAC=false
 ASSUME_YES=false
 DRY_RUN=false
 TAIL_LOGS=false
@@ -164,6 +172,7 @@ while [[ $# -gt 0 ]]; do
     --health-timeout)    shift; HEALTH_TIMEOUT="${1:-180}" ;;
     --no-auto-rollback)  AUTO_ROLLBACK=false ;;
     --skip-parity-check) SKIP_PARITY=true ;;
+    --skip-rbac-grant)   SKIP_RBAC=true ;;
     --yes|-y)            ASSUME_YES=true ;;
     --dry-run)           DRY_RUN=true ;;
     --logs)              TAIL_LOGS=true; ASSUME_YES=true ;;
@@ -323,6 +332,65 @@ preflight_storage_parity || {
   set_result "parity_rejected" "Storage parity preflight rejected the deploy"
   die "Storage parity preflight failed (see above)."
 }
+
+# ---------------------------------------------------------------------------
+# Preflight: runtime RBAC grant on the AKS cluster RG.
+#
+# Why: `infra/modules/controlPlaneRoles.bicep` only grants the dashboard MI
+# Contributor + User Access Administrator on its *own* RG. The OpenAPI
+# deploy task (`api.tasks.openapi.rbac.setup_workload_identity`) reaches
+# into the AKS cluster's RG (typically `rg-elb-cluster`) and tries to
+# create `id-elb-openapi` + a federated credential + three role
+# assignments. Without those roles the SPA's "Deploy elb-openapi" button
+# fails with "workload identity setup failed; OpenAPI pod would have no
+# AZURE_CLIENT_ID."
+#
+# This preflight calls `grant-runtime-rbac.sh`, which is idempotent: it
+# checks each role assignment with `az role assignment list` first and
+# only creates missing ones. Already-correct setups exit in <2 s with
+# "[skip] already assigned".
+#
+# Best-effort: a failure here does NOT block the cli-upgrade itself
+# (the api/frontend/terminal images can still ship). It only warns the
+# operator that the next OpenAPI deploy from the SPA will fail. Common
+# failure mode: the operator running cli-upgrade lacks UAA on the AKS
+# cluster RG; in that case the grant must be done out-of-band by a
+# tenant/sub admin.
+#
+# Skipped for `rollback` scope — rollback must never be blocked or
+# slowed down by an RBAC check, and rollback doesn't change runtime
+# behavior anyway (it just swaps image refs).
+# ---------------------------------------------------------------------------
+preflight_runtime_rbac() {
+  if $SKIP_RBAC; then
+    warn "skipping runtime RBAC grant (--skip-rbac-grant)"
+    return 0
+  fi
+  if [[ "$SCOPE" == "rollback" ]]; then
+    return 0
+  fi
+  if $DRY_RUN; then
+    ts "==> (dry-run) would call grant-runtime-rbac.sh --container-app $CONTAINER_APP_NAME --rg $AZURE_RESOURCE_GROUP"
+    return 0
+  fi
+  if [[ ! -x "$REPO_ROOT/scripts/dev/grant-runtime-rbac.sh" ]]; then
+    warn "scripts/dev/grant-runtime-rbac.sh missing or not executable — skipping RBAC preflight"
+    return 0
+  fi
+  ts "==> Ensuring dashboard MI has Contributor + UAA on the AKS cluster RG"
+  local rbac_args=(--container-app "$CONTAINER_APP_NAME" --rg "$AZURE_RESOURCE_GROUP" --yes)
+  [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]] && rbac_args+=(--subscription "$AZURE_SUBSCRIPTION_ID")
+  if ! bash "$REPO_ROOT/scripts/dev/grant-runtime-rbac.sh" "${rbac_args[@]}"; then
+    warn "runtime RBAC grant did not fully succeed."
+    warn "  cli-upgrade will continue (api/frontend/terminal images still ship),"
+    warn "  but the SPA's 'Deploy elb-openapi' button will fail until a"
+    warn "  subscription/tenant admin runs:"
+    warn "    bash scripts/dev/grant-runtime-rbac.sh \\"
+    warn "      --container-app $CONTAINER_APP_NAME --rg $AZURE_RESOURCE_GROUP --yes"
+  fi
+  return 0
+}
+preflight_runtime_rbac
 
 SNAPSHOT="${ELB_UPGRADE_SNAPSHOT:-/tmp/elb-upgrade-snapshot-${CONTAINER_APP_NAME}.json}"
 
