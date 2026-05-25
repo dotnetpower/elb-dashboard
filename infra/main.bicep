@@ -61,6 +61,12 @@ param assignSubscriptionReader bool = true
 @description('If true, grants the shared UAMI resource-group-scope Contributor and User Access Administrator for runtime resource orchestration. Set to false when equivalent roles already exist outside this template.')
 param assignControlPlaneRoles bool = true
 
+@description('Optional name of the AKS workload cluster RG (e.g. `rg-elb-cluster`). When set, grants the shared UAMI Contributor + User Access Administrator on that RG so `api.tasks.openapi.rbac.setup_workload_identity` can create `id-elb-openapi` + federated credential + downstream role assignments. Leave empty on the first `azd up` (the RG does not exist yet); set it on the second `azd provision` after the SPA has created AKS. `scripts/dev/grant-runtime-rbac.sh` is the workstation safety net for deployments that pre-date this parameter.')
+param aksClusterResourceGroup string = ''
+
+@description('If true and `aksClusterResourceGroup` is non-empty, grants the shared UAMI Contributor + User Access Administrator on that RG. Set to false when equivalent roles already exist outside this template.')
+param assignWorkloadClusterRoles bool = true
+
 @description('If true, create Application Insights. The default deployment creates only Log Analytics; Application Insights can be enabled later with ENABLE_APPLICATION_INSIGHTS=true.')
 param enableApplicationInsights bool = false
 
@@ -200,6 +206,25 @@ module subscriptionRoles 'modules/subscriptionRoles.bicep' = if (assignSubscript
 module controlPlaneRoles 'modules/controlPlaneRoles.bicep' = if (assignControlPlaneRoles) {
   name: 'control-plane-roles-${resourceToken}'
   scope: platformRg
+  params: {
+    uamiPrincipalId: identity.outputs.identityPrincipalId
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workload-cluster RG roles (Contributor + UAA on the AKS cluster's RG).
+//
+// Required by `api.tasks.openapi.rbac.setup_workload_identity` so the
+// dashboard can create `id-elb-openapi` + federated credential + downstream
+// role assignments inside the AKS workload RG. Skipped when
+// `aksClusterResourceGroup` is empty (first `azd up`, before the SPA has
+// created AKS). `scripts/dev/grant-runtime-rbac.sh` is the workstation
+// safety net for deployments that pre-date this module or that cannot run
+// `azd provision` after AKS provisioning.
+// ---------------------------------------------------------------------------
+module workloadClusterRoles 'modules/workloadClusterRoles.bicep' = if (assignWorkloadClusterRoles && !empty(aksClusterResourceGroup)) {
+  name: 'workload-cluster-roles-${resourceToken}'
+  scope: resourceGroup(aksClusterResourceGroup)
   params: {
     uamiPrincipalId: identity.outputs.identityPrincipalId
   }

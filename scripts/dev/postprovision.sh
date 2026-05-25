@@ -591,6 +591,40 @@ ts "  RG:         $AZURE_RESOURCE_GROUP"
 ts "  Logs dir:   $LOG_DIR"
 echo "============================================================"
 
+# ---------------------------------------------------------------------------
+# 4. Workload-cluster RBAC self-heal.
+#
+# `infra/modules/workloadClusterRoles.bicep` grants the dashboard MI
+# Contributor + User Access Administrator on the AKS cluster's RG, but
+# only when `aksClusterResourceGroup` is set on the azd env. The first
+# `azd up` cannot set it (the RG does not exist yet); the SPA wizard
+# creates AKS later. Call `grant-runtime-rbac.sh` here as a self-healing
+# safety net so any existing AKS cluster in the same subscription gets
+# the required RBAC immediately without an explicit second `azd provision`.
+#
+# Soft-fail: missing UAA at the cluster-RG scope is expected on first run.
+# The operator is told to run the helper by hand in that case.
+# ---------------------------------------------------------------------------
+RBAC_SCRIPT="$REPO_ROOT/scripts/dev/grant-runtime-rbac.sh"
+if [[ -x "$RBAC_SCRIPT" ]]; then
+  ts "==> Self-heal: granting workload-cluster RBAC (best-effort)..."
+  if "$RBAC_SCRIPT" \
+        --container-app "$CONTAINER_APP_NAME" \
+        --rg "$AZURE_RESOURCE_GROUP" \
+        --subscription "$(az account show --query id -o tsv)" \
+        --yes 2>&1 | sed 's/^/    /'; then
+    ts "    ✓ workload-cluster RBAC OK"
+  else
+    rc=$?
+    if [[ "$rc" == "3" ]]; then
+      ts "    ⓘ workload-cluster RBAC skipped (no AKS cluster yet — re-run after creating AKS)"
+    else
+      ts "    ⚠ workload-cluster RBAC self-heal failed (rc=$rc)."
+      ts "      OpenAPI deploys may need:  scripts/dev/grant-runtime-rbac.sh"
+    fi
+  fi
+fi
+
 # Soft-fail policy: do not break azd up just because health was slow to
 # come up. Hard-fail above stays for image-build / swap-deploy errors.
 exit 0

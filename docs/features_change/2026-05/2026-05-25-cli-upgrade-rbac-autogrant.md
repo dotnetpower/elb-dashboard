@@ -56,11 +56,22 @@ Discovered today on env B (`ca-elb-dashboard`) when an operator clicked
 
 ## API / IaC diff summary
 
-* No API change — pure operational/ops tooling.
-* No Bicep change in this PR. The structural fix in Bicep (extending
-  `controlPlaneRoles.bicep` to optionally grant on a *workload-cluster*
-  RG) is intentionally **deferred** so this fix stays small and
-  testable; the script preflight self-heals existing deployments today.
+* No API change — pure operational/ops tooling + IaC.
+* **Bicep**: new sibling module
+  [`infra/modules/workloadClusterRoles.bicep`](../../../infra/modules/workloadClusterRoles.bicep)
+  + two new `main.bicep` params (`aksClusterResourceGroup`,
+  `assignWorkloadClusterRoles`). When `aksClusterResourceGroup` is set
+  (e.g. `rg-elb-cluster`), `azd provision` now grants the same
+  `Contributor` + `User Access Administrator` pair on the AKS cluster
+  RG that `controlPlaneRoles.bicep` already grants on the deployment
+  RG. The assignment `name` is `guid(resourceGroup().id,
+  uamiPrincipalId, roleId)` so a redeploy against an RG where the
+  helper already created the assignment is a no-op (Bicep adopts the
+  existing assignment in place).
+* **`postprovision.sh`** now calls `grant-runtime-rbac.sh` as a
+  best-effort self-heal at the end of `azd provision` — covers the
+  "first `azd up` had no AKS RG yet, SPA created AKS later, never
+  re-ran `azd provision`" case.
 * Runtime contract preserved: `api/tasks/openapi/rbac.py` and
   `api/tasks/openapi/deploy.py` already raise loudly with the exact
   error string the SPA displays; nothing in those files changed.
@@ -128,11 +139,25 @@ Summary: created=0 skipped=2 failed=0
 
 ## Follow-up
 
-1. **Bicep follow-up**: extend `infra/modules/controlPlaneRoles.bicep`
+1. ~~**Bicep follow-up**: extend `infra/modules/controlPlaneRoles.bicep`
    (or add a sibling module `workloadClusterRoles.bicep`) so new
    deployments grant the workload-cluster-RG roles at provision time
-   and `grant-runtime-rbac.sh` becomes a pure self-healing safety net.
-   Deferred to a separate PR to keep this one small.
-2. RBAC propagation typically takes 1-5 min after `az role assignment
+   and `grant-runtime-rbac.sh` becomes a pure self-healing safety net.~~
+   **Done in this PR** — see [`infra/modules/workloadClusterRoles.bicep`](../../../infra/modules/workloadClusterRoles.bicep)
+   + the `aksClusterResourceGroup` / `assignWorkloadClusterRoles`
+   params in `infra/main.bicep`. The shell helper is now formally the
+   self-healing safety net (also invoked from `postprovision.sh`).
+2. To opt new deployments into the Bicep grant after AKS exists, set:
+   ```bash
+   azd env set AKS_CLUSTER_RESOURCE_GROUP rg-elb-cluster
+   azd provision
+   ```
+   The new `aksClusterResourceGroup` Bicep param is wired into
+   `infra/main.parameters.json` as `${AKS_CLUSTER_RESOURCE_GROUP=}` so
+   the standard azd env-to-bicep binding picks it up. When the env var
+   is unset the module is skipped (default empty string). The
+   `postprovision.sh` self-heal call covers the case where operators
+   forget to set it.
+3. RBAC propagation typically takes 1-5 min after `az role assignment
    create`. If the SPA's "Deploy elb-openapi" still returns
    `AuthorizationFailed` immediately after the grant, retry after ~2 min.
