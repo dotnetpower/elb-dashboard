@@ -43,6 +43,9 @@ def build_cluster_params(
         ManagedCluster,
         ManagedClusterAgentPoolProfile,
         ManagedClusterIdentity,
+        ManagedClusterOIDCIssuerProfile,
+        ManagedClusterSecurityProfile,
+        ManagedClusterSecurityProfileWorkloadIdentity,
         ManagedClusterStorageProfile,
         ManagedClusterStorageProfileBlobCSIDriver,
     )
@@ -71,6 +74,27 @@ def build_cluster_params(
         location=region,
         identity=ManagedClusterIdentity(type="SystemAssigned"),
         dns_prefix=cluster_name,
+        # OIDC issuer + Microsoft Entra Workload ID. Both are required for
+        # the dashboard's "Deploy elb-openapi" flow:
+        #
+        #   * oidc_issuer_profile.enabled gives the cluster an OIDC issuer
+        #     URL so `api.tasks.openapi.rbac.setup_workload_identity` can
+        #     create a Federated Identity Credential bound to that issuer.
+        #   * security_profile.workload_identity.enabled installs the
+        #     workload-identity mutating webhook in the cluster so the
+        #     OpenAPI pod actually gets its projected SA token at
+        #     /var/run/secrets/azure/tokens/azure-identity-token.
+        #
+        # Verified gap: a cluster created with only `oidc=true` and
+        # `wi=null` (Azure default for OIDC in some API versions) still
+        # produces a federated credential but the pod hangs on the token
+        # swap with "WorkloadIdentityCredential: failed to read token
+        # file". Pinning both flags up-front avoids the
+        # `az aks update --enable-workload-identity` follow-up.
+        oidc_issuer_profile=ManagedClusterOIDCIssuerProfile(enabled=True),
+        security_profile=ManagedClusterSecurityProfile(
+            workload_identity=ManagedClusterSecurityProfileWorkloadIdentity(enabled=True)
+        ),
         storage_profile=ManagedClusterStorageProfile(
             blob_csi_driver=ManagedClusterStorageProfileBlobCSIDriver(enabled=True)
         ),

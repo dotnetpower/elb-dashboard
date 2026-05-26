@@ -14,7 +14,8 @@
  * Hides the raw Azure message behind a `<details>` accordion so it
  * stays available for debugging but does not visually dominate.
  */
-import { AlertCircle, BookOpen, ExternalLink, RotateCcw, X } from "lucide-react";
+import { AlertCircle, BookOpen, Check, Copy, ExternalLink, RotateCcw, X } from "lucide-react";
+import { useState } from "react";
 
 import { classifyArmError, type ArmErrorAction } from "./armErrorClassifier";
 
@@ -49,7 +50,61 @@ export interface ProvisionErrorCardProps {
 function actionIcon(kind: ArmErrorAction["kind"]) {
   if (kind === "portal") return <ExternalLink size={11} strokeWidth={1.5} />;
   if (kind === "docs") return <BookOpen size={11} strokeWidth={1.5} />;
+  if (kind === "command") return <Copy size={11} strokeWidth={1.5} />;
   return <ExternalLink size={11} strokeWidth={1.5} />;
+}
+
+/** Render a command-kind action as a clipboard-copy button. Falls back to
+ *  document.execCommand when navigator.clipboard is unavailable (some
+ *  cross-origin frames / older browsers); shows a transient "Copied!"
+ *  label so the operator gets immediate feedback. */
+function CommandActionButton({ action }: { action: ArmErrorAction }) {
+  const [copied, setCopied] = useState(false);
+  const onClick = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(action.href);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = action.href;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "absolute";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard refused (e.g. permissions policy). Leave the command in
+      // the details/raw block where the operator can still hand-copy it.
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="glass-button"
+      title={action.href}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 11,
+        padding: "4px 10px",
+        color: "var(--accent)",
+      }}
+    >
+      {copied ? (
+        <Check size={11} strokeWidth={1.5} />
+      ) : (
+        actionIcon(action.kind)
+      )}
+      {copied ? "Copied!" : action.label}
+    </button>
+  );
 }
 
 export function ProvisionErrorCard({
@@ -150,27 +205,37 @@ export function ProvisionErrorCard({
           marginTop: 2,
         }}
       >
-        {classified.actions.map((action) => (
-          <a
-            key={`${action.kind}:${action.href}`}
-            href={action.href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="glass-button"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              fontSize: 11,
-              padding: "4px 10px",
-              color: "var(--accent)",
-              textDecoration: "none",
-            }}
-          >
-            {actionIcon(action.kind)}
-            {action.label}
-          </a>
-        ))}
+        {classified.actions.map((action) => {
+          if (action.kind === "command") {
+            return (
+              <CommandActionButton
+                key={`${action.kind}:${action.label}`}
+                action={action}
+              />
+            );
+          }
+          return (
+            <a
+              key={`${action.kind}:${action.href}`}
+              href={action.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="glass-button"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                fontSize: 11,
+                padding: "4px 10px",
+                color: "var(--accent)",
+                textDecoration: "none",
+              }}
+            >
+              {actionIcon(action.kind)}
+              {action.label}
+            </a>
+          );
+        })}
         {extraPortalUrl && (
           <a
             key="extra-portal"

@@ -21,7 +21,20 @@ from api.services.storage.network import ensure_workload_storage_private_endpoin
 LOGGER = logging.getLogger(__name__)
 
 STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
-ACR_PULL_ROLE_ID = "8311e382-0749-4cb8-b61a-304f252e45ec"
+# Azure built-in role definition IDs for ACR. Source:
+# https://learn.microsoft.com/azure/role-based-access-control/built-in-roles
+# (also mirrored in infra/modules/acr.bicep for the platform ACR).
+#
+# Note: the legacy constant `ACR_PULL_ROLE_ID` previously carried the AcrPush
+# GUID by mistake (verified against the Bicep module which assigns the
+# correct ID). The mislabel meant ensure_acr granted the caller AcrPush
+# instead of AcrPull and never granted the shared MI any ACR role at all.
+# The new constants below carry the correct values; the legacy name is
+# kept as an alias pointing to the correct AcrPull ID so any external
+# import keeps working AND now grants what its name claims.
+ACR_PULL_ROLE_ID = "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+ACR_PUSH_ROLE_ID = "8311e382-0749-4cb8-b61a-304f252e45ec"
+ACR_CONTRIBUTOR_ROLE_ID = "b24988ac-6180-42a0-ab88-20f7382dd24c"
 
 
 def _current_managed_identity_principal_id() -> str:
@@ -167,7 +180,15 @@ def ensure_acr(
     region: str,
     caller_oid: str = "",
 ) -> None:
-    """Create a Standard SKU ACR and assign caller RBAC when requested."""
+    """Create a Standard SKU ACR and assign caller + shared-MI RBAC when requested.
+
+    The wizard path that calls this for a brand-new ACR must mirror
+    `ensure_storage_account`: the caller gets the role they need to inspect
+    the registry from the SPA, and the shared dashboard MI gets the roles
+    the api/worker sidecars need to pull/push images and schedule ACR Tasks
+    (mirrors what `infra/modules/acr.bicep` does for the platform ACR
+    during `azd up`).
+    """
 
     client = acr_client(credential, subscription_id)
     LOGGER.info("ensure_acr registry=%s rg=%s", registry_name, resource_group)
@@ -183,12 +204,46 @@ def ensure_acr(
     )
     poller.result()
 
+    acr_scope = (
+        f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+        f"/providers/Microsoft.ContainerRegistry/registries/{registry_name}"
+    )
+
+    # Caller (the SPA user, principalType=User) only needs AcrPull — they
+    # browse repositories from the dashboard, they do not push from their
+    # laptop. The legacy code accidentally granted AcrPush (8311e382…)
+    # under the wrong-named ACR_PULL_ROLE_ID constant; this restores the
+    # intended least-privilege grant.
     if caller_oid:
         _auto_assign_role(
             credential,
             subscription_id,
             caller_oid,
-            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
-            f"/providers/Microsoft.ContainerRegistry/registries/{registry_name}",
+            acr_scope,
             ACR_PULL_ROLE_ID,
+            principal_type="User",
         )
+
+    # Shared dashboard MI needs the same trio it gets on the platform ACR
+    # (see infra/modules/acr.bicep): AcrPull so Container Apps + AKS nodes
+    # can pull images, AcrPush so postprovision / quick-deploy can push,
+    # Contributor so the worker sidecar can call ACR Tasks
+    # scheduleRun/action to build runtime BLAST images. Without this trio,
+    # attaching a brand-new ACR from the SPA wizard leaves the MI with
+    # zero RBAC and every later "ACR" card / build job in the dashboard
+    # fails with `AuthorizationFailed`.
+    uami_principal_id = _current_managed_identity_principal_id()
+    if uami_principal_id:
+        for role_id in (
+            ACR_PULL_ROLE_ID,
+            ACR_PUSH_ROLE_ID,
+            ACR_CONTRIBUTOR_ROLE_ID,
+        ):
+            _auto_assign_role(
+                credential,
+                subscription_id,
+                uami_principal_id,
+                acr_scope,
+                role_id,
+                principal_type="ServicePrincipal",
+            )

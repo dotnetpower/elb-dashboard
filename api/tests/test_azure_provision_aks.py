@@ -33,6 +33,35 @@ def test_build_cluster_params_enables_blob_csi_driver() -> None:
     assert cluster.storage_profile.blob_csi_driver.enabled is True
 
 
+def test_build_cluster_params_enables_oidc_and_workload_identity() -> None:
+    """Regression guard for the 2026-05-26 'wi=null' incident.
+
+    The AKS API accepts a cluster with `oidcIssuerProfile.enabled=True`
+    while `securityProfile.workloadIdentity` is unset (the field is
+    nullable on the server side). The dashboard's OpenAPI deploy then
+    succeeds at creating the federated identity credential but the
+    OpenAPI pod hangs on the token swap because the workload-identity
+    mutating webhook is not installed in the cluster. Pin both flags so
+    `az aks update --enable-workload-identity` is never required as a
+    post-create follow-up.
+    """
+    cluster = _build_cluster_params(
+        region="koreacentral",
+        cluster_name="elb-smoke-aks",
+        sys_sku="Standard_D2s_v3",
+        sys_count=1,
+        blast_sku="Standard_D8s_v3",
+        blast_count=1,
+        caller_oid="caller-1",
+    )
+
+    assert cluster.oidc_issuer_profile is not None
+    assert cluster.oidc_issuer_profile.enabled is True
+    assert cluster.security_profile is not None
+    assert cluster.security_profile.workload_identity is not None
+    assert cluster.security_profile.workload_identity.enabled is True
+
+
 def test_build_cluster_params_keeps_expected_pools_and_taints() -> None:
     cluster = _build_cluster_params(
         region="koreacentral",

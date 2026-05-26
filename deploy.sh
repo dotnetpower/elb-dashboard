@@ -21,6 +21,19 @@ Environment overrides:
   ELB_RESOURCE_NAME_SLOT       Optional azd-safe slot such as slot01 for numbered deployments
   ELB_ALLOW_AZD_ENV_RETARGET   true to allow overwriting an existing azd env target subscription/tenant
   ELB_SKIP_LOCAL_RBAC          true to skip granting local-debug RBAC to the deployer
+  ELB_AUTO_FIX_RBAC            true to let the MI RBAC doctor auto-grant any missing
+                               role assignment under the current az login identity
+                               (default: false, doctor only reports). Grants are
+                               audit-logged with the operator's identity, which is why
+                               this is opt-in rather than default.
+  ELB_BOOTSTRAP_CLUSTER_RG     true to auto-bootstrap the AKS cluster RG (create the
+                               RG + grant the dashboard MI Contributor + UAA) right
+                               after a fresh azd up. Default: false, deploy.sh asks
+                               interactively when stdin is a TTY and skips when not.
+  ELB_CLUSTER_RG_NAME          Override the default cluster RG name (default:
+                               rg-elb-cluster) for the bootstrap above.
+  ELB_CLUSTER_RG_REGION        Override the region (default: $AZURE_LOCATION) for the
+                               bootstrap above.
 
 USAGE
 }
@@ -214,6 +227,23 @@ echo "==> Pre-flight provider check"
 bash "$repo_root/scripts/dev/register-providers.sh" --subscription "$subscription_id"
 export ELB_PROVIDER_REGISTRATION_READY=true
 
+# ---------------------------------------------------------------------------
+# Pre-flight: caller permissions. Verify the operator running deploy.sh has
+# the role set Bicep will need (Owner OR Contributor+UAA at subscription
+# scope) BEFORE we hand control over to `azd up`. Without this we discover
+# the gap 10+ minutes in, leaving a half-created RG and an azd state file
+# pointing at a Container App that never came up. The helper exits non-zero
+# with a clear remediation hint if the caller is under-privileged; if it
+# cannot determine the caller it warns and proceeds (CI/SP edge cases).
+# ---------------------------------------------------------------------------
+# shellcheck source=scripts/dev/_caller-precheck.sh
+source "$repo_root/scripts/dev/_caller-precheck.sh"
+if elb_precheck_init "$subscription_id"; then
+  echo "==> Pre-flight: verifying caller permissions for full deployment"
+  elb_precheck_caller_for "deploy"
+  echo "    \u2713 caller '$ELB_CALLER_UPN' has the roles required for azd up"
+fi
+
 bash "$repo_root/scripts/dev/resolve-resource-group.sh" --subscription "$subscription_id" --environment "$env_name"
 resource_slot="$(azd env get-values --environment "$env_name" 2>/dev/null | awk -F= '/^ELB_RESOURCE_NAME_SLOT=/{gsub(/"/, "", $2); print $2; exit}')"
 resource_suffix="${resource_slot#slot}"
@@ -276,8 +306,119 @@ if [[ -z "$app_url" ]]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Permission doctor (best-effort, read-only).
+#
+# Bicep is idempotent for the role assignments it owns, but it cannot detect
+# (a) orphaned assignments from a previous MI principalId, (b) MI roles
+# missing on pre-existing workload Storage/ACR that the SPA wizard attaches
+# to, or (c) the cluster-RG bootstrap gap. `check-mi-rbac.sh` enumerates the
+# expected {scope, role} pairs and prints the exact `az role assignment
+# create` snippets for any missing one. It never mutates RBAC \u2014 the operator
+# decides which fixes to apply.
+# ---------------------------------------------------------------------------
+DOCTOR_SCRIPT="$repo_root/scripts/dev/check-mi-rbac.sh"
+DOCTOR_OUTPUT=""
+if [[ -x "$DOCTOR_SCRIPT" ]]; then
+  doctor_args=(--subscription "$subscription_id")
+  if is_true "${ELB_AUTO_FIX_RBAC:-false}"; then
+    echo "==> Running MI RBAC doctor (--auto-fix: missing roles will be granted"
+    echo "    under '$user_name'; opt-out with ELB_AUTO_FIX_RBAC=false)"
+    doctor_args+=(--auto-fix)
+  else
+    echo "==> Running MI RBAC doctor (read-only, may take ~30s)"
+    echo "    Set ELB_AUTO_FIX_RBAC=true to also grant any missing roles in-line."
+  fi
+  # Tee the doctor output to both the console and a variable so we can
+  # detect the "no cluster yet" branch and offer the bootstrap below.
+  if ! DOCTOR_OUTPUT="$(bash "$DOCTOR_SCRIPT" "${doctor_args[@]}" 2>&1 | tee /dev/tty)"; then
+    echo "==> MI RBAC doctor reported unresolved gaps — see the fix commands above."
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Cluster-RG bootstrap (closes the bc0fcf1 first-time-cluster-create gap).
+#
+# The dashboard MI is granted only Reader at subscription scope, so the
+# very first SPA "Create Cluster" click fails when the cluster RG does
+# not exist yet (resourceGroups/write at sub scope is denied). We close
+# that gap by pre-creating the RG and granting Contributor + UAA on it
+# only — same pair `infra/modules/workloadClusterRoles.bicep` would apply
+# on the second `azd provision`, but available immediately after the
+# first `azd up`.
+#
+# Trigger conditions (any one):
+#   1. ELB_BOOTSTRAP_CLUSTER_RG=true                  — explicit env override
+#   2. doctor printed "no AKS cluster found" AND stdin is a TTY
+#                                                     — interactive prompt
+# Skipped when: stdin is not a TTY and the env override is not set
+# (a CI/non-interactive run gets a clear hint in the closing summary
+# instead, since silently mutating Azure on automated runs is the wrong
+# default — same rationale as ELB_AUTO_FIX_RBAC).
+# ---------------------------------------------------------------------------
+CLUSTER_BOOTSTRAP_RAN=false
+CLUSTER_BOOTSTRAP_HINT=false
+if printf '%s' "$DOCTOR_OUTPUT" | grep -q "no AKS cluster found in subscription"; then
+  BOOTSTRAP_RG="${ELB_CLUSTER_RG_NAME:-rg-elb-cluster}"
+  BOOTSTRAP_REGION="${ELB_CLUSTER_RG_REGION:-$location}"
+  RBAC_SCRIPT="$repo_root/scripts/dev/grant-runtime-rbac.sh"
+
+  if [[ ! -x "$RBAC_SCRIPT" ]]; then
+    echo "==> Cluster-RG bootstrap skipped — helper script missing: $RBAC_SCRIPT"
+  elif is_true "${ELB_BOOTSTRAP_CLUSTER_RG:-false}"; then
+    echo "==> Cluster-RG bootstrap (ELB_BOOTSTRAP_CLUSTER_RG=true)"
+    echo "    Creating '$BOOTSTRAP_RG' in '$BOOTSTRAP_REGION' and granting MI roles."
+    if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --region "$BOOTSTRAP_REGION" --yes; then
+      CLUSTER_BOOTSTRAP_RAN=true
+    fi
+  elif [[ -t 0 && -t 1 ]]; then
+    echo ""
+    echo "==> The dashboard MI does not yet have access to a cluster RG."
+    echo "    The SPA's first \"Create Cluster\" click will fail with"
+    echo "    AuthorizationFailed (resourceGroups/write at sub scope) unless"
+    echo "    the cluster RG is pre-created and the MI is granted Contributor."
+    echo ""
+    read -r -p "Pre-create the cluster RG + grant MI roles now? [Y/n] " _ans
+    case "${_ans:-Y}" in
+      n|N|no|No|NO)
+        echo "    Skipping bootstrap. Run later with:"
+        echo "      bash scripts/dev/grant-runtime-rbac.sh \\"
+        echo "        --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION --yes"
+        CLUSTER_BOOTSTRAP_HINT=true
+        ;;
+      *)
+        read -r -p "  Cluster RG name [$BOOTSTRAP_RG]: " _rg
+        BOOTSTRAP_RG="${_rg:-$BOOTSTRAP_RG}"
+        read -r -p "  Region [$BOOTSTRAP_REGION]: " _region
+        BOOTSTRAP_REGION="${_region:-$BOOTSTRAP_REGION}"
+        echo "==> Running grant-runtime-rbac.sh --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION"
+        if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --region "$BOOTSTRAP_REGION" --yes; then
+          CLUSTER_BOOTSTRAP_RAN=true
+        else
+          echo "==> Bootstrap failed — see the error above. Manual command:"
+          echo "      bash scripts/dev/grant-runtime-rbac.sh \\"
+          echo "        --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION --yes"
+        fi
+        ;;
+    esac
+  else
+    # Non-interactive (CI). Print the hint in the closing summary.
+    CLUSTER_BOOTSTRAP_HINT=true
+  fi
+fi
+
 if [[ -n "$app_url" ]]; then
   echo "==> Deployment complete: $app_url"
+  if $CLUSTER_BOOTSTRAP_RAN; then
+    echo "    Cluster RG '$BOOTSTRAP_RG' is ready. Wait 1–5 min for RBAC propagation,"
+    echo "    then click 'Create Cluster' in the dashboard."
+  elif $CLUSTER_BOOTSTRAP_HINT; then
+    echo ""
+    echo "    [!] Before clicking 'Create Cluster' in the dashboard, run:"
+    echo "        bash scripts/dev/grant-runtime-rbac.sh \\"
+    echo "          --cluster-rg ${ELB_CLUSTER_RG_NAME:-rg-elb-cluster} \\"
+    echo "          --region ${ELB_CLUSTER_RG_REGION:-$location} --yes"
+  fi
   open_url "$app_url"
 else
   echo "==> Deployment complete. Run 'azd env get-values --environment $env_name' to inspect outputs."

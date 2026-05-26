@@ -36,6 +36,9 @@
 #   scripts/dev/grant-runtime-rbac.sh                       # auto-detect from azd env + AKS list
 #   scripts/dev/grant-runtime-rbac.sh --container-app ca-elb-dashboard --rg rg-elb-dashboard
 #   scripts/dev/grant-runtime-rbac.sh --principal-id <oid> --cluster-rg rg-elb-cluster
+#   scripts/dev/grant-runtime-rbac.sh --cluster-rg rg-elb-cluster --region koreacentral
+#                                                            # bootstrap mode: create the RG
+#                                                            # if it doesn't exist yet, then grant.
 #   scripts/dev/grant-runtime-rbac.sh --dry-run
 #   scripts/dev/grant-runtime-rbac.sh --yes                 # skip the "proceed?" prompt
 #
@@ -44,13 +47,26 @@
 #     `identity.userAssignedIdentities` (the SINGLE shared MI).
 #   * AKS cluster RG — when the subscription has exactly one AKS cluster,
 #     use its RG. When there are multiple, refuse and ask for --cluster-rg.
+#     When there are zero clusters AND --cluster-rg was passed, run in
+#     bootstrap mode (create the RG if --region is also passed, then grant).
 #   * Container App name + RG — from `azd env get-values` keys
 #     `CONTAINER_APP_NAME` and `AZURE_RESOURCE_GROUP`.
+#
+# Bootstrap mode (first-time cluster create on a fresh subscription):
+#   The shared dashboard MI is granted only Reader at subscription scope,
+#   so `api.tasks.azure.provision.provision_aks` -> `rc.resource_groups
+#   .create_or_update(<cluster_rg>, ...)` returns AuthorizationFailed for
+#   `Microsoft.Resources/subscriptions/resourcegroups/write` when the RG
+#   doesn't already exist. To unblock that path safely (without granting
+#   Contributor at subscription scope) the caller pre-creates the RG and
+#   then grants Contributor + UAA on that RG only. Pass --cluster-rg with
+#   --region to do both in one shot.
 #
 # Exit codes:
 #   0  every requested role was already present or newly granted
 #   2  one or more role grants failed (caller lacks UAA at the target scope)
-#   3  preconditions not met (az not logged in, MI not found, ambiguous AKS)
+#   3  preconditions not met (az not logged in, MI not found, ambiguous AKS,
+#      RG missing without --region in bootstrap mode)
 
 set -Eeuo pipefail
 
@@ -63,7 +79,10 @@ ts()     { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die()    { red "ERROR: $*" >&2; exit "${2:-3}"; }
 
 usage() {
-  sed -n '2,55p' "$0"
+  # Print the leading comment block (header through "Exit codes"). Keep this
+  # range in sync with the header docs above; we slice to the final exit-code
+  # line so bootstrap-mode usage stays discoverable from --help.
+  sed -n '2,69p' "$0"
   exit "${1:-1}"
 }
 
@@ -72,20 +91,22 @@ RESOURCE_GROUP=""
 SUBSCRIPTION=""
 PRINCIPAL_ID=""
 CLUSTER_RG=""
+CLUSTER_REGION=""
 DRY_RUN=0
 ASSUME_YES=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --container-app|--app) CONTAINER_APP="$2"; shift 2 ;;
-    --rg|--resource-group) RESOURCE_GROUP="$2"; shift 2 ;;
-    --subscription)        SUBSCRIPTION="$2";   shift 2 ;;
-    --principal-id|--oid)  PRINCIPAL_ID="$2";   shift 2 ;;
-    --cluster-rg)          CLUSTER_RG="$2";     shift 2 ;;
-    --dry-run)             DRY_RUN=1;           shift ;;
-    --yes|-y)              ASSUME_YES=1;        shift ;;
-    -h|--help)             usage 0 ;;
-    *)                     die "unknown flag: $1" ;;
+    --container-app|--app)   CONTAINER_APP="$2";   shift 2 ;;
+    --rg|--resource-group)   RESOURCE_GROUP="$2";  shift 2 ;;
+    --subscription)          SUBSCRIPTION="$2";    shift 2 ;;
+    --principal-id|--oid)    PRINCIPAL_ID="$2";    shift 2 ;;
+    --cluster-rg)            CLUSTER_RG="$2";      shift 2 ;;
+    --region|--location)     CLUSTER_REGION="$2";  shift 2 ;;
+    --dry-run)               DRY_RUN=1;            shift ;;
+    --yes|-y)                ASSUME_YES=1;         shift ;;
+    -h|--help)               usage 0 ;;
+    *)                       die "unknown flag: $1" ;;
   esac
 done
 
@@ -150,14 +171,22 @@ fi
 # ---------------------------------------------------------------------------
 # Resolve the AKS cluster RG. If --cluster-rg was passed, use it as-is.
 # Otherwise list AKS in the subscription and accept only the unambiguous
-# "exactly one" case.
+# "exactly one" case. When no AKS clusters exist AND --cluster-rg was
+# not passed, print an actionable bootstrap hint instead of silently
+# returning 0 (which would hide the first-time-cluster-create RBAC gap).
 # ---------------------------------------------------------------------------
+BOOTSTRAP_MODE=0
 if [[ -z "$CLUSTER_RG" ]]; then
   AKS_LIST="$(az aks list "${SUB_FLAG[@]}" \
     --query "[].{name:name, rg:resourceGroup}" -o tsv 2>/dev/null || true)"
   AKS_COUNT="$(printf '%s\n' "$AKS_LIST" | grep -c . || true)"
   if [[ "$AKS_COUNT" -eq 0 ]]; then
-    yellow "no AKS cluster found in subscription; skipping (nothing to grant)"
+    yellow "no AKS cluster found in subscription — nothing to grant in maintenance mode."
+    yellow "If you plan to create a NEW cluster via the SPA, the dashboard MI must have"
+    yellow "Contributor on the cluster RG so 'create_or_update(<cluster_rg>)' can succeed."
+    yellow "Re-run this script in bootstrap mode (creates RG + grants):"
+    yellow "  bash scripts/dev/grant-runtime-rbac.sh \\"
+    yellow "    --cluster-rg <rg-elb-cluster> --region <koreacentral> --yes"
     exit 0
   fi
   if [[ "$AKS_COUNT" -gt 1 ]]; then
@@ -167,8 +196,34 @@ if [[ -z "$CLUSTER_RG" ]]; then
   fi
   CLUSTER_RG="$(printf '%s\n' "$AKS_LIST" | awk '{print $2}')"
 fi
-az group show "${SUB_FLAG[@]}" -n "$CLUSTER_RG" -o none 2>/dev/null \
-  || die "AKS cluster RG '$CLUSTER_RG' not found"
+
+# Bootstrap path: --cluster-rg was specified (explicitly or auto-derived) but
+# the RG doesn't exist yet. We do NOT die anymore — that was exactly the gap
+# that left fresh-subscription deploys with no way to grant the MI write
+# access to the future cluster RG without escalating to subscription-scope
+# Contributor. Two sub-cases:
+#   (a) caller passed --region — create the RG, then continue with the grant.
+#   (b) caller did NOT pass --region — actionable die() telling them how to
+#       fix it; we deliberately do not pick a region for them.
+if ! az group show "${SUB_FLAG[@]}" -n "$CLUSTER_RG" -o none 2>/dev/null; then
+  if [[ -z "$CLUSTER_REGION" ]]; then
+    red "AKS cluster RG '$CLUSTER_RG' does not exist yet."
+    red "Re-run with --region <azure-region> to create it before the grant, e.g.:"
+    red "  bash scripts/dev/grant-runtime-rbac.sh \\"
+    red "    --cluster-rg $CLUSTER_RG --region koreacentral --yes"
+    exit 3
+  fi
+  BOOTSTRAP_MODE=1
+  ts "Bootstrap mode: RG '$CLUSTER_RG' missing — will create in $CLUSTER_REGION."
+  if [[ $DRY_RUN -eq 1 ]]; then
+    yellow "  [dry ] would run: az group create -n $CLUSTER_RG -l $CLUSTER_REGION"
+  else
+    az group create "${SUB_FLAG[@]}" \
+      --name "$CLUSTER_RG" --location "$CLUSTER_REGION" --output none \
+      || die "failed to create resource group '$CLUSTER_RG' in '$CLUSTER_REGION'" 2
+    ts "  [ok  ] created resource group $CLUSTER_RG in $CLUSTER_REGION"
+  fi
+fi
 
 CLUSTER_RG_SCOPE="/subscriptions/${SUBSCRIPTION}/resourceGroups/${CLUSTER_RG}"
 
@@ -178,7 +233,7 @@ CLUSTER_RG_SCOPE="/subscriptions/${SUBSCRIPTION}/resourceGroups/${CLUSTER_RG}"
 ts "Subscription:    $SUBSCRIPTION"
 ts "Container App:   ${CONTAINER_APP:-<not used>} (${RESOURCE_GROUP:-<not used>})"
 ts "Dashboard MI:    $PRINCIPAL_ID"
-ts "AKS cluster RG:  $CLUSTER_RG"
+ts "AKS cluster RG:  $CLUSTER_RG${BOOTSTRAP_MODE:+ (bootstrap)}"
 [[ $DRY_RUN -eq 1 ]] && yellow "(dry-run — no role assignments will be created)"
 
 if [[ $ASSUME_YES -ne 1 && $DRY_RUN -ne 1 ]]; then

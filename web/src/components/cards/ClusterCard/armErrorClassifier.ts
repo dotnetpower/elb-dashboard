@@ -31,8 +31,16 @@ export type ArmErrorCategory =
   | "unknown";
 
 export interface ArmErrorAction {
-  /** Stable kind so the card can pick the right icon. */
-  kind: "portal" | "docs" | "retry";
+  /** Stable kind so the card can pick the right icon and renderer.
+   *  - `portal` / `docs`: opens `href` in a new tab.
+   *  - `retry`: callback-driven (renderer ignores `href`).
+   *  - `command`: `href` carries a shell command (multi-line allowed) that
+   *    the renderer copies to clipboard on click instead of navigating.
+   *    Used for the rg_permission CTA so the operator gets the exact
+   *    `az role assignment create` invocation — pre-filled with the MI
+   *    object id, subscription, and RG parsed out of the ARM error —
+   *    rather than a generic Microsoft Learn link. */
+  kind: "portal" | "docs" | "retry" | "command";
   label: string;
   href: string;
 }
@@ -112,6 +120,63 @@ function parseBlockedSkus(raw: string): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/** Extract the failing principal's object id + the subscription + resource
+ *  group from an AuthorizationFailed message of the canonical shape:
+ *
+ *    "The client 'X' with object id '<oid>' does not have authorization
+ *     to perform action '<action>' over scope '/subscriptions/<sub>/
+ *     resourceGroups/<rg>' ..."
+ *
+ *  Used by the rg_permission branch so we can hand the operator a
+ *  concrete `az role assignment create` snippet instead of a generic
+ *  docs link. Falls back to `null` for any field that doesn't parse,
+ *  in which case the classifier omits the command action. */
+function parseAuthFailure(
+  raw: string,
+): { oid?: string; subscriptionId?: string; resourceGroup?: string } {
+  const out: { oid?: string; subscriptionId?: string; resourceGroup?: string } = {};
+  const oidMatch = raw.match(/object id ['"]([0-9a-f-]{36})['"]/i);
+  if (oidMatch) out.oid = oidMatch[1];
+  // Match both `/resourceGroups/<rg>` and `/resourcegroups/<rg>` (Azure
+  // mixes the casing across services). The non-greedy [^/'"\s] keeps the
+  // RG name from swallowing the closing quote.
+  const scopeMatch = raw.match(
+    /\/subscriptions\/([0-9a-f-]{36})\/resource[gG]roups\/([^/'"\s]+)/,
+  );
+  if (scopeMatch) {
+    out.subscriptionId = scopeMatch[1];
+    out.resourceGroup = scopeMatch[2];
+  }
+  return out;
+}
+
+/** Build the multi-line `az role assignment create` snippet that grants
+ *  the dashboard MI Contributor on the cluster RG. The snippet is what
+ *  the operator must run from a shell with Owner / User Access
+ *  Administrator at subscription scope — it's the exact missing step
+ *  that `infra/modules/subscriptionRoles.bicep` deliberately does NOT
+ *  perform. Region is left as a `<region>` placeholder because the SPA
+ *  doesn't know it at the time the error renders. */
+function buildGrantContributorCommand(args: {
+  oid: string;
+  subscriptionId: string;
+  resourceGroup: string;
+}): string {
+  const { oid, subscriptionId, resourceGroup } = args;
+  return [
+    `# 1) (optional) create the RG if it does not exist yet`,
+    `az group create --subscription ${subscriptionId} \\`,
+    `  --name ${resourceGroup} --location <region>`,
+    ``,
+    `# 2) grant the dashboard MI Contributor on that RG only`,
+    `az role assignment create --subscription ${subscriptionId} \\`,
+    `  --assignee-object-id ${oid} \\`,
+    `  --assignee-principal-type ServicePrincipal \\`,
+    `  --role Contributor \\`,
+    `  --scope /subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`,
+  ].join("\n");
 }
 
 export function classifyArmError(
@@ -210,23 +275,46 @@ export function classifyArmError(
     /authorizationfailed/i.test(text) ||
     /does not have authorization to perform action/i.test(lower)
   ) {
+    // Try to extract MI oid + subscription + RG from the raw ARM error so
+    // we can hand the operator a concrete `az role assignment create`
+    // snippet. Falls back gracefully to the docs link when any field is
+    // missing.
+    const parsed = parseAuthFailure(text);
+    const oid = parsed.oid;
+    const sub = parsed.subscriptionId ?? context.subscriptionId;
+    const rg = parsed.resourceGroup ?? context.resourceGroup;
+    const actions: ArmErrorAction[] = [
+      {
+        kind: "portal",
+        label: "Open resource group",
+        href: portalRgUrl(sub, rg),
+      },
+    ];
+    if (oid && sub && rg) {
+      actions.push({
+        kind: "command",
+        label: "Copy az role assignment command",
+        href: buildGrantContributorCommand({
+          oid,
+          subscriptionId: sub,
+          resourceGroup: rg,
+        }),
+      });
+    }
+    actions.push({
+      kind: "docs",
+      label: "Grant Contributor role (docs)",
+      href: "https://learn.microsoft.com/azure/role-based-access-control/role-assignments-portal",
+    });
     return {
       category: "rg_permission",
-      summary: `Could not access resource group ${context.resourceGroup ?? "(unknown)"}.`,
+      summary: `Could not access resource group ${rg ?? "(unknown)"}.`,
       details:
-        "The Container App's managed identity may be missing Contributor on this resource group, or the RG doesn't exist.",
-      actions: [
-        {
-          kind: "portal",
-          label: "Open resource group",
-          href: portalRgUrl(context.subscriptionId, context.resourceGroup),
-        },
-        {
-          kind: "docs",
-          label: "Grant Contributor role",
-          href: "https://learn.microsoft.com/azure/role-based-access-control/role-assignments-portal",
-        },
-      ],
+        "The Container App's managed identity has Reader at subscription scope but " +
+        "needs Contributor on this resource group to create or modify it. The dashboard " +
+        "deploy intentionally does not grant subscription-scope Contributor — " +
+        "pre-create the RG and assign the role at RG scope using the command below.",
+      actions,
     };
   }
 

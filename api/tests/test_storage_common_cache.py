@@ -40,6 +40,20 @@ def _xml_with_keys(*keys: str) -> bytes:
     return ElementTree.tostring(root)
 
 
+def _xml_truncated(keys: list[str], next_token: str) -> bytes:
+    namespace = "http://s3.amazonaws.com/doc/2006-03-01/"
+    root = ElementTree.Element(f"{{{namespace}}}ListBucketResult")
+    for key in keys:
+        contents = ElementTree.SubElement(root, f"{{{namespace}}}Contents")
+        key_elem = ElementTree.SubElement(contents, f"{{{namespace}}}Key")
+        key_elem.text = key
+    truncated = ElementTree.SubElement(root, f"{{{namespace}}}IsTruncated")
+    truncated.text = "true"
+    tok = ElementTree.SubElement(root, f"{{{namespace}}}NextContinuationToken")
+    tok.text = next_token
+    return ElementTree.tostring(root)
+
+
 def test_resolve_latest_dir_caches_response(monkeypatch) -> None:
     common.reset_ncbi_catalogue_cache()
     calls = {"n": 0}
@@ -112,3 +126,52 @@ def test_reset_ncbi_catalogue_cache_clears_both(monkeypatch) -> None:
     common.reset_ncbi_catalogue_cache()
     common._resolve_latest_dir()
     assert calls["n"] == 2
+
+
+def test_list_keys_url_encodes_continuation_token(monkeypatch) -> None:
+    """Regression: S3 NextContinuationToken often contains '+' and '/'.
+
+    Without percent-encoding, S3 returns HTTP 400 "The continuation token
+    provided is incorrect" on page 2 of every multi-page DB (e.g. `nt`,
+    `nr`), which the route layer surfaces as a 502 Bad Gateway. This test
+    pins the encoding so the bug cannot regress.
+    """
+    common.reset_ncbi_catalogue_cache()
+    raw_token = "1XsZSqpjyYrMb+E3GGD/OLGnO16"
+    expected_encoded = "1XsZSqpjyYrMb%2BE3GGD%2FOLGnO16"
+    call_log: list[str] = []
+
+    class _FakeClient:
+        def get(self, url):
+            call_log.append(url)
+            if "continuation-token" not in url:
+                return _FakeResponse(
+                    content=_xml_truncated(
+                        ["snap/nt.001.tar.gz", "snap/nt.001.tar.gz.md5"],
+                        raw_token,
+                    )
+                )
+            # Page 2 — assert the URL carries the *encoded* token, not the
+            # raw one. If '+' / '/' make it through unencoded, S3 returns
+            # 400 in production.
+            assert expected_encoded in url, (
+                f"continuation-token not percent-encoded; url={url!r}"
+            )
+            assert raw_token not in url.split("continuation-token=", 1)[-1], (
+                f"raw token leaked into URL; url={url!r}"
+            )
+            return _FakeResponse(
+                content=_xml_with_keys("snap/nt.002.tar.gz")
+            )
+
+    from api.services import httpx_pool
+
+    monkeypatch.setattr(httpx_pool, "get_pooled_client", lambda *_a, **_kw: _FakeClient())
+
+    keys = common._list_keys("snap", "nt")
+    assert keys == [
+        "snap/nt.001.tar.gz",
+        "snap/nt.001.tar.gz.md5",
+        "snap/nt.002.tar.gz",
+    ]
+    assert len(call_log) == 2

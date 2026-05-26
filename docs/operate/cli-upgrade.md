@@ -86,6 +86,47 @@ deployed dashboard. It is paired with the script
     run. Tune the budget with `--health-timeout 300` when the terminal
     sidecar was rebuilt or the app was scaled to zero.
 
+!!! note "If you see RBAC errors after the upgrade (e.g. cluster create fails)"
+
+    The dashboard's user-assigned managed identity is granted only
+    `Reader` at subscription scope by design. The very first SPA
+    "Create Cluster" click on a fresh subscription fails with
+    `AuthorizationFailed` on `Microsoft.Resources/subscriptions/
+    resourcegroups/write` because the future cluster RG (e.g.
+    `rg-elb-cluster`) does not exist yet and the MI has no sub-scope
+    write. The fix is a single bootstrap command that creates the RG
+    and grants the MI `Contributor` + `User Access Administrator` at
+    that RG scope only (no escalation to sub-scope `Contributor`):
+
+    ```bash
+    cd ~/dev/elb-dashboard
+    bash scripts/dev/grant-runtime-rbac.sh \
+      --cluster-rg rg-elb-cluster \
+      --region koreacentral \
+      --yes
+    ```
+
+    The script is **idempotent** — re-running on an already-correct
+    setup exits in under two seconds with `skipped=N`. After it
+    succeeds, wait 1–5 minutes for Azure RBAC propagation, then click
+    **Edit & retry** in the SPA error card. Detail in
+    [Identity Architecture § 6.1](../architecture/identity.md#61-authorizationfailed-on-resourcegroupswrite)
+    and the
+    [`grant-runtime-rbac.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/grant-runtime-rbac.sh)
+    `--help` output.
+
+    For a comprehensive RBAC audit (all expected `{scope, role}` pairs
+    for the dashboard MI), run the doctor:
+
+    ```bash
+    bash scripts/dev/check-mi-rbac.sh             # read-only audit
+    bash scripts/dev/check-mi-rbac.sh --auto-fix  # opt-in: also grant missing
+    ```
+
+    `cli-upgrade.sh full` invokes the doctor automatically after a
+    successful health check; pass `--auto-fix-rbac` to let it grant the
+    missing roles in-line under your current `az login` identity.
+
 !!! tip "Prefer the in-browser upgrade when possible"
 
     The browser-driven [In-app Upgrade](../user-guide/upgrades.md) does the

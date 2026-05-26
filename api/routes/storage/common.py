@@ -108,6 +108,8 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
         files" answer until process restart.
       * 5xx / network errors raise ``NcbiUnavailable`` (uncached).
     """
+    from urllib.parse import quote
+
     import httpx
 
     cache_key = (latest_dir, db_name)
@@ -129,7 +131,13 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
         for _page in range(50):
             list_url = f"{_NCBI_S3_BASE}?list-type=2&prefix={prefix}&max-keys=1000"
             if continuation:
-                list_url += f"&continuation-token={continuation}"
+                # S3 continuation tokens are opaque base64-ish blobs that
+                # routinely contain '+' and '/' — both URL-significant. The
+                # token MUST be percent-encoded or S3 returns HTTP 400
+                # "The continuation token provided is incorrect" on page 2
+                # of every multi-page DB (e.g. `nt`, `nr`). Quote with
+                # safe='' so '/' is also encoded.
+                list_url += f"&continuation-token={quote(continuation, safe='')}"
             resp = client.get(list_url)
             if resp.status_code == 403:
                 _breaker_record_failure()

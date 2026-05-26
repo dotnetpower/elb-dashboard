@@ -119,6 +119,7 @@ nav:
           - High Level Architecture: architecture/high-level.md
           - Container Apps: architecture/container-apps.md
           - Runtime Plan: architecture/runtime-plan.md
+          - Identity: architecture/identity.md
           - Storage Isolation & Proxy: architecture/storage-contract.md
           - Authentication: architecture/authentication.md
       - Research Notes:

@@ -37,7 +37,9 @@ from api.services.monitoring.aks import (
     BLAST_POOL_NAME,
 )
 from api.services.monitoring.provisioning import (
+    ACR_CONTRIBUTOR_ROLE_ID,
     ACR_PULL_ROLE_ID,
+    ACR_PUSH_ROLE_ID,
     STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID,
     _auto_assign_role,
 )
@@ -124,7 +126,9 @@ def ensure_acr(
     )
 
 __all__ = [
+    "ACR_CONTRIBUTOR_ROLE_ID",
     "ACR_PULL_ROLE_ID",
+    "ACR_PUSH_ROLE_ID",
     "BLAST_POOL_NAME",
     "STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID",
     "_auto_assign_role",

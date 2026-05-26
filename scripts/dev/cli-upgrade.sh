@@ -52,6 +52,14 @@
 #                        `id-elb-openapi` + federated creds). Skip only
 #                        when the caller lacks UAA on the cluster RG and
 #                        the grant was already applied out-of-band.
+#   --auto-fix-rbac      OPT-IN: after the health check passes, invoke the
+#                        MI RBAC doctor with --auto-fix so any missing
+#                        role assignment it finds is granted inline under
+#                        the operator's current az login. Default is
+#                        read-only (the doctor only reports). The grants
+#                        are reversible (`az role assignment delete`) but
+#                        are audit-logged with the operator's identity,
+#                        which is why this is opt-in rather than default.
 #   --yes                Skip the interactive "proceed?" prompt.
 #   --dry-run            Print the plan, do not build or PATCH.
 #   --logs               Tail the api sidecar logs after a successful
@@ -161,6 +169,17 @@ SKIP_RBAC=false
 ASSUME_YES=false
 DRY_RUN=false
 TAIL_LOGS=false
+# When true, the post-upgrade MI RBAC doctor is invoked with --auto-fix so
+# any missing role assignment the doctor finds is granted inline under the
+# operator's current az login identity. Default false (read-only) for the
+# audit-trail and security-regression reasons explained in the doctor
+# script's --auto-fix policy block. Opt in with --auto-fix-rbac.
+AUTO_FIX_RBAC=false
+# Set to 1 by preflight_runtime_rbac when the subscription has zero AKS
+# clusters AND no cluster RG could be auto-detected — i.e. the next thing the
+# operator does will be "Create Cluster" in the SPA, which needs the MI to
+# already have Contributor on the cluster RG. See the end-of-script note.
+NEEDS_BOOTSTRAP_NOTE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -173,6 +192,7 @@ while [[ $# -gt 0 ]]; do
     --no-auto-rollback)  AUTO_ROLLBACK=false ;;
     --skip-parity-check) SKIP_PARITY=true ;;
     --skip-rbac-grant)   SKIP_RBAC=true ;;
+    --auto-fix-rbac)     AUTO_FIX_RBAC=true ;;
     --yes|-y)            ASSUME_YES=true ;;
     --dry-run)           DRY_RUN=true ;;
     --logs)              TAIL_LOGS=true; ASSUME_YES=true ;;
@@ -334,6 +354,34 @@ preflight_storage_parity || {
 }
 
 # ---------------------------------------------------------------------------
+# Pre-flight: caller permissions. Verify the operator running cli-upgrade
+# has the role set this run will need on Azure BEFORE we spend 5+ minutes
+# building images and then fail on `az containerapp update`. Mode depends
+# on what we're going to do:
+#   * rollback or --dry-run \u2192 read-only (Reader at sub is enough).
+#   * normal upgrade        \u2192 Contributor or Owner at sub (for ACR build +
+#                             Container App patch).
+#   * --auto-fix-rbac       \u2192 also requires UAA / Owner so the post-health
+#                             doctor can actually `az role assignment create`.
+# ---------------------------------------------------------------------------
+# shellcheck source=scripts/dev/_caller-precheck.sh
+source "$REPO_ROOT/scripts/dev/_caller-precheck.sh"
+if elb_precheck_init "${AZURE_SUBSCRIPTION_ID:-}"; then
+  if $DRY_RUN || [[ "$SCOPE" == "rollback" ]]; then
+    ts "==> Pre-flight: verifying caller can read role assignments (dry-run / rollback)"
+    elb_precheck_caller_for "upgrade-read"
+  else
+    ts "==> Pre-flight: verifying caller has Contributor at sub for upgrade"
+    elb_precheck_caller_for "upgrade-write"
+    if $AUTO_FIX_RBAC; then
+      ts "==> Pre-flight: --auto-fix-rbac also requires UAA / Owner at sub"
+      elb_precheck_caller_for "upgrade-autofix"
+    fi
+  fi
+  ts "    \u2713 caller '$ELB_CALLER_UPN' has the roles required for this run"
+fi
+
+# ---------------------------------------------------------------------------
 # Preflight: runtime RBAC grant on the AKS cluster RG.
 #
 # Why: `infra/modules/controlPlaneRoles.bicep` only grants the dashboard MI
@@ -380,13 +428,26 @@ preflight_runtime_rbac() {
   ts "==> Ensuring dashboard MI has Contributor + UAA on the AKS cluster RG"
   local rbac_args=(--container-app "$CONTAINER_APP_NAME" --rg "$AZURE_RESOURCE_GROUP" --yes)
   [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]] && rbac_args+=(--subscription "$AZURE_SUBSCRIPTION_ID")
-  if ! bash "$REPO_ROOT/scripts/dev/grant-runtime-rbac.sh" "${rbac_args[@]}"; then
+  # Capture stdout+stderr so we can detect the "no AKS cluster found" branch
+  # (first-time-cluster-create on a fresh subscription) and re-print the
+  # actionable bootstrap hint *after* all the postprovision noise — otherwise
+  # the operator scrolls past it and clicks "Create Cluster" in the SPA only
+  # to hit AuthorizationFailed on resourcegroups/write. The subscription
+  # script gives MI only Reader at sub scope, so the cluster RG must be
+  # pre-created and granted before that ARM call lands.
+  local rbac_out rbac_rc
+  rbac_out="$(bash "$REPO_ROOT/scripts/dev/grant-runtime-rbac.sh" "${rbac_args[@]}" 2>&1)" \
+    && rbac_rc=0 || rbac_rc=$?
+  printf '%s\n' "$rbac_out"
+  if [[ $rbac_rc -ne 0 ]]; then
     warn "runtime RBAC grant did not fully succeed."
     warn "  cli-upgrade will continue (api/frontend/terminal images still ship),"
     warn "  but the SPA's 'Deploy elb-openapi' button will fail until a"
     warn "  subscription/tenant admin runs:"
     warn "    bash scripts/dev/grant-runtime-rbac.sh \\"
     warn "      --container-app $CONTAINER_APP_NAME --rg $AZURE_RESOURCE_GROUP --yes"
+  elif printf '%s' "$rbac_out" | grep -q "no AKS cluster found in subscription"; then
+    NEEDS_BOOTSTRAP_NOTE=1
   fi
   return 0
 }
@@ -623,10 +684,58 @@ fi
 # ---------------------------------------------------------------------------
 # Verify + (optional) auto-rollback.
 # ---------------------------------------------------------------------------
+emit_bootstrap_note_if_needed() {
+  [[ "${NEEDS_BOOTSTRAP_NOTE:-0}" == "1" ]] || return 0
+  cat >&2 <<EOF
+
+⚠  First-time-cluster-create RBAC note
+   The subscription has no AKS cluster yet, so the dashboard MI was NOT granted
+   Contributor/UAA on a cluster RG. If the next action in the SPA is
+   "Create Cluster", that flow calls 'resource_groups.create_or_update(<rg>)'
+   under the MI — which has only Reader at subscription scope — and Azure
+   returns AuthorizationFailed on 'Microsoft.Resources/subscriptions/
+   resourcegroups/write'. Pre-create the RG + grant in one shot:
+
+     bash scripts/dev/grant-runtime-rbac.sh \\
+       --cluster-rg <rg-elb-cluster> \\
+       --region    <koreacentral> \\
+       --yes
+
+   Then wait 1–5 minutes for RBAC propagation before clicking Create Cluster.
+EOF
+}
+
 if poll_health; then
   ts "✓ Upgrade complete and healthy."
   ts "  Roll back later with: $0 rollback --yes"
   set_result "success" ""
+  emit_bootstrap_note_if_needed
+  # ---------------------------------------------------------------------------
+  # Permission doctor (best-effort, read-only).
+  #
+  # cli-upgrade.sh does not re-apply Bicep, so any role assignment that
+  # Bicep would have created for a NEW resource type added in the pulled
+  # commits will be missing on the deployed MI until the operator runs a
+  # full `azd provision` again. The doctor flags those gaps and prints
+  # the exact `az role assignment create` snippets for each one. Read-only
+  # \u2014 the operator decides which fixes to apply.
+  # ---------------------------------------------------------------------------
+  DOCTOR_SCRIPT="$REPO_ROOT/scripts/dev/check-mi-rbac.sh"
+  if [[ -x "$DOCTOR_SCRIPT" ]]; then
+    if $AUTO_FIX_RBAC; then
+      ts "==> Running MI RBAC doctor (--auto-fix: missing roles will be granted)"
+    else
+      ts "==> Running MI RBAC doctor (read-only — pass --auto-fix-rbac to grant)"
+    fi
+    doctor_args=()
+    [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]] && doctor_args+=(--subscription "$AZURE_SUBSCRIPTION_ID")
+    if $AUTO_FIX_RBAC; then
+      doctor_args+=(--auto-fix)
+    else
+      doctor_args+=(--quiet)
+    fi
+    bash "$DOCTOR_SCRIPT" "${doctor_args[@]}" || true
+  fi
   if $TAIL_LOGS; then
     ts "==> Tailing api logs (Ctrl-C to exit)"
     az containerapp logs show --name "$CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \

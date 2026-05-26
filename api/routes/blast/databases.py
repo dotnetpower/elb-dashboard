@@ -784,13 +784,15 @@ def blast_database_preview(
     except ValueError as exc:
         raise HTTPException(400, str(exc)[:200]) from exc
     except NcbiAccessDenied as exc:
-        LOGGER.warning("preview %s: NCBI denied: %s", db_name, type(exc).__name__)
+        LOGGER.warning("preview %s: NCBI denied: %s: %s", db_name, type(exc).__name__, exc)
         raise HTTPException(
             502,
             "NCBI bucket refused the request (likely rate-limited); retry shortly.",
         ) from exc
     except NcbiUnavailable as exc:
-        LOGGER.warning("preview %s: NCBI unavailable: %s", db_name, type(exc).__name__)
+        LOGGER.warning(
+            "preview %s: NCBI unavailable: %s: %s", db_name, type(exc).__name__, exc
+        )
         raise HTTPException(
             502,
             f"Could not contact NCBI: {type(exc).__name__}",

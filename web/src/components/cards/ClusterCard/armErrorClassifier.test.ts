@@ -56,6 +56,35 @@ describe("classifyArmError", () => {
     expect(portal?.href).toContain("rg-elb-cluster");
   });
 
+  it("emits a concrete az role assignment command when the raw error carries oid + scope", () => {
+    // Verbatim shape Azure returns on the fresh-subscription create-cluster
+    // path: `with object id '<oid>'` + `over scope '/subscriptions/<sub>/
+    // resourcegroups/<rg>'`. The classifier must surface a `command`
+    // action that the SPA renders as a clipboard-copy button instead of
+    // forwarding to a generic docs link.
+    const raw =
+      "Provisioning task failed: HttpResponseError(\"(AuthorizationFailed) " +
+      "The client '9b96face-65e5-406c-bb27-15e506fea865' with object id " +
+      "'17c635ef-a30f-4942-9da7-60c8219b4d69' does not have authorization to " +
+      "perform action 'Microsoft.Resources/subscriptions/resourcegroups/write' " +
+      "over scope '/subscriptions/00000000-0000-0000-0000-000000000000/" +
+      "resourcegroups/rg-elb-cluster' or the scope is invalid.\")";
+    const res = classifyArmError(raw);
+    expect(res.category).toBe("rg_permission");
+    // RG parsed from scope wins over the (absent) context.resourceGroup.
+    expect(res.summary).toContain("rg-elb-cluster");
+    const command = res.actions.find((a) => a.kind === "command");
+    expect(command).toBeDefined();
+    expect(command?.label).toMatch(/copy/i);
+    expect(command?.href).toContain("17c635ef-a30f-4942-9da7-60c8219b4d69");
+    expect(command?.href).toContain("00000000-0000-0000-0000-000000000000");
+    expect(command?.href).toContain("rg-elb-cluster");
+    expect(command?.href).toContain("--role Contributor");
+    // ServicePrincipal type is non-negotiable: the MI auth call refuses
+    // role assignments missing this field on newly-created principals.
+    expect(command?.href).toContain("ServicePrincipal");
+  });
+
   it("falls through to unknown but strips the Provisioning task failed wrapper", () => {
     const raw =
       "Provisioning task failed: (Conflict) The cluster name is already " +
