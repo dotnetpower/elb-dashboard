@@ -86,6 +86,18 @@ def test_local_to_blast_job_exposes_error_for_frontend():
     assert out["error"] == "boom"
 
 
+def test_local_to_blast_job_does_not_expose_submit_slot_wait_as_error():
+    out = _local_to_blast_job(
+        _state(
+            status="running",
+            phase="waiting_for_submit_slot",
+            error_code="blast_submit_lock_busy",
+        )
+    )
+    assert out["error_code"] == "blast_submit_lock_busy"
+    assert out["error"] == ""
+
+
 def test_local_to_blast_job_exposes_progress_steps():
     out = _local_to_blast_job(
         _state(

@@ -142,4 +142,26 @@ describe("BLAST step state", () => {
       }),
     ).toBe("active");
   });
+
+  it("keeps the Submit step active while waiting for a submit slot", () => {
+    const stepsData = {
+      preparing: { status: "completed", success: true },
+      warming_up: { status: "completed", success: true },
+      configuring: { status: "completed", success: true },
+      staging_db: { status: "skipped", skipped: true },
+    };
+
+    expect(resolveActiveStepIndex("waiting_for_submit_slot", stepsData)).toBe(
+      SUBMITTING_INDEX,
+    );
+    expect(
+      getTimelineStepState({
+        phase: "waiting_for_submit_slot",
+        idx: SUBMITTING_INDEX,
+        key: "submitting",
+        stepsData,
+        failedStepIdx: -1,
+      }),
+    ).toBe("active");
+  });
 });

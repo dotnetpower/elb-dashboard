@@ -7,9 +7,8 @@ social:
     description: Two managed identities, zero secrets — the full lifecycle, RBAC matrix, and recovery playbook.
 tags:
   - architecture
-  - identity
+  - auth
   - security
-  - rbac
 ---
 
 # Identity Architecture

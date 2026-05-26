@@ -205,6 +205,7 @@ _K8S_REFRESH_MIN_INTERVAL_SECONDS = 20.0
 _K8S_REFRESH_FAST_INTERVAL_SECONDS = 5.0
 _K8S_REFRESH_FAST_PHASES = frozenset({"running", "results_pending"})
 _K8S_REFRESH_LAST_CHECK: dict[tuple[str, str, str, str], float] = {}
+_NON_ERROR_RUNNING_ERROR_CODES = frozenset({"blast_submit_lock_busy"})
 
 
 def _refresh_min_interval_seconds(phase: str) -> float:
@@ -317,6 +318,16 @@ def _split_child_summaries_from_repo(
     return summaries
 
 
+def _job_error_for_response(state: Any) -> str:
+    error_code = str(getattr(state, "error_code", "") or "")
+    if not error_code:
+        return ""
+    status = str(getattr(state, "status", "") or "").strip().casefold()
+    if status == "running" and error_code in _NON_ERROR_RUNNING_ERROR_CODES:
+        return ""
+    return error_code
+
+
 def _local_to_blast_job(
     state: Any,
     split_children: dict[str, Any] | None = None,
@@ -354,7 +365,7 @@ def _local_to_blast_job(
         "created_at": state.created_at,
         "updated_at": state.updated_at,
         "error_code": state.error_code,
-        "error": state.error_code,
+        "error": _job_error_for_response(state),
         "payload": payload,
         "config_snapshot": payload.get("config_snapshot") if isinstance(payload, dict) else None,
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},

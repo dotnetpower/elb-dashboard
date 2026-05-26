@@ -45,6 +45,7 @@ class _Template:
 @dataclass
 class _Properties:
     template: _Template
+    configuration: Any | None = None
     latest_revision_name: str = "ca-elb-dashboard--rev1"
 
 
@@ -220,3 +221,63 @@ def test_apply_app_insights_connection_string_updates_server_sidecars_only() -> 
         elif container.name == "redis":
             assert ai_entries == []
     assert app.properties.template.revision_suffix == "telemetry-test"
+
+
+def test_apply_app_insights_omits_masked_secrets_from_update_payload() -> None:
+    """ARM GET returns Container App secrets with names but no values.
+
+    Sending those masked snapshots back through begin_update makes the RP reject
+    existing secrets such as `exec-token` with ContainerAppSecretInvalid. The
+    telemetry update mutates only template env vars, so the update payload must
+    omit `configuration.secrets` and let the service preserve them server-side.
+    """
+
+    app = _make_app("v0.3.0")
+    app.properties.configuration = type(
+        "Cfg",
+        (),
+        {"secrets": [type("Secret", (), {"name": "exec-token"})()]},
+    )()
+    client = _FakeClient(app)
+
+    aca_template.apply_app_insights_connection_string(
+        connection_string="InstrumentationKey=abc;IngestionEndpoint=https://example.local/",
+        revision_suffix="telemetry-test",
+        client=client,
+    )
+
+    payload = client.update_calls[0]
+    assert payload.properties.configuration.secrets is None
+
+
+def test_image_template_updates_also_omit_masked_secrets() -> None:
+    """All Container App begin_update paths must omit masked secrets.
+
+    The same ARM masked-secret snapshot appears regardless of whether the
+    caller is applying App Insights, rolling images forward, or rolling them
+    back. Pin both image update paths so a future refactor does not re-open the
+    exec-token invalid-secret failure for non-telemetry updates.
+    """
+
+    app = _make_app("v0.2.1")
+    app.properties.configuration = type(
+        "Cfg",
+        (),
+        {"secrets": [type("Secret", (), {"name": "exec-token"})()]},
+    )()
+    client = _FakeClient(app)
+
+    aca_template.swap_images(target_version="0.3.0", client=client)
+    assert client.update_calls[-1].properties.configuration.secrets is None
+
+    # Restore a masked snapshot as if another fresh ARM GET returned it.
+    app.properties.configuration.secrets = [type("Secret", (), {"name": "exec-token"})()]
+    aca_template.apply_images(
+        images=aca_template.SidecarImages(
+            api="myacr.azurecr.io/elb-api:v0.2.1",
+            frontend="myacr.azurecr.io/elb-frontend:v0.2.1",
+            terminal="myacr.azurecr.io/elb-terminal:v0.2.1",
+        ),
+        client=client,
+    )
+    assert client.update_calls[-1].properties.configuration.secrets is None

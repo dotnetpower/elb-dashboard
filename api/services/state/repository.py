@@ -41,6 +41,25 @@ from api.services.state.table_pool import (
 
 LOGGER = logging.getLogger(__name__)
 
+# Azure Table Storage hard-caps `$top` (page size) at 1000 entities per
+# response. Asking for more returns HTTP 400
+# ``InvalidInput / "One of the request inputs is not valid"`` with no
+# results, which silently breaks any caller that passes a larger logical
+# ``limit`` straight through to ``results_per_page`` (the cancel task hit
+# this with ``limit=10_000`` and stalled the cluster card on "Running"
+# because it never got past ``list_children``).
+#
+# The SDK's iterator handles multi-page walks transparently, so callers
+# can still ask for a logical limit > 1000 — we just have to clamp the
+# per-request page size and let pagination do its job.
+_AZURE_TABLES_MAX_PAGE_SIZE = 1000
+
+
+def _clamp_page_size(limit: int) -> int:
+    if limit <= 0:
+        return 1
+    return min(limit, _AZURE_TABLES_MAX_PAGE_SIZE)
+
 
 class JobStateRepository:
     """Read/write jobstate + jobhistory tables on the platform Storage account."""
@@ -327,7 +346,8 @@ class JobStateRepository:
             rows = []
             try:
                 entities = t.query_entities(
-                    f"parent_job_id eq '{safe_parent}'", results_per_page=limit
+                    f"parent_job_id eq '{safe_parent}'",
+                    results_per_page=_clamp_page_size(limit),
                 )
                 for e in entities:
                     rows.append(JobState.from_entity(dict(e)))
@@ -359,7 +379,9 @@ class JobStateRepository:
         rows: list[JobState] = []
         with self._state_client() as t:
             try:
-                entities = t.query_entities(filter_expr, results_per_page=limit)
+                entities = t.query_entities(
+                    filter_expr, results_per_page=_clamp_page_size(limit)
+                )
                 for e in entities:
                     rows.append(JobState.from_entity(dict(e)))
                     if len(rows) >= limit:
@@ -380,7 +402,9 @@ class JobStateRepository:
         rows: list[JobState] = []
         with self._state_client() as t:
             try:
-                entities = t.query_entities(filter_expr, results_per_page=limit)
+                entities = t.query_entities(
+                    filter_expr, results_per_page=_clamp_page_size(limit)
+                )
                 for e in entities:
                     rows.append(JobState.from_entity(dict(e)))
                     if len(rows) >= limit:
@@ -413,7 +437,7 @@ class JobStateRepository:
             try:
                 entities = t.query_entities(
                     f"owner_oid eq '{safe_oid}' and parent_job_id ne ''",
-                    results_per_page=limit,
+                    results_per_page=_clamp_page_size(limit),
                 )
                 seen = 0
                 for e in entities:
@@ -459,7 +483,10 @@ class JobStateRepository:
         with self._history_client() as t:
             rows = []
             try:
-                entities = t.query_entities(f"PartitionKey eq '{safe_id}'", results_per_page=limit)
+                entities = t.query_entities(
+                    f"PartitionKey eq '{safe_id}'",
+                    results_per_page=_clamp_page_size(limit),
+                )
                 for e in entities:
                     rows.append(dict(e))
                     if len(rows) >= limit:
@@ -494,8 +521,11 @@ class JobStateRepository:
             f"PartitionKey eq '{_sanitise_odata_value(job_id)}'" for job_id in unique_ids
         )
         # Generous per-page so the SDK doesn't paginate mid-flight for a
-        # 20-job batch with up to ``per_job_limit`` rows each.
-        page_size = max(per_job_limit, per_job_limit * len(unique_ids))
+        # 20-job batch with up to ``per_job_limit`` rows each. Clamp to
+        # Azure Tables' hard max of 1000 entities per response.
+        page_size = _clamp_page_size(
+            max(per_job_limit, per_job_limit * len(unique_ids))
+        )
         grouped: dict[str, list[dict[str, Any]]] = {job_id: [] for job_id in unique_ids}
         with self._history_client() as t:
             try:

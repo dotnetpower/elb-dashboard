@@ -10,6 +10,8 @@ import { BlastJobDetailsGrid } from "./BlastJobDetailsGrid";
 import { BlastJobMetrics } from "./BlastJobMetrics";
 import type { BlastResultsState } from "./useBlastResultsState";
 
+import { shouldShowNonTerminalJobError } from "@/pages/blastResultsModel";
+
 export interface JobDetailsCardProps {
   jobId: string;
   state: BlastResultsState;
@@ -48,6 +50,7 @@ export function JobDetailsCard({ jobId, state }: JobDetailsCardProps) {
     hasExportTargets,
     files,
   } = state;
+  const showJobError = shouldShowNonTerminalJobError(job, phase);
 
   return (
     <section className="glass-card glass-card--strong">
@@ -145,7 +148,7 @@ export function JobDetailsCard({ jobId, state }: JobDetailsCardProps) {
         />
       )}
 
-      {job?.error && phase !== "failed" && phase !== "error" && (
+      {showJobError && job?.error && (
         <div
           style={{
             marginTop: "var(--space-4)",

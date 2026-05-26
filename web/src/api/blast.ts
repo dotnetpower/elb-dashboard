@@ -177,6 +177,7 @@ export interface BlastJobSummary {
   /** Display-only label for the query (filename or first sequence id). */
   query_label?: string;
   owner_upn?: string;
+  error_code?: string;
   error?: string;
 }
 

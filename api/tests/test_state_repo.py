@@ -413,3 +413,50 @@ def test_list_completed_filters_to_completed_state(monkeypatch) -> None:
     repo.list_completed(job_type="blast")
 
     assert captured == ["type eq 'blast' and status eq 'completed'"]
+
+
+def test_list_methods_clamp_page_size_to_azure_tables_max(monkeypatch) -> None:
+    """Regression: Azure Tables rejects ``results_per_page > 1000`` with
+    ``InvalidInput``. The cancel task previously passed ``limit=10_000``
+    straight through to ``list_children`` which made the whole cancel
+    pipeline fail (HTTP 400 InvalidInput → ``cancel_unavailable`` → the
+    cluster card kept showing "Running" because the K8s Jobs were never
+    deleted). Pin the clamp so the bug cannot regress for any list_* path
+    that takes a caller-supplied ``limit``.
+    """
+    captured: list[tuple[str, int]] = []
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, *, results_per_page: int, **_kw):
+            captured.append((query_filter, results_per_page))
+            return []
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+
+    # The exact value the cancel task asks for.
+    repo.list_children("parent-1", limit=10_000)
+    # Other list_* paths whose limit is caller-controlled.
+    repo.list_active(job_type="blast", limit=10_000)
+    repo.list_completed(job_type="blast", limit=10_000)
+    repo.list_children_for_owner("owner-1", ["parent-1"], limit=10_000)
+    repo.get_history("job-1", limit=10_000)
+
+    # All page sizes must stay <= 1000 (Azure Tables hard max).
+    page_sizes = [page for _filter, page in captured]
+    assert page_sizes, "no query_entities calls captured"
+    assert all(p <= 1000 for p in page_sizes), (
+        f"page sizes exceed Azure Tables max: {page_sizes!r}"
+    )

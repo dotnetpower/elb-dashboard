@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
@@ -230,9 +230,6 @@ export function SettingsPanel({ open, onClose }: Props) {
               >
                 Reset
               </button>
-              <button className="glass-button glass-button--primary" onClick={onClose} style={{ fontSize: 12 }}>
-                Done
-              </button>
             </div>
           )}
         </footer>
@@ -324,6 +321,7 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
   const [error, setError] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [form, setForm] = useState<ProvisionFormState>(() => defaultProvisionForm(config));
+  const lastAutoAppliedConnectionString = useRef("");
 
   useEffect(() => {
     setForm((prev) => ({
@@ -357,10 +355,17 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
   });
 
   usePollTask(applyTask, setApplyTask, (status) => {
+    if (status.status === "FAILURE") {
+      lastAutoAppliedConnectionString.current = "";
+      return;
+    }
     if (status.status !== "SUCCESS") return;
     const result = status.result as { deployment_apply?: { status?: string; reason?: string; revision?: string | null } } | null;
     const applyStatus = result?.deployment_apply?.status;
     const revision = result?.deployment_apply?.revision;
+    if (applyStatus !== "applied") {
+      lastAutoAppliedConnectionString.current = "";
+    }
     setApplyTask((prev) => prev && {
       ...prev,
       message: applyStatus === "applied"
@@ -369,19 +374,21 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
     });
   });
 
-  const applyToDeployment = useCallback(async (connectionString?: string) => {
+  const applyToDeployment = useCallback(async (connectionString?: string): Promise<boolean> => {
     const value = (connectionString ?? prefs.appInsightsConnectionString).trim();
     if (!value) {
       setApplyError("Enter an Application Insights connection string first.");
-      return;
+      return false;
     }
     setApplyError(null);
     setApplyTask(null);
     try {
       const response = await settingsApi.applyAppInsightsToDeployment({ connection_string: value });
       setApplyTask({ taskId: response.task_id, status: "PENDING", message: "Applying server telemetry" });
+      return true;
     } catch (err) {
       setApplyError(formatApiError(err, "arm"));
+      return false;
     }
   }, [prefs.appInsightsConnectionString]);
 
@@ -392,6 +399,26 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
       void applyToDeployment(userConnectionString);
     }
   }, [applyToDeployment, prefs.appInsightsConnectionString, setPref]);
+
+  useEffect(() => {
+    const value = prefs.appInsightsConnectionString.trim();
+    if (!value) return;
+    // Avoid sending partial manual input. A modern App Insights connection
+    // string includes both fields; provisioning still sets the same shape.
+    if (!value.includes("InstrumentationKey=") || !value.includes("IngestionEndpoint=")) {
+      return;
+    }
+    if (value === lastAutoAppliedConnectionString.current) return;
+    if (isRunningTask(applyTask)) return;
+    const timer = window.setTimeout(() => {
+      void applyToDeployment(value).then((queued) => {
+        if (queued) {
+          lastAutoAppliedConnectionString.current = value;
+        }
+      });
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [applyTask, applyToDeployment, prefs.appInsightsConnectionString]);
 
   const sendTest = useCallback(() => {
     if (!ai.active) {
@@ -422,7 +449,7 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
       <Group>
         <Row
           label="Send application telemetry to App Insights"
-          hint="Browser telemetry starts immediately. When a user connection string is present, enabling also applies it to api, worker, and beat."
+          hint="Browser telemetry starts immediately. Connection string edits are applied to api, worker, and beat automatically."
           control={<Toggle checked={prefs.telemetryEnabled} onChange={handleTelemetryToggle} label="Application telemetry" />}
         />
         <Row
@@ -433,7 +460,7 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
       </Group>
 
       <Group title="Connection string override">
-        <Field label="Application Insights connection string" hint="Leave blank to use the deployment-provided connection string.">
+        <Field label="Application Insights connection string" hint="Leave blank to use the deployment-provided connection string. A complete value is applied to server sidecars automatically.">
           <div style={{ display: "flex", gap: 6 }}>
             <input
               type={showSecret ? "text" : "password"}
@@ -451,9 +478,6 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
         </Field>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", paddingBottom: 14 }}>
           <button className="glass-button" onClick={sendTest} style={{ fontSize: 12 }}>Send test event</button>
-          <button className="glass-button" onClick={() => void applyToDeployment()} disabled={!prefs.appInsightsConnectionString.trim() || isRunningTask(applyTask)} style={{ fontSize: 12 }}>
-            {isRunningTask(applyTask) ? <Loader2 size={13} /> : <Activity size={13} />} Apply to server
-          </button>
           {testMessage && <StatusLine kind={testMessage.kind}>{testMessage.text}</StatusLine>}
           {applyError && <StatusLine kind="error">{applyError}</StatusLine>}
           {applyTask && <TaskStatusLine task={applyTask} />}

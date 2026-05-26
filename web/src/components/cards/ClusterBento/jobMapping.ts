@@ -50,11 +50,28 @@ const FAILED = new Set([
   "split_submit_invalid",
   "cancelled",
   "Cancelled",
+  // Terminal cancel-pipeline phases: even though the Celery cancel task
+  // briefly sets ``status="running"`` while it retries the K8s delete,
+  // these final phases are unambiguously terminal — surface them as
+  // Failed so the cluster card flips off "Running" the moment the cancel
+  // task gives up instead of waiting for the next reconciler pass.
+  "cancel_unavailable",
+  "cancel_blocked",
+  "cancel_retryable_failure",
 ]);
+
+// Cancel-in-flight phases. The backend leaves ``status="running"`` while
+// the Celery cancel task retries (so the reconciler doesn't double-cancel),
+// but the user already clicked Cancel and expects the row to stop saying
+// "Running". Treating these as Pending shows a calmer in-progress badge
+// until the cancel either succeeds (=> Failed via FAILED set above) or
+// gives up (=> Failed via cancel_unavailable above).
+const CANCELLING = new Set(["cancelling", "Cancelling"]);
 
 function classifyValue(value: string | undefined): DisplayJobState | null {
   if (!value) return null;
   if (FAILED.has(value)) return "Failed";
+  if (CANCELLING.has(value)) return "Pending";
   if (COMPLETED.has(value)) return "Completed";
   if (ACTIVE_REDUCING.has(value)) return "Reducing";
   if (ACTIVE_RUNNING.has(value)) return "Running";
@@ -75,6 +92,12 @@ export function classifyJobState(input: {
   const statusState = classifyValue(input.status);
   if (phaseState === "Failed" || statusState === "Failed") return "Failed";
   if (phaseState === "Completed" || statusState === "Completed") return "Completed";
+  // Cancel-in-flight: the Celery cancel task intentionally keeps
+  // ``status="running"`` while retrying so the reconciler does not race
+  // it, but ``phase="cancelling"`` is the source of truth from the user's
+  // perspective. Honour phase here so the row stops claiming "Running"
+  // the instant the user clicks Cancel.
+  if (phaseState === "Pending" && CANCELLING.has(input.phase || "")) return "Pending";
   if (statusState) return statusState;
   if (phaseState) return phaseState;
   if (input.error && input.error.trim().length > 0) return "Failed";

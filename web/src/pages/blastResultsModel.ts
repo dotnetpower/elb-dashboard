@@ -11,6 +11,7 @@ const DEBUG_FILES = new Set(["blast-status.txt", "jobs.txt", "pods.txt"]);
 const RESULT_SUFFIXES = [".out", ".out.gz", ".xml", ".xml.gz", ".asn", ".asn.gz"];
 const REPORT_SUFFIXES = [".json", ".jsonl"];
 const REPORT_NAME_RE = /(manifest|report|summary|metrics|stats|metadata)/i;
+const NON_ERROR_RUNNING_JOB_CODES = new Set(["blast_submit_lock_busy"]);
 
 export type BlastResultFileKind = "result" | "support" | "diagnostic";
 
@@ -172,6 +173,18 @@ export function resolveBlastResultState({
     failedStepKey,
     failedStepLabel,
   };
+}
+
+export function shouldShowNonTerminalJobError(
+  job: BlastJobSummary | undefined,
+  phase: string,
+): boolean {
+  if (!job?.error || phase === "failed" || phase === "error") return false;
+  const code = job.error_code || job.error;
+  if (job.status === "running" && NON_ERROR_RUNNING_JOB_CODES.has(code)) {
+    return false;
+  }
+  return true;
 }
 
 function hasSubmitFatalErrors(submitOutput: string): boolean {

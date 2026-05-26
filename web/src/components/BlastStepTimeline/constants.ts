@@ -65,6 +65,7 @@ export const PHASE_TO_STEP: Record<string, string> = {
   waiting_for_warmup: "warming_up",
   submit_failed: "submitting",
   staging_db: "staging_db",
+  waiting_for_submit_slot: "submitting",
   // `submitted` is a transit phase: the submit task finished, K8s accepted
   // the job, but the first `poll_running_status` tick has not yet observed
   // pods=Running. Without this mapping, getTimelineStepState falls back to
@@ -100,6 +101,8 @@ export const PHASE_MESSAGES: Record<string, string> = {
   waiting_for_warmup: "Waiting for node-local DB warmup...",
   staging_db: "Reusing or staging DB shards on node-local SSD...",
   submitting: "Submitting job to AKS cluster...",
+  waiting_for_submit_slot:
+    "Queued behind another BLAST submit. Waiting for the submit slot...",
   submitted: "Job accepted by AKS. Waiting for pods to start running...",
   reading_split_query: "Reading the original query from Storage...",
   splitting_queries: "Splitting queries by effective search space...",

@@ -136,6 +136,7 @@ def swap_images(
     previous = _extract_images(app)
     target = _compute_target_images(target_version)
     _apply_images_to_template(app, target)
+    _omit_masked_secrets_from_update(app)
     if revision_suffix:
         _set_revision_suffix(app, revision_suffix)
     try:
@@ -157,6 +158,7 @@ def apply_images(
     cli = client or _client()
     app = read_app_template(client=cli)
     _apply_explicit_images_to_template(app, images)
+    _omit_masked_secrets_from_update(app)
     if revision_suffix:
         _set_revision_suffix(app, revision_suffix)
     try:
@@ -188,6 +190,7 @@ def apply_app_insights_connection_string(
     )
     if changed != len(_SERVER_TELEMETRY_CONTAINERS):
         raise TemplateError("container app template is missing api/worker/beat containers")
+    _omit_masked_secrets_from_update(app)
     _set_revision_suffix(app, revision_suffix or _telemetry_revision_suffix())
     try:
         return cli.container_apps.begin_update(rg, name, app)
@@ -210,6 +213,29 @@ def _template_containers(app: Any) -> list[Any]:
     if not containers:
         raise TemplateError("container app template has no containers")
     return list(containers)
+
+
+def _omit_masked_secrets_from_update(app: Any) -> None:
+    """Drop masked secret snapshots from Container App update payloads.
+
+    ARM GET returns ``properties.configuration.secrets`` entries with the
+    secret ``name`` but without the secret ``value`` (or Key Vault URL +
+    identity). Sending that object back during ``begin_update`` makes the
+    Container Apps RP validate each secret as if it were a new secret and fail
+    with ``ContainerAppSecretInvalid`` (commonly for ``exec-token``). Template
+    updates do not need to modify secrets, so omit the list entirely and let RP
+    preserve the existing secrets server-side.
+    """
+
+    properties = getattr(app, "properties", app)
+    configuration = getattr(properties, "configuration", None)
+    if configuration is None:
+        return
+    if isinstance(configuration, dict):
+        configuration.pop("secrets", None)
+        return
+    if hasattr(configuration, "secrets"):
+        configuration.secrets = None
 
 
 def _extract_images(app: Any) -> SidecarImages:

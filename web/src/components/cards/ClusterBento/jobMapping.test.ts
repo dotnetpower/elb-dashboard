@@ -27,6 +27,29 @@ describe("classifyJobState", () => {
   it("classifies submit_failed as failed even without an error string", () => {
     expect(classifyJobState({ phase: "submit_failed", status: "failed" })).toBe("Failed");
   });
+
+  it("treats cancel-in-flight as Pending so the card stops claiming Running", () => {
+    // Backend keeps status="running" while the cancel task retries so the
+    // reconciler doesn't race it. phase="cancelling" must still win in
+    // the UI — see api/tasks/blast/cancel_task.py.
+    expect(classifyJobState({ phase: "cancelling", status: "running" })).toBe("Pending");
+  });
+
+  it("treats terminal cancel failure phases as Failed", () => {
+    // The cancel task gives up after retries with phase="cancel_unavailable"
+    // / status="failed" (or status="running" if the final _update_state
+    // raced the row write). Either combination must surface as Failed
+    // so the cluster card flips off "Running" immediately.
+    expect(classifyJobState({ phase: "cancel_unavailable", status: "failed" })).toBe(
+      "Failed",
+    );
+    expect(classifyJobState({ phase: "cancel_unavailable", status: "running" })).toBe(
+      "Failed",
+    );
+    expect(classifyJobState({ phase: "cancel_blocked", status: "failed" })).toBe(
+      "Failed",
+    );
+  });
 });
 
 describe("toJobRowView", () => {
