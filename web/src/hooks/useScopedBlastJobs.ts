@@ -33,15 +33,32 @@ export function useScopedBlastJobs(options: ScopedBlastJobsOptions = {}) {
     discoveredClusters[0];
   const selectedClusterName =
     options.clusterName || discoveredCluster?.name || "";
+  // The cluster's own RG (typically `rg-elb-cluster`) is what gets stored on
+  // the job state row, NOT the dashboard's workspace RG (where Storage / ACR
+  // live). Use the discovered cluster's RG for the jobs query so the backend
+  // scope filter matches even when the user's workspace RG differs.
+  const clusterResourceGroup =
+    discoveredCluster?.resource_group || resourceGroup;
   const clusterScopeReady =
     !hasWorkspaceContext || Boolean(options.clusterName) || clustersQuery.isFetched;
 
   const jobsQuery = useQuery({
-    queryKey: ["blast-jobs", subscriptionId, resourceGroup, selectedClusterName],
+    queryKey: [
+      "blast-jobs",
+      subscriptionId,
+      clusterResourceGroup,
+      selectedClusterName,
+    ],
     queryFn: () =>
       blastApi.listJobs({
         subscriptionId,
-        resourceGroup,
+        // Omit resource_group entirely when we have a cluster_name — the
+        // backend treats cluster_name as the strongest scope key, and
+        // passing the wrong RG would hide jobs whose row carries the
+        // cluster RG. When no cluster is discovered yet we fall back to
+        // the cluster's RG (if known) so a pre-discovery refetch can
+        // still see in-flight rows.
+        resourceGroup: selectedClusterName ? undefined : clusterResourceGroup,
         clusterName: selectedClusterName,
       }),
     enabled: enabled && clusterScopeReady,
@@ -52,7 +69,7 @@ export function useScopedBlastJobs(options: ScopedBlastJobsOptions = {}) {
     jobsQuery,
     clustersQuery,
     subscriptionId,
-    resourceGroup,
+    resourceGroup: clusterResourceGroup,
     clusterName: selectedClusterName,
   } as const;
 }

@@ -678,7 +678,17 @@ async def aks_openapi_proxy(
     # would force a full BLAST result file into the api sidecar's RAM
     # before the browser sees the first byte; large XML / gzip responses
     # multiplied through the api sidecar's memory under concurrent loads.
-    client = httpx.AsyncClient(timeout=30.0, follow_redirects=False)
+    #
+    # Per-phase timeouts: a 5 s connect cap turns the "VNet peering not
+    # yet set up" case into a fast `openapi_upstream_unreachable` 502
+    # (with the SPA recovery affordance) instead of a 30 s "Sending…"
+    # spinner — the same gap that the new `/api/aks/peer-with-platform`
+    # endpoint exists to close. Read/write/pool stay at 30 s so a large
+    # BLAST result that takes a while to stream is not interrupted.
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
+        follow_redirects=False,
+    )
     try:
         upstream_req = client.build_request(
             request.method,

@@ -363,15 +363,25 @@ class JobStateRepository:
         The unscoped ``/api/blast/jobs`` path must keep using
         :meth:`list_for_owner` so personal dashboard-submitted jobs remain
         private by default.
+
+        Scope semantics: ``cluster_name`` is the strongest key — an AKS
+        cluster is the actual runtime that owns the job. When the caller
+        provides ``cluster_name``, ``resource_group`` is intentionally NOT
+        used as a hard filter. The dashboard's "workspace RG" (where
+        Storage / ACR live) is a different concept from the cluster's RG
+        (commonly ``rg-elb-cluster`` when the deploy helper's cluster-RG
+        bootstrap pre-created it), so requiring both to match would hide
+        jobs whose row was saved with the cluster RG. When ``cluster_name``
+        is empty, ``resource_group`` falls back to a hard filter.
         """
 
         clauses = ["status ne 'deleted'"]
         if subscription_id:
             clauses.append(f"subscription_id eq '{_sanitise_odata_value(subscription_id)}'")
-        if resource_group:
-            clauses.append(f"resource_group eq '{_sanitise_odata_value(resource_group)}'")
         if cluster_name:
             clauses.append(f"cluster_name eq '{_sanitise_odata_value(cluster_name)}'")
+        elif resource_group:
+            clauses.append(f"resource_group eq '{_sanitise_odata_value(resource_group)}'")
         if len(clauses) == 1:
             # Refuse an owner-agnostic global scan by accident.
             return []

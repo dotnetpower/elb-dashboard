@@ -45,6 +45,9 @@ from api.tasks.azure.helpers import (
     update_state as _update_state,
 )
 from api.tasks.azure.lifecycle import delete_aks, start_aks, stop_aks
+from api.tasks.azure.peering import (
+    ensure_vnet_peering_with_cluster as _ensure_vnet_peering_with_cluster,
+)
 from api.tasks.azure.provision import provision_aks, reconcile_stale_aks_provisions
 from api.tasks.azure.rbac import (
     assign_aks_roles,
@@ -67,6 +70,7 @@ __all__ = (
     "_build_cluster_params",
     "_ensure_aks_runtime_rbac",
     "_ensure_dashboard_mi_cluster_rg_roles",
+    "_ensure_vnet_peering_with_cluster",
     "_grant_storage_blob_contributor_to_aks",
     "_now_iso",
     "_update_state",

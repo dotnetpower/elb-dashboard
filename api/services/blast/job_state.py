@@ -459,22 +459,34 @@ def _local_state_matches_job_scope(
     resource_group: str,
     cluster_name: str,
 ) -> bool:
+    """Re-check a row's scope after the OData query, with cluster precedence.
+
+    Matches the storage-layer semantics in
+    :meth:`JobStateRepository.list_for_scope`: when the caller asks for a
+    specific ``cluster_name`` the row's ``resource_group`` is allowed to
+    differ. The dashboard's workspace RG (where Storage / ACR live) and
+    the cluster's own RG (typically ``rg-elb-cluster``) are different
+    concepts; treating RG as a hard filter would silently drop jobs whose
+    row was saved with the cluster RG. RG only acts as a hard filter when
+    the caller did NOT pass a ``cluster_name``.
+    """
     payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
-    return (
-        _scope_value_matches(
-            getattr(state, "subscription_id", None) or _payload_value(payload, "subscription_id"),
-            subscription_id,
-        )
-        and _scope_value_matches(
-            getattr(state, "resource_group", None) or _payload_value(payload, "resource_group"),
-            resource_group,
-        )
-        and _scope_value_matches(
-            getattr(state, "cluster_name", None)
-            or _payload_value(payload, "aks_cluster_name", "cluster_name"),
-            cluster_name,
-        )
+    sub_ok = _scope_value_matches(
+        getattr(state, "subscription_id", None) or _payload_value(payload, "subscription_id"),
+        subscription_id,
     )
+    cluster_ok = _scope_value_matches(
+        getattr(state, "cluster_name", None)
+        or _payload_value(payload, "aks_cluster_name", "cluster_name"),
+        cluster_name,
+    )
+    if cluster_name:
+        return sub_ok and cluster_ok
+    rg_ok = _scope_value_matches(
+        getattr(state, "resource_group", None) or _payload_value(payload, "resource_group"),
+        resource_group,
+    )
+    return sub_ok and rg_ok and cluster_ok
 
 
 def _refresh_running_blast_state(repo: Any, state: Any) -> Any:

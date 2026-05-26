@@ -34,6 +34,7 @@ import pytest
 # print the canonical set.
 _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.azure.assign_aks_roles",  # .delay
+    "api.tasks.azure.peering.ensure_vnet_peering_with_cluster",
     "api.tasks.azure.start_aks",  # .delay
     "api.tasks.blast.submit",  # .delay
     "api.tasks.storage._autowarmup_inflight_acquire",

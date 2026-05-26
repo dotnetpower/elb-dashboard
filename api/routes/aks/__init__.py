@@ -17,6 +17,7 @@ from fastapi import APIRouter
 from api.routes.aks import cancel as _cancel_routes
 from api.routes.aks import lifecycle as _lifecycle_routes
 from api.routes.aks import openapi as _openapi_routes
+from api.routes.aks import peering as _peering_routes
 from api.routes.aks import preflight as _preflight_routes
 from api.routes.aks import provision as _provision_routes
 from api.routes.aks import recent_failures as _recent_failures_routes
@@ -53,6 +54,7 @@ from api.routes.aks.openapi import (
 from api.routes.aks.openapi import (
     aks_openapi_token_generate as aks_openapi_token_generate,
 )
+from api.routes.aks.peering import aks_peer_with_platform as aks_peer_with_platform
 from api.routes.aks.provision import aks_provision as aks_provision
 from api.routes.aks.roles import aks_assign_roles as aks_assign_roles
 from api.routes.aks.skus import aks_skus as aks_skus
@@ -64,5 +66,6 @@ aks_router.include_router(_provision_routes.router)
 aks_router.include_router(_cancel_routes.router)
 aks_router.include_router(_recent_failures_routes.router)
 aks_router.include_router(_openapi_routes.router)
+aks_router.include_router(_peering_routes.router)
 aks_router.include_router(_lifecycle_routes.router)
 aks_router.include_router(_roles_routes.router)

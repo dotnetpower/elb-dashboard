@@ -71,6 +71,7 @@ _RBAC_SUB_PHASES: dict[str, str] = {
     "ensuring_rbac_acr": "Granting AcrPull to AKS kubelet",
     "ensuring_rbac_storage": "Granting Storage Blob Data Contributor",
     "ensuring_dashboard_mi_rbac": "Self-granting dashboard MI on cluster RG",
+    "ensuring_vnet_peering": "Peering dashboard VNet with AKS VNet",
 }
 
 
@@ -545,6 +546,31 @@ def provision_aks(
             recovery,
         )
 
+    # Peer the dashboard platform VNet with the AKS-auto-created VNet so
+    # the api sidecar can reach the `elb-openapi` Service's internal LB
+    # IP (10.224.0.0/12 by default). Without this, `/api/aks/openapi/{proxy,
+    # spec}` time out at 30s with httpx ConnectError even though the pod
+    # is healthy and endpoints exist. Best-effort like the dashboard-MI
+    # self-grant — failure surfaces via `vnet_peering.error` +
+    # `recovery_command` in the completion payload but does NOT fail the
+    # task. The AKS cluster is fully usable for BLAST submits via the
+    # terminal sidecar regardless.
+    _publish(self, job_id, "ensuring_vnet_peering")
+    peering_summary = _facade._ensure_vnet_peering_with_cluster(
+        cred,
+        subscription_id=subscription_id,
+        cluster_resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    if peering_summary.get("error"):
+        LOGGER.warning(
+            "AKS %s ready, but VNet peering with dashboard incomplete: %s. "
+            "OpenAPI Try-It / spec will be unreachable until an admin runs: %s",
+            cluster_name,
+            peering_summary["error"],
+            peering_summary.get("recovery_command", ""),
+        )
+
     _publish(
         self,
         job_id,
@@ -555,6 +581,7 @@ def provision_aks(
         roles_assigned=rbac_summary["roles_assigned"],
         roles_failed=rbac_summary["roles_failed"],
         dashboard_mi_rbac=mi_summary,
+        vnet_peering=peering_summary,
     )
     return {
         "cluster_name": cluster_name,
@@ -566,6 +593,7 @@ def provision_aks(
         "roles_assigned": rbac_summary["roles_assigned"],
         "roles_failed": rbac_summary["roles_failed"],
         "dashboard_mi_rbac": mi_summary,
+        "vnet_peering": peering_summary,
         "pools": [
             {"name": SYSTEM_POOL_NAME, "mode": "System", "vm_size": sys_sku, "count": sys_count},
             {"name": BLAST_POOL_NAME, "mode": "User", "vm_size": blast_sku, "count": blast_count},

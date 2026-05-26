@@ -169,9 +169,107 @@ def test_list_for_scope_is_owner_agnostic_but_requires_scope(monkeypatch) -> Non
     )
 
     assert [row.job_id for row in scoped] == ["job-other-owner"]
+    # cluster_name is the strongest scope key — when supplied, resource_group
+    # is intentionally omitted from the OData filter so jobs whose row was
+    # saved with the cluster RG (e.g. rg-elb-cluster) still show up when the
+    # caller is filtering from a dashboard whose workspace RG is different
+    # (e.g. rg-elb-dashboard). See the docstring on list_for_scope.
     assert queries == [
         "status ne 'deleted' and subscription_id eq 'sub-1' "
-        "and resource_group eq 'rg-elb-cluster' and cluster_name eq 'elb-cluster-01'"
+        "and cluster_name eq 'elb-cluster-01'"
+    ]
+
+
+def test_list_for_scope_drops_rg_when_cluster_name_set(monkeypatch) -> None:
+    """RG mismatch must not hide a row when caller supplied cluster_name.
+
+    Reproduces the production bug where the Recent searches list silently
+    rendered zero jobs because the SPA passed the dashboard workspace RG
+    (``rg-elb-dashboard``) while the job row was saved with the cluster RG
+    (``rg-elb-cluster``). The OData filter must drop the RG clause when
+    ``cluster_name`` is provided so the row is returned.
+    """
+    queries: list[str] = []
+    rows = [
+        JobState(
+            job_id="22cf0dae-a402-482e-9208-f07fe922957f",
+            type="blast",
+            status="running",
+            owner_oid="owner-1",
+            subscription_id="sub-1",
+            resource_group="rg-elb-cluster",
+            cluster_name="elb-cluster-01",
+            created_at="2026-05-26T17:48:40Z",
+        ).to_entity(),
+    ]
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, **_kwargs: object) -> list[dict[str, object]]:
+            queries.append(query_filter)
+            return rows
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+
+    scoped = repo.list_for_scope(
+        subscription_id="sub-1",
+        resource_group="rg-elb-dashboard",  # workspace RG, NOT the cluster's RG
+        cluster_name="elb-cluster-01",
+        include_payload=False,
+    )
+
+    assert [row.job_id for row in scoped] == ["22cf0dae-a402-482e-9208-f07fe922957f"]
+    assert queries == [
+        "status ne 'deleted' and subscription_id eq 'sub-1' "
+        "and cluster_name eq 'elb-cluster-01'"
+    ]
+
+
+def test_list_for_scope_uses_rg_when_cluster_name_omitted(monkeypatch) -> None:
+    """RG is still a hard filter when no cluster_name is supplied."""
+    queries: list[str] = []
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, **_kwargs: object) -> list[dict[str, object]]:
+            queries.append(query_filter)
+            return []
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+
+    repo.list_for_scope(
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+        include_payload=False,
+    )
+
+    assert queries == [
+        "status ne 'deleted' and subscription_id eq 'sub-1' "
+        "and resource_group eq 'rg-elb-cluster'"
     ]
 
 
