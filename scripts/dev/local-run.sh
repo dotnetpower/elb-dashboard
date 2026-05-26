@@ -3,12 +3,16 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: scripts/dev/local-run.sh <api|worker|beat|web|redis|terminal-exec|smoke|storage-on|storage-off|storage-status|auth-on|auth-off|auth-status|compose-full|compose-local> [-- extra args]
+usage: scripts/dev/local-run.sh <start|stop|restart|status|api|worker|beat|web|redis|terminal-exec|smoke|storage-on|storage-off|storage-status|auth-on|auth-off|auth-status|compose-full|compose-local> [-- extra args]
 
 Starts one local development process through run-with-log.sh so direct terminal
 runs and VS Code tasks both write to .logs/local/latest/.
 
 Examples:
+  scripts/dev/local-run.sh start           # launch host-mode servers in the background and return immediately
+  scripts/dev/local-run.sh stop            # stop host-mode servers, compose stacks, and local Redis
+  scripts/dev/local-run.sh restart         # stop, then launch host-mode servers in the background
+  scripts/dev/local-run.sh status          # inspect local server ports/processes
   scripts/dev/local-run.sh api
   scripts/dev/local-run.sh web
   scripts/dev/local-run.sh worker
@@ -40,6 +44,24 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 project_root=$(cd -- "$script_dir/../.." && pwd)
 run_with_log="$script_dir/run-with-log.sh"
 compose_with_log="$script_dir/compose-with-log.sh"
+
+if [[ "${ELB_LOCAL_RUN_LOGGED:-}" != "1" ]]; then
+  case "$service" in
+    api|worker|beat|web|terminal-exec)
+      export ELB_LOCAL_RUN_LOGGED=1
+      exec "$run_with_log" "$service" -- "$script_dir/local-run.sh" "$service" -- "$@"
+      ;;
+  esac
+fi
+
+exec_local_service() {
+  local service_name=$1
+  shift
+  if [[ "${ELB_LOCAL_RUN_LOGGED:-}" == "1" ]]; then
+    exec "$@"
+  fi
+  exec "$run_with_log" "$service_name" -- "$@"
+}
 
 load_local_azure_env() {
   local env_file="$project_root/.env"
@@ -230,6 +252,160 @@ describe_port_owner() {
   fi
 }
 
+new_local_log_session() {
+  local log_base=${LOCAL_LOG_BASE:-"$project_root/.logs/local"}
+  local session now
+  now=$(date -u +%s)
+  session=${LOCAL_LOG_SESSION:-$(date -u +%Y%m%dT%H%M%SZ)-server}
+  mkdir -p "$log_base/$session"
+  printf '%s %s\n' "$session" "$now" > "$log_base/.current-session"
+  ln -sfn "$session" "$log_base/latest"
+  printf '%s\n' "$session"
+}
+
+service_is_running() {
+  local service_name=$1
+  local api_port=${API_PORT:-8085}
+  local web_port=${WEB_PORT:-8090}
+  local exec_port=${EXEC_PORT:-7682}
+
+  case "$service_name" in
+    redis)
+      docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^elb-dev-redis$'
+      ;;
+    api)
+      api_health_ready "http://127.0.0.1:$api_port"
+      ;;
+    web)
+      http_health_ready "http://127.0.0.1:$web_port/"
+      ;;
+    terminal-exec)
+      http_health_ready "http://127.0.0.1:$exec_port/healthz"
+      ;;
+    worker)
+      pgrep -f 'api/run_celery_workers\.py|python3 -m celery -A api\.celery_app:celery_app worker|celery -A api\.celery_app:celery_app worker' >/dev/null 2>&1
+      ;;
+    beat)
+      pgrep -f 'celery -A api\.celery_app beat' >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+start_detached_service() {
+  local service_name=$1
+  local session=$2
+  local log_base=${LOCAL_LOG_BASE:-"$project_root/.logs/local"}
+  local session_dir="$log_base/$session"
+  local launch_log="$session_dir/start.log"
+  local launcher_pid_file="$session_dir/$service_name.launch.pid"
+  local script_path="$script_dir/local-run.sh"
+
+  if service_is_running "$service_name"; then
+    printf '%-14s already running\n' "$service_name"
+    return 0
+  fi
+
+  printf '%-14s launching in background\n' "$service_name"
+  (
+    cd "$project_root"
+    nohup env \
+      LOCAL_LOG_SESSION="$session" \
+      LOCAL_LOG_CONSOLE=false \
+      "$script_path" "$service_name" \
+      >> "$launch_log" 2>&1 < /dev/null &
+    printf '%s\n' "$!" > "$launcher_pid_file"
+  )
+}
+
+terminate_matching_processes() {
+  local pattern
+  for pattern in "$@"; do
+    pkill -TERM -f "$pattern" 2>/dev/null || true
+  done
+  for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+    local any_running=false
+    for pattern in "$@"; do
+      if pgrep -f "$pattern" >/dev/null 2>&1; then
+        any_running=true
+        break
+      fi
+    done
+    [[ "$any_running" == false ]] && return 0
+    sleep 0.5
+  done
+  for pattern in "$@"; do
+    pkill -KILL -f "$pattern" 2>/dev/null || true
+  done
+}
+
+run_server_start() {
+  local session
+  with_common_env
+  session=$(new_local_log_session)
+  export LOCAL_LOG_SESSION="$session"
+  export LOCAL_LOG_CONSOLE=false
+
+  run_redis
+  for service_name in terminal-exec api worker beat web; do
+    start_detached_service "$service_name" "$session"
+  done
+
+  echo "local servers are launching in the background"
+  echo "logs: .logs/local/$session/"
+  echo "api: http://127.0.0.1:${API_PORT:-8085}/api/health"
+  echo "web: http://127.0.0.1:${WEB_PORT:-8090}/"
+}
+
+run_server_stop() {
+  local api_port=${API_PORT:-8085}
+  local web_port=${WEB_PORT:-8090}
+  local exec_port=${EXEC_PORT:-7682}
+
+  # Stop broker-dependent host processes (worker/beat/api/web/terminal-exec)
+  # BEFORE removing Redis. If Redis goes first, Celery raises
+  # "Connection closed by server" tracebacks during shutdown.
+  terminate_matching_processes \
+    "run-with-log\.sh worker -- .*/local-run\.sh worker" \
+    'api/run_celery_workers\.py' \
+    'python3 -m celery -A api\.celery_app:celery_app worker' \
+    'celery -A api\.celery_app:celery_app worker' \
+    "run-with-log\.sh beat -- .*/local-run\.sh beat" \
+    'celery -A api\.celery_app beat' \
+    "run-with-log\.sh api -- .*/local-run\.sh api" \
+    "run-with-log\.sh api -- uv run uvicorn api\.main:app .* --port $api_port" \
+    "uvicorn api\.main:app .* --port $api_port" \
+    "run-with-log\.sh web -- .*/local-run\.sh web" \
+    "run-with-log\.sh web -- npm run dev" \
+    "vite .*--port $web_port" \
+    "$project_root/web/node_modules/.bin/vite" \
+    "run-with-log\.sh terminal-exec -- .*/local-run\.sh terminal-exec" \
+    "run-with-log\.sh terminal-exec -- python3 terminal/exec_server\.py" \
+    'terminal/exec_server\.py'
+
+  # Now that host workers/api have detached from Redis, tear down the
+  # in-revision broker, compose stacks, and Azurite.
+  "$compose_with_log" full down --remove-orphans >/dev/null 2>&1 || true
+  "$compose_with_log" local down --remove-orphans >/dev/null 2>&1 || true
+  docker rm -f elb-dev-redis azurite-elb >/dev/null 2>&1 || true
+
+  echo "local servers stopped"
+  echo "checked ports: api=$api_port web=$web_port exec=$exec_port redis=6379 compose=18080"
+}
+
+run_server_status() {
+  local service_name
+  for service_name in redis terminal-exec api worker beat web; do
+    if service_is_running "$service_name"; then
+      printf '%-14s running\n' "$service_name"
+    else
+      printf '%-14s stopped\n' "$service_name"
+    fi
+  done
+}
+
 run_api() {
   with_common_env
   with_celery_env
@@ -277,7 +453,7 @@ run_api() {
   fi
 
   cd "$project_root/api"
-  exec "$run_with_log" api -- uv run uvicorn api.main:app --host "$api_host" --port "$api_port" "$@"
+  exec_local_service api uv run uvicorn api.main:app --host "$api_host" --port "$api_port" "$@"
 }
 
 run_redis() {
@@ -315,6 +491,19 @@ exit 1
 }
 
 case "$service" in
+  start)
+    run_server_start "$@"
+    ;;
+  stop)
+    run_server_stop "$@"
+    ;;
+  restart)
+    run_server_stop "$@"
+    run_server_start "$@"
+    ;;
+  status)
+    run_server_status "$@"
+    ;;
   api)
     run_api "$@"
     ;;
@@ -340,7 +529,7 @@ case "$service" in
     done
     pkill -KILL -f 'python3 -m celery -A api\.celery_app:celery_app worker' 2>/dev/null || true
     pkill -KILL -f 'api/run_celery_workers\.py' 2>/dev/null || true
-    exec "$run_with_log" worker -- uv run python api/run_celery_workers.py "$@"
+    exec_local_service worker uv run python api/run_celery_workers.py "$@"
     ;;
   beat)
     with_common_env
@@ -353,7 +542,7 @@ case "$service" in
     pkill -TERM -f 'celery -A api\.celery_app beat' 2>/dev/null || true
     sleep 1
     pkill -KILL -f 'celery -A api\.celery_app beat' 2>/dev/null || true
-    exec "$run_with_log" beat -- uv run celery -A api.celery_app beat -l info --schedule=/tmp/elb-celerybeat-schedule --pidfile=/tmp/elb-celerybeat.pid "$@"
+    exec_local_service beat uv run celery -A api.celery_app beat -l info --schedule=/tmp/elb-celerybeat-schedule --pidfile=/tmp/elb-celerybeat.pid "$@"
     ;;
   web)
     with_common_env
@@ -385,7 +574,7 @@ case "$service" in
       exit 1
     fi
     cd "$project_root/web"
-    exec "$run_with_log" web -- npm run dev "$@"
+    exec_local_service web npm run dev "$@"
     ;;
   redis)
     run_redis "$@"
@@ -439,7 +628,7 @@ case "$service" in
       exit 1
     fi
     cd "$project_root"
-    exec "$run_with_log" terminal-exec -- python3 terminal/exec_server.py "$@"
+    exec_local_service terminal-exec python3 terminal/exec_server.py "$@"
     ;;
   smoke)
     cd "$project_root"

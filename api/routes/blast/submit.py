@@ -297,6 +297,36 @@ def blast_submit(
         except Exception as exc:
             LOGGER.warning("capacity pre-check failed (non-blocking): %s", exc)
 
+    # Fail-closed preflight gates: reject the submit *before* we write a queued
+    # job row that would be stranded waiting on an impossible execution
+    # (terminal sidecar down, AKS stopped, DB not prepared, broker offline,
+    # exec token unset). The SPA can override with ``X-Submit-Allow-Unverified:
+    # true`` when it wants to ignore "unknown" gates (e.g. ARM throttled).
+    from api.services.blast import submit_gates
+
+    allow_unverified = (
+        request.headers.get("x-submit-allow-unverified", "").strip().lower() == "true"
+    )
+    gates_report = submit_gates.evaluate_submit_gates(
+        subscription_id=req.subscription_id or os.environ.get("AZURE_SUBSCRIPTION_ID", ""),
+        resource_group=req.resource_group,
+        cluster_name=req.cluster_name,
+        storage_account=req.storage_account,
+        database=req.database,
+        allow_unverified=allow_unverified,
+    )
+    if gates_report.blocking:
+        summary = "; ".join(g.message for g in gates_report.blocking)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "blocked_by_preflight",
+                "message": summary[:_EXCEPTION_DETAIL_MAX_CHARS],
+                "blocking_gates": [g.to_dict() for g in gates_report.blocking],
+                "gates": [g.to_dict() for g in gates_report.gates],
+            },
+        )
+
     from api.tasks.blast import submit
 
     submit_options = dict(req.options or {})

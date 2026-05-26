@@ -40,6 +40,40 @@ def _env_baseline(
 
 
 @pytest.fixture(autouse=True)
+def _stub_blast_submit_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default-pass for the BLAST submit fail-closed gates.
+
+    The synchronous gate evaluator hits the terminal sidecar / broker / ARM /
+    Storage; almost no existing test stubs those, so without this fixture every
+    ``POST /api/blast/submit`` test that used to succeed would now 409, and the
+    pre-flight route (which surfaces the local sidecar gates inline) would
+    sprout spurious ``fail`` rows. Tests that exercise the gates themselves
+    patch ``evaluate_submit_gates`` and the individual ``_gate_*`` helpers
+    again inside the test body to override the default-pass.
+    """
+    from api.services.blast import submit_gates
+
+    def _allow_all(**_kwargs: object) -> submit_gates.SubmitGatesReport:
+        return submit_gates.SubmitGatesReport(ok=True, gates=[], blocking=[])
+
+    def _ok(gate_id: str) -> submit_gates.GateResult:
+        return submit_gates.GateResult(
+            id=gate_id,
+            status="ok",
+            severity="critical",
+            error_code="",
+            message="default-pass under tests",
+        )
+
+    monkeypatch.setattr(submit_gates, "evaluate_submit_gates", _allow_all)
+    monkeypatch.setattr(submit_gates, "_gate_exec_token", lambda: _ok("exec_token"))
+    monkeypatch.setattr(
+        submit_gates, "_gate_terminal_sidecar", lambda: _ok("terminal_sidecar")
+    )
+    submit_gates.reset_submit_gates_cache()
+
+
+@pytest.fixture(autouse=True)
 def _reset_external_jobs_cache() -> Generator[None, None, None]:
     """Clear the in-memory external-OpenAPI jobs cache between every test.
 

@@ -21,15 +21,25 @@ Environment overrides:
   ELB_RESOURCE_NAME_SLOT       Optional azd-safe slot such as slot01 for numbered deployments
   ELB_ALLOW_AZD_ENV_RETARGET   true to allow overwriting an existing azd env target subscription/tenant
   ELB_SKIP_LOCAL_RBAC          true to skip granting local-debug RBAC to the deployer
-  ELB_AUTO_FIX_RBAC            true to let the MI RBAC doctor auto-grant any missing
-                               role assignment under the current az login identity
-                               (default: false, doctor only reports). Grants are
-                               audit-logged with the operator's identity, which is why
-                               this is opt-in rather than default.
-  ELB_BOOTSTRAP_CLUSTER_RG     true to auto-bootstrap the AKS cluster RG (create the
-                               RG + grant the dashboard MI Contributor + UAA) right
-                               after a fresh azd up. Default: false, deploy.sh asks
-                               interactively when stdin is a TTY and skips when not.
+  ELB_AUTO_FIX_RBAC            true (default) to let the MI RBAC doctor auto-grant
+                               any missing resource-to-resource role assignment
+                               (Sub Reader, Platform RG Contributor+UAA, Storage
+                               Blob/Table Data Contributor, ACR AcrPull/AcrPush/
+                               Contributor, Key Vault Secrets User, optional
+                               cluster RG Contributor+UAA) under the current az
+                               login identity. Set false for security-audited
+                               environments that require an Owner / UAA to apply
+                               the role assignments out of band; the doctor will
+                               then only report the gaps and print the exact
+                               `az role assignment create` commands.
+  ELB_BOOTSTRAP_CLUSTER_RG     true (default) to auto-bootstrap the AKS cluster RG
+                               (create the RG + grant the dashboard MI Contributor
+                               + UAA on that RG only) so the SPA's first "Create
+                               Cluster" click succeeds without granting the MI
+                               Contributor at subscription scope. Set false to
+                               keep the legacy least-privilege posture (the
+                               operator must run grant-runtime-rbac.sh by hand
+                               before the first cluster create).
   ELB_CLUSTER_RG_NAME          Override the default cluster RG name (default:
                                rg-elb-cluster) for the bootstrap above.
   ELB_CLUSTER_RG_REGION        Override the region (default: $AZURE_LOCATION) for the
@@ -307,27 +317,28 @@ if [[ -z "$app_url" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Permission doctor (best-effort, read-only).
+# Permission doctor (auto-fix by default).
 #
 # Bicep is idempotent for the role assignments it owns, but it cannot detect
 # (a) orphaned assignments from a previous MI principalId, (b) MI roles
 # missing on pre-existing workload Storage/ACR that the SPA wizard attaches
 # to, or (c) the cluster-RG bootstrap gap. `check-mi-rbac.sh` enumerates the
-# expected {scope, role} pairs and prints the exact `az role assignment
-# create` snippets for any missing one. It never mutates RBAC \u2014 the operator
-# decides which fixes to apply.
+# expected {scope, role} pairs and grants any missing ones under the current
+# az login identity. Set ELB_AUTO_FIX_RBAC=false to fall back to read-only
+# mode (security-audited environments that require an Owner / UAA to apply
+# the role assignments out of band).
 # ---------------------------------------------------------------------------
 DOCTOR_SCRIPT="$repo_root/scripts/dev/check-mi-rbac.sh"
 DOCTOR_OUTPUT=""
 if [[ -x "$DOCTOR_SCRIPT" ]]; then
   doctor_args=(--subscription "$subscription_id")
-  if is_true "${ELB_AUTO_FIX_RBAC:-false}"; then
-    echo "==> Running MI RBAC doctor (--auto-fix: missing roles will be granted"
-    echo "    under '$user_name'; opt-out with ELB_AUTO_FIX_RBAC=false)"
+  if is_true "${ELB_AUTO_FIX_RBAC:-true}"; then
+    echo "==> Running MI RBAC doctor (--auto-fix: missing resource-to-resource roles"
+    echo "    will be granted under '$user_name'; opt-out with ELB_AUTO_FIX_RBAC=false)"
     doctor_args+=(--auto-fix)
   else
-    echo "==> Running MI RBAC doctor (read-only, may take ~30s)"
-    echo "    Set ELB_AUTO_FIX_RBAC=true to also grant any missing roles in-line."
+    echo "==> Running MI RBAC doctor (read-only, ELB_AUTO_FIX_RBAC=false)"
+    echo "    Set ELB_AUTO_FIX_RBAC=true (default) to also grant any missing roles in-line."
   fi
   # Tee the doctor output to both the console and a variable so we can
   # detect the "no cluster yet" branch and offer the bootstrap below.
@@ -347,14 +358,15 @@ fi
 # on the second `azd provision`, but available immediately after the
 # first `azd up`.
 #
-# Trigger conditions (any one):
-#   1. ELB_BOOTSTRAP_CLUSTER_RG=true                  — explicit env override
-#   2. doctor printed "no AKS cluster found" AND stdin is a TTY
-#                                                     — interactive prompt
-# Skipped when: stdin is not a TTY and the env override is not set
-# (a CI/non-interactive run gets a clear hint in the closing summary
-# instead, since silently mutating Azure on automated runs is the wrong
-# default — same rationale as ELB_AUTO_FIX_RBAC).
+# Trigger conditions:
+#   * ELB_BOOTSTRAP_CLUSTER_RG=true (default) AND doctor printed
+#     "no AKS cluster found" — auto-create + grant. Interactive shells
+#     get a Y/n confirmation with default Y; non-interactive (CI) runs
+#     proceed straight to the bootstrap so a fresh `./deploy.sh` always
+#     produces a workspace where "Create Cluster" can run.
+#   * ELB_BOOTSTRAP_CLUSTER_RG=false — skipped; deploy.sh only prints the
+#     manual command in the closing summary. Use this when policy forbids
+#     `deploy.sh` from creating workload resource groups.
 # ---------------------------------------------------------------------------
 CLUSTER_BOOTSTRAP_RAN=false
 CLUSTER_BOOTSTRAP_HINT=false
@@ -365,12 +377,9 @@ if printf '%s' "$DOCTOR_OUTPUT" | grep -q "no AKS cluster found in subscription"
 
   if [[ ! -x "$RBAC_SCRIPT" ]]; then
     echo "==> Cluster-RG bootstrap skipped — helper script missing: $RBAC_SCRIPT"
-  elif is_true "${ELB_BOOTSTRAP_CLUSTER_RG:-false}"; then
-    echo "==> Cluster-RG bootstrap (ELB_BOOTSTRAP_CLUSTER_RG=true)"
-    echo "    Creating '$BOOTSTRAP_RG' in '$BOOTSTRAP_REGION' and granting MI roles."
-    if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --region "$BOOTSTRAP_REGION" --yes; then
-      CLUSTER_BOOTSTRAP_RAN=true
-    fi
+  elif ! is_true "${ELB_BOOTSTRAP_CLUSTER_RG:-true}"; then
+    echo "==> Cluster-RG bootstrap skipped (ELB_BOOTSTRAP_CLUSTER_RG=false)."
+    CLUSTER_BOOTSTRAP_HINT=true
   elif [[ -t 0 && -t 1 ]]; then
     echo ""
     echo "==> The dashboard MI does not yet have access to a cluster RG."
@@ -402,8 +411,18 @@ if printf '%s' "$DOCTOR_OUTPUT" | grep -q "no AKS cluster found in subscription"
         ;;
     esac
   else
-    # Non-interactive (CI). Print the hint in the closing summary.
-    CLUSTER_BOOTSTRAP_HINT=true
+    # Non-interactive (CI). Default is bootstrap-on so the dashboard's
+    # first "Create Cluster" works without follow-up steps.
+    echo "==> Cluster-RG bootstrap (non-interactive default; opt-out with ELB_BOOTSTRAP_CLUSTER_RG=false)"
+    echo "    Creating '$BOOTSTRAP_RG' in '$BOOTSTRAP_REGION' and granting MI roles."
+    if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --region "$BOOTSTRAP_REGION" --yes; then
+      CLUSTER_BOOTSTRAP_RAN=true
+    else
+      echo "==> Bootstrap failed — see the error above. Manual command:"
+      echo "      bash scripts/dev/grant-runtime-rbac.sh \\"
+      echo "        --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION --yes"
+      CLUSTER_BOOTSTRAP_HINT=true
+    fi
   fi
 fi
 

@@ -194,7 +194,12 @@ export function Layout({ children }: PropsWithChildren) {
   const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
   const terminalEnabled = isFeatureEnabled("terminal");
   const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
-  const newSearchBlocked = !cluster.hasRunningCluster;
+  const clusterNeedsAttention = !cluster.isLoading && !cluster.isError && !cluster.hasRunningCluster;
+  const clusterAttentionTitle = clusterNeedsAttention
+    ? cluster.hasAnyCluster
+      ? "AKS cluster is not running"
+      : "No AKS cluster provisioned yet"
+    : undefined;
   const terminalBlocked = !terminalSidecar.isHealthy;
   const showToolsGroup = labToolsEnabled || terminalEnabled;
   const buildVersion = formatBuildVersion(__APP_VERSION__, __APP_BUILD_NUMBER__);
@@ -250,8 +255,15 @@ export function Layout({ children }: PropsWithChildren) {
         <nav className={`layout__nav${mobileNavOpen ? " layout__nav--open" : ""}`} aria-label="Main navigation">
           {/* #26 Visual grouping */}
           <span className="layout__nav-group-label">Monitor</span>
-          <NavLink to="/" end className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+          <NavLink
+            to="/"
+            end
+            className="layout__nav-item"
+            onClick={() => setMobileNavOpen(false)}
+            title={clusterAttentionTitle}
+          >
             <Activity size={14} strokeWidth={1.5} /> Dashboard
+            {clusterNeedsAttention && <NavWarnDot />}
           </NavLink>
           {liveWallEnabled && (
             <NavLink to="/monitor/live-wall" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
@@ -264,16 +276,8 @@ export function Layout({ children }: PropsWithChildren) {
             to="/blast/submit"
             className="layout__nav-item"
             onClick={() => setMobileNavOpen(false)}
-            title={
-              newSearchBlocked
-                ? cluster.hasAnyCluster
-                  ? "AKS cluster is not running"
-                  : "No AKS cluster provisioned yet"
-                : undefined
-            }
           >
             <Search size={14} strokeWidth={1.5} /> New Search
-            {newSearchBlocked && <NavWarnDot />}
           </NavLink>
           <NavLink to="/blast/jobs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
             <List size={14} strokeWidth={1.5} /> Recent searches

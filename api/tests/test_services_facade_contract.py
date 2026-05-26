@@ -45,6 +45,7 @@ _FLAT_SHIMS: tuple[tuple[str, str], ...] = (
     ("api.services.blast_result_manifest", "api.services.blast.result_manifest"),
     ("api.services.blast_results_parser", "api.services.blast.results_parser"),
     ("api.services.blast_submit_payload", "api.services.blast.submit_payload"),
+    ("api.services.blast_submit_gates", "api.services.blast.submit_gates"),
     ("api.services.blast_task_config", "api.services.blast.task_config"),
     # db/
     ("api.services.db_ops_audit", "api.services.db.ops_audit"),

@@ -298,7 +298,7 @@ scripts/dev/local-run.sh api
 
 VS Code dev tasks and direct terminal runs through `scripts/dev/local-run.sh`
 mirror local pipeline logs into `.logs/local/latest/` inside this project. The
-newest 3 sessions are retained, each log chunk is capped at 1 MiB, and each
+newest 20 sessions are retained, each log chunk is capped at 1 MiB, and each
 service keeps a bounded 16-chunk ring per session. Start with
 `.logs/local/latest/api.log`, then check `worker.log`, `beat.log`, `web.log`,
 and `smoke.log` when diagnosing warnings, errors, or pipeline health.

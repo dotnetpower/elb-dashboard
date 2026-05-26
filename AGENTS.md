@@ -18,8 +18,13 @@
    ```bash
    uv sync --all-groups          # creates .venv on Python 3.12
    uv run pytest -q api/tests    # ~980 passing
-   scripts/dev/local-run.sh api  # writes .logs/local/latest/api.log
+   scripts/dev/local-run.sh start # detached api/worker/beat/web/terminal-exec + Redis
    ```
+   When the user asks to start or restart the local server, use
+   `scripts/dev/local-run.sh start` or `scripts/dev/local-run.sh restart` so
+   the command returns after launching detached background processes. Use
+   `scripts/dev/local-run.sh stop` and `scripts/dev/local-run.sh status` for
+   shutdown / inspection.
    When starting local servers directly from a terminal, use
    `scripts/dev/local-run.sh <api|worker|beat|web|redis|smoke|compose-full|compose-local>`
    instead of raw `uvicorn`, `celery`, `npm run dev`, or `docker compose` so

@@ -69,6 +69,43 @@ def blast_pre_flight(
                 precision_options[key] = body[key]
     _apply_web_blast_searchsp_default(str(db), precision_options)
 
+    # Local sidecar gates from `api.services.blast.submit_gates`: terminal
+    # sidecar reachability and EXEC_TOKEN presence are blocking conditions for
+    # the submit task but were previously invisible in pre-flight, so the SPA
+    # could not warn the user before they clicked Run BLAST. Surface them here
+    # in the same `checks[]` shape the existing UI already renders.
+    try:
+        from api.services.blast import submit_gates
+
+        for gate_fn in (submit_gates._gate_exec_token, submit_gates._gate_terminal_sidecar):
+            gate = gate_fn()
+            checks.append(
+                {
+                    "id": gate.id,
+                    "status": "pass" if gate.status == "ok" else "fail",
+                    "title": (
+                        "Terminal Sidecar"
+                        if gate.id == "terminal_sidecar"
+                        else "Exec Token"
+                    ),
+                    "detail": gate.message,
+                    "severity": "critical" if gate.status != "ok" else None,
+                    "action": gate.action,
+                    "action_type": gate.action_type,
+                }
+            )
+            if gate.status != "ok":
+                critical += 1
+    except Exception as exc:
+        checks.append(
+            {
+                "id": "submit_gates",
+                "status": "warn",
+                "title": "Submit Gates",
+                "detail": f"Could not evaluate sidecar gates: {type(exc).__name__}",
+            }
+        )
+
     try:
         from api.services import get_credential
         from api.services.monitoring import list_aks_clusters

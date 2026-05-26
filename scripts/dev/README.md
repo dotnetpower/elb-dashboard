@@ -13,7 +13,7 @@
 | [`setup-app-registration.sh`](./setup-app-registration.sh) | One-shot Entra ID app registration creation. |
 | [`grant-local-rbac.sh`](./grant-local-rbac.sh) | One-shot: grant your `az login` user the minimum RBAC (Storage Blob Data Contributor, Storage Account Contributor, RG Reader, AcrPull) needed to drive a deployed environment from a local api sidecar. Idempotent; run once per fresh clone. |
 | [`storage-public-access.sh`](./storage-public-access.sh) | Manually flip a workload Storage account's `publicNetworkAccess` on (IP-allowlisted) / off for local debugging. The api also auto-opens it when `LOCAL_DEBUG_AUTO_OPEN_STORAGE=true` — see `api/services/storage_public_access.py`. |
-| [`local-run.sh`](./local-run.sh) | Direct terminal and VS Code task entrypoint for `api`, `worker`, `beat`, `web`, `redis`, `smoke`, `compose-full`, and `compose-local`; always routes through local logging. |
+| [`local-run.sh`](./local-run.sh) | Direct terminal and VS Code task entrypoint for detached `start` / `stop` / `restart` / `status`, individual services (`api`, `worker`, `beat`, `web`, `redis`, `terminal-exec`), `smoke`, `compose-full`, and `compose-local`; always routes through local logging. |
 | [`e2e-ui.sh`](./e2e-ui.sh) | One-command UI E2E session launcher. Starts local api + web in dev-bypass mode without Azure login, or delegates to `auth-on` for real MSAL login, then exports headed/headless scenario environment. |
 | [`run-with-log.sh`](./run-with-log.sh) | Lower-level wrapper that mirrors any local dev command's stdout/stderr into `.logs/local/latest/*.log` for warning/error review. |
 
@@ -41,7 +41,7 @@ workspace without relying on terminal scrollback:
 
 Rules:
 
-- keep the newest 3 log sessions;
+- keep the newest 20 log sessions;
 - cap each log chunk at 1 MiB by default (`LOCAL_LOG_MAX_BYTES=1048576`);
 - keep at most 16 chunks per service in a session (`LOCAL_LOG_MAX_CHUNKS=16`),
   rotating as a bounded ring so long-running debug sessions cannot grow
@@ -66,6 +66,10 @@ pipeline is healthy end to end.
 Direct examples:
 
 ```bash
+scripts/dev/local-run.sh start     # detached host-mode full stack; returns immediately
+scripts/dev/local-run.sh restart   # stop, then detached host-mode start
+scripts/dev/local-run.sh stop      # stop host-mode services, compose stacks, Redis, and Azurite
+scripts/dev/local-run.sh status    # print host-mode service state
 scripts/dev/local-run.sh api
 scripts/dev/local-run.sh web
 scripts/dev/local-run.sh worker
@@ -103,6 +107,14 @@ startup lock and checks `/api/health` before invoking uvicorn: if the local API
 is already healthy, the command exits successfully instead of writing an opaque
 `Address already in use` failure; if another process owns the port, the log
 prints the listener details from `ss` or `lsof`.
+
+For agent-driven or one-command local sessions, prefer `local-run.sh start` or
+the VS Code `server: start` / `fullstack: start` task. Those commands launch
+Redis, terminal-exec, api, worker, beat, and web through detached background
+processes, then return immediately while service logs continue under
+`.logs/local/latest/`. Use `local-run.sh restart` for a fresh server cycle and
+`local-run.sh status` when you need readiness details without attaching to the
+long-running processes.
 
 Docker Compose logging:
 

@@ -2,6 +2,58 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "server: start",
+      "detail": "Launch the host-mode local control plane in detached background processes and return immediately.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["start"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "LOCAL_LOG_CONSOLE": "false" }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "close": true
+      }
+    },
+    {
+      "label": "server: restart",
+      "detail": "Stop local ELB servers, then launch the host-mode control plane in detached background processes.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["restart"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "LOCAL_LOG_CONSOLE": "false" }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "close": true
+      }
+    },
+    {
+      "label": "server: stop",
+      "detail": "Stop host-mode servers, local compose stacks, Redis, and Azurite for this repo.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["stop"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "server: status",
+      "detail": "Show whether the host-mode local control plane services are running.",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/dev/local-run.sh",
+      "args": ["status"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
       "label": "redis: ensure",
       "detail": "Start a local Redis container on 127.0.0.1:6379 (idempotent). Used by worker/beat.",
       "type": "shell",
@@ -185,15 +237,8 @@
     },
     {
       "label": "fullstack: start",
-      "detail": "Start the host-mode local control plane: api, worker, beat, web, and terminal-exec.",
-      "dependsOn": [
-        "api: start",
-        "worker: start",
-        "beat: start",
-        "web: dev",
-        "terminal-exec: start"
-      ],
-      "dependsOrder": "parallel",
+      "detail": "Start the host-mode local control plane through the detached server launcher.",
+      "dependsOn": ["server: start"],
       "problemMatcher": []
     },
     {

@@ -14,7 +14,7 @@ Environment:
   LOCAL_LOG_MAX_CHUNKS        Per service chunks to keep in a session (default: 16)
   LOCAL_LOG_FLUSH_LINES       Flush file output every N lines (default: 50)
   LOCAL_LOG_CONSOLE           Mirror logs to console as well as file (default: true)
-  LOCAL_LOG_KEEP_SESSIONS     Number of session directories to keep (default: 3)
+  LOCAL_LOG_KEEP_SESSIONS     Number of session directories to keep (default: 20)
   LOCAL_LOG_SESSION           Force a session name for multiple commands
   LOCAL_LOG_SESSION_TTL_SECONDS
                               Reuse a freshly-created session for parallel tasks
@@ -45,7 +45,7 @@ max_bytes=${LOCAL_LOG_MAX_BYTES:-1048576}
 max_chunks=${LOCAL_LOG_MAX_CHUNKS:-16}
 flush_lines=${LOCAL_LOG_FLUSH_LINES:-50}
 console_enabled=${LOCAL_LOG_CONSOLE:-true}
-keep_sessions=${LOCAL_LOG_KEEP_SESSIONS:-3}
+keep_sessions=${LOCAL_LOG_KEEP_SESSIONS:-20}
 session_ttl=${LOCAL_LOG_SESSION_TTL_SECONDS:-120}
 lock_stale_seconds=${LOCAL_LOG_LOCK_STALE_SECONDS:-30}
 current_file="$log_base/.current-session"
