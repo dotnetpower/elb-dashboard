@@ -203,9 +203,21 @@ def blast_jobs_list(
         from api.services.state_repo import get_state_repo
 
         repo = get_state_repo()
+        scoped_listing = bool(subscription_id or resource_group or cluster_name)
+        source_rows = (
+            repo.list_for_scope(
+                subscription_id=subscription_id,
+                resource_group=resource_group,
+                cluster_name=cluster_name,
+                limit=limit,
+                include_payload=False,
+            )
+            if scoped_listing and hasattr(repo, "list_for_scope")
+            else repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
+        )
         rows = [
             row
-            for row in repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
+            for row in source_rows
             if row.type == "blast"
             and _local_state_matches_job_scope(
                 row,

@@ -52,7 +52,12 @@ export async function prefetchApiReferenceQueries(
   cfg: PrefetchInput,
   isCancelled: () => boolean = () => false,
 ): Promise<void> {
-  const { subscriptionId: sub, workloadResourceGroup: rg, acrResourceGroup: acrRg, acrName } = cfg;
+  const {
+    subscriptionId: sub,
+    workloadResourceGroup: rg,
+    acrResourceGroup: acrRg,
+    acrName,
+  } = cfg;
   if (!sub || !rg) return;
 
   // 1) AKS cluster list — subscription-wide so clusters outside the
@@ -87,7 +92,11 @@ export async function prefetchApiReferenceQueries(
     sub,
     "sub",
   ]);
-  const { cluster, clusterName, resourceGroup: clusterRg } = resolveApiReferenceClusterContext({
+  const {
+    cluster,
+    clusterName,
+    resourceGroup: clusterRg,
+  } = resolveApiReferenceClusterContext({
     clusters: clustersData?.clusters ?? [],
     anchorResourceGroup: rg,
   });
@@ -106,10 +115,9 @@ export async function prefetchApiReferenceQueries(
   }
   if (isCancelled()) return;
 
-  // Only fire the spec fetch if the service IP actually resolved — otherwise
-  // the page will surface its own "service not found" UX and a prefetch error
-  // here would just pollute the cache.
-  const svcData = qc.getQueryData<{ external_ip?: string }>([
+  // Only fire the spec fetch if the service IP actually resolved; otherwise
+  // the page will surface its own deploy-panel UX.
+  const svcData = qc.getQueryData<{ external_ip?: string | null }>([
     "openapi-svc",
     sub,
     clusterRg,
@@ -132,7 +140,12 @@ export async function prefetchApiReferenceQueries(
 
 export function usePrefetchApiReference(cfg: PrefetchInput): void {
   const qc = useQueryClient();
-  const { subscriptionId: sub, workloadResourceGroup: rg, acrResourceGroup: acrRg, acrName } = cfg;
+  const {
+    subscriptionId: sub,
+    workloadResourceGroup: rg,
+    acrResourceGroup: acrRg,
+    acrName,
+  } = cfg;
 
   useEffect(() => {
     if (!sub || !rg) return;
@@ -142,7 +155,12 @@ export function usePrefetchApiReference(cfg: PrefetchInput): void {
     const handle = window.setTimeout(() => {
       void prefetchApiReferenceQueries(
         qc,
-        { subscriptionId: sub, workloadResourceGroup: rg, acrResourceGroup: acrRg, acrName },
+        {
+          subscriptionId: sub,
+          workloadResourceGroup: rg,
+          acrResourceGroup: acrRg,
+          acrName,
+        },
         () => cancelled,
       );
     }, 250);

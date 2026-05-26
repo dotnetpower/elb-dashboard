@@ -330,7 +330,12 @@ export const monitoringApi = {
     clusterName: string,
     serviceName: string,
   ) =>
-    api.get<{ service_name: string; external_ip: string }>(
+    api.get<{
+      service_name: string;
+      external_ip: string | null;
+      available: boolean;
+      status: "ready" | "missing_or_pending";
+    }>(
       `/monitor/aks/service-ip?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&service_name=${encodeURIComponent(serviceName)}`,
     ),
 

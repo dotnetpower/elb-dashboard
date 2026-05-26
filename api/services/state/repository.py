@@ -340,6 +340,58 @@ class JobStateRepository:
         rows.sort(key=lambda r: r.created_at or "", reverse=True)
         return rows
 
+    def list_for_scope(
+        self,
+        *,
+        subscription_id: str = "",
+        resource_group: str = "",
+        cluster_name: str = "",
+        limit: int = 50,
+        include_payload: bool = True,
+    ) -> list[JobState]:
+        """Return non-deleted jobs matching an explicit Azure/AKS scope.
+
+        This is intentionally owner-agnostic and should only be used by route
+        handlers that received an explicit scope from the caller (for example
+        ``/api/blast/jobs?cluster_name=elb-cluster-01``). The Recent searches
+        view reached from a cluster card is an operator surface: it should show
+        the jobs running on that cluster even when the table row's ``owner_oid``
+        differs from the currently signed-in browser user (common after
+        switching Microsoft accounts, using a different tenant login, or
+        syncing OpenAPI-originated jobs).
+
+        The unscoped ``/api/blast/jobs`` path must keep using
+        :meth:`list_for_owner` so personal dashboard-submitted jobs remain
+        private by default.
+        """
+
+        clauses = ["status ne 'deleted'"]
+        if subscription_id:
+            clauses.append(f"subscription_id eq '{_sanitise_odata_value(subscription_id)}'")
+        if resource_group:
+            clauses.append(f"resource_group eq '{_sanitise_odata_value(resource_group)}'")
+        if cluster_name:
+            clauses.append(f"cluster_name eq '{_sanitise_odata_value(cluster_name)}'")
+        if len(clauses) == 1:
+            # Refuse an owner-agnostic global scan by accident.
+            return []
+
+        with self._state_client() as table:
+            rows = []
+            try:
+                kwargs: dict[str, Any] = {"results_per_page": limit}
+                if not include_payload:
+                    kwargs["select"] = _JOBSTATE_SUMMARY_SELECT
+                entities = table.query_entities(" and ".join(clauses), **kwargs)
+                for entity in entities:
+                    rows.append(JobState.from_entity(dict(entity)))
+                    if len(rows) >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+        rows.sort(key=lambda row: row.created_at or "", reverse=True)
+        return rows
+
     def list_children(self, parent_job_id: str, limit: int = 100) -> list[JobState]:
         safe_parent = _sanitise_odata_value(parent_job_id)
         with self._state_client() as t:

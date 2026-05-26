@@ -125,6 +125,56 @@ def test_list_for_owner_ensures_missing_jobstate_table(monkeypatch) -> None:
     assert created_tables == ["jobstate"]
 
 
+def test_list_for_scope_is_owner_agnostic_but_requires_scope(monkeypatch) -> None:
+    queries: list[str] = []
+    rows = [
+        JobState(
+            job_id="job-other-owner",
+            type="blast",
+            status="failed",
+            owner_oid="owner-from-previous-login",
+            subscription_id="sub-1",
+            resource_group="rg-elb-cluster",
+            cluster_name="elb-cluster-01",
+            created_at="2026-05-26T06:21:28Z",
+        ).to_entity(),
+    ]
+
+    class RecordingTableClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> RecordingTableClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def query_entities(self, query_filter: str, **_kwargs: object) -> list[dict[str, object]]:
+            queries.append(query_filter)
+            return rows
+
+    monkeypatch.setenv("AZURE_TABLE_ENDPOINT", "https://acct.table.core.windows.net")
+    monkeypatch.setattr(state_repo, "TableClient", RecordingTableClient)
+    monkeypatch.setattr(state_repo, "get_credential", lambda: object())
+
+    repo = JobStateRepository()
+
+    assert repo.list_for_scope() == []
+    scoped = repo.list_for_scope(
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-01",
+        include_payload=False,
+    )
+
+    assert [row.job_id for row in scoped] == ["job-other-owner"]
+    assert queries == [
+        "status ne 'deleted' and subscription_id eq 'sub-1' "
+        "and resource_group eq 'rg-elb-cluster' and cluster_name eq 'elb-cluster-01'"
+    ]
+
+
 def test_list_children_for_owner_groups_parent_rows(monkeypatch) -> None:
     queries: list[tuple[str, int]] = []
     rows = [

@@ -64,7 +64,10 @@ export function ApiReference() {
     staleTime: 300_000,
     retry: 1,
   });
-  const baseUrl = svcQuery.data ? `http://${svcQuery.data.external_ip}` : null;
+  const baseUrl = svcQuery.data?.external_ip
+    ? `http://${svcQuery.data.external_ip}`
+    : null;
+  const serviceMissingOrPending = svcQuery.isSuccess && !svcQuery.data?.external_ip;
 
   const specQuery = useQuery({
     queryKey: ["openapi-spec", sub, clusterRg, clusterName],
@@ -143,7 +146,7 @@ export function ApiReference() {
         <MissingOpenApiImageState />
       )}
 
-      {svcQuery.isError && !clusterStopped && (
+      {(svcQuery.isError || serviceMissingOrPending) && !clusterStopped && (
         <OpenApiDeployPanel
           subscriptionId={sub}
           resourceGroup={clusterRg}

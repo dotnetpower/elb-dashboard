@@ -171,12 +171,12 @@ def aks_service_ip(
     """Return the LoadBalancer external IP for a service in the AKS cluster.
 
     Response shape (matches the SPA's `monitoringApi.serviceIp` typing):
-        ``{"service_name": "<name>", "external_ip": "<addr>"}``
+        ``{"service_name": "<name>", "external_ip": "<addr>|null", "available": bool}``
 
-    Raises HTTP 404 when the service does not exist or has no LoadBalancer
-    ingress yet. The SPA relies on the error state to render the
-    OpenApiDeployPanel — never collapse "no IP yet" into a 200 response or
-    the page hangs in the "Discovering OpenAPI service…" state.
+    Missing service / pending LoadBalancer ingress is an expected discovery
+    state for the OpenAPI page, not an HTTP error. Keep that as a 200 so the
+    request inspector and request metrics do not surface routine deploy-panel
+    discovery as a failing API call.
     """
 
     sub = subscription_id or _sub_default()
@@ -189,19 +189,19 @@ def aks_service_ip(
         )
     except Exception as exc:
         # k8s_get_service_ip should already swallow not-found and return
-        # None, but if it raises something else (auth, network), surface a
-        # 404 so the SPA shows the deploy panel.
+        # None. If a lower layer still raises, keep discovery non-fatal for
+        # the API Reference page; the deploy panel can guide the user through
+        # reconciliation without polluting the inspector with expected 404s.
         LOGGER.warning("aks_service_ip: lookup failed: %s", exc)
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "service_not_found", "service_name": service_name},
-        ) from exc
+        ip = None
     if not ip:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "service_no_external_ip", "service_name": service_name},
-        )
-    return {"service_name": service_name, "external_ip": ip}
+        return {
+            "service_name": service_name,
+            "external_ip": None,
+            "available": False,
+            "status": "missing_or_pending",
+        }
+    return {"service_name": service_name, "external_ip": ip, "available": True, "status": "ready"}
 
 
 @router.get("/aks/warmup-status")
