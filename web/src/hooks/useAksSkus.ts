@@ -5,7 +5,7 @@ import { aksApi, type AksSku, type AksAvailableSkusResponse } from "@/api/endpoi
 export const DEFAULT_AKS_SKU = "Standard_E16s_v5";
 /** Mirrors sibling repo constants.py::ELB_DFLT_AZURE_SYSTEM_VM_SIZE. */
 export const DEFAULT_AKS_SYSTEM_SKU = "Standard_D2s_v3";
-export const DEFAULT_AKS_SYSTEM_NODE_COUNT = 2;
+export const DEFAULT_AKS_SYSTEM_NODE_COUNT = 1;
 
 const FALLBACK_AKS_SKUS: AksSku[] = [
   {

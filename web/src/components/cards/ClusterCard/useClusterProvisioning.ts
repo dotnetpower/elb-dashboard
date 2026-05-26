@@ -24,16 +24,27 @@ export const CLUSTER_NAME_RE = /^[a-zA-Z][a-zA-Z0-9-]{1,62}$/;
 
 /** Free-form cluster classification label written to the `elb-tier` ARM tag.
  *  The dashboard's cluster card surfaces this as a chip so a multi-cluster
- *  deployment ("heavy" / "light" / "gpu") stays readable at a glance.
+ *  deployment ("heavy" / "light") stays readable at a glance.
  *  Empty string == leave the tag off entirely. */
-export type ClusterTier = "" | "heavy" | "light" | "gpu" | "general";
+export type ClusterTier = "" | "heavy" | "light" | "general";
+
+/** Workload-pool preset applied when the user picks a tier and has not
+ *  yet manually overridden the SKU or node count. Picking a tier also
+ *  writes the `elb-tier` ARM tag (see `handleProvision`). */
+export const CLUSTER_TIER_PRESETS: Record<
+  Exclude<ClusterTier, "">,
+  { sku: string; nodes: number }
+> = {
+  light: { sku: "Standard_D16s_v3", nodes: 2 },
+  general: { sku: "Standard_E16s_v5", nodes: 5 },
+  heavy: { sku: "Standard_E32s_v5", nodes: 10 },
+};
 
 export const CLUSTER_TIER_OPTIONS: { value: ClusterTier; label: string }[] = [
   { value: "", label: "(unspecified)" },
-  { value: "heavy", label: "heavy — large BLAST jobs / GB-scale queries" },
-  { value: "light", label: "light — quick smoke / dev jobs" },
-  { value: "gpu", label: "gpu — GPU-backed workloads" },
-  { value: "general", label: "general — mixed workloads" },
+  { value: "light", label: "light — D16s_v3 × 2 (quick smoke / dev)" },
+  { value: "general", label: "general — E16s_v5 × 5 (mixed workloads)" },
+  { value: "heavy", label: "heavy — E32s_v5 × 10 (large BLAST jobs)" },
 ];
 
 const CLUSTER_NAME_PREFIX = "elb-cluster";
@@ -134,17 +145,41 @@ export function useClusterProvisioning(args: {
   // so it is intentionally not destructured here.
 
   const [clusterName, setClusterName] = useState("elb-cluster-01");
-  const [nodeSku, setNodeSku] = useState(DEFAULT_AKS_SKU);
+  const [nodeSku, setNodeSkuState] = useState(DEFAULT_AKS_SKU);
   // Node count is fully user-controlled. The preflight quota check surfaces
   // `max_blast_nodes_fit` in the modal as a warning with an explicit
   // "Apply N nodes" button — we never mutate the input on the user's behalf.
-  const [nodeCount, setNodeCount] = useState(DEFAULT_NODE_COUNT);
+  const [nodeCount, setNodeCountState] = useState(DEFAULT_NODE_COUNT);
   const [systemVmSize, setSystemVmSize] = useState(DEFAULT_AKS_SYSTEM_SKU);
   const [systemNodeCount, setSystemNodeCount] = useState(DEFAULT_AKS_SYSTEM_NODE_COUNT);
+  // Tier presets fill nodeSku/nodeCount only while the user has not yet
+  // edited them directly. Any external call to `setNodeSku` / `setNodeCount`
+  // (modal SKU dropdown, count input, "Apply N nodes" button) flips the
+  // matching flag so subsequent tier changes leave the user's pick alone.
+  const [nodeSkuUserTouched, setNodeSkuUserTouched] = useState(false);
+  const [nodeCountUserTouched, setNodeCountUserTouched] = useState(false);
+  const setNodeSku = (value: string) => {
+    setNodeSkuUserTouched(true);
+    setNodeSkuState(value);
+  };
+  const setNodeCount = (value: number) => {
+    setNodeCountUserTouched(true);
+    setNodeCountState(value);
+  };
   /** Free-form cluster classification — written to the `elb-tier` ARM tag
    *  so the dashboard can group multi-cluster deployments. Empty string =
-   *  leave the tag off. The picker is optional in the UI. */
-  const [tier, setTier] = useState<ClusterTier>("");
+   *  leave the tag off. The picker is optional in the UI. Selecting a
+   *  non-empty tier also applies its workload-pool preset to nodeSku /
+   *  nodeCount unless the user has already overridden either field. */
+  const [tier, setTierState] = useState<ClusterTier>("");
+  const setTier = (value: ClusterTier) => {
+    setTierState(value);
+    if (!value) return;
+    const preset = CLUSTER_TIER_PRESETS[value];
+    if (!preset) return;
+    if (!nodeSkuUserTouched) setNodeSkuState(preset.sku);
+    if (!nodeCountUserTouched) setNodeCountState(preset.nodes);
+  };
   // Modal-local overrides so the user can pick a different region / RG for
   // *this* AKS cluster without touching the dashboard-wide selectors at the
   // top of the page. Defaults: region falls back to the dashboard's region;
@@ -286,6 +321,10 @@ export function useClusterProvisioning(args: {
             node_count: nodeCount,
             system_vm_size: systemVmSize,
             system_node_count: systemNodeCount,
+            acr_resource_group: acrResourceGroup || "",
+            acr_name: acrName || "",
+            storage_resource_group: storageResourceGroup || "",
+            storage_account: storageAccount || "",
           });
           setPreflightResult(res);
         } catch {
@@ -312,6 +351,14 @@ export function useClusterProvisioning(args: {
     nodeCount,
     systemVmSize,
     systemNodeCount,
+    // ACR / Storage are inputs to the new `rbac_runtime` preflight row
+    // (UAA coverage check). If the dashboard re-renders with different
+    // platform resources the auto-preflight must re-run so the row
+    // reflects the current targets, not the stale ones.
+    acrResourceGroup,
+    acrName,
+    storageResourceGroup,
+    storageAccount,
     preflightStatus,
     preflightResult,
   ]);
@@ -473,6 +520,10 @@ export function useClusterProvisioning(args: {
       node_count: nodeCount,
       system_vm_size: systemVmSize,
       system_node_count: systemNodeCount,
+      acr_resource_group: acrResourceGroup || "",
+      acr_name: acrName || "",
+      storage_resource_group: storageResourceGroup || "",
+      storage_account: storageAccount || "",
     };
     reportClientError({
       level: "info",

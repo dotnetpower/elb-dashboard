@@ -110,6 +110,29 @@ fi
 
 progress step 4 "App registration" "Create/reuse the Entra App Registration if API_CLIENT_ID is empty."
 API_CLIENT_ID_VAL="${API_CLIENT_ID:-}"
+# Defensive: a non-empty API_CLIENT_ID inherited from a previous deploy in a
+# different tenant (e.g. azd env retargeted, or a process env var leaking
+# in from another shell) would otherwise FATAL inside
+# `ensure_spa_redirect_uri` with "cannot find App Registration ... in the
+# active Azure CLI tenant". Re-running deploy.sh on a fresh subscription
+# is a common, supported workflow, so we silently clear the stale id and
+# fall through to the standard create/reuse path instead of refusing to
+# proceed.
+if [ -n "$API_CLIENT_ID_VAL" ]; then
+  if ! az ad app show --id "$API_CLIENT_ID_VAL" --query id -o tsv --only-show-errors >/dev/null 2>&1; then
+    progress note "API_CLIENT_ID '$API_CLIENT_ID_VAL' does not exist in the active Azure CLI tenant; clearing it and creating a fresh App Registration."
+    if command -v azd >/dev/null 2>&1; then
+      # Persist the clear back to the azd env file so a subsequent
+      # `azd env get-values` does not surface the stale value again.
+      # `apiClientId` is the Bicep parameter alias also set by some
+      # earlier deploy.sh revisions — clear both to stay idempotent.
+      azd env set API_CLIENT_ID "" >/dev/null 2>&1 || true
+      azd env set apiClientId "" >/dev/null 2>&1 || true
+    fi
+    API_CLIENT_ID_VAL=""
+    unset API_CLIENT_ID
+  fi
+fi
 if [ -z "$API_CLIENT_ID_VAL" ]; then
   echo "==> API_CLIENT_ID is not set; creating or reusing the Entra App Registration..."
   ADDITIONAL_REDIRECT_URIS="https://$CONTAINER_APP_FQDN" \

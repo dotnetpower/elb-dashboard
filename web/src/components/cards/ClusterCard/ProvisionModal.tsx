@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Copy,
   Cpu,
   Loader2,
   Plus,
@@ -492,10 +493,11 @@ export function ProvisionModal({
               ))}
             </select>
             <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
-              Stored as the <code>elb-tier</code> ARM tag so the dashboard can
-              group multi-cluster fleets at a glance. Leave unspecified if the
-              cluster fits no obvious bucket — you can always edit the tag
-              later from the Azure Portal.
+              Picking a tier pre-fills the workload SKU and node count below
+              (e.g. <code>heavy</code> → E32s_v5 × 10) and writes the
+              <code> elb-tier</code> ARM tag so the dashboard can group
+              multi-cluster fleets at a glance. Edits you make to the SKU or
+              node count after picking a tier are preserved.
             </div>
           </div>
 
@@ -763,6 +765,11 @@ export function ProvisionModal({
                       className="glass-input"
                       style={{ width: "100%", fontSize: 13 }}
                     />
+                    <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+                      Default 1 is enough for dev / test. Bump to 2+ for
+                      higher availability of CoreDNS / metrics-server in
+                      production-grade clusters.
+                    </div>
                   </div>
                 </div>
               </div>
@@ -980,6 +987,7 @@ export function ProvisionModal({
                   quota: "Compute quota",
                   resource_group: "Resource group",
                   region: "Region",
+                  rbac: "Dashboard MI permissions",
                 };
                 // The quota row carries a recommended `max_blast_nodes_fit`
                 // when it fails. If that number is >= 1 and differs from
@@ -998,6 +1006,17 @@ export function ProvisionModal({
                   : 0;
                 const canApply =
                   isQuotaFail && maxFit >= 1 && maxFit !== nodeCount;
+                // RBAC row carries `details.missing[]` when status === "fail".
+                // Each entry has `{scope, role, reason, remediation}` —
+                // the remediation is a ready-to-run `az role assignment
+                // create` (or "re-run azd up" for the project custom
+                // role). Surface one Copy button per missing item so the
+                // operator can paste-and-fix without hunting through
+                // logs or docs.
+                const rbacMissing =
+                  c.name === "rbac" && c.status === "fail"
+                    ? ((c.details as { missing?: Array<{ scope: string; role: string; reason: string; remediation: string }> } | undefined)?.missing ?? [])
+                    : [];
                 return (
                   <div
                     key={c.name}
@@ -1050,6 +1069,56 @@ export function ProvisionModal({
                         >
                           (no node count fits — switch SKU or request quota)
                         </span>
+                      )}
+                      {rbacMissing.length > 0 && (
+                        <div
+                          style={{
+                            marginTop: 6,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 6,
+                          }}
+                        >
+                          {rbacMissing.map((m, idx) => (
+                            <div
+                              key={`${m.scope}-${m.role}-${idx}`}
+                              style={{
+                                fontSize: 11,
+                                color: "var(--text-muted)",
+                                paddingLeft: 8,
+                                borderLeft: "2px solid var(--danger)",
+                              }}
+                            >
+                              <div>
+                                <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                                  {m.role}
+                                </span>{" "}
+                                missing at <code>{m.scope}</code>
+                              </div>
+                              <div style={{ marginTop: 2 }}>{m.reason}</div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void navigator.clipboard.writeText(m.remediation);
+                                }}
+                                className="glass-button"
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: 4,
+                                  fontSize: 10,
+                                  padding: "2px 8px",
+                                  marginTop: 4,
+                                  color: "var(--accent)",
+                                }}
+                                title="Copy the remediation command for an Owner / User Access Administrator to run"
+                              >
+                                <Copy size={10} strokeWidth={1.5} />
+                                Copy grant command
+                              </button>
+                            </div>
+                          ))}
+                        </div>
                       )}
                     </div>
                   </div>

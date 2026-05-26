@@ -169,6 +169,7 @@ export function useClusterActions(args: {
 
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionInfo, setActionInfo] = useState<string | null>(null);
   const [transitioning, setTransitioning] = useState<Map<string, ClusterTransitionKind>>(
     () => readPersistedTransitions(subscriptionId, resourceGroup),
   );
@@ -388,6 +389,24 @@ export function useClusterActions(args: {
             void query.refetch();
           } else if (status === "SUCCESS") {
             clearTransition(name);
+            if (action === "deleting") {
+              const result = task.result as
+                | {
+                    resource_group_status?: string;
+                    resource_group?: string;
+                  }
+                | null
+                | undefined;
+              if (result?.resource_group_status === "deleted" && result.resource_group) {
+                setActionInfo(
+                  `Cluster ${name} deleted. Resource group ${result.resource_group} was empty and has also been removed.`,
+                );
+              } else if (result?.resource_group_status === "retained" && result.resource_group) {
+                setActionInfo(
+                  `Cluster ${name} deleted. Resource group ${result.resource_group} kept (other resources still present).`,
+                );
+              }
+            }
             void query.refetch();
           }
         } catch {
@@ -419,10 +438,19 @@ export function useClusterActions(args: {
     return () => clearTimeout(t);
   }, [actionError]);
 
+  // Auto-dismiss actionInfo after 8s (matches error pattern).
+  useEffect(() => {
+    if (!actionInfo) return;
+    const t = setTimeout(() => setActionInfo(null), 8_000);
+    return () => clearTimeout(t);
+  }, [actionInfo]);
+
   return {
     actionLoading,
     actionError,
     setActionError,
+    actionInfo,
+    setActionInfo,
     transitioning,
     handleStartStop,
     handleDelete,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Info } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
 import { armProxyApi } from "@/api/armProxy";
@@ -273,7 +273,17 @@ export function ClusterCard({
     terminalVmName,
   });
 
+  // Block opening a second provision while either (a) a cluster in the
+  // list is still creating (ARM `provisioning_state` says so) or (b) the
+  // current submit's task is still in flight in this browser.
+  const addClusterDisabled =
+    hasProvisioningCluster || prov.provStatus === "creating";
+  const addClusterDisabledReason = addClusterDisabled
+    ? "A cluster is currently being provisioned. Wait for it to finish before adding another."
+    : undefined;
+
   const openProvision = () => {
+    if (addClusterDisabled) return;
     const suggested = nextElbClusterName(clusters, existingResourceGroupNames);
     // Order matters: reset RG tracking before setting cluster name so the
     // auto-sync useEffect inside the hook picks up the new name and writes
@@ -321,7 +331,12 @@ export function ClusterCard({
       }}
       rightSlot={
         enabled && !showInitialClusterSkeleton && !noClusters ? (
-          <AddClusterButton variant="pill" onClick={openProvision} />
+          <AddClusterButton
+            variant="pill"
+            onClick={openProvision}
+            disabled={addClusterDisabled}
+            disabledTitle={addClusterDisabledReason}
+          />
         ) : null
       }
       accentColor="cluster"
@@ -339,7 +354,12 @@ export function ClusterCard({
         </div>
       )}
       {showErrorClusterAction && (
-        <AddClusterButton variant="dashed" onClick={openProvision} />
+        <AddClusterButton
+          variant="dashed"
+          onClick={openProvision}
+          disabled={addClusterDisabled}
+          disabledTitle={addClusterDisabledReason}
+        />
       )}
 
       {showEmptyClusterState &&
@@ -512,7 +532,12 @@ export function ClusterCard({
 
       {/* Big dashed "Add Cluster" CTA only when the list is empty. */}
       {showEmptyClusterState && (
-        <AddClusterButton variant="dashed" onClick={openProvision} />
+        <AddClusterButton
+          variant="dashed"
+          onClick={openProvision}
+          disabled={addClusterDisabled}
+          disabledTitle={addClusterDisabledReason}
+        />
       )}
 
       {actions.actionError && (
@@ -521,6 +546,15 @@ export function ClusterCard({
         >
           <AlertTriangle size={10} style={{ verticalAlign: "middle" }} />{" "}
           {actions.actionError}
+        </div>
+      )}
+
+      {actions.actionInfo && (
+        <div
+          style={{ marginTop: "var(--space-2)", fontSize: 11, color: "var(--success, #16a34a)" }}
+        >
+          <Info size={10} style={{ verticalAlign: "middle" }} />{" "}
+          {actions.actionInfo}
         </div>
       )}
 

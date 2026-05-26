@@ -151,10 +151,76 @@ def delete_aks(
     resource_group: str,
     cluster_name: str,
 ) -> dict[str, Any]:
-    """Delete an AKS cluster."""
+    """Delete an AKS cluster, and the enclosing resource group if it becomes empty.
+
+    Side effects: ARM `managed_clusters.begin_delete` (which also tears down the
+    auto-managed `MC_*` node-infra RG). After the AKS LRO completes, the parent RG
+    is inspected; if it (a) carries the `managed-by=elb-dashboard` tag we wrote
+    at create time **and** (b) contains no remaining resources, it is deleted too
+    so the dashboard does not accumulate empty `rg-elb-cluster`-style shells.
+    A non-empty RG or an RG without our ownership tag is left untouched — that
+    closes both the user-shared-RG case and the TOCTOU race where the RG was
+    listed empty here but another caller created a resource between
+    `list_by_resource_group` and `begin_delete`. RG cleanup failures are logged
+    but do not fail the task — the AKS delete already succeeded.
+    """
     cred = _facade.get_credential()
     aks = _facade.aks_client(cred, subscription_id)
     poller = aks.managed_clusters.begin_delete(resource_group, cluster_name)
     poller.result()
     LOGGER.info("AKS cluster %s deleted", cluster_name)
-    return {"cluster_name": cluster_name, "action": "delete", "status": "completed"}
+
+    rg_status = "retained"
+    rg_remaining = -1
+    try:
+        rc = _facade.resource_client(cred, subscription_id)
+        # Ownership gate first — never auto-delete an RG we did not
+        # create. `provision_aks` tags newly-created RGs with
+        # `managed-by: elb-dashboard`. RGs that pre-date this tagging
+        # change (or that the user created by hand) are intentionally
+        # left for the operator to clean up manually.
+        rg_props = rc.resource_groups.get(resource_group)
+        rg_tags = dict(getattr(rg_props, "tags", None) or {})
+        owns_rg = (
+            rg_tags.get("managed-by") == "elb-dashboard"
+            or rg_tags.get("managedBy") == "elb-dashboard"
+        )
+        if not owns_rg:
+            rg_status = "retained_not_owned"
+            LOGGER.info(
+                "Resource group %s retained (no managed-by=elb-dashboard tag; "
+                "treating as user-owned)",
+                resource_group,
+            )
+        else:
+            remaining = [
+                r.name for r in rc.resources.list_by_resource_group(resource_group)
+            ]
+            rg_remaining = len(remaining)
+            if rg_remaining == 0:
+                rc.resource_groups.begin_delete(resource_group).result()
+                rg_status = "deleted"
+                LOGGER.info(
+                    "Resource group %s deleted (owned + empty after AKS removal)",
+                    resource_group,
+                )
+            else:
+                rg_status = "retained_not_empty"
+                LOGGER.info(
+                    "Resource group %s retained (%d resource(s) remain: %s)",
+                    resource_group,
+                    rg_remaining,
+                    ", ".join(remaining[:5]) + (" ..." if rg_remaining > 5 else ""),
+                )
+    except Exception as exc:
+        rg_status = "error"
+        LOGGER.warning("RG cleanup check failed for %s: %s", resource_group, exc)
+
+    return {
+        "cluster_name": cluster_name,
+        "action": "delete",
+        "status": "completed",
+        "resource_group": resource_group,
+        "resource_group_status": rg_status,
+        "resource_group_remaining": rg_remaining,
+    }

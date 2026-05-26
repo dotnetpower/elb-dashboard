@@ -191,6 +191,18 @@ add() { MANIFEST+=("$1|$2|$3|$4"); }
 add "Sub Reader (discovery wizard)" "Reader" \
     "/subscriptions/$SUBSCRIPTION" "FAIL"
 
+# Sub-scope RG-write: AKS auto-creates the `MC_<rg>_<cluster>_<region>`
+# node RG at sub scope, which requires
+# `Microsoft.Resources/subscriptions/resourceGroups/write`. The project
+# custom role "Elb Workload RG Creator" grants only that (plus reads /
+# delete / deployments) so we do NOT have to grant sub-scope Contributor.
+# Either the custom role or sub-scope Owner/Contributor satisfies the
+# requirement — the doctor reports FAIL only when none of those are
+# present. (We check "Elb Workload RG Creator" by name; the GUID is
+# assigned by Azure at create time and differs per subscription.)
+add "Sub-scope RG Creator (AKS MC_* node RG)" "Elb Workload RG Creator" \
+    "/subscriptions/$SUBSCRIPTION" "FAIL"
+
 if [[ -n "$RESOURCE_GROUP" ]]; then
   add "Platform RG Contributor"        "Contributor" \
       "/subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP" "FAIL"

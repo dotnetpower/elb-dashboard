@@ -20,6 +20,11 @@ Environment overrides:
   ELB_RESOURCE_NAME_SUFFIX     Optional suffix such as -01 for numbered deployments
   ELB_RESOURCE_NAME_SLOT       Optional azd-safe slot such as slot01 for numbered deployments
   ELB_ALLOW_AZD_ENV_RETARGET   true to allow overwriting an existing azd env target subscription/tenant
+                               without prompting. In an interactive TTY the script
+                               otherwise asks whether to (1) switch Azure CLI to
+                               match the azd env target, (2) retarget the azd env,
+                               or (3) abort. In a non-interactive shell the script
+                               errors instead of prompting.
   ELB_SKIP_LOCAL_RBAC          true to skip granting local-debug RBAC to the deployer
   ELB_AUTO_FIX_RBAC            true (default) to let the MI RBAC doctor auto-grant
                                any missing resource-to-resource role assignment
@@ -129,49 +134,102 @@ echo "    Tenant:       $tenant_id"
 existing_env_values="$(azd env get-values --environment "$env_name" 2>/dev/null || true)"
 existing_subscription_id="$(printf '%s\n' "$existing_env_values" | azd_env_value AZURE_SUBSCRIPTION_ID)"
 existing_tenant_id="$(printf '%s\n' "$existing_env_values" | azd_env_value AZURE_TENANT_ID)"
-if ! is_true "${ELB_ALLOW_AZD_ENV_RETARGET:-}"; then
-  if [[ -n "$existing_subscription_id" && "$existing_subscription_id" != "$subscription_id" ]]; then
+
+subscription_mismatch=false
+tenant_mismatch=false
+if [[ -n "$existing_subscription_id" && "$existing_subscription_id" != "$subscription_id" ]]; then
+  subscription_mismatch=true
+fi
+if [[ -n "$existing_tenant_id" && "$existing_tenant_id" != "$tenant_id" ]]; then
+  tenant_mismatch=true
+fi
+
+if ! is_true "${ELB_ALLOW_AZD_ENV_RETARGET:-}" && { [[ "$subscription_mismatch" == "true" ]] || [[ "$tenant_mismatch" == "true" ]]; }; then
+  target_tenant_id="${existing_tenant_id:-$tenant_id}"
+
+  cat >&2 <<EOF
+==> Azure CLI / azd environment mismatch detected
+    azd environment '$env_name' (from .azure/$env_name/.env):
+      Subscription: $existing_subscription_id
+      Tenant:       ${existing_tenant_id:-<unset>}
+    Active Azure CLI context:
+      Subscription: $subscription_id ($account_name)
+      Tenant:       $tenant_id
+
+EOF
+
+  if [[ ! -t 0 ]] || [[ ! -t 1 ]]; then
     cat >&2 <<EOF
-ERROR: azd environment '$env_name' targets subscription '$existing_subscription_id',
-but the active Azure CLI subscription is '$subscription_id'.
+ERROR: refusing to silently retarget the azd environment in a non-interactive shell.
 
-This value comes from the existing azd environment state (.azure/$env_name/.env),
-not from the repository .env file. Fresh clones without an existing azd
-environment will use the active Azure CLI subscription.
-
-Refusing to retarget the existing azd environment from the current shell.
 Choose one of these paths, then rerun ./deploy.sh:
 
-1. Keep using the existing azd environment target:
-  az account set --subscription "$existing_subscription_id"
-  azd auth login --use-device-code --tenant-id "${existing_tenant_id:-$tenant_id}"
-
-2. Intentionally retarget this azd environment to the active Azure CLI context:
+1. Use the active Azure CLI context (retarget the azd environment):
   ELB_ALLOW_AZD_ENV_RETARGET=true ./deploy.sh
 
+2. Keep the existing azd environment target:
+  az account set --subscription "$existing_subscription_id"$( [[ "$tenant_mismatch" == "true" ]] && printf '\n  az login --tenant "%s"\n  azd auth login --use-device-code --tenant-id "%s"' "$target_tenant_id" "$target_tenant_id" )
 EOF
     exit 1
   fi
-  if [[ -n "$existing_tenant_id" && "$existing_tenant_id" != "$tenant_id" ]]; then
-    cat >&2 <<EOF
-ERROR: azd environment '$env_name' targets tenant '$existing_tenant_id',
-but the active Azure CLI tenant is '$tenant_id'.
 
-This value comes from the existing azd environment state (.azure/$env_name/.env),
-not from the repository .env file. Fresh clones without an existing azd
-environment will use the active Azure CLI tenant.
-
-Refusing to mix Azure CLI and azd accounts. Choose one of these paths, then
-rerun ./deploy.sh:
-
-1. Keep using the existing azd environment target:
-  az login --tenant "$existing_tenant_id"
-
-2. Intentionally retarget this azd environment to the active Azure CLI context:
-  ELB_ALLOW_AZD_ENV_RETARGET=true ./deploy.sh
+  cat >&2 <<EOF
+How would you like to proceed?
+  1) Use the active Azure CLI context — retarget the azd environment to it (sets ELB_ALLOW_AZD_ENV_RETARGET=true)
+  2) Keep the azd environment target — switch Azure CLI to match it (runs az account set$( [[ "$tenant_mismatch" == "true" ]] && printf ' + az login --tenant' ))
+  3) Abort and let me fix it manually
 EOF
-    exit 1
-  fi
+
+  mismatch_choice=""
+  while true; do
+    printf 'Enter choice [1/2/3] (default 3): ' >&2
+    if ! read -r mismatch_choice; then
+      mismatch_choice="3"
+    fi
+    mismatch_choice="${mismatch_choice:-3}"
+    case "$mismatch_choice" in
+      1|2|3) break ;;
+      *) echo "Invalid choice: $mismatch_choice" >&2 ;;
+    esac
+  done
+
+  case "$mismatch_choice" in
+    1)
+      echo "==> Retargeting azd environment '$env_name' to the active Azure CLI context" >&2
+      export ELB_ALLOW_AZD_ENV_RETARGET=true
+      ;;
+    2)
+      if [[ "$tenant_mismatch" == "true" ]]; then
+        echo "==> Switching Azure CLI to tenant $target_tenant_id (browser login required)" >&2
+        az login --tenant "$target_tenant_id" >/dev/null
+      fi
+      echo "==> Setting Azure CLI subscription to $existing_subscription_id" >&2
+      az account set --subscription "$existing_subscription_id"
+      subscription_id="$(az account show --query id -o tsv)"
+      tenant_id="$(az account show --query tenantId -o tsv)"
+      account_name="$(az account show --query name -o tsv)"
+      user_name="$(az account show --query user.name -o tsv)"
+      echo "    User:         $user_name"
+      echo "    Subscription: $account_name ($subscription_id)"
+      echo "    Tenant:       $tenant_id"
+      if [[ "$subscription_id" != "$existing_subscription_id" ]]; then
+        echo "ERROR: 'az account set' did not switch to '$existing_subscription_id'. Run 'az login' against that tenant first." >&2
+        exit 1
+      fi
+      ;;
+    3)
+      cat >&2 <<EOF
+Aborted. To fix manually, run one of:
+
+1. Use the active Azure CLI context (retarget the azd environment):
+  ELB_ALLOW_AZD_ENV_RETARGET=true ./deploy.sh
+
+2. Keep the existing azd environment target:
+  az account set --subscription "$existing_subscription_id"$( [[ "$tenant_mismatch" == "true" ]] && printf '\n  az login --tenant "%s"\n  azd auth login --use-device-code --tenant-id "%s"' "$target_tenant_id" "$target_tenant_id" )
+EOF
+      exit 1
+      ;;
+  esac
 fi
 
 azd_status="$(azd auth login --check-status 2>&1 || true)"
@@ -367,10 +425,17 @@ fi
 #   * ELB_BOOTSTRAP_CLUSTER_RG=false — skipped; deploy.sh only prints the
 #     manual command in the closing summary. Use this when policy forbids
 #     `deploy.sh` from creating workload resource groups.
+#
+# The "no cluster yet" condition is detected by a real `az aks list` against
+# the subscription, not by grepping the doctor's stdout. The doctor's WARN
+# row about a missing cluster RG uses different phrasing across versions, and
+# relying on a specific substring made this entire bootstrap block dead code
+# in the past.
 # ---------------------------------------------------------------------------
 CLUSTER_BOOTSTRAP_RAN=false
 CLUSTER_BOOTSTRAP_HINT=false
-if printf '%s' "$DOCTOR_OUTPUT" | grep -q "no AKS cluster found in subscription"; then
+existing_aks_id="$(az aks list --subscription "$subscription_id" --query '[0].id' -o tsv 2>/dev/null || true)"
+if [[ -z "$existing_aks_id" ]]; then
   BOOTSTRAP_RG="${ELB_CLUSTER_RG_NAME:-rg-elb-cluster}"
   BOOTSTRAP_REGION="${ELB_CLUSTER_RG_REGION:-$location}"
   RBAC_SCRIPT="$repo_root/scripts/dev/grant-runtime-rbac.sh"

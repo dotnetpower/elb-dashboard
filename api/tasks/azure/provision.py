@@ -62,6 +62,16 @@ _TOTAL_STEPS = len(_PROVISION_STEPS)
 _STEP_INDEX: dict[str, int] = {key: i + 1 for i, (key, _) in enumerate(_PROVISION_STEPS)}
 _STEP_LABEL: dict[str, str] = {key: label for key, label in _PROVISION_STEPS}
 
+# Sub-phases published during the RBAC step. They share the parent
+# `ensuring_rbac` step counter (step 4 of 5) so the banner can show the
+# specific role currently being granted instead of one opaque "Granting
+# role assignments" line. The phase strings are also surfaced in the
+# FE banner's PHASE_LABELS map.
+_RBAC_SUB_PHASES: dict[str, str] = {
+    "ensuring_rbac_acr": "Granting AcrPull to AKS kubelet",
+    "ensuring_rbac_storage": "Granting Storage Blob Data Contributor",
+}
+
 
 def _publish(
     task: Any,
@@ -75,9 +85,17 @@ def _publish(
     """Wrapper around `publish_progress` that auto-fills step/total_steps from
     `_PROVISION_STEPS` and uses the canonical human label as the default
     message. Use this instead of bare `update_state` so the FE banner gets
-    a consistent step indicator on every tick."""
+    a consistent step indicator on every tick.
+
+    RBAC sub-phases (`ensuring_rbac_acr` / `ensuring_rbac_storage`) inherit
+    the parent `ensuring_rbac` step number so they render under "Step 4/5"
+    instead of an unknown step.
+    """
     step = _STEP_INDEX.get(phase)
     label = _STEP_LABEL.get(phase)
+    if step is None and phase in _RBAC_SUB_PHASES:
+        step = _STEP_INDEX["ensuring_rbac"]
+        label = _RBAC_SUB_PHASES[phase]
     publish_progress(
         task,
         job_id,
@@ -235,7 +253,7 @@ def provision_aks(
     node_sku: str,
     node_count: int,
     system_vm_size: str = "",
-    system_node_count: int = 2,
+    system_node_count: int = 1,
     acr_resource_group: str = "",
     acr_name: str = "",
     storage_resource_group: str = "",
@@ -303,7 +321,20 @@ def provision_aks(
     try:
         rc.resource_groups.get(resource_group)
     except ResourceNotFoundError:
-        rc.resource_groups.create_or_update(resource_group, {"location": region})
+        # Tag the freshly-created RG so `delete_aks` can later auto-clean
+        # it when the cluster is removed. The tag is the gate that
+        # prevents accidental deletion of a user-owned RG that just
+        # happened to be empty at delete time.
+        rc.resource_groups.create_or_update(
+            resource_group,
+            {
+                "location": region,
+                "tags": {
+                    "managed-by": "elb-dashboard",
+                    "purpose": "elb-aks-workload",
+                },
+            },
+        )
 
     # ARM eventual-consistency guard: confirm the RG is visible before
     # handing off to AKS. Without this, AKS create occasionally still
@@ -427,6 +458,14 @@ def provision_aks(
         raise
 
     _publish(self, job_id, "ensuring_rbac")
+
+    def _rbac_progress(sub_phase: str, msg: str) -> None:
+        # Inner helper closes over `self` + `job_id` so the rbac module
+        # stays decoupled from Celery state internals. Sub-phase names
+        # must be present in `_RBAC_SUB_PHASES` so `_publish` resolves
+        # the parent step number.
+        _publish(self, job_id, sub_phase, message=msg)
+
     rbac_summary = _facade._ensure_aks_runtime_rbac(
         cred,
         subscription_id,
@@ -436,15 +475,42 @@ def provision_aks(
         acr_name=acr_name,
         storage_resource_group=storage_resource_group or resource_group,
         storage_account=storage_account,
+        progress_callback=_rbac_progress,
     )
+    # Runtime RBAC failure is no longer "best effort": a cluster whose
+    # kubelet identity cannot pull from ACR or read from Storage will
+    # silently break BLAST submits with ImagePullBackOff or
+    # AuthorizationPermissionMismatch. Surface it as a task failure now
+    # so the SPA prompts the operator to fix RBAC (or re-run with the
+    # right shared-MI grants) instead of "Cluster ready" hiding it.
     if rbac_summary["roles_failed"]:
+        failed = rbac_summary["roles_failed"]
+        roles_assigned = rbac_summary.get("roles_assigned") or []
+        # Render `{role: error}` (dict) or `[role, ...]` (legacy list)
+        # consistently so the FE error card is readable.
+        if isinstance(failed, dict):
+            failed_items = ", ".join(f"{r}: {e}" for r, e in failed.items())
+        else:
+            failed_items = ", ".join(str(r) for r in failed)
+        rbac_error = (
+            "AKS cluster created but runtime RBAC failed; the kubelet "
+            "identity cannot access the requested resources. "
+            f"Assigned: {roles_assigned or 'none'}. Failed: {failed_items}. "
+            "Verify the dashboard managed identity has User Access "
+            "Administrator on the ACR and Storage scopes, then re-run "
+            "/api/aks/assign-roles or delete + recreate the cluster."
+        )
         _publish(
             self,
             job_id,
-            "rbac_ensure_failed_nonfatal",
-            message=f"RBAC partial: {len(rbac_summary['roles_failed'])} role(s) failed",
+            "failed",
+            status="failed",
+            message=rbac_error[:500],
+            error_code="rbac_assignment_failed",
             rbac=rbac_summary,
+            portal_url=portal_url,
         )
+        raise RuntimeError(rbac_error)
 
     _publish(
         self,

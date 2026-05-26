@@ -5,12 +5,15 @@ const formatTime = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
 
 /** Human label for a Celery task phase published by provision_aks. Keeps
  *  the FE friendly even though the task strings stay machine-flavoured.
- *  Keep keys in sync with `api/tasks/azure/provision.py::_PROVISION_STEPS`. */
+ *  Keep keys in sync with `api/tasks/azure/provision.py::_PROVISION_STEPS`
+ *  and `_RBAC_SUB_PHASES`. */
 const PHASE_LABELS: Record<string, string> = {
   creating_cluster: "Preparing ARM request",
   ensuring_resource_group: "Ensuring resource group",
   arm_create_or_update: "Creating AKS cluster (5–10 min)",
   ensuring_rbac: "Granting role assignments",
+  ensuring_rbac_acr: "Granting AcrPull to AKS kubelet",
+  ensuring_rbac_storage: "Granting Storage Blob Data Contributor",
   rbac_ensure_failed_nonfatal: "RBAC partially failed (non-fatal)",
   completed: "Cluster ready",
   failed: "Failing",

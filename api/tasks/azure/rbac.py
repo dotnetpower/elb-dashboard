@@ -12,7 +12,9 @@ Key entry points: `attach_acr`, `grant_storage_blob_contributor_to_aks`,
     `api.tasks.azure.assign_aks_roles`).
 Risky contracts: Task name `api.tasks.azure.assign_aks_roles` must not change — the
     SPA + tests reference it. Role assignment Conflicts / RoleAssignmentExists are
-    treated as success; other failures are non-fatal but recorded in `roles_failed`.
+    treated as success; the freshly-created kubelet MI's Entra-ID propagation is
+    handled via short retry on `PrincipalNotFound`. Any other failure is recorded
+    in `roles_failed` and the caller (`provision_aks`) escalates to task failure.
 Validation: `uv run pytest -q api/tests/test_azure_tasks.py
     api/tests/test_warmup_route.py`.
 """
@@ -20,7 +22,9 @@ Validation: `uv run pytest -q api/tests/test_azure_tasks.py
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from celery import shared_task
@@ -28,6 +32,75 @@ from celery import shared_task
 import api.tasks.azure as _facade
 
 LOGGER = logging.getLogger(__name__)
+
+# PrincipalNotFound retry window — the freshly-created AKS kubelet
+# managed identity needs a few seconds for Entra ID to propagate to the
+# Authorization service. Documented Azure guidance is "up to ~60 s".
+_PRINCIPAL_PROPAGATION_RETRY_SECONDS = 60.0
+_PRINCIPAL_PROPAGATION_INITIAL_DELAY = 2.0
+_PRINCIPAL_PROPAGATION_MAX_DELAY = 10.0
+
+
+def _is_idempotent_conflict(exc: BaseException) -> bool:
+    msg = str(exc)
+    return "RoleAssignmentExists" in msg or "Conflict" in msg
+
+
+def _is_principal_propagation_error(exc: BaseException) -> bool:
+    # Case-insensitive across the whole message — Azure sometimes phrases
+    # the error as "PrincipalNotFound" (code), "does not exist in the
+    # directory" (longer message), or "principalId ... was not found".
+    msg = str(exc).lower()
+    return (
+        "principalnotfound" in msg
+        or "does not exist in the directory" in msg
+        or ("principalid" in msg and "not found" in msg)
+    )
+
+
+def _create_role_assignment_with_retry(
+    auth_cl: Any,
+    scope: str,
+    role_assignment_name: str,
+    parameters: Any,
+    *,
+    label: str,
+) -> None:
+    """Wrap `role_assignments.create` with idempotency + Entra propagation retry.
+
+    Raises the original Azure SDK exception on any non-recoverable error so
+    the caller can record it in `roles_failed` and fail the provision task.
+    Treats `RoleAssignmentExists` / `Conflict` as success. Retries with
+    exponential backoff (capped) when the service reports
+    `PrincipalNotFound` — the kubelet MI was just minted by the AKS
+    create_or_update poller a few seconds ago.
+    """
+
+    deadline = time.monotonic() + _PRINCIPAL_PROPAGATION_RETRY_SECONDS
+    delay = _PRINCIPAL_PROPAGATION_INITIAL_DELAY
+    while True:
+        try:
+            auth_cl.role_assignments.create(
+                scope=scope,
+                role_assignment_name=role_assignment_name,
+                parameters=parameters,
+            )
+            return
+        except Exception as exc:
+            if _is_idempotent_conflict(exc):
+                LOGGER.info("%s role already assigned (idempotent)", label)
+                return
+            if _is_principal_propagation_error(exc) and time.monotonic() < deadline:
+                LOGGER.info(
+                    "%s assignment hit PrincipalNotFound (Entra propagation), "
+                    "retrying in %.1fs",
+                    label,
+                    delay,
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, _PRINCIPAL_PROPAGATION_MAX_DELAY)
+                continue
+            raise
 
 
 # Tests monkeypatch `api.tasks.azure.aks_client` / `acr_client` / `storage_client` /
@@ -49,6 +122,25 @@ def get_credential() -> Any:
     return _facade.get_credential()
 
 
+def _resolve_kubelet_oid(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> str | None:
+    """Read the kubelet managed-identity `object_id` off the AKS cluster.
+
+    Returns `None` when the cluster has no kubelet identity profile (very
+    old AKS or service-principal mode). Callers should treat `None` as a
+    silent skip — there is no kubelet MI to grant roles to.
+    """
+    aks_cl = aks_client(cred, subscription_id)
+    cluster = aks_cl.managed_clusters.get(resource_group, cluster_name)
+    if cluster.identity_profile and "kubeletidentity" in cluster.identity_profile:
+        return cluster.identity_profile["kubeletidentity"].object_id
+    return None
+
+
 def attach_acr(
     cred: Any,
     subscription_id: str,
@@ -56,17 +148,23 @@ def attach_acr(
     cluster_name: str,
     acr_resource_group: str,
     acr_name: str,
+    *,
+    kubelet_oid: str | None = None,
 ) -> None:
-    """Grant AcrPull to the AKS kubelet identity on the ACR."""
+    """Grant AcrPull to the AKS kubelet identity on the ACR.
+
+    Accepts an optional pre-resolved `kubelet_oid` so callers in a tight
+    loop (provision_aks) can avoid the duplicate `managed_clusters.get`
+    round trip. When omitted, falls back to the legacy lookup so external
+    callers / tests keep working.
+    """
     from azure.mgmt.authorization import AuthorizationManagementClient
     from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
 
-    aks_cl = aks_client(cred, subscription_id)
-    cluster = aks_cl.managed_clusters.get(resource_group, cluster_name)
-
-    kubelet_oid = None
-    if cluster.identity_profile and "kubeletidentity" in cluster.identity_profile:
-        kubelet_oid = cluster.identity_profile["kubeletidentity"].object_id
+    if kubelet_oid is None:
+        kubelet_oid = _resolve_kubelet_oid(
+            cred, subscription_id, resource_group, cluster_name
+        )
 
     if not kubelet_oid:
         LOGGER.warning("No kubelet identity found, skipping ACR attach")
@@ -87,22 +185,18 @@ def attach_acr(
     role_assignment_id = str(
         uuid.uuid5(uuid.NAMESPACE_URL, f"{acr_scope}|{kubelet_oid}|{acr_pull_role}")
     )
-    try:
-        auth_cl.role_assignments.create(
-            scope=acr_scope,
-            role_assignment_name=role_assignment_id,
-            parameters=RoleAssignmentCreateParameters(  # type: ignore[call-arg]
-                role_definition_id=role_definition_id,
-                principal_id=kubelet_oid,
-                principal_type="ServicePrincipal",
-            ),
-        )
-        LOGGER.info("AcrPull role assigned to %s on %s", kubelet_oid, acr_name)
-    except Exception as exc:
-        if "RoleAssignmentExists" in str(exc):
-            LOGGER.info("AcrPull role already assigned")
-        else:
-            raise
+    _create_role_assignment_with_retry(
+        auth_cl,
+        acr_scope,
+        role_assignment_id,
+        RoleAssignmentCreateParameters(  # type: ignore[call-arg]
+            role_definition_id=role_definition_id,
+            principal_id=kubelet_oid,
+            principal_type="ServicePrincipal",
+        ),
+        label="AcrPull",
+    )
+    LOGGER.info("AcrPull role assigned to %s on %s", kubelet_oid, acr_name)
 
 
 def grant_storage_blob_contributor_to_aks(
@@ -112,17 +206,21 @@ def grant_storage_blob_contributor_to_aks(
     cluster_name: str,
     storage_resource_group: str,
     storage_account: str,
+    *,
+    kubelet_oid: str | None = None,
 ) -> None:
-    """Grant Storage Blob Data Contributor to the AKS kubelet identity."""
+    """Grant Storage Blob Data Contributor to the AKS kubelet identity.
+
+    Accepts an optional pre-resolved `kubelet_oid`; falls back to the
+    cluster lookup when not provided.
+    """
     from azure.mgmt.authorization import AuthorizationManagementClient
     from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
 
-    aks_cl = aks_client(cred, subscription_id)
-    cluster = aks_cl.managed_clusters.get(resource_group, cluster_name)
-
-    kubelet_oid = None
-    if cluster.identity_profile and "kubeletidentity" in cluster.identity_profile:
-        kubelet_oid = cluster.identity_profile["kubeletidentity"].object_id
+    if kubelet_oid is None:
+        kubelet_oid = _resolve_kubelet_oid(
+            cred, subscription_id, resource_group, cluster_name
+        )
 
     if not kubelet_oid:
         LOGGER.warning("No kubelet identity found, skipping Storage Blob Data Contributor")
@@ -143,26 +241,44 @@ def grant_storage_blob_contributor_to_aks(
     role_assignment_id = str(
         uuid.uuid5(uuid.NAMESPACE_URL, f"{storage_scope}|{kubelet_oid}|{blob_contributor_role}")
     )
+    _create_role_assignment_with_retry(
+        auth_cl,
+        storage_scope,
+        role_assignment_id,
+        RoleAssignmentCreateParameters(  # type: ignore[call-arg]
+            role_definition_id=role_definition_id,
+            principal_id=kubelet_oid,
+            principal_type="ServicePrincipal",
+        ),
+        label="Storage Blob Data Contributor",
+    )
+    LOGGER.info(
+        "Storage Blob Data Contributor role assigned to %s on %s",
+        kubelet_oid,
+        storage_account,
+    )
+
+
+def _call_with_optional_kubelet_oid(
+    fn: Any,
+    *positional: Any,
+    kubelet_oid: str | None,
+) -> None:
+    """Call `fn(*positional, kubelet_oid=kubelet_oid)` with a fallback that
+    handles test fakes / older monkeypatches that don't accept `kubelet_oid`.
+
+    Only ``TypeError`` whose message mentions ``kubelet_oid`` triggers the
+    fallback — a genuine TypeError from inside the callee (e.g. bad SDK
+    parameters) still propagates. Without that narrowing, a legitimate
+    bug in the real role-assignment code would be silently retried as if
+    it were a signature mismatch.
+    """
     try:
-        auth_cl.role_assignments.create(
-            scope=storage_scope,
-            role_assignment_name=role_assignment_id,
-            parameters=RoleAssignmentCreateParameters(  # type: ignore[call-arg]
-                role_definition_id=role_definition_id,
-                principal_id=kubelet_oid,
-                principal_type="ServicePrincipal",
-            ),
-        )
-        LOGGER.info(
-            "Storage Blob Data Contributor role assigned to %s on %s",
-            kubelet_oid,
-            storage_account,
-        )
-    except Exception as exc:
-        if "RoleAssignmentExists" in str(exc):
-            LOGGER.info("Storage Blob Data Contributor role already assigned")
-        else:
+        fn(*positional, kubelet_oid=kubelet_oid)
+    except TypeError as exc:
+        if "kubelet_oid" not in str(exc):
             raise
+        fn(*positional)
 
 
 def ensure_aks_runtime_rbac(
@@ -175,34 +291,110 @@ def ensure_aks_runtime_rbac(
     acr_name: str = "",
     storage_resource_group: str = "",
     storage_account: str = "",
+    progress_callback: Callable[[str, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Best-effort runtime RBAC ensure for the AKS kubelet identity."""
+    """Best-effort runtime RBAC ensure for the AKS kubelet identity.
+
+    Returns ``{"roles_assigned": [...], "roles_failed": {role: error, ...}}``.
+    Callers (currently ``provision_aks`` and the ``assign_aks_roles`` task)
+    are expected to treat a non-empty ``roles_failed`` as a hard failure —
+    a cluster whose kubelet cannot pull from ACR or read from Storage will
+    silently break BLAST submits. Idempotent role-exists conflicts and
+    transient ``PrincipalNotFound`` (Entra propagation) are absorbed by
+    `_create_role_assignment_with_retry` and never surface here.
+
+    The optional ``progress_callback(phase, message)`` lets the provision
+    task publish per-role sub-phases (``ensuring_rbac_acr`` /
+    ``ensuring_rbac_storage``) so the UI banner can show what is currently
+    being granted instead of one long "Granting role assignments" pause.
+    """
     roles_assigned: list[str] = []
     roles_failed: dict[str, str] = {}
 
+    # Single kubelet OID lookup shared by both downstream grants. Without
+    # this, attach_acr + grant_storage_blob_contributor_to_aks each did
+    # their own `managed_clusters.get` round trip (~1-3 s each).
+    kubelet_lookup_error: str | None = None
+    try:
+        kubelet_oid = _resolve_kubelet_oid(
+            cred, subscription_id, resource_group, cluster_name
+        )
+    except Exception as exc:
+        LOGGER.warning("Kubelet OID lookup failed: %s", type(exc).__name__)
+        kubelet_oid = None
+        kubelet_lookup_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+
+    # Pre-flight: if there is at least one runtime-RBAC target but no
+    # kubelet identity, every downstream grant becomes a silent skip
+    # (`if not kubelet_oid: return` inside attach_acr / grant_storage_*).
+    # Record an explicit failure so `provision_aks` fail-fasts instead of
+    # marking the cluster "Cluster ready" with no roles assigned — which
+    # was the historical silent-failure mode for clusters created without
+    # a kubelet managed identity (e.g. legacy service-principal mode or
+    # an interrupted create).
+    has_targets = bool(acr_name and acr_resource_group) or bool(
+        storage_account and storage_resource_group
+    )
+    if has_targets and not kubelet_oid:
+        message = (
+            kubelet_lookup_error
+            or "AKS cluster has no kubelet managed identity "
+            "(identity_profile.kubeletidentity is missing). The cluster "
+            "may be using service-principal mode or the create was "
+            "interrupted before the kubelet MI was provisioned."
+        )
+        if acr_name and acr_resource_group:
+            roles_failed["AcrPull"] = message
+        if storage_account and storage_resource_group:
+            roles_failed["Storage Blob Data Contributor"] = message
+        return {
+            "cluster_name": cluster_name,
+            "roles_assigned": roles_assigned,
+            "roles_failed": roles_failed,
+        }
+
     if acr_name and acr_resource_group:
+        if progress_callback is not None:
+            progress_callback(
+                "ensuring_rbac_acr",
+                f"Granting AcrPull to AKS kubelet on {acr_name}",
+            )
         try:
-            _facade._attach_acr(
-                cred, subscription_id, resource_group, cluster_name, acr_resource_group, acr_name
+            _call_with_optional_kubelet_oid(
+                _facade._attach_acr,
+                cred,
+                subscription_id,
+                resource_group,
+                cluster_name,
+                acr_resource_group,
+                acr_name,
+                kubelet_oid=kubelet_oid,
             )
             roles_assigned.append("AcrPull")
         except Exception as exc:
-            LOGGER.warning("AcrPull assignment failed (non-fatal): %s", exc)
+            LOGGER.warning("AcrPull assignment failed: %s", exc)
             roles_failed["AcrPull"] = str(exc)[:300]
 
     if storage_account and storage_resource_group:
+        if progress_callback is not None:
+            progress_callback(
+                "ensuring_rbac_storage",
+                f"Granting Storage Blob Data Contributor on {storage_account}",
+            )
         try:
-            _facade._grant_storage_blob_contributor_to_aks(
+            _call_with_optional_kubelet_oid(
+                _facade._grant_storage_blob_contributor_to_aks,
                 cred,
                 subscription_id,
                 resource_group,
                 cluster_name,
                 storage_resource_group,
                 storage_account,
+                kubelet_oid=kubelet_oid,
             )
             roles_assigned.append("Storage Blob Data Contributor")
         except Exception as exc:
-            LOGGER.warning("Storage Blob Data Contributor assignment failed (non-fatal): %s", exc)
+            LOGGER.warning("Storage Blob Data Contributor assignment failed: %s", exc)
             roles_failed["Storage Blob Data Contributor"] = str(exc)[:300]
 
     return {
@@ -224,7 +416,16 @@ def assign_aks_roles(
     storage_resource_group: str = "",
     storage_account: str = "",
 ) -> dict[str, Any]:
-    """Assign runtime RBAC roles to the AKS kubelet identity."""
+    """Assign runtime RBAC roles to the AKS kubelet identity.
+
+    Returns the role-assignment summary with ``status: completed`` when
+    every requested role landed. When at least one role failed (caller
+    lacks UAA on the target scope, kubelet identity vanished, etc.) the
+    task raises ``RuntimeError`` so Celery marks the result as ``FAILURE``
+    instead of "completed with a quiet roles_failed[] dict" — that
+    silent-success mode is what made the "re-assign roles" button look
+    like a success while the kubelet was still unable to pull from ACR.
+    """
     cred = _facade.get_credential()
     summary = _facade._ensure_aks_runtime_rbac(
         cred,
@@ -236,4 +437,15 @@ def assign_aks_roles(
         storage_resource_group=storage_resource_group or resource_group,
         storage_account=storage_account,
     )
+    failed = summary.get("roles_failed") or {}
+    if failed:
+        if isinstance(failed, dict):
+            failed_items = ", ".join(f"{r}: {e}" for r, e in failed.items())
+        else:
+            failed_items = ", ".join(str(r) for r in failed)
+        raise RuntimeError(
+            f"Failed to assign runtime RBAC: {failed_items}. The dashboard "
+            "managed identity may be missing User Access Administrator on "
+            "the ACR / Storage scopes."
+        )
     return {**summary, "status": "completed"}

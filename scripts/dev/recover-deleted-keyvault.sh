@@ -109,6 +109,30 @@ if [[ "$count" == "0" ]]; then
   exit 0
 fi
 
+# `az keyvault recover --resource-group $target_rg` fails with
+# ResourceGroupNotFound when the target RG does not exist yet. On a
+# fresh-clone deploy that is the common case: Bicep is about to create the
+# RG, but the preprovision hook runs before Bicep. Create the RG up front
+# so the recover call succeeds; Bicep's RG resource is idempotent and will
+# reuse the same RG (provisioningState: Succeeded). Location defaults to
+# AZURE_LOCATION (azd env), then $location_arg from the deleted KV, then
+# koreacentral as last resort.
+if ! az group exists "${subscription_arg[@]}" --name "$target_rg" -o tsv 2>/dev/null | grep -qx true; then
+  rg_location="${AZURE_LOCATION:-}"
+  if [[ -z "$rg_location" ]]; then
+    rg_location="$(azd_env_value AZURE_LOCATION || true)"
+  fi
+  rg_location="${rg_location:-koreacentral}"
+  echo "==> Creating target resource group $target_rg in $rg_location so recover can target it."
+  az group create \
+    "${subscription_arg[@]}" \
+    --name "$target_rg" \
+    --location "$rg_location" \
+    --tags app=elb-dashboard managedBy=azd repo=elb-dashboard \
+    --only-show-errors \
+    -o none
+fi
+
 echo "==> Recovering $count compatible soft-deleted Key Vault(s) for $target_rg."
 jq -c '.[]' <<<"$candidates" | while IFS= read -r vault; do
   name="$(jq -r '.name' <<<"$vault")"

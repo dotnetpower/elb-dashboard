@@ -370,6 +370,10 @@ def run_provision_preflight(
     node_count: int,
     system_vm_size: str,
     system_node_count: int,
+    acr_resource_group: str = "",
+    acr_name: str = "",
+    storage_resource_group: str = "",
+    storage_account: str = "",
 ) -> tuple[bool, list[PreflightCheck]]:
     """Compose SKU + quota + RG checks into a single ordered list.
 
@@ -579,6 +583,43 @@ def run_provision_preflight(
                 message=f"Resource group '{rg.name}' will be created.",
             )
         )
+
+    # ---- RBAC ----
+    # Verify the dashboard MI has the role assignments AKS create needs
+    # (Contributor on the cluster RG + sub-scope RG-write). The check
+    # never raises — a missing read-permission or absent principal id
+    # degrades to a warn row so preflight can still render the SKU /
+    # quota / RG outcomes. Import inside the function so the module's
+    # top-level import graph stays cycle-free.
+    from api.services.rbac_preflight import (
+        aks_create_rbac_check,
+        aks_runtime_rbac_check,
+    )
+
+    checks.append(
+        aks_create_rbac_check(
+            credential,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+        )
+    )
+
+    # Runtime RBAC advisory — UAA on ACR + Storage scopes. Always emitted
+    # so the operator sees explicitly whether the post-create role
+    # assignment step will succeed. `warn` (not `fail`) because Azure
+    # RBAC is still the ground truth and the provision task fail-fasts
+    # on the actual failure (see ensuring_rbac in provision_aks).
+    checks.append(
+        aks_runtime_rbac_check(
+            credential,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            acr_resource_group=acr_resource_group,
+            acr_name=acr_name,
+            storage_resource_group=storage_resource_group,
+            storage_account=storage_account,
+        )
+    )
 
     # Derive overall_ok from the rendered rows so we don't have to keep
     # the manual flag in sync with every new `fail` site below. Any

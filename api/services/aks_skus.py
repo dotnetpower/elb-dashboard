@@ -135,7 +135,7 @@ def _sku(
 # Sibling defaults: constants.py.
 DEFAULT_SKU: str = "Standard_E32s_v5"  # ELB_DFLT_AZURE_MACHINE_TYPE
 DEFAULT_SYSTEM_SKU: str = "Standard_D2s_v3"  # ELB_DFLT_AZURE_SYSTEM_VM_SIZE
-DEFAULT_SYSTEM_NODE_COUNT: int = 2
+DEFAULT_SYSTEM_NODE_COUNT: int = 1
 
 
 # Mirror of sibling azure_traits.py::AZURE_HPC_MACHINES plus matching

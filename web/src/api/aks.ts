@@ -12,16 +12,17 @@ export interface AksProvisionRequest {
   /** AKS system pool VM size. Mirrors sibling repo
    *  constants.py::ELB_DFLT_AZURE_SYSTEM_VM_SIZE (Standard_D2s_v3). */
   system_vm_size?: string;
-  /** Node count for the system pool (default 2, capped at 3). */
+  /** Node count for the system pool (default 1, capped at 3). */
   system_node_count?: number;
   acr_resource_group?: string;
   acr_name?: string;
   storage_resource_group?: string;
   storage_account?: string;
-  /** Free-form cluster classification ("heavy" / "light" / "gpu" /
-   *  "general" / ""). Written to ARM as the `elb-tier` tag so the
-   *  dashboard can group multi-cluster deployments. Empty string =
-   *  do not write the tag. */
+  /** Free-form cluster classification ("heavy" / "light" / "general" / "").
+   *  Written to ARM as the `elb-tier` tag so the dashboard can group
+   *  multi-cluster deployments. Empty string = do not write the tag.
+   *  Picking a non-empty tier in the SPA also pre-fills the workload
+   *  pool's `node_sku` / `node_count` from `CLUSTER_TIER_PRESETS`. */
   tier?: string;
 }
 
@@ -131,6 +132,13 @@ export interface AksPreflightRequest {
   node_count: number;
   system_vm_size: string;
   system_node_count: number;
+  /** Optional ACR / Storage targets so the backend can also report the
+   *  `rbac_runtime` row (User Access Administrator on the runtime RBAC
+   *  scopes). Leaving them empty makes that row a no-op `ok`. */
+  acr_resource_group?: string;
+  acr_name?: string;
+  storage_resource_group?: string;
+  storage_account?: string;
 }
 
 export interface AksPreflightCheck {

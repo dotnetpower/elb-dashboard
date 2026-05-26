@@ -61,6 +61,9 @@ param assignSubscriptionReader bool = true
 @description('If true, grants the shared UAMI resource-group-scope Contributor and User Access Administrator for runtime resource orchestration. Set to false when equivalent roles already exist outside this template.')
 param assignControlPlaneRoles bool = true
 
+@description('If true, defines and assigns the project custom role `Elb Workload RG Creator` to the shared UAMI at subscription scope. The custom role grants ONLY `Microsoft.Resources/subscriptions/resourceGroups/{read,write,delete}` (plus sub-scope deployment reads) so AKS can auto-create its `MC_<rg>_<cluster>_<region>` node RG. The UAMI still cannot create resources inside any RG without a separate Contributor assignment at that RG scope — this is the least-privilege alternative to granting sub-scope Contributor. Disable when policy forbids any custom roles in the subscription.')
+param assignWorkloadRgCreatorRole bool = true
+
 @description('Optional name of the AKS workload cluster RG (e.g. `rg-elb-cluster`). When set, grants the shared UAMI Contributor + User Access Administrator on that RG so `api.tasks.openapi.rbac.setup_workload_identity` can create `id-elb-openapi` + federated credential + downstream role assignments. Leave empty on the first `azd up` (the RG does not exist yet); set it on the second `azd provision` after the SPA has created AKS. `scripts/dev/grant-runtime-rbac.sh` is the workstation safety net for deployments that pre-date this parameter.')
 param aksClusterResourceGroup string = ''
 
@@ -208,6 +211,26 @@ module controlPlaneRoles 'modules/controlPlaneRoles.bicep' = if (assignControlPl
   scope: platformRg
   params: {
     uamiPrincipalId: identity.outputs.identityPrincipalId
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sub-scope custom role: "Elb Workload RG Creator".
+//
+// AKS auto-creates `MC_<rg>_<cluster>_<region>` at sub scope on every
+// managed cluster create. Without `resourceGroups/write` at sub scope
+// the AKS resource provider returns AuthorizationFailed even when the
+// cluster RG itself carries Contributor. This module grants the
+// narrowest permission set that satisfies that requirement instead of
+// granting the UAMI sub-scope Contributor (which would let it provision
+// arbitrary resources anywhere in the subscription).
+// ---------------------------------------------------------------------------
+module workloadRgCreatorRole 'modules/workloadRgCreatorRole.bicep' = if (assignWorkloadRgCreatorRole) {
+  name: 'workload-rg-creator-${resourceToken}'
+  // Sub-scope (no `scope:` clause) — main.bicep targets subscription.
+  params: {
+    uamiPrincipalId: identity.outputs.identityPrincipalId
+    resourceToken: resourceToken
   }
 }
 

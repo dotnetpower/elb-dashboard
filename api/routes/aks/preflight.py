@@ -104,6 +104,10 @@ def aks_preflight(
         node_count=node_count,
         system_vm_size=system_vm_size,
         system_node_count=system_node_count,
+        acr_resource_group=str(body.get("acr_resource_group") or ""),
+        acr_name=str(body.get("acr_name") or ""),
+        storage_resource_group=str(body.get("storage_resource_group") or ""),
+        storage_account=str(body.get("storage_account") or ""),
     )
     payload: dict[str, Any] = {
         "ok": ok,
