@@ -235,7 +235,7 @@ def provision_aks(
     node_sku: str,
     node_count: int,
     system_vm_size: str = "",
-    system_node_count: int = 1,
+    system_node_count: int = 2,
     acr_resource_group: str = "",
     acr_name: str = "",
     storage_resource_group: str = "",
@@ -256,6 +256,7 @@ def provision_aks(
     """
     from api.services.aks_skus import (
         DEFAULT_SKU,
+        DEFAULT_SYSTEM_NODE_COUNT,
         DEFAULT_SYSTEM_SKU,
         SKU_BY_NAME,
         is_allowed,
@@ -285,7 +286,7 @@ def provision_aks(
             DEFAULT_SYSTEM_SKU,
         )
         sys_sku = DEFAULT_SYSTEM_SKU
-    sys_count = max(1, min(int(system_node_count or 1), 3))
+    sys_count = max(1, min(int(system_node_count or DEFAULT_SYSTEM_NODE_COUNT), 3))
     blast_count = max(1, int(node_count or 1))
 
     cred = _facade.get_credential()

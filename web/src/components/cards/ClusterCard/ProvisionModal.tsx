@@ -19,6 +19,8 @@ import type { AksPreflightResponse, AksSku } from "@/api/endpoints";
 import type { ArmLocation } from "@/api/armProxy";
 import { AZURE_REGIONS } from "@/constants";
 import {
+  DEFAULT_AKS_SYSTEM_NODE_COUNT,
+  DEFAULT_AKS_SYSTEM_SKU,
   describeAksSku,
   formatAksSkuOption,
   groupAksSkus,
@@ -193,11 +195,12 @@ export function ProvisionModal({
   }, [onClose, provStatus]);
 
   // System pool is collapsed by default — 95% of users keep the defaults
-  // (D-series × 1 node), and showing the full panel inflates the modal.
+  // (D-series × default node count), and showing the full panel inflates the modal.
   // Auto-expand if the user has already tweaked the defaults so they don't
   // get hidden behind a toggle when reopening the modal.
   const systemUsesDefaults =
-    systemVmSize === "Standard_D2s_v3" && systemNodeCount === 1;
+    systemVmSize === DEFAULT_AKS_SYSTEM_SKU &&
+    systemNodeCount === DEFAULT_AKS_SYSTEM_NODE_COUNT;
   const [systemPoolExpanded, setSystemPoolExpanded] = useState(
     !systemUsesDefaults,
   );

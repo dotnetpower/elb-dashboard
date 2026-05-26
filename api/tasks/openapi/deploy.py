@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from celery import shared_task
@@ -26,12 +27,117 @@ from api.services import get_credential
 from api.services.azure_clients import aks_client
 from api.services.image_tags import IMAGE_TAGS
 from api.services.k8s.monitoring import k8s_get_deployment_ready_replicas, k8s_get_service_ip
+from api.services.k8s.observability import k8s_list_events
 from api.tasks.openapi.helpers import blast_node_count, record_progress
 from api.tasks.openapi.kubectl import kubectl_apply
 from api.tasks.openapi.manifests import build_manifests
 from api.tasks.openapi.rbac import setup_workload_identity
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _openapi_ready_failure_diagnostics(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    for namespace in ("default", "kube-system"):
+        try:
+            events.extend(
+                k8s_list_events(
+                    cred,
+                    subscription_id,
+                    resource_group,
+                    cluster_name,
+                    namespace=namespace,
+                    limit=50,
+                )
+            )
+        except Exception as exc:
+            LOGGER.warning("openapi deploy: event probe failed namespace=%s: %s", namespace, exc)
+
+    diagnostic_events = _filter_ready_failure_events(events)
+    likely_cause = _classify_ready_failure(diagnostic_events)
+    if likely_cause == "workload_identity_webhook_unavailable":
+        message = (
+            "Deployment applied but no pod reached Ready because the AKS Workload Identity "
+            "webhook is unavailable. Check `azure-wi-webhook-controller-manager` in "
+            "kube-system; if it is Pending with `Insufficient cpu`, increase the systempool "
+            "node count or use a larger systempool SKU, then re-run Deploy elb-openapi."
+        )
+    elif likely_cause == "image_pull_failed":
+        message = (
+            "Deployment applied but no pod reached Ready because the image pull failed. "
+            "Verify AcrPull on the AKS kubelet identity and that the elb-openapi image tag "
+            "exists in the target ACR."
+        )
+    elif likely_cause == "unschedulable":
+        message = (
+            "Deployment applied but no pod reached Ready because Kubernetes could not "
+            "schedule it. Verify the blastpool label `workload=blast`, taint "
+            "`workload=blast:NoSchedule`, and OpenAPI toleration/nodeSelector."
+        )
+    else:
+        message = (
+            "Deployment applied but no pod reached Ready. Check the diagnostic_events "
+            "field for Kubernetes warning events, then inspect pod logs if a pod was created."
+        )
+    return {
+        "likely_cause": likely_cause,
+        "message": message,
+        "events": diagnostic_events[:8],
+    }
+
+
+def _filter_ready_failure_events(events: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    matched: list[dict[str, Any]] = []
+    for event in events:
+        if str(event.get("type") or "") != "Warning":
+            continue
+        involved_name = str(event.get("involved_name") or "")
+        message = str(event.get("message") or "")
+        haystack = f"{involved_name}\n{message}".lower()
+        if any(
+            token in haystack
+            for token in (
+                "elb-openapi",
+                "azure-wi-webhook",
+                "azure-workload-identity",
+                "imagepullbackoff",
+                "errimagepull",
+                "insufficient cpu",
+                "untolerated taint",
+                "failedscheduling",
+                "no endpoints available",
+            )
+        ):
+            matched.append(
+                {
+                    "namespace": event.get("namespace") or "",
+                    "kind": event.get("involved_kind") or "",
+                    "name": involved_name,
+                    "reason": event.get("reason") or "",
+                    "message": message[:500],
+                    "last_timestamp": event.get("last_timestamp") or "",
+                    "count": event.get("count") or 1,
+                }
+            )
+    return matched
+
+
+def _classify_ready_failure(events: Sequence[dict[str, Any]]) -> str:
+    text = "\n".join(
+        f"{event.get('name') or ''}\n{event.get('message') or ''}" for event in events
+    ).lower()
+    if "azure-workload-identity" in text or "azure-wi-webhook" in text:
+        return "workload_identity_webhook_unavailable"
+    if "imagepullbackoff" in text or "errimagepull" in text or "failed to pull image" in text:
+        return "image_pull_failed"
+    if "failedscheduling" in text or "untolerated taint" in text or "insufficient cpu" in text:
+        return "unschedulable"
+    return "unknown"
 
 
 @shared_task(
@@ -197,13 +303,20 @@ def deploy_openapi_service(
 
     if ready_replicas < 1:
         elapsed = int(time.time() - started)
+        diagnostics = _openapi_ready_failure_diagnostics(
+            cred,
+            subscription_id,
+            resource_group,
+            cluster_name,
+        )
         LOGGER.warning(
             "openapi deploy: no Ready replica after probe window image=%s "
-            "external_ip=%s ready=%s desired=%s",
+            "external_ip=%s ready=%s desired=%s cause=%s",
             image,
             external_ip or "<pending>",
             ready_replicas,
             desired_replicas,
+            diagnostics.get("likely_cause"),
         )
         return {
             "status": "failed",
@@ -216,14 +329,8 @@ def deploy_openapi_service(
                 "external_ip": external_ip,
                 "ready_replicas": ready_replicas,
                 "desired_replicas": desired_replicas,
-                "error": (
-                    "Deployment applied but no pod reached Ready. "
-                    "Common causes: ImagePullBackOff (verify AcrPull on the "
-                    "AKS kubelet identity), CrashLoopBackOff (check pod logs "
-                    "via the terminal sidecar: `kubectl logs -n default "
-                    "deploy/elb-openapi --previous`), or no schedulable node "
-                    "in the blast pool (taint/label mismatch)."
-                ),
+                "error": diagnostics["message"],
+                "diagnostics": diagnostics,
                 "apply_output": apply_output[:1000],
             },
             "elapsed_seconds": elapsed,

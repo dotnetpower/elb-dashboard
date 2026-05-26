@@ -5,6 +5,7 @@ import { aksApi, type AksSku, type AksAvailableSkusResponse } from "@/api/endpoi
 export const DEFAULT_AKS_SKU = "Standard_E16s_v5";
 /** Mirrors sibling repo constants.py::ELB_DFLT_AZURE_SYSTEM_VM_SIZE. */
 export const DEFAULT_AKS_SYSTEM_SKU = "Standard_D2s_v3";
+export const DEFAULT_AKS_SYSTEM_NODE_COUNT = 2;
 
 const FALLBACK_AKS_SKUS: AksSku[] = [
   {
@@ -125,6 +126,8 @@ export function useAksSkus({ enabled = true }: { enabled?: boolean } = {}) {
   const defaultSku = query.data?.default_sku ?? query.data?.default ?? DEFAULT_AKS_SKU;
   const defaultSystemSku =
     query.data?.default_system_sku ?? DEFAULT_AKS_SYSTEM_SKU;
+  const defaultSystemNodeCount =
+    query.data?.default_system_node_count ?? DEFAULT_AKS_SYSTEM_NODE_COUNT;
   const groupLabels = query.data?.group_labels ?? FALLBACK_GROUP_LABELS;
   const groupOrder = query.data?.group_order ?? FALLBACK_GROUP_ORDER;
 
@@ -133,6 +136,7 @@ export function useAksSkus({ enabled = true }: { enabled?: boolean } = {}) {
     skus,
     defaultSku,
     defaultSystemSku,
+    defaultSystemNodeCount,
     groupLabels,
     groupOrder,
   };

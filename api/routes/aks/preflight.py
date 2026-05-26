@@ -42,6 +42,7 @@ from api.services.aks_availability import (
 )
 from api.services.aks_skus import (
     DEFAULT_SKU,
+    DEFAULT_SYSTEM_NODE_COUNT,
     DEFAULT_SYSTEM_SKU,
 )
 
@@ -91,7 +92,7 @@ def aks_preflight(
     node_sku = str(body.get("node_sku") or DEFAULT_SKU)
     node_count = int(body.get("node_count") or 1)
     system_vm_size = str(body.get("system_vm_size") or DEFAULT_SYSTEM_SKU)
-    system_node_count = int(body.get("system_node_count") or 1)
+    system_node_count = int(body.get("system_node_count") or DEFAULT_SYSTEM_NODE_COUNT)
 
     credential = get_credential()
     ok, checks = run_provision_preflight(

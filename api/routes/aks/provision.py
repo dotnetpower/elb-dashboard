@@ -21,7 +21,7 @@ from fastapi import APIRouter, Body, Depends
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _safe_delay
-from api.services.aks_skus import DEFAULT_SKU, DEFAULT_SYSTEM_SKU
+from api.services.aks_skus import DEFAULT_SKU, DEFAULT_SYSTEM_NODE_COUNT, DEFAULT_SYSTEM_SKU
 
 LOGGER = logging.getLogger(__name__)
 
@@ -78,7 +78,9 @@ def aks_provision(
                     "node_sku": body.get("node_sku", DEFAULT_SKU),
                     "node_count": body.get("node_count", 3),
                     "system_vm_size": body.get("system_vm_size", DEFAULT_SYSTEM_SKU),
-                    "system_node_count": body.get("system_node_count", 1),
+                    "system_node_count": body.get(
+                        "system_node_count", DEFAULT_SYSTEM_NODE_COUNT
+                    ),
                     "tier": str(body.get("tier", "") or ""),
                 },
             )
@@ -98,7 +100,7 @@ def aks_provision(
         # Sibling repo's two-pool layout: small system pool + workload pool.
         # Defaults mirror constants.py::ELB_DFLT_AZURE_SYSTEM_VM_SIZE.
         system_vm_size=body.get("system_vm_size", DEFAULT_SYSTEM_SKU),
-        system_node_count=body.get("system_node_count", 1),
+        system_node_count=body.get("system_node_count", DEFAULT_SYSTEM_NODE_COUNT),
         acr_resource_group=body.get("acr_resource_group", ""),
         acr_name=body.get("acr_name", ""),
         storage_resource_group=body.get("storage_resource_group", ""),

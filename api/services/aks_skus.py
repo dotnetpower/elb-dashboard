@@ -45,6 +45,7 @@ class SkuListResponse(TypedDict):
     default: str
     default_sku: str
     default_system_sku: str
+    default_system_node_count: int
     group_labels: dict[str, str]
     group_order: list[str]
     degraded: bool
@@ -134,6 +135,7 @@ def _sku(
 # Sibling defaults: constants.py.
 DEFAULT_SKU: str = "Standard_E32s_v5"  # ELB_DFLT_AZURE_MACHINE_TYPE
 DEFAULT_SYSTEM_SKU: str = "Standard_D2s_v3"  # ELB_DFLT_AZURE_SYSTEM_VM_SIZE
+DEFAULT_SYSTEM_NODE_COUNT: int = 2
 
 
 # Mirror of sibling azure_traits.py::AZURE_HPC_MACHINES plus matching
@@ -271,6 +273,7 @@ def sku_list_response(
         "default": DEFAULT_SKU,
         "default_sku": DEFAULT_SKU,
         "default_system_sku": DEFAULT_SYSTEM_SKU,
+        "default_system_node_count": DEFAULT_SYSTEM_NODE_COUNT,
         "group_labels": {g: SKU_GROUP_LABELS[g] for g in ordered},
         "group_order": ordered,
         "degraded": degraded,

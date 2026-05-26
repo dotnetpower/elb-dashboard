@@ -12,7 +12,7 @@ export interface AksProvisionRequest {
   /** AKS system pool VM size. Mirrors sibling repo
    *  constants.py::ELB_DFLT_AZURE_SYSTEM_VM_SIZE (Standard_D2s_v3). */
   system_vm_size?: string;
-  /** Node count for the system pool (default 1, capped at 3). */
+  /** Node count for the system pool (default 2, capped at 3). */
   system_node_count?: number;
   acr_resource_group?: string;
   acr_name?: string;
@@ -69,6 +69,8 @@ export interface AksSkuListResponse {
   default_sku: string;
   /** Default SKU for the small AKS system pool. */
   default_system_sku: string;
+  /** Default node count for the AKS system pool. */
+  default_system_node_count?: number;
   /** Map of group id → human-friendly label (used as `<optgroup label>`). */
   group_labels?: Record<string, string>;
   /** Stable display order for the group ids in the dropdown. */

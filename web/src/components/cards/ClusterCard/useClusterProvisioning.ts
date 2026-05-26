@@ -8,6 +8,7 @@ import { reportClientError } from "@/api/clientLog";
 import type { AksClusterSummary } from "@/api/endpoints";
 import {
   DEFAULT_AKS_SKU,
+  DEFAULT_AKS_SYSTEM_NODE_COUNT,
   DEFAULT_AKS_SYSTEM_SKU,
 } from "@/hooks/useAksSkus";
 
@@ -17,7 +18,6 @@ import {
 } from "./lastFailedProvision";
 
 const DEFAULT_NODE_COUNT = 10;
-const DEFAULT_SYSTEM_NODE_COUNT = 1;
 
 export const MAX_SYSTEM_NODE_COUNT = 3;
 export const CLUSTER_NAME_RE = /^[a-zA-Z][a-zA-Z0-9-]{1,62}$/;
@@ -140,7 +140,7 @@ export function useClusterProvisioning(args: {
   // "Apply N nodes" button — we never mutate the input on the user's behalf.
   const [nodeCount, setNodeCount] = useState(DEFAULT_NODE_COUNT);
   const [systemVmSize, setSystemVmSize] = useState(DEFAULT_AKS_SYSTEM_SKU);
-  const [systemNodeCount, setSystemNodeCount] = useState(DEFAULT_SYSTEM_NODE_COUNT);
+  const [systemNodeCount, setSystemNodeCount] = useState(DEFAULT_AKS_SYSTEM_NODE_COUNT);
   /** Free-form cluster classification — written to the `elb-tier` ARM tag
    *  so the dashboard can group multi-cluster deployments. Empty string =
    *  leave the tag off. The picker is optional in the UI. */

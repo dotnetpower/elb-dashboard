@@ -165,6 +165,7 @@ def test_aks_skus_route_returns_compatible_default_fields(
     assert body["default"] == aks_skus.DEFAULT_SKU
     assert body["default_sku"] == aks_skus.DEFAULT_SKU
     assert body["default_system_sku"] == aks_skus.DEFAULT_SYSTEM_SKU
+    assert body["default_system_node_count"] == aks_skus.DEFAULT_SYSTEM_NODE_COUNT
     assert len(body["skus"]) == len(aks_skus.ALLOWED_SKUS)
     assert body["skus"][0]["hourlyUsd"] == aks_skus.AZURE_VM_HOURLY_USD[body["skus"][0]["name"]]
     # Every SKU carries role + group so the SPA can split blast / system
