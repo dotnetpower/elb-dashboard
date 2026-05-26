@@ -65,6 +65,13 @@ need() {
   }
 }
 
+is_true() {
+  case "${1:-}" in
+    true|TRUE|1|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 need az
 
 if [[ -n "$suffix" && ! "$suffix" =~ ^-[0-9][0-9]$ ]]; then
@@ -126,6 +133,16 @@ rg_exists() {
   [[ "$(az group exists "${subscription_arg[@]}" --name "$1" -o tsv 2>/dev/null || echo false)" == "true" ]]
 }
 
+rg_state() {
+  # Returns the RG's provisioningState (e.g. Succeeded, Deleting) or an
+  # empty string when the RG does not exist. Used to skip slots whose RG
+  # is mid-deletion so the recover-deleted-keyvault.sh hook does not hit
+  # `(ResourceGroupBeingDeleted) The resource group 'X' is in
+  # deprovisioning state and cannot perform this operation`.
+  az group show "${subscription_arg[@]}" --name "$1" \
+    --query 'properties.provisioningState' -o tsv 2>/dev/null || true
+}
+
 resource_count() {
   az resource list "${subscription_arg[@]}" --resource-group "$1" --query 'length(@)' -o tsv 2>/dev/null || echo 0
 }
@@ -135,16 +152,34 @@ print_sample_resources() {
     --query '[0:10].{name:name,type:type}' -o table 2>/dev/null || true
 }
 
+rg_slot_is_usable() {
+  # "Usable" = either does not exist, or exists with provisioningState=Succeeded
+  # AND zero resources. Anything else (Deleting / Creating / Failed, or
+  # has lingering resources) is treated as a collision worth skipping.
+  local rg="$1"
+  if ! rg_exists "$rg"; then
+    return 0
+  fi
+  local state count
+  state="$(rg_state "$rg")"
+  if [[ "$state" != "Succeeded" ]]; then
+    return 1
+  fi
+  count="$(resource_count "$rg")"
+  if [[ "$count" != "0" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 next_numbered_suffix() {
-  local candidate count n
+  # Scan -01..-99 and return the first slot whose RG is usable
+  # (rg_slot_is_usable). Skips Deleting/Creating/Failed RGs as well as
+  # RGs that still hold resources from a previous deployment.
+  local candidate n
   for n in $(seq 1 99); do
     candidate="$(printf -- '-%02d' "$n")"
-    if ! rg_exists "${base_rg}${candidate}"; then
-      printf '%s' "$candidate"
-      return 0
-    fi
-    count="$(resource_count "${base_rg}${candidate}")"
-    if [[ "$count" == "0" ]]; then
+    if rg_slot_is_usable "${base_rg}${candidate}"; then
       printf '%s' "$candidate"
       return 0
     fi
@@ -154,7 +189,52 @@ next_numbered_suffix() {
 
 target_rg="${base_rg}${suffix}"
 if [[ -n "$suffix" ]]; then
-  echo "==> Resource group suffix already selected: $suffix"
+  # Validate the preselected slot. If the target RG is in Deleting state
+  # (or otherwise unusable), fall through to auto-increment so the
+  # deploy does not crash inside the recover-deleted-keyvault hook.
+  if rg_slot_is_usable "$target_rg"; then
+    echo "==> Resource group suffix already selected: $suffix"
+    echo "==> Target resource group: $target_rg"
+    set_azd_slot "$slot"
+    exit 0
+  fi
+
+  current_state="$(rg_state "$target_rg")"
+  current_count="$(resource_count "$target_rg" 2>/dev/null || echo 0)"
+  echo "==> Preselected slot $suffix is not usable (state=${current_state:-<missing>} resources=$current_count); searching for the next available slot."
+  new_suffix="$(next_numbered_suffix)" || {
+    echo "ERROR: could not find an available numbered resource group from ${base_rg}-01 to ${base_rg}-99." >&2
+    exit 1
+  }
+
+  # When attached to a TTY ask the operator before silently switching
+  # slots — a 5 s timeout auto-accepts so non-attended re-runs (e.g.
+  # "re-run after coffee") still complete. Non-interactive shells (CI,
+  # `</dev/null` piped) skip the prompt and proceed straight to the new
+  # slot. `ELB_AUTO_SWITCH_SLOT=true` opts out of the prompt explicitly.
+  if [[ -t 0 && -t 1 ]] && ! is_true "${ELB_AUTO_SWITCH_SLOT:-}"; then
+    reply=""
+    if ! read -r -t 5 -p "Switch from ${base_rg}${suffix} to ${base_rg}${new_suffix}? [Y/n] (auto Y in 5 s): " reply; then
+      reply=""
+      echo
+    fi
+    case "${reply,,}" in
+      n|no)
+        echo "ERROR: operator declined the slot switch. Free the slot or pass ELB_RESOURCE_NAME_SUFFIX manually, then re-run." >&2
+        exit 1
+        ;;
+      ""|y|yes) ;;
+      *)
+        echo "ERROR: unrecognised reply '$reply' — expected y or n." >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  suffix="$new_suffix"
+  slot="slot${suffix#-}"
+  target_rg="${base_rg}${suffix}"
+  echo "==> Switching to next available slot: $suffix"
   echo "==> Target resource group: $target_rg"
   set_azd_slot "$slot"
   exit 0

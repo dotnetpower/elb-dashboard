@@ -235,7 +235,7 @@ if [[ -n "$CLUSTER_RG" ]]; then
 else
   # No cluster yet — record a WARN so the operator knows the bootstrap
   # path is the next thing they'll need.
-  add "Cluster RG (none detected) \u2014 first-time create needs bootstrap" \
+  add "Cluster RG (none detected) — first-time create needs bootstrap" \
       "(run: scripts/dev/grant-runtime-rbac.sh --cluster-rg <rg> --region <r> --yes)" \
       "(n/a)" "WARN"
 fi
@@ -249,13 +249,13 @@ fi
   gray  "  Subscription:   $SUBSCRIPTION"
   gray  "  Container App:  ${CONTAINER_APP:-<n/a>} (${RESOURCE_GROUP:-<n/a>})"
   gray  "  MI principalId: $PRINCIPAL_ID"
-  gray  "  Cluster RG:     ${CLUSTER_RG:-<not detected \u2014 bootstrap will be needed>}"
+  gray  "  Cluster RG:     ${CLUSTER_RG:-<not detected — bootstrap will be needed>}"
   if [[ $AUTO_FIX -eq 1 ]]; then
     # Audit banner: makes the operator-approved auto-grant explicit in
     # the console output AND (via Azure Activity Log) in Azure itself,
     # since the `az role assignment create` calls below run under the
     # operator's current `az login` context.
-    yellow "  Mode:           --auto-fix ENABLED \u2014 missing roles will be granted"
+    yellow "  Mode:           --auto-fix ENABLED — missing roles will be granted"
     yellow "                  under the current az login identity:"
     yellow "                  $(az account show --query user.name -o tsv 2>/dev/null || echo '<unknown>')"
   else
@@ -318,7 +318,7 @@ for row in "${MANIFEST[@]}"; do
       continue
     else
       FAIL_COUNT=$((FAIL_COUNT + 1))
-      red   "  [FAIL] $LABEL (auto-fix could not grant \u2014 you may lack UAA here)"
+      red   "  [FAIL] $LABEL (auto-fix could not grant — you may lack UAA here)"
       gray  "         role:  $ROLE"
       gray  "         scope: $SCOPE"
       gray  "         azerr: $(tr -d '\n' </tmp/check-mi-rbac.err | head -c 200)"
@@ -354,7 +354,7 @@ printf '\n'
 if [[ $AUTO_FIX -eq 1 ]]; then
   gray "Summary: ok=$OK_COUNT fixed=$FIXED_COUNT warn=$WARN_COUNT fail=$FAIL_COUNT"
   if [[ $FIXED_COUNT -gt 0 ]]; then
-    yellow "RBAC propagation usually takes 1\u20135 minutes \u2014 newly granted roles"
+    yellow "RBAC propagation usually takes 1–5 minutes — newly granted roles"
     yellow "will not take effect immediately on the deployed Container App."
   fi
 else
@@ -380,7 +380,7 @@ if [[ "$FAIL_COUNT" -gt 0 ]]; then
 fi
 
 if [[ "$WARN_COUNT" -gt 0 ]]; then
-  yellow "Warnings are informational \u2014 review them when planning the next"
+  yellow "Warnings are informational — review them when planning the next"
   yellow "AKS / Storage / ACR onboarding step."
 fi
 

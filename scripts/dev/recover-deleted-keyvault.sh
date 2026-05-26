@@ -77,9 +77,17 @@ azd_env_value() {
 need az
 need jq
 
-slot="${ELB_RESOURCE_NAME_SLOT:-}"
+# Prefer the azd env file over the process env var. `resolve-resource-group.sh`
+# runs earlier in the same preprovision hook chain and may swap the slot
+# (e.g. -01 → -02) when the preselected RG is Deleting/occupied; that
+# update lands in `.azure/<env>/.env`, but the parent shell still carries
+# azd's original `ELB_RESOURCE_NAME_SLOT` injection. Reading the file
+# first picks up the swap; falling back to the env var keeps the script
+# usable from a plain `bash recover-deleted-keyvault.sh` invocation
+# outside an azd hook.
+slot="$(azd_env_value ELB_RESOURCE_NAME_SLOT || true)"
 if [[ -z "$slot" ]]; then
-  slot="$(azd_env_value ELB_RESOURCE_NAME_SLOT || true)"
+  slot="${ELB_RESOURCE_NAME_SLOT:-}"
 fi
 
 if [[ -n "$slot" && ! "$slot" =~ ^slot[0-9][0-9]$ ]]; then

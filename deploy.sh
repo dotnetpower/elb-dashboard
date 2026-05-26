@@ -426,18 +426,21 @@ fi
 #     manual command in the closing summary. Use this when policy forbids
 #     `deploy.sh` from creating workload resource groups.
 #
-# The "no cluster yet" condition is detected by a real `az aks list` against
-# the subscription, not by grepping the doctor's stdout. The doctor's WARN
-# row about a missing cluster RG uses different phrasing across versions, and
-# relying on a specific substring made this entire bootstrap block dead code
-# in the past.
+# The "no cluster yet" condition was previously detected by `az aks list`,
+# but that fires false-negatives on shared subscriptions where other teams
+# already operate AKS clusters: any unrelated cluster makes the bootstrap
+# skip, leaving the dashboard's own MI without permissions on its workload
+# RG. The correct signal is "the cluster RG this deployment will use
+# (rg-elb-cluster by default, or ELB_CLUSTER_RG_NAME) exists" — if it
+# doesn't, we definitely have to bootstrap; if it does, grant-runtime-rbac
+# in maintenance mode is a cheap no-op that surfaces any stray gaps.
 # ---------------------------------------------------------------------------
 CLUSTER_BOOTSTRAP_RAN=false
 CLUSTER_BOOTSTRAP_HINT=false
-existing_aks_id="$(az aks list --subscription "$subscription_id" --query '[0].id' -o tsv 2>/dev/null || true)"
-if [[ -z "$existing_aks_id" ]]; then
-  BOOTSTRAP_RG="${ELB_CLUSTER_RG_NAME:-rg-elb-cluster}"
-  BOOTSTRAP_REGION="${ELB_CLUSTER_RG_REGION:-$location}"
+BOOTSTRAP_RG="${ELB_CLUSTER_RG_NAME:-rg-elb-cluster}"
+BOOTSTRAP_REGION="${ELB_CLUSTER_RG_REGION:-$location}"
+cluster_rg_exists="$(az group exists --subscription "$subscription_id" --name "$BOOTSTRAP_RG" -o tsv 2>/dev/null || echo false)"
+if [[ "$cluster_rg_exists" != "true" ]]; then
   RBAC_SCRIPT="$repo_root/scripts/dev/grant-runtime-rbac.sh"
 
   if [[ ! -x "$RBAC_SCRIPT" ]]; then
