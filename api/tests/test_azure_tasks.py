@@ -153,6 +153,10 @@ def test_ensure_aks_runtime_rbac_grants_acr_and_storage(monkeypatch) -> None:
 
     monkeypatch.setattr(azure, "_attach_acr", fake_attach_acr)
     monkeypatch.setattr(azure, "_grant_storage_blob_contributor_to_aks", fake_grant_storage)
+    # Provide a kubelet OID so the function reaches the grant helpers
+    # instead of taking the kubelet-missing early-exit branch.
+    import api.tasks.azure.rbac as rbac_mod
+    monkeypatch.setattr(rbac_mod, "_resolve_kubelet_oid", lambda *_a, **_kw: "kubelet-oid")
 
     summary = azure._ensure_aks_runtime_rbac(
         object(),
@@ -178,6 +182,10 @@ def test_ensure_aks_runtime_rbac_reports_nonfatal_failures(monkeypatch) -> None:
     monkeypatch.setattr(
         azure, "_grant_storage_blob_contributor_to_aks", lambda *_args, **_kwargs: None
     )
+    # Provide a kubelet OID so we reach the grant helpers (otherwise the
+    # kubelet-missing early-exit would short-circuit before fail_attach_acr).
+    import api.tasks.azure.rbac as rbac_mod
+    monkeypatch.setattr(rbac_mod, "_resolve_kubelet_oid", lambda *_a, **_kw: "kubelet-oid")
 
     summary = azure._ensure_aks_runtime_rbac(
         object(),
@@ -202,6 +210,8 @@ def test_ensure_aks_runtime_rbac_publishes_sub_phases(monkeypatch) -> None:
     monkeypatch.setattr(
         azure, "_grant_storage_blob_contributor_to_aks", lambda *_a, **_kw: None
     )
+    import api.tasks.azure.rbac as rbac_mod
+    monkeypatch.setattr(rbac_mod, "_resolve_kubelet_oid", lambda *_a, **_kw: "kubelet-oid")
 
     published: list[tuple[str, str]] = []
 
@@ -252,6 +262,8 @@ def test_ensure_aks_runtime_rbac_does_not_swallow_internal_typeerror(monkeypatch
     monkeypatch.setattr(
         azure, "_grant_storage_blob_contributor_to_aks", lambda *_a, **_kw: None
     )
+    import api.tasks.azure.rbac as rbac_mod
+    monkeypatch.setattr(rbac_mod, "_resolve_kubelet_oid", lambda *_a, **_kw: "kubelet-oid")
 
     summary = azure._ensure_aks_runtime_rbac(
         object(),

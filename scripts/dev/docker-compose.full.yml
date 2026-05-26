@@ -121,7 +121,7 @@ services:
   # ---------------------------------------------------------------------
   frontend:
     dns: [8.8.8.8, 1.1.1.1]
-    image: node:20-alpine
+    image: node:22-alpine
     working_dir: /web
     # 1) Install python3 + redis-py (one-shot, ~25 MB) so the standalone
     #    cgroup_reporter can publish to the ops bus from inside the vite

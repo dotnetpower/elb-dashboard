@@ -4,7 +4,7 @@
 # Stage 2: serve via nginx:alpine on loopback :8081 — the api sidecar
 #          reverse-proxies non-/api/* requests here.
 
-FROM node:20.18-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /web
 
 # Install deps with cache friendliness.
