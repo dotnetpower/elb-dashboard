@@ -302,6 +302,17 @@ export const monitoringApi = {
       `/monitor/aks/pod-logs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&pod_name=${encodeURIComponent(podName)}&tail=${tail ?? 200}`,
     ),
 
+  k8sPodDescribe: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    namespace: string,
+    podName: string,
+  ) =>
+    api.get<{ describe: string }>(
+      `/monitor/aks/pod-describe?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&pod_name=${encodeURIComponent(podName)}`,
+    ),
+
   buildAcrImages: (
     subscriptionId: string,
     rg: string,

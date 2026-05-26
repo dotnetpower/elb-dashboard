@@ -42,6 +42,8 @@ export interface AppInsightsProvisionRequest {
   region: string;
   workspace_name: string;
   workspace_resource_group?: string;
+  /** Log Analytics retention in days. Backend allows 7-730 from a discrete list. */
+  retention_days?: number;
 }
 
 export interface AppInsightsApplyRequest {
@@ -104,6 +106,12 @@ export const settingsApi = {
     api.post<AppInsightsTaskQueuedResponse>(
       "/settings/app-insights/apply",
       body,
+    ),
+
+  clearAppInsightsFromDeployment: () =>
+    api.post<AppInsightsTaskQueuedResponse>(
+      "/settings/app-insights/clear",
+      {},
     ),
 
   getAksObservabilityStatus: (q: AksObservabilityStatusQuery) =>

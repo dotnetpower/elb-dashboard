@@ -342,6 +342,59 @@ def test_ensure_aks_runtime_rbac_skips_kubelet_check_when_no_targets(monkeypatch
     assert summary["roles_failed"] == {}
 
 
+def test_ensure_aks_runtime_rbac_defaults_storage_from_env(monkeypatch) -> None:
+    """Regression for the silent-skip that produced `AKS cache failed`
+    with `azcopy ... 403 AuthorizationPermissionMismatch` during warmup.
+
+    The SPA cluster-provision form historically left `storage_account`
+    empty in the request body. The provision route forwarded `""` to
+    `ensure_aks_runtime_rbac`, which then skipped the Storage Blob Data
+    Contributor grant entirely — the kubelet ended up with `AcrPull`
+    only, and every warmup `azcopy cp` later 403'd on the manifest HEAD.
+
+    With the env-default in place, when the caller omits the target and
+    the platform env carries the workload Storage identifier, the grant
+    helper is invoked with those values so the kubelet always gets the
+    role on the dashboard's own Storage account."""
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stworkload")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-workload")
+
+    import api.tasks.azure.rbac as rbac_mod
+
+    monkeypatch.setattr(rbac_mod, "_resolve_kubelet_oid", lambda *_a, **_kw: "kubelet-oid")
+    monkeypatch.setattr(azure, "_attach_acr", lambda *_a, **_kw: None)
+
+    grants: list[tuple[str, str]] = []
+
+    def fake_grant_storage(
+        _cred: object,
+        _subscription_id: str,
+        _resource_group: str,
+        _cluster_name: str,
+        storage_resource_group: str,
+        storage_account: str,
+    ) -> None:
+        grants.append((storage_resource_group, storage_account))
+
+    monkeypatch.setattr(azure, "_grant_storage_blob_contributor_to_aks", fake_grant_storage)
+
+    summary = azure._ensure_aks_runtime_rbac(
+        object(),
+        "sub-1",
+        "rg-aks",
+        "aks1",
+        acr_resource_group="rg-acr",
+        acr_name="acr1",
+        # SPA omits storage target — the env default must fill it.
+        storage_resource_group="",
+        storage_account="",
+    )
+
+    assert grants == [("rg-workload", "stworkload")]
+    assert "Storage Blob Data Contributor" in summary["roles_assigned"]
+    assert summary["roles_failed"] == {}
+
+
 def test_create_role_assignment_retries_principal_not_found(monkeypatch) -> None:
     """Freshly minted kubelet identities occasionally hit
     ``PrincipalNotFound`` for ~30 s while Entra ID propagates. The retry
@@ -685,3 +738,219 @@ def test_delete_aks_accepts_managedby_camelcase_tag(monkeypatch) -> None:
     assert fake_mc.deleted == [("rg-elb-legacy", "elb-aks")]
     assert rg_deleted == ["rg-elb-legacy"]
     assert result["resource_group_status"] == "deleted"
+
+
+# ---------------------------------------------------------------------------
+# Dashboard MI self-grant on the AKS cluster RG (Part A of the OpenAPI-deploy
+# RBAC-gap fix). See `api/tasks/azure/rbac.py::ensure_dashboard_mi_cluster_rg_roles`.
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_dashboard_mi_cluster_rg_roles_skips_when_no_principal_id(
+    monkeypatch,
+) -> None:
+    """Local-dev shell with no `SHARED_IDENTITY_PRINCIPAL_ID` must skip
+    silently — there is no MI to self-grant to, and the helper must not
+    blow up by hitting the Azure SDK.
+    """
+    monkeypatch.delenv("SHARED_IDENTITY_PRINCIPAL_ID", raising=False)
+
+    result = azure._ensure_dashboard_mi_cluster_rg_roles(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        mi_principal_id="",
+    )
+
+    assert result == {
+        "skipped": True,
+        "reason": "SHARED_IDENTITY_PRINCIPAL_ID not set",
+        "roles_assigned": [],
+        "roles_failed": {},
+    }
+
+
+def test_ensure_dashboard_mi_cluster_rg_roles_assigns_both_roles(monkeypatch) -> None:
+    """Happy path: Contributor + UAA assigned on cluster RG to the MI.
+
+    Verifies the helper writes the role assignments at RG scope with the
+    well-known role definition GUIDs and returns both labels in
+    `roles_assigned` plus the recovery command for SPA display.
+    """
+    captured: list[dict[str, Any]] = []
+
+    class FakeRoleAssignments:
+        def create(
+            self, *, scope: str, role_assignment_name: str, parameters: object
+        ) -> None:
+            captured.append(
+                {
+                    "scope": scope,
+                    "role_assignment_name": role_assignment_name,
+                    "role_definition_id": parameters.role_definition_id,
+                    "principal_id": parameters.principal_id,
+                    "principal_type": parameters.principal_type,
+                }
+            )
+
+    class FakeAuthorizationClient:
+        def __init__(self, _cred: object, _sub: str) -> None:
+            self.role_assignments = FakeRoleAssignments()
+
+    import azure.mgmt.authorization as auth_mod
+
+    monkeypatch.setattr(auth_mod, "AuthorizationManagementClient", FakeAuthorizationClient)
+
+    result = azure._ensure_dashboard_mi_cluster_rg_roles(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        mi_principal_id="mi-oid",
+    )
+
+    assert result["roles_assigned"] == ["Contributor", "User Access Administrator"]
+    assert result["roles_failed"] == {}
+    assert result["mi_principal_id"] == "mi-oid"
+    assert result["cluster_resource_group"] == "rg-elb-cluster"
+    assert "grant-runtime-rbac.sh" in result["recovery_command"]
+    assert "--cluster-rg rg-elb-cluster" in result["recovery_command"]
+    assert "--principal-id mi-oid" in result["recovery_command"]
+
+    assert len(captured) == 2
+    rg_scope = "/subscriptions/sub-1/resourceGroups/rg-elb-cluster"
+    assert all(c["scope"] == rg_scope for c in captured), captured
+    assert all(c["principal_id"] == "mi-oid" for c in captured), captured
+    assert all(c["principal_type"] == "ServicePrincipal" for c in captured), captured
+    role_guids = sorted(c["role_definition_id"].rsplit("/", 1)[-1] for c in captured)
+    assert role_guids == sorted(
+        [
+            "b24988ac-6180-42a0-ab88-20f7382dd24c",  # Contributor
+            "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9",  # User Access Administrator
+        ]
+    )
+
+
+def test_ensure_dashboard_mi_cluster_rg_roles_records_authorization_failure(
+    monkeypatch,
+) -> None:
+    """When the MI lacks `roleAssignments/write` at the target scope (pre
+    Part-C deployments) the helper must NOT raise — record the failure
+    into `roles_failed` and surface the exact `grant-runtime-rbac.sh`
+    command so an admin can recover by hand. The cluster itself is still
+    fully usable; failing the provision task here would be a worse UX.
+    """
+
+    class _AuthFailed(Exception):
+        pass
+
+    class FakeRoleAssignments:
+        def create(
+            self, *, scope: str, role_assignment_name: str, parameters: object
+        ) -> None:
+            raise _AuthFailed(
+                "(AuthorizationFailed) The client 'mi-oid' does not have "
+                "authorization to perform action "
+                "'Microsoft.Authorization/roleAssignments/write' over scope "
+                f"'{scope}'."
+            )
+
+    class FakeAuthorizationClient:
+        def __init__(self, _cred: object, _sub: str) -> None:
+            self.role_assignments = FakeRoleAssignments()
+
+    import azure.mgmt.authorization as auth_mod
+
+    monkeypatch.setattr(auth_mod, "AuthorizationManagementClient", FakeAuthorizationClient)
+
+    result = azure._ensure_dashboard_mi_cluster_rg_roles(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        mi_principal_id="mi-oid",
+    )
+
+    # Both attempts failed → both labels recorded; no exception raised.
+    assert result["roles_assigned"] == []
+    assert set(result["roles_failed"].keys()) == {
+        "Contributor",
+        "User Access Administrator",
+    }
+    for msg in result["roles_failed"].values():
+        assert "AuthorizationFailed" in msg
+    # Recovery command is always included so the SPA can render a copy
+    # button even on the failure path.
+    assert "grant-runtime-rbac.sh" in result["recovery_command"]
+
+
+def test_ensure_dashboard_mi_cluster_rg_roles_treats_existing_assignment_as_success(
+    monkeypatch,
+) -> None:
+    """Re-runs against an already-granted MI must idempotently land in
+    `roles_assigned` (not `roles_failed`). The `_create_role_assignment_with_retry`
+    helper turns `RoleAssignmentExists` into a silent success.
+    """
+
+    class _Conflict(Exception):
+        pass
+
+    class FakeRoleAssignments:
+        def create(
+            self, *, scope: str, role_assignment_name: str, parameters: object
+        ) -> None:
+            raise _Conflict(
+                "(RoleAssignmentExists) The role assignment already exists."
+            )
+
+    class FakeAuthorizationClient:
+        def __init__(self, _cred: object, _sub: str) -> None:
+            self.role_assignments = FakeRoleAssignments()
+
+    import azure.mgmt.authorization as auth_mod
+
+    monkeypatch.setattr(auth_mod, "AuthorizationManagementClient", FakeAuthorizationClient)
+
+    result = azure._ensure_dashboard_mi_cluster_rg_roles(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        mi_principal_id="mi-oid",
+    )
+
+    assert result["roles_assigned"] == ["Contributor", "User Access Administrator"]
+    assert result["roles_failed"] == {}
+
+
+def test_ensure_dashboard_mi_cluster_rg_roles_falls_back_to_env_var(
+    monkeypatch,
+) -> None:
+    """When `mi_principal_id=""`, the helper picks up
+    `SHARED_IDENTITY_PRINCIPAL_ID` from the environment so callers in
+    `provision_aks` do not have to pass it through explicitly.
+    """
+    captured: list[str] = []
+
+    class FakeRoleAssignments:
+        def create(
+            self, *, scope: str, role_assignment_name: str, parameters: object
+        ) -> None:
+            captured.append(parameters.principal_id)
+
+    class FakeAuthorizationClient:
+        def __init__(self, _cred: object, _sub: str) -> None:
+            self.role_assignments = FakeRoleAssignments()
+
+    import azure.mgmt.authorization as auth_mod
+
+    monkeypatch.setattr(auth_mod, "AuthorizationManagementClient", FakeAuthorizationClient)
+    monkeypatch.setenv("SHARED_IDENTITY_PRINCIPAL_ID", "env-mi-oid")
+
+    result = azure._ensure_dashboard_mi_cluster_rg_roles(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        mi_principal_id="",
+    )
+
+    assert captured == ["env-mi-oid", "env-mi-oid"]
+    assert result["mi_principal_id"] == "env-mi-oid"
+    assert "--principal-id env-mi-oid" in result["recovery_command"]

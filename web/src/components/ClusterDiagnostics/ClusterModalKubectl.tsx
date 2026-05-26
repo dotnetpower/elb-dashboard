@@ -25,6 +25,7 @@ export interface ClusterModalKubectlProps {
   clusterName: string;
   topQuery: {
     isLoading: boolean;
+    isFetching: boolean;
     isError: boolean;
     data?: { nodes: K8sNodeMetrics[] } | null;
     error?: unknown;
@@ -52,6 +53,13 @@ export function ClusterModalKubectl({
     retry: 1,
   });
 
+  // `topQuery` is a UseQueryResult passed in from the parent. Reading
+  // `isFetching` (not just `isLoading`) is what surfaces refresh activity —
+  // refetch otherwise updates data silently and looks like "nothing happened"
+  // when the numbers are steady.
+  const isRefreshing =
+    topQuery.isFetching || nodesQuery.isFetching || podsQuery.isFetching;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div
@@ -78,16 +86,23 @@ export function ClusterModalKubectl({
             nodesQuery.refetch();
             podsQuery.refetch();
           }}
+          disabled={isRefreshing}
           style={{
             padding: "4px 10px",
             fontSize: 10,
             display: "flex",
             alignItems: "center",
             gap: 4,
+            cursor: isRefreshing ? "wait" : "pointer",
           }}
-          title="Refresh all diagnostics"
+          title={isRefreshing ? "Refreshing…" : "Refresh all diagnostics"}
         >
-          <RefreshCw size={10} strokeWidth={1.5} /> Refresh All
+          <RefreshCw
+            size={10}
+            strokeWidth={1.5}
+            className={isRefreshing ? "spin" : undefined}
+          />
+          {isRefreshing ? "Refreshing…" : "Refresh All"}
         </button>
       </div>
 

@@ -83,15 +83,21 @@ resource operatorSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04
 }
 
 // ---------------------------------------------------------------------------
-// Private endpoint + DNS zone (only when locked down).
+// Private endpoint + DNS zone (ALWAYS created).
+//
+// `allowPublicAccessForBootstrap` only controls publicNetworkAccess /
+// networkAcls on the vault itself (above). The PE is created from day 1
+// so the Container App reads secrets over the private path through both
+// postures. See the matching note in storage.bicep for why decoupling
+// these two concerns eliminates a class of broken middle states.
 // ---------------------------------------------------------------------------
-resource kvPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (!allowPublicAccessForBootstrap) {
+resource kvPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = {
   name: 'privatelink.vaultcore.azure.net'
   location: 'global'
   tags: moduleTags
 }
 
-resource kvPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (!allowPublicAccessForBootstrap) {
+resource kvPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
   parent: kvPrivateDnsZone
   name: 'link-${uniqueString(vnetResourceId)}'
   location: 'global'
@@ -102,7 +108,7 @@ resource kvPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks
   }
 }
 
-resource kvPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (!allowPublicAccessForBootstrap) {
+resource kvPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   name: 'pe-${keyVaultName}'
   location: location
   tags: moduleTags
@@ -120,7 +126,7 @@ resource kvPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if 
   }
 }
 
-resource kvPrivateDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = if (!allowPublicAccessForBootstrap) {
+resource kvPrivateDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
   parent: kvPrivateEndpoint
   name: 'default'
   properties: {

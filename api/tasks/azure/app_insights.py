@@ -25,10 +25,13 @@ from api.services import get_credential
 from api.services.app_insights_provisioning import (
     ensure_application_insights,
     ensure_log_analytics_workspace,
+    get_application_insights,
+    get_workspace,
 )
 from api.services.upgrade.aca_template import (
     CONTAINER_APP_NAME_ENV,
     apply_app_insights_connection_string,
+    clear_app_insights_connection_string,
 )
 from api.tasks.azure.helpers import publish_progress
 
@@ -50,6 +53,7 @@ def provision_app_insights(
     region: str,
     workspace_name: str,
     workspace_resource_group: str | None = None,
+    retention_days: int | None = None,
 ) -> dict[str, Any]:
     """Create (or look up) a workspace-based Application Insights component.
 
@@ -65,6 +69,9 @@ def provision_app_insights(
     the App Insights JS SDK without re-running this task. In production the
     same connection string is also written into the Container App template so
     server-side logs/traces start exporting after the new revision rolls out.
+
+    ``workspace_created`` / ``component_created`` in the result let the SPA
+    distinguish "we made this for you" from "we reused an existing one".
     """
     job_id = self.request.id or "provision_app_insights"
     ws_rg = workspace_resource_group or resource_group
@@ -78,13 +85,22 @@ def provision_app_insights(
         message=f"Ensuring Log Analytics workspace {workspace_name}",
     )
     cred = get_credential()
-    workspace = ensure_log_analytics_workspace(
+    pre_existing_workspace = get_workspace(
         cred,
         subscription_id=subscription_id,
         resource_group=ws_rg,
         workspace_name=workspace_name,
-        region=region,
     )
+    ws_kwargs: dict[str, Any] = {
+        "subscription_id": subscription_id,
+        "resource_group": ws_rg,
+        "workspace_name": workspace_name,
+        "region": region,
+    }
+    if retention_days is not None:
+        ws_kwargs["retention_days"] = retention_days
+    workspace = ensure_log_analytics_workspace(cred, **ws_kwargs)
+    workspace_created = pre_existing_workspace is None
 
     publish_progress(
         self,
@@ -95,6 +111,12 @@ def provision_app_insights(
         message=f"Ensuring Application Insights component {component_name}",
         workspace_id=workspace.get("id"),
     )
+    pre_existing_component = get_application_insights(
+        cred,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        component_name=component_name,
+    )
     component = ensure_application_insights(
         cred,
         subscription_id=subscription_id,
@@ -103,6 +125,7 @@ def provision_app_insights(
         region=region,
         workspace_resource_id=workspace["id"],
     )
+    component_created = pre_existing_component is None
 
     connection_string = str(component.get("connection_string") or "").strip()
     deployment_apply = _apply_connection_string_to_deployment(
@@ -128,7 +151,9 @@ def provision_app_insights(
     )
     return {
         "workspace": workspace,
+        "workspace_created": workspace_created,
         "component": component,
+        "component_created": component_created,
         "connection_string": connection_string,
         "deployment_apply": deployment_apply,
     }
@@ -155,6 +180,49 @@ def apply_app_insights_to_deployment(
         total_steps=1,
     )
     return {"deployment_apply": deployment_apply}
+
+
+@shared_task(  # type: ignore[misc]
+    bind=True,
+    name="api.tasks.azure.clear_app_insights_from_deployment",
+    autoretry_for=(),
+    max_retries=0,
+)
+def clear_app_insights_from_deployment(self: Any) -> dict[str, Any]:
+    """Remove the App Insights connection string env var from api/worker/beat.
+
+    Used by the Settings panel "Clear server override" action so an operator
+    can revert to whatever the Bicep / deployment template provides.
+    """
+    job_id = self.request.id or "clear_app_insights_from_deployment"
+    if not os.environ.get(CONTAINER_APP_NAME_ENV):
+        return {
+            "deployment_clear": {"status": "skipped", "reason": "container_app_env_missing"}
+        }
+
+    publish_progress(
+        self,
+        job_id,
+        "clearing_deployment",
+        step=1,
+        total_steps=1,
+        message="Removing App Insights connection string from api, worker, and beat",
+    )
+    poller, removed = clear_app_insights_connection_string()
+    result = poller.result()
+    revision = getattr(
+        getattr(result, "properties", None),
+        "latest_revision_name",
+        getattr(result, "latest_revision_name", None),
+    )
+    return {
+        "deployment_clear": {
+            "status": "cleared" if removed else "no_change",
+            "containers": ["api", "worker", "beat"],
+            "containers_changed": removed,
+            "revision": revision,
+        }
+    }
 
 
 def _apply_connection_string_to_deployment(

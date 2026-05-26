@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Info } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
 import { armProxyApi } from "@/api/armProxy";
-import { aksApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import { ClusterItem } from "@/components/ClusterItem";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -20,12 +19,6 @@ import { ClusterListSkeleton } from "./ClusterListSkeleton";
 import { ProvisionDoneBanner, ProvisioningBanner } from "./ProvisioningBanner";
 import { ProvisionModal } from "./ProvisionModal";
 import { ProvisionErrorCard } from "./ProvisionErrorCard";
-import {
-  dismissLastFailedProvision,
-  loadDismissThreshold,
-  loadLastFailedProvision,
-  type LastFailedProvision,
-} from "./lastFailedProvision";
 import { useClusterActions } from "./useClusterActions";
 import {
   nextElbClusterName,
@@ -107,87 +100,14 @@ export function ClusterCard({
   // Role assignment result (shown after provision completes).
   const [roleResult] = useState<string[] | null>(null);
   const [showProvision, setShowProvision] = useState(false);
-  // P3-2: persist the last failed provision in localStorage so a
-  // browser reload still surfaces a "Last attempt failed" banner
-  // (with retry button) instead of dropping the error on the floor.
-  // R-1: server-side source via /api/aks/recent-failed-provisions
-  // takes precedence — it survives cross-browser sessions while
-  // localStorage is per-browser. Hydrated once on mount; the server
-  // query is best-effort (any error falls back to localStorage).
-  // Cleared on Dismiss or when a new attempt succeeds (handled
-  // inside `useClusterProvisioning`).
-  const [lastFailed, setLastFailed] = useState<LastFailedProvision | null>(
-    null,
-  );
-  useEffect(() => {
-    let cancelled = false;
-    // Localstorage hydration is synchronous and provides instant UI;
-    // the async server fetch then overrides if it returns a newer
-    // (or first) row.
-    const fromLocal = loadLastFailedProvision();
-    if (fromLocal) setLastFailed(fromLocal);
-    if (!enabled) return;
-    (async () => {
-      try {
-        const res = await aksApi.recentFailedProvisions(24, 1);
-        if (cancelled) return;
-        if (res.degraded || res.jobs.length === 0) return;
-        const top = res.jobs[0];
-        const whenMs = top.updated_at
-          ? new Date(top.updated_at).getTime()
-          : Date.now();
-        // Dismiss threshold (set by Dismiss / Retry / Success) wins
-        // over server hydration. Without this, a user can dismiss the
-        // banner, reload the page, and the same server-side jobstate
-        // row (24 h window) re-surfaces the banner — exactly the bug
-        // the user reported.
-        if (
-          Number.isFinite(whenMs) &&
-          whenMs <= loadDismissThreshold()
-        )
-          return;
-        // Backend wins when it has a strictly-newer entry; otherwise
-        // we keep the local snapshot so a recent in-browser failure
-        // is not overwritten by a stale server row.
-        if (
-          !fromLocal ||
-          (Number.isFinite(whenMs) && whenMs > fromLocal.when)
-        ) {
-          setLastFailed({
-            raw: top.error_code ?? "Provisioning failed.",
-            clusterName: top.cluster_name ?? "",
-            region: top.region ?? "",
-            resourceGroup: top.resource_group ?? "",
-            subscriptionId: top.subscription_id ?? "",
-            when: whenMs,
-          });
-        }
-      } catch {
-        // Server fetch is best-effort. localStorage source remains.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled]);
-
-  // R-2: cross-tab sync. The `storage` event fires on *other* tabs
-  // when localStorage changes; this lets a failure in Tab A become
-  // visible on Tab B without requiring a manual refresh. We re-read
-  // the slot on any change to our key so add/clear both propagate.
-  useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key !== "elb_last_failed_provision_v1" && e.key !== null) return;
-      setLastFailed(loadLastFailedProvision());
-    };
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
-
-  // Stale-failure detection moves below, after `prov` is initialised, so it
-  // can see clusters in *both* the dashboard's workload RG and the RG the
-  // user just provisioned into (which may differ — modal RG defaults to
-  // `rg-<clusterBase>`, see useClusterProvisioning).
+  // Provision errors are intentionally transient: `prov.provError`
+  // lives only in this component's React state, so it surfaces once
+  // when the failure happens and disappears on browser refresh or
+  // when the user clicks Dismiss. A previous iteration hydrated a
+  // "Last attempt failed" banner from localStorage + a 24 h
+  // server-side `recent-failed-provisions` window, but that made
+  // stale errors re-appear on every reload (even after the cluster
+  // had been cleanly deleted) which is not what users expect.
 
   const {
     skus: skuOptions,
@@ -244,21 +164,6 @@ export function ClusterCard({
     enabled && !showInitialClusterSkeleton && !query.isError && noClusters;
   const showErrorClusterAction =
     enabled && !showInitialClusterSkeleton && query.isError && noClusters;
-
-  // Stale-failure detection: once the cluster shows up in the list (any
-  // `provisioning_state`) the lingering "Last attempt failed" banner is
-  // redundant. We record a dismiss threshold so server hydration on the
-  // next reload doesn't bring it back.
-  const lastFailedIsStale = useMemo(() => {
-    if (!lastFailed?.clusterName) return false;
-    return clusters.some((c) => c.name === lastFailed.clusterName);
-  }, [lastFailed, clusters]);
-  useEffect(() => {
-    if (!lastFailedIsStale) return;
-    if (!lastFailed) return;
-    dismissLastFailedProvision(lastFailed.when);
-    setLastFailed(null);
-  }, [lastFailedIsStale, lastFailed]);
 
   const actions = useClusterActions({
     subscriptionId,
@@ -457,37 +362,6 @@ export function ClusterCard({
             onDismiss={prov.resetError}
             onRetry={() => {
               prov.resetError();
-              setShowProvision(true);
-            }}
-          />
-        </div>
-      )}
-      {/* P3-2: sticky "Last attempt failed" banner — only when the
-          modal is closed and there is no live error already rendered
-          above (we never want to show the same failure twice). Also
-          suppressed when a retry has already landed a Succeeded cluster
-          with the same name in this RG (stale record). */}
-      {lastFailed && !lastFailedIsStale && !showProvision && !prov.provError && (
-        <div style={{ marginBottom: "var(--space-3)" }}>
-          <ProvisionErrorCard
-            raw={lastFailed.raw}
-            context={{
-              subscriptionId: lastFailed.subscriptionId,
-              region: lastFailed.region,
-              resourceGroup: lastFailed.resourceGroup,
-            }}
-            onDismiss={() => {
-              dismissLastFailedProvision(lastFailed.when);
-              setLastFailed(null);
-            }}
-            onRetry={() => {
-              prov.applyLastFailedContext({
-                clusterName: lastFailed.clusterName,
-                region: lastFailed.region,
-                resourceGroup: lastFailed.resourceGroup,
-              });
-              dismissLastFailedProvision(lastFailed.when);
-              setLastFailed(null);
               setShowProvision(true);
             }}
           />

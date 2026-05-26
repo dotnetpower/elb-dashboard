@@ -99,10 +99,23 @@ resource roleTable 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// Private DNS zones + private endpoints (only when locked down).
+// Private DNS zones + private endpoints (ALWAYS created).
 // dfs zone added because HNS-enabled accounts expose the dfs endpoint that
 // `azcopy` and the ADLS Gen2 SDK use for hierarchical-namespace operations.
 // File endpoint removed: no SMB mounts, so no file private endpoint needed.
+//
+// `allowPublicAccessForBootstrap` only controls publicNetworkAccess /
+// networkAcls above. Private endpoints are orthogonal and must exist from
+// day 1 so the Container App's data-plane path keeps working through both
+// the bootstrap-public posture and the locked-down posture. Pre-2026-05-27
+// these resources were gated behind `if (!allowPublicAccessForBootstrap)`,
+// which created a broken middle state when `publicNetworkAccess` was later
+// flipped to `Disabled` (manually or by drift) without re-running provision
+// with `lockdownPrivateNetworking=true`: workloads lost the public path AND
+// had no PE to fall back to, surfacing as `403 AuthorizationFailure` on
+// every Storage Tables call. Always creating PEs makes that state
+// unreachable. (Charter §9 lockdown is still enforced by
+// publicNetworkAccess / networkAcls, which remain gated above.)
 // ---------------------------------------------------------------------------
 var storageDnsSuffix = environment().suffixes.storage
 var endpointGroups = [
@@ -111,13 +124,13 @@ var endpointGroups = [
   { suffix: 'table', zone: 'privatelink.table.${storageDnsSuffix}' }
 ]
 
-resource zones 'Microsoft.Network/privateDnsZones@2024-06-01' = [for g in endpointGroups: if (!allowPublicAccessForBootstrap) {
+resource zones 'Microsoft.Network/privateDnsZones@2024-06-01' = [for g in endpointGroups: {
   name: g.zone
   location: 'global'
   tags: moduleTags
 }]
 
-resource zoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = [for (g, i) in endpointGroups: if (!allowPublicAccessForBootstrap) {
+resource zoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = [for (g, i) in endpointGroups: {
   name: '${g.zone}/link-${uniqueString(vnetResourceId)}'
   location: 'global'
   tags: moduleTags
@@ -128,7 +141,7 @@ resource zoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-0
   dependsOn: [ zones[i] ]
 }]
 
-resource endpoints 'Microsoft.Network/privateEndpoints@2024-01-01' = [for g in endpointGroups: if (!allowPublicAccessForBootstrap) {
+resource endpoints 'Microsoft.Network/privateEndpoints@2024-01-01' = [for g in endpointGroups: {
   name: 'pe-${storageAccountName}-${g.suffix}'
   location: location
   tags: moduleTags
@@ -146,7 +159,7 @@ resource endpoints 'Microsoft.Network/privateEndpoints@2024-01-01' = [for g in e
   }
 }]
 
-resource endpointDnsGroups 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = [for (g, i) in endpointGroups: if (!allowPublicAccessForBootstrap) {
+resource endpointDnsGroups 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = [for (g, i) in endpointGroups: {
   name: 'pe-${storageAccountName}-${g.suffix}/default'
   properties: {
     privateDnsZoneConfigs: [

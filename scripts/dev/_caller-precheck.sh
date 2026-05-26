@@ -38,7 +38,7 @@
 # `az login --identity` in CI) are tolerated: when `az ad signed-in-user`
 # returns nothing the helper falls back to `az ad sp show` against the
 # account name. If even that fails, the helper *warns* but does NOT
-# block \u2014 the deploy will still fail on the first SDK call with a clear
+# block — the deploy will still fail on the first SDK call with a clear
 # Azure error message, and we'd rather not block CI on a mis-detected
 # identity.
 
@@ -140,7 +140,7 @@ _elb_precheck_die() {
   local mode="$1"
   shift
   _elb_red ""
-  _elb_red "\u274c Insufficient permissions to run this script as '$ELB_CALLER_UPN'."
+  _elb_red "❌ Insufficient permissions to run this script as '$ELB_CALLER_UPN'."
   _elb_red ""
   _elb_red "Mode '$mode' requires one of:"
   for line in "$@"; do
@@ -157,7 +157,7 @@ _elb_precheck_die() {
   _elb_red "    --role <role-name> \\"
   _elb_red "    --scope /subscriptions/$ELB_CALLER_SUB"
   _elb_red ""
-  _elb_red "RBAC propagation usually takes 1\u20135 minutes after the grant lands."
+  _elb_red "RBAC propagation usually takes 1–5 minutes after the grant lands."
   exit 4
 }
 
@@ -166,7 +166,7 @@ elb_precheck_caller_for() {
   local mode="${1:-}"
   [[ -n "$mode" ]] || { _elb_red "elb_precheck_caller_for: mode required"; return 2; }
 
-  # If init failed (caller called us anyway), behave permissively \u2014 the
+  # If init failed (caller called us anyway), behave permissively — the
   # script's own error path will surface the underlying issue.
   [[ -n "$ELB_CALLER_OID" ]] || return 0
 
@@ -188,7 +188,7 @@ elb_precheck_caller_for() {
       # cli-upgrade.sh needs ACR build/push + Container App patch on the
       # platform RG. Sub-Contributor is the cleanest signal; we allow
       # Owner as a superset. If the caller has neither at sub, they
-      # might still have Contributor at RG scope only \u2014 that case is
+      # might still have Contributor at RG scope only — that case is
       # rare for cli-upgrade operators and we ask them to re-run with
       # `az account set` against the right context, OR the script will
       # fail loudly on the first `az containerapp update` with a clear

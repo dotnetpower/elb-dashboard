@@ -309,7 +309,7 @@ source "$repo_root/scripts/dev/_caller-precheck.sh"
 if elb_precheck_init "$subscription_id"; then
   echo "==> Pre-flight: verifying caller permissions for full deployment"
   elb_precheck_caller_for "deploy"
-  echo "    \u2713 caller '$ELB_CALLER_UPN' has the roles required for azd up"
+  echo "    ✓ caller '$ELB_CALLER_UPN' has the roles required for azd up"
 fi
 
 bash "$repo_root/scripts/dev/resolve-resource-group.sh" --subscription "$subscription_id" --environment "$env_name"
@@ -337,6 +337,66 @@ post_deploy_env_values="$(azd env get-values --environment "$env_name" 2>/dev/nu
 deployed_rg="$(printf '%s\n' "$post_deploy_env_values" | azd_env_value AZURE_RESOURCE_GROUP)"
 deployed_storage="$(printf '%s\n' "$post_deploy_env_values" | azd_env_value STORAGE_ACCOUNT_NAME)"
 deployed_acr="$(printf '%s\n' "$post_deploy_env_values" | azd_env_value ACR_NAME)"
+
+# ---------------------------------------------------------------------------
+# Storage reachability parity check.
+#
+# Detects the silent-failure state where the workload Storage account has
+# `publicNetworkAccess: Disabled` but no approved Private Endpoint, which
+# leaves the Container App with zero network paths to Storage and surfaces
+# in the SPA as misleading 403 / "AuthorizationFailed" / "Could not access
+# resource group" errors on every action (because every task tries to
+# write JobState to Storage Tables first).
+#
+# Since 2026-05-27 Bicep always creates PEs for Storage/ACR/KV regardless
+# of `allowPublicAccessForBootstrap`, so a fresh `azd up` cannot reach this
+# state. This check exists for two surviving paths:
+#   1. Environments deployed BEFORE the Bicep fix that were later flipped
+#      to `publicNetworkAccess=Disabled` manually or by drift — re-running
+#      `azd provision` now creates the missing PEs.
+#   2. Manual deletion of a PE after deploy.
+#
+# Skipped silently when the storage outputs aren't available yet (e.g.
+# azd up failed earlier and the env doesn't have STORAGE_ACCOUNT_NAME).
+# ---------------------------------------------------------------------------
+if [[ -n "$deployed_storage" && -n "$deployed_rg" ]]; then
+  storage_state_json="$(az storage account show --subscription "$subscription_id" \
+    -g "$deployed_rg" -n "$deployed_storage" \
+    --query '{public:publicNetworkAccess, pe:length(privateEndpointConnections[?properties.privateLinkServiceConnectionState.status==`Approved`])}' \
+    -o json 2>/dev/null || true)"
+  if [[ -n "$storage_state_json" ]]; then
+    storage_public="$(printf '%s' "$storage_state_json" | jq -r '.public // "unknown"')"
+    storage_pe_count="$(printf '%s' "$storage_state_json" | jq -r '.pe // 0')"
+    echo "==> Storage reachability: account=$deployed_storage publicNetworkAccess=$storage_public approvedPrivateEndpoints=$storage_pe_count"
+    if [[ "$storage_public" == "Disabled" && "$storage_pe_count" == "0" ]]; then
+      cat >&2 <<EOF
+
+ERROR: workload Storage '$deployed_storage' is unreachable from the Container App.
+       publicNetworkAccess=Disabled AND no approved Private Endpoint connection.
+       In this state every Storage Tables call from api/worker returns 403
+       "AuthorizationFailure", which the SPA surfaces as misleading "Could not
+       access resource group" errors on Create Cluster and other actions.
+
+Recovery (re-run Bicep to create the missing Private Endpoints):
+
+    azd provision --environment $env_name --no-prompt
+
+This works because Bicep now always provisions PEs for Storage/ACR/KV.
+
+Quick workaround (NOT a fix — re-opens the public path so the deployed
+Container App can talk to Storage while you investigate):
+
+    az storage account update --subscription $subscription_id \\
+        -g $deployed_rg -n $deployed_storage \\
+        --public-network-access Enabled --default-action Allow --bypass AzureServices
+
+EOF
+      STORAGE_REACHABILITY_BROKEN=true
+    else
+      STORAGE_REACHABILITY_BROKEN=false
+    fi
+  fi
+fi
 
 if is_true "${ELB_SKIP_LOCAL_RBAC:-false}"; then
   echo "==> Skipping local-debug RBAC grant (ELB_SKIP_LOCAL_RBAC=true)"
@@ -440,62 +500,87 @@ CLUSTER_BOOTSTRAP_HINT=false
 BOOTSTRAP_RG="${ELB_CLUSTER_RG_NAME:-rg-elb-cluster}"
 BOOTSTRAP_REGION="${ELB_CLUSTER_RG_REGION:-$location}"
 cluster_rg_exists="$(az group exists --subscription "$subscription_id" --name "$BOOTSTRAP_RG" -o tsv 2>/dev/null || echo false)"
-if [[ "$cluster_rg_exists" != "true" ]]; then
-  RBAC_SCRIPT="$repo_root/scripts/dev/grant-runtime-rbac.sh"
-
-  if [[ ! -x "$RBAC_SCRIPT" ]]; then
-    echo "==> Cluster-RG bootstrap skipped — helper script missing: $RBAC_SCRIPT"
-  elif ! is_true "${ELB_BOOTSTRAP_CLUSTER_RG:-true}"; then
-    echo "==> Cluster-RG bootstrap skipped (ELB_BOOTSTRAP_CLUSTER_RG=false)."
-    CLUSTER_BOOTSTRAP_HINT=true
-  elif [[ -t 0 && -t 1 ]]; then
-    echo ""
-    echo "==> The dashboard MI does not yet have access to a cluster RG."
-    echo "    The SPA's first \"Create Cluster\" click will fail with"
-    echo "    AuthorizationFailed (resourceGroups/write at sub scope) unless"
-    echo "    the cluster RG is pre-created and the MI is granted Contributor."
-    echo ""
-    read -r -p "Pre-create the cluster RG + grant MI roles now? [Y/n] " _ans
-    case "${_ans:-Y}" in
-      n|N|no|No|NO)
-        echo "    Skipping bootstrap. Run later with:"
-        echo "      bash scripts/dev/grant-runtime-rbac.sh \\"
-        echo "        --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION --yes"
-        CLUSTER_BOOTSTRAP_HINT=true
-        ;;
-      *)
-        read -r -p "  Cluster RG name [$BOOTSTRAP_RG]: " _rg
-        BOOTSTRAP_RG="${_rg:-$BOOTSTRAP_RG}"
-        read -r -p "  Region [$BOOTSTRAP_REGION]: " _region
-        BOOTSTRAP_REGION="${_region:-$BOOTSTRAP_REGION}"
-        echo "==> Running grant-runtime-rbac.sh --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION"
-        if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --region "$BOOTSTRAP_REGION" --yes; then
-          CLUSTER_BOOTSTRAP_RAN=true
-        else
-          echo "==> Bootstrap failed — see the error above. Manual command:"
-          echo "      bash scripts/dev/grant-runtime-rbac.sh \\"
-          echo "        --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION --yes"
-        fi
-        ;;
-    esac
+# Always run grant-runtime-rbac when not opted out: the helper is idempotent
+# (skips already-granted roles, creates missing ones, bootstraps the RG when
+# absent). Previously this block was gated on the RG NOT existing, which left
+# a hole — when a partial deploy or a colleague pre-created `rg-elb-cluster`,
+# the dashboard MI never received Contributor and the SPA wizard's preflight
+# kept failing with "Contributor missing at resourceGroups/rg-elb-cluster".
+RBAC_SCRIPT="$repo_root/scripts/dev/grant-runtime-rbac.sh"
+if [[ ! -x "$RBAC_SCRIPT" ]]; then
+  echo "==> Cluster-RG bootstrap skipped — helper script missing: $RBAC_SCRIPT"
+elif ! is_true "${ELB_BOOTSTRAP_CLUSTER_RG:-true}"; then
+  echo "==> Cluster-RG bootstrap skipped (ELB_BOOTSTRAP_CLUSTER_RG=false)."
+  CLUSTER_BOOTSTRAP_HINT=true
+elif [[ "$cluster_rg_exists" == "true" ]]; then
+  # RG already exists — run grant-runtime-rbac in maintenance mode (no
+  # --region) so it only audits + grants Contributor/UAA. Skipped roles are
+  # cheap no-ops; missing roles are filled in. This is the case the
+  # screenshot ("rg-elb-cluster exists and will be reused" +
+  # "Contributor missing") was failing on before.
+  echo "==> Cluster RG '$BOOTSTRAP_RG' exists — auditing MI roles (Contributor + UAA)"
+  if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --yes; then
+    CLUSTER_BOOTSTRAP_RAN=true
   else
-    # Non-interactive (CI). Default is bootstrap-on so the dashboard's
-    # first "Create Cluster" works without follow-up steps.
-    echo "==> Cluster-RG bootstrap (non-interactive default; opt-out with ELB_BOOTSTRAP_CLUSTER_RG=false)"
-    echo "    Creating '$BOOTSTRAP_RG' in '$BOOTSTRAP_REGION' and granting MI roles."
-    if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --region "$BOOTSTRAP_REGION" --yes; then
-      CLUSTER_BOOTSTRAP_RAN=true
-    else
-      echo "==> Bootstrap failed — see the error above. Manual command:"
+    echo "==> grant-runtime-rbac reported failures — see the error above. Manual command:"
+    echo "      bash scripts/dev/grant-runtime-rbac.sh --cluster-rg $BOOTSTRAP_RG --yes"
+    CLUSTER_BOOTSTRAP_HINT=true
+  fi
+elif [[ -t 0 && -t 1 ]]; then
+  echo ""
+  echo "==> The dashboard MI does not yet have access to a cluster RG."
+  echo "    The SPA's first \"Create Cluster\" click will fail with"
+  echo "    AuthorizationFailed (resourceGroups/write at sub scope) unless"
+  echo "    the cluster RG is pre-created and the MI is granted Contributor."
+  echo ""
+  read -r -p "Pre-create the cluster RG + grant MI roles now? [Y/n] " _ans
+  case "${_ans:-Y}" in
+    n|N|no|No|NO)
+      echo "    Skipping bootstrap. Run later with:"
       echo "      bash scripts/dev/grant-runtime-rbac.sh \\"
       echo "        --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION --yes"
       CLUSTER_BOOTSTRAP_HINT=true
-    fi
+      ;;
+    *)
+      read -r -p "  Cluster RG name [$BOOTSTRAP_RG]: " _rg
+      BOOTSTRAP_RG="${_rg:-$BOOTSTRAP_RG}"
+      read -r -p "  Region [$BOOTSTRAP_REGION]: " _region
+      BOOTSTRAP_REGION="${_region:-$BOOTSTRAP_REGION}"
+      echo "==> Running grant-runtime-rbac.sh --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION"
+      if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --region "$BOOTSTRAP_REGION" --yes; then
+        CLUSTER_BOOTSTRAP_RAN=true
+      else
+        echo "==> Bootstrap failed — see the error above. Manual command:"
+        echo "      bash scripts/dev/grant-runtime-rbac.sh \\"
+        echo "        --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION --yes"
+      fi
+      ;;
+  esac
+else
+  # Non-interactive (CI). Default is bootstrap-on so the dashboard's
+  # first "Create Cluster" works without follow-up steps.
+  echo "==> Cluster-RG bootstrap (non-interactive default; opt-out with ELB_BOOTSTRAP_CLUSTER_RG=false)"
+  echo "    Creating '$BOOTSTRAP_RG' in '$BOOTSTRAP_REGION' and granting MI roles."
+  if bash "$RBAC_SCRIPT" --cluster-rg "$BOOTSTRAP_RG" --region "$BOOTSTRAP_REGION" --yes; then
+    CLUSTER_BOOTSTRAP_RAN=true
+  else
+    echo "==> Bootstrap failed — see the error above. Manual command:"
+    echo "      bash scripts/dev/grant-runtime-rbac.sh \\"
+    echo "        --cluster-rg $BOOTSTRAP_RG --region $BOOTSTRAP_REGION --yes"
+    CLUSTER_BOOTSTRAP_HINT=true
   fi
 fi
 
 if [[ -n "$app_url" ]]; then
   echo "==> Deployment complete: $app_url"
+  if [[ "${STORAGE_REACHABILITY_BROKEN:-false}" == "true" ]]; then
+    echo ""
+    echo "    [!] WARNING: workload Storage is unreachable from the Container App"
+    echo "        (publicNetworkAccess=Disabled + 0 Private Endpoints). The dashboard"
+    echo "        will surface 403 / 'Could not access RG' errors on every action."
+    echo "        Recover with:  azd provision --environment $env_name --no-prompt"
+    echo ""
+  fi
   if $CLUSTER_BOOTSTRAP_RAN; then
     echo "    Cluster RG '$BOOTSTRAP_RG' is ready. Wait 1–5 min for RBAC propagation,"
     echo "    then click 'Create Cluster' in the dashboard."

@@ -3,9 +3,12 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  Copy,
+  ExternalLink,
   Eye,
   EyeOff,
   Gauge,
+  HelpCircle,
   Loader2,
   Monitor,
   Moon,
@@ -13,11 +16,13 @@ import {
   RotateCcw,
   Settings as SettingsIcon,
   Sun,
+  Trash2,
+  Upload,
   X,
 } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
-import { settingsApi } from "@/api/settings";
+import { settingsApi, type AppInsightsProvisionRequest } from "@/api/settings";
 import { tasksApi, type TaskStatusResponse } from "@/api/tasks";
 import { clearConfig, loadSavedConfig, type ResourceConfig } from "@/components/SetupWizard";
 import { useAppInsights } from "@/hooks/useAppInsights";
@@ -27,7 +32,13 @@ import { useSidecarMetrics, type SidecarMetric } from "@/hooks/useSidecarMetrics
 import { useTheme } from "@/hooks/useTheme";
 
 type SectionId = "appearance" | "preview" | "telemetry" | "aks" | "sizing" | "resources";
-type TaskState = { taskId: string; status: TaskStatusResponse["status"]; message?: string };
+type TaskState = {
+  taskId: string;
+  status: TaskStatusResponse["status"];
+  message?: string;
+  step?: number;
+  totalSteps?: number;
+};
 
 type ProvisionFormState = {
   subscription_id: string;
@@ -35,7 +46,48 @@ type ProvisionFormState = {
   component_name: string;
   region: string;
   workspace_name: string;
+  workspace_resource_group: string;
+  retention_days: number;
 };
+
+const KNOWN_AZURE_REGIONS = [
+  "australiaeast",
+  "brazilsouth",
+  "canadacentral",
+  "centralindia",
+  "centralus",
+  "eastasia",
+  "eastus",
+  "eastus2",
+  "francecentral",
+  "germanywestcentral",
+  "japaneast",
+  "japanwest",
+  "koreacentral",
+  "northcentralus",
+  "northeurope",
+  "norwayeast",
+  "southafricanorth",
+  "southcentralus",
+  "southeastasia",
+  "swedencentral",
+  "switzerlandnorth",
+  "uaenorth",
+  "uksouth",
+  "ukwest",
+  "westeurope",
+  "westus",
+  "westus2",
+  "westus3",
+] as const;
+
+const RETENTION_DAYS_OPTIONS = [7, 14, 30, 60, 90, 120, 180, 270, 365, 550, 730] as const;
+const DEFAULT_RETENTION_DAYS = 30;
+
+const SUBSCRIPTION_GUID_RE = /^[0-9a-fA-F-]{36}$/;
+const RG_NAME_RE = /^[-\w._()]{1,90}$/;
+const RESOURCE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._\-]{1,254}$/;
+const REGION_RE = /^[a-z][a-z0-9]{2,29}$/;
 
 const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> = [
   { id: "appearance", label: "Appearance", icon: <Sun size={14} strokeWidth={1.5} /> },
@@ -315,13 +367,16 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
   const ai = useAppInsights();
   const [showSecret, setShowSecret] = useState(false);
   const [testMessage, setTestMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const [copyMessage, setCopyMessage] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [task, setTask] = useState<TaskState | null>(null);
   const [applyTask, setApplyTask] = useState<TaskState | null>(null);
+  const [clearTask, setClearTask] = useState<TaskState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
+  const [clearError, setClearError] = useState<string | null>(null);
   const [form, setForm] = useState<ProvisionFormState>(() => defaultProvisionForm(config));
-  const lastAutoAppliedConnectionString = useRef("");
+  const copyTimer = useRef<number | null>(null);
 
   useEffect(() => {
     setForm((prev) => ({
@@ -332,97 +387,143 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
     }));
   }, [config]);
 
+  useEffect(() => () => {
+    if (copyTimer.current != null) window.clearTimeout(copyTimer.current);
+  }, []);
+
+  const userConnectionString = prefs.appInsightsConnectionString.trim();
+  const userKeyTail = extractInstrumentationKeyTail(userConnectionString);
+  const isWellFormedUserString = isWellFormedConnectionString(userConnectionString);
+  const hasConnectionStringSomewhere = ai.active || isWellFormedUserString || ai.source === "deployment";
+
   usePollTask(task, setTask, (status) => {
     if (status.status !== "SUCCESS") return;
     const result = status.result as {
       connection_string?: string;
       component?: { workspace_resource_id?: string };
+      component_created?: boolean;
       workspace?: { id?: string };
-      deployment_apply?: { status?: string; reason?: string };
+      workspace_created?: boolean;
+      deployment_apply?: { status?: string; reason?: string; revision?: string | null };
     } | null;
     if (result?.connection_string) {
       setPref("appInsightsConnectionString", result.connection_string);
       setPref("telemetryEnabled", true);
+      const tail = extractInstrumentationKeyTail(result.connection_string);
+      if (tail) setPref("appInsightsLastAppliedKeyTail", tail);
     }
     const workspaceId = result?.component?.workspace_resource_id || result?.workspace?.id;
     if (workspaceId) {
       setPref("appInsightsWorkspaceResourceId", workspaceId);
     }
+    const serverApplied = result?.deployment_apply?.status === "applied";
+    if (serverApplied && result?.deployment_apply?.revision) {
+      setPref("appInsightsLastAppliedRevision", result.deployment_apply.revision);
+    }
     if (result?.connection_string || workspaceId) {
-      const serverApplied = result?.deployment_apply?.status === "applied";
-      setTask((prev) => prev && { ...prev, message: serverApplied ? "App Insights, workspace, and server telemetry applied." : "App Insights and workspace applied." });
+      const createdParts: string[] = [];
+      if (result?.component_created) createdParts.push("App Insights component created");
+      else if (result?.component_created === false) createdParts.push("Existing App Insights reused");
+      if (result?.workspace_created) createdParts.push("Log Analytics workspace created");
+      else if (result?.workspace_created === false) createdParts.push("existing workspace reused");
+      const createdSummary = createdParts.length > 0 ? `${createdParts.join("; ")}. ` : "";
+      const deploymentSummary = serverApplied
+        ? "Server telemetry applied."
+        : "Server sidecars unchanged.";
+      setTask((prev) => prev && { ...prev, message: `${createdSummary}${deploymentSummary}` });
+      // Auto-collapse the form so the success status is the focal point.
+      setFormOpen(false);
     }
   });
 
   usePollTask(applyTask, setApplyTask, (status) => {
-    if (status.status === "FAILURE") {
-      lastAutoAppliedConnectionString.current = "";
-      return;
-    }
     if (status.status !== "SUCCESS") return;
     const result = status.result as { deployment_apply?: { status?: string; reason?: string; revision?: string | null } } | null;
     const applyStatus = result?.deployment_apply?.status;
     const revision = result?.deployment_apply?.revision;
-    if (applyStatus !== "applied") {
-      lastAutoAppliedConnectionString.current = "";
+    if (applyStatus === "applied" && revision) {
+      setPref("appInsightsLastAppliedRevision", revision);
+      const tail = extractInstrumentationKeyTail(prefs.appInsightsConnectionString);
+      if (tail) setPref("appInsightsLastAppliedKeyTail", tail);
     }
     setApplyTask((prev) => prev && {
       ...prev,
       message: applyStatus === "applied"
-        ? `Server telemetry applied${revision ? ` (${revision})` : ""}.`
+        ? `Server sidecars now use this connection string${revision ? ` (revision ${revision}).` : "."}`
         : `Server telemetry not applied (${result?.deployment_apply?.reason ?? "skipped"}).`,
     });
   });
 
-  const applyToDeployment = useCallback(async (connectionString?: string): Promise<boolean> => {
-    const value = (connectionString ?? prefs.appInsightsConnectionString).trim();
-    if (!value) {
-      setApplyError("Enter an Application Insights connection string first.");
-      return false;
+  usePollTask(clearTask, setClearTask, (status) => {
+    if (status.status !== "SUCCESS") return;
+    const result = status.result as { deployment_clear?: { status?: string; revision?: string | null } } | null;
+    const clearStatus = result?.deployment_clear?.status;
+    const revision = result?.deployment_clear?.revision;
+    if (clearStatus === "cleared" || clearStatus === "no_change") {
+      setPref("appInsightsLastAppliedRevision", revision ?? "");
+      setPref("appInsightsLastAppliedKeyTail", "");
+    }
+    setClearTask((prev) => prev && {
+      ...prev,
+      message: clearStatus === "cleared"
+        ? `Server override removed${revision ? ` (revision ${revision}).` : "."}`
+        : clearStatus === "no_change"
+          ? "No server override was set — nothing to clear."
+          : "Clear request was skipped.",
+    });
+  });
+
+  const applyToDeployment = useCallback(async () => {
+    if (!isWellFormedUserString) {
+      setApplyError("Enter a complete connection string (InstrumentationKey + IngestionEndpoint) first.");
+      return;
     }
     setApplyError(null);
     setApplyTask(null);
     try {
-      const response = await settingsApi.applyAppInsightsToDeployment({ connection_string: value });
-      setApplyTask({ taskId: response.task_id, status: "PENDING", message: "Applying server telemetry" });
-      return true;
+      const response = await settingsApi.applyAppInsightsToDeployment({ connection_string: userConnectionString });
+      setApplyTask({ taskId: response.task_id, status: "PENDING", message: "Applying connection string to api, worker, and beat" });
     } catch (err) {
       setApplyError(formatApiError(err, "arm"));
-      return false;
     }
-  }, [prefs.appInsightsConnectionString]);
+  }, [isWellFormedUserString, userConnectionString]);
 
-  const handleTelemetryToggle = useCallback((enabled: boolean) => {
-    setPref("telemetryEnabled", enabled);
-    const userConnectionString = prefs.appInsightsConnectionString.trim();
-    if (enabled && userConnectionString) {
-      void applyToDeployment(userConnectionString);
-    }
-  }, [applyToDeployment, prefs.appInsightsConnectionString, setPref]);
-
-  useEffect(() => {
-    const value = prefs.appInsightsConnectionString.trim();
-    if (!value) return;
-    // Avoid sending partial manual input. A modern App Insights connection
-    // string includes both fields; provisioning still sets the same shape.
-    if (!value.includes("InstrumentationKey=") || !value.includes("IngestionEndpoint=")) {
+  const clearFromDeployment = useCallback(async () => {
+    if (!window.confirm(
+      "Remove the App Insights connection string from api, worker, and beat?\n\n" +
+      "A new Container App revision will roll out. The api / worker / beat sidecars will fall back to whatever the deployment template provides.",
+    )) {
       return;
     }
-    if (value === lastAutoAppliedConnectionString.current) return;
-    if (isRunningTask(applyTask)) return;
-    const timer = window.setTimeout(() => {
-      void applyToDeployment(value).then((queued) => {
-        if (queued) {
-          lastAutoAppliedConnectionString.current = value;
-        }
-      });
-    }, 900);
-    return () => window.clearTimeout(timer);
-  }, [applyTask, applyToDeployment, prefs.appInsightsConnectionString]);
+    setClearError(null);
+    setClearTask(null);
+    try {
+      const response = await settingsApi.clearAppInsightsFromDeployment();
+      setClearTask({ taskId: response.task_id, status: "PENDING", message: "Removing connection string from server sidecars" });
+    } catch (err) {
+      setClearError(formatApiError(err, "arm"));
+    }
+  }, []);
+
+  const handleTelemetryToggle = useCallback(
+    (enabled: boolean) => {
+      if (enabled && !hasConnectionStringSomewhere) {
+        setPref("telemetryEnabled", false);
+        setTestMessage({
+          kind: "error",
+          text: "Add a connection string (or provision an App Insights resource) before enabling telemetry.",
+        });
+        return;
+      }
+      setTestMessage(null);
+      setPref("telemetryEnabled", enabled);
+    },
+    [hasConnectionStringSomewhere, setPref],
+  );
 
   const sendTest = useCallback(() => {
     if (!ai.active) {
-      setTestMessage({ kind: "error", text: "Telemetry is off or no connection string is configured." });
+      setTestMessage({ kind: "error", text: "Enable telemetry and configure a connection string first." });
       return;
     }
     try {
@@ -434,34 +535,133 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
   }, [ai]);
 
   const provision = useCallback(async () => {
+    const validation = validateProvisionForm(form);
+    if (!validation.ok) {
+      setError(validation.message);
+      return;
+    }
+    const ws_rg = form.workspace_resource_group.trim();
+    const summaryLines = [
+      `Resource group: ${form.resource_group}`,
+      `App Insights: ${form.component_name} (${form.region})`,
+      `Log Analytics: ${form.workspace_name}${ws_rg && ws_rg !== form.resource_group ? ` in ${ws_rg}` : ""}`,
+      `Retention: ${form.retention_days} days`,
+    ];
+    if (
+      !window.confirm(
+        "Provision Application Insights?\n\n" +
+          summaryLines.join("\n") +
+          "\n\nThis creates Azure resources that may incur Log Analytics ingestion charges.",
+      )
+    ) {
+      return;
+    }
     setError(null);
     setTask(null);
     try {
-      const response = await settingsApi.provisionAppInsights(form);
-      setTask({ taskId: response.task_id, status: "PENDING" });
+      const payload: AppInsightsProvisionRequest = {
+        subscription_id: form.subscription_id.trim(),
+        resource_group: form.resource_group.trim(),
+        component_name: form.component_name.trim(),
+        region: form.region.trim(),
+        workspace_name: form.workspace_name.trim(),
+        retention_days: form.retention_days,
+      };
+      if (ws_rg) payload.workspace_resource_group = ws_rg;
+      const response = await settingsApi.provisionAppInsights(payload);
+      setTask({ taskId: response.task_id, status: "PENDING", message: "Submitted to background worker" });
     } catch (err) {
       setError(formatApiError(err, "arm"));
     }
   }, [form]);
+
+  const copyConnectionString = useCallback(async () => {
+    if (!userConnectionString) return;
+    try {
+      await navigator.clipboard.writeText(userConnectionString);
+      setCopyMessage("Copied to clipboard.");
+    } catch {
+      setCopyMessage("Copy failed. Select the field and copy manually.");
+    }
+    if (copyTimer.current != null) window.clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopyMessage(null), 2200);
+  }, [userConnectionString]);
+
+  const sourceDescriptor = describeEffectiveSource(ai.source, ai.active);
+  const portalUrl = appInsightsPortalUrl(config?.subscriptionId, form.component_name, form.resource_group);
+  const userValueDiffersFromApplied =
+    isWellFormedUserString && userKeyTail !== "" && userKeyTail !== prefs.appInsightsLastAppliedKeyTail;
 
   return (
     <Section heading="Telemetry">
       <Group>
         <Row
           label="Send application telemetry to App Insights"
-          hint="Browser telemetry starts immediately. Connection string edits are applied to api, worker, and beat automatically."
-          control={<Toggle checked={prefs.telemetryEnabled} onChange={handleTelemetryToggle} label="Application telemetry" />}
+          hint={
+            hasConnectionStringSomewhere
+              ? "Browser telemetry starts when the toggle is on. Server sidecar updates are explicit (see below)."
+              : "Add a connection string or provision an App Insights resource before enabling."
+          }
+          control={
+            <Toggle
+              checked={prefs.telemetryEnabled}
+              onChange={handleTelemetryToggle}
+              label="Application telemetry"
+              disabled={!hasConnectionStringSomewhere}
+            />
+          }
         />
         <Row
           label="Effective source"
-          hint={ai.source === "deployment" ? "Using APPLICATIONINSIGHTS_CONNECTION_STRING from the deployment." : ai.source === "user" ? "Using the manually entered connection string below." : "Enter a connection string or provision a new resource."}
-          control={<Badge tone={ai.active ? "success" : "muted"}>{ai.active ? "Active" : ai.source}</Badge>}
+          hint={sourceDescriptor.hint}
+          control={
+            <Badge tone={sourceDescriptor.tone} icon={sourceDescriptor.icon}>
+              {sourceDescriptor.label}
+            </Badge>
+          }
         />
+        {(prefs.appInsightsLastAppliedRevision || prefs.appInsightsLastAppliedKeyTail) && (
+          <Row
+            label="Server sidecars"
+            hint={
+              prefs.appInsightsLastAppliedKeyTail
+                ? `api / worker / beat last received a connection string ending …${prefs.appInsightsLastAppliedKeyTail}.`
+                : "api / worker / beat last had the connection string removed."
+            }
+            control={
+              prefs.appInsightsLastAppliedRevision ? (
+                <code style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                  {prefs.appInsightsLastAppliedRevision}
+                </code>
+              ) : (
+                <Badge tone="muted">No revision</Badge>
+              )
+            }
+          />
+        )}
       </Group>
 
       <Group title="Connection string override">
-        <Field label="Application Insights connection string" hint="Leave blank to use the deployment-provided connection string. A complete value is applied to server sidecars automatically.">
-          <div style={{ display: "flex", gap: 6 }}>
+        <Field
+          label="Application Insights connection string"
+          hint={
+            <>
+              Leave blank to use the deployment-provided value. The {" "}
+              <a
+                href="https://learn.microsoft.com/en-us/azure/azure-monitor/app/sdk-connection-string"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--text-muted)", textDecoration: "underline" }}
+              >
+                connection string
+              </a>{" "}
+              must include both <code>InstrumentationKey=</code> and <code>IngestionEndpoint=</code>.
+              Applying this value updates api, worker, and beat — frontend and terminal are read-only sidecars
+              and are intentionally not touched.
+            </>
+          }
+        >
+          <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
             <input
               type={showSecret ? "text" : "password"}
               value={prefs.appInsightsConnectionString}
@@ -469,37 +669,259 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
               placeholder="InstrumentationKey=...;IngestionEndpoint=https://..."
               autoComplete="off"
               spellCheck={false}
-              style={INPUT_STYLE}
+              aria-invalid={userConnectionString.length > 0 && !isWellFormedUserString}
+              style={{
+                ...INPUT_STYLE,
+                borderColor:
+                  userConnectionString.length === 0
+                    ? "var(--border-weak)"
+                    : isWellFormedUserString
+                      ? "color-mix(in srgb, var(--success) 60%, var(--border-weak))"
+                      : "color-mix(in srgb, var(--warning) 60%, var(--border-weak))",
+              }}
             />
-            <IconButton label={showSecret ? "Hide connection string" : "Show connection string"} onClick={() => setShowSecret((p) => !p)}>
+            <IconButton
+              label={showSecret ? "Hide connection string" : "Show connection string"}
+              onClick={() => setShowSecret((p) => !p)}
+              pressed={showSecret}
+            >
               {showSecret ? <EyeOff size={14} /> : <Eye size={14} />}
             </IconButton>
+            <IconButton
+              label="Copy connection string"
+              onClick={copyConnectionString}
+              disabled={!userConnectionString}
+            >
+              <Copy size={14} />
+            </IconButton>
           </div>
+          {userConnectionString.length > 0 && !isWellFormedUserString && (
+            <StatusLine kind="info">
+              Waiting for a complete value — the apply button stays disabled until both fields are present.
+            </StatusLine>
+          )}
+          {copyMessage && <StatusLine kind="info">{copyMessage}</StatusLine>}
         </Field>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", paddingBottom: 14 }}>
-          <button className="glass-button" onClick={sendTest} style={{ fontSize: 12 }}>Send test event</button>
-          {testMessage && <StatusLine kind={testMessage.kind}>{testMessage.text}</StatusLine>}
-          {applyError && <StatusLine kind="error">{applyError}</StatusLine>}
-          {applyTask && <TaskStatusLine task={applyTask} />}
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            flexWrap: "wrap",
+            paddingBottom: 14,
+          }}
+        >
+          <button
+            type="button"
+            className="glass-button"
+            onClick={sendTest}
+            disabled={!ai.active}
+            title={ai.active ? "Send a browser pageView to App Insights" : "Enable telemetry and configure a connection string first"}
+            style={{ fontSize: 12 }}
+          >
+            Send test event
+          </button>
+          <button
+            type="button"
+            className="glass-button glass-button--primary"
+            onClick={applyToDeployment}
+            disabled={!isWellFormedUserString || isRunningTask(applyTask) || !userValueDiffersFromApplied}
+            title={
+              !isWellFormedUserString
+                ? "Enter a complete connection string"
+                : !userValueDiffersFromApplied
+                  ? "Server sidecars already use this connection string"
+                  : "Apply this connection string to api, worker, and beat"
+            }
+            style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
+          >
+            <Upload size={13} strokeWidth={1.5} />
+            Apply to server sidecars
+          </button>
+          <button
+            type="button"
+            className="glass-button"
+            onClick={clearFromDeployment}
+            disabled={isRunningTask(clearTask) || !prefs.appInsightsLastAppliedKeyTail}
+            title={
+              prefs.appInsightsLastAppliedKeyTail
+                ? "Remove the connection string from api, worker, and beat"
+                : "No server-side override is currently set"
+            }
+            style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
+          >
+            <Trash2 size={13} strokeWidth={1.5} />
+            Clear server override
+          </button>
         </div>
+
+        {testMessage && (
+          <div style={{ paddingBottom: 8 }}>
+            <StatusLine kind={testMessage.kind}>{testMessage.text}</StatusLine>
+          </div>
+        )}
+        {applyError && (
+          <div style={{ paddingBottom: 8 }}>
+            <StatusLine kind="error">{applyError}</StatusLine>
+          </div>
+        )}
+        {applyTask && (
+          <div style={{ paddingBottom: 8 }}>
+            <TaskStatusLine task={applyTask} />
+          </div>
+        )}
+        {clearError && (
+          <div style={{ paddingBottom: 8 }}>
+            <StatusLine kind="error">{clearError}</StatusLine>
+          </div>
+        )}
+        {clearTask && (
+          <div style={{ paddingBottom: 8 }}>
+            <TaskStatusLine task={clearTask} />
+          </div>
+        )}
       </Group>
 
       <Group title="Provision a resource">
         <Row
           label="Create Application Insights"
-          hint="Creates or reuses a Log Analytics workspace, then creates an App Insights component."
-          control={<button className="glass-button" onClick={() => setFormOpen((p) => !p)} style={{ fontSize: 12 }}>{formOpen ? "Hide form" : "Open form"}</button>}
+          hint={
+            <>
+              Will create <code>{form.workspace_name || "log-…"}</code> (Log Analytics) and {" "}
+              <code>{form.component_name || "appi-…"}</code> in {" "}
+              <code>{form.resource_group || "<resource group>"}</code> ·{" "}
+              <code>{form.region || "<region>"}</code>. Existing resources with the same name are reused.
+            </>
+          }
+          control={
+            <button
+              type="button"
+              className="glass-button"
+              onClick={() => setFormOpen((p) => !p)}
+              aria-expanded={formOpen}
+              style={{ fontSize: 12 }}
+            >
+              {formOpen ? "Hide form" : "Open form"}
+            </button>
+          }
         />
         {formOpen && (
           <div style={{ paddingBottom: 14 }}>
-            <ProvisionForm value={form} onChange={setForm} onSubmit={provision} busy={isRunningTask(task)} />
+            <ProvisionForm
+              value={form}
+              onChange={setForm}
+              onSubmit={provision}
+              busy={isRunningTask(task)}
+              workloadRegion={config?.region}
+              onReset={() => setForm(defaultProvisionForm(config))}
+            />
             {error && <StatusLine kind="error">{error}</StatusLine>}
             {task && <TaskStatusLine task={task} />}
+          </div>
+        )}
+        {!formOpen && task?.status === "SUCCESS" && (
+          <div style={{ paddingBottom: 14 }}>
+            <StatusLine kind="success">
+              Provisioning finished. {task.message ?? ""}
+            </StatusLine>
+          </div>
+        )}
+        {portalUrl && (
+          <div style={{ paddingBottom: 14, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <a
+              href={portalUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                fontSize: 12,
+                color: "var(--text-muted)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                textDecoration: "underline",
+              }}
+            >
+              <ExternalLink size={12} strokeWidth={1.5} /> Open in Azure Portal
+            </a>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--text-faint)" }}>
+              <HelpCircle size={12} strokeWidth={1.5} />
+              Connection strings live on the resource Overview blade.
+            </span>
           </div>
         )}
       </Group>
     </Section>
   );
+}
+
+function isWellFormedConnectionString(value: string): boolean {
+  return value.includes("InstrumentationKey=") && value.includes("IngestionEndpoint=");
+}
+
+function extractInstrumentationKeyTail(value: string): string {
+  const match = value.match(/InstrumentationKey=([^;]+)/);
+  if (!match) return "";
+  const key = match[1].trim();
+  return key.length > 8 ? key.slice(-8) : key;
+}
+
+function describeEffectiveSource(
+  source: "user" | "deployment" | "none",
+  active: boolean,
+): { label: string; hint: string; tone: "success" | "muted" | "warning"; icon: React.ReactNode } {
+  if (active && source === "user") {
+    return {
+      label: "Browser override · active",
+      hint: "The SPA is using the connection string entered below.",
+      tone: "success",
+      icon: <CheckCircle2 size={11} strokeWidth={2} />,
+    };
+  }
+  if (active && source === "deployment") {
+    return {
+      label: "Deployment · active",
+      hint: "Using APPLICATIONINSIGHTS_CONNECTION_STRING injected by the Container App template.",
+      tone: "success",
+      icon: <CheckCircle2 size={11} strokeWidth={2} />,
+    };
+  }
+  if (source === "user") {
+    return {
+      label: "Browser override · idle",
+      hint: "A connection string is entered but telemetry is disabled.",
+      tone: "warning",
+      icon: <AlertCircle size={11} strokeWidth={2} />,
+    };
+  }
+  if (source === "deployment") {
+    return {
+      label: "Deployment · idle",
+      hint: "Connection string is available but telemetry is disabled.",
+      tone: "warning",
+      icon: <AlertCircle size={11} strokeWidth={2} />,
+    };
+  }
+  return {
+    label: "Not configured",
+    hint: "Enter a connection string below or provision an Application Insights resource.",
+    tone: "muted",
+    icon: null,
+  };
+}
+
+function appInsightsPortalUrl(
+  subscriptionId: string | undefined | null,
+  componentName: string,
+  resourceGroup: string,
+): string | null {
+  if (subscriptionId && resourceGroup && componentName) {
+    const path =
+      `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}` +
+      `/providers/Microsoft.Insights/components/${componentName}`;
+    return `https://portal.azure.com/#@/resource${path}/overview`;
+  }
+  return "https://portal.azure.com/#blade/HubsExtension/BrowseResource/resourceType/microsoft.insights%2Fcomponents";
 }
 
 function AksSection({ config }: { config: ResourceConfig | null }) {
@@ -892,20 +1314,355 @@ function ResourcesSection({ config }: { config: ResourceConfig | null }) {
   );
 }
 
-function ProvisionForm({ value, onChange, onSubmit, busy }: { value: ProvisionFormState; onChange: (next: ProvisionFormState) => void; onSubmit: () => void; busy: boolean }) {
-  const update = (key: keyof ProvisionFormState) => (event: React.ChangeEvent<HTMLInputElement>) => onChange({ ...value, [key]: event.target.value });
+function ProvisionForm({
+  value,
+  onChange,
+  onSubmit,
+  busy,
+  workloadRegion,
+  onReset,
+}: {
+  value: ProvisionFormState;
+  onChange: (next: ProvisionFormState) => void;
+  onSubmit: () => void;
+  busy: boolean;
+  workloadRegion?: string;
+  onReset: () => void;
+}) {
+  const update =
+    (key: keyof ProvisionFormState) =>
+    (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+      onChange({
+        ...value,
+        [key]: key === "retention_days" ? Number(event.target.value) : event.target.value,
+      });
+
+  const fieldErrors = useMemo(() => validateProvisionFields(value), [value]);
+  const formInvalid = Object.keys(fieldErrors).length > 0;
+  const regionMismatch = Boolean(
+    workloadRegion && value.region && value.region.trim().toLowerCase() !== workloadRegion.trim().toLowerCase(),
+  );
+  const datalistId = "elb-azure-regions";
+  const idPrefix = "elb-prov";
+
+  const [lookup, setLookup] = useState<{ state: "idle" | "checking" | "found" | "missing" | "error"; message?: string }>({ state: "idle" });
+  const lookupAbort = useRef<AbortController | null>(null);
+
+  // Debounced existence check whenever the component_name / RG / subscription_id are valid.
+  useEffect(() => {
+    if (
+      !SUBSCRIPTION_GUID_RE.test(value.subscription_id) ||
+      !RG_NAME_RE.test(value.resource_group) ||
+      !RESOURCE_NAME_RE.test(value.component_name)
+    ) {
+      setLookup({ state: "idle" });
+      return;
+    }
+    const handle = window.setTimeout(async () => {
+      lookupAbort.current?.abort();
+      const controller = new AbortController();
+      lookupAbort.current = controller;
+      setLookup({ state: "checking" });
+      try {
+        await settingsApi.lookupAppInsights({
+          subscription_id: value.subscription_id.trim(),
+          resource_group: value.resource_group.trim(),
+          component_name: value.component_name.trim(),
+        });
+        if (!controller.signal.aborted) {
+          setLookup({ state: "found", message: "An App Insights resource with this name already exists. Provision will reuse it." });
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        const status = (err as { status?: number })?.status;
+        if (status === 404) {
+          setLookup({ state: "missing", message: "Name is available — Provision will create a new resource." });
+        } else if (status === 409) {
+          setLookup({ state: "error", message: "Multiple matches in the subscription; pick a different name or set the resource group." });
+        } else {
+          setLookup({ state: "idle" });
+        }
+      }
+    }, 600);
+    return () => {
+      window.clearTimeout(handle);
+      lookupAbort.current?.abort();
+    };
+  }, [value.subscription_id, value.resource_group, value.component_name]);
+
   return (
-    <div style={{ display: "grid", gap: 10, paddingTop: 10 }}>
-      <Field label="Subscription ID"><input value={value.subscription_id} onChange={update("subscription_id")} style={INPUT_STYLE} /></Field>
-      <Field label="Resource group"><input value={value.resource_group} onChange={update("resource_group")} style={INPUT_STYLE} /></Field>
-      <Field label="Region"><input value={value.region} onChange={update("region")} style={INPUT_STYLE} /></Field>
-      <Field label="Application Insights name"><input value={value.component_name} onChange={update("component_name")} style={INPUT_STYLE} placeholder="appi-elb-dashboard" /></Field>
-      <Field label="Log Analytics workspace name"><input value={value.workspace_name} onChange={update("workspace_name")} style={INPUT_STYLE} placeholder="log-elb-dashboard" /></Field>
-      <button className="glass-button glass-button--primary" onClick={onSubmit} disabled={busy} style={{ justifySelf: "start" }}>
-        {busy ? <Loader2 size={13} /> : <Activity size={13} />} Provision App Insights
-      </button>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (busy || formInvalid) return;
+        onSubmit();
+      }}
+      style={{ display: "grid", gap: 10, paddingTop: 10 }}
+    >
+      <fieldset
+        disabled={busy}
+        style={{ display: "grid", gap: 10, border: 0, padding: 0, margin: 0, minInlineSize: 0 }}
+      >
+        <ProvisionField
+          id={`${idPrefix}-sub`}
+          label="Subscription ID"
+          hint="36-character GUID. Prefilled from the Setup Wizard."
+          error={fieldErrors.subscription_id}
+        >
+          <input
+            id={`${idPrefix}-sub`}
+            value={value.subscription_id}
+            onChange={update("subscription_id")}
+            style={INPUT_STYLE}
+            autoComplete="off"
+            spellCheck={false}
+            required
+            aria-required
+            aria-invalid={Boolean(fieldErrors.subscription_id)}
+            placeholder="00000000-0000-0000-0000-000000000000"
+          />
+        </ProvisionField>
+
+        <ProvisionField
+          id={`${idPrefix}-rg`}
+          label="Resource group"
+          hint="The Azure Resource Group that will hold the App Insights component."
+          error={fieldErrors.resource_group}
+        >
+          <input
+            id={`${idPrefix}-rg`}
+            value={value.resource_group}
+            onChange={update("resource_group")}
+            style={INPUT_STYLE}
+            autoComplete="off"
+            spellCheck={false}
+            required
+            aria-required
+            aria-invalid={Boolean(fieldErrors.resource_group)}
+            placeholder="rg-elb-dashboard"
+          />
+        </ProvisionField>
+
+        <ProvisionField
+          id={`${idPrefix}-region`}
+          label="Region"
+          hint={
+            regionMismatch
+              ? `Workload region is ${workloadRegion}. Using a different region for observability adds cross-region latency to Container Insights ingestion.`
+              : "Pick a known Azure region or type a custom one."
+          }
+          error={fieldErrors.region}
+          hintTone={regionMismatch ? "warning" : "muted"}
+        >
+          <input
+            id={`${idPrefix}-region`}
+            list={datalistId}
+            value={value.region}
+            onChange={update("region")}
+            style={INPUT_STYLE}
+            autoComplete="off"
+            spellCheck={false}
+            required
+            aria-required
+            aria-invalid={Boolean(fieldErrors.region)}
+            placeholder="koreacentral"
+          />
+          <datalist id={datalistId}>
+            {KNOWN_AZURE_REGIONS.map((region) => (
+              <option key={region} value={region} />
+            ))}
+          </datalist>
+        </ProvisionField>
+
+        <ProvisionField
+          id={`${idPrefix}-name`}
+          label="Application Insights name"
+          hint="Microsoft CAF prefix is `appi-`. Existing resources with this name are reused."
+          error={fieldErrors.component_name}
+        >
+          <input
+            id={`${idPrefix}-name`}
+            value={value.component_name}
+            onChange={update("component_name")}
+            style={INPUT_STYLE}
+            autoComplete="off"
+            spellCheck={false}
+            required
+            aria-required
+            aria-invalid={Boolean(fieldErrors.component_name)}
+            placeholder="appi-elb-dashboard"
+          />
+          {lookup.state === "checking" && (
+            <StatusLine kind="loading">Checking whether the name is already taken…</StatusLine>
+          )}
+          {lookup.state === "found" && (
+            <StatusLine kind="info">{lookup.message}</StatusLine>
+          )}
+          {lookup.state === "missing" && (
+            <StatusLine kind="success">{lookup.message}</StatusLine>
+          )}
+          {lookup.state === "error" && lookup.message && (
+            <StatusLine kind="error">{lookup.message}</StatusLine>
+          )}
+        </ProvisionField>
+
+        <ProvisionField
+          id={`${idPrefix}-ws`}
+          label="Log Analytics workspace name"
+          hint="Microsoft CAF prefix is `log-`. Workspace-based App Insights requires this."
+          error={fieldErrors.workspace_name}
+        >
+          <input
+            id={`${idPrefix}-ws`}
+            value={value.workspace_name}
+            onChange={update("workspace_name")}
+            style={INPUT_STYLE}
+            autoComplete="off"
+            spellCheck={false}
+            required
+            aria-required
+            aria-invalid={Boolean(fieldErrors.workspace_name)}
+            placeholder="log-elb-dashboard"
+          />
+        </ProvisionField>
+
+        <ProvisionField
+          id={`${idPrefix}-ws-rg`}
+          label="Workspace resource group (optional)"
+          hint="Leave blank to put the workspace in the same resource group as App Insights."
+          error={fieldErrors.workspace_resource_group}
+        >
+          <input
+            id={`${idPrefix}-ws-rg`}
+            value={value.workspace_resource_group}
+            onChange={update("workspace_resource_group")}
+            style={INPUT_STYLE}
+            autoComplete="off"
+            spellCheck={false}
+            aria-invalid={Boolean(fieldErrors.workspace_resource_group)}
+            placeholder={value.resource_group || "rg-elb-observability"}
+          />
+        </ProvisionField>
+
+        <ProvisionField
+          id={`${idPrefix}-retention`}
+          label="Log Analytics retention"
+          hint="Workspace data older than this is dropped. PerGB2018 ingestion is the dominant cost — short retention keeps the bill predictable."
+        >
+          <select
+            id={`${idPrefix}-retention`}
+            value={value.retention_days}
+            onChange={update("retention_days")}
+            style={{ ...INPUT_STYLE, fontFamily: "var(--font-mono)" }}
+          >
+            {RETENTION_DAYS_OPTIONS.map((days) => (
+              <option key={days} value={days}>
+                {days} days{days === DEFAULT_RETENTION_DAYS ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </ProvisionField>
+
+        <StatusLine kind="info">
+          Creates 1 Log Analytics workspace (SKU <code>PerGB2018</code>) + 1 workspace-based Application Insights
+          component. Both default to Microsoft-managed encryption. Existing resources with the same name are reused
+          idempotently.
+        </StatusLine>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", paddingTop: 6 }}>
+          <button
+            type="submit"
+            className="glass-button glass-button--primary"
+            disabled={busy || formInvalid}
+            title={formInvalid ? "Fix the highlighted fields first" : "Provision (or reuse) the resources"}
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, justifySelf: "start" }}
+          >
+            {busy ? (
+              <Loader2 size={13} style={{ animation: "spin 0.9s linear infinite" }} />
+            ) : (
+              <Activity size={13} strokeWidth={1.5} />
+            )}
+            Provision App Insights
+          </button>
+          <button
+            type="button"
+            className="glass-button"
+            onClick={onReset}
+            disabled={busy}
+            style={{ fontSize: 12 }}
+          >
+            Reset to defaults
+          </button>
+        </div>
+      </fieldset>
+    </form>
+  );
+}
+
+function ProvisionField({
+  id,
+  label,
+  hint,
+  error,
+  hintTone = "muted",
+  children,
+}: {
+  id: string;
+  label: React.ReactNode;
+  hint?: React.ReactNode;
+  error?: string;
+  hintTone?: "muted" | "warning";
+  children: React.ReactNode;
+}) {
+  const hintColor = hintTone === "warning" ? "var(--warning)" : "var(--text-faint)";
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <label htmlFor={id} style={{ fontSize: 12, color: "var(--text-muted)" }}>
+        {label}
+      </label>
+      {children}
+      {hint && (
+        <span style={{ fontSize: 11, color: hintColor, lineHeight: 1.5 }}>{hint}</span>
+      )}
+      {error && (
+        <span style={{ fontSize: 11, color: "var(--danger)", lineHeight: 1.5 }}>{error}</span>
+      )}
     </div>
   );
+}
+
+function validateProvisionFields(value: ProvisionFormState): Partial<Record<keyof ProvisionFormState, string>> {
+  const errors: Partial<Record<keyof ProvisionFormState, string>> = {};
+  if (!SUBSCRIPTION_GUID_RE.test(value.subscription_id.trim())) {
+    errors.subscription_id = "Must be a 36-character GUID.";
+  }
+  if (!RG_NAME_RE.test(value.resource_group.trim())) {
+    errors.resource_group = "1–90 characters: letters, digits, '-', '.', '_', '(', ')'.";
+  }
+  if (!RESOURCE_NAME_RE.test(value.component_name.trim())) {
+    errors.component_name = "Start with a letter or digit; up to 255 characters.";
+  }
+  if (!REGION_RE.test(value.region.trim())) {
+    errors.region = "Use the lowercase Azure region slug, e.g. 'koreacentral'.";
+  }
+  if (!RESOURCE_NAME_RE.test(value.workspace_name.trim())) {
+    errors.workspace_name = "Start with a letter or digit; up to 255 characters.";
+  }
+  const wsRg = value.workspace_resource_group.trim();
+  if (wsRg && !RG_NAME_RE.test(wsRg)) {
+    errors.workspace_resource_group = "1–90 characters: letters, digits, '-', '.', '_', '(', ')'.";
+  }
+  if (!(RETENTION_DAYS_OPTIONS as readonly number[]).includes(value.retention_days)) {
+    errors.retention_days = "Pick a value from the list.";
+  }
+  return errors;
+}
+
+function validateProvisionForm(value: ProvisionFormState): { ok: true } | { ok: false; message: string } {
+  const errors = validateProvisionFields(value);
+  if (Object.keys(errors).length === 0) return { ok: true };
+  const first = Object.values(errors)[0];
+  return { ok: false, message: `Fix the highlighted fields first — ${first}` };
 }
 
 function Section({ heading, children }: { heading: string; children: React.ReactNode }) {
@@ -963,24 +1720,134 @@ function Segmented<T extends string>({ value, options, onChange, ariaLabel }: { 
   );
 }
 
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (next: boolean) => void; label: string }) {
+function Toggle({
+  checked,
+  onChange,
+  label,
+  disabled,
+  describedBy,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label: string;
+  disabled?: boolean;
+  describedBy?: string;
+}) {
   return (
-    <button role="switch" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)} style={{ position: "relative", width: 36, height: 20, borderRadius: 999, background: checked ? "color-mix(in srgb, var(--accent) 30%, var(--bg-tertiary))" : "var(--bg-tertiary)", border: `1px solid ${checked ? "var(--border-focus)" : "var(--border-medium)"}`, cursor: "pointer", padding: 0 }}>
-      <span style={{ position: "absolute", top: 2, left: 2, width: 14, height: 14, borderRadius: "50%", background: checked ? "var(--accent)" : "var(--text-muted)", transform: checked ? "translateX(16px)" : "translateX(0)", transition: "transform 120ms" }} />
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      aria-describedby={describedBy}
+      aria-disabled={disabled || undefined}
+      disabled={disabled}
+      onClick={() => {
+        if (disabled) return;
+        onChange(!checked);
+      }}
+      style={{
+        position: "relative",
+        width: 36,
+        height: 20,
+        borderRadius: 999,
+        background: checked
+          ? "color-mix(in srgb, var(--accent) 30%, var(--bg-tertiary))"
+          : "var(--bg-tertiary)",
+        border: `1px solid ${checked ? "var(--border-focus)" : "var(--border-medium)"}`,
+        cursor: disabled ? "not-allowed" : "pointer",
+        padding: 0,
+        opacity: disabled ? 0.55 : 1,
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: 2,
+          left: 2,
+          width: 14,
+          height: 14,
+          borderRadius: "50%",
+          background: checked ? "var(--accent)" : "var(--text-muted)",
+          transform: checked ? "translateX(16px)" : "translateX(0)",
+          transition: "transform 120ms",
+        }}
+      />
     </button>
   );
 }
 
-function IconButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
+function IconButton({
+  label,
+  onClick,
+  children,
+  pressed,
+  disabled,
+  title,
+}: {
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+  pressed?: boolean;
+  disabled?: boolean;
+  title?: string;
+}) {
   return (
-    <button aria-label={label} onClick={onClick} style={{ width: 30, height: 30, display: "grid", placeItems: "center", color: "var(--text-muted)", background: "var(--bg-tertiary)", border: "1px solid var(--border-weak)", borderRadius: 6, cursor: "pointer" }}>
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={typeof pressed === "boolean" ? pressed : undefined}
+      title={title ?? label}
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        width: 30,
+        height: 30,
+        display: "grid",
+        placeItems: "center",
+        color: disabled ? "var(--text-faint)" : "var(--text-muted)",
+        background: "var(--bg-tertiary)",
+        border: "1px solid var(--border-weak)",
+        borderRadius: 6,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.55 : 1,
+      }}
+    >
       {children}
     </button>
   );
 }
 
-function Badge({ tone, children }: { tone: "success" | "muted"; children: React.ReactNode }) {
-  return <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em", borderRadius: 999, padding: "2px 8px", border: "1px solid var(--border-weak)", color: tone === "success" ? "var(--success)" : "var(--text-faint)", background: tone === "success" ? "rgba(115,191,105,0.08)" : "var(--bg-tertiary)" }}>{children}</span>;
+function Badge({ tone, icon, children }: { tone: "success" | "muted" | "warning"; icon?: React.ReactNode; children: React.ReactNode }) {
+  const color =
+    tone === "success" ? "var(--success)" : tone === "warning" ? "var(--warning)" : "var(--text-faint)";
+  const background =
+    tone === "success"
+      ? "rgba(115,191,105,0.08)"
+      : tone === "warning"
+        ? "rgba(229,160,55,0.10)"
+        : "var(--bg-tertiary)";
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 11,
+        textTransform: "uppercase",
+        letterSpacing: "0.04em",
+        borderRadius: 999,
+        padding: "2px 8px",
+        border: "1px solid var(--border-weak)",
+        color,
+        background,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {icon}
+      {children}
+    </span>
+  );
 }
 
 function StatusLine({ kind, children }: { kind: "info" | "success" | "error" | "loading"; children: React.ReactNode }) {
@@ -990,17 +1857,66 @@ function StatusLine({ kind, children }: { kind: "info" | "success" | "error" | "
 
 function TaskStatusLine({ task }: { task: TaskState }) {
   const kind = task.status === "SUCCESS" ? "success" : task.status === "FAILURE" ? "error" : "loading";
-  return <StatusLine kind={kind}>Task <code>{task.taskId.slice(0, 8)}...</code> · {task.status}{task.message ? ` — ${task.message}` : ""}</StatusLine>;
+  const showProgress =
+    task.status !== "SUCCESS" &&
+    task.status !== "FAILURE" &&
+    typeof task.step === "number" &&
+    typeof task.totalSteps === "number" &&
+    task.totalSteps > 0;
+  return (
+    <div>
+      <StatusLine kind={kind}>
+        Task <code>{task.taskId.slice(0, 8)}...</code> · {task.status}
+        {showProgress ? ` · step ${task.step}/${task.totalSteps}` : ""}
+        {task.message ? ` — ${task.message}` : ""}
+      </StatusLine>
+      {showProgress && (
+        <div
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={task.totalSteps ?? 0}
+          aria-valuenow={task.step ?? 0}
+          aria-label="Task progress"
+          style={{
+            height: 4,
+            borderRadius: 999,
+            background: "var(--bg-tertiary)",
+            overflow: "hidden",
+            border: "1px solid var(--border-weak)",
+            marginTop: 6,
+          }}
+        >
+          <div
+            style={{
+              width: `${Math.min(100, Math.round(((task.step ?? 0) / (task.totalSteps ?? 1)) * 100))}%`,
+              height: "100%",
+              background: "var(--accent)",
+              transition: "width 200ms ease-out",
+            }}
+          />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function defaultProvisionForm(config: ResourceConfig | null): ProvisionFormState {
+  const envFromRg = deriveEnvName(config?.workloadResourceGroup);
   return {
     subscription_id: config?.subscriptionId ?? "",
     resource_group: config?.workloadResourceGroup ?? "",
-    component_name: "appi-elb-dashboard",
+    component_name: envFromRg ? `appi-${envFromRg}` : "appi-elb-dashboard",
     region: config?.region ?? "koreacentral",
-    workspace_name: "log-elb-dashboard",
+    workspace_name: envFromRg ? `log-${envFromRg}` : "log-elb-dashboard",
+    workspace_resource_group: "",
+    retention_days: DEFAULT_RETENTION_DAYS,
   };
+}
+
+function deriveEnvName(rg: string | undefined | null): string {
+  if (!rg) return "";
+  // "rg-elb-dashboard" -> "elb-dashboard", "rg-my-app-prod" -> "my-app-prod"
+  return rg.replace(/^rg-/i, "").trim();
 }
 
 function isRunningTask(task: TaskState | null): boolean {
@@ -1017,8 +1933,16 @@ function usePollTask(
     const id = window.setInterval(async () => {
       try {
         const status = await tasksApi.status(task.taskId);
-        const progress = status.progress as { message?: string } | undefined;
-        setTask({ taskId: task.taskId, status: status.status, message: progress?.message ?? status.error });
+        const progress = status.progress as
+          | { message?: string; step?: number; total_steps?: number }
+          | undefined;
+        setTask({
+          taskId: task.taskId,
+          status: status.status,
+          message: progress?.message ?? status.error,
+          step: progress?.step,
+          totalSteps: progress?.total_steps,
+        });
         onUpdate?.(status);
       } catch (err) {
         setTask({ taskId: task.taskId, status: "FAILURE", message: formatApiError(err) });

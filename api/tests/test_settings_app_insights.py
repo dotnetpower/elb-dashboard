@@ -133,6 +133,47 @@ def test_provision_enqueues_celery_task_and_returns_id(
     assert body["status"] == "queued"
     assert calls and calls[0]["component_name"] == "appi-elb"
     assert calls[0]["workspace_name"] == "log-elb"
+    # Optional fields default to None when the body omits them.
+    assert calls[0].get("workspace_resource_group") is None
+    assert calls[0].get("retention_days") is None
+
+
+def test_provision_accepts_workspace_rg_and_retention_days(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, fake_delay = make_delay_recorder("ai-task-2")
+    monkeypatch.setattr("api.tasks.azure.provision_app_insights.delay", fake_delay, raising=True)
+    r = client.post(
+        "/api/settings/app-insights/provision",
+        json={
+            "subscription_id": "11111111-2222-3333-4444-555555555555",
+            "resource_group": "rg-elb",
+            "component_name": "appi-elb",
+            "region": "koreacentral",
+            "workspace_name": "log-elb",
+            "workspace_resource_group": "rg-elb-observability",
+            "retention_days": 90,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert calls[0]["workspace_resource_group"] == "rg-elb-observability"
+    assert calls[0]["retention_days"] == 90
+
+
+def test_provision_rejects_invalid_retention_days(client: TestClient) -> None:
+    r = client.post(
+        "/api/settings/app-insights/provision",
+        json={
+            "subscription_id": "11111111-2222-3333-4444-555555555555",
+            "resource_group": "rg-elb",
+            "component_name": "appi-elb",
+            "region": "koreacentral",
+            "workspace_name": "log-elb",
+            "retention_days": 5,
+        },
+    )
+    assert r.status_code == 400
+    assert "retention_days" in r.json()["detail"]
 
 
 def test_apply_enqueues_celery_task_and_returns_id(
@@ -163,6 +204,22 @@ def test_apply_rejects_invalid_connection_string(client: TestClient) -> None:
     assert r.status_code == 400
 
 
+def test_clear_enqueues_celery_task_and_returns_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, fake_delay = make_delay_recorder("ai-clear-1")
+    monkeypatch.setattr(
+        "api.tasks.azure.clear_app_insights_from_deployment.delay", fake_delay, raising=True
+    )
+    r = client.post("/api/settings/app-insights/clear")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["task_id"] == "ai-clear-1"
+    assert body["status"] == "queued"
+    # clear takes no body params
+    assert calls == [{}]
+
+
 def test_routes_reject_anonymous_when_bypass_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
     monkeypatch.setenv("AZURE_TENANT_ID", "common")
@@ -175,6 +232,7 @@ def test_routes_reject_anonymous_when_bypass_off(monkeypatch: pytest.MonkeyPatch
         ("POST", "/api/settings/app-insights/lookup"),
         ("POST", "/api/settings/app-insights/provision"),
         ("POST", "/api/settings/app-insights/apply"),
+        ("POST", "/api/settings/app-insights/clear"),
     ):
         resp = bare_client.request(method, path, json={})
         assert resp.status_code == 401, f"{method} {path} returned {resp.status_code}"

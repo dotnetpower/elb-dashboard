@@ -130,9 +130,14 @@ export AZD_ENV_NAME=elb-dashboard
 export AZURE_LOCATION=koreacentral
 export LOCKDOWN_PRIVATE_NETWORKING=false
 export ALLOWED_ORIGINS=""
-export ELB_EXISTING_RG_ACTION=number  # delete, number, or abort
+export ELB_EXISTING_RG_ACTION=number     # delete, number, or abort
+export ELB_AUTO_FIX_RBAC=true            # let post-deploy doctor grant missing roles
+export ELB_BOOTSTRAP_CLUSTER_RG=true     # pre-create rg-elb-cluster + grant MI roles
+export ELB_CLUSTER_RG_NAME=rg-elb-cluster
 ./deploy.sh
 ```
+
+See [Get Started → Environment Overrides](get-started.md#environment-overrides) for the complete table.
 
 Prepare only, without running `azd up`:
 
@@ -163,16 +168,25 @@ Leave `DEPLOYER_PRINCIPAL_ID` unset unless your administrator explicitly gives y
 
 ## What azd up Does
 
-The command prints an `azd up progress map` before long-running work starts, then marks the active step as `[n/8]` while it runs.
+`./deploy.sh` prints an `azd up progress map` before long-running work starts, then marks the active step as `[n/8]` while it runs (steps `0/8` through `8/8`, nine phases in total).
 
-1. Registers deployment Azure resource providers and starts first-run workflow provider registration.
-2. Checks `rg-elb-dashboard`; if it already contains resources, asks whether to delete it, deploy to a numbered group such as `rg-elb-dashboard-01`, or abort.
-3. Provisions the bootstrap platform resources from `infra/main.bicep`.
-4. Creates or reuses the App Registration if `API_CLIENT_ID` is not set.
-5. Validates the platform Storage account and dashboard discovery tags.
-6. Builds the API, frontend, and terminal images with `az acr build`.
-7. Swaps the Container App to the six-sidecar layout.
-8. Waits for `/api/health` and prints the Container App URL.
+| Step | Title | What runs |
+| --- | --- | --- |
+| 0/8 | Local bootstrap | `az` / `azd` sign-in check, azd env target check (3-way prompt on mismatch unless `ELB_ALLOW_AZD_ENV_RETARGET=true`), azd env create/select, env-value upsert, caller permission pre-check (`_caller-precheck.sh`). |
+| 1/8 | Provider registration | `scripts/dev/register-providers.sh` registers the providers Bicep requires. |
+| 2/8 | Resource group choice | `scripts/dev/resolve-resource-group.sh` reuses `rg-elb-dashboard` or picks the next numbered slot (`rg-elb-dashboard-NN`), honoring `ELB_EXISTING_RG_ACTION` / `ELB_RESOURCE_NAME_SLOT`. |
+| 3/8 | Bicep provision | `azd up` deploys `infra/main.bicep` (RG, VNet, MI, ACR, Storage, Key Vault, Container Apps Environment, bootstrap Container App). |
+| 4/8 | App registration | Creates or reuses the SPA/API App Registration; skipped when `API_CLIENT_ID` is set. |
+| 5/8 | Resource validation | Verifies Storage HNS and the dashboard discovery tags (`azd-env-name`, `app`, `topology`, …). |
+| 6/8 | Image builds | `az acr build` for `api`, `frontend`, and `terminal` directly in ACR — no local Docker required. |
+| 7/8 | Sidecar swap | `scripts/dev/postprovision.sh` applies the six-sidecar template to `ca-elb-dashboard` (`frontend`, `api`, `worker`, `beat`, `redis`, `terminal`) with `min=max=1`. |
+| 8/8 | Health check | Polls `/api/health` until `200 OK`, prints the Container App URL, and tries to open it in the browser. |
+
+After step `8/8`, `deploy.sh` runs three follow-up helpers (see [Get Started → Post-deploy](get-started.md#detailed-walkthrough)):
+
+- `scripts/dev/grant-local-rbac.sh` — local-debug Storage / ACR roles for the deployer (skip with `ELB_SKIP_LOCAL_RBAC=true`).
+- `scripts/dev/check-mi-rbac.sh --auto-fix` — managed-identity RBAC doctor (read-only with `ELB_AUTO_FIX_RBAC=false`).
+- `scripts/dev/grant-runtime-rbac.sh` — pre-creates the cluster RG (default `rg-elb-cluster`) and grants the MI `Contributor + UAA` on it so the first **Create Cluster** click works (disable with `ELB_BOOTSTRAP_CLUSTER_RG=false`).
 
 Check the health endpoint:
 

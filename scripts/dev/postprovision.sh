@@ -245,6 +245,29 @@ EOF
     exit 1
   fi
   ts "    ✓ Storage kind=$kind HNS=$hns publicNetworkAccess=${public_network_access:-unknown}"
+  # Production posture per .github/copilot-instructions.md §9 is
+  # `publicNetworkAccess: Disabled` (private endpoints only). The first
+  # `azd up` intentionally provisions Storage / KV / ACR with
+  # `lockdownPrivateNetworking=false` so postprovision can push images
+  # and seed secrets over the public path. Surface a clear next-step
+  # banner whenever the Storage account is still in that bootstrap
+  # state so the operator does not forget to flip the lockdown on a
+  # follow-up `azd provision`. The dashboard's Storage card relies on
+  # this — see web/src/components/cards/storage/StorageWarnings.tsx
+  # "Private only" banner.
+  if [ "${public_network_access:-}" = "Enabled" ]; then
+    ts ""
+    ts "    ℹ Storage / Key Vault / ACR are still in BOOTSTRAP posture (public path open)."
+    ts "       This is the expected first-deploy state so postprovision can push images and"
+    ts "       seed secrets. Once the workspace is ready, lock the data plane down with:"
+    ts ""
+    ts "           azd env set --environment \"\$AZURE_ENV_NAME\" LOCKDOWN_PRIVATE_NETWORKING true"
+    ts "           azd provision"
+    ts ""
+    ts "       After the second provision, every workload Storage account flips to"
+    ts "       publicNetworkAccess=Disabled and the dashboard's Storage card shows"
+    ts "       'Private only'. Charter §9 — production posture is private-only."
+  fi
 }
 
 progress step 5 "Resource validation" "Validate Storage HNS and merge dashboard discovery tags."

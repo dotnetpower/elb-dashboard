@@ -93,18 +93,21 @@ resource acrContributorForUami 'Microsoft.Authorization/roleAssignments@2022-04-
 }
 
 // ---------------------------------------------------------------------------
-// Private endpoint + DNS zone (only created when public access is locked).
-// During first deploy we keep public access enabled so `az acr build` can
-// run from the operator's machine; the postprovision hook can flip the
-// `allowPublicAccessForBootstrap` flag and redeploy to lock down.
+// Private endpoint + DNS zone (ALWAYS created).
+//
+// `allowPublicAccessForBootstrap` only controls publicNetworkAccess on the
+// registry itself (above). The PE is created from day 1 so the Container
+// App pulls images over the private path through both postures. See the
+// matching note in storage.bicep for why decoupling these two concerns
+// eliminates a class of broken middle states (public disabled + no PE).
 // ---------------------------------------------------------------------------
-resource acrPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (!allowPublicAccessForBootstrap) {
+resource acrPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = {
   name: 'privatelink.azurecr.io'
   location: 'global'
   tags: moduleTags
 }
 
-resource acrPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (!allowPublicAccessForBootstrap) {
+resource acrPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = {
   parent: acrPrivateDnsZone
   name: 'link-${uniqueString(vnetResourceId)}'
   location: 'global'
@@ -115,7 +118,7 @@ resource acrPrivateDnsLink 'Microsoft.Network/privateDnsZones/virtualNetworkLink
   }
 }
 
-resource acrPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if (!allowPublicAccessForBootstrap) {
+resource acrPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   name: 'pe-${acrName}'
   location: location
   tags: moduleTags
@@ -133,7 +136,7 @@ resource acrPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-01-01' = if
   }
 }
 
-resource acrPrivateDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = if (!allowPublicAccessForBootstrap) {
+resource acrPrivateDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
   parent: acrPrivateEndpoint
   name: 'default'
   properties: {

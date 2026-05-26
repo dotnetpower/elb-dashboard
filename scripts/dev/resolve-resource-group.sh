@@ -253,6 +253,28 @@ if [[ "$count" == "0" ]]; then
   exit 0
 fi
 
+# Re-provision short-circuit.
+#
+# If the current azd env's `AZURE_RESOURCE_GROUP` already points at this
+# RG, the existing resources are not a foreign deployment about to be
+# clobbered — they are this environment's own previous provision. The
+# d/n/a prompt below was designed for "fresh clone hits an old deploy",
+# which is the wrong question to ask on every subsequent `azd provision`
+# (the user has no good answer: delete=destroy everything, number=create
+# a parallel deploy, abort=can't iterate on infra). Recognise the
+# same-env case and let azd provision do its incremental update.
+azd_env_rg=""
+if [[ -n "$environment_name" && -f "${repo_root}/.azure/${environment_name}/.env" ]]; then
+  azd_env_rg="$(awk -F= '/^AZURE_RESOURCE_GROUP=/{gsub(/"/, "", $2); print $2; exit}' \
+    "${repo_root}/.azure/${environment_name}/.env" 2>/dev/null || true)"
+fi
+if [[ -n "$azd_env_rg" && "$azd_env_rg" == "$base_rg" ]]; then
+  echo "==> Resource group '$base_rg' is the current azd env's previous deployment target ($count resources)."
+  echo "    Treating this as an incremental re-provision; skipping the d/n/a prompt."
+  set_azd_slot ""
+  exit 0
+fi
+
 cat >&2 <<EOF
 
 WARNING: Resource group '$base_rg' already exists and contains $count resources.

@@ -358,10 +358,10 @@ preflight_storage_parity || {
 # has the role set this run will need on Azure BEFORE we spend 5+ minutes
 # building images and then fail on `az containerapp update`. Mode depends
 # on what we're going to do:
-#   * rollback or --dry-run \u2192 read-only (Reader at sub is enough).
-#   * normal upgrade        \u2192 Contributor or Owner at sub (for ACR build +
+#   * rollback or --dry-run → read-only (Reader at sub is enough).
+#   * normal upgrade        → Contributor or Owner at sub (for ACR build +
 #                             Container App patch).
-#   * --auto-fix-rbac       \u2192 also requires UAA / Owner so the post-health
+#   * --auto-fix-rbac       → also requires UAA / Owner so the post-health
 #                             doctor can actually `az role assignment create`.
 # ---------------------------------------------------------------------------
 # shellcheck source=scripts/dev/_caller-precheck.sh
@@ -378,7 +378,7 @@ if elb_precheck_init "${AZURE_SUBSCRIPTION_ID:-}"; then
       elb_precheck_caller_for "upgrade-autofix"
     fi
   fi
-  ts "    \u2713 caller '$ELB_CALLER_UPN' has the roles required for this run"
+  ts "    ✓ caller '$ELB_CALLER_UPN' has the roles required for this run"
 fi
 
 # ---------------------------------------------------------------------------
@@ -718,7 +718,7 @@ if poll_health; then
   # commits will be missing on the deployed MI until the operator runs a
   # full `azd provision` again. The doctor flags those gaps and prints
   # the exact `az role assignment create` snippets for each one. Read-only
-  # \u2014 the operator decides which fixes to apply.
+  # — the operator decides which fixes to apply.
   # ---------------------------------------------------------------------------
   DOCTOR_SCRIPT="$REPO_ROOT/scripts/dev/check-mi-rbac.sh"
   if [[ -x "$DOCTOR_SCRIPT" ]]; then

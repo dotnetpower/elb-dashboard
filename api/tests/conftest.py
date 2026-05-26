@@ -36,6 +36,13 @@ def _env_baseline(
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     # Tests that need dev auth bypass opt in explicitly; ambient CI/local env must not leak.
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
+    # The AKS runtime-RBAC helper defaults the workload-Storage target to
+    # the platform env when the caller omits it (api/tasks/azure/rbac.py
+    # `_resolve_workload_storage_defaults`). Tests that exercise the
+    # "no storage target" path must not pick up ambient azd env values.
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.delenv("STORAGE_ACCOUNT_NAME", raising=False)
+    monkeypatch.delenv("AZURE_RESOURCE_GROUP", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path_factory.mktemp("elb_state")))
 
 

@@ -371,7 +371,7 @@ if [[ "$FAIL_COUNT" -gt 0 ]]; then
     yellow "Fix the missing assignments with the commands below (requires User"
     yellow "Access Administrator at the target scope), OR re-run this doctor"
     yellow "with --auto-fix to attempt them under your current az login. RBAC"
-    yellow "propagation usually takes 1\u20135 minutes after each create."
+    yellow "propagation usually takes 1–5 minutes after each create."
   fi
   printf '\n'
   for line in "${FIX_CMDS[@]}"; do

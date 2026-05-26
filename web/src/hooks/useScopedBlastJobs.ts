@@ -17,15 +17,22 @@ export function useScopedBlastJobs(options: ScopedBlastJobsOptions = {}) {
   const hasWorkspaceContext = Boolean(subscriptionId && resourceGroup);
   const needsClusterDiscovery = !options.clusterName;
 
+  // Subscription-wide cluster discovery (matches ClusterCard / StorageCard).
+  // An RG-scoped probe missed clusters that elastic-blast had created in its
+  // own RG, leaving the BLAST jobs list empty even though a cluster existed.
   const clustersQuery = useQuery({
-    queryKey: ["aks", subscriptionId, resourceGroup],
-    queryFn: () => monitoringApi.aks(subscriptionId, resourceGroup),
-    enabled: enabled && hasWorkspaceContext && needsClusterDiscovery,
+    queryKey: ["aks", subscriptionId, "sub"],
+    queryFn: () => monitoringApi.aks(subscriptionId),
+    enabled: enabled && Boolean(subscriptionId) && needsClusterDiscovery,
     staleTime: 30_000,
   });
 
+  const discoveredClusters = clustersQuery.data?.clusters ?? [];
+  const discoveredCluster =
+    discoveredClusters.find((cluster) => cluster.resource_group === resourceGroup) ??
+    discoveredClusters[0];
   const selectedClusterName =
-    options.clusterName || clustersQuery.data?.clusters?.[0]?.name || "";
+    options.clusterName || discoveredCluster?.name || "";
   const clusterScopeReady =
     !hasWorkspaceContext || Boolean(options.clusterName) || clustersQuery.isFetched;
 

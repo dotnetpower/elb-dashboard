@@ -34,7 +34,7 @@ from api.services.k8s.nodes import (
     k8s_get_nodes,
     k8s_ready_warmup_node_names,
 )
-from api.services.k8s.observability import k8s_list_events, k8s_pod_logs
+from api.services.k8s.observability import k8s_list_events, k8s_pod_describe, k8s_pod_logs
 from api.services.k8s.timestamps import (
     k8s_timestamp_span_payload as _k8s_timestamp_span_payload,
 )
@@ -73,6 +73,7 @@ __all__ = [
     "k8s_get_pods",
     "k8s_get_service_ip",
     "k8s_list_events",
+    "k8s_pod_describe",
     "k8s_pod_logs",
     "k8s_ready_warmup_node_names",
     "k8s_release_stale_warmup_jobs",

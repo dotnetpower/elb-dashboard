@@ -4,6 +4,8 @@ import { ChevronDown, Loader2 } from "lucide-react";
 import { formatApiError } from "@/api/client";
 import type { K8sNode } from "@/api/endpoints";
 
+import { SectionShimmerBar } from "./SectionShimmerBar";
+
 /**
  * Collapsible table of K8s node identities (status / version / IP / OS /
  * runtime). Sourced from the typed direct K8s API. No metrics here —
@@ -11,6 +13,7 @@ import type { K8sNode } from "@/api/endpoints";
  */
 interface K8sNodesQuery {
   isLoading: boolean;
+  isFetching?: boolean;
   isError: boolean;
   data?: { nodes: K8sNode[] } | null;
   error?: unknown;
@@ -23,11 +26,13 @@ export function K8sNodesSection({ query }: { query: K8sNodesQuery }) {
   return (
     <div
       style={{
+        position: "relative",
         borderRadius: 8,
         border: "1px solid var(--border-weak)",
         overflow: "hidden",
       }}
     >
+      <SectionShimmerBar active={Boolean(query.isFetching)} />
       <button
         onClick={() => setCollapsed(!collapsed)}
         style={{

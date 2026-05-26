@@ -51,10 +51,12 @@ export function useGettingStartedReadiness({
       config.storageAccountName,
   );
 
+  // Subscription-wide list (matches ClusterCard / StorageCard) so a cluster
+  // created in a non-anchor RG — the elastic-blast default — is detected and
+  // the Getting Started panel does not pop "Create AKS" as a false negative.
   const aksQuery = useQuery({
-    queryKey: ["aks", config.subscriptionId, config.workloadResourceGroup],
-    queryFn: () =>
-      monitoringApi.aks(config.subscriptionId, config.workloadResourceGroup),
+    queryKey: ["aks", config.subscriptionId, "sub"],
+    queryFn: () => monitoringApi.aks(config.subscriptionId),
     enabled: hasConfig && !gettingStartedDismissed,
     staleTime: 60_000,
     retry: 1,

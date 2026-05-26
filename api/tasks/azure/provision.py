@@ -70,6 +70,7 @@ _STEP_LABEL: dict[str, str] = {key: label for key, label in _PROVISION_STEPS}
 _RBAC_SUB_PHASES: dict[str, str] = {
     "ensuring_rbac_acr": "Granting AcrPull to AKS kubelet",
     "ensuring_rbac_storage": "Granting Storage Blob Data Contributor",
+    "ensuring_dashboard_mi_rbac": "Self-granting dashboard MI on cluster RG",
 }
 
 
@@ -512,6 +513,38 @@ def provision_aks(
         )
         raise RuntimeError(rbac_error)
 
+    # Self-grant Contributor + User Access Administrator to the dashboard
+    # MI on the AKS cluster RG so the operator can later click
+    # "Deploy elb-openapi" without first running `grant-runtime-rbac.sh`
+    # or re-provisioning `workloadClusterRoles.bicep`. Best-effort: if
+    # the MI lacks `Microsoft.Authorization/roleAssignments/write` at
+    # this scope (pre-Part-C deployments), the helper records the
+    # failure into ``roles_failed`` and returns a `recovery_command`
+    # string the SPA can surface — but the cluster itself is fully
+    # usable, so we do NOT fail the task here.
+    mi_summary = _facade._ensure_dashboard_mi_cluster_rg_roles(
+        cred,
+        subscription_id=subscription_id,
+        cluster_resource_group=resource_group,
+        mi_principal_id=os.environ.get("SHARED_IDENTITY_PRINCIPAL_ID", "").strip(),
+        progress_callback=_rbac_progress,
+    )
+    if mi_summary.get("roles_failed"):
+        failed = mi_summary["roles_failed"]
+        if isinstance(failed, dict):
+            failed_items = ", ".join(f"{r}: {e}" for r, e in failed.items())
+        else:
+            failed_items = ", ".join(str(r) for r in failed)
+        recovery = mi_summary.get("recovery_command") or ""
+        LOGGER.warning(
+            "AKS %s ready, but dashboard-MI self-grant on %s incomplete: %s. "
+            "OpenAPI deploy will fail until an admin runs: %s",
+            cluster_name,
+            resource_group,
+            failed_items,
+            recovery,
+        )
+
     _publish(
         self,
         job_id,
@@ -521,6 +554,7 @@ def provision_aks(
         portal_url=portal_url,
         roles_assigned=rbac_summary["roles_assigned"],
         roles_failed=rbac_summary["roles_failed"],
+        dashboard_mi_rbac=mi_summary,
     )
     return {
         "cluster_name": cluster_name,
@@ -531,6 +565,7 @@ def provision_aks(
         "system_vm_size": sys_sku,
         "roles_assigned": rbac_summary["roles_assigned"],
         "roles_failed": rbac_summary["roles_failed"],
+        "dashboard_mi_rbac": mi_summary,
         "pools": [
             {"name": SYSTEM_POOL_NAME, "mode": "System", "vm_size": sys_sku, "count": sys_count},
             {"name": BLAST_POOL_NAME, "mode": "User", "vm_size": blast_sku, "count": blast_count},

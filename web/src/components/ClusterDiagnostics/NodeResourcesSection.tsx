@@ -10,6 +10,7 @@ import {
   pressureFlags,
   shortNodeName,
 } from "./k8sFormat";
+import { SectionShimmerBar } from "./SectionShimmerBar";
 
 /**
  * Visual progress bars for per-node CPU and memory usage, grouped by
@@ -18,6 +19,7 @@ import {
  */
 interface NodeResourcesQuery {
   isLoading: boolean;
+  isFetching?: boolean;
   isError: boolean;
   data?: { nodes: K8sNodeMetrics[] } | null;
   error?: unknown;
@@ -70,11 +72,13 @@ export function NodeResourcesSection({ query }: { query: NodeResourcesQuery }) {
   return (
     <div
       style={{
+        position: "relative",
         borderRadius: 8,
         border: "1px solid var(--border-weak)",
         overflow: "hidden",
       }}
     >
+      <SectionShimmerBar active={Boolean(query.isFetching)} />
       <div
         style={{
           padding: "8px 12px",

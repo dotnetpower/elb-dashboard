@@ -4,7 +4,7 @@ Responsibility: AKS monitor routes
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
 Key entry points: `list_aks`, `aks_nodes`, `aks_pods`, `aks_top_nodes`, `aks_pod_logs`,
-`aks_service_ip`
+`aks_pod_describe`, `aks_service_ip`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_route_contracts.py
@@ -158,6 +158,30 @@ def aks_pod_logs(
         return {"logs": logs}
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_pod_logs", exc, empty={"logs": ""}))
+
+
+@router.get("/aks/pod-describe")
+def aks_pod_describe(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(...),
+    pod_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+
+    cred = monitor_package.get_credential()
+    try:
+        describe = monitoring_svc.k8s_pod_describe(
+            cred, sub, resource_group, cluster_name, namespace, pod_name
+        )
+        return {"describe": describe}
+    except Exception as exc:
+        return cast(
+            dict[str, Any], _graceful("aks_pod_describe", exc, empty={"describe": ""})
+        )
 
 
 @router.get("/aks/service-ip")

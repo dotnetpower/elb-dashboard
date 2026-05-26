@@ -33,6 +33,7 @@ from api.tasks.azure.aks_observability import (
 )
 from api.tasks.azure.app_insights import (
     apply_app_insights_to_deployment,
+    clear_app_insights_from_deployment,
     provision_app_insights,
 )
 from api.tasks.azure.cluster_params import build_cluster_params as _build_cluster_params
@@ -55,6 +56,9 @@ from api.tasks.azure.rbac import (
     ensure_aks_runtime_rbac as _ensure_aks_runtime_rbac,
 )
 from api.tasks.azure.rbac import (
+    ensure_dashboard_mi_cluster_rg_roles as _ensure_dashboard_mi_cluster_rg_roles,
+)
+from api.tasks.azure.rbac import (
     grant_storage_blob_contributor_to_aks as _grant_storage_blob_contributor_to_aks,
 )
 
@@ -62,6 +66,7 @@ __all__ = (
     "_attach_acr",
     "_build_cluster_params",
     "_ensure_aks_runtime_rbac",
+    "_ensure_dashboard_mi_cluster_rg_roles",
     "_grant_storage_blob_contributor_to_aks",
     "_now_iso",
     "_update_state",
@@ -69,6 +74,7 @@ __all__ = (
     "aks_client",
     "apply_app_insights_to_deployment",
     "assign_aks_roles",
+    "clear_app_insights_from_deployment",
     "delete_aks",
     "diag_noop",
     "disable_aks_container_insights",

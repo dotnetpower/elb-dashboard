@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.41.2.15936",
-      "templateHash": "11946278934578013216"
+      "templateHash": "5065778528694125806"
     }
   },
   "parameters": {
@@ -92,6 +92,27 @@
       "defaultValue": true,
       "metadata": {
         "description": "If true, grants the shared UAMI resource-group-scope Contributor and User Access Administrator for runtime resource orchestration. Set to false when equivalent roles already exist outside this template."
+      }
+    },
+    "assignWorkloadRgCreatorRole": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "If true, defines and assigns the project custom role `Elb Workload RG Creator` to the shared UAMI at subscription scope. The custom role grants ONLY `Microsoft.Resources/subscriptions/resourceGroups/{read,write,delete}` (plus sub-scope deployment reads) so AKS can auto-create its `MC_<rg>_<cluster>_<region>` node RG. The UAMI still cannot create resources inside any RG without a separate Contributor assignment at that RG scope — this is the least-privilege alternative to granting sub-scope Contributor. Disable when policy forbids any custom roles in the subscription."
+      }
+    },
+    "aksClusterResourceGroup": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional name of the AKS workload cluster RG (e.g. `rg-elb-cluster`). When set, grants the shared UAMI Contributor + User Access Administrator on that RG so `api.tasks.openapi.rbac.setup_workload_identity` can create `id-elb-openapi` + federated credential + downstream role assignments. Leave empty on the first `azd up` (the RG does not exist yet); set it on the second `azd provision` after the SPA has created AKS. `scripts/dev/grant-runtime-rbac.sh` is the workstation safety net for deployments that pre-date this parameter."
+      }
+    },
+    "assignWorkloadClusterRoles": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "If true and `aksClusterResourceGroup` is non-empty, grants the shared UAMI Contributor + User Access Administrator on that RG. Set to false when equivalent roles already exist outside this template."
       }
     },
     "enableApplicationInsights": {
@@ -680,6 +701,205 @@
       ]
     },
     {
+      "condition": "[parameters('assignWorkloadRgCreatorRole')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('workload-rg-creator-{0}', variables('resourceToken'))]",
+      "location": "[deployment().location]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "uamiPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('identity-{0}', variables('resourceToken'))), '2025-04-01').outputs.identityPrincipalId.value]"
+          },
+          "resourceToken": {
+            "value": "[variables('resourceToken')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.41.2.15936",
+              "templateHash": "11070257963419586149"
+            }
+          },
+          "parameters": {
+            "uamiPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal id (object id) of the shared UAMI to grant the custom role to."
+              }
+            },
+            "resourceToken": {
+              "type": "string",
+              "metadata": {
+                "description": "Stable token appended to the role definition name so multiple environments in the same subscription do not collide."
+              }
+            }
+          },
+          "variables": {
+            "roleName": "Elb Workload RG Creator",
+            "roleDescription": "Allows the dashboard managed identity to create / read / delete subscription resource groups so AKS can auto-create its MC_* node RG, and to assign a fixed whitelist of runtime roles (Contributor, User Access Administrator, Storage Blob Data Contributor, AcrPull, AKS Cluster User) so it can self-heal RBAC on the workload cluster RG.",
+            "allowedRoleDefinitionIds": [
+              "b24988ac-6180-42a0-ab88-20f7382dd24c",
+              "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9",
+              "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+              "7f951dda-4ed3-4680-a7ca-43fe172d538d",
+              "4abbcc35-e782-43d8-92c5-2d3f1bd2253f"
+            ],
+            "allowedRolesCsv": "[join(variables('allowedRoleDefinitionIds'), ', ')]",
+            "roleAssignmentCondition": "[format('((!(ActionMatches{{''Microsoft.Authorization/roleAssignments/write''}})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {{{0}}} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] StringEqualsIgnoreCase ''ServicePrincipal''))', variables('allowedRolesCsv'))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleDefinitions",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(subscription().id, variables('roleName'))]",
+              "properties": {
+                "roleName": "[variables('roleName')]",
+                "description": "[variables('roleDescription')]",
+                "type": "CustomRole",
+                "assignableScopes": [
+                  "[subscription().id]"
+                ],
+                "permissions": [
+                  {
+                    "actions": [
+                      "Microsoft.Resources/subscriptions/resourceGroups/read",
+                      "Microsoft.Resources/subscriptions/resourceGroups/write",
+                      "Microsoft.Resources/subscriptions/resourceGroups/delete",
+                      "Microsoft.Resources/deployments/read",
+                      "Microsoft.Resources/deployments/write",
+                      "Microsoft.Resources/deployments/operations/read",
+                      "Microsoft.Resources/deployments/operationStatuses/read",
+                      "Microsoft.Authorization/roleAssignments/read",
+                      "Microsoft.Authorization/roleAssignments/write"
+                    ],
+                    "notActions": [],
+                    "dataActions": [],
+                    "notDataActions": []
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(subscription().id, parameters('uamiPrincipalId'), subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, variables('roleName'))), parameters('resourceToken'))]",
+              "properties": {
+                "principalId": "[parameters('uamiPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, variables('roleName')))]",
+                "description": "elb-dashboard shared UAMI — sub-scope RG-write for AKS MC_* auto-create + ABAC-restricted self-heal of runtime RBAC.",
+                "condition": "[variables('roleAssignmentCondition')]",
+                "conditionVersion": "2.0"
+              },
+              "dependsOn": [
+                "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, variables('roleName')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "workloadRgCreatorRoleId": {
+              "type": "string",
+              "value": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, variables('roleName')))]"
+            },
+            "workloadRgCreatorAssignmentId": {
+              "type": "string",
+              "value": "[subscriptionResourceId('Microsoft.Authorization/roleAssignments', guid(subscription().id, parameters('uamiPrincipalId'), subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, variables('roleName'))), parameters('resourceToken')))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('identity-{0}', variables('resourceToken')))]"
+      ]
+    },
+    {
+      "condition": "[and(parameters('assignWorkloadClusterRoles'), not(empty(parameters('aksClusterResourceGroup'))))]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('workload-cluster-roles-{0}', variables('resourceToken'))]",
+      "resourceGroup": "[parameters('aksClusterResourceGroup')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "uamiPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('identity-{0}', variables('resourceToken'))), '2025-04-01').outputs.identityPrincipalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.41.2.15936",
+              "templateHash": "8922205726141650640"
+            }
+          },
+          "parameters": {
+            "uamiPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal id (object id) of the shared UAMI used by the api/worker sidecars."
+              }
+            }
+          },
+          "variables": {
+            "contributorRoleId": "b24988ac-6180-42a0-ab88-20f7382dd24c",
+            "userAccessAdministratorRoleId": "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('uamiPrincipalId'), variables('contributorRoleId'))]",
+              "properties": {
+                "principalId": "[parameters('uamiPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('contributorRoleId'))]",
+                "description": "elb-dashboard shared UAMI — create id-elb-openapi MI + federated cred + read/list AKS in the workload RG."
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, parameters('uamiPrincipalId'), variables('userAccessAdministratorRoleId'))]",
+              "properties": {
+                "principalId": "[parameters('uamiPrincipalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('userAccessAdministratorRoleId'))]",
+                "description": "elb-dashboard shared UAMI — assign Contributor + AKS Cluster User to id-elb-openapi in the workload RG."
+              }
+            }
+          ],
+          "outputs": {
+            "contributorRoleAssignmentId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Authorization/roleAssignments', guid(resourceGroup().id, parameters('uamiPrincipalId'), variables('contributorRoleId')))]"
+            },
+            "userAccessAdministratorRoleAssignmentId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Authorization/roleAssignments', guid(resourceGroup().id, parameters('uamiPrincipalId'), variables('userAccessAdministratorRoleId')))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', format('identity-{0}', variables('resourceToken')))]"
+      ]
+    },
+    {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
       "name": "[format('acr-{0}', variables('resourceToken'))]",
@@ -719,7 +939,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "13757773863560156782"
+              "templateHash": "18213738371853647902"
             }
           },
           "parameters": {
@@ -836,7 +1056,6 @@
               ]
             },
             {
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateDnsZones",
               "apiVersion": "2024-06-01",
               "name": "privatelink.azurecr.io",
@@ -844,7 +1063,6 @@
               "tags": "[variables('moduleTags')]"
             },
             {
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
               "apiVersion": "2024-06-01",
               "name": "[format('{0}/{1}', 'privatelink.azurecr.io', format('link-{0}', uniqueString(parameters('vnetResourceId'))))]",
@@ -861,7 +1079,6 @@
               ]
             },
             {
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateEndpoints",
               "apiVersion": "2024-01-01",
               "name": "[format('pe-{0}', parameters('acrName'))]",
@@ -888,7 +1105,6 @@
               ]
             },
             {
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
               "apiVersion": "2024-01-01",
               "name": "[format('{0}/{1}', format('pe-{0}', parameters('acrName')), 'default')]",
@@ -970,7 +1186,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "15072985498021086158"
+              "templateHash": "11582500986259011289"
             }
           },
           "parameters": {
@@ -1095,7 +1311,6 @@
                 "name": "zones",
                 "count": "[length(variables('endpointGroups'))]"
               },
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateDnsZones",
               "apiVersion": "2024-06-01",
               "name": "[variables('endpointGroups')[copyIndex()].zone]",
@@ -1107,7 +1322,6 @@
                 "name": "zoneLinks",
                 "count": "[length(variables('endpointGroups'))]"
               },
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
               "apiVersion": "2024-06-01",
               "name": "[format('{0}/link-{1}', variables('endpointGroups')[copyIndex()].zone, uniqueString(parameters('vnetResourceId')))]",
@@ -1128,7 +1342,6 @@
                 "name": "endpoints",
                 "count": "[length(variables('endpointGroups'))]"
               },
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateEndpoints",
               "apiVersion": "2024-01-01",
               "name": "[format('pe-{0}-{1}', parameters('storageAccountName'), variables('endpointGroups')[copyIndex()].suffix)]",
@@ -1159,7 +1372,6 @@
                 "name": "endpointDnsGroups",
                 "count": "[length(variables('endpointGroups'))]"
               },
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
               "apiVersion": "2024-01-01",
               "name": "[format('pe-{0}-{1}/default', parameters('storageAccountName'), variables('endpointGroups')[copyIndex()].suffix)]",
@@ -1436,7 +1648,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.41.2.15936",
-              "templateHash": "11095574862022857057"
+              "templateHash": "7706441266121964756"
             }
           },
           "parameters": {
@@ -1554,7 +1766,6 @@
               ]
             },
             {
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateDnsZones",
               "apiVersion": "2024-06-01",
               "name": "privatelink.vaultcore.azure.net",
@@ -1562,7 +1773,6 @@
               "tags": "[variables('moduleTags')]"
             },
             {
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
               "apiVersion": "2024-06-01",
               "name": "[format('{0}/{1}', 'privatelink.vaultcore.azure.net', format('link-{0}', uniqueString(parameters('vnetResourceId'))))]",
@@ -1579,7 +1789,6 @@
               ]
             },
             {
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateEndpoints",
               "apiVersion": "2024-01-01",
               "name": "[format('pe-{0}', parameters('keyVaultName'))]",
@@ -1606,7 +1815,6 @@
               ]
             },
             {
-              "condition": "[not(parameters('allowPublicAccessForBootstrap'))]",
               "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
               "apiVersion": "2024-01-01",
               "name": "[format('{0}/{1}', format('pe-{0}', parameters('keyVaultName')), 'default')]",

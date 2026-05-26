@@ -38,6 +38,15 @@ export interface Preferences {
   appInsightsConnectionString: string;
   /** Log Analytics workspace ARM id backing the App Insights component. */
   appInsightsWorkspaceResourceId: string;
+  /**
+   * Name of the Container App revision created by the most recent
+   * "Apply to server sidecars" action (or empty when never applied).
+   * Surfaces in the Telemetry settings so operators can correlate the
+   * connection string in the SPA with what is running server-side.
+   */
+  appInsightsLastAppliedRevision: string;
+  /** Last 8 characters of the InstrumentationKey that was applied. */
+  appInsightsLastAppliedKeyTail: string;
   /** Preview opt-in: show Custom DB surfaces when the runtime flag allows it. */
   previewCustomDbEnabled: boolean;
   /** Preview opt-in: show Lab Tools surfaces when the runtime flag allows it. */
@@ -55,6 +64,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   telemetryEnabled: false,
   appInsightsConnectionString: "",
   appInsightsWorkspaceResourceId: "",
+  appInsightsLastAppliedRevision: "",
+  appInsightsLastAppliedKeyTail: "",
   previewCustomDbEnabled: false,
   previewLabToolsEnabled: false,
   previewLiveWallEnabled: false,

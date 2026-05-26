@@ -12,11 +12,6 @@ import {
   DEFAULT_AKS_SYSTEM_SKU,
 } from "@/hooks/useAksSkus";
 
-import {
-  dismissLastFailedProvision,
-  saveLastFailedProvision,
-} from "./lastFailedProvision";
-
 const DEFAULT_NODE_COUNT = 10;
 
 export const MAX_SYSTEM_NODE_COUNT = 3;
@@ -405,20 +400,11 @@ export function useClusterProvisioning(args: {
               ? "Provisioning task was cancelled before it finished."
               : "Provisioning task failed without an error message. Check worker logs.";
           setProvError(errMsg);
-          // P3-2: persist the failure so a browser reload still shows
-          // a "Last attempt failed" banner. Only saves on real
-          // FAILURE — REVOKED was a deliberate user cancel and does
-          // not deserve a sticky banner on reload.
-          if (status === "FAILURE") {
-            saveLastFailedProvision({
-              raw: errMsg,
-              clusterName,
-              region: provisionRegion,
-              resourceGroup: provisionResourceGroup,
-              subscriptionId,
-              when: Date.now(),
-            });
-          }
+          // Provisioning errors are transient by design — they live in
+          // `provError` only and disappear on browser refresh / Dismiss.
+          // Re-introducing localStorage or server hydration here would
+          // bring back the stale "Last attempt failed" banner that
+          // re-surfaced after a clean cluster delete.
         }
       } catch {
         // Transient — swallow one poll error so a 500 doesn't kill the
@@ -488,13 +474,6 @@ export function useClusterProvisioning(args: {
     if (foundSucceeded || armSucceeded) {
       setProvStatus("done");
       closeModal();
-      // P3-2: any "last attempt failed" sticky note becomes stale the
-      // moment a new attempt succeeds — clear it so the dashboard
-      // doesn't keep nagging the user about a problem they fixed.
-      // Use dismiss (not plain clear) so the same row in the server's
-      // 24 h recent-failed-provisions window cannot re-hydrate the
-      // banner on the next reload.
-      dismissLastFailedProvision(Date.now());
     }
   }, [provStatus, query.data, clusterName, taskProgress, closeModal]);
 

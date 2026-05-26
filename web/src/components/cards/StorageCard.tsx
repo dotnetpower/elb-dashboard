@@ -48,10 +48,15 @@ export function StorageCard({
     refetchInterval,
   });
 
+  // Subscription-wide AKS list (ELB-managed clusters only) — matches the
+  // ClusterCard behaviour. The BLAST workload cluster typically lives in
+  // its own RG (e.g. `elasticblast-<user>`), not the dashboard's anchor
+  // workload RG, so an RG-scoped query here would render "No AKS workload
+  // cluster has been created yet" even when one exists.
   const clusterQuery = useQuery({
-    queryKey: ["aks", subscriptionId, resourceGroup],
-    queryFn: () => monitoringApi.aks(subscriptionId, resourceGroup),
-    enabled,
+    queryKey: ["aks", subscriptionId, "sub"],
+    queryFn: () => monitoringApi.aks(subscriptionId),
+    enabled: Boolean(subscriptionId),
     refetchInterval,
   });
 
@@ -59,6 +64,7 @@ export function StorageCard({
     const clusters = clusterQuery.data?.clusters ?? [];
     const preferredCluster =
       clusters.find((cluster) => cluster.name === clusterName) ??
+      clusters.find((cluster) => cluster.resource_group === resourceGroup) ??
       clusters.find((cluster) => (getWorkloadNodeCount(cluster) ?? 0) > 0) ??
       clusters[0];
     return {
@@ -67,7 +73,7 @@ export function StorageCard({
       nodeCount: preferredCluster ? getWorkloadNodeCount(preferredCluster) : null,
       isLoading:
         clusterQuery.isLoading ||
-        (enabled && !clusterQuery.data && clusterQuery.isFetching),
+        (Boolean(subscriptionId) && !clusterQuery.data && clusterQuery.isFetching),
       isError: clusterQuery.isError,
     };
   }, [
@@ -76,7 +82,8 @@ export function StorageCard({
     clusterQuery.isError,
     clusterQuery.isFetching,
     clusterQuery.isLoading,
-    enabled,
+    resourceGroup,
+    subscriptionId,
   ]);
 
   // Tracks whether BlastDbSection has any in-flight download — used only to

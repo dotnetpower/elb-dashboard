@@ -22,6 +22,7 @@ Validation: `uv run pytest -q api/tests/test_azure_tasks.py
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable
@@ -32,6 +33,40 @@ from celery import shared_task
 import api.tasks.azure as _facade
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_workload_storage_defaults(
+    storage_resource_group: str,
+    storage_account: str,
+) -> tuple[str, str]:
+    """Default the workload-Storage RBAC target to the platform's own Storage.
+
+    The SPA's cluster-provision form is allowed to omit `storage_account`
+    (it has historically defaulted to `""`); without this fallback the
+    downstream `ensure_aks_runtime_rbac` silently skips the Storage Blob
+    Data Contributor grant and the kubelet later 403s on `azcopy cp`
+    during warmup (`AuthorizationPermissionMismatch`). The dashboard's
+    Container App always sets `STORAGE_ACCOUNT_NAME` + `AZURE_RESOURCE_GROUP`
+    in the worker env, so when the caller omits the target we fill it
+    from there.
+
+    Unit tests that intentionally exercise the "no storage target" path
+    do not set the env vars, so the existing skip-when-empty contract is
+    preserved for them.
+    """
+    if storage_account.strip():
+        return storage_resource_group, storage_account
+    env_account = (
+        os.environ.get("AZURE_STORAGE_ACCOUNT")
+        or os.environ.get("STORAGE_ACCOUNT_NAME")
+        or ""
+    ).strip()
+    if not env_account:
+        return storage_resource_group, storage_account
+    env_rg = storage_resource_group.strip() or os.environ.get(
+        "AZURE_RESOURCE_GROUP", ""
+    ).strip()
+    return env_rg, env_account
 
 # PrincipalNotFound retry window — the freshly-created AKS kubelet
 # managed identity needs a few seconds for Entra ID to propagate to the
@@ -281,6 +316,157 @@ def _call_with_optional_kubelet_oid(
         fn(*positional)
 
 
+# Built-in role definition GUIDs used by the dashboard-MI self-grant on the
+# AKS cluster RG. Kept here (rather than imported from openapi.constants) so
+# this module stays self-contained for unit tests that stub the openapi
+# package.
+_ROLE_CONTRIBUTOR_GUID = "b24988ac-6180-42a0-ab88-20f7382dd24c"
+_ROLE_USER_ACCESS_ADMINISTRATOR_GUID = "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"
+
+
+def _dashboard_mi_recovery_command(
+    *,
+    subscription_id: str,
+    cluster_resource_group: str,
+    mi_principal_id: str,
+) -> str:
+    """Render the exact `grant-runtime-rbac.sh` command that closes the gap.
+
+    Surfaced verbatim in the provision_aks completion payload so a tenant
+    admin can copy-paste it without guessing the principal id or scope.
+    """
+    return (
+        "bash scripts/dev/grant-runtime-rbac.sh --yes "
+        f"--cluster-rg {cluster_resource_group} "
+        f"--principal-id {mi_principal_id} "
+        f"--subscription {subscription_id}"
+    )
+
+
+def ensure_dashboard_mi_cluster_rg_roles(
+    cred: Any,
+    *,
+    subscription_id: str,
+    cluster_resource_group: str,
+    mi_principal_id: str = "",
+    progress_callback: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
+    """Self-grant Contributor + User Access Administrator to the dashboard MI
+    on the AKS cluster RG.
+
+    Without these two roles on `rg-elb-cluster`, the downstream
+    `api.tasks.openapi.rbac.setup_workload_identity` step (triggered when
+    the operator later clicks "Deploy elb-openapi") fails immediately
+    because the worker MI cannot create `id-elb-openapi`, its federated
+    credential, or assign Contributor / Storage Blob Data Contributor /
+    AKS Cluster User to it.
+
+    Best-effort by design:
+
+    * `mi_principal_id` empty (local-dev shell with no
+      `SHARED_IDENTITY_PRINCIPAL_ID`) → returns ``{"skipped": True}``.
+    * Self-grant succeeds (or the role assignment already exists) → row
+      goes into ``roles_assigned``.
+    * Self-grant fails (typically `AuthorizationFailed` because the MI
+      lacks `Microsoft.Authorization/roleAssignments/write` on the
+      cluster RG — pre-`workloadRgCreatorRole` ABAC condition) → row
+      goes into ``roles_failed`` with the short error message. The
+      caller (`provision_aks`) does **not** fail the task: the cluster
+      is fully usable for everything except OpenAPI deploy, and the
+      summary embeds an exact `grant-runtime-rbac.sh` command the
+      operator can paste.
+
+    Returns ``{"roles_assigned": [...], "roles_failed": {role: error},
+    "mi_principal_id": <oid>, "cluster_resource_group": <rg>,
+    "recovery_command": <str>}``. ``recovery_command`` is included on
+    every call (even successful ones) so the SPA can render a "Re-run
+    if needed" affordance.
+    """
+
+    principal_id = (mi_principal_id or "").strip()
+    if not principal_id:
+        principal_id = (os.environ.get("SHARED_IDENTITY_PRINCIPAL_ID") or "").strip()
+    if not principal_id:
+        return {
+            "skipped": True,
+            "reason": "SHARED_IDENTITY_PRINCIPAL_ID not set",
+            "roles_assigned": [],
+            "roles_failed": {},
+        }
+
+    from azure.mgmt.authorization import AuthorizationManagementClient
+    from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
+
+    scope = (
+        f"/subscriptions/{subscription_id}/resourceGroups/{cluster_resource_group}"
+    )
+    auth_cl = AuthorizationManagementClient(cred, subscription_id)
+
+    targets: list[tuple[str, str]] = [
+        ("Contributor", _ROLE_CONTRIBUTOR_GUID),
+        ("User Access Administrator", _ROLE_USER_ACCESS_ADMINISTRATOR_GUID),
+    ]
+
+    roles_assigned: list[str] = []
+    roles_failed: dict[str, str] = {}
+
+    for label, role_guid in targets:
+        if progress_callback is not None:
+            progress_callback(
+                "ensuring_dashboard_mi_rbac",
+                f"Self-granting {label} on {cluster_resource_group}",
+            )
+        role_definition_id = (
+            f"/subscriptions/{subscription_id}/providers/"
+            f"Microsoft.Authorization/roleDefinitions/{role_guid}"
+        )
+        # Stable assignment id so re-runs hit the idempotent
+        # `RoleAssignmentExists` branch instead of leaving duplicates.
+        assignment_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"{scope}|{principal_id}|{role_guid}")
+        )
+        try:
+            _create_role_assignment_with_retry(
+                auth_cl,
+                scope,
+                assignment_id,
+                RoleAssignmentCreateParameters(  # type: ignore[call-arg]
+                    role_definition_id=role_definition_id,
+                    principal_id=principal_id,
+                    principal_type="ServicePrincipal",
+                ),
+                label=f"dashboard-MI {label}",
+            )
+            roles_assigned.append(label)
+        except Exception as exc:
+            # Most common: AuthorizationFailed because the MI lacks
+            # `Microsoft.Authorization/roleAssignments/write` at this
+            # scope (pre-Part-C deployments where the
+            # `Elb Workload RG Creator` custom role does not yet allow
+            # role-assignment writes). Record + continue so the second
+            # role is still attempted and the cluster create is not
+            # marked failed.
+            LOGGER.warning(
+                "dashboard-MI self-grant %s on %s failed: %s",
+                label,
+                cluster_resource_group,
+                str(exc)[:200],
+            )
+            roles_failed[label] = str(exc)[:300]
+
+    return {
+        "roles_assigned": roles_assigned,
+        "roles_failed": roles_failed,
+        "mi_principal_id": principal_id,
+        "cluster_resource_group": cluster_resource_group,
+        "recovery_command": _dashboard_mi_recovery_command(
+            subscription_id=subscription_id,
+            cluster_resource_group=cluster_resource_group,
+            mi_principal_id=principal_id,
+        ),
+    }
+
+
 def ensure_aks_runtime_rbac(
     cred: Any,
     subscription_id: str,
@@ -310,6 +496,15 @@ def ensure_aks_runtime_rbac(
     """
     roles_assigned: list[str] = []
     roles_failed: dict[str, str] = {}
+
+    # Default the workload-Storage target to the platform's own Storage
+    # when the caller passes empty strings. This is the safety net for
+    # the SPA cluster-provision form omitting `storage_account`; without
+    # it the kubelet ends up with `AcrPull` only and `azcopy cp` later
+    # 403s on `blast-db/*.manifest` during warmup.
+    storage_resource_group, storage_account = _resolve_workload_storage_defaults(
+        storage_resource_group, storage_account
+    )
 
     # Single kubelet OID lookup shared by both downstream grants. Without
     # this, attach_acr + grant_storage_blob_contributor_to_aks each did

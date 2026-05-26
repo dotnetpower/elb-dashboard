@@ -59,6 +59,22 @@ def _require(value: Any, pattern: re.Pattern[str], label: str) -> str:
     return value
 
 
+_ALLOWED_RETENTION_DAYS = (7, 14, 30, 60, 90, 120, 180, 270, 365, 550, 730)
+
+
+def _require_retention_days(value: Any) -> int:
+    try:
+        days = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "invalid retention_days: must be an integer") from exc
+    if days not in _ALLOWED_RETENTION_DAYS:
+        raise HTTPException(
+            400,
+            f"invalid retention_days: must be one of {list(_ALLOWED_RETENTION_DAYS)}",
+        )
+    return days
+
+
 @router.get("")
 def get_status(_caller: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
     """Return the deployment-injected connection string (or empty when unset).
@@ -145,6 +161,10 @@ def provision(
     workspace_rg = (
         _require(workspace_rg_raw, _RE_RG, "workspace_resource_group") if workspace_rg_raw else None
     )
+    retention_days_raw = body.get("retention_days")
+    retention_days = (
+        _require_retention_days(retention_days_raw) if retention_days_raw is not None else None
+    )
 
     from api.tasks.azure import provision_app_insights
 
@@ -156,6 +176,7 @@ def provision(
         region=region,
         workspace_name=workspace_name,
         workspace_resource_group=workspace_rg,
+        retention_days=retention_days,
     )
     LOGGER.info(
         "app_insights provision enqueued by oid=%s sub=%s rg=%s name=%s",
@@ -187,6 +208,30 @@ def apply_to_deployment(
     )
     LOGGER.info(
         "app_insights deployment apply enqueued by oid=%s",
+        caller.object_id,
+    )
+    return {
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/tasks/{result.id}",
+        "status": "queued",
+    }
+
+
+@router.post("/clear")
+def clear_deployment(
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Enqueue a task that removes the App Insights env var from server sidecars.
+
+    The Settings panel calls this when the operator clicks "Clear server
+    override" — it reverts api/worker/beat to whatever the Bicep / deployment
+    template provided originally.
+    """
+    from api.tasks.azure import clear_app_insights_from_deployment
+
+    result = _safe_delay(clear_app_insights_from_deployment)
+    LOGGER.info(
+        "app_insights deployment clear enqueued by oid=%s",
         caller.object_id,
     )
     return {

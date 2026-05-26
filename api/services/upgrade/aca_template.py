@@ -198,6 +198,35 @@ def apply_app_insights_connection_string(
         raise TemplateError(f"begin_update failed: {exc}") from exc
 
 
+def clear_app_insights_connection_string(
+    *,
+    revision_suffix: str | None = None,
+    client: Any | None = None,
+) -> Any:
+    """Remove the App Insights connection string env var from api/worker/beat.
+
+    Symmetrical to ``apply_app_insights_connection_string``; used by the
+    Settings panel "Clear server override" action so an operator can revert
+    to the deployment-provided value after experimenting with a manual one.
+    """
+    rg = _env(AZURE_RESOURCE_GROUP_ENV)
+    name = _env(CONTAINER_APP_NAME_ENV)
+    cli = client or _client()
+    app = read_app_template(client=cli)
+    removed = _remove_env_var_from_containers(
+        app,
+        container_names=_SERVER_TELEMETRY_CONTAINERS,
+        env_name=APPLICATIONINSIGHTS_CONNECTION_STRING_ENV,
+    )
+    _omit_masked_secrets_from_update(app)
+    _set_revision_suffix(app, revision_suffix or _telemetry_revision_suffix())
+    try:
+        poller = cli.container_apps.begin_update(rg, name, app)
+    except Exception as exc:
+        raise TemplateError(f"begin_update failed: {exc}") from exc
+    return poller, removed
+
+
 # ---------------------------------------------------------------------------
 # Template inspection / mutation helpers (kept private so tests can drive
 # them through the public API).
@@ -323,6 +352,40 @@ def _apply_env_var_to_containers(
             _set_env_entry_value(entry, env_value)
         changed += 1
     return changed
+
+
+def _remove_env_var_from_containers(
+    app: Any,
+    *,
+    container_names: set[str],
+    env_name: str,
+) -> int:
+    """Drop the named env var from each matching container.
+
+    Returns the number of containers from which the variable was actually
+    removed (zero when none of them carried it).
+    """
+    removed = 0
+    for container in _template_containers(app):
+        cname = getattr(container, "name", "") or ""
+        if cname not in container_names:
+            continue
+        env = getattr(container, "env", None)
+        if not env:
+            continue
+        before = len(env)
+        filtered = [
+            entry
+            for entry in env
+            if (
+                (entry.get("name") if isinstance(entry, dict) else getattr(entry, "name", None))
+                != env_name
+            )
+        ]
+        if len(filtered) != before:
+            container.env = filtered
+            removed += 1
+    return removed
 
 
 def _ensure_env_list(container: Any) -> list[Any]:

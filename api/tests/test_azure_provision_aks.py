@@ -576,3 +576,99 @@ def test_provision_aks_retries_in_progress_cluster_operation(
     assert publishes[-1]["meta"]["status"] == "running"
     assert publishes[-1]["meta"]["error_code"] == "aks_operation_in_progress"
     assert "failed" not in phases
+
+
+def test_provision_aks_includes_dashboard_mi_rbac_in_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completed task payload + final PROGRESS publish must include
+    `dashboard_mi_rbac` so the SPA can show whether the cluster-RG
+    self-grant succeeded or surface the recovery command on failure.
+
+    This is the integration assertion for Part A of the OpenAPI-deploy
+    RBAC-gap fix. Without it, a regression that silently drops the
+    self-grant step would slip through the existing happy-path tests.
+    """
+    import api.tasks.azure as azure
+    from api.tasks.azure import provision_aks
+    from azure.core.exceptions import ResourceNotFoundError
+
+    class FakeResourceGroups:
+        def create_or_update(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
+
+        def get(self, _rg: str) -> object:
+            return object()
+
+    class FakeRc:
+        resource_groups = FakeResourceGroups()
+
+    class FakePoller:
+        def result(self) -> object:
+            class _Cluster:
+                identity = type("I", (), {"principal_id": "mi-principal"})()
+                provisioning_state = "Succeeded"
+                node_resource_group = "MC_rg-test_elb-cluster_koreacentral"
+
+            return _Cluster()
+
+    class FakeManagedClusters:
+        def begin_create_or_update(
+            self, _rg: str, _name: str, _params: object
+        ) -> FakePoller:
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    publishes: list[dict[str, Any]] = []
+
+    def _capture(state: str, meta: dict[str, Any] | None = None, **_kw: Any) -> None:
+        publishes.append({"state": state, "meta": dict(meta or {})})
+
+    monkeypatch.setattr(provision_aks, "update_state", _capture)
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setattr(azure, "resource_client", lambda _cred, _sub: FakeRc())
+    monkeypatch.setattr(
+        azure,
+        "_ensure_aks_runtime_rbac",
+        lambda *_args, **_kwargs: {
+            "roles_assigned": ["AcrPull"],
+            "roles_failed": [],
+        },
+    )
+    # Mark the self-grant as "skipped" (the simplest deterministic
+    # outcome for this integration test) by clearing the env var. The
+    # behaviour-specific paths (success / failure / idempotent) are
+    # exercised in `test_azure_tasks.py::test_ensure_dashboard_mi_*`.
+    monkeypatch.delenv("SHARED_IDENTITY_PRINCIPAL_ID", raising=False)
+
+    result = provision_aks.run(
+        job_id="job-mi-rbac",
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+        region="koreacentral",
+        cluster_name="elb-cluster-01",
+        node_sku="Standard_D8s_v3",
+        node_count=1,
+        system_vm_size="Standard_D2s_v3",
+        system_node_count=1,
+        acr_resource_group="",
+        acr_name="",
+        storage_resource_group="",
+        storage_account="",
+        caller_oid="caller-1",
+    )
+
+    assert "dashboard_mi_rbac" in result
+    assert result["dashboard_mi_rbac"].get("skipped") is True
+
+    # The final `completed` publish must also carry it so the SPA can
+    # render the recovery affordance from the progress stream alone
+    # (without waiting for `/api/tasks/{id}` result).
+    completed = [p for p in publishes if p["meta"].get("phase") == "completed"]
+    assert completed, publishes
+    assert "dashboard_mi_rbac" in completed[-1]["meta"]
+
+    _ = ResourceNotFoundError  # silence import-unused
