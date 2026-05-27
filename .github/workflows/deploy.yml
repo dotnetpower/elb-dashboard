@@ -82,6 +82,12 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Ensure containerapp CLI extension
+        # The runner's az CLI may not have the containerapp extension
+        # pre-installed; quick-deploy.sh relies on `az containerapp update`.
+        # --yes silences the prompt; --upgrade keeps an existing one fresh.
+        run: az extension add --name containerapp --yes --upgrade -o none
+
       - name: Verify chosen image tag exists in ACR
         run: |
           set -euo pipefail
