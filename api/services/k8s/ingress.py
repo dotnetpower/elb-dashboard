@@ -86,12 +86,109 @@ SYSTEM_POOL_TOLERATION: dict[str, str] = {
 SYSTEM_POOL_NODE_SELECTOR: dict[str, str] = {
     "kubernetes.azure.com/mode": "system",
 }
+# Lowered resource *requests* injected on every container of the patched
+# workloads so cert-manager + ingress-nginx fit on the AKS default
+# systempool node (Standard_D2s_v3 = 2 vCPU; the upstream ingress-nginx
+# manifest requests 100m CPU which on a single-node systempool already
+# carrying coredns / azure-wi-webhook / Container Insights ama-metrics
+# overflows allocation and leaves the controller Pod in `Pending`
+# forever — observed in production on elb-cluster-01: scheduler reported
+# "0/3 nodes are available: 1 Insufficient cpu, 2 node(s) had untolerated
+# taint(s)"). The lowered numbers reflect idle usage measured by
+# kubectl top pod on a steady-state install (controller ~5-15m CPU,
+# webhook ~2-5m CPU, ~30-80Mi memory). We only lower the *request* — any
+# existing `resources.limits` is left untouched so peak usage is not
+# capped. The patch is monotonic-decreasing: if the upstream already
+# requests less than these floors, the existing (lower) request wins.
+SYSTEM_POOL_LOW_CPU_REQUEST = "20m"
+SYSTEM_POOL_LOW_MEMORY_REQUEST = "64Mi"
 # Workload kinds whose podTemplate must carry the systempool patch. We
 # patch Jobs too because ingress-nginx ships admission-webhook bootstrap
 # Jobs whose Pods would otherwise be Pending.
 _SYSTEM_POOL_WORKLOAD_KINDS: frozenset[str] = frozenset(
     {"Deployment", "DaemonSet", "StatefulSet", "Job", "ReplicaSet"}
 )
+
+
+def _parse_cpu_to_millicores(value: object) -> int | None:
+    """Best-effort parse of a Kubernetes CPU quantity into millicores.
+
+    Returns ``None`` for shapes we don't recognise so the caller leaves
+    the existing request untouched (safer than guessing). Handles the
+    two forms used by upstream manifests: bare CPU count (``"1"``,
+    ``"0.5"``) and millicore suffix (``"100m"``). Other valid Kubernetes
+    suffixes (``n``, ``u``) are rejected — we have not seen them in any
+    ingress-nginx / cert-manager release.
+    """
+    if isinstance(value, int | float):
+        return int(float(value) * 1000)
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if text.endswith("m"):
+        try:
+            return int(text[:-1])
+        except ValueError:
+            return None
+    try:
+        return int(float(text) * 1000)
+    except ValueError:
+        return None
+
+
+def _parse_memory_to_bytes(value: object) -> int | None:
+    """Best-effort parse of a Kubernetes memory quantity into bytes.
+
+    Returns ``None`` for unrecognised shapes so the caller leaves the
+    existing request untouched. Handles the IEC suffixes that upstream
+    manifests actually use (``Ki``, ``Mi``, ``Gi``) plus bare integers.
+    """
+    if isinstance(value, int | float):
+        return int(value)
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    multipliers = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3}
+    for suffix, mult in multipliers.items():
+        if text.endswith(suffix):
+            try:
+                return int(float(text[: -len(suffix)]) * mult)
+            except ValueError:
+                return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+_LOW_CPU_MILLICORES = _parse_cpu_to_millicores(SYSTEM_POOL_LOW_CPU_REQUEST) or 20
+_LOW_MEMORY_BYTES = _parse_memory_to_bytes(SYSTEM_POOL_LOW_MEMORY_REQUEST) or (64 * 1024**2)
+
+
+def _shrink_container_requests(container: Any) -> None:
+    """Lower the container's CPU/memory *requests* to fit the systempool.
+
+    Monotonic-decreasing: if an upstream container is already requesting
+    less than the floor, the existing request is preserved. Limits and
+    every other field are left alone. Containers without
+    ``resources.requests`` get the floors written in.
+    """
+    if not isinstance(container, dict):
+        return
+    resources = container.setdefault("resources", {})
+    if not isinstance(resources, dict):
+        return
+    requests = resources.setdefault("requests", {})
+    if not isinstance(requests, dict):
+        return
+
+    cpu_existing = _parse_cpu_to_millicores(requests.get("cpu"))
+    if cpu_existing is None or cpu_existing > _LOW_CPU_MILLICORES:
+        requests["cpu"] = SYSTEM_POOL_LOW_CPU_REQUEST
+
+    mem_existing = _parse_memory_to_bytes(requests.get("memory"))
+    if mem_existing is None or mem_existing > _LOW_MEMORY_BYTES:
+        requests["memory"] = SYSTEM_POOL_LOW_MEMORY_REQUEST
 # Label selector for the ingress-nginx admission-webhook Jobs. Jobs are
 # spec-immutable, so an earlier failed install (toleration-less) leaves
 # Pending pods behind that ``kubectl apply -f -`` cannot reconcile. The
@@ -152,6 +249,18 @@ def patch_manifest_for_system_pool(raw_manifest: str) -> str:
             pod_spec["nodeSelector"] = node_selector
         for k, v in SYSTEM_POOL_NODE_SELECTOR.items():
             node_selector.setdefault(k, v)
+
+        # Shrink CPU/memory requests so the controller + webhook Pods
+        # fit on the default single-node D2s_v3 systempool (the upstream
+        # 100m CPU request was the actual blocker on elb-cluster-01).
+        # See SYSTEM_POOL_LOW_CPU_REQUEST docstring for the measurement
+        # basis. Init-containers get the same treatment because they
+        # also count against the node's allocatable CPU at scheduling
+        # time.
+        for container in pod_spec.get("containers", []) or []:
+            _shrink_container_requests(container)
+        for init_container in pod_spec.get("initContainers", []) or []:
+            _shrink_container_requests(init_container)
 
     # Drop empty / null documents before re-serialising. Upstream
     # cert-manager.yaml ends with a trailing `---` whose `safe_load`

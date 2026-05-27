@@ -167,6 +167,24 @@ where the failure was found, but knowing them up front saves a lot of time.
     "Post-implementation self-review", then summarise the outcome in the
     final user-facing message. If any check is unresolved, fix it or
     escalate — do not mark the task done.
+14. **Every docs page's `tags:` frontmatter must use only canonical tags.**
+    The Publish Docs CI job runs [scripts/docs/check_frontmatter.py](./scripts/docs/check_frontmatter.py)
+    which fails the build if any navigated `docs/**/*.md` file is missing
+    `title:` / `description:` or carries a tag outside the
+    `CANON_TAGS` whitelist (`overview`, `setup`, `user-guide`, `operate`,
+    `architecture`, `infra`, `auth`, `security`, `blast`, `terminal`,
+    `ui`, `agent`, `research`, `contributor`, `release`). Two rules:
+    * **Reuse first.** Do not invent freshly-named tags ("reference",
+      "guide", "howto", "docs", …) for a single page. Pick from the
+      whitelist; for a reference page that uses `user-guide` + the topic
+      tag (e.g. `blast`, `terminal`) is the standard pattern.
+    * **If a new tag is genuinely needed, add it in two places in the
+      same change**: `CANON_TAGS` in `scripts/docs/check_frontmatter.py`
+      **and** the Canon table in [docs/tags.md](./docs/tags.md). Adding
+      it in only one place will either fail the guard or leave the
+      tags index out of sync. Before any docs commit, run
+      `uv run python scripts/docs/check_frontmatter.py` locally — the
+      same check CI runs, takes <1s, and saves a red Publish Docs run.
 
 ---
 
@@ -179,6 +197,7 @@ where the failure was found, but knowing them up front saves a lot of time.
 | Backend lint | `uv run ruff check api` |
 | Worker | `uv run celery -A api.celery_app worker -l info` (needs local Redis) |
 | Frontend build | `cd web && npm run build` |
+| Docs frontmatter guard | `uv run python scripts/docs/check_frontmatter.py` (same check Publish Docs CI runs) |
 | Infra preview | `azd provision --preview` |
 | Local 2-sidecar Compose | `docker compose -f scripts/dev/docker-compose.local.yml up --build` |
 | Local debug as real az identity | `scripts/dev/local-run.sh auth-on` (RBAC + storage open + bypass=false + restart) → debug → `scripts/dev/local-run.sh auth-off` |

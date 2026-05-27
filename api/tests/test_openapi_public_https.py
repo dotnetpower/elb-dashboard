@@ -272,6 +272,98 @@ def test_patch_manifest_for_system_pool_passes_through_non_workload_docs() -> No
     )
 
 
+def test_patch_manifest_for_system_pool_shrinks_container_requests() -> None:
+    import yaml as _yaml
+    from api.services.k8s.ingress import (
+        SYSTEM_POOL_LOW_CPU_REQUEST,
+        SYSTEM_POOL_LOW_MEMORY_REQUEST,
+        patch_manifest_for_system_pool,
+    )
+
+    raw = _yaml.safe_dump_all(
+        [
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": "ingress-nginx-controller"},
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "controller",
+                                    "resources": {
+                                        "requests": {"cpu": "100m", "memory": "90Mi"},
+                                        "limits": {"cpu": "1", "memory": "256Mi"},
+                                    },
+                                }
+                            ],
+                            "initContainers": [
+                                {
+                                    "name": "setup",
+                                    "resources": {"requests": {"cpu": "250m"}},
+                                }
+                            ],
+                        }
+                    }
+                },
+            },
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": "cert-manager"},
+                "spec": {
+                    "template": {
+                        "spec": {"containers": [{"name": "controller"}]},
+                    }
+                },
+            },
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": "tiny-already"},
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "x",
+                                    "resources": {"requests": {"cpu": "5m"}},
+                                }
+                            ]
+                        }
+                    }
+                },
+            },
+        ]
+    )
+
+    patched = _safe_load_all(patch_manifest_for_system_pool(raw))
+
+    # ingress-nginx-controller: 100m → 20m, 90Mi → 64Mi (both lowered);
+    # init-container 250m → 20m; limits untouched.
+    controller = next(d for d in patched if d["metadata"]["name"] == "ingress-nginx-controller")
+    c_pod = controller["spec"]["template"]["spec"]
+    c_main = c_pod["containers"][0]
+    assert c_main["resources"]["requests"]["cpu"] == SYSTEM_POOL_LOW_CPU_REQUEST
+    assert c_main["resources"]["requests"]["memory"] == SYSTEM_POOL_LOW_MEMORY_REQUEST
+    assert c_main["resources"]["limits"] == {"cpu": "1", "memory": "256Mi"}
+    assert c_pod["initContainers"][0]["resources"]["requests"]["cpu"] == SYSTEM_POOL_LOW_CPU_REQUEST
+
+    # cert-manager controller had no resources block at all → floor written in.
+    cm = next(d for d in patched if d["metadata"]["name"] == "cert-manager")
+    cm_main = cm["spec"]["template"]["spec"]["containers"][0]
+    assert cm_main["resources"]["requests"]["cpu"] == SYSTEM_POOL_LOW_CPU_REQUEST
+    assert cm_main["resources"]["requests"]["memory"] == SYSTEM_POOL_LOW_MEMORY_REQUEST
+
+    # tiny-already had cpu=5m (below 20m floor) → preserved (monotonic decreasing).
+    tiny = next(d for d in patched if d["metadata"]["name"] == "tiny-already")
+    tiny_main = tiny["spec"]["template"]["spec"]["containers"][0]
+    assert tiny_main["resources"]["requests"]["cpu"] == "5m"
+    # memory had no existing request → floor written in.
+    assert tiny_main["resources"]["requests"]["memory"] == SYSTEM_POOL_LOW_MEMORY_REQUEST
+
+
 # ------------------------------------------------------------------------ runtime cache
 
 
@@ -789,13 +881,13 @@ def test_wait_for_cert_manager_webhook_sleeps_between_rollout_retries(
     with pytest.raises(RuntimeError):
         task_module._wait_for_cert_manager_webhook(kubeconfig_path="/fake")
 
-    # 5 retries → 4 sleeps (not after the last attempt). All at the same
-    # documented 15 s interval. Without these sleeps the whole 5-retry
-    # budget would collapse to <1 s of wall time when the Deployment
-    # object never appears server-side.
+    # N retries → N-1 sleeps (not after the last attempt). All at the
+    # same documented 15 s interval. Without these sleeps the whole
+    # retry budget would collapse to <1 s of wall time when the
+    # Deployment object never appears server-side.
     assert sleeps == [
         task_module._CERT_MANAGER_WEBHOOK_PROBE_INTERVAL_SECONDS,
-    ] * 4
+    ] * (task_module._CERT_MANAGER_WEBHOOK_PROBE_RETRIES - 1)
 
 
 def test_wait_for_cert_manager_webhook_raises_when_rollout_never_succeeds(
@@ -888,7 +980,7 @@ def test_wait_for_ingress_nginx_controller_sleeps_between_rollout_retries(
 
     assert sleeps == [
         task_module._INGRESS_NGINX_CONTROLLER_PROBE_INTERVAL_SECONDS,
-    ] * 4
+    ] * (task_module._INGRESS_NGINX_CONTROLLER_PROBE_RETRIES - 1)
 
 
 def test_wait_for_ingress_nginx_controller_raises_when_rollout_never_succeeds(
