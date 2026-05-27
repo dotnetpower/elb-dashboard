@@ -4,7 +4,6 @@ description: End-to-end reference of every BLAST execution option the dashboard 
 tags:
   - user-guide
   - blast
-  - reference
 ---
 
 # BLAST Options Reference
