@@ -50,7 +50,15 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
   const runtime = runtimeLabel(job, isActiveJobState(phase), now);
   const cluster = job.infrastructure?.cluster_name;
   const upn = job.owner_upn;
-  const shortUser = upn ? upn.split("@")[0] : null;
+  // Legacy rows pre-dating owner_upn capture still carry submission_source on
+  // the payload. Surfacing "api" for external_api submits keeps the User
+  // column meaningful even before the table row is rewritten.
+  const submissionSource =
+    typeof job.payload?.submission_source === "string"
+      ? (job.payload.submission_source as string)
+      : null;
+  const isApiSubmit = upn === "api" || submissionSource === "external_api";
+  const shortUser = isApiSubmit ? "api" : upn ? upn.split("@")[0] : null;
   const splitChildren = job.split_children;
   const splitLabel = splitChildren ? `${splitChildren.child_count} child jobs` : null;
 

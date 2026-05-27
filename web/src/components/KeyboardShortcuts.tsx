@@ -393,6 +393,12 @@ function InfoItem({ label, value }: { label: string; value: string }) {
 function LinksTab() {
   const links = [
     {
+      icon: <BookOpen size={14} />,
+      label: "Manual",
+      desc: "User guide & documentation site",
+      url: "https://dotnetpower.github.io/elb-dashboard/",
+    },
+    {
       icon: <Github size={14} />,
       label: "Source Code",
       desc: "elb-dashboard",

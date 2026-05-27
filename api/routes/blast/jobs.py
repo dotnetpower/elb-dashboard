@@ -33,6 +33,7 @@ from api.routes._blast_shared import (
     _local_state_matches_job_scope,
     _local_to_blast_job,
     _payload_value,
+    _queries_blob_path,
     _refresh_running_blast_state,
     _reset_external_jobs_cache,
     _split_child_summaries_from_repo,
@@ -544,6 +545,158 @@ def blast_job_events(
                 "message": f"Could not read job events: {type(exc).__name__}",
             },
         ) from exc
+
+
+# Hard cap on the original query FASTA the Edit search rehydration endpoint
+# will return. Mirrors the BLAST submit dialog's practical limit: anything
+# larger almost certainly belongs in the query_file field instead, and
+# round-tripping multi-MiB FASTA through the SPA sessionStorage hits browser
+# quotas.
+_QUERY_EDIT_MAX_BYTES = 5 * 1024 * 1024
+
+
+@router.get("/jobs/{job_id}/query")
+def blast_job_query(
+    job_id: str = Path(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the original FASTA submitted with this job.
+
+    The dashboard strips ``query_data`` from the persisted payload after
+    uploading it to the workload Storage account (keeps the JobState row
+    small). The Edit search button needs the original text to rehydrate
+    the form, so this route streams the blob back through the api sidecar
+    with a hard 5 MiB cap. No SAS token is ever issued to the browser.
+    """
+    from azure.core.exceptions import ResourceNotFoundError
+
+    from api.services import get_credential
+    from api.services.state_repo import get_state_repo
+    from api.services.storage.blob_io import read_metadata_blob_bytes
+    from api.services.storage.data import _blob_service
+
+    try:
+        repo = get_state_repo()
+        state = repo.get(job_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning(
+            "blast_job_query state lookup failed job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            503,
+            {"code": "query_fetch_unavailable", "message": type(exc).__name__},
+        ) from exc
+    if state is None:
+        raise HTTPException(404, "job not found")
+    if state.owner_oid and state.owner_oid != caller.object_id:
+        raise HTTPException(403, "not owner")
+    payload = state.payload if isinstance(state.payload, dict) else {}
+    blob_path = _queries_blob_path(
+        _payload_value(payload, "query_file", "query_blob_url")
+    )
+    if not blob_path:
+        raise HTTPException(
+            404,
+            {
+                "code": "query_not_persisted",
+                "message": "no query file was recorded for this job",
+            },
+        )
+    # Defensive guard: even though `query_file` is populated by our own
+    # submit pipeline, a corrupted Table row could carry "../" or an
+    # absolute path. Reject before reaching the Storage SDK.
+    from api.services.storage.blob_paths import _validate_blob_path
+
+    try:
+        _validate_blob_path(blob_path)
+    except ValueError as exc:
+        LOGGER.warning(
+            "blast_job_query rejected unsafe blob path job_id=%s: %s",
+            job_id,
+            exc,
+        )
+        raise HTTPException(
+            422,
+            {
+                "code": "invalid_query_path",
+                "message": "recorded query path is not safe to read",
+            },
+        ) from exc
+    storage_account = state.storage_account or str(
+        _payload_value(payload, "storage_account") or ""
+    )
+    if not storage_account:
+        raise HTTPException(
+            404,
+            {
+                "code": "query_not_persisted",
+                "message": "no storage account was recorded for this job",
+            },
+        )
+    try:
+        blob_client = _blob_service(get_credential(), storage_account).get_blob_client(
+            "queries", blob_path
+        )
+        raw = read_metadata_blob_bytes(
+            blob_client,
+            max_bytes=_QUERY_EDIT_MAX_BYTES,
+            label="query.fa",
+        )
+    except ResourceNotFoundError as exc:
+        raise HTTPException(
+            404,
+            {
+                "code": "query_blob_missing",
+                "message": "the original query blob is no longer in storage",
+            },
+        ) from exc
+    except ValueError as exc:
+        # ``read_metadata_blob_bytes`` raises ValueError when the blob
+        # exceeds ``max_bytes``. Surface as 413 so the SPA can degrade
+        # cleanly (toast + open the form without the original FASTA).
+        raise HTTPException(
+            413,
+            {
+                "code": "query_too_large_for_edit",
+                "message": (
+                    f"query exceeds the {_QUERY_EDIT_MAX_BYTES}-byte cap; "
+                    "cannot rehydrate the Edit search form"
+                ),
+                "max_bytes": _QUERY_EDIT_MAX_BYTES,
+            },
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning(
+            "blast_job_query blob fetch failed job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            503,
+            {"code": "query_fetch_unavailable", "message": type(exc).__name__},
+        ) from exc
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            422,
+            {
+                "code": "query_not_utf8",
+                "message": "stored query is not valid UTF-8",
+            },
+        ) from exc
+    return {
+        "job_id": job_id,
+        "query_text": text,
+        "size_bytes": len(raw),
+        "max_bytes": _QUERY_EDIT_MAX_BYTES,
+    }
 
 
 @router.get("/jobs/{job_id}/queue")

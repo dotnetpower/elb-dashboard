@@ -38,6 +38,7 @@ from api.services.k8s.ingress import (
     CERT_MANAGER_NAMESPACE,
     CERT_MANAGER_WEBHOOK_DEPLOYMENT,
     INGRESS_NGINX_ADMISSION_JOB_SELECTOR,
+    INGRESS_NGINX_CONTROLLER_DEPLOYMENT,
     INGRESS_NGINX_INSTALL_URL,
     INGRESS_NGINX_NAMESPACE,
     INGRESS_NGINX_SERVICE_NAME,
@@ -110,6 +111,301 @@ _CERT_MANAGER_WEBHOOK_PROBE_RETRIES = 5
 _CERT_MANAGER_WEBHOOK_PROBE_TIMEOUT_SECONDS = 60
 _CERT_MANAGER_WEBHOOK_PROBE_INTERVAL_SECONDS = 15
 _CERT_MANAGER_WEBHOOK_AVAILABLE_TIMEOUT_SECONDS = 300
+
+_INGRESS_NGINX_CONTROLLER_PROBE_RETRIES = 5
+_INGRESS_NGINX_CONTROLLER_PROBE_TIMEOUT_SECONDS = 60
+_INGRESS_NGINX_CONTROLLER_PROBE_INTERVAL_SECONDS = 15
+_INGRESS_NGINX_CONTROLLER_AVAILABLE_TIMEOUT_SECONDS = 300
+
+
+def _wait_for_ingress_nginx_controller(
+    *, kubeconfig_path: str
+) -> dict[str, Any]:
+    """Wait for the ingress-nginx controller Deployment to become Available.
+
+    The Ingress admission webhook is served by the ingress-nginx
+    controller Pod itself (Service ``ingress-nginx-controller-admission``
+    selects the controller Pods). On a cold cluster the Service object
+    exists \u2014 and so the LoadBalancer EXTERNAL-IP wait in Step 3 returns
+    successfully \u2014 well before any controller Pod has finished pulling
+    its image, registering its TLS keypair, and flipping to Ready, so a
+    naive ``kubectl apply -f <ingress>`` immediately after Step 6 fails
+    with:
+
+        Error from server (InternalError): failed calling webhook
+        "validate.nginx.ingress.kubernetes.io": ... no endpoints
+        available for service "ingress-nginx-controller-admission"
+
+    The retry pattern mirrors ``_wait_for_cert_manager_webhook``: short
+    ``kubectl rollout status`` probes (which return ``NotFound``
+    immediately when the Deployment does not yet exist server-side)
+    spaced by a sleep so the advertised budget is not collapsed by
+    fast-failing probes, followed by a single generous
+    ``kubectl wait --for=condition=Available`` for the final readiness
+    flip. Total budget \u2248 5 min, matching the cert-manager-webhook
+    helper.
+    """
+    last_err = ""
+    probe_started = time.time()
+    success = False
+    for attempt in range(1, _INGRESS_NGINX_CONTROLLER_PROBE_RETRIES + 1):
+        result = kubectl_run(
+            [
+                "rollout",
+                "status",
+                f"deployment/{INGRESS_NGINX_CONTROLLER_DEPLOYMENT}",
+                "-n",
+                INGRESS_NGINX_NAMESPACE,
+                f"--timeout={_INGRESS_NGINX_CONTROLLER_PROBE_TIMEOUT_SECONDS}s",
+            ],
+            kubeconfig_path=kubeconfig_path,
+            timeout_seconds=_INGRESS_NGINX_CONTROLLER_PROBE_TIMEOUT_SECONDS + 20,
+        )
+        if result.get("exit_code", 1) == 0:
+            success = True
+            break
+        last_err = (
+            (result.get("stderr") or result.get("stdout") or "").strip()[:300]
+        )
+        LOGGER.info(
+            "public-https: ingress-nginx-controller rollout probe %d/%d not ready yet: %s",
+            attempt,
+            _INGRESS_NGINX_CONTROLLER_PROBE_RETRIES,
+            last_err,
+        )
+        if attempt < _INGRESS_NGINX_CONTROLLER_PROBE_RETRIES:
+            time.sleep(_INGRESS_NGINX_CONTROLLER_PROBE_INTERVAL_SECONDS)
+    if not success:
+        elapsed = int(time.time() - probe_started)
+        raise RuntimeError(
+            "kubectl rollout status ingress-nginx-controller failed after "
+            f"{_INGRESS_NGINX_CONTROLLER_PROBE_RETRIES} probes "
+            f"({elapsed}s elapsed); last error: {last_err}"
+        )
+
+    return _kubectl_or_raise(
+        [
+            "wait",
+            "--for=condition=Available=true",
+            f"deployment/{INGRESS_NGINX_CONTROLLER_DEPLOYMENT}",
+            "-n",
+            INGRESS_NGINX_NAMESPACE,
+            f"--timeout={_INGRESS_NGINX_CONTROLLER_AVAILABLE_TIMEOUT_SECONDS}s",
+        ],
+        kubeconfig_path=kubeconfig_path,
+        timeout_seconds=_INGRESS_NGINX_CONTROLLER_AVAILABLE_TIMEOUT_SECONDS + 30,
+        context="wait ingress-nginx-controller",
+    )
+
+
+_INGRESS_NGINX_ADMISSION_JOB_WAIT_TIMEOUT_SECONDS = 180
+_INGRESS_NGINX_ADMISSION_JOBS = (
+    "ingress-nginx-admission-create",
+    "ingress-nginx-admission-patch",
+)
+
+
+def _wait_for_ingress_nginx_admission_jobs(*, kubeconfig_path: str) -> None:
+    """Wait for the ingress-nginx admission bootstrap Jobs to Complete.
+
+    The upstream ingress-nginx install manifest ships two pre-controller
+    Jobs (``ingress-nginx-admission-create`` and
+    ``ingress-nginx-admission-patch``). They generate the admission
+    webhook's TLS keypair (Secret ``ingress-nginx-admission``) and patch
+    its ``caBundle`` into the ``ValidatingWebhookConfiguration``. Until
+    BOTH Jobs reach the ``Complete`` condition, the caBundle is empty
+    and any Ingress apply fails with::
+
+        x509: certificate signed by unknown authority
+
+    (a *different* error from the "no endpoints available" race the
+    Deployment wait above handles \u2014 same root cause family, but the
+    apiserver sees a TLS verify failure instead of a missing endpoint).
+    This wait is layered defense: even if the Deployment is Available
+    and the EndpointSlice is published, a missing caBundle still
+    breaks the apply.
+
+    Idempotency: re-running setup on a cluster where the Jobs already
+    Completed is a no-op (``kubectl wait`` returns immediately when
+    the condition is already true on the Job object). The pre-delete
+    in Step 1 ensures the *current* Jobs are the ones we wait on.
+
+    The wait is best-effort: if a Job is missing (rare \u2014 only happens
+    when an operator manually removed the upstream Jobs) we log and
+    move on rather than fail the whole pipeline, because the
+    subsequent endpoint readiness probe + apply retry will surface
+    the real problem with a clearer error if one is still present.
+    """
+    for job_name in _INGRESS_NGINX_ADMISSION_JOBS:
+        result = kubectl_run(
+            [
+                "wait",
+                "--for=condition=Complete",
+                f"job/{job_name}",
+                "-n",
+                INGRESS_NGINX_NAMESPACE,
+                f"--timeout={_INGRESS_NGINX_ADMISSION_JOB_WAIT_TIMEOUT_SECONDS}s",
+            ],
+            kubeconfig_path=kubeconfig_path,
+            timeout_seconds=_INGRESS_NGINX_ADMISSION_JOB_WAIT_TIMEOUT_SECONDS + 30,
+        )
+        if result.get("exit_code", 1) != 0:
+            detail = (result.get("stderr") or result.get("stdout") or "").strip()[:300]
+            # "NotFound" is benign \u2014 the upstream manifest may have
+            # been customised. A timeout on an existing Job is the real
+            # signal; surface it so cert-manager challenge does not
+            # silently fail later.
+            if "NotFound" in detail or "not found" in detail.lower():
+                LOGGER.info(
+                    "public-https: ingress-nginx admission Job %s not present (skipped): %s",
+                    job_name,
+                    detail,
+                )
+                continue
+            raise RuntimeError(
+                f"ingress-nginx admission Job {job_name} did not Complete within "
+                f"{_INGRESS_NGINX_ADMISSION_JOB_WAIT_TIMEOUT_SECONDS}s: {detail}"
+            )
+
+
+_ADMISSION_ENDPOINTS_PROBE_RETRIES = 20
+_ADMISSION_ENDPOINTS_PROBE_INTERVAL_SECONDS = 3
+INGRESS_NGINX_ADMISSION_SERVICE = "ingress-nginx-controller-admission"
+
+
+def _wait_for_admission_endpoints_ready(*, kubeconfig_path: str) -> None:
+    """Poll the admission Service until at least one endpoint address exists.
+
+    ``kubectl wait --for=condition=Available`` on the controller
+    Deployment returns the moment a controller Pod transitions to
+    ``Ready``. The Service's EndpointSlice, however, is published by
+    a SEPARATE kube-controller-manager controller after that
+    transition \u2014 typical lag is a few hundred ms on a warm cluster,
+    but on a cold cluster (new AKS systempool, slow EndpointSlice
+    sync) it can stretch to several seconds. During that window any
+    Ingress ``kubectl apply`` hits the apiserver's webhook call,
+    which sees the Service has no endpoints, and the apiserver
+    returns::
+
+        Internal error occurred: failed calling webhook
+        "validate.nginx.ingress.kubernetes.io": ... no endpoints
+        available for service "ingress-nginx-controller-admission"
+
+    (Reproduced verbatim on elb-cluster-small, 2026-05-27.)
+
+    The probe polls ``kubectl get endpoints`` for the admission
+    Service and exits as soon as the first ``subsets[].addresses[].ip``
+    appears. Budget is generous (~60 s) but on a warm cluster the
+    very first probe usually succeeds in <100 ms, so the wall-clock
+    cost is negligible.
+    """
+    last_err = ""
+    for attempt in range(1, _ADMISSION_ENDPOINTS_PROBE_RETRIES + 1):
+        result = kubectl_run(
+            [
+                "get",
+                "endpoints",
+                INGRESS_NGINX_ADMISSION_SERVICE,
+                "-n",
+                INGRESS_NGINX_NAMESPACE,
+                "-o",
+                "jsonpath={.subsets[*].addresses[*].ip}",
+            ],
+            kubeconfig_path=kubeconfig_path,
+            timeout_seconds=15,
+        )
+        if result.get("exit_code", 1) == 0:
+            ips = (result.get("stdout") or "").strip()
+            if ips:
+                return
+            last_err = "admission Service has no endpoint addresses yet"
+        else:
+            last_err = (result.get("stderr") or "").strip()[:200]
+        if attempt < _ADMISSION_ENDPOINTS_PROBE_RETRIES:
+            time.sleep(_ADMISSION_ENDPOINTS_PROBE_INTERVAL_SECONDS)
+    raise RuntimeError(
+        f"ingress-nginx admission Service {INGRESS_NGINX_ADMISSION_SERVICE} "
+        f"never got endpoint addresses (probed {_ADMISSION_ENDPOINTS_PROBE_RETRIES} "
+        f"times \u00d7 {_ADMISSION_ENDPOINTS_PROBE_INTERVAL_SECONDS}s); last: {last_err}"
+    )
+
+
+# Transient webhook failure strings the apiserver surfaces when the
+# admission webhook is reachable in principle (Service + endpoints
+# exist) but the call itself failed for a recoverable reason \u2014
+# typically (a) EndpointSlice was published between our probe and the
+# apply but the kube-proxy on the apiserver-side node has not yet
+# synced (~milliseconds), (b) the controller Pod was restarted by the
+# Kubelet between our wait and our apply, or (c) caBundle is in the
+# middle of being patched. None of these warrant failing the whole
+# pipeline; a short retry covers them.
+_TRANSIENT_WEBHOOK_FAILURE_SUBSTRINGS: tuple[str, ...] = (
+    "no endpoints available for service",
+    "connection refused",
+    "context deadline exceeded",
+    "i/o timeout",
+    "x509: certificate signed by unknown authority",
+    "tls: failed to verify certificate",
+    "EOF",
+)
+_INGRESS_APPLY_RETRY_ATTEMPTS = 6
+_INGRESS_APPLY_RETRY_INTERVAL_SECONDS = 5
+
+
+def _apply_ingress_with_webhook_retry(
+    *,
+    kubeconfig_path: str,
+    ingress_yaml: str,
+) -> None:
+    """Apply the elb-openapi Ingress, retrying on transient webhook errors.
+
+    Final safety net after the Deployment + Jobs + Endpoints waits.
+    ``ValidatingWebhookConfiguration.failurePolicy`` defaults to
+    ``Fail``, so any transient webhook call error is a hard apply
+    failure \u2014 the whole public-https Enable click bounces. Short
+    retries (~30 s total) on the known transient strings absorb the
+    last-millisecond races without masking genuine misconfiguration
+    (wrong CRD version, syntactically invalid Ingress, RBAC denial,
+    etc.) because those produce different error strings and the
+    function fails immediately.
+    """
+    last_detail = ""
+    for attempt in range(1, _INGRESS_APPLY_RETRY_ATTEMPTS + 1):
+        result = kubectl_run(
+            ["apply", "-f", "-"],
+            kubeconfig_path=kubeconfig_path,
+            stdin=ingress_yaml,
+            timeout_seconds=60,
+        )
+        if result.get("exit_code", 1) == 0:
+            if attempt > 1:
+                LOGGER.info(
+                    "public-https: Ingress apply succeeded on attempt %d "
+                    "after transient webhook failure",
+                    attempt,
+                )
+            return
+        detail = (result.get("stderr") or result.get("stdout") or "").strip()[:600]
+        last_detail = detail
+        if not any(s in detail for s in _TRANSIENT_WEBHOOK_FAILURE_SUBSTRINGS):
+            # Non-transient \u2014 fail fast with the original error so the
+            # operator does not wait ~30 s for a definitively broken
+            # apply (wrong CRD version, RBAC denial, syntax error, ...).
+            raise RuntimeError(f"kubectl apply Ingress failed: {detail}")
+        LOGGER.info(
+            "public-https: Ingress apply transient webhook failure on "
+            "attempt %d/%d, retrying in %ds: %s",
+            attempt,
+            _INGRESS_APPLY_RETRY_ATTEMPTS,
+            _INGRESS_APPLY_RETRY_INTERVAL_SECONDS,
+            detail,
+        )
+        if attempt < _INGRESS_APPLY_RETRY_ATTEMPTS:
+            time.sleep(_INGRESS_APPLY_RETRY_INTERVAL_SECONDS)
+    raise RuntimeError(
+        f"kubectl apply Ingress failed after {_INGRESS_APPLY_RETRY_ATTEMPTS} "
+        f"transient-webhook retries: {last_detail}"
+    )
 
 
 def _wait_for_cert_manager_webhook(
@@ -524,14 +820,39 @@ def setup_openapi_public_https(
         )
 
         # Step 7: Ingress + Certificate (cert-manager auto-creates the
-        # Certificate CR from the Ingress's tls block + annotation)
+        # Certificate CR from the Ingress's tls block + annotation).
+        #
+        # Layered defense against the admission-webhook races that
+        # repeatedly broke this pipeline in production (see
+        # docs/features_change/2026-05/2026-05-27-public-https-*.md):
+        #
+        #   a. Deployment Available  \u2014 controller Pod is Ready.
+        #   b. Admission Jobs Complete \u2014 caBundle is patched in
+        #      ValidatingWebhookConfiguration; without this the
+        #      apiserver fails the webhook call with
+        #      "x509: certificate signed by unknown authority".
+        #   c. Admission Service endpoints published \u2014 closes the
+        #      EndpointSlice race between Pod-Ready and Service-has-
+        #      endpoints, which is the literal "no endpoints
+        #      available for service ingress-nginx-controller-
+        #      admission" error operators were seeing.
+        #   d. Apply with transient-error retry \u2014 last-millisecond
+        #      races (kube-proxy sync lag, Pod restart by Kubelet
+        #      between probe and apply) are absorbed by short retries
+        #      instead of bouncing the whole Enable click.
+        record_progress(self, "wait_ingress_nginx_controller")
+        _wait_for_ingress_nginx_controller(kubeconfig_path=kubeconfig_path)
+
+        record_progress(self, "wait_admission_jobs_complete")
+        _wait_for_ingress_nginx_admission_jobs(kubeconfig_path=kubeconfig_path)
+
+        record_progress(self, "wait_admission_endpoints_ready")
+        _wait_for_admission_endpoints_ready(kubeconfig_path=kubeconfig_path)
+
         record_progress(self, "apply_ingress", fqdn=fqdn)
-        _kubectl_or_raise(
-            ["apply", "-f", "-"],
+        _apply_ingress_with_webhook_retry(
             kubeconfig_path=kubeconfig_path,
-            stdin=build_openapi_ingress(fqdn=fqdn),
-            timeout_seconds=60,
-            context="apply Ingress",
+            ingress_yaml=build_openapi_ingress(fqdn=fqdn),
         )
 
         # Step 8: wait for the cert to become Ready (HTTP-01 challenge +

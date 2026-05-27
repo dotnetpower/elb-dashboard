@@ -33,6 +33,40 @@ const CORE_NT_JOB_EXAMPLE = {
   },
 };
 
+// E. coli K-12 MG1655 16S ribosomal RNA, partial (NCBI NR_024570.1, first ~490 bp).
+// Used as the lightweight default `Try it` example so /v1/jobs can be exercised
+// against the small 16S_ribosomal_RNA database (~50 MB) before core_nt is staged.
+const SMALL_16S_RRNA_FASTA =
+  [
+    ">NR_024570.1 Escherichia coli str. K-12 substr. MG1655 16S ribosomal RNA, partial sequence",
+    "AAATTGAAGAGTTTGATCATGGCTCAGATTGAACGCTGGCGGCAGGCCTAACACATGCAA",
+    "GTCGAACGGTAACAGGAAGAAGCTTGCTTCTTTGCTGACGAGTGGCGGACGGGTGAGTAA",
+    "TGTCTGGGAAACTGCCTGATGGAGGGGGATAACTACTGGAAACGGTAGCTAATACCGCAT",
+    "AACGTCGCAAGACCAAAGAGGGGGACCTTCGGGCCTCTTGCCATCGGATGTGCCCAGATG",
+    "GGATTAGCTAGTAGGTGGGGTAACGGCTCACCTAGGCGACGATCCCTAGCTGGTCTGAGA",
+    "GGATGACCAGCCACACTGGAACTGAGACACGGTCCAGACTCCTACGGGAGGCAGCAGTGG",
+    "GGAATATTGCACAATGGGCGCAAGCCTGATGCAGCCATGCCGCGTGTATGAAGAAGGCCT",
+    "TCGGGTTGTAAAGTACTTTCAGCGGGGAGGAAGGGAGTAAAGTTAATACCTTTGCTCATT",
+    "GACGTTACCCGCAGAAGAAGCACCGGCTAACTCCGTGCCAGCAGCCGCGGTAATACGGAG",
+  ].join("\n") + "\n";
+
+const SMALL_16S_RRNA_JOB_EXAMPLE = {
+  summary: "Small - 16S ribosomal RNA (~50 MB DB)",
+  description:
+    "Lightweight default that runs against the small 16S_ribosomal_RNA database. Use this to exercise the API before staging core_nt (~700 MB). Query is E. coli K-12 16S rRNA partial (NR_024570.1).",
+  value: {
+    program: "blastn",
+    db: "16S_ribosomal_RNA",
+    query_fasta: SMALL_16S_RRNA_FASTA,
+    blast_options: {
+      evalue: 0.01,
+      max_target_seqs: 50,
+      outfmt: "5",
+    },
+    resource_profile: "standard",
+  },
+};
+
 const OPENAPI_JOB_ID_DESCRIPTION =
   "Short OpenAPI job id returned by POST /v1/jobs, for example 17dfd2825089. Do not paste a Dashboard job UUID from /blast/jobs/<uuid>.";
 const OPENAPI_JOB_ID_USAGE_HINT =
@@ -422,6 +456,7 @@ function withCuratedRequestExamples(
       "application/json": {
         ...jsonBody,
         examples: {
+          small_16s_rrna: SMALL_16S_RRNA_JOB_EXAMPLE,
           mode_b_core_nt: CORE_NT_JOB_EXAMPLE,
           ...(jsonBody.examples || {}),
         },
@@ -707,6 +742,10 @@ export function getDefaultRequestExampleKey(
   exampleKeys: string[],
 ): string {
   if (endpoint.path === "/v1/jobs" && endpoint.method === "post") {
+    // Default to the lightweight 16S example so the dashboard's Try it surface
+    // works against a small staged database before core_nt is ready. The
+    // Web BLAST-equivalent core_nt entry stays available in the dropdown.
+    if (exampleKeys.includes("small_16s_rrna")) return "small_16s_rrna";
     if (exampleKeys.includes("mode_b_core_nt")) return "mode_b_core_nt";
     return (
       exampleKeys.find((key) => key.toLowerCase().includes("mode_b")) ||

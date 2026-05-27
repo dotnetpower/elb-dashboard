@@ -37,6 +37,30 @@ def test_job_state_round_trips_parent_job_id() -> None:
     assert restored.payload == {"group_id": "qg1"}
 
 
+def test_job_state_round_trips_owner_upn() -> None:
+    # The User column on Recent searches reads owner_upn — guard the round
+    # trip so a future schema edit can't silently drop it.
+    state = JobState(
+        job_id="job-upn",
+        type="blast",
+        status="queued",
+        owner_oid="oid-1",
+        owner_upn="alice@example.com",
+    )
+
+    entity = state.to_entity()
+    restored = JobState.from_entity(entity)
+
+    assert entity["owner_upn"] == "alice@example.com"
+    assert restored.owner_upn == "alice@example.com"
+
+    # Missing owner_upn round trips to None (legacy rows).
+    legacy_entity = dict(entity)
+    legacy_entity["owner_upn"] = ""
+    legacy_restored = JobState.from_entity(legacy_entity)
+    assert legacy_restored.owner_upn is None
+
+
 def test_job_state_writes_canonical_v2_job_metadata() -> None:
     state = JobState(
         job_id="job-1",

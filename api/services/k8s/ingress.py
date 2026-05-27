@@ -50,6 +50,15 @@ CERT_MANAGER_INSTALL_URL = (
 # webhook readiness and to scope the DNS label patch.
 INGRESS_NGINX_NAMESPACE = "ingress-nginx"
 INGRESS_NGINX_SERVICE_NAME = "ingress-nginx-controller"
+# Deployment name shipped by the upstream ingress-nginx cloud installer.
+# The admission-webhook Service (``ingress-nginx-controller-admission``)
+# selects this Deployment's Pods, so until at least one controller Pod
+# is Ready the webhook Service has no endpoints — and any Ingress
+# ``kubectl apply`` returns ``failed calling webhook ... no endpoints
+# available for service "ingress-nginx-controller-admission"``. The
+# task waits on this Deployment becoming Available before applying the
+# elb-openapi Ingress.
+INGRESS_NGINX_CONTROLLER_DEPLOYMENT = "ingress-nginx-controller"
 CERT_MANAGER_NAMESPACE = "cert-manager"
 CERT_MANAGER_WEBHOOK_DEPLOYMENT = "cert-manager-webhook"
 

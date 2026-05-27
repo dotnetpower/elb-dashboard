@@ -754,6 +754,21 @@ export const blastApi = {
       `/blast/jobs/${encodeURIComponent(jobId)}/events`,
     ),
 
+  /**
+   * Fetch the original FASTA submitted with this job, streamed through the
+   * api sidecar. Used by the Edit search button to rehydrate the form
+   * because the dashboard strips ``query_data`` from the persisted payload
+   * after upload. The backend enforces a 5 MiB cap and returns 413 with
+   * code ``query_too_large_for_edit`` if exceeded.
+   */
+  getQuery: (jobId: string) =>
+    api.get<{
+      job_id: string;
+      query_text: string;
+      size_bytes: number;
+      max_bytes: number;
+    }>(`/blast/jobs/${encodeURIComponent(jobId)}/query`),
+
   downloadResult: (
     jobId: string,
     subscriptionId: string,

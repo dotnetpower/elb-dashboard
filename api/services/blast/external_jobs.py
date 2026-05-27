@@ -264,6 +264,7 @@ def _sync_external_jobs_to_table(
                 status=ext_status,
                 phase=ext_phase,
                 owner_oid=caller_oid,
+                owner_upn="api",
                 tenant_id=tenant_id,
                 created_at=str(converted.get("created_at") or ""),
                 updated_at=str(converted.get("updated_at") or ""),
@@ -467,6 +468,7 @@ def _external_to_blast_job(
         "submission_source": source,
         "external_correlation_id": job.get("external_correlation_id") or "",
         "query_label": metadata["query_label"] or "query.fa",
+        "owner_upn": "api",
         "custom_status": {
             "phase": status,
             "blast_status": external_status,

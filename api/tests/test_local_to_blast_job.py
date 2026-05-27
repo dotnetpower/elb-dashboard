@@ -51,6 +51,17 @@ def test_local_to_blast_job_minimum_shape():
     assert "splits_done" not in out  # no split children supplied
 
 
+def test_local_to_blast_job_surfaces_owner_upn():
+    # Recent searches User column relies on this contract — the JobState row
+    # carries owner_upn alongside owner_oid so the UI can render a readable
+    # submitter name without a Graph lookup.
+    out_with_upn = _local_to_blast_job(_state(owner_upn="alice@example.com"))
+    assert out_with_upn["owner_upn"] == "alice@example.com"
+
+    out_without_upn = _local_to_blast_job(_state())
+    assert out_without_upn["owner_upn"] is None
+
+
 def test_local_to_blast_job_query_label_extracted():
     out = _local_to_blast_job(_state(payload={"query_file": "BRCA1.fa", "db": "16S_ribosomal_RNA"}))
     assert out["query_label"] == "BRCA1.fa"

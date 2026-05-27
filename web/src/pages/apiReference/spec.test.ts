@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { getDefaultRequestExampleKey, parseSpec } from "./spec";
 
 describe("API Reference spec parser", () => {
-  it("prefers the curated core_nt inline FASTA example for POST /v1/jobs", () => {
+  it("puts the small 16S rRNA example first and keeps the core_nt example for POST /v1/jobs", () => {
     const parsed = parseSpec(
       {
         info: { title: "ElasticBLAST API", version: "1" },
@@ -32,8 +32,31 @@ describe("API Reference spec parser", () => {
 
     const endpoint = parsed.endpoints[0];
     const examples = endpoint.requestBody?.content?.["application/json"]?.examples || {};
-    const firstKey = Object.keys(examples)[0];
-    const firstExample = examples[firstKey].value as {
+    const keys = Object.keys(examples);
+
+    // small_16s_rrna is first (the dashboard default), mode_b_core_nt remains
+    // available, and the upstream `mode_a` example is preserved at the end.
+    expect(keys).toEqual(["small_16s_rrna", "mode_b_core_nt", "mode_a"]);
+
+    const small16s = examples.small_16s_rrna.value as {
+      program: string;
+      db: string;
+      query_fasta: string;
+      blast_options: { evalue: number; max_target_seqs: number; outfmt: string };
+      resource_profile: string;
+    };
+    expect(small16s.program).toBe("blastn");
+    expect(small16s.db).toBe("16S_ribosomal_RNA");
+    expect(small16s.query_fasta).toContain(">NR_024570.1");
+    expect(small16s.query_fasta).toContain("\nAAATTGAAGAGTTTGATCATGGCTCAGAT");
+    expect(small16s.blast_options).toEqual({
+      evalue: 0.01,
+      max_target_seqs: 50,
+      outfmt: "5",
+    });
+    expect(small16s.resource_profile).toBe("standard");
+
+    const coreNt = examples.mode_b_core_nt.value as {
       db: string;
       query_fasta: string;
       blast_options: {
@@ -44,21 +67,19 @@ describe("API Reference spec parser", () => {
       };
       resource_profile: string;
     };
-
-    expect(firstKey).toBe("mode_b_core_nt");
-    expect(firstExample.db).toBe("core_nt");
-    expect(firstExample.query_fasta).toContain(">NC_003310.1:c48509-48048");
-    expect(firstExample.query_fasta).toContain("\nATGGAGAAGCGAGAAGTTAA");
-    expect(firstExample.blast_options).toEqual({
+    expect(coreNt.db).toBe("core_nt");
+    expect(coreNt.query_fasta).toContain(">NC_003310.1:c48509-48048");
+    expect(coreNt.query_fasta).toContain("\nATGGAGAAGCGAGAAGTTAA");
+    expect(coreNt.blast_options).toEqual({
       evalue: 0.05,
       max_target_seqs: 100,
       outfmt: "5",
       extra: "-word_size 28 -dust yes -soft_masking false -searchsp 32156241807668",
     });
-    expect(firstExample.resource_profile).toBe("core_nt_safe");
+    expect(coreNt.resource_profile).toBe("core_nt_safe");
   });
 
-  it("selects Mode B as the default request body example for POST /v1/jobs", () => {
+  it("selects the small 16S rRNA example as the default request body for POST /v1/jobs", () => {
     expect(
       getDefaultRequestExampleKey({ path: "/v1/jobs", method: "post" }, [
         "mode_a",
@@ -74,6 +95,14 @@ describe("API Reference spec parser", () => {
         "mode_b_taxid",
       ]),
     ).toBe("mode_b_core_nt");
+
+    expect(
+      getDefaultRequestExampleKey({ path: "/v1/jobs", method: "post" }, [
+        "small_16s_rrna",
+        "mode_b_core_nt",
+        "mode_a",
+      ]),
+    ).toBe("small_16s_rrna");
   });
 
   it("adds response shapes and examples to submit and job status endpoints", () => {

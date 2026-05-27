@@ -370,6 +370,7 @@ def _local_to_blast_job(
         "config_snapshot": payload.get("config_snapshot") if isinstance(payload, dict) else None,
         "infrastructure": {k: v for k, v in infrastructure.items() if v not in (None, "")},
         "source": "dashboard",
+        "owner_upn": getattr(state, "owner_upn", None) or None,
     }
     out["target"] = build_target(
         resource_type="blast_job",

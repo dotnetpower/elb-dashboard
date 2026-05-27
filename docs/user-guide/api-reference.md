@@ -13,7 +13,7 @@ The API Reference page is for developers and platform maintainers who need to in
 
     - **[When To Use It](#when-to-use-it)** · **[Setup checklist](#before-the-api-page-works)** · **[Auth + token](#authentication)**
     - **[Submit example](#submit-example-post-v1jobs)** · **[Status example](#status-example-get-v1jobsjob_idstatus)** · **[Result example](#result-example-get-v1jobsjob_idresults)**
-    - **[External façade](#external-elasticblast-facade)** · **[Response contract](#response-contract)** · **[Troubleshooting](#troubleshooting)**
+    - **[External façade](#external-elasticblast-facade)** · **[Response contract](#response-contract)** · **[Error codes](#error-codes)** · **[Troubleshooting](#troubleshooting)**
 
 ![API Reference page with endpoint groups and API menu selected](../images/screenshots/api-reference.png)
 
@@ -114,6 +114,10 @@ This is the shortest end-to-end API Reference path for a test job.
 ## Submit Example: `POST /v1/jobs`
 
 Use `POST /v1/jobs` when you want the core OpenAPI service contract. The inline FASTA mode is the easiest way to test because the server uploads the query and resolves Storage paths for you.
+
+![POST /v1/jobs endpoint card showing the response codes 202, 400, 401, 409, 422, 429, and 500 with the Try It request body](../images/screenshots/api-jobs-submit.png)
+
+The endpoint card lists every response code the OpenAPI service can return for `POST /v1/jobs`. See [Error Codes](#error-codes) below for the full meaning of each `4xx` and `5xx` row, including the response body shape used for `500 RuntimeFailure`.
 
 The example below uses the same `core_nt` monkeypox query shown in the result XML sample later in this guide. Keep the FASTA as a single JSON string with `\n` between FASTA lines.
 
@@ -494,7 +498,38 @@ The in-page response contract panel uses the same model:
 | `admission` | Queue/capacity decision at accept time | Treat as a snapshot; it is not a completion guarantee. |
 | `meta` | Correlation and support metadata | Keep `request_id` in client logs. |
 
+## Error Codes
+
+The OpenAPI service and the dashboard backend both return JSON error bodies. Every error response shares the same envelope so clients can route on `status` and surface `detail` directly to users:
+
+```json
+{
+  "detail": "<human-readable message or field-level error list>",
+  "request_id": "<correlation id, when emitted by the dashboard>"
+}
+```
+
+`422 ValidationError` returns `detail` as a list of per-field objects produced by FastAPI's request validator. All other codes use a string `detail`. The dashboard backend stamps `request_id` on every response (success and error) — quote that value in support tickets so the request can be correlated to logs.
+
+| Code | Label | When it is returned | Response body | Client action |
+| --- | --- | --- | --- | --- |
+| `202` | `JobSubmitAccepted` | `POST /v1/jobs` or `POST /api/v1/elastic-blast/submit` accepted the request and queued BLAST work. Completion is still pending. | Submit payload with `job_id`, `status`, and `status_url`. | Poll the status endpoint until terminal (`completed` / `success` / `failed` / `cancelled`). |
+| `400` | `InvalidRequest` | Request shape, query parameter, or identifier is malformed. Typical causes: Dashboard UUID used where an OpenAPI job id is required, unknown `content` value on result routes, missing required path parameter. | `{"detail": "<message>"}` | Fix the identifier or parameter and resubmit. For status routes, use the short id returned by `POST /v1/jobs`. |
+| `401` | `Unauthorized` | `X-ELB-API-Token` is missing, expired, or does not match the configured OpenAPI token secret. Dashboard MSAL routes use this when the bearer token cannot be validated. | `{"detail": "<reason>"}` | Copy the current token from the API token panel (or refresh the MSAL session for dashboard routes) and retry. Regenerate the token only when rotating credentials. |
+| `404` | `NotFound` | Job id, file id, or result artifact does not exist. Result routes also return `404` when the job is `completed` but the merger has not published `merged_results.out.gz` yet. | `{"detail": "<message>"}` | Confirm the id is the OpenAPI short id. For result routes, poll status until terminal and try `content=full` if `content=xml` is missing. |
+| `409` | `Conflict` | Current job, cluster, or shard state does not allow this operation. Examples: external file download requested before status reached `success`; submit attempted while a conflicting job with the same `idempotency_key` is already running. | `{"detail": "<reason>"}` | Poll status until the precondition is met, or supply a fresh `idempotency_key`. |
+| `422` | `ValidationError` | One or more request fields failed schema validation (FastAPI request body / query parsing). | `{"detail": [{"loc": [...], "msg": "...", "type": "..."}, ...]}` | Inspect each `loc` path, correct the offending field, and resubmit. |
+| `429` | `AdmissionRejected` | Queue depth or runtime capacity cannot accept more work yet. A `Retry-After` header is included when the service can suggest a wait window. | `{"detail": "<reason>"}` plus optional `Retry-After`. | Wait for `Retry-After` (or the dashboard's poll hint) and reduce concurrent submissions before retrying. |
+| `500` | `RuntimeFailure` (server error) | Unexpected failure inside the control plane or ElasticBLAST runtime — for example an Azure SDK call raised, the OpenAPI pod crashed, or a Celery task hit an unhandled exception. **The response body includes the failure detail** so clients and operators can see what went wrong without reading server logs. | `{"detail": "<error message>", "request_id": "<rid>"}` — for handled cases the route supplies a focused message (e.g. `failed to create ACR: <sanitised reason>`); the catch-all handler returns `"internal server error"` with the same `request_id`. | Capture `request_id`, the endpoint path, the job id (if any), and the `detail` text. If `detail` already names the cause (quota, permission, missing resource), act on it; otherwise share the bundle with the operator. Retry only after a transient cause is confirmed. |
+| `502` / `503` / `504` | Upstream / availability errors | Dashboard could not reach the OpenAPI pod, AKS API server, or Storage; or the pod is restarting. | `{"detail": "<reason>"}` plus optional `Retry-After`. | Check Dashboard cluster card and OpenAPI deployment status; retry after the upstream recovers. |
+
+!!! note "500 always carries content"
+
+    A `500` response is never an empty body — the dashboard's global exception handler always returns JSON with `detail` and `request_id`, and the OpenAPI service's `RuntimeFailure` row contains the failure message. If your client treats `5xx` as "no detail available", update it to log the `detail` and `request_id` from the response body.
+
 ## Troubleshooting
+
+This table is symptom-first; for the JSON shape and meaning of each status code see [Error Codes](#error-codes) above.
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
@@ -502,12 +537,12 @@ The in-page response contract panel uses the same model:
 | OpenAPI service not found | AKS service or deployment is missing | Build `elb-openapi`, then use the deploy panel on this page. |
 | Cluster stopped | AKS exists but is not running | Start the cluster from Cluster Plane before using API Reference. |
 | Token not configured | OpenAPI token secret has not been generated | Use Generate in the API token panel. |
-| `401` | Missing or wrong `X-ELB-API-Token` | Copy the current token and retry. |
+| `401` on `Try` or external call | Missing or wrong `X-ELB-API-Token` | Copy the current token and retry. |
 | `400` on status | Dashboard UUID used where OpenAPI job id is required | Use the short id returned by `POST /v1/jobs`. |
 | `404` on results | Job not complete, wrong job id, or merged result not published | Poll status; try `content=full` if `content=xml` is missing. |
 | `409` on external file route | External job has not reached `success` | Poll `/api/v1/elastic-blast/jobs/{job_id}` first. |
-| `429` | Queue/capacity rejected work | Wait for the suggested poll window or reduce concurrent submissions. |
-| `5xx` | Control plane or execution runtime failed unexpectedly | Capture `request_id`, job id, and endpoint path for support. |
+| `429` | Queue/capacity rejected work | Honour `Retry-After` or the dashboard poll window and reduce concurrent submissions. |
+| `5xx` with empty-looking body | Client logged only the status code | Read the response body — `500` always includes a `detail` string and `request_id`. Capture both for support. |
 
 ## Safe Screenshot Practice
 

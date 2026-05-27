@@ -31,6 +31,7 @@ _JOBSTATE_SUMMARY_SELECT = [
     "status",
     "phase",
     "owner_oid",
+    "owner_upn",
     "tenant_id",
     "parent_job_id",
     "task_id",
@@ -114,6 +115,7 @@ class JobState:
     status: str  # queued|running|completed|failed|cancelled
     phase: str | None = None
     owner_oid: str | None = None
+    owner_upn: str | None = None
     tenant_id: str | None = None
     parent_job_id: str | None = None
     task_id: str | None = None
@@ -145,6 +147,7 @@ class JobState:
             "status": self.status,
             "phase": self.phase or "",
             "owner_oid": self.owner_oid or "",
+            "owner_upn": self.owner_upn or "",
             "tenant_id": self.tenant_id or "",
             "parent_job_id": self.parent_job_id or "",
             "task_id": self.task_id or "",
@@ -187,6 +190,7 @@ class JobState:
             status=e.get("status", ""),
             phase=e.get("phase") or None,
             owner_oid=e.get("owner_oid") or None,
+            owner_upn=e.get("owner_upn") or None,
             tenant_id=e.get("tenant_id") or None,
             parent_job_id=e.get("parent_job_id") or None,
             task_id=e.get("task_id") or None,

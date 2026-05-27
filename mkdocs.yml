@@ -104,9 +104,11 @@ nav:
       - user-guide/index.md
       - Dashboard: user-guide/dashboard.md
       - New Search: user-guide/new-search.md
+      - BLAST Options Reference: user-guide/blast-options.md
       - Jobs: user-guide/jobs.md
       - Results: user-guide/results.md
       - API Reference: user-guide/api-reference.md
+      - Observability: user-guide/observability.md
       - UI Preview: user-guide/ui-preview.md
       - Terminal: user-guide/terminal.md
       - In-app Upgrades: user-guide/upgrades.md

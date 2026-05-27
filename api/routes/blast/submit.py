@@ -365,6 +365,7 @@ def blast_submit(
             status="queued",
             phase="queued",
             owner_oid=caller.object_id,
+            owner_upn=caller.upn,
             tenant_id=caller.tenant_id,
             created_at=now,
             updated_at=now,

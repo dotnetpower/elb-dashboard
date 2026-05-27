@@ -19,6 +19,7 @@ import type {
   BlastExportFormat,
   BlastResultFile,
 } from "@/api/endpoints";
+import { blastApi } from "@/api/blast";
 import { BlastHelpMenu } from "@/pages/blastResults/BlastHelpMenu";
 import {
   buildConfigFilename,
@@ -94,15 +95,20 @@ export function BlastJobHeader({
   const { toast } = useToast();
   const [copiedId, setCopiedId] = useState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+  const [loadingQuery, setLoadingQuery] = useState(false);
 
   const hydratableFields = jobPayload ? partialFormFromJobPayload(jobPayload) : null;
   const canReuseConfig = Boolean(hydratableFields);
 
-  const queryId = pickString(jobPayload, ["query_id", "query_name"]);
+  const queryId =
+    pickString(jobPayload, ["query_id", "query_name", "query_label"]) ??
+    firstQueryRecordId(jobPayload) ??
+    queryFileBasename(jobPayload);
   const queryDescription =
     pickString(jobPayload, ["query_description", "description"]) ?? jobTitle ?? null;
   const molecule = pickString(jobPayload, ["molecule_type"]) ?? deriveMolecule(program);
-  const queryLength = pickNumber(jobPayload, ["query_length"]);
+  const queryLength =
+    pickNumber(jobPayload, ["query_length"]) ?? firstQueryRecordLength(jobPayload);
   const submittedAt = createdAt ? new Date(createdAt) : null;
 
   const cluster = pickString(infrastructure, ["cluster_name"]);
@@ -125,14 +131,61 @@ export function BlastJobHeader({
     }
   };
 
-  const handleEditSearch = () => {
+  const handleEditSearch = async () => {
     if (!hydratableFields) return;
+    let fieldsToStash = hydratableFields;
+    // The submit pipeline strips ``query_data`` from the persisted payload
+    // after uploading the FASTA to Storage, so Edit search needs to fetch
+    // the original text from the api sidecar to repopulate the form
+    // textarea. Skip the fetch when we already have inline FASTA or no
+    // original blob is recorded.
+    const hasInlineQuery =
+      typeof fieldsToStash.query_data === "string" &&
+      fieldsToStash.query_data.trim().length > 0;
+    const hasOriginalBlob =
+      Boolean(jobPayload?.query_file) || Boolean(jobPayload?.query_blob_url);
+    if (!hasInlineQuery && hasOriginalBlob) {
+      setLoadingQuery(true);
+      try {
+        const { query_text } = await blastApi.getQuery(jobId);
+        fieldsToStash = { ...fieldsToStash, query_data: query_text };
+      } catch (err) {
+        const status =
+          err && typeof err === "object" && "status" in err
+            ? (err as { status?: number }).status
+            : undefined;
+        const code =
+          err && typeof err === "object" && "body" in err
+            ? ((err as { body?: { code?: string } }).body?.code ?? "")
+            : "";
+        if (status === 413 || code === "query_too_large_for_edit") {
+          toast(
+            "The original query is too large to load into the Edit form. Re-upload it manually.",
+            "warning",
+          );
+        } else if (status === 404) {
+          toast(
+            "Original query is no longer available. Opening the form without it.",
+            "warning",
+          );
+        } else {
+          toast(
+            `Could not load original query: ${
+              err instanceof Error ? err.message : "unknown error"
+            }`,
+            "error",
+          );
+        }
+      } finally {
+        setLoadingQuery(false);
+      }
+    }
     try {
       window.sessionStorage.setItem(
         PENDING_DUPLICATE_KEY,
         JSON.stringify({
           source: { jobId, jobTitle: jobTitle ?? undefined },
-          form: hydratableFields,
+          form: fieldsToStash,
         }),
       );
     } catch (err) {
@@ -242,10 +295,12 @@ export function BlastJobHeader({
         <button
           className="glass-button glass-button--primary"
           onClick={handleEditSearch}
-          disabled={!canReuseConfig}
+          disabled={!canReuseConfig || loadingQuery}
           title={
             canReuseConfig
-              ? "Open the New BLAST search form pre-filled with these parameters."
+              ? loadingQuery
+                ? "Loading original query…"
+                : "Open the New BLAST search form pre-filled with these parameters."
               : "Original submit payload is not available for this search."
           }
           style={{
@@ -255,7 +310,8 @@ export function BlastJobHeader({
             fontSize: 12,
           }}
         >
-          <Edit3 size={14} strokeWidth={1.5} /> Edit search
+          <Edit3 size={14} strokeWidth={1.5} />{" "}
+          {loadingQuery ? "Loading…" : "Edit search"}
         </button>
         <button
           className="glass-button"
@@ -390,12 +446,16 @@ export function BlastJobHeader({
           </>
         )}
 
-        {(databaseMetadata?.molecule_type || databaseMetadata?.update_date) && (
+        {(databaseMetadata?.molecule_type ||
+          deriveDbMolecule(program) ||
+          databaseMetadata?.update_date) && (
           <>
             <Term label="DB molecule" />
-            <Detail>{databaseMetadata.molecule_type ?? "—"}</Detail>
+            <Detail>
+              {databaseMetadata?.molecule_type ?? deriveDbMolecule(program) ?? "—"}
+            </Detail>
             <Term label="DB updated" />
-            <Detail>{databaseMetadata.update_date ?? "—"}</Detail>
+            <Detail>{databaseMetadata?.update_date ?? "—"}</Detail>
           </>
         )}
 
@@ -775,6 +835,63 @@ function deriveMolecule(program: string | null | undefined): string | null {
     default:
       return null;
   }
+}
+
+// BLAST database molecule type derived from the program convention.
+// Differs from the query-side `deriveMolecule` for tblastn / tblastx
+// (protein query against nucleotide database). Used as a fallback when
+// the database catalogue doesn't carry an explicit molecule_type.
+function deriveDbMolecule(program: string | null | undefined): string | null {
+  if (!program) return null;
+  switch (program.toLowerCase()) {
+    case "blastn":
+    case "tblastn":
+    case "tblastx":
+      return "nucleotide";
+    case "blastp":
+    case "blastx":
+      return "protein";
+    default:
+      return null;
+  }
+}
+
+function firstQueryRecordId(
+  payload: Record<string, unknown> | undefined,
+): string | null {
+  const metadata = payload?.query_metadata;
+  if (!metadata || typeof metadata !== "object") return null;
+  const records = (metadata as Record<string, unknown>).records;
+  if (!Array.isArray(records) || records.length === 0) return null;
+  const first = records[0];
+  if (!first || typeof first !== "object") return null;
+  const id = (first as Record<string, unknown>).query_id;
+  return typeof id === "string" && id.trim().length > 0 ? id : null;
+}
+
+function firstQueryRecordLength(
+  payload: Record<string, unknown> | undefined,
+): number | null {
+  const metadata = payload?.query_metadata;
+  if (!metadata || typeof metadata !== "object") return null;
+  const records = (metadata as Record<string, unknown>).records;
+  if (!Array.isArray(records) || records.length === 0) return null;
+  const first = records[0];
+  if (!first || typeof first !== "object") return null;
+  const length = (first as Record<string, unknown>).length;
+  return typeof length === "number" && Number.isFinite(length) && length > 0
+    ? length
+    : null;
+}
+
+function queryFileBasename(
+  payload: Record<string, unknown> | undefined,
+): string | null {
+  const raw = pickString(payload, ["query_file", "query_blob_url"]);
+  if (!raw) return null;
+  const cleaned = raw.replace(/\\/g, "/");
+  const tail = cleaned.includes("/") ? cleaned.split("/").pop() : cleaned;
+  return tail && tail.length > 0 ? tail : null;
 }
 
 export interface TimingMetric {

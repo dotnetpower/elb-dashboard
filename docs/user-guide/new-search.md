@@ -70,6 +70,8 @@ The **Execution profile** step is where you choose the AKS cluster, sharding mod
 
 The **Algorithm parameters** step exposes the underlying BLAST flags — `evalue`, `max_target_seqs`, `outfmt`, `word_size`, and the low-complexity filter. Leave the defaults unless you have a specific reason to change them; the command preview will reflect every change immediately.
 
+For a per-field reference of every option on this page — UI field, OpenAPI body field, BLAST+ CLI flag, default, allowed values, and validation rules — see [BLAST Options Reference](blast-options.md).
+
 ## Preflight And Command Preview
 
 The submit footer always shows the **command preview** built from the current form. The preview mirrors the `blastn` / `blastp` / ... invocation that ElasticBLAST will run on the cluster, with Storage paths still placeholdered. Use it as a fast sanity check before submitting.
