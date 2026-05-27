@@ -105,6 +105,17 @@ jobs:
           bash scripts/dev/quick-deploy.sh all "$TAG" --build-only --yes
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
+      - name: Upload per-image build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-deploy-logs
+          path: |
+            .logs/quick-deploy/**/build-*.log
+            .logs/quick-deploy/**/run-*.log
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Tag images as latest-main
         run: |
           set -euo pipefail
