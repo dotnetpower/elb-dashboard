@@ -4,9 +4,10 @@
  * tick so we render at most one timer for the whole jobs list (instead
  * of one per row).
  *
- * Layout mirrors the Recent searches table row (JOB · USER · STATUS ·
- * TIME) so the AKS card's preview and the dedicated Jobs page read the
- * same way.
+ * Layout is a single horizontal line reading
+ * `{program} | {db} | {title}  USER  STATUS  {age}(age) | {duration}(duration)`
+ * so the AKS card preview and the dedicated Jobs page stay scan-friendly
+ * at a glance instead of stacking the title above program/db chips.
  */
 
 import { useNavigate } from "react-router-dom";
@@ -20,12 +21,12 @@ import type {
 import { statusColor } from "@/constants";
 import { timeAgo } from "@/pages/BlastJobs/dateGroup";
 
-import { ownerLabel, prettifyQueryLabel, summariseNote } from "./helpers";
+import { ownerLabel, summariseNote } from "./helpers";
 
 export const JOB_ROW_GRID_GAP = 10;
 
-const JOB_ROW_GRID_WITH_USER = "minmax(0, 1fr) 72px 92px 104px";
-const JOB_ROW_GRID_WITHOUT_USER = "minmax(0, 1fr) 92px 104px";
+const JOB_ROW_GRID_WITH_USER = "minmax(0, 1fr) 72px 92px 160px";
+const JOB_ROW_GRID_WITHOUT_USER = "minmax(0, 1fr) 92px 160px";
 
 export function jobRowGridTemplate(showUser: boolean): string {
   return showUser ? JOB_ROW_GRID_WITH_USER : JOB_ROW_GRID_WITHOUT_USER;
@@ -52,9 +53,9 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
   const noteTone = noteSeverity(noteText, isFailed);
 
   const createdAt = job.createdAt;
-  const timeAgoLabel = createdAt ? timeAgo(createdAt) : "—";
+  const timeAgoLabel = createdAt ? stripAgoSuffix(timeAgo(createdAt)) : "—";
   const durationLabel = formatDuration(elapsedSec);
-  const durationCaption = active ? "Elapsed" : "Duration";
+  const durationCaption = active ? "elapsed" : "duration";
 
   const goToJob = () => navigate(`/blast/jobs/${encodeURIComponent(job.jobId)}`);
   const fullHoverText = job.note
@@ -62,8 +63,10 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
     : `${job.state} · ${job.jobId}`;
 
   const titleText = job.title || job.jobId;
-  const queryLabel = job.query ? prettifyQueryLabel(job.query) : null;
   const gridTemplate = jobRowGridTemplate(showUser);
+  const timingAria = createdAt
+    ? `${timeAgoLabel} old, ${durationCaption} ${durationLabel}`
+    : "timing unknown";
 
   return (
     <div
@@ -90,13 +93,13 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
         cursor: "pointer",
       }}
       title={fullHoverText}
-      aria-label={`Open job ${titleText} (${job.state}).`}
+      aria-label={`Open job ${titleText}, ${job.state}, ${timingAria}.`}
     >
       <div
         className="pulse-job-identity"
         style={{
           display: "flex",
-          alignItems: "flex-start",
+          alignItems: "center",
           gap: 6,
           minWidth: 0,
         }}
@@ -108,7 +111,7 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
             alignItems: "center",
             justifyContent: "center",
             width: 12,
-            height: 16,
+            height: 14,
             flexShrink: 0,
           }}
         >
@@ -132,46 +135,63 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
             />
           )}
         </span>
-        <div
+        <span
+          className="pulse-job-meta"
           style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 2,
+            display: "inline-flex",
+            alignItems: "baseline",
+            gap: 6,
             minWidth: 0,
             flex: 1,
+            fontSize: 11.5,
+            lineHeight: 1.3,
+            fontFamily:
+              "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           }}
         >
           <span
+            className="pulse-job-program"
+            style={{
+              color: "var(--accent)",
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+            }}
+          >
+            {job.program}
+          </span>
+          <PipeSep />
+          <span
+            className="pulse-job-db"
+            style={{
+              color: "var(--text-primary)",
+              fontWeight: 500,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
+              maxWidth: 140,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {job.db}
+          </span>
+          <PipeSep />
+          <span
             className="pulse-job-title"
             style={{
-              fontSize: 11.5,
-              fontWeight: 600,
               color: "var(--text-primary)",
+              fontWeight: 600,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
-              lineHeight: 1.25,
+              minWidth: 0,
+              flex: 1,
+              fontFamily: "inherit",
             }}
           >
             {titleText}
           </span>
-          <span
-            className="pulse-job-chip-row"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              flexWrap: "wrap",
-              minWidth: 0,
-            }}
-          >
-            <ChipMono>{job.program}</ChipMono>
-            <ChipMono tone="db">{job.db}</ChipMono>
-            {queryLabel && queryLabel !== titleText && (
-              <ChipMono tone="query">{queryLabel}</ChipMono>
-            )}
-          </span>
-        </div>
+        </span>
       </div>
       {showUser && (
         <span
@@ -212,26 +232,41 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
         className="pulse-job-timeblock"
         style={{
           display: "flex",
-          flexDirection: "column",
-          alignItems: "flex-end",
-          gap: 0,
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 6,
           fontVariantNumeric: "tabular-nums",
+          minWidth: 0,
         }}
         title={createdAt ? new Date(createdAt).toLocaleString() : ""}
       >
         <span
           className="pulse-job-timeago"
-          style={{ fontSize: 10, color: "var(--text-muted)" }}
+          style={{
+            fontSize: 10,
+            color: "var(--text-muted)",
+            whiteSpace: "nowrap",
+          }}
         >
           {timeAgoLabel}
+          <span style={{ color: "var(--text-muted)", marginLeft: 1 }}>(age)</span>
         </span>
         {createdAt && (
-          <span
-            className="pulse-job-duration"
-            style={{ fontSize: 9, color: "var(--text-faint)" }}
-          >
-            {durationCaption} {durationLabel}
-          </span>
+          <>
+            <span style={{ color: "var(--text-faint)", fontSize: 10 }}>|</span>
+            <span
+              className="pulse-job-duration"
+              style={{
+                fontSize: 10,
+                color: "var(--text-muted)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {durationLabel}
+              <span style={{ color: "var(--text-muted)", marginLeft: 1 }}>({durationCaption})</span>
+            </span>
+          </>
         )}
       </div>
       {noteText && (
@@ -279,48 +314,19 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
   );
 }
 
-type ChipTone = "program" | "db" | "query";
-
-function ChipMono({
-  children,
-  tone = "program",
-}: {
-  children: React.ReactNode;
-  tone?: ChipTone;
-}) {
+function PipeSep() {
   return (
     <span
-      className={`pulse-job-chip pulse-job-chip--${tone}`}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        padding: "1px 5px",
-        borderRadius: 3,
-        fontSize: 9.5,
-        fontWeight: 600,
-        lineHeight: 1.35,
-        letterSpacing: "0.01em",
-        background: "var(--glass-bg-strong)",
-        border: "1px solid var(--border-weak)",
-        color:
-          tone === "db"
-            ? "var(--text-primary)"
-            : tone === "query"
-              ? "var(--text-muted)"
-              : "var(--accent)",
-        fontFamily:
-          tone === "query"
-            ? "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-            : "inherit",
-        maxWidth: tone === "query" ? 120 : 90,
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-      }}
+      aria-hidden="true"
+      style={{ color: "var(--text-faint)", flexShrink: 0 }}
     >
-      {children}
+      |
     </span>
   );
+}
+
+function stripAgoSuffix(label: string): string {
+  return label.endsWith(" ago") ? label.slice(0, -4) : label;
 }
 
 function noteSeverity(

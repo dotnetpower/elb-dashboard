@@ -4,6 +4,10 @@ import { ChevronDown, Link2, Loader2, Play, Zap } from "lucide-react";
 import { METHOD_META } from "@/pages/apiReference/constants";
 import { JsonHighlight } from "@/pages/apiReference/JsonHighlight";
 import { MethodBadge } from "@/pages/apiReference/MethodBadge";
+import {
+  RepairPeeringButton,
+  isPeerWithPlatformRecovery,
+} from "@/pages/apiReference/RepairPeeringButton";
 import { ResponseViewer } from "@/pages/apiReference/ResponseViewer";
 import { SectionLabel } from "@/pages/apiReference/SectionLabel";
 import { getDefaultRequestExampleKey, isSimpleEndpoint } from "@/pages/apiReference/spec";
@@ -908,6 +912,19 @@ export function EndpointCard({
 
             {response && <ResponseViewer response={response} onCopy={copyResponse} />}
 
+            {response &&
+              (response.status === 502 || response.status === 503) &&
+              proxyInfo &&
+              isPeerWithPlatformRecovery(safeParseJson(response.body)) && (
+                <RepairPeeringButton
+                  subscriptionId={proxyInfo.sub}
+                  resourceGroup={proxyInfo.rg}
+                  clusterName={proxyInfo.clusterName}
+                  onResolved={() => execute()}
+                  size="block"
+                />
+              )}
+
             {!response && !loading && simple && (
               <div
                 style={{
@@ -929,6 +946,19 @@ export function EndpointCard({
       )}
     </div>
   );
+}
+
+/** Try It response bodies are stored as strings (the executor pretty-prints
+ *  JSON before display). Return parsed JSON for recovery-action detection,
+ *  or null when the body is plain text / non-JSON — the caller treats null
+ *  as "no recovery hint", which is the safe default. */
+function safeParseJson(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 function sortResponses(entries: ResponseEntry[]): ResponseEntry[] {

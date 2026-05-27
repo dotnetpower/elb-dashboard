@@ -367,6 +367,36 @@ def provision_aks(
             )
             time.sleep(_RG_VISIBILITY_DELAY_SECONDS)
 
+    # Self-grant Contributor + UAA on the (possibly just-created) cluster
+    # RG to the dashboard MI BEFORE the AKS create. The MI's sub-scope
+    # `Elb Workload RG Creator` custom role grants RG-write + the
+    # ABAC-whitelisted roleAssignments/write needed for this self-grant.
+    # Without this pre-grant, picking a brand-new cluster name (e.g.
+    # `elb-cluster-small` → `rg-elb-cluster-small`) fails preflight with
+    # "Contributor missing at <new-RG>" and, if the user grants the
+    # role manually and resubmits, would still 403 on
+    # `Microsoft.ContainerService/managedClusters/write` because the
+    # post-create self-grant (see end of this function) only runs after
+    # AKS create succeeds. Idempotent — uses stable assignment UUIDs, so
+    # the post-create call below becomes a no-op on success.
+    def _pre_create_rbac_progress(sub_phase: str, msg: str) -> None:
+        _publish(self, job_id, sub_phase, message=msg)
+
+    pre_create_mi_summary = _facade._ensure_dashboard_mi_cluster_rg_roles(
+        cred,
+        subscription_id=subscription_id,
+        cluster_resource_group=resource_group,
+        mi_principal_id=os.environ.get("SHARED_IDENTITY_PRINCIPAL_ID", "").strip(),
+        progress_callback=_pre_create_rbac_progress,
+    )
+    if pre_create_mi_summary.get("roles_failed"):
+        LOGGER.warning(
+            "pre-create dashboard-MI self-grant on %s incomplete: %s. "
+            "AKS managedClusters/write may fail; falling through to ARM.",
+            resource_group,
+            pre_create_mi_summary["roles_failed"],
+        )
+
     SYSTEM_POOL_NAME = "systempool"
     BLAST_POOL_NAME = "blastpool"
 

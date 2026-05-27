@@ -6,7 +6,8 @@ Edit boundaries: Stub `configure_azure_monitor` so tests do not require an App
 Insights resource.
 Key entry points: `test_init_skipped_without_connection_string`,
     `test_init_calls_distro_when_connection_string_present`,
-    `test_init_honors_explicit_logging_disable`.
+    `test_init_honors_explicit_logging_disable`,
+    `test_init_honors_explicit_live_metrics_disable`.
 Risky contracts: `init_telemetry` must never raise; tests assert it returns
     True/False instead of propagating exceptions.
 Validation: `uv run pytest -q api/tests/test_telemetry_init.py`.
@@ -72,6 +73,7 @@ def test_init_calls_distro_when_connection_string_present(
     assert calls and "connection_string" in calls[0]
     assert calls[0]["logger_name"] == "api"
     assert calls[0]["instrumentation_options"] == {"fastapi": {"enabled": False}}
+    assert calls[0]["enable_live_metrics"] is True
     assert "disable_logging" not in calls[0]
     assert calls[0]["resource"].attributes["service.name"] == "elb-api"
     assert calls[0]["resource"].attributes["service.namespace"] == "elb-dashboard"
@@ -100,6 +102,27 @@ def test_init_honors_explicit_logging_disable(monkeypatch: pytest.MonkeyPatch) -
     assert telemetry.init_telemetry("worker") is True
     assert calls and "disable_logging" not in calls[0]
     assert os.environ["OTEL_LOGS_EXPORTER"] == "none"
+
+
+def test_init_honors_explicit_live_metrics_disable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        "InstrumentationKey=abc;IngestionEndpoint=https://example.local/",
+    )
+    monkeypatch.setenv("AZURE_MONITOR_DISABLE_LIVE_METRICS", "true")
+    calls: list[dict[str, Any]] = []
+
+    def _fake_configure(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    import azure.monitor.opentelemetry as distro
+
+    monkeypatch.setattr(distro, "configure_azure_monitor", _fake_configure)
+    telemetry = _fresh_telemetry_module(monkeypatch)
+    assert telemetry.init_telemetry("worker") is True
+    assert calls and calls[0]["enable_live_metrics"] is False
 
 
 def test_worker_process_init_initializes_worker_telemetry(

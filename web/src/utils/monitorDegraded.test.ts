@@ -176,3 +176,24 @@ describe("aggregateDiagnostics", () => {
     expect(agg.reasons[0]).toBe("subscriptions_unavailable");
   });
 });
+
+import { describe as describe2, it as it2, expect as expect2 } from "vitest";
+
+describe2("cluster_stopped / cluster_not_found descriptors (Pillar B)", () => {
+  it2("classifies cluster_stopped with a non-auth label and actionable description", () => {
+    const info = getDegradedInfo({ degraded: true, degraded_reason: "cluster_stopped" });
+    expect2(info.degraded).toBe(true);
+    expect2(info.reason).toBe("cluster_stopped");
+    expect2(info.label.toLowerCase()).toContain("stopped");
+    expect2(info.isAuthIssue).toBe(false);
+    expect2(info.description.toLowerCase()).toMatch(/start/);
+  });
+
+  it2("classifies cluster_not_found with a non-auth label and actionable description", () => {
+    const info = getDegradedInfo({ degraded: true, degraded_reason: "cluster_not_found" });
+    expect2(info.reason).toBe("cluster_not_found");
+    expect2(info.label.toLowerCase()).toContain("missing");
+    expect2(info.isAuthIssue).toBe(false);
+    expect2(info.description.toLowerCase()).toMatch(/deleted|moved/);
+  });
+});

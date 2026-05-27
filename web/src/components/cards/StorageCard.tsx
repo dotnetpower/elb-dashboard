@@ -12,6 +12,7 @@ import { StorageMetaGrid } from "@/components/cards/storage/StorageMetaGrid";
 import { StorageWarnings } from "@/components/cards/storage/StorageWarnings";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 import { getWorkloadNodeCount } from "@/pages/blastSubmit/computeEnvironment";
+import { pickPreferredCluster } from "@/utils/clusterSelection";
 import { getDegradedInfo } from "@/utils/monitorDegraded";
 
 interface Props {
@@ -62,11 +63,16 @@ export function StorageCard({
 
   const clusterTopology = useMemo<BlastDbClusterTopology>(() => {
     const clusters = clusterQuery.data?.clusters ?? [];
-    const preferredCluster =
-      clusters.find((cluster) => cluster.name === clusterName) ??
-      clusters.find((cluster) => cluster.resource_group === resourceGroup) ??
-      clusters.find((cluster) => (getWorkloadNodeCount(cluster) ?? 0) > 0) ??
-      clusters[0];
+    // Prefer a workload-ready cluster ahead of the RG/has-nodes fallbacks so
+    // the BLAST DB topology card reflects whichever cluster can actually
+    // serve warmup right now. Without this, a Stopped peer with stale node
+    // counts could win the picker and the card would advertise warmup
+    // capability that does not exist.
+    const preferredCluster = pickPreferredCluster(clusters, {
+      name: clusterName,
+      resourceGroup,
+      requireNodes: true,
+    });
     return {
       hasCluster: clusterQuery.data ? clusters.length > 0 : null,
       clusterName: preferredCluster?.name ?? clusterName ?? null,

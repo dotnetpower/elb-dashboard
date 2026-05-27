@@ -220,6 +220,22 @@ export interface AksRecentFailedProvisionsResponse {
   degraded: boolean;
 }
 
+/** Result of POST /api/aks/peer-with-platform — mirrors
+ *  `ensure_vnet_peering_with_cluster`'s return shape. Both directions are
+ *  reported; `error` populated when one direction failed (the other may
+ *  still be Connected). `skipped` set when there is nothing to peer
+ *  (BYO-VNet mode or env not resolved). */
+export interface AksPeerWithPlatformResponse {
+  dashboard_vnet?: string;
+  aks_vnet?: string;
+  node_resource_group?: string;
+  peerings?: Array<{ direction: string; name: string; state: string }>;
+  recovery_command?: string;
+  skipped?: boolean;
+  reason?: string;
+  error?: string;
+}
+
 export const aksApi = {
   listSkus: () => api.get<AksSkuListResponse>("/aks/skus"),
 
@@ -384,4 +400,17 @@ export const aksApi = {
         error?: string;
       }>
     >(`/aks/openapi/public-https/${encodeURIComponent(taskId)}/status`),
+
+  /** Re-create the bidirectional VNet peering between the dashboard
+   *  platform VNet and the AKS-auto VNet. Wraps the same idempotent
+   *  helper the AKS provision task runs at end-of-create, so re-running
+   *  on an already-peered pair is a no-op. Use from the API Reference
+   *  page when the OpenAPI spec / proxy / Try-It surfaces report
+   *  `recovery_action === "peer_with_platform"`. */
+  peerWithPlatform: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.post<AksPeerWithPlatformResponse>("/aks/peer-with-platform", {
+      subscription_id: subscriptionId,
+      resource_group: rg,
+      cluster_name: clusterName,
+    }),
 };

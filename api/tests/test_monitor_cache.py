@@ -245,3 +245,255 @@ def test_invalidate_prefix_empty_is_noop() -> None:
         "monitor:aks:sub:rg", lambda: {"a": 2}, ttl_seconds=30
     )
     assert hit["a"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Transient-failure telemetry suppression (App Insights noise reduction).
+# Anchors:
+#   - api/services/monitor_cache.py::_is_transient_refresh_failure
+#   - api/services/monitor_cache.py::_should_suppress_transient_telemetry
+# ---------------------------------------------------------------------------
+
+
+def _make_requests_connection_error() -> Exception:
+    """Build the same exception class the kubernetes client raises when DNS
+    fails (`requests.exceptions.ConnectionError(NameResolutionError(...))`).
+    """
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+
+    return RequestsConnectionError(
+        "HTTPSConnectionPool(host='cluster.example', port=443): "
+        "Failed to resolve 'cluster.example' ([Errno -2] Name or service not known)"
+    )
+
+
+def _make_requests_connect_timeout() -> Exception:
+    from requests.exceptions import ConnectTimeout
+
+    return ConnectTimeout("connect timeout=10")
+
+
+def _make_arm_404() -> Exception:
+    from azure.core.exceptions import ResourceNotFoundError
+
+    return ResourceNotFoundError("cluster not found")
+
+
+def test_is_transient_refresh_failure_classifies_known_families() -> None:
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_connection_error()) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_requests_connect_timeout()) is True
+    assert monitor_cache._is_transient_refresh_failure(_make_arm_404()) is True
+    # Unknown / programmer errors must remain "non-transient" so a real bug
+    # still produces a full stack trace + App Insights exception row.
+    assert monitor_cache._is_transient_refresh_failure(RuntimeError("boom")) is False
+    assert monitor_cache._is_transient_refresh_failure(ValueError("bad")) is False
+
+
+def test_transient_refresh_with_stale_entry_logs_one_line_after_first(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """First failure inside the dedup window emits exc_info=True; the next
+    failure for the same (cache_key, exc class) only logs a one-liner so the
+    OTel logging exporter doesn't record a fresh AppInsights exception row.
+    """
+    monitor_cache._reset_transient_dedup()
+    now = 5000.0
+    monkeypatch.setattr(monitor_cache, "_monotonic", lambda: now)
+
+    def _inline_runner(target):
+        # Mirror the production wrapper in `_start_refresh_thread.run`: swallow
+        # the refresh exception so the caller does not see it bubble up. The
+        # log records (which is what the test asserts on) are still emitted.
+        try:
+            target()
+        except Exception:  # noqa: S110 - mirror prod _start_refresh_thread wrapper
+            pass
+
+    monkeypatch.setattr(monitor_cache, "_start_refresh_thread", _inline_runner)
+
+    # Seed a stale entry so the refresh path takes the "transient + stale" branch.
+    monitor_cache.cached_snapshot(
+        "monitor:aks:top-nodes:sub:rg:stopped",
+        lambda: {"nodes": ["seed"]},
+        ttl_seconds=10,
+        stale_seconds=300,
+    )
+    now = 5020.0  # past TTL, still within stale window.
+
+    failing_loader_calls = 0
+
+    def failing_loader() -> dict[str, object]:
+        nonlocal failing_loader_calls
+        failing_loader_calls += 1
+        raise _make_requests_connect_timeout()
+
+    caplog.set_level("WARNING", logger="api.services.monitor_cache")
+
+    # First read returns the stale entry AND queues a background refresh
+    # (which we run inline via the monkeypatched _start_refresh_thread).
+    first = monitor_cache.cached_snapshot(
+        "monitor:aks:top-nodes:sub:rg:stopped",
+        failing_loader,
+        ttl_seconds=10,
+        stale_seconds=300,
+    )
+    assert first["nodes"] == ["seed"]  # stale fallback preserved
+    assert first["cache"]["state"] == "stale"
+    # The refresh exception was caught by _start_refresh_thread.run() — we
+    # only care about the log records here.
+    assert failing_loader_calls == 1
+    first_record = [r for r in caplog.records if "refresh failed" in r.getMessage()][-1]
+    assert first_record.exc_info is not None  # full stack on first occurrence
+
+    caplog.clear()
+
+    # Second poll tick still inside the dedup window: same cache_key, same
+    # exception class -> stack-trace suppressed, one-line warning only.
+    now = 5025.0
+    # Make it stale again (the previous failed refresh did not write anything).
+    # Trigger a fresh background refresh:
+    second = monitor_cache.cached_snapshot(
+        "monitor:aks:top-nodes:sub:rg:stopped",
+        failing_loader,
+        ttl_seconds=10,
+        stale_seconds=300,
+    )
+    assert second["cache"]["state"] == "stale"
+    assert failing_loader_calls == 2
+    second_record = [r for r in caplog.records if "refresh failed" in r.getMessage()][-1]
+    assert second_record.exc_info is None  # suppressed
+    assert "deduped" in second_record.getMessage()
+
+
+def test_transient_refresh_without_stale_entry_keeps_full_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cold-miss failures (no stale entry to fall back on) MUST keep
+    exc_info=True so an unhealthy first-ever fetch is fully observable.
+    """
+    monitor_cache._reset_transient_dedup()
+
+    def _inline_runner(target):
+        try:
+            target()
+        except Exception:  # noqa: S110 - mirror prod _start_refresh_thread wrapper
+            pass
+
+    monkeypatch.setattr(monitor_cache, "_start_refresh_thread", _inline_runner)
+    caplog.set_level("WARNING", logger="api.services.monitor_cache")
+
+    def failing_loader() -> dict[str, object]:
+        raise _make_requests_connection_error()
+
+    from requests.exceptions import ConnectionError as _RC
+
+    with pytest.raises(_RC):
+        monitor_cache.cached_snapshot(
+            "monitor:aks:nodes:sub:rg:firstever",
+            failing_loader,
+            ttl_seconds=10,
+            stale_seconds=300,
+        )
+
+    rec = [r for r in caplog.records if "refresh failed" in r.getMessage()][-1]
+    assert rec.exc_info is not None
+
+
+def test_non_transient_refresh_failure_always_keeps_full_stack(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A genuine code bug (RuntimeError / ValueError / ...) is never deduped —
+    even if a stale entry exists.
+    """
+    monitor_cache._reset_transient_dedup()
+    now = 7000.0
+    monkeypatch.setattr(monitor_cache, "_monotonic", lambda: now)
+
+    def _inline_runner(target):
+        try:
+            target()
+        except Exception:  # noqa: S110 - mirror prod _start_refresh_thread wrapper
+            pass
+
+    monkeypatch.setattr(monitor_cache, "_start_refresh_thread", _inline_runner)
+    caplog.set_level("WARNING", logger="api.services.monitor_cache")
+
+    monitor_cache.cached_snapshot(
+        "monitor:aks:top-nodes:sub:rg:bug",
+        lambda: {"nodes": ["seed"]},
+        ttl_seconds=10,
+        stale_seconds=300,
+    )
+    now = 7020.0
+
+    def buggy_loader() -> dict[str, object]:
+        raise RuntimeError("programmer error")
+
+    # Two consecutive failures — both must keep the full stack.
+    for _ in range(2):
+        monitor_cache.cached_snapshot(
+            "monitor:aks:top-nodes:sub:rg:bug",
+            buggy_loader,
+            ttl_seconds=10,
+            stale_seconds=300,
+        )
+        now += 5.0
+
+    records = [r for r in caplog.records if "refresh failed" in r.getMessage()]
+    assert len(records) >= 2
+    for rec in records:
+        assert rec.exc_info is not None, "non-transient failures must keep stack"
+
+
+def test_refresh_failure_increments_otel_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every refresh failure (transient OR programmer error) must increment
+    the OpenTelemetry counter so operators can alert on real env-wide
+    outages independently of the AppInsights exception stream we now dedup.
+    """
+    monitor_cache._reset_transient_dedup()
+    monitor_cache._reset_refresh_failure_counter()
+
+    recorded: list[tuple[int, dict[str, object]]] = []
+
+    class _RecordingCounter:
+        def add(self, value: int, attributes: dict[str, object] | None = None) -> None:
+            recorded.append((value, dict(attributes or {})))
+
+    monkeypatch.setattr(
+        monitor_cache, "_get_refresh_failure_counter", lambda: _RecordingCounter()
+    )
+
+    def _inline_runner(target):
+        try:
+            target()
+        except Exception:  # noqa: S110 - mirror prod _start_refresh_thread wrapper
+            pass
+
+    monkeypatch.setattr(monitor_cache, "_start_refresh_thread", _inline_runner)
+
+    # Cold-miss failure (no stale fallback) — transient classification still
+    # records the counter.
+    def failing_cold() -> dict[str, object]:
+        raise _make_requests_connect_timeout()
+
+    from requests.exceptions import ConnectTimeout as _CT
+
+    with pytest.raises(_CT):
+        monitor_cache.cached_snapshot(
+            "monitor:aks:cold-miss",
+            failing_cold,
+            ttl_seconds=10,
+            stale_seconds=300,
+        )
+
+    assert recorded, "counter must increment on refresh failure"
+    value, attrs = recorded[-1]
+    assert value == 1
+    assert attrs["exception_class"] == "ConnectTimeout"
+    assert attrs["stale_fallback"] is False
+    assert attrs["transient"] is False  # transient classification needs stale fallback

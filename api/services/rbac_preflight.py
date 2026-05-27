@@ -198,6 +198,14 @@ def aks_create_rbac_check(
     # by display name for any non-built-in role assignment at sub scope.
     sub_rg_write_ok = False
     sub_rg_write_via: dict[str, Any] = {}
+    # Whether sub-scope RG-write was satisfied via the project's custom
+    # role. The custom role also grants `roleAssignments/read+write`
+    # with an ABAC whitelist that includes Contributor + UAA (see
+    # `infra/modules/workloadRgCreatorRole.bicep`), so the provision
+    # task can self-grant Contributor on the cluster RG immediately
+    # after creating it — meaning the cluster-RG requirement is
+    # bootstrap-capable even when no per-RG Contributor exists yet.
+    sub_rg_write_via_custom_role = False
     for role_guid, scope, role_def_id in rows:
         if scope != sub_scope:
             continue
@@ -210,20 +218,43 @@ def aks_create_rbac_check(
         if role_name and role_name.strip().lower() == _CUSTOM_ROLE_NAME.lower():
             sub_rg_write_ok = True
             sub_rg_write_via = {"role_name": role_name, "scope": scope}
+            sub_rg_write_via_custom_role = True
             break
 
-    if cluster_rg_ok and sub_rg_write_ok:
-        return PreflightCheck(
-            name="rbac",
-            status="ok",
-            message=(
+    # If the cluster-RG Contributor grant is missing but the MI holds
+    # the `Elb Workload RG Creator` custom role at sub scope, the
+    # provision task self-grants Contributor + UAA on the cluster RG
+    # right after `ensuring_resource_group` and before
+    # `arm_create_or_update` (see `api.tasks.azure.provision`). Treat
+    # this as ok so renaming the cluster (which derives a fresh
+    # `rg-<base>` RG) does not turn a fully-functional bootstrap path
+    # into a hard preflight failure.
+    cluster_rg_bootstrap_capable = (
+        not cluster_rg_ok and sub_rg_write_via_custom_role
+    )
+
+    if (cluster_rg_ok or cluster_rg_bootstrap_capable) and sub_rg_write_ok:
+        if cluster_rg_ok:
+            message = (
                 "Dashboard managed identity has Contributor on "
                 f"'{resource_group}' and sub-scope RG-write — AKS create "
                 "is authorized."
-            ),
+            )
+        else:
+            message = (
+                "Dashboard managed identity will self-grant Contributor "
+                f"on '{resource_group}' (via the '{_CUSTOM_ROLE_NAME}' "
+                "custom role at subscription scope) before AKS create — "
+                "no manual role assignment needed."
+            )
+        return PreflightCheck(
+            name="rbac",
+            status="ok",
+            message=message,
             details={
                 "principal_id": pid,
                 "cluster_rg_grant": cluster_rg_via,
+                "cluster_rg_bootstrap_capable": cluster_rg_bootstrap_capable,
                 "sub_rg_write_grant": sub_rg_write_via,
             },
         )

@@ -108,8 +108,6 @@ export function ClusterPulse({
     trans,
     cpuPct: signals.cpuPct,
     memPct: signals.memPct,
-    apiP95: signals.apiP95,
-    apiErrors: signals.apiErrors,
     jobsDegraded: signals.jobsDegraded,
     metricsDegraded: signals.metricsDegraded,
     nodeNotReady: signals.nodeSummary.notReady,
@@ -178,6 +176,7 @@ export function ClusterPulse({
             onStartStop={onStartStop}
             onDelete={onDelete}
             onOpenDetail={onOpenDetail}
+            subscriptionId={subscriptionId}
           />
 
           <PulseMetaGrid
@@ -199,9 +198,8 @@ export function ClusterPulse({
             }
             cpuPct={signals.cpuPct}
             memPct={signals.memPct}
-            apiP95Ms={signals.apiP95}
-            apiErrors={signals.apiErrors}
             metricsDegraded={signals.metricsDegraded}
+            operational={showOperationalDetails}
           />
 
           {showOperationalDetails && (

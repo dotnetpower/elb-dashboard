@@ -18,6 +18,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -52,12 +53,163 @@ _LOCK = threading.Lock()
 _GENERATION = 0
 
 
+# Transient-failure dedup window. The same cache key (and the same exception
+# class) repeating inside this window is logged only once with `exc_info=True`;
+# further occurrences are demoted to a one-line warning so the Azure Monitor
+# OpenTelemetry logging exporter does not record a fresh AppInsights exception
+# row every poll tick. Window is intentionally short — long enough to absorb
+# a dashboard poll burst (every 15-30 s) but not so long that a sustained
+# outage stops emitting exceptions entirely.
+_TRANSIENT_DEDUP_WINDOW_SECONDS = 300.0
+_TRANSIENT_DEDUP_MAX_ENTRIES = 256
+# (cache_key, exc_class_name) -> last_emitted_monotonic
+_TRANSIENT_DEDUP: dict[tuple[str, str], float] = {}
+_TRANSIENT_DEDUP_ORDER: deque[tuple[str, str]] = deque()
+_TRANSIENT_DEDUP_LOCK = threading.Lock()
+
+
+def _is_transient_refresh_failure(exc: BaseException) -> bool:
+    """Classify ``exc`` as a transient cluster/network reach failure.
+
+    Used by ``_refresh`` to decide whether to emit a full stack trace (and
+    therefore a recorded App Insights exception) or just a one-line warning.
+    Returns True for the well-known "the cluster is stopped / DNS just
+    hiccuped / ARM returned 5xx" family — those routinely degrade to the
+    stale cache fallback and do not warrant a per-poll exception row.
+    """
+    try:
+        from requests.exceptions import (
+            ConnectionError as _RequestsConnectionError,
+        )
+        from requests.exceptions import (
+            ConnectTimeout as _RequestsConnectTimeout,
+        )
+        from requests.exceptions import (
+            ReadTimeout as _RequestsReadTimeout,
+        )
+    except ImportError:  # pragma: no cover - requests is a transitive dep
+        _RequestsConnectionError = ()  # type: ignore[assignment]
+        _RequestsConnectTimeout = ()  # type: ignore[assignment]
+        _RequestsReadTimeout = ()  # type: ignore[assignment]
+
+    if isinstance(exc, (_RequestsConnectionError, _RequestsConnectTimeout, _RequestsReadTimeout)):
+        return True
+
+    try:
+        from azure.core.exceptions import (
+            HttpResponseError,
+            ResourceNotFoundError,
+            ServiceRequestError,
+        )
+    except ImportError:  # pragma: no cover
+        return False
+
+    if isinstance(exc, (ResourceNotFoundError, ServiceRequestError)):
+        return True
+    if isinstance(exc, HttpResponseError):
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and status in {404, 408, 429, 500, 502, 503, 504}:
+            return True
+    return False
+
+
+def _should_suppress_transient_telemetry(cache_key: str, exc: BaseException) -> bool:
+    """Return True when an identical transient failure was logged with stack
+    inside the dedup window. Caller still logs a one-line warning — only the
+    `exc_info=True` stack (which the OTel logging exporter turns into an
+    App Insights exception row) is suppressed on repeats.
+    """
+    key = (cache_key, type(exc).__name__)
+    now = _monotonic()
+    cutoff = now - _TRANSIENT_DEDUP_WINDOW_SECONDS
+    with _TRANSIENT_DEDUP_LOCK:
+        # Evict expired entries from the front of the order queue first so the
+        # cap stays meaningful (the dict can outlive the deque if we skip).
+        while _TRANSIENT_DEDUP_ORDER:
+            head = _TRANSIENT_DEDUP_ORDER[0]
+            last = _TRANSIENT_DEDUP.get(head)
+            if last is None or last < cutoff:
+                _TRANSIENT_DEDUP_ORDER.popleft()
+                _TRANSIENT_DEDUP.pop(head, None)
+                continue
+            break
+        last = _TRANSIENT_DEDUP.get(key)
+        if last is not None and last >= cutoff:
+            return True
+        # Record this emission as the new "last full record" timestamp.
+        _TRANSIENT_DEDUP[key] = now
+        _TRANSIENT_DEDUP_ORDER.append(key)
+        # Hard cap defence — should rarely fire because the cutoff loop above
+        # already evicts; leave as belt-and-braces against an unbounded set
+        # of cache keys.
+        while len(_TRANSIENT_DEDUP_ORDER) > _TRANSIENT_DEDUP_MAX_ENTRIES:
+            oldest = _TRANSIENT_DEDUP_ORDER.popleft()
+            _TRANSIENT_DEDUP.pop(oldest, None)
+    return False
+
+
+def _reset_transient_dedup() -> None:
+    """Test-only: clear the dedup window so tests are deterministic."""
+    with _TRANSIENT_DEDUP_LOCK:
+        _TRANSIENT_DEDUP.clear()
+        _TRANSIENT_DEDUP_ORDER.clear()
+
+
+# OpenTelemetry counter for "monitor snapshot refresh failed" events. Lets
+# the operator alert on a SUSTAINED refresh failure spike (a real env-wide
+# outage) without parsing AppInsights exception rows, which we now dedup.
+# The meter is created lazily so a process without OTel initialised still
+# imports this module cleanly.
+_REFRESH_FAILURE_COUNTER: Any = None
+_REFRESH_FAILURE_COUNTER_LOCK = threading.Lock()
+
+
+def _get_refresh_failure_counter() -> Any:
+    global _REFRESH_FAILURE_COUNTER
+    if _REFRESH_FAILURE_COUNTER is not None:
+        return _REFRESH_FAILURE_COUNTER
+    with _REFRESH_FAILURE_COUNTER_LOCK:
+        if _REFRESH_FAILURE_COUNTER is not None:
+            return _REFRESH_FAILURE_COUNTER
+        try:
+            from opentelemetry import metrics
+
+            meter = metrics.get_meter("api.services.monitor_cache")
+            _REFRESH_FAILURE_COUNTER = meter.create_counter(
+                "elb_monitor_snapshot_refresh_failed",
+                unit="1",
+                description=(
+                    "Count of monitor snapshot loader failures, "
+                    "labelled by exception class and whether a stale "
+                    "fallback was available."
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.debug("OTel meter unavailable: %s", type(exc).__name__)
+            _REFRESH_FAILURE_COUNTER = _NullCounter()
+    return _REFRESH_FAILURE_COUNTER
+
+
+class _NullCounter:
+    def add(self, value: float, attributes: dict[str, Any] | None = None) -> None:
+        return None
+
+
+def _reset_refresh_failure_counter() -> None:
+    """Test-only: drop the cached counter so the meter is re-resolved on
+    next use (e.g. after monkeypatching OTel)."""
+    global _REFRESH_FAILURE_COUNTER
+    with _REFRESH_FAILURE_COUNTER_LOCK:
+        _REFRESH_FAILURE_COUNTER = None
+
+
 def reset_monitor_snapshot_cache() -> None:
     """Clear all monitor snapshots. Test-only helper."""
     global _GENERATION
     with _LOCK:
         _CACHE.clear()
         _GENERATION += 1
+    _reset_transient_dedup()
 
 
 def invalidate_monitor_snapshot_prefix(prefix: str) -> int:
@@ -225,12 +377,37 @@ def _refresh(
                 _CACHE[cache_key] = entry
                 _evict_over_capacity(now)
         return entry
-    except Exception:
+    except Exception as exc:
         with _LOCK:
             stale_entry = _CACHE.get(cache_key)
             if stale_entry is not None:
                 stale_entry.refreshing = False
-        LOGGER.warning("monitor snapshot refresh failed key=%s", cache_key, exc_info=True)
+        # Demote the well-known "cluster stopped / DNS hiccup / ARM 5xx"
+        # family to a one-line warning so the Azure Monitor OpenTelemetry
+        # logging exporter does not record a fresh AppInsights exception
+        # row every poll tick. The full stack trace is still emitted on the
+        # first failure inside the dedup window (or whenever no stale
+        # fallback exists) so a real new fault is never hidden.
+        transient = _is_transient_refresh_failure(exc) and stale_entry is not None
+        if transient and _should_suppress_transient_telemetry(cache_key, exc):
+            LOGGER.warning(
+                "monitor snapshot refresh failed key=%s reason=%s (stale fallback, deduped)",
+                cache_key,
+                type(exc).__name__,
+            )
+        else:
+            LOGGER.warning("monitor snapshot refresh failed key=%s", cache_key, exc_info=True)
+        try:
+            _get_refresh_failure_counter().add(
+                1,
+                {
+                    "exception_class": type(exc).__name__,
+                    "stale_fallback": bool(stale_entry is not None),
+                    "transient": bool(transient),
+                },
+            )
+        except Exception:  # noqa: S110 - counter must never break refresh
+            pass
         raise
 
 

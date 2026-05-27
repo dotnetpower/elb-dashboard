@@ -121,6 +121,65 @@ def _k8s_session_http_pool_size() -> int:
     return _K8S_SESSION_HTTP_POOL_SIZE
 
 
+# Single, fast retry on transient connect / DNS failures. The Container
+# Apps environment's coredns sidecar occasionally returns NXDOMAIN for a
+# few hundred ms during overlay refresh; without this retry each hiccup
+# bubbled up as a `requests.exceptions.ConnectionError(NameResolutionError)`
+# and recorded an App Insights exception even though the very next poll
+# succeeded. Read errors and HTTP status codes are NOT retried — a
+# successful TCP connect that returns 5xx is the API server's answer, not
+# a transport blip.
+_K8S_SESSION_RETRY_TOTAL = 1
+_K8S_SESSION_RETRY_BACKOFF = 0.5
+
+
+def _k8s_session_retry_total() -> int:
+    raw = os.environ.get("K8S_SESSION_RETRY_TOTAL", "")
+    if raw:
+        try:
+            return max(0, min(int(raw), 5))
+        except ValueError:
+            return _K8S_SESSION_RETRY_TOTAL
+    return _K8S_SESSION_RETRY_TOTAL
+
+
+def _k8s_session_retry_backoff() -> float:
+    raw = os.environ.get("K8S_SESSION_RETRY_BACKOFF", "")
+    if raw:
+        try:
+            return max(0.0, min(float(raw), 5.0))
+        except ValueError:
+            return _K8S_SESSION_RETRY_BACKOFF
+    return _K8S_SESSION_RETRY_BACKOFF
+
+
+def _build_k8s_retry() -> Any:
+    """Build the urllib3 Retry object used by the pooled K8s session.
+
+    Lazy-imported so unit tests that only exercise the caching machinery
+    do not require urllib3 to be present, and so this module stays
+    importable in stripped-down test environments.
+    """
+    from urllib3.util.retry import Retry
+
+    return Retry(
+        total=_k8s_session_retry_total(),
+        connect=_k8s_session_retry_total(),
+        read=0,
+        status=0,
+        redirect=0,
+        other=0,
+        backoff_factor=_k8s_session_retry_backoff(),
+        # Only retry connect-time failures (DNS / TCP reset) — never a
+        # successful response with a 4xx/5xx body, because those are
+        # the API server's authoritative answer.
+        status_forcelist=(),
+        allowed_methods=frozenset(["GET", "HEAD", "OPTIONS"]),
+        raise_on_status=False,
+        raise_on_redirect=False,
+    )
+
+
 def _get_k8s_credential_material(
     credential: TokenCredential,
     subscription_id: str,
@@ -227,6 +286,7 @@ def _get_k8s_session(
         pool_connections=_k8s_pool_size,
         pool_maxsize=_k8s_pool_size,
         pool_block=False,
+        max_retries=_build_k8s_retry(),
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)

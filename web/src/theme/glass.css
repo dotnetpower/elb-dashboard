@@ -1876,6 +1876,11 @@ textarea.form-input {
   text-align: center;
 }
 
+.glass-dialog ul,
+.glass-dialog ol {
+  text-align: left;
+}
+
 .glass-dialog__actions {
   display: flex;
   gap: var(--space-3);

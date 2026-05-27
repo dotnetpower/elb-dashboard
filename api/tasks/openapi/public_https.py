@@ -104,6 +104,93 @@ def _kubectl_or_raise(
     return result
 
 
+_CERT_MANAGER_WEBHOOK_PROBE_RETRIES = 5
+_CERT_MANAGER_WEBHOOK_PROBE_TIMEOUT_SECONDS = 60
+_CERT_MANAGER_WEBHOOK_AVAILABLE_TIMEOUT_SECONDS = 300
+
+
+def _wait_for_cert_manager_webhook(
+    *, kubeconfig_path: str
+) -> dict[str, Any]:
+    """Wait for the cert-manager webhook Deployment to become Available.
+
+    Previously a single ``kubectl wait --timeout=180s`` immediately after
+    ``kubectl apply -f cert-manager`` raced the cainjector→controller→webhook
+    creation order on cold clusters: when the apply returned, the webhook
+    Deployment object did not yet exist, so the wait condition had no target
+    and burned the full 180 s timeout before failing the pipeline. Observed
+    in production once on a fresh elb-cluster-01 right before the cluster
+    auto-stopped, recorded in App Insights as a `RuntimeError("public-https:
+    pipeline failed")`.
+
+    The hardened sequence is:
+
+    1. Up to ``_CERT_MANAGER_WEBHOOK_PROBE_RETRIES`` short ``kubectl rollout
+       status`` probes (60 s each) that tolerate the Deployment not yet
+       existing — once it shows up, rollout status returns quickly.
+    2. A single ``kubectl wait --for=condition=Available`` with a generous
+       300 s timeout for the final readiness flip (serving-cert bootstrap +
+       webhook TLS warmup).
+
+    Returns the final ``kubectl wait`` result. Raises ``RuntimeError`` only
+    when the webhook is still not Available after all retries — exactly the
+    same failure shape callers already expected.
+    """
+    last_err = ""
+    for attempt in range(1, _CERT_MANAGER_WEBHOOK_PROBE_RETRIES + 1):
+        result = kubectl_run(
+            [
+                "rollout",
+                "status",
+                f"deployment/{CERT_MANAGER_WEBHOOK_DEPLOYMENT}",
+                "-n",
+                CERT_MANAGER_NAMESPACE,
+                f"--timeout={_CERT_MANAGER_WEBHOOK_PROBE_TIMEOUT_SECONDS}s",
+            ],
+            kubeconfig_path=kubeconfig_path,
+            timeout_seconds=_CERT_MANAGER_WEBHOOK_PROBE_TIMEOUT_SECONDS + 20,
+        )
+        if result.get("exit_code", 1) == 0:
+            break
+        last_err = (
+            (result.get("stderr") or result.get("stdout") or "").strip()[:300]
+        )
+        LOGGER.info(
+            "public-https: cert-manager-webhook rollout probe %d/%d not ready yet: %s",
+            attempt,
+            _CERT_MANAGER_WEBHOOK_PROBE_RETRIES,
+            last_err,
+        )
+    else:
+        # Loop exhausted without a successful probe — the Deployment never
+        # showed up. Surface a clear error message instead of silently
+        # falling through to the Available wait (which would also fail
+        # but with a less informative timeout message).
+        raise RuntimeError(
+            "kubectl rollout status cert-manager-webhook failed after "
+            f"{_CERT_MANAGER_WEBHOOK_PROBE_RETRIES} probes "
+            f"(~{_CERT_MANAGER_WEBHOOK_PROBE_RETRIES * _CERT_MANAGER_WEBHOOK_PROBE_TIMEOUT_SECONDS}"
+            f"s); last error: {last_err}"
+        )
+
+    # Final readiness flip — once rollout status has returned 0, this
+    # normally completes in <5 s, but a cold cluster + AKS node scaling
+    # can stretch it; keep the timeout generous.
+    return _kubectl_or_raise(
+        [
+            "wait",
+            "--for=condition=Available=true",
+            f"deployment/{CERT_MANAGER_WEBHOOK_DEPLOYMENT}",
+            "-n",
+            CERT_MANAGER_NAMESPACE,
+            f"--timeout={_CERT_MANAGER_WEBHOOK_AVAILABLE_TIMEOUT_SECONDS}s",
+        ],
+        kubeconfig_path=kubeconfig_path,
+        timeout_seconds=_CERT_MANAGER_WEBHOOK_AVAILABLE_TIMEOUT_SECONDS + 30,
+        context="wait cert-manager-webhook",
+    )
+
+
 def _wait_for_external_ip(*, kubeconfig_path: str, timeout_seconds: int = 240) -> str:
     """Poll the ingress-nginx Service for its LoadBalancer EXTERNAL-IP."""
     deadline = time.time() + timeout_seconds
@@ -300,23 +387,12 @@ def setup_openapi_public_https(
             context="apply cert-manager",
         )
 
-        # Step 5: wait for cert-manager webhook Ready (rest of cert-manager
-        # is fast, but the webhook serving cert spins up via a self-signed
-        # bootstrap and takes ~30-60 s on a cold cluster)
+        # Step 5: wait for cert-manager webhook Ready. The dedicated helper
+        # absorbs the cold-cluster race where ``kubectl wait`` would start
+        # before the webhook Deployment object existed and burn its full
+        # timeout for nothing.
         record_progress(self, "wait_cert_manager_webhook")
-        _kubectl_or_raise(
-            [
-                "wait",
-                "--for=condition=Available=true",
-                f"deployment/{CERT_MANAGER_WEBHOOK_DEPLOYMENT}",
-                "-n",
-                CERT_MANAGER_NAMESPACE,
-                "--timeout=180s",
-            ],
-            kubeconfig_path=kubeconfig_path,
-            timeout_seconds=200,
-            context="wait cert-manager-webhook",
-        )
+        _wait_for_cert_manager_webhook(kubeconfig_path=kubeconfig_path)
 
         # Step 6: ClusterIssuer (Let's Encrypt prod, HTTP-01)
         record_progress(self, "apply_cluster_issuer", email=_mask_email(email))

@@ -55,20 +55,22 @@ export function DatabaseChipStrip({
         >
           Databases
         </span>
-        <span
-          className="muted cluster-db-legend"
-          style={{
-            fontSize: 10,
-            display: "inline-flex",
-            gap: 8,
-            flexWrap: "wrap",
-          }}
-          title="Node-local warm cache state only. Downloaded or sharded databases are managed in the BLAST Databases modal until they are actually warming or warm."
-        >
-          <LegendDot color="var(--accent)" label="warming" />
-          <LegendDot color="var(--success)" label="ready" />
-          <LegendDot color="var(--warning)" label="failed" />
-        </span>
+        {warmChips.length > 0 && (
+          <span
+            className="muted cluster-db-legend"
+            style={{
+              fontSize: 10,
+              display: "inline-flex",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+            title="Node-local warm cache state only. Downloaded or sharded databases are managed in the BLAST Databases modal until they are actually warming or warm."
+          >
+            <LegendDot color="var(--accent)" label="warming" />
+            <LegendDot color="var(--success)" label="ready" />
+            <LegendDot color="var(--warning)" label="failed" />
+          </span>
+        )}
       </div>
       {dbListDegraded && warmChips.length === 0 ? (
         <div

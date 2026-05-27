@@ -114,6 +114,12 @@ def init_telemetry(role: str, app: FastAPI | None = None) -> bool:
                 # Root logging would also capture Azure SDK/exporter internals
                 # and can create noisy feedback loops.
                 "logger_name": "api",
+                # Live Metrics (QuickPulse) streams per-second request / failure
+                # / dependency counters to the App Insights blade so an
+                # operator can correlate a dashboard click with backend
+                # behaviour in real time. Opt-out via
+                # AZURE_MONITOR_DISABLE_LIVE_METRICS=true.
+                "enable_live_metrics": _bool_env("AZURE_MONITOR_DISABLE_LIVE_METRICS") is not True,
             }
 
             configure_azure_monitor(**kwargs)

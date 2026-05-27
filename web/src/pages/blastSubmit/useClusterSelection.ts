@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { type AksClusterSummary, monitoringApi } from "@/api/endpoints";
@@ -36,14 +36,33 @@ export function useClusterSelection({
     (c) => c.name === form.selectedCluster,
   );
 
+  // One-shot default selection per mount. Runs as soon as the cluster list
+  // resolves (non-empty) and prefers a workload-ready (Running + Succeeded)
+  // cluster over whatever the sessionStorage draft persisted. Without this,
+  // a previously-selected cluster that has since been stopped would remain
+  // selected across visits to /blast/submit even though a healthy peer is
+  // available — confusing for fleets with multiple tiers. After the one-shot
+  // runs, manual picks in the dropdown are respected for the rest of the
+  // page lifetime.
+  const defaultedRef = useRef(false);
   useEffect(() => {
-    if (!form.selectedCluster && clusters.length > 0) {
-      const running = clusters.find(isAksWorkloadReady);
-      setForm((f) => ({
-        ...f,
-        selectedCluster: running?.name ?? clusters[0].name,
-      }));
+    if (defaultedRef.current) return;
+    if (clusters.length === 0) return;
+
+    const running = clusters.find(isAksWorkloadReady);
+    const current = clusters.find((c) => c.name === form.selectedCluster);
+
+    let next: string | undefined;
+    if (!form.selectedCluster || !current) {
+      next = running?.name ?? clusters[0].name;
+    } else if (!isAksWorkloadReady(current) && running) {
+      next = running.name;
     }
+
+    if (next && next !== form.selectedCluster) {
+      setForm((f) => ({ ...f, selectedCluster: next }));
+    }
+    defaultedRef.current = true;
   }, [clusters, form.selectedCluster, setForm]);
 
   return { clusterQuery, clusters, selectedCluster } as const;

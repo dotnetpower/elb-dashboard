@@ -167,11 +167,17 @@ def test_rbac_check_fail_when_sub_rg_write_missing(
     assert "az role assignment create" not in missing[0]["remediation"]
 
 
-def test_rbac_check_fail_when_cluster_rg_contributor_missing(
+def test_rbac_check_ok_when_only_custom_role_at_sub_bootstraps_cluster_rg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sub-scope Reader + custom role still leaves the cluster RG
-    Contributor gap."""
+    """Custom role at sub scope grants `roleAssignments/write` with an
+    ABAC whitelist that includes Contributor + UAA (see
+    `infra/modules/workloadRgCreatorRole.bicep`). The provision task
+    self-grants those on the cluster RG before AKS create, so the
+    cluster-RG Contributor requirement is satisfied as bootstrap-capable
+    even when the per-RG assignment doesn't exist yet. This is the
+    "user renamed the cluster → fresh `rg-<name>` doesn't have a
+    pre-existing Contributor" path."""
     monkeypatch.setenv("SHARED_IDENTITY_PRINCIPAL_ID", "mi-oid")
     from api.services.rbac_preflight import aks_create_rbac_check
 
@@ -187,14 +193,41 @@ def test_rbac_check_fail_when_cluster_rg_contributor_missing(
     check = aks_create_rbac_check(
         object(),
         subscription_id="sub-1",
+        resource_group="rg-elb-cluster-small",
+    )
+    assert check.status == "ok"
+    assert "self-grant" in check.message.lower()
+    assert "rg-elb-cluster-small" in check.message
+    assert check.details["cluster_rg_bootstrap_capable"] is True
+
+
+def test_rbac_check_fail_when_no_sub_scope_grants_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without sub-scope Contributor AND without the custom role, the MI
+    has neither the cluster-RG grant nor the bootstrap capability —
+    preflight must fail with both gaps surfaced."""
+    monkeypatch.setenv("SHARED_IDENTITY_PRINCIPAL_ID", "mi-oid")
+    from api.services.rbac_preflight import aks_create_rbac_check
+
+    sub = "/subscriptions/sub-1"
+    rows = [
+        _RoleAssignment(_role_id(sub, _READER_ID), sub),
+    ]
+    _patch_auth_client(monkeypatch, _FakeAuthClient(rows))
+
+    check = aks_create_rbac_check(
+        object(),
+        subscription_id="sub-1",
         resource_group="rg-elb-cluster",
     )
     assert check.status == "fail"
     missing = check.details["missing"]
-    assert len(missing) == 1
-    assert missing[0]["scope"].endswith("/rg-elb-cluster")
-    assert missing[0]["role"] == "Contributor"
-    assert "az role assignment create" in missing[0]["remediation"]
+    # Both the cluster RG Contributor and the sub-scope custom role
+    # are missing — bootstrap path is unavailable.
+    roles = {m["role"] for m in missing}
+    assert "Contributor" in roles
+    assert "Elb Workload RG Creator" in roles
 
 
 def test_rbac_check_warn_when_principal_id_env_missing(

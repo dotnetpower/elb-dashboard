@@ -73,6 +73,37 @@ export default function RemoteTerminal() {
     terminal.focus();
   };
 
+  // PuTTY-style right-click: if there is a selection, copy it; otherwise
+  // paste from clipboard. Always suppress the browser context menu.
+  // Wired as a native capture-phase listener on the xterm container so it
+  // beats xterm's internal canvas/textarea handlers (React's synthetic
+  // onContextMenu can be too late for the browser's default menu).
+  const handleTerminalContextMenu = (event: Event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const terminal = termRef.current;
+    if (!terminal) return;
+    const selection = terminal.getSelection();
+    if (selection && selection.length > 0) {
+      void navigator.clipboard.writeText(selection).catch(() => {
+        /* clipboard may be unavailable; ignore */
+      });
+      terminal.clearSelection();
+      terminal.focus();
+      return;
+    }
+    void (async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) terminal.paste(text);
+      } catch {
+        /* clipboard read may be blocked; ignore */
+      } finally {
+        terminal.focus();
+      }
+    })();
+  };
+
   useEffect(() => {
     if (!containerRef.current) return;
     const term = new Terminal({
@@ -133,6 +164,13 @@ export default function RemoteTerminal() {
       }
     });
     ro.observe(containerRef.current);
+
+    // Capture-phase contextmenu suppression. xterm renders to a canvas
+    // and a hidden helper textarea; both can bubble through React but
+    // attaching natively in the capture phase guarantees we win over
+    // anything xterm or the browser might do.
+    const contextMenuTarget = containerRef.current;
+    contextMenuTarget.addEventListener("contextmenu", handleTerminalContextMenu, true);
 
     let cancelled = false;
     let inputDisposable: { dispose: () => void } | null = null;
@@ -333,6 +371,7 @@ export default function RemoteTerminal() {
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       inputDisposable?.dispose();
       ro.disconnect();
+      contextMenuTarget.removeEventListener("contextmenu", handleTerminalContextMenu, true);
       try {
         wsRef.current?.close();
       } catch {

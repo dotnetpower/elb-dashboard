@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
+import { type AksClusterSummary, monitoringApi } from "@/api/monitoring";
 import { settingsApi, type AppInsightsProvisionRequest } from "@/api/settings";
 import { tasksApi, type TaskStatusResponse } from "@/api/tasks";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -33,6 +34,7 @@ import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { usePreferences, type ThemeMode } from "@/hooks/usePreferences";
 import { useSidecarMetrics, type SidecarMetric } from "@/hooks/useSidecarMetrics";
 import { useTheme } from "@/hooks/useTheme";
+import { pickPreferredCluster } from "@/utils/clusterSelection";
 
 type SectionId = "appearance" | "preview" | "telemetry" | "aks" | "sizing" | "resources";
 type TaskState = {
@@ -960,13 +962,22 @@ function appInsightsPortalUrl(
 
 function AksSection({ config }: { config: ResourceConfig | null }) {
   const { prefs, setPref } = usePreferences();
-  const [clusterName, setClusterName] = useState("aks-elb-e2e-core-nt");
+  const [clusterName, setClusterName] = useState("");
   const [appInsightsName, setAppInsightsName] = useState("appi-elb-dashboard");
   const [status, setStatus] = useState<string | null>(null);
   const [containerInsightsEnabled, setContainerInsightsEnabled] = useState<boolean | null>(null);
   const [task, setTask] = useState<TaskState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resolvingWorkspace, setResolvingWorkspace] = useState(false);
+  // Track the full cluster objects (not just names) so enable/disable/status
+  // requests can forward each cluster's actual `resource_group`. A multi-tier
+  // fleet routinely lives across several RGs (e.g. workload RG vs the
+  // elastic-blast default RG) and the backend `list_aks_clusters` lookup is
+  // RG-scoped, so sending the workspace anchor RG for a cluster that lives
+  // elsewhere produces a "cluster not found" failure.
+  const [availableClusters, setAvailableClusters] = useState<AksClusterSummary[]>([]);
+  const [clustersLoading, setClustersLoading] = useState(false);
+  const [clustersLoaded, setClustersLoaded] = useState(false);
 
   usePollTask(task, setTask, (taskStatus) => {
     if (taskStatus.status !== "SUCCESS") return;
@@ -981,7 +992,18 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
     }
   });
 
-  const canRead = Boolean(config?.subscriptionId && config.workloadResourceGroup && clusterName);
+  // Resolve the selected cluster's *actual* RG. The dropdown stores the
+  // cluster name but the backend Observability endpoints need the RG that
+  // physically holds the AKS resource (api/services/aks_observability.py
+  // calls `client.managed_clusters.get(rg, name)` directly).
+  const selectedClusterRg =
+    availableClusters.find((c) => c.name === clusterName)?.resource_group ??
+    config?.workloadResourceGroup ??
+    "";
+
+  const canRead = Boolean(
+    config?.subscriptionId && selectedClusterRg && clusterName,
+  );
 
   const refresh = useCallback(async () => {
     if (!config || !canRead) return;
@@ -989,7 +1011,7 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
     try {
       const response = await settingsApi.getAksObservabilityStatus({
         subscription_id: config.subscriptionId,
-        resource_group: config.workloadResourceGroup,
+        resource_group: selectedClusterRg,
         cluster_name: clusterName,
       });
       setContainerInsightsEnabled(response.enabled);
@@ -1000,12 +1022,46 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
     } catch (err) {
       setError(formatApiError(err, "aks"));
     }
-  }, [canRead, clusterName, config, setPref]);
+  }, [canRead, clusterName, config, selectedClusterRg, setPref]);
 
   useEffect(() => {
     if (!canRead) return;
     void refresh();
   }, [canRead, refresh]);
+
+  useEffect(() => {
+    // Sub-wide cluster discovery — matches ClusterCard / StorageCard /
+    // BlastSubmit so an ElasticBLAST workload cluster living outside the
+    // dashboard anchor RG is still listed in the Observability picker.
+    if (!config?.subscriptionId) return;
+    let cancelled = false;
+    setClustersLoading(true);
+    void (async () => {
+      try {
+        const response = await monitoringApi.aks(config.subscriptionId);
+        if (cancelled) return;
+        const clusters = (response.clusters ?? []).filter((c) => c.name);
+        setAvailableClusters(clusters);
+        setClustersLoaded(true);
+        setClusterName((current) => {
+          if (current && clusters.some((c) => c.name === current)) return current;
+          const preferred = pickPreferredCluster(clusters, {
+            resourceGroup: config.workloadResourceGroup,
+          });
+          return preferred?.name ?? current;
+        });
+      } catch {
+        if (cancelled) return;
+        setAvailableClusters([]);
+        setClustersLoaded(true);
+      } finally {
+        if (!cancelled) setClustersLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [config?.subscriptionId, config?.workloadResourceGroup]);
 
   const workspaceId = prefs.appInsightsWorkspaceResourceId.trim();
 
@@ -1049,7 +1105,7 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
     try {
       const response = await settingsApi.enableAksObservability({
         subscription_id: config.subscriptionId,
-        resource_group: config.workloadResourceGroup,
+        resource_group: selectedClusterRg,
         cluster_name: clusterName,
         workspace_resource_id: workspaceId,
       });
@@ -1057,7 +1113,7 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
     } catch (err) {
       setError(formatApiError(err, "aks"));
     }
-  }, [clusterName, config, prefs.appInsightsWorkspaceResourceId, resolveWorkspace]);
+  }, [clusterName, config, prefs.appInsightsWorkspaceResourceId, resolveWorkspace, selectedClusterRg]);
 
   const disable = useCallback(async () => {
     if (!config) return;
@@ -1066,20 +1122,52 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
     try {
       const response = await settingsApi.disableAksObservability({
         subscription_id: config.subscriptionId,
-        resource_group: config.workloadResourceGroup,
+        resource_group: selectedClusterRg,
         cluster_name: clusterName,
       });
       setTask({ taskId: response.task_id, status: "PENDING", message: "Disabling Container Insights" });
     } catch (err) {
       setError(formatApiError(err, "aks"));
     }
-  }, [clusterName, config]);
+  }, [clusterName, config, selectedClusterRg]);
 
   return (
     <Section heading="AKS Observability">
       <Group>
-        <Field label="AKS cluster name" hint="Container Insights is enabled by patching the omsagent addon on this cluster.">
-          <input value={clusterName} onChange={(event) => setClusterName(event.target.value)} style={INPUT_STYLE} />
+        <Field
+          label="AKS cluster name"
+          hint={
+            clustersLoading
+              ? "Discovering AKS clusters in this subscription..."
+              : availableClusters.length > 1
+                ? "Pick the cluster whose omsagent addon should be patched."
+                : availableClusters.length === 1
+                  ? "Container Insights is enabled by patching the omsagent addon on this cluster."
+                  : clustersLoaded
+                    ? "No ELB-managed AKS clusters were found in this subscription. Create one from the Cluster card first."
+                    : "Container Insights is enabled by patching the omsagent addon on this cluster."
+          }
+        >
+          {availableClusters.length > 1 ? (
+            <select
+              value={clusterName}
+              onChange={(event) => setClusterName(event.target.value)}
+              style={INPUT_STYLE}
+            >
+              {availableClusters.map((c) => (
+                <option key={`${c.resource_group}/${c.name}`} value={c.name}>
+                  {c.name} ({c.power_state ?? "?"})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={clusterName}
+              onChange={(event) => setClusterName(event.target.value)}
+              placeholder={clustersLoaded && availableClusters.length === 0 ? "No AKS cluster detected" : "aks-..."}
+              style={INPUT_STYLE}
+            />
+          )}
         </Field>
         <Field label="Application Insights resource name" hint="Used to resolve the backing Log Analytics workspace automatically.">
           <input value={appInsightsName} onChange={(event) => setAppInsightsName(event.target.value)} style={INPUT_STYLE} placeholder="appi-elb-dashboard" />

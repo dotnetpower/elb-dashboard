@@ -326,6 +326,40 @@ def test_openapi_proxy_returns_503_when_service_ip_missing(
     assert response.status_code == 503
     body = response.json()
     assert body["code"] == "openapi_service_not_reachable"
+    # SPA reads recovery_action to render the "Repair VNet peering" button
+    # that POSTs to /api/aks/peer-with-platform. Without this the operator
+    # is silently stuck — see docs/features_change/2026-05-27-openapi-peering-recovery.md.
+    assert body["recovery_action"] == "peer_with_platform"
+    assert "elb-openapi" in body["recovery_hint"]
+
+
+def test_openapi_proxy_502_includes_peer_with_platform_recovery_hint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the api sidecar can resolve the Service IP but the upstream
+    request fails (the canonical "VNet peering missing" 502 path), the
+    detail must carry the generic recovery_action so the SPA can render
+    the repair affordance without parsing free-form messages."""
+
+    _patch_service_ip(monkeypatch, "10.0.0.50")
+
+    def boom(self: Any, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        raise httpx.ConnectError("connection refused (mocked)")
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", boom)
+    monkeypatch.setenv("ELB_OPENAPI_API_TOKEN", "api-token")
+
+    response = client.get(
+        "/api/aks/openapi/proxy",
+        params={"resource_group": "rg-elb", "cluster_name": "aks-elb", "path": "/healthz"},
+    )
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["code"] == "openapi_upstream_unreachable"
+    assert body["recovery_action"] == "peer_with_platform"
+    assert "elb-openapi" in body["recovery_hint"]
 
 
 def test_openapi_proxy_rejects_non_service_path(client: TestClient) -> None:
@@ -677,6 +711,31 @@ def test_openapi_proxy_allows_openapi_spec_and_docs(
     )
     assert r1.status_code == 200
     assert r2.status_code == 200
+
+
+def test_openapi_spec_degraded_payload_carries_recovery_hint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the Service IP cannot be resolved (cluster not yet ready, or
+    VNet peering missing) the spec route degrades to a 200 placeholder.
+    The placeholder must carry `recovery_action: peer_with_platform` so
+    the SPA's API Reference page can render the repair affordance —
+    otherwise the operator sees an empty docs page with no remediation
+    hint."""
+    _patch_service_ip(monkeypatch, None)
+
+    response = client.get(
+        "/api/aks/openapi/spec",
+        params={"resource_group": "rg-elb", "cluster_name": "aks-elb"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["degraded"] is True
+    assert body["degraded_reason"] == "openapi_service_not_reachable"
+    assert body["recovery_action"] == "peer_with_platform"
+    assert "elb-openapi" in body["recovery_hint"]
 
 
 def test_openapi_spec_falls_back_to_k8s_service_proxy(

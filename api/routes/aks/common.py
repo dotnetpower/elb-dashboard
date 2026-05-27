@@ -38,5 +38,11 @@ def _invalidate_aks_monitor_cache(subscription_id: str, resource_group: str) -> 
     # invalidation ignores neighbouring RGs whose names share a string prefix.
     invalidate_monitor_snapshot_prefix(f"monitor:aks:{sub}:{resource_group}")
     # Per-cluster keys are `monitor:aks:<cat>:{sub}:{rg}:{cluster}[:...]`.
-    for category in ("nodes", "pods", "top-nodes", "warmup-status", "events"):
+    # `meta` is owned by `api/services/cluster_health.py::get_cluster_health` —
+    # its `power_state` snapshot MUST be dropped on lifecycle mutations or the
+    # cluster_health gate keeps the previous reading for up to 90 s and either
+    # (a) skips healthy K8s polls right after Start, surfacing a false
+    # `cluster_stopped` chip, or (b) attempts K8s calls right after Stop and
+    # re-introduces the connect-timeout exception noise we tried to dedup.
+    for category in ("nodes", "pods", "top-nodes", "warmup-status", "events", "meta"):
         invalidate_monitor_snapshot_prefix(f"monitor:aks:{category}:{sub}:{resource_group}")

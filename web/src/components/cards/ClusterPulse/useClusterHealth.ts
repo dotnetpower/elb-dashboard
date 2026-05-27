@@ -13,7 +13,7 @@ import type { AksClusterSummary } from "@/api/endpoints";
 import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
 import { getAksProvisioningLabel, isAksProvisioningFailed } from "@/utils/aksStatus";
 
-import { fmtMs, type HealthTone } from "./helpers";
+import type { HealthTone } from "./helpers";
 
 export interface ClusterHealthInput {
   cluster: AksClusterSummary;
@@ -23,8 +23,6 @@ export interface ClusterHealthInput {
   trans?: ClusterTransitionKind;
   cpuPct: number | null;
   memPct: number | null;
-  apiP95: number | null;
-  apiErrors: number;
   jobsDegraded: boolean;
   metricsDegraded: boolean;
   nodeNotReady: number;
@@ -47,8 +45,6 @@ export function useClusterHealth(input: ClusterHealthInput): ClusterHealthVerdic
     trans,
     cpuPct,
     memPct,
-    apiP95,
-    apiErrors,
     jobsDegraded,
     metricsDegraded,
     nodeNotReady,
@@ -64,7 +60,6 @@ export function useClusterHealth(input: ClusterHealthInput): ClusterHealthVerdic
     if (nodeNotReady > 0 || nodePressureCount > 0) return "degraded";
     if (cpuPct != null && cpuPct >= 0.95) return "degraded";
     if (memPct != null && memPct >= 0.95) return "degraded";
-    if (apiErrors > 5) return "degraded";
     if (
       jobsDegraded &&
       metricsDegraded &&
@@ -82,7 +77,6 @@ export function useClusterHealth(input: ClusterHealthInput): ClusterHealthVerdic
     provisioningBusy,
     cpuPct,
     memPct,
-    apiErrors,
     jobsDegraded,
     metricsDegraded,
     nodeNotReady,
@@ -119,8 +113,6 @@ export function useClusterHealth(input: ClusterHealthInput): ClusterHealthVerdic
         parts.push(`CPU ${Math.round(cpuPct * 100)}%`);
       if (memPct != null && memPct >= 0.85)
         parts.push(`Mem ${Math.round(memPct * 100)}%`);
-      if (apiP95 != null && apiP95 > 2000) parts.push(`API p95 ${fmtMs(apiP95)}`);
-      if (apiErrors > 0) parts.push(`${apiErrors} errors / 15m`);
       if (nodeNotReady > 0) parts.push(`${nodeNotReady} node not ready`);
       return {
         statusLine: parts.length > 0 ? parts.join(" · ") : "Degraded",
@@ -129,12 +121,6 @@ export function useClusterHealth(input: ClusterHealthInput): ClusterHealthVerdic
     }
     if (tone === "unknown") {
       return { statusLine: "Metrics not yet available", statusTone: "unknown" };
-    }
-    const softParts: string[] = [];
-    if (apiP95 != null && apiP95 > 2000) softParts.push(`API p95 ${fmtMs(apiP95)}`);
-    if (apiErrors > 0) softParts.push(`${apiErrors} errors / 15m`);
-    if (softParts.length > 0) {
-      return { statusLine: softParts.join(" · "), statusTone: "degraded" };
     }
     return { statusLine: "All systems nominal", statusTone: "healthy" };
   }, [
@@ -145,8 +131,6 @@ export function useClusterHealth(input: ClusterHealthInput): ClusterHealthVerdic
     tone,
     cpuPct,
     memPct,
-    apiP95,
-    apiErrors,
     nodeNotReady,
   ]);
 

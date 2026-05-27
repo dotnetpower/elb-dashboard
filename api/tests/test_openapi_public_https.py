@@ -201,6 +201,8 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
         # get-service jsonpath → return EXTERNAL-IP
         if args[:3] == ["get", "service", "ingress-nginx-controller"]:
             return _ok(stdout="20.41.1.2")
+        if args[:2] == ["rollout", "status"]:
+            return _ok()
         if args[:1] == ["wait"]:
             return _ok()
         if args[:1] == ["patch"]:
@@ -374,3 +376,98 @@ def test_kubectl_run_helper_signature(args: list[str], want_substr: str) -> None
     assert callable(kubectl_run)
     assert want_substr  # parametrise sanity
     assert args  # parametrise sanity
+
+
+# ---------------------------------------------------------------------------
+# cert-manager webhook wait hardening (Pillar D — cold-cluster race fix)
+# Anchors:
+#   - api/tasks/openapi/public_https.py::_wait_for_cert_manager_webhook
+# ---------------------------------------------------------------------------
+
+
+def test_wait_for_cert_manager_webhook_retries_rollout_status_then_waits(
+    monkeypatch,
+) -> None:
+    """First few rollout-status probes fail (Deployment not yet created),
+    the wrapper retries; once rollout-status succeeds the Available wait
+    runs exactly once.
+    """
+    from api.tasks.openapi import public_https as task_module
+
+    calls: list[list[str]] = []
+    rollout_attempts = 0
+
+    def fake_kubectl_run(
+        args: list[str],
+        *,
+        kubeconfig_path: str,
+        stdin: str | None = None,
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        nonlocal rollout_attempts
+        calls.append(args)
+        if args[:2] == ["rollout", "status"]:
+            rollout_attempts += 1
+            if rollout_attempts < 3:
+                return {
+                    "exit_code": 1,
+                    "stderr": (
+                        'Error from server (NotFound): '
+                        'deployments.apps "cert-manager-webhook" not found'
+                    ),
+                    "stdout": "",
+                }
+            return _ok()
+        if args[:1] == ["wait"]:
+            return _ok()
+        return _ok()
+
+    monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
+
+    task_module._wait_for_cert_manager_webhook(kubeconfig_path="/fake")
+
+    rollout_calls = [c for c in calls if c[:2] == ["rollout", "status"]]
+    wait_calls = [c for c in calls if c[:1] == ["wait"]]
+    # 2 failures + 1 success = 3 rollout calls, then exactly 1 wait.
+    assert len(rollout_calls) == 3
+    assert len(wait_calls) == 1
+    assert "cert-manager-webhook" in " ".join(wait_calls[0])
+    # The Available wait MUST use the new generous 300s timeout, not the
+    # old 180s that timed out on cold clusters.
+    assert "--timeout=300s" in wait_calls[0]
+
+
+def test_wait_for_cert_manager_webhook_raises_when_rollout_never_succeeds(
+    monkeypatch,
+) -> None:
+    """If the rollout probes exhaust without success, the wrapper raises a
+    clear RuntimeError (no fall-through to the Available wait).
+    """
+    from api.tasks.openapi import public_https as task_module
+
+    wait_called = False
+
+    def fake_kubectl_run(
+        args: list[str],
+        *,
+        kubeconfig_path: str,
+        stdin: str | None = None,
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        nonlocal wait_called
+        if args[:2] == ["rollout", "status"]:
+            return {
+                "exit_code": 1,
+                "stderr": "timed out",
+                "stdout": "",
+            }
+        if args[:1] == ["wait"]:
+            wait_called = True
+        return _ok()
+
+    monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
+
+    with pytest.raises(RuntimeError, match="rollout status cert-manager-webhook"):
+        task_module._wait_for_cert_manager_webhook(kubeconfig_path="/fake")
+
+    assert wait_called is False, "Available wait must not run when rollout probes exhausted"

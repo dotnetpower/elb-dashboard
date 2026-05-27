@@ -32,6 +32,20 @@ export type DegradedReason =
   | "openapi_upstream_error"
   | "openapi_http_401"
   /**
+   * The selected AKS cluster exists in ARM but its power_state is not
+   * `Running` (typically Stopped). The K8s API server is unreachable so
+   * the monitor route returns this instead of a connection-error degrade.
+   * Origin: `api/services/cluster_health.py::get_cluster_health`.
+   */
+  | "cluster_stopped"
+  /**
+   * The selected AKS cluster could not be found in ARM (deleted or wrong
+   * RG). Same origin as `cluster_stopped`; surfaced as a distinct card
+   * label so the user can decide between "start the cluster" and "pick
+   * another cluster / re-run setup".
+   */
+  | "cluster_not_found"
+  /**
    * Synthetic, SPA-only: the `subscriptionId` saved in `localStorage` is not
    * in the list returned by `/api/arm/subscriptions`. There is no backend
    * payload for this — the diagnostics banner synthesises it from the
@@ -160,6 +174,18 @@ const REASON_TABLE: Record<string, ReasonDescriptor> = {
   redis_unavailable: {
     label: "Redis offline",
     description: "The sidecar Redis broker is unreachable.",
+    isAuthIssue: false,
+  },
+  cluster_stopped: {
+    label: "Cluster stopped",
+    description:
+      "The AKS cluster is in Stopped power state. Monitoring will resume automatically after you start it from the AKS card or the Azure portal.",
+    isAuthIssue: false,
+  },
+  cluster_not_found: {
+    label: "Cluster missing",
+    description:
+      "The selected AKS cluster could not be found in ARM. It may have been deleted or moved to a different resource group; pick another cluster from the dropdown or re-run the setup wizard.",
     isAuthIssue: false,
   },
 };

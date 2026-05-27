@@ -1,9 +1,13 @@
 /**
- * PulseMetaGrid — 4-col grid of meta cells shown when the row is open.
+ * PulseMetaGrid — grid of meta cells shown when the row is open.
+ *
+ * Live signals (CPU peak, Mem peak, DBs) are gated by `operational`
+ * so stopped / transitioning clusters do not show stale or empty
+ * cells. Dashboard-wide `/api/blast` p95 + 5xx live in the parent
+ * ClusterCard header instead — they are NOT a per-cluster signal.
  */
 
 import { MetaCell } from "./atoms";
-import { fmtMs } from "./helpers";
 
 interface Props {
   region: string;
@@ -12,9 +16,12 @@ interface Props {
   dbCountsLabel: string;
   cpuPct: number | null;
   memPct: number | null;
-  apiP95Ms: number | null;
-  apiErrors: number;
   metricsDegraded: boolean;
+  /** False when the cluster is stopped / transitioning / failed to
+   *  provision. Hides live-data cells (CPU peak, Mem peak, DBs) so
+   *  the operator does not see an empty placeholder that looks like
+   *  "0%" or "0 visible". */
+  operational: boolean;
 }
 
 function pctTone(pct: number | null): string | undefined {
@@ -31,9 +38,8 @@ export function PulseMetaGrid({
   dbCountsLabel,
   cpuPct,
   memPct,
-  apiP95Ms,
-  apiErrors,
   metricsDegraded,
+  operational,
 }: Props) {
   return (
     <div
@@ -60,47 +66,49 @@ export function PulseMetaGrid({
         value={nodeCountLabel}
         tooltip="Ready nodes across all pools"
       />
-      <MetaCell
-        label="DBs"
-        value={dbCountsLabel}
-        tooltip="Pre-baked BLAST databases reachable from this cluster"
-      />
-      <MetaCell
-        label="CPU peak"
-        value={cpuPct == null ? "—" : `${Math.round(cpuPct * 100)}%`}
-        tone={pctTone(cpuPct)}
-        tooltip="Highest CPU% across user-pool nodes right now"
-      />
-      <MetaCell
-        label="Mem peak"
-        value={memPct == null ? "—" : `${Math.round(memPct * 100)}%`}
-        tone={pctTone(memPct)}
-        tooltip="Highest memory% across user-pool nodes right now"
-      />
-      <MetaCell
-        label="API p95"
-        value={apiP95Ms == null ? "—" : fmtMs(apiP95Ms)}
-        tone={
-          apiP95Ms == null
-            ? undefined
-            : apiP95Ms > 2000
-              ? "var(--danger)"
-              : apiP95Ms > 1000
-                ? "var(--warning)"
-                : undefined
-        }
-        tooltip="/api/blast latency p95 over the last 15 minutes"
-      />
-      <MetaCell
-        label="Errors 15m"
-        value={metricsDegraded ? "—" : apiErrors.toString()}
-        tone={apiErrors > 0 ? "var(--danger)" : undefined}
-        tooltip={
-          metricsDegraded
-            ? "Metrics store unavailable"
-            : "/api/blast 5xx responses over the last 15 minutes"
-        }
-      />
+      {operational && (
+        <MetaCell
+          label="DBs"
+          value={dbCountsLabel}
+          tooltip="Pre-baked BLAST databases reachable from this cluster"
+        />
+      )}
+      {operational && (
+        <MetaCell
+          label="CPU peak"
+          value={
+            metricsDegraded
+              ? "—"
+              : cpuPct == null
+                ? "—"
+                : `${Math.round(cpuPct * 100)}%`
+          }
+          tone={pctTone(cpuPct)}
+          tooltip={
+            metricsDegraded
+              ? "Node metrics unavailable"
+              : "Highest CPU% across user-pool nodes right now"
+          }
+        />
+      )}
+      {operational && (
+        <MetaCell
+          label="Mem peak"
+          value={
+            metricsDegraded
+              ? "—"
+              : memPct == null
+                ? "—"
+                : `${Math.round(memPct * 100)}%`
+          }
+          tone={pctTone(memPct)}
+          tooltip={
+            metricsDegraded
+              ? "Node metrics unavailable"
+              : "Highest memory% across user-pool nodes right now"
+          }
+        />
+      )}
     </div>
   );
 }

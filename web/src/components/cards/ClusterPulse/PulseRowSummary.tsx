@@ -134,7 +134,26 @@ export function PulseRowSummary({
             >
               {tier}
             </span>
-          ) : null}
+          ) : (
+            <span
+              title="elb-tier ARM tag not set on this cluster"
+              style={{
+                flexShrink: 0,
+                fontSize: 9,
+                fontWeight: 500,
+                lineHeight: 1,
+                padding: "2px 6px",
+                borderRadius: 999,
+                background: "transparent",
+                color: "var(--text-faint)",
+                border: "1px dashed var(--border-weak)",
+                textTransform: "lowercase",
+                letterSpacing: 0.2,
+              }}
+            >
+              untagged
+            </span>
+          )}
           {resourceGroup ? (
             <span
               title={`Resource group: ${resourceGroup}`}
@@ -184,11 +203,11 @@ export function PulseRowSummary({
           tooltip="Jobs currently Pending, Running or Reducing"
         />
         <PulseStat
-          label="Pressure"
+          label="Load"
           value={pressureLabel}
           icon={<Flame size={11} aria-hidden="true" />}
           tone={pressureTone}
-          tooltip="Higher of CPU peak and Mem peak across user-pool nodes"
+          tooltip="max(CPU peak, Mem peak) across user-pool nodes"
         />
       </div>
       {open ? (

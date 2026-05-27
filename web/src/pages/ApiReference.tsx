@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Loader2, Package, Power, RefreshCw, Server } from "lucide-react";
@@ -12,11 +12,39 @@ import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
 import { ApiResponseContractPanel } from "@/pages/apiReference/ApiResponseContractPanel";
 import { ApiTokenPanel } from "@/pages/apiReference/ApiTokenPanel";
 import { PublicHttpsPanel } from "@/pages/apiReference/PublicHttpsPanel";
+import {
+  RepairPeeringButton,
+  isPeerWithPlatformRecovery,
+} from "@/pages/apiReference/RepairPeeringButton";
 import { resolveApiReferenceClusterContext } from "@/pages/apiReference/clusterContext";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { parseSpec } from "@/pages/apiReference/spec";
 import { TagSection } from "@/pages/apiReference/TagSection";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
+
+const PREFERRED_CLUSTER_STORAGE_KEY = "elb-api-ref-cluster";
+
+function loadPreferredClusterName(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(PREFERRED_CLUSTER_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function savePreferredClusterName(name: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (name) {
+      window.localStorage.setItem(PREFERRED_CLUSTER_STORAGE_KEY, name);
+    } else {
+      window.localStorage.removeItem(PREFERRED_CLUSTER_STORAGE_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 function normaliseImageTag(value: string): string {
   return value.trim().replace(/^v/i, "");
@@ -24,6 +52,9 @@ function normaliseImageTag(value: string): string {
 
 export function ApiReference() {
   const [savedConfig] = useState(() => loadSavedConfig());
+  const [preferredClusterName, setPreferredClusterName] = useState<string>(
+    () => loadPreferredClusterName(),
+  );
 
   const sub = savedConfig?.subscriptionId ?? "";
   const anchorRg = savedConfig?.workloadResourceGroup ?? "";
@@ -40,11 +71,32 @@ export function ApiReference() {
     cluster: firstCluster,
     clusterName,
     resourceGroup: clusterRg,
+    candidates,
   } = resolveApiReferenceClusterContext({
     clusters,
     anchorResourceGroup: anchorRg,
+    preferredClusterName,
   });
   const clusterStopped = firstCluster && !isAksWorkloadReady(firstCluster);
+  const hasMultipleClusters = candidates.length > 1;
+
+  // If the user's stored preference no longer exists in the fleet
+  // (cluster deleted), drop it so the auto-selector takes over again
+  // on the next render instead of silently sticking to the fallback.
+  useEffect(() => {
+    if (!preferredClusterName) return;
+    if (candidates.length === 0) return;
+    const stillPresent = candidates.some((c) => c.name === preferredClusterName);
+    if (!stillPresent) {
+      setPreferredClusterName("");
+      savePreferredClusterName("");
+    }
+  }, [preferredClusterName, candidates]);
+
+  const onSelectCluster = (name: string) => {
+    setPreferredClusterName(name);
+    savePreferredClusterName(name);
+  };
 
   const acrRg = savedConfig?.acrResourceGroup ?? "";
   const acrName = savedConfig?.acrName ?? "";
@@ -149,6 +201,14 @@ export function ApiReference() {
         refreshing={specQuery.isFetching}
       />
 
+      {enabled && hasMultipleClusters && (
+        <ClusterPicker
+          clusters={candidates}
+          selectedName={clusterName}
+          onSelect={onSelectCluster}
+        />
+      )}
+
       {(!enabled || svcQuery.isLoading || clustersQuery.isLoading) &&
         enabled &&
         !clusterStopped && <OpenApiLoadingState />}
@@ -226,7 +286,28 @@ export function ApiReference() {
       {baseUrl && specQuery.isLoading && <SpecLoadingState />}
 
       {specQuery.isError && (
-        <SpecErrorState message={(specQuery.error as Error).message} />
+        <SpecErrorState
+          message={(specQuery.error as Error).message}
+          showRepair={isPeerWithPlatformRecovery(specQuery.error)}
+          subscriptionId={sub}
+          resourceGroup={clusterRg}
+          clusterName={clusterName}
+          onResolved={() => specQuery.refetch()}
+        />
+      )}
+
+      {/* Spec returned 200 with `degraded: true` — the api sidecar reached
+          the proxy route but the upstream elb-openapi did not answer. Render
+          the same recovery affordance as the hard error case. */}
+      {specQuery.isSuccess && isPeerWithPlatformRecovery(specQuery.data) && (
+        <SpecErrorState
+          message="The elb-openapi service did not respond. The dashboard could not load the live OpenAPI spec."
+          showRepair
+          subscriptionId={sub}
+          resourceGroup={clusterRg}
+          clusterName={clusterName}
+          onResolved={() => specQuery.refetch()}
+        />
       )}
 
       {baseUrl && hasOpenApiImage && clusterName && (
@@ -291,6 +372,138 @@ function MissingConfigState() {
       <p style={{ color: "var(--text-muted)", fontSize: 13 }}>
         Configure Subscription and Workload RG in the Dashboard first.
       </p>
+    </PanelState>
+  );
+}
+
+function ClusterPicker({
+  clusters,
+  selectedName,
+  onSelect,
+}: {
+  clusters: import("@/api/endpoints").AksClusterSummary[];
+  selectedName: string;
+  onSelect: (name: string) => void;
+}) {
+  // Issues-first ordering so the running cluster surfaces above the
+  // stopped one. Mirrors the Dashboard's ClusterCard sort so the user
+  // sees the same ordering on both surfaces.
+  const sorted = useMemo(() => {
+    const bucket = (c: import("@/api/endpoints").AksClusterSummary): number => {
+      if (isAksWorkloadReady(c)) return 0;
+      if (c.power_state === "Stopped") return 2;
+      return 1;
+    };
+    return [...clusters].sort((a, b) => {
+      const ba = bucket(a);
+      const bb = bucket(b);
+      if (ba !== bb) return ba - bb;
+      return a.name.localeCompare(b.name);
+    });
+  }, [clusters]);
+
+  return (
+    <PanelState border="1px solid var(--border-weak)">
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          flexWrap: "wrap",
+        }}
+      >
+        <Server size={14} style={{ color: "var(--text-faint)" }} />
+        <span
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: "0.08em",
+            color: "var(--text-faint)",
+          }}
+        >
+          Cluster
+        </span>
+        <div
+          role="radiogroup"
+          aria-label="Select an AKS cluster for the OpenAPI service"
+          style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
+        >
+          {sorted.map((c) => {
+            const running = isAksWorkloadReady(c);
+            const isSelected = c.name === selectedName;
+            const dotColor = running
+              ? "var(--success)"
+              : c.power_state === "Stopped"
+                ? "var(--danger)"
+                : "var(--text-faint)";
+            return (
+              <button
+                key={`${c.resource_group}/${c.name}`}
+                type="button"
+                role="radio"
+                aria-checked={isSelected}
+                onClick={() => onSelect(c.name)}
+                title={`${c.name} (${c.resource_group}) · ${
+                  running ? "Running" : c.power_state ?? "Unknown"
+                }`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "4px 10px",
+                  fontSize: 12,
+                  fontWeight: isSelected ? 600 : 500,
+                  color: isSelected
+                    ? "var(--text-primary)"
+                    : "var(--text-secondary)",
+                  background: isSelected
+                    ? "rgba(122,167,255,0.12)"
+                    : "transparent",
+                  border: `1px solid ${
+                    isSelected ? "var(--accent)" : "var(--border-medium)"
+                  }`,
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  lineHeight: 1.2,
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: dotColor,
+                    flexShrink: 0,
+                  }}
+                />
+                {c.name}
+                {!running && (
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: "var(--text-faint)",
+                      fontWeight: 500,
+                    }}
+                  >
+                    ({c.power_state ?? "stopped"})
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <span
+          style={{
+            marginLeft: "auto",
+            fontSize: 11,
+            color: "var(--text-faint)",
+          }}
+        >
+          Selection persists per browser.
+        </span>
+      </div>
     </PanelState>
   );
 }
@@ -552,7 +765,21 @@ function SkeletonLine({
   );
 }
 
-function SpecErrorState({ message }: { message: string }) {
+function SpecErrorState({
+  message,
+  showRepair,
+  subscriptionId,
+  resourceGroup,
+  clusterName,
+  onResolved,
+}: {
+  message: string;
+  showRepair?: boolean;
+  subscriptionId?: string;
+  resourceGroup?: string;
+  clusterName?: string;
+  onResolved?: () => void;
+}) {
   return (
     <PanelState border="1px solid rgba(242,114,111,0.2)" padding="16px 20px">
       <AlertTriangle
@@ -560,6 +787,15 @@ function SpecErrorState({ message }: { message: string }) {
         style={{ color: "var(--danger)", verticalAlign: "middle", marginRight: 6 }}
       />
       <span style={{ fontSize: 12 }}>Failed to load openapi.json: {message}</span>
+      {showRepair && subscriptionId && resourceGroup && clusterName && (
+        <RepairPeeringButton
+          subscriptionId={subscriptionId}
+          resourceGroup={resourceGroup}
+          clusterName={clusterName}
+          onResolved={() => onResolved?.()}
+          size="block"
+        />
+      )}
     </PanelState>
   );
 }

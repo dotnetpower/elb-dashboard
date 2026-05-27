@@ -11,7 +11,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { blastApi, monitoringApi } from "@/api/endpoints";
+import { blastApi } from "@/api/endpoints";
 import type { BlastJobSummary } from "@/api/endpoints";
 import { useNodeSummary } from "@/components/ClusterDetailModal/useNodeSummary";
 import {
@@ -23,7 +23,6 @@ import {
 import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBento/jobTypes";
 
 export const JOB_PREVIEW = 3;
-const REQUEST_METRICS_WINDOW_SEC = 900; // 15 min
 
 const JOB_STATE_ORDER: Record<DisplayJobState, number> = {
   Pending: 0,
@@ -42,7 +41,10 @@ export interface PulseSignals {
    *  the "No jobs yet" empty state, which previously flashed for ~1s
    *  on every dashboard mount before the response landed. */
   jobsLoading: boolean;
-  /** True when /api/monitor/request-metrics returned a `degraded` flag. */
+  /** True when the node-summary fetch is degraded (used as the
+   *  "metrics unavailable" signal for verdict + meta grid since the
+   *  dashboard `/api/blast` request metrics are NOT a per-cluster
+   *  signal — they live in the card header now). */
   metricsDegraded: boolean;
 
   jobRows: JobRowView[];
@@ -62,13 +64,8 @@ export interface PulseSignals {
   cpuPct: number | null;
   /** Peak user-pool memory pct (0..1) — null when unknown. */
   memPct: number | null;
-  /** max(cpu, mem) for the row-level Pressure stat. */
+  /** max(cpu, mem) for the row-level Load stat. */
   pressureValue: number | null;
-
-  /** /api/blast p95 ms over the last 15 min. */
-  apiP95: number | null;
-  /** /api/blast error count over the last 15 min. */
-  apiErrors: number;
 
   nodeSummary: ReturnType<typeof useNodeSummary>["summary"];
   topQuery: ReturnType<typeof useNodeSummary>["topQuery"];
@@ -108,20 +105,10 @@ export function usePulseSignals(args: {
   type JobsDegraded = { degraded?: boolean };
   const jobsDegraded = (jobsQuery.data as JobsDegraded | undefined)?.degraded === true;
 
-  const metricsQuery = useQuery({
-    queryKey: ["request-metrics-blast", REQUEST_METRICS_WINDOW_SEC],
-    queryFn: () =>
-      monitoringApi.requestMetrics({
-        windowSeconds: REQUEST_METRICS_WINDOW_SEC,
-        pathPrefix: "/api/blast",
-        rpmBuckets: 60,
-      }),
-    enabled,
-    staleTime: 25_000,
-    refetchInterval: enabled ? 30_000 : false,
-    retry: 0,
-  });
-  const metricsDegraded = metricsQuery.data?.degraded === true;
+  // Per-cluster K8s node-summary degradation drives the "metrics
+  // unavailable" UI. The dashboard `/api/blast` p95 / 5xx is a
+  // process-local metric and is rendered ONCE in the card header.
+  const metricsDegraded = topQuery.isError;
 
   const clusterJobs = useMemo<BlastJobSummary[]>(
     () => (jobsQuery.data?.jobs ?? []).filter((j) => jobClusterName(j) === clusterName),
@@ -225,8 +212,6 @@ export function usePulseSignals(args: {
     cpuPct,
     memPct,
     pressureValue,
-    apiP95: metricsQuery.data?.p95_ms ?? null,
-    apiErrors: metricsQuery.data?.errors ?? 0,
     nodeSummary,
     topQuery,
   };

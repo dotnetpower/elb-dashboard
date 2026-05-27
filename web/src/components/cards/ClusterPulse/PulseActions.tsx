@@ -1,9 +1,9 @@
 /**
- * PulseActions — Start / Stop / Open detail / Delete buttons rendered
- * inside the expanded panel.
+ * PulseActions — Start / Stop / Open detail / Open in Portal / Delete
+ * buttons rendered inside the expanded panel.
  */
 
-import { Info, Loader2, Play, Square, Trash2 } from "lucide-react";
+import { ExternalLink, Info, Loader2, Play, Square, Trash2 } from "lucide-react";
 
 import type { AksClusterSummary } from "@/api/endpoints";
 import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
@@ -18,6 +18,24 @@ interface Props {
   onStartStop: (name: string, action: "start" | "stop") => void;
   onDelete: (name: string) => void;
   onOpenDetail: () => void;
+  /** Azure subscription id — used to build the cluster's Portal URL. */
+  subscriptionId: string;
+}
+
+function clusterPortalUrl(args: {
+  subscriptionId: string;
+  resourceGroup: string;
+  clusterName: string;
+}): string {
+  const { subscriptionId, resourceGroup, clusterName } = args;
+  const path = `/subscriptions/${encodeURIComponent(
+    subscriptionId,
+  )}/resourceGroups/${encodeURIComponent(
+    resourceGroup,
+  )}/providers/Microsoft.ContainerService/managedClusters/${encodeURIComponent(
+    clusterName,
+  )}/overview`;
+  return `https://portal.azure.com/#@/resource${path}`;
 }
 
 export function PulseActions({
@@ -27,9 +45,17 @@ export function PulseActions({
   onStartStop,
   onDelete,
   onOpenDetail,
+  subscriptionId,
 }: Props) {
   const canControlPower = isAksProvisioned(c);
   const busy = actionLoading !== null;
+  const portalHref = subscriptionId
+    ? clusterPortalUrl({
+        subscriptionId,
+        resourceGroup: c.resource_group,
+        clusterName: c.name,
+      })
+    : null;
   return (
     <div
       style={{
@@ -42,17 +68,42 @@ export function PulseActions({
         flexWrap: "wrap",
       }}
     >
-      <span title="Open the per-cluster detail modal (node pools, identity, network)">
-        <ActionBtn
-          tone="accent"
-          onClick={onOpenDetail}
-          icon={<Info size={11} aria-hidden="true" />}
-        >
-          Open cluster detail
-        </ActionBtn>
-      </span>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <span title="Open the per-cluster detail modal (node pools, identity, network)">
+          <ActionBtn
+            tone="accent"
+            onClick={onOpenDetail}
+            icon={<Info size={11} aria-hidden="true" />}
+          >
+            Open cluster detail
+          </ActionBtn>
+        </span>
+        {portalHref && (
+          <a
+            href={portalHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open this AKS cluster in the Azure Portal"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              padding: "3px 8px",
+              fontSize: 10,
+              fontWeight: 500,
+              color: "var(--text-muted)",
+              background: "transparent",
+              border: "1px solid var(--border-medium)",
+              borderRadius: 6,
+              textDecoration: "none",
+              lineHeight: 1.1,
+            }}
+          >
+            <ExternalLink size={11} aria-hidden="true" /> Portal
+          </a>
+        )}
+      </div>
       <div
-        className="dashboard-hide-mobile"
         style={{
           display: "flex",
           gap: 6,

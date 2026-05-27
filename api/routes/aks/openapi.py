@@ -71,6 +71,29 @@ _OPENAPI_SERVICE_NAME = "elb-openapi"
 _OPENAPI_SERVICE_PORT = 80
 
 
+def _peering_recovery_hint() -> dict[str, str]:
+    """Generic recovery affordance for `elb-openapi` unreachable errors.
+
+    The api sidecar lives in the dashboard platform VNet; the
+    ``elb-openapi`` Service IP lives in the AKS auto-VNet. Without a
+    bidirectional VNet peering the proxy / spec routes time out. The
+    SPA reads ``recovery_action`` to render a "Repair VNet peering"
+    button that POSTs to ``/api/aks/peer-with-platform`` (the same
+    idempotent helper the AKS provision task runs at the end of cluster
+    create). Returned fields are additive and stable.
+    """
+    return {
+        "recovery_action": "peer_with_platform",
+        "recovery_hint": (
+            "The api sidecar cannot reach the elb-openapi Service IP. "
+            "This is usually a missing VNet peering between the dashboard "
+            "platform VNet and the AKS-auto VNet. Click 'Repair VNet peering' "
+            "to run the idempotent recovery, or run "
+            "`scripts/dev/peer-cluster-network.sh`."
+        ),
+    }
+
+
 def _is_private_ipv4(value: str) -> bool:
     """Return True if ``value`` parses as a private / loopback / link-local IPv4.
 
@@ -670,6 +693,7 @@ def aks_openapi_spec(
                 "paths": {},
                 "degraded": True,
                 "degraded_reason": "openapi_service_not_reachable",
+                **_peering_recovery_hint(),
             }
         base_url = f"http://{ip}"
 
@@ -698,6 +722,7 @@ def aks_openapi_spec(
         "paths": {},
         "degraded": True,
         "degraded_reason": "openapi_endpoint_unreachable",
+        **_peering_recovery_hint(),
     }
 
 
@@ -763,6 +788,7 @@ async def aks_openapi_proxy(
                     "code": "openapi_service_not_reachable",
                     "message": "The elb-openapi service is not reachable yet.",
                     "retryable": True,
+                    **_peering_recovery_hint(),
                 },
             )
 
@@ -865,6 +891,7 @@ async def aks_openapi_proxy(
                 "code": "openapi_upstream_unreachable",
                 "message": "The elb-openapi endpoint did not respond.",
                 "retryable": True,
+                **_peering_recovery_hint(),
             },
         ) from exc
 

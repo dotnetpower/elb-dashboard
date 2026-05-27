@@ -75,7 +75,7 @@ def test_read_recent_lines_la_parses_rows_and_sanitizes(monkeypatch: pytest.Monk
     api_lines = sidecar_logs_la.read_recent_lines_la("api", tail=10)
     worker_lines = sidecar_logs_la.read_recent_lines_la("worker", tail=10)
 
-    assert [line["text"] for line in api_lines][0] == "GET /api/health 200 OK"
+    assert next(line["text"] for line in api_lines) == "GET /api/health 200 OK"
     # The masking pipeline runs both the "Bearer …" and the
     # "Authorization: …" patterns, so the rendered line contains two
     # REDACTED tokens. The important assertion is that the original token

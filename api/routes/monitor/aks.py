@@ -21,6 +21,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from api.auth import CallerIdentity, require_caller
 from api.routes.monitor.common import _cache_key, _graceful, _sub_default
 from api.services import monitoring as monitoring_svc
+from api.services.cluster_health import cached_snapshot_with_cluster_gate
 from api.services.monitor_cache import cached_snapshot
 from api.services.sanitise import sanitise
 
@@ -85,11 +86,16 @@ def aks_nodes(
 
     cred = monitor_package.get_credential()
     try:
-        return cached_snapshot(
+        return cached_snapshot_with_cluster_gate(
             _cache_key("monitor", "aks", "nodes", sub, resource_group, cluster_name),
             lambda: {
                 "nodes": monitoring_svc.k8s_get_nodes(cred, sub, resource_group, cluster_name)
             },
+            credential=cred,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            empty={"nodes": []},
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_nodes", exc, empty={"nodes": []}))
@@ -107,9 +113,14 @@ def aks_pods(
 
     cred = monitor_package.get_credential()
     try:
-        return cached_snapshot(
+        return cached_snapshot_with_cluster_gate(
             _cache_key("monitor", "aks", "pods", sub, resource_group, cluster_name),
             lambda: {"pods": monitoring_svc.k8s_get_pods(cred, sub, resource_group, cluster_name)},
+            credential=cred,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            empty={"pods": []},
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_pods", exc, empty={"pods": []}))
@@ -127,11 +138,16 @@ def aks_top_nodes(
 
     cred = monitor_package.get_credential()
     try:
-        return cached_snapshot(
+        return cached_snapshot_with_cluster_gate(
             _cache_key("monitor", "aks", "top-nodes", sub, resource_group, cluster_name),
             lambda: {
                 "nodes": monitoring_svc.k8s_top_nodes(cred, sub, resource_group, cluster_name)
             },
+            credential=cred,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            empty={"nodes": []},
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_top_nodes", exc, empty={"nodes": []}))
@@ -286,9 +302,14 @@ def aks_warmup_status(
 
     cred = monitor_package.get_credential()
     try:
-        return cached_snapshot(
+        return cached_snapshot_with_cluster_gate(
             _cache_key("monitor", "aks", "warmup-status", sub, resource_group, cluster_name),
             lambda: monitoring_svc.k8s_warmup_status(cred, sub, resource_group, cluster_name),
+            credential=cred,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            empty={"databases": []},
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_warmup_status", exc, empty={"databases": []}))

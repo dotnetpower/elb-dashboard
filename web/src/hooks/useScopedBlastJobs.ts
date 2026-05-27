@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { blastApi, monitoringApi } from "@/api/endpoints";
 import { loadSavedConfig } from "@/components/SetupWizard";
+import { pickPreferredCluster } from "@/utils/clusterSelection";
 
 export interface ScopedBlastJobsOptions {
   clusterName?: string;
@@ -28,9 +29,14 @@ export function useScopedBlastJobs(options: ScopedBlastJobsOptions = {}) {
   });
 
   const discoveredClusters = clustersQuery.data?.clusters ?? [];
-  const discoveredCluster =
-    discoveredClusters.find((cluster) => cluster.resource_group === resourceGroup) ??
-    discoveredClusters[0];
+  // Prefer a workload-ready cluster over the workspace-anchor RG match.
+  // The previous fallback (`find(rg match) ?? clusters[0]`) could pick a
+  // Stopped peer, and BLAST job rows are keyed by cluster_name \u2014 jobs
+  // running on a different cluster in the fleet would silently vanish from
+  // the list.
+  const discoveredCluster = pickPreferredCluster(discoveredClusters, {
+    resourceGroup,
+  });
   const selectedClusterName =
     options.clusterName || discoveredCluster?.name || "";
   // The cluster's own RG (typically `rg-elb-cluster`) is what gets stored on

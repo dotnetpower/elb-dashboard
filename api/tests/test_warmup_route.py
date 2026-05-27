@@ -208,6 +208,13 @@ def test_aks_lifecycle_routes_invalidate_monitor_cache(
         f"monitor:aks:top-nodes:{sub}:{rg}:{cluster}",
         f"monitor:aks:warmup-status:{sub}:{rg}:{cluster}",
         f"monitor:aks:events:{sub}:{rg}:{cluster}:default:50",
+        # Pillar B (2026-05-27): per-cluster ARM `power_state` snapshot
+        # consumed by `cluster_health.get_cluster_health`. MUST be cleared
+        # on lifecycle mutations or the gate keeps the previous reading
+        # for up to 90 s and either skips healthy K8s polls right after
+        # Start (false `cluster_stopped` chip) or re-introduces K8s
+        # connect-timeout noise right after Stop.
+        f"monitor:aks:meta:{sub}:{rg}:{cluster}",
     ]
     for key in seeded:
         monitor_cache.cached_snapshot(key, lambda: {"seeded": True}, ttl_seconds=30)

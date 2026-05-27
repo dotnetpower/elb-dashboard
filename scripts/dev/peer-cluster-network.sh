@@ -152,11 +152,104 @@ API_CLIENT_ID="$(az containerapp show "${SUB_FLAG[@]}" \
   -o tsv 2>/dev/null || true)"
 [[ -n "$API_CLIENT_ID" ]] || die "could not read API_CLIENT_ID from Container App 'api' sidecar env"
 
+# Mirrors api.tasks.azure.peering._dashboard_vnet_id_from_env — used by the
+# direct-az fallback when the dashboard endpoint is unreachable / token
+# acquisition fails. The Container App template injects
+# PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID on every sidecar; the parent VNet id
+# is everything up to /subnets/<name>.
+resolve_dashboard_vnet_id() {
+  local subnet_id
+  subnet_id="$(az containerapp show "${SUB_FLAG[@]}" \
+    -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
+    --query "properties.template.containers[?name=='api'].env[?name=='PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID'].value | [0] | [0]" \
+    -o tsv 2>/dev/null || true)"
+  [[ -n "$subnet_id" ]] || return 1
+  # /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<name>/subnets/<subnet>
+  printf '%s' "${subnet_id%/subnets/*}"
+}
+
+# Direct-az fallback that mirrors ensure_vnet_peering_with_cluster from
+# api/tasks/azure/peering.py. Used when the dashboard endpoint cannot be
+# reached for auth reasons (AADSTS65001 admin-consent required, missing
+# SPA scope) — pure Network Contributor on both VNets is enough.
+# Treats AlreadyExists / Conflict as success; bidirectional.
+direct_az_peer() {
+  local dash_vnet_id aks_node_rg aks_vnet_id dash_rg dash_name aks_rg aks_name
+  dash_vnet_id="$(resolve_dashboard_vnet_id || true)"
+  [[ -n "$dash_vnet_id" ]] \
+    || { red "  [fall] direct az: could not resolve dashboard VNet from PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID"; return 3; }
+
+  aks_node_rg="$(az aks show "${SUB_FLAG[@]}" -g "$CLUSTER_RG" -n "$CLUSTER_NAME" \
+    --query nodeResourceGroup -o tsv 2>/dev/null || true)"
+  [[ -n "$aks_node_rg" ]] \
+    || { red "  [fall] direct az: could not read AKS nodeResourceGroup for $CLUSTER_NAME"; return 3; }
+
+  aks_vnet_id="$(az network vnet list "${SUB_FLAG[@]}" -g "$aks_node_rg" \
+    --query "[0].id" -o tsv 2>/dev/null || true)"
+  [[ -n "$aks_vnet_id" ]] \
+    || { yellow "  [fall] direct az: no VNet in $aks_node_rg (BYO-VNet mode?); nothing to peer"; return 0; }
+
+  dash_rg="$(printf '%s' "$dash_vnet_id"   | awk -F'/' '{print $5}')"
+  dash_name="$(printf '%s' "$dash_vnet_id" | awk -F'/' '{print $9}')"
+  aks_rg="$(printf '%s' "$aks_vnet_id"     | awk -F'/' '{print $5}')"
+  aks_name="$(printf '%s' "$aks_vnet_id"   | awk -F'/' '{print $9}')"
+
+  ts "  [fall] direct az: peering $dash_name <-> $aks_name"
+
+  local rc=0
+  # dashboard -> aks
+  if ! az network vnet peering create "${SUB_FLAG[@]}" \
+      -g "$dash_rg" --vnet-name "$dash_name" \
+      --name "peer-${dash_name}-to-${aks_name}" \
+      --remote-vnet "$aks_vnet_id" \
+      --allow-vnet-access \
+      --query "peeringState" -o tsv 2>/tmp/peer-cluster-network.err >/dev/null; then
+    if grep -qiE "AlreadyExists|Conflict" /tmp/peer-cluster-network.err 2>/dev/null; then
+      yellow "  [fall] dashboard->aks already exists (idempotent)"
+    else
+      red "  [fall] dashboard->aks failed:"
+      sed 's/^/    /' /tmp/peer-cluster-network.err
+      rc=2
+    fi
+  else
+    green "  [fall] dashboard->aks created"
+  fi
+
+  # aks -> dashboard
+  if ! az network vnet peering create "${SUB_FLAG[@]}" \
+      -g "$aks_rg" --vnet-name "$aks_name" \
+      --name "peer-${aks_name}-to-${dash_name}" \
+      --remote-vnet "$dash_vnet_id" \
+      --allow-vnet-access \
+      --query "peeringState" -o tsv 2>/tmp/peer-cluster-network.err >/dev/null; then
+    if grep -qiE "AlreadyExists|Conflict" /tmp/peer-cluster-network.err 2>/dev/null; then
+      yellow "  [fall] aks->dashboard already exists (idempotent)"
+    else
+      red "  [fall] aks->dashboard failed:"
+      sed 's/^/    /' /tmp/peer-cluster-network.err
+      rc=2
+    fi
+  else
+    green "  [fall] aks->dashboard created"
+  fi
+  rm -f /tmp/peer-cluster-network.err
+  return "$rc"
+}
+
 ACCESS_TOKEN="$(az account get-access-token \
   --resource "api://${API_CLIENT_ID}" \
   --query accessToken -o tsv 2>/dev/null || true)"
-[[ -n "$ACCESS_TOKEN" ]] \
-  || die "could not get an access token for api://${API_CLIENT_ID}; ensure your user is consented to the SPA's API scope"
+if [[ -z "$ACCESS_TOKEN" ]]; then
+  yellow "could not get an access token for api://${API_CLIENT_ID}"
+  yellow "(common when the SPA scope is not pre-consented — AADSTS65001)"
+  yellow "falling back to direct az network vnet peering create"
+  direct_az_peer
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
+    yellow "VNet peerings typically become Connected within 1-2 minutes."
+  fi
+  exit "$rc"
+fi
 
 PAYLOAD=$(printf '{"subscription_id":"%s","resource_group":"%s","cluster_name":"%s"}' \
   "$SUBSCRIPTION" "$CLUSTER_RG" "$CLUSTER_NAME")
@@ -180,14 +273,17 @@ case "$HTTP_CODE" in
     fi
     ;;
   401|403)
-    red "  [auth] dashboard returned $HTTP_CODE — make sure your az login user is consented to api://${API_CLIENT_ID}"
-    printf '%s\n' "$BODY"
-    exit 3
+    yellow "  [auth] dashboard returned $HTTP_CODE — token did not authorise the route"
+    yellow "  falling back to direct az network vnet peering create"
+    direct_az_peer
+    exit $?
     ;;
   *)
     red "  [fail] dashboard returned HTTP $HTTP_CODE"
     printf '%s\n' "$BODY"
-    exit 2
+    yellow "  falling back to direct az network vnet peering create"
+    direct_az_peer
+    exit $?
     ;;
 esac
 

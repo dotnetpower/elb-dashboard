@@ -26,6 +26,17 @@ import { resolveApiReferenceClusterContext } from "@/pages/apiReference/clusterC
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
 
+const PREFERRED_CLUSTER_STORAGE_KEY = "elb-api-ref-cluster";
+
+function readPreferredClusterName(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(PREFERRED_CLUSTER_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 interface PrefetchInput {
   /** Active subscription. Empty string skips the prefetch. */
   subscriptionId: string;
@@ -99,6 +110,7 @@ export async function prefetchApiReferenceQueries(
   } = resolveApiReferenceClusterContext({
     clusters: clustersData?.clusters ?? [],
     anchorResourceGroup: rg,
+    preferredClusterName: readPreferredClusterName(),
   });
   const clusterRunning = isAksWorkloadReady(cluster);
   if (!clusterName || !clusterRunning) return;

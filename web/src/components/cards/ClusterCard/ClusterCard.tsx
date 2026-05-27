@@ -11,7 +11,11 @@ import { MonitorCard } from "@/components/MonitorCard";
 import { degradedStatusOverride } from "@/components/cards/cardStatusOverride";
 import { useAksAvailableSkus, useAksSkus } from "@/hooks/useAksSkus";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
-import { isAksProvisioning, isAksProvisioningFailed } from "@/utils/aksStatus";
+import {
+  isAksProvisioning,
+  isAksProvisioningFailed,
+  isAksWorkloadReady,
+} from "@/utils/aksStatus";
 import { getDegradedInfo } from "@/utils/monitorDegraded";
 
 import { AddClusterButton } from "./AddClusterButton";
@@ -150,10 +154,28 @@ export function ClusterCard({
   // Memoise so the `?? []` fallback does not create a fresh array reference
   // on every render — otherwise downstream `useMemo` / `useEffect` blocks
   // keyed off `clusters` re-fire on every parent render.
-  const clusters = useMemo(
+  const rawClusters = useMemo(
     () => query.data?.clusters ?? [],
     [query.data?.clusters],
   );
+  // Issues-first sort so a multi-cluster fleet surfaces failed /
+  // transitioning rows above happy ones. Within a bucket, fall back to
+  // alphabetical name for a stable visual order across polls.
+  const clusters = useMemo(() => {
+    const bucket = (c: (typeof rawClusters)[number]): number => {
+      if (isAksProvisioningFailed(c)) return 0;
+      if (isAksProvisioning(c)) return 1;
+      if (c.power_state === "Stopped") return 2;
+      if (!isAksWorkloadReady(c)) return 3;
+      return 4;
+    };
+    return [...rawClusters].sort((a, b) => {
+      const ba = bucket(a);
+      const bb = bucket(b);
+      if (ba !== bb) return ba - bb;
+      return a.name.localeCompare(b.name);
+    });
+  }, [rawClusters]);
   const noClusters = clusters.length === 0;
   const hasProvisioningCluster = clusters.some(isAksProvisioning);
   const hasFailedProvisioningCluster = clusters.some(isAksProvisioningFailed);
@@ -164,6 +186,45 @@ export function ClusterCard({
     enabled && !showInitialClusterSkeleton && !query.isError && noClusters;
   const showErrorClusterAction =
     enabled && !showInitialClusterSkeleton && query.isError && noClusters;
+
+  // Aggregate fleet KPIs — single line shown above the cluster list so
+  // the operator can read "2 clusters · 1 running · 1 stopped" without
+  // counting rows.
+  const fleetKpi = useMemo(() => {
+    let running = 0;
+    let stopped = 0;
+    let provisioning = 0;
+    let failed = 0;
+    for (const c of clusters) {
+      if (isAksProvisioningFailed(c)) failed += 1;
+      else if (isAksProvisioning(c)) provisioning += 1;
+      else if (c.power_state === "Stopped") stopped += 1;
+      else if (isAksWorkloadReady(c)) running += 1;
+    }
+    return { total: clusters.length, running, stopped, provisioning, failed };
+  }, [clusters]);
+
+  // Dashboard-wide `/api/blast` request metrics — used to live PER
+  // cluster row, which was misleading because the value is a single
+  // process-local figure for the dashboard backend itself, not the
+  // K8s API server. Lift it to one card-header strip so every cluster
+  // row no longer fires the same request and the label is honest.
+  const dashboardMetricsQuery = useQuery({
+    queryKey: ["request-metrics-blast", 900],
+    queryFn: () =>
+      monitoringApi.requestMetrics({
+        windowSeconds: 900,
+        pathPrefix: "/api/blast",
+        rpmBuckets: 60,
+      }),
+    enabled,
+    staleTime: 25_000,
+    refetchInterval: enabled ? 30_000 : false,
+    retry: 0,
+  });
+  const dashboardP95 = dashboardMetricsQuery.data?.p95_ms ?? null;
+  const dashboardErrors = dashboardMetricsQuery.data?.errors ?? 0;
+  const dashboardMetricsDegraded = dashboardMetricsQuery.data?.degraded === true;
 
   const actions = useClusterActions({
     subscriptionId,
@@ -368,6 +429,67 @@ export function ClusterCard({
         </div>
       )}
 
+      {enabled && !showInitialClusterSkeleton && clusters.length > 0 && (
+        <div
+          className="muted"
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "baseline",
+            gap: "4px 14px",
+            marginBottom: "var(--space-2)",
+            fontSize: 11,
+            fontVariantNumeric: "tabular-nums",
+            color: "var(--text-faint)",
+          }}
+        >
+          <span>
+            <strong style={{ color: "var(--text-secondary)" }}>
+              {fleetKpi.total}
+            </strong>{" "}
+            cluster{fleetKpi.total === 1 ? "" : "s"}
+          </span>
+          {fleetKpi.running > 0 && (
+            <span style={{ color: "var(--success)" }}>
+              {fleetKpi.running} running
+            </span>
+          )}
+          {fleetKpi.stopped > 0 && <span>{fleetKpi.stopped} stopped</span>}
+          {fleetKpi.provisioning > 0 && (
+            <span style={{ color: "var(--accent)" }}>
+              {fleetKpi.provisioning} provisioning
+            </span>
+          )}
+          {fleetKpi.failed > 0 && (
+            <span style={{ color: "var(--danger)" }}>
+              {fleetKpi.failed} failed
+            </span>
+          )}
+          <span
+            title="Dashboard backend /api/blast latency p95 and 5xx count over the last 15 minutes. Not a per-cluster signal."
+            style={{ marginLeft: "auto", cursor: "help" }}
+          >
+            Dashboard p95{" "}
+            <strong style={{ color: "var(--text-secondary)" }}>
+              {dashboardMetricsDegraded || dashboardP95 == null
+                ? "\u2014"
+                : dashboardP95 >= 1000
+                  ? `${(dashboardP95 / 1000).toFixed(1)}s`
+                  : `${Math.round(dashboardP95)}ms`}
+            </strong>
+            {" \u00b7 "}
+            <span
+              style={{
+                color:
+                  dashboardErrors > 0 ? "var(--danger)" : "var(--text-faint)",
+              }}
+            >
+              {dashboardMetricsDegraded ? "\u2014" : dashboardErrors} 5xx / 15m
+            </span>
+          </span>
+        </div>
+      )}
+
       <ul
         style={{
           margin: 0,
@@ -414,8 +536,29 @@ export function ClusterCard({
         />
       )}
 
+      {/* Live region so screen-reader users receive Start / Stop / Delete
+          completion + error messages without polling the visible text. */}
+      <div
+        aria-live="polite"
+        aria-atomic="true"
+        style={{
+          position: "absolute",
+          width: 1,
+          height: 1,
+          padding: 0,
+          margin: -1,
+          overflow: "hidden",
+          clip: "rect(0,0,0,0)",
+          whiteSpace: "nowrap",
+          border: 0,
+        }}
+      >
+        {actions.actionError || actions.actionInfo || ""}
+      </div>
+
       {actions.actionError && (
         <div
+          role="status"
           style={{ marginTop: "var(--space-2)", fontSize: 11, color: "var(--danger)" }}
         >
           <AlertTriangle size={10} style={{ verticalAlign: "middle" }} />{" "}
@@ -425,6 +568,7 @@ export function ClusterCard({
 
       {actions.actionInfo && (
         <div
+          role="status"
           style={{ marginTop: "var(--space-2)", fontSize: 11, color: "var(--success, #16a34a)" }}
         >
           <Info size={10} style={{ verticalAlign: "middle" }} />{" "}
@@ -437,6 +581,8 @@ export function ClusterCard({
           title={`Delete cluster "${actions.deleteTarget}"?`}
           message="This action is irreversible. The cluster and all its workloads will be permanently deleted."
           confirmLabel="Delete"
+          typeToConfirm={actions.deleteTarget}
+          typeToConfirmLabel={`Type "${actions.deleteTarget}" to confirm`}
           onConfirm={() => actions.handleDelete(actions.deleteTarget!)}
           onCancel={() => actions.setDeleteTarget(null)}
         />
