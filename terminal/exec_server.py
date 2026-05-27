@@ -39,7 +39,14 @@ LISTEN_HOST = os.environ.get("EXEC_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("EXEC_PORT", "7682"))
 EXEC_TOKEN = os.environ.get("EXEC_TOKEN", "")
 MAX_CONCURRENCY = int(os.environ.get("EXEC_MAX_CONCURRENCY", "4"))
-MAX_BODY_BYTES = int(os.environ.get("EXEC_MAX_BODY_BYTES", str(64 * 1024)))
+# Body cap for the JSON request envelope. Raised to 8 MiB (matching the
+# `EXEC_RUN_MAX_OUTPUT_BYTES` ceiling) so callers can pipe full
+# `kubectl apply -f -` manifests through ``stdin`` — the cert-manager
+# upstream install YAML alone is ~1.7 MiB, and the public-HTTPS pipeline
+# previously failed at step 1 (`install_ingress_nginx`) with
+# ``413: body too large (max 65536)``. The endpoint stays loopback-only
+# and `X-Exec-Token`-authenticated so the larger surface is safe.
+MAX_BODY_BYTES = int(os.environ.get("EXEC_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 DEFAULT_TIMEOUT = 60
 MAX_TIMEOUT = 1800  # hard 30-min cap; longer tasks must be split
 SIGTERM_GRACE_SECONDS = 5

@@ -370,6 +370,10 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // and terminal/exec_server.py. Same secret as the api sidecar.
             { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
             { name: 'EXEC_MAX_CONCURRENCY', value: '4' }
+            // 8 MiB body cap so callers can pipe full `kubectl apply -f -`
+            // install manifests (cert-manager.yaml alone is ~1.7 MiB).
+            // The endpoint is loopback-only + token-authenticated.
+            { name: 'EXEC_MAX_BODY_BYTES', value: '8388608' }
           ]
           // Probe the exec server's /healthz (no auth required). Catches the
           // case where the supervisor's `wait -n` did not fire because the

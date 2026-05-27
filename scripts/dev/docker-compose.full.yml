@@ -87,6 +87,7 @@ services:
     environment:
       EXEC_TOKEN: dev-exec-token-not-secret-but-long-enough-for-startup-check
       EXEC_MAX_CONCURRENCY: "4"
+      EXEC_MAX_BODY_BYTES: "8388608"
       SIDECAR_NAME: terminal
       # The production Container App sidecars share loopback, so both ttyd
       # and exec_server bind 127.0.0.1 there. Docker Compose gives each
