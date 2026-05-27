@@ -21,13 +21,13 @@ from api.services import get_credential
 from api.services.auto_warmup_reconcile import (
     autowarmup_inflight_acquire as _autowarmup_inflight_acquire,
 )
-from api.services.warmup_task_planning import (
+from api.services.warmup.task_planning import (
     build_elb_image as _build_elb_image,
 )
-from api.services.warmup_task_planning import (
+from api.services.warmup.task_planning import (
     program_to_mol_type as _program_to_mol_type,
 )
-from api.services.warmup_task_planning import (
+from api.services.warmup.task_planning import (
     select_warmup_shard_count as _select_warmup_shard_count,
 )
 from api.tasks.storage.helpers import (

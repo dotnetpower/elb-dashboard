@@ -10,6 +10,7 @@ import {
   Eye,
   EyeOff,
   Gauge,
+  Globe,
   HelpCircle,
   Loader2,
   Monitor,
@@ -24,6 +25,7 @@ import {
 } from "lucide-react";
 
 import { formatApiError } from "@/api/client";
+import { aksApi, type OpenApiPublicHttpsStatus } from "@/api/aks";
 import { type AksClusterSummary, monitoringApi } from "@/api/monitoring";
 import { settingsApi, type AppInsightsProvisionRequest } from "@/api/settings";
 import { tasksApi, type TaskStatusResponse } from "@/api/tasks";
@@ -36,7 +38,14 @@ import { useSidecarMetrics, type SidecarMetric } from "@/hooks/useSidecarMetrics
 import { useTheme } from "@/hooks/useTheme";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
 
-type SectionId = "appearance" | "preview" | "telemetry" | "aks" | "sizing" | "resources";
+type SectionId =
+  | "appearance"
+  | "preview"
+  | "telemetry"
+  | "aks"
+  | "public-https"
+  | "sizing"
+  | "resources";
 type TaskState = {
   taskId: string;
   status: TaskStatusResponse["status"];
@@ -99,6 +108,7 @@ const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> =
   { id: "preview", label: "Preview", icon: <FlaskConical size={14} strokeWidth={1.5} /> },
   { id: "telemetry", label: "Telemetry", icon: <Activity size={14} strokeWidth={1.5} /> },
   { id: "aks", label: "AKS Observability", icon: <Monitor size={14} strokeWidth={1.5} /> },
+  { id: "public-https", label: "Public HTTPS", icon: <Globe size={14} strokeWidth={1.5} /> },
   { id: "sizing", label: "Sizing", icon: <Gauge size={14} strokeWidth={1.5} /> },
   { id: "resources", label: "Resources", icon: <SettingsIcon size={14} strokeWidth={1.5} /> },
 ];
@@ -257,6 +267,7 @@ export function SettingsPanel({ open, onClose }: Props) {
             {active === "preview" && <PreviewSection />}
             {active === "telemetry" && <TelemetrySection config={config} />}
             {active === "aks" && <AksSection config={config} />}
+            {active === "public-https" && <PublicHttpsSection config={config} />}
             {active === "sizing" && <SizingSection />}
             {active === "resources" && <ResourcesSection config={config} />}
           </main>
@@ -1201,6 +1212,332 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
         {status && <StatusLine kind={status.startsWith("Enabled") ? "success" : "info"}>{status}</StatusLine>}
         {error && <StatusLine kind="error">{error}</StatusLine>}
         {task && <TaskStatusLine task={task} />}
+      </Group>
+    </Section>
+  );
+}
+
+/**
+ * Public HTTPS endpoint settings — drives `setup_openapi_public_https`
+ * / `disable_openapi_public_https`. Installs ingress-nginx + cert-manager
+ * on the selected AKS cluster and exposes elb-openapi over an
+ * Azure-issued FQDN with a Let's Encrypt cert. Mirrors AksSection's
+ * cluster discovery so the dropdown also lists clusters outside the
+ * dashboard anchor RG.
+ */
+function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
+  const [clusterName, setClusterName] = useState("");
+  const [availableClusters, setAvailableClusters] = useState<AksClusterSummary[]>([]);
+  const [clustersLoading, setClustersLoading] = useState(false);
+  const [clustersLoaded, setClustersLoaded] = useState(false);
+  const [status, setStatus] = useState<OpenApiPublicHttpsStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [email, setEmail] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [taskRunning, setTaskRunning] = useState(false);
+  const [taskPhase, setTaskPhase] = useState<string>("");
+  const pollTimer = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (pollTimer.current !== null) {
+        window.clearTimeout(pollTimer.current);
+        pollTimer.current = null;
+      }
+    },
+    [],
+  );
+
+  const selectedClusterRg =
+    availableClusters.find((c) => c.name === clusterName)?.resource_group ??
+    config?.workloadResourceGroup ??
+    "";
+
+  const subscriptionId = config?.subscriptionId ?? "";
+  const canAct = Boolean(subscriptionId && selectedClusterRg && clusterName);
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    setStatusLoading(true);
+    try {
+      const data = await aksApi.openApiPublicHttpsStatus();
+      setStatus(data);
+    } catch (err) {
+      setError(formatApiError(err, "aks"));
+    } finally {
+      setStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    // Mirror AksSection cluster discovery so the picker lists every
+    // AKS cluster in the subscription regardless of RG.
+    if (!subscriptionId) return;
+    let cancelled = false;
+    setClustersLoading(true);
+    void (async () => {
+      try {
+        const response = await monitoringApi.aks(subscriptionId);
+        if (cancelled) return;
+        const clusters = (response.clusters ?? []).filter((c) => c.name);
+        setAvailableClusters(clusters);
+        setClustersLoaded(true);
+        setClusterName((current) => {
+          if (current && clusters.some((c) => c.name === current)) return current;
+          const preferred = pickPreferredCluster(clusters, {
+            resourceGroup: config?.workloadResourceGroup,
+          });
+          return preferred?.name ?? current;
+        });
+      } catch {
+        if (cancelled) return;
+        setAvailableClusters([]);
+        setClustersLoaded(true);
+      } finally {
+        if (!cancelled) setClustersLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [subscriptionId, config?.workloadResourceGroup]);
+
+  // Poll the Celery task until terminal. 3 s cadence matches the original
+  // PublicHttpsPanel — install + ACME challenge takes ~3-5 minutes on
+  // first run, so we trade a bit of poll volume for a snappier UI flip.
+  const pollTask = useCallback(
+    (taskId: string) => {
+      const tick = async () => {
+        try {
+          const result = await aksApi.openApiPublicHttpsTaskStatus(taskId);
+          const customStatus =
+            result.custom_status && typeof result.custom_status === "object"
+              ? (result.custom_status as { phase?: string })
+              : {};
+          const phase = customStatus.phase ?? "";
+          if (phase) setTaskPhase(phase);
+          const runtime = result.runtime_status ?? "";
+          if (runtime === "Completed" || runtime === "Failed" || runtime === "Terminated") {
+            setTaskRunning(false);
+            // setup_openapi_public_https swallows pipeline errors and
+            // returns `{status: 'failed', error: '...'}` as a normal task
+            // result, so Celery reports `runtime_status: 'Completed'`
+            // even when the actual install failed (e.g. cert-manager
+            // webhook never reached Ready). Treat dict-level `status:
+            // 'failed'` the same as a runtime-level Failed so the SPA
+            // surfaces the error banner instead of silently flipping
+            // to the success state.
+            const dictFailed = result.output?.status === "failed";
+            const taskFailed = runtime !== "Completed" || dictFailed;
+            if (!taskFailed) {
+              await refresh();
+            } else {
+              const msg =
+                result.output?.error ||
+                `Task ${runtime.toLowerCase()} (phase=${phase || "n/a"})`;
+              setError(String(msg).slice(0, 600));
+            }
+            return;
+          }
+        } catch (err) {
+          setError(formatApiError(err, "aks"));
+          setTaskRunning(false);
+          return;
+        }
+        pollTimer.current = window.setTimeout(tick, 3_000);
+      };
+      pollTimer.current = window.setTimeout(tick, 1_500);
+    },
+    [refresh],
+  );
+
+  const enable = async () => {
+    if (!canAct) return;
+    setError(null);
+    setTaskRunning(true);
+    setTaskPhase("queued");
+    try {
+      const res = await aksApi.enableOpenApiPublicHttps(
+        subscriptionId,
+        selectedClusterRg,
+        clusterName,
+        email,
+      );
+      pollTask(res.task_id || res.id);
+    } catch (err) {
+      setError(formatApiError(err, "aks"));
+      setTaskRunning(false);
+    }
+  };
+
+  const disable = async () => {
+    if (!canAct) return;
+    setError(null);
+    setTaskRunning(true);
+    setTaskPhase("queued");
+    try {
+      const res = await aksApi.disableOpenApiPublicHttps(
+        subscriptionId,
+        selectedClusterRg,
+        clusterName,
+      );
+      pollTask(res.task_id || res.id);
+    } catch (err) {
+      setError(formatApiError(err, "aks"));
+      setTaskRunning(false);
+    }
+  };
+
+  const enabled = Boolean(status?.enabled);
+  const publicUrl = status?.public_base_url ?? "";
+
+  return (
+    <Section heading="Public HTTPS Endpoint">
+      <Group>
+        <StatusLine kind="info">
+          Installs ingress-nginx + cert-manager on the selected AKS cluster and exposes the
+          elb-openapi service over an Azure-issued FQDN with a Let&apos;s Encrypt cert.
+          First-time install is ~3-5 minutes.
+        </StatusLine>
+        <Field
+          label="AKS cluster"
+          hint={
+            clustersLoading
+              ? "Discovering AKS clusters in this subscription..."
+              : availableClusters.length === 0 && clustersLoaded
+                ? "No ELB-managed AKS clusters were found in this subscription."
+                : "Pick the cluster running elb-openapi."
+          }
+        >
+          {availableClusters.length > 1 ? (
+            <select
+              value={clusterName}
+              onChange={(event) => setClusterName(event.target.value)}
+              style={INPUT_STYLE}
+            >
+              {availableClusters.map((c) => (
+                <option key={`${c.resource_group}/${c.name}`} value={c.name}>
+                  {c.name} ({c.power_state ?? "?"})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={clusterName}
+              onChange={(event) => setClusterName(event.target.value)}
+              placeholder={clustersLoaded && availableClusters.length === 0 ? "No AKS cluster detected" : "aks-..."}
+              style={INPUT_STYLE}
+            />
+          )}
+        </Field>
+        {!enabled && (
+          <Field
+            label="Operator email (optional)"
+            hint="Used by Let's Encrypt to send certificate-expiry notifications."
+          >
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="ops@example.com"
+              style={INPUT_STYLE}
+            />
+          </Field>
+        )}
+        <Row
+          label="Status"
+          control={
+            <Badge tone={enabled ? "success" : "muted"}>
+              {statusLoading && !status ? "Checking..." : enabled ? "Exposed" : "Not exposed"}
+            </Badge>
+          }
+        />
+        {enabled && publicUrl && (
+          <Row
+            label="Public endpoint"
+            control={
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <code style={{ fontSize: 11, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}>
+                  {publicUrl}
+                </code>
+                <button
+                  type="button"
+                  className="glass-button"
+                  onClick={() => {
+                    if (typeof navigator !== "undefined" && navigator.clipboard) {
+                      navigator.clipboard.writeText(publicUrl).catch(() => undefined);
+                    }
+                  }}
+                  title="Copy URL"
+                  aria-label="Copy URL"
+                  style={{ fontSize: 11 }}
+                >
+                  <Copy size={12} />
+                </button>
+                <a
+                  href={publicUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="glass-button"
+                  style={{ fontSize: 11, textDecoration: "none" }}
+                >
+                  <ExternalLink size={11} />
+                </a>
+              </span>
+            }
+          />
+        )}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", paddingBottom: 14 }}>
+          <button
+            className="glass-button"
+            onClick={() => void refresh()}
+            disabled={statusLoading || taskRunning}
+            style={{ fontSize: 12 }}
+          >
+            Refresh status
+          </button>
+          {enabled ? (
+            <button
+              className="glass-button"
+              onClick={disable}
+              disabled={!canAct || taskRunning}
+              style={{ fontSize: 12 }}
+            >
+              Disable
+            </button>
+          ) : (
+            <button
+              className="glass-button glass-button--primary"
+              onClick={enable}
+              disabled={!canAct || taskRunning}
+              style={{ fontSize: 12 }}
+            >
+              Enable
+            </button>
+          )}
+          {taskRunning && (
+            <span style={{ fontSize: 11, color: "var(--text-muted)", display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <Loader2 size={12} className="spin" /> {taskPhase || "queued"}
+            </span>
+          )}
+        </div>
+        {enabled && status && (
+          <StatusLine kind="info">
+            {[
+              status.ingress_lb_ip ? `LB ${status.ingress_lb_ip}` : null,
+              status.cert_issuer || null,
+              status.cert_expires_at ? `expires ${status.cert_expires_at} (auto-renew)` : null,
+              status.updated_at ? `updated ${status.updated_at}` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </StatusLine>
+        )}
+        {error && <StatusLine kind="error">{error}</StatusLine>}
       </Group>
     </Section>
   );

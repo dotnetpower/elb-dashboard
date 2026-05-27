@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildCurl,
   buildTargetPath,
   formatBinarySummary,
   isBinaryContentType,
@@ -84,5 +85,114 @@ describe("OpenAPI executor binary handling", () => {
     expect(text).toContain("merged_results.zip");
     expect(text).toContain("2.00 KiB");
     expect(text).toContain("application/zip");
+  });
+});
+
+describe("OpenAPI executor curl builder", () => {
+  it("builds a direct curl for non-proxy endpoints without an Authorization header", () => {
+    const curl = buildCurl({
+      endpoint: {
+        method: "get",
+        path: "/healthz",
+        parameters: [],
+      },
+      baseUrl: "https://elb-openapi.example",
+      proxyInfo: undefined,
+      paramValues: {},
+      bodyText: "",
+      apiBase: "",
+      origin: "https://dash.example",
+    });
+    expect(curl).toContain("curl -X GET 'https://elb-openapi.example/healthz'");
+    expect(curl).not.toContain("Authorization");
+    expect(curl).not.toContain("--data-raw");
+  });
+
+  it("builds a proxy curl with a $AAD_TOKEN placeholder when no bearer token is provided", () => {
+    const curl = buildCurl({
+      endpoint: {
+        method: "post",
+        path: "/v1/jobs/{job_id}/cancel",
+        parameters: [{ name: "job_id", in: "path" }],
+        requestBody: { content: { "application/json": {} } },
+      },
+      baseUrl: "",
+      proxyInfo: { sub: "sub-1", rg: "rg-1", clusterName: "aks-1" },
+      paramValues: { job_id: "abc/123" },
+      bodyText: '{"reason":"user-cancel"}',
+      apiBase: "",
+      origin: "https://dash.example",
+    });
+    expect(curl).toContain("curl -X POST");
+    expect(curl).toContain("https://dash.example/api/aks/openapi/proxy?");
+    expect(curl).toContain("path=%2Fv1%2Fjobs%2Fabc%252F123%2Fcancel");
+    expect(curl).toContain("'Authorization: Bearer $AAD_TOKEN'");
+    expect(curl).toContain("'Content-Type: application/json'");
+    expect(curl).toContain(`--data-raw '{"reason":"user-cancel"}'`);
+  });
+
+  it("inlines a real bearer token when explicitly provided", () => {
+    const curl = buildCurl({
+      endpoint: { method: "get", path: "/v1/jobs", parameters: [] },
+      baseUrl: "",
+      proxyInfo: { sub: "s", rg: "r", clusterName: "c" },
+      paramValues: {},
+      bodyText: "",
+      apiBase: "",
+      origin: "https://dash.example",
+      bearerToken: "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.payload.sig",
+    });
+    expect(curl).toContain(
+      "'Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.payload.sig'",
+    );
+    expect(curl).not.toContain("$AAD_TOKEN");
+  });
+
+  it("falls back to the placeholder when bearerToken is null or empty", () => {
+    for (const token of [null, ""]) {
+      const curl = buildCurl({
+        endpoint: { method: "get", path: "/v1/jobs", parameters: [] },
+        baseUrl: "",
+        proxyInfo: { sub: "s", rg: "r", clusterName: "c" },
+        paramValues: {},
+        bodyText: "",
+        apiBase: "",
+        origin: "https://dash.example",
+        bearerToken: token,
+      });
+      expect(curl).toContain("'Authorization: Bearer $AAD_TOKEN'");
+    }
+  });
+
+  it("escapes single quotes in body so the command stays POSIX-safe", () => {
+    const curl = buildCurl({
+      endpoint: {
+        method: "post",
+        path: "/v1/echo",
+        parameters: [],
+        requestBody: { content: { "application/json": {} } },
+      },
+      baseUrl: "https://api.example",
+      proxyInfo: undefined,
+      paramValues: {},
+      bodyText: "it's fine",
+      apiBase: "",
+      origin: "",
+    });
+    expect(curl).toContain(`--data-raw 'it'\\''s fine'`);
+  });
+
+  it("prefers apiBase over origin when provided (local dev: VITE_API_BASE_URL=http://localhost:8085)", () => {
+    const curl = buildCurl({
+      endpoint: { method: "get", path: "/v1/x", parameters: [] },
+      baseUrl: "",
+      proxyInfo: { sub: "s", rg: "r", clusterName: "c" },
+      paramValues: {},
+      bodyText: "",
+      apiBase: "http://localhost:8085",
+      origin: "http://localhost:8090",
+    });
+    expect(curl).toContain("http://localhost:8085/api/aks/openapi/proxy?");
+    expect(curl).not.toContain("http://localhost:8090/api/aks/openapi/proxy?");
   });
 });

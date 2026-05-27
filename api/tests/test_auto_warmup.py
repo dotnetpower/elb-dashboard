@@ -99,6 +99,106 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
     assert calls[0]["kwargs"]["require_all_warmup_nodes"] is True
 
 
+def test_reconcile_auto_warmup_seeds_job_state_before_enqueue(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Auto-warmup reconciler must seed JobState before enqueueing the task.
+
+    Without the seed, `warmup_database`'s first `_update_state` checkpoint
+    calls `repo.update()` → `get_entity` → 404, which surfaces as a red
+    Dependency failure in App Insights and silently drops every phase
+    update so the SPA can't render progress.
+    """
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.tasks.storage._autowarmup_inflight_acquire",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "api.services.monitoring.list_aks_clusters",
+        lambda credential, subscription_id, resource_group: [
+            {
+                "name": "elb-cluster",
+                "provisioning_state": "Succeeded",
+                "power_state": "Running",
+                "node_count": 4,
+                "node_sku": "Standard_E16s_v5",
+            }
+        ],
+    )
+    _patch_ready_warmup_nodes(monkeypatch, 4)
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_warmup_status",
+        lambda credential, subscription_id, resource_group, cluster_name: {"databases": []},
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data.list_databases",
+        lambda credential, storage_account: [{"name": "core_nt"}],
+    )
+
+    created: list[Any] = []
+    updates: list[dict[str, Any]] = []
+
+    class _FakeRepo:
+        def create(self, state: Any) -> Any:
+            created.append(state)
+            return state
+
+        def update(self, job_id: str, **kwargs: Any) -> Any:
+            updates.append({"job_id": job_id, **kwargs})
+            return object()
+
+    fake_repo = _FakeRepo()
+    monkeypatch.setattr("api.services.state_repo.get_state_repo", lambda: fake_repo)
+
+    calls, fake_send_task = make_send_task_recorder("warmup-task-seeded")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+
+    pref = AutoWarmupPreference(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+        storage_account="elbstg01",
+        storage_resource_group="rg-elb",
+        databases=["core_nt"],
+        programs={"core_nt": "blastn"},
+        owner_oid="auto-warmup-owner",
+    )
+
+    result = reconcile_auto_warmup.run(preference=pref.to_dict(), force=True)
+    assert result["clusters"][0]["status"] == "triggered"
+    assert calls and calls[0]["task_name"] == "api.tasks.storage.warmup_database"
+
+    job_id = calls[0]["kwargs"]["job_id"]
+    assert job_id.startswith("auto-warmup-elb-cluster-core_nt-")
+
+    # JobState row must be created before send_task, with the canonical fields
+    # the warmup task and SPA expect.
+    assert len(created) == 1, "JobState.create() must be called exactly once before enqueue"
+    seeded = created[0]
+    assert seeded.job_id == job_id
+    assert seeded.type == "warmup"
+    assert seeded.status == "queued"
+    assert seeded.phase == "queued"
+    assert seeded.db == "core_nt"
+    assert seeded.program == "blastn"
+    assert seeded.cluster_name == "elb-cluster"
+    assert seeded.owner_oid == "auto-warmup-owner"
+
+    # task_id must be attached after enqueue so the SPA / status routes can
+    # resolve the Celery task from the job row.
+    assert any(
+        u["job_id"] == job_id and u.get("task_id") == "warmup-task-seeded" for u in updates
+    ), f"task_id must be attached to seeded JobState; updates={updates}"
+
+
+
+
+
 def test_reconcile_auto_warmup_waits_for_all_ready_workload_nodes(
     monkeypatch,
     tmp_path,

@@ -37,6 +37,7 @@ from api.services.k8s.ingress import (
     CERT_MANAGER_INSTALL_URL,
     CERT_MANAGER_NAMESPACE,
     CERT_MANAGER_WEBHOOK_DEPLOYMENT,
+    INGRESS_NGINX_ADMISSION_JOB_SELECTOR,
     INGRESS_NGINX_INSTALL_URL,
     INGRESS_NGINX_NAMESPACE,
     INGRESS_NGINX_SERVICE_NAME,
@@ -49,6 +50,7 @@ from api.services.k8s.ingress import (
     build_openapi_ingress,
     cloudapp_fqdn,
     dns_label_for_cluster,
+    fetch_install_manifest_for_system_pool,
 )
 from api.services.openapi.runtime import (
     clear_openapi_public_base_url,
@@ -106,6 +108,7 @@ def _kubectl_or_raise(
 
 _CERT_MANAGER_WEBHOOK_PROBE_RETRIES = 5
 _CERT_MANAGER_WEBHOOK_PROBE_TIMEOUT_SECONDS = 60
+_CERT_MANAGER_WEBHOOK_PROBE_INTERVAL_SECONDS = 15
 _CERT_MANAGER_WEBHOOK_AVAILABLE_TIMEOUT_SECONDS = 300
 
 
@@ -126,8 +129,17 @@ def _wait_for_cert_manager_webhook(
     The hardened sequence is:
 
     1. Up to ``_CERT_MANAGER_WEBHOOK_PROBE_RETRIES`` short ``kubectl rollout
-       status`` probes (60 s each) that tolerate the Deployment not yet
-       existing — once it shows up, rollout status returns quickly.
+       status`` probes (60 s each), each followed by a
+       ``_CERT_MANAGER_WEBHOOK_PROBE_INTERVAL_SECONDS`` sleep when the probe
+       fails fast. ``kubectl rollout status`` returns a ``NotFound`` error
+       **immediately** when the Deployment object has not yet been created
+       (the ``--timeout`` flag only applies to waiting for an existing
+       rollout to complete) — without the sleep, all retries would burn
+       through in ~5 seconds and the pipeline would fail before cert-manager
+       had any chance to create the webhook Deployment server-side. Total
+       wait window with the sleep is ~5 × (≤60 s rollout + 15 s sleep) ≈
+       5 min, matching the original "~300s" budget advertised in the
+       fall-through error message.
     2. A single ``kubectl wait --for=condition=Available`` with a generous
        300 s timeout for the final readiness flip (serving-cert bootstrap +
        webhook TLS warmup).
@@ -137,6 +149,8 @@ def _wait_for_cert_manager_webhook(
     same failure shape callers already expected.
     """
     last_err = ""
+    probe_started = time.time()
+    success = False
     for attempt in range(1, _CERT_MANAGER_WEBHOOK_PROBE_RETRIES + 1):
         result = kubectl_run(
             [
@@ -151,6 +165,7 @@ def _wait_for_cert_manager_webhook(
             timeout_seconds=_CERT_MANAGER_WEBHOOK_PROBE_TIMEOUT_SECONDS + 20,
         )
         if result.get("exit_code", 1) == 0:
+            success = True
             break
         last_err = (
             (result.get("stderr") or result.get("stdout") or "").strip()[:300]
@@ -161,16 +176,21 @@ def _wait_for_cert_manager_webhook(
             _CERT_MANAGER_WEBHOOK_PROBE_RETRIES,
             last_err,
         )
-    else:
-        # Loop exhausted without a successful probe — the Deployment never
-        # showed up. Surface a clear error message instead of silently
-        # falling through to the Available wait (which would also fail
-        # but with a less informative timeout message).
+        # Sleep BETWEEN attempts (not after the last) so a fast NotFound
+        # response — which kubectl rollout status returns immediately when
+        # the Deployment has not yet been created server-side — does not
+        # burn through all retries in milliseconds. Without this sleep the
+        # "5 × 60 s" advertised budget collapses to ~5 s of wall time and
+        # the pipeline fails before cert-manager has had any chance to
+        # create the webhook Deployment.
+        if attempt < _CERT_MANAGER_WEBHOOK_PROBE_RETRIES:
+            time.sleep(_CERT_MANAGER_WEBHOOK_PROBE_INTERVAL_SECONDS)
+    if not success:
+        elapsed = int(time.time() - probe_started)
         raise RuntimeError(
             "kubectl rollout status cert-manager-webhook failed after "
             f"{_CERT_MANAGER_WEBHOOK_PROBE_RETRIES} probes "
-            f"(~{_CERT_MANAGER_WEBHOOK_PROBE_RETRIES * _CERT_MANAGER_WEBHOOK_PROBE_TIMEOUT_SECONDS}"
-            f"s); last error: {last_err}"
+            f"({elapsed}s elapsed); last error: {last_err}"
         )
 
     # Final readiness flip — once rollout status has returned 0, this
@@ -223,12 +243,70 @@ def _wait_for_external_ip(*, kubeconfig_path: str, timeout_seconds: int = 240) -
     )
 
 
+_CERTIFICATE_EXISTS_PROBE_RETRIES = 12
+_CERTIFICATE_EXISTS_PROBE_INTERVAL_SECONDS = 5
+
+
+def _wait_for_certificate_object_to_exist(
+    *, kubeconfig_path: str
+) -> None:
+    """Poll ``kubectl get certificate`` until the object is server-side present.
+
+    cert-manager's ingress-shim controller creates the Certificate CR
+    asynchronously after the Ingress is applied — typically <2 s on a
+    warm cluster, but up to ~30 s on a cold cluster where ingress-shim
+    is still scheduling. Without this pre-existence probe, the immediate
+    ``kubectl wait --for=condition=Ready`` call returns ``NotFound``
+    instantly (older kubectl) or burns its full timeout (newer kubectl
+    that waits for resource creation), neither of which is the desired
+    progress signal.
+
+    Returns silently when the Certificate exists. Returns silently also
+    after the retry budget is exhausted — we leave the subsequent
+    ``kubectl wait`` to surface the eventual failure with its richer
+    condition-message probe, so this helper never substitutes a less
+    informative error for the real one.
+    """
+    for attempt in range(1, _CERTIFICATE_EXISTS_PROBE_RETRIES + 1):
+        result = kubectl_run(
+            [
+                "get",
+                "certificate",
+                OPENAPI_TLS_SECRET_NAME,
+                "-n",
+                OPENAPI_NAMESPACE,
+                "-o",
+                "name",
+            ],
+            kubeconfig_path=kubeconfig_path,
+            timeout_seconds=15,
+        )
+        if result.get("exit_code", 1) == 0 and (result.get("stdout") or "").strip():
+            return
+        LOGGER.debug(
+            "public-https: certificate object not yet present (probe %d/%d)",
+            attempt,
+            _CERTIFICATE_EXISTS_PROBE_RETRIES,
+        )
+        if attempt < _CERTIFICATE_EXISTS_PROBE_RETRIES:
+            time.sleep(_CERTIFICATE_EXISTS_PROBE_INTERVAL_SECONDS)
+
+
 def _wait_for_certificate_ready(
     *,
     kubeconfig_path: str,
     timeout_seconds: int = 300,
 ) -> None:
-    """Block until the openapi Certificate resource is Ready=True."""
+    """Block until the openapi Certificate resource is Ready=True.
+
+    The pre-existence probe absorbs the small ingress-shim delay before
+    cert-manager has even created the Certificate CR — without it, on
+    older kubectl builds where ``kubectl wait --for=condition`` returns
+    immediately on ``NotFound``, this helper would fail in <1 s with a
+    "certificate not found" error that the operator would mistake for a
+    permanent issue rather than a normal cold-start race.
+    """
+    _wait_for_certificate_object_to_exist(kubeconfig_path=kubeconfig_path)
     result = kubectl_run(
         [
             "wait",
@@ -342,11 +420,45 @@ def setup_openapi_public_https(
         return {"status": "failed", "step": "ensure_kubeconfig", "error": str(exc)[:500]}
 
     try:
-        # Step 1: install ingress-nginx (idempotent kubectl apply -f URL)
+        # Step 1: install ingress-nginx with systempool tolerations.
+        # The upstream manifest at INGRESS_NGINX_INSTALL_URL ships pods
+        # with no tolerations, so on AKS clusters whose nodes carry the
+        # `CriticalAddonsOnly=true:NoSchedule` (systempool) or
+        # `workload=blast:NoSchedule` (blastpool) taints, every pod
+        # lands in Pending forever — observed in production on
+        # elb-cluster-01 (FailedScheduling: "0/3 nodes are available:
+        # 3 node(s) had untolerated taint(s)"). The fetch-and-patch
+        # helper injects the systempool toleration + nodeSelector into
+        # every Deployment / DaemonSet / Job from the install manifest
+        # so the add-on lands on the systempool only.
         record_progress(self, "install_ingress_nginx")
-        _kubectl_or_raise(
-            ["apply", "-f", INGRESS_NGINX_INSTALL_URL],
+        ingress_nginx_manifest = fetch_install_manifest_for_system_pool(
+            INGRESS_NGINX_INSTALL_URL
+        )
+        # ingress-nginx ships admission-webhook bootstrap Jobs whose
+        # spec is immutable. A previous toleration-less install leaves
+        # `Pending` Job pods behind that `kubectl apply -f -` cannot
+        # reconcile in place, so we pre-delete them by their well-known
+        # label before re-applying the patched manifest. The flag
+        # `--ignore-not-found=true` keeps the step idempotent on the
+        # first run.
+        kubectl_run(
+            [
+                "delete",
+                "job",
+                "-n",
+                INGRESS_NGINX_NAMESPACE,
+                "-l",
+                INGRESS_NGINX_ADMISSION_JOB_SELECTOR,
+                "--ignore-not-found=true",
+            ],
             kubeconfig_path=kubeconfig_path,
+            timeout_seconds=60,
+        )
+        _kubectl_or_raise(
+            ["apply", "-f", "-"],
+            kubeconfig_path=kubeconfig_path,
+            stdin=ingress_nginx_manifest,
             timeout_seconds=180,
             context="apply ingress-nginx",
         )
@@ -378,11 +490,18 @@ def setup_openapi_public_https(
             timeout_seconds=240,
         )
 
-        # Step 4: install cert-manager (idempotent kubectl apply -f URL)
+        # Step 4: install cert-manager with the same systempool patch.
+        # cert-manager ships Deployments only (no install-time Jobs),
+        # so no pre-delete is needed — strategic merge patch on the
+        # existing Deployments is enough to roll Pending pods.
         record_progress(self, "install_cert_manager")
+        cert_manager_manifest = fetch_install_manifest_for_system_pool(
+            CERT_MANAGER_INSTALL_URL
+        )
         _kubectl_or_raise(
-            ["apply", "-f", CERT_MANAGER_INSTALL_URL],
+            ["apply", "-f", "-"],
             kubeconfig_path=kubeconfig_path,
+            stdin=cert_manager_manifest,
             timeout_seconds=300,
             context="apply cert-manager",
         )

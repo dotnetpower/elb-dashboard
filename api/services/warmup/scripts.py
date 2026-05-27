@@ -1,6 +1,6 @@
 """Shell-script text fragments injected into BLAST DB warmup Kubernetes Jobs.
 
-Used by [api/services/warmup_jobs.py](./warmup_jobs.py) when assembling the
+Used by [api/services/warmup/jobs.py](./jobs.py) when assembling the
 container `command` and the shared `elb-warmup-scripts` ConfigMap. These are
 plain shell-script strings — no Python logic, no f-strings — kept here so
 that the manifest builder stays focused on Kubernetes shape.

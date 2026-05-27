@@ -306,27 +306,21 @@
     gap: 4px !important;
   }
 
-  .pulse-job-row > .pulse-job-identity {
-    /* Identity (title + program / db / query chips) gets the first line. */
-    width: 100%;
-    flex-wrap: wrap;
-  }
-
   .pulse-job-row > .pulse-job-status-cell {
-    /* Status pill sits on the right of the second line. */
+    /* Status pill stays right-aligned even in the stacked layout. */
     align-self: flex-end;
     text-align: right !important;
   }
 
-  .pulse-job-row > .pulse-job-timeblock {
-    /* Time block left-aligns under the identity to read naturally. */
-    align-items: flex-start !important;
-    flex-direction: row !important;
-    gap: 6px !important;
+  .pulse-job-row > .pulse-job-timeago,
+  .pulse-job-row > .pulse-job-duration {
+    /* On phones, time/duration sit on their own line — left-align so
+       they read like the rest of the stacked cells. */
+    text-align: left !important;
   }
 
   .pulse-job-row .pulse-job-user,
-  .pulse-job-skeleton > *:nth-child(2) {
+  .pulse-job-skeleton > *:nth-child(4) {
     display: none !important;
   }
 

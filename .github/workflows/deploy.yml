@@ -1,0 +1,148 @@
+name: Deploy to Container App
+
+# Manual deployment of pre-built images to the bundled Container App.
+# Builds happen in `build-images.yml` on every push to main; this workflow
+# only patches the running `ca-elb-dashboard` to a chosen tag.
+#
+# The `production` environment carries a required reviewer rule — after you
+# click "Run workflow", a maintainer (you) must approve the deployment from
+# the Actions UI before `az containerapp update` runs.
+#
+# Configure the environment once at:
+#   https://github.com/dotnetpower/elb-dashboard/settings/environments
+#   → "production" → Required reviewers: <your GitHub user>
+#
+# Required repository secrets (shared with build-images.yml):
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+# Required repository variables:
+#   ACR_NAME, ACR_LOGIN_SERVER, AZURE_RESOURCE_GROUP, CONTAINER_APP_NAME
+
+on:
+  workflow_dispatch:
+    inputs:
+      sidecar:
+        description: "Which container to patch"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - api
+          - worker
+          - beat
+          - frontend
+          - terminal
+      tag:
+        description: "Image tag to deploy (default: latest-main)"
+        required: true
+        default: "latest-main"
+        type: string
+      skip_health_check:
+        description: "Skip post-deploy /api/health smoke (default: false)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # Only one deploy at a time. cancel-in-progress=false because we never
+  # want to abort an in-flight `az containerapp update`.
+  group: deploy-container-app
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      # CONTAINER_APP_FQDN should be a repo variable; the env link lets the
+      # GitHub UI show a click-through URL alongside the approval gate.
+      url: https://${{ vars.CONTAINER_APP_FQDN }}/
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      CONTAINER_APP_NAME: ${{ vars.CONTAINER_APP_NAME }}
+      CONTAINER_APP_FQDN: ${{ vars.CONTAINER_APP_FQDN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify chosen image tag exists in ACR
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          sidecar="${{ inputs.sidecar }}"
+          case "$sidecar" in
+            all)      images=(elb-api elb-frontend elb-terminal) ;;
+            api|worker|beat) images=(elb-api) ;;
+            frontend) images=(elb-frontend) ;;
+            terminal) images=(elb-terminal) ;;
+            *) echo "unknown sidecar '$sidecar'" >&2; exit 1 ;;
+          esac
+          missing=0
+          for img in "${images[@]}"; do
+            if az acr repository show-tags --name "$ACR_NAME" --repository "$img" --query "[?@=='$tag']" -o tsv 2>/dev/null | grep -qx "$tag"; then
+              echo "  ✓ $img:$tag"
+            else
+              echo "  ✗ $img:$tag NOT FOUND in ACR" >&2
+              missing=1
+            fi
+          done
+          [ "$missing" = "0" ] || { echo "Refusing to deploy — at least one image tag is missing. Run the Build Images workflow first." >&2; exit 1; }
+
+      - name: Patch Container App (no rebuild)
+        env:
+          ELB_QUICK_DEPLOY_SKIP_CONFIRM: "1"
+          SKIP_PROVIDER_REGISTRATION: "true"
+        run: |
+          set -euo pipefail
+          bash scripts/dev/quick-deploy.sh "${{ inputs.sidecar }}" "${{ inputs.tag }}" --no-build --yes
+
+      - name: Smoke test /api/health
+        if: ${{ inputs.skip_health_check != true }}
+        run: |
+          set -euo pipefail
+          url="https://${CONTAINER_APP_FQDN}/api/health"
+          # New revision activation can take 30-60s. Retry for up to 3 min.
+          for i in $(seq 1 18); do
+            status="$(curl -s -o /tmp/health.json -w '%{http_code}' --max-time 10 "$url" || echo 000)"
+            if [ "$status" = "200" ]; then
+              echo "==> /api/health OK after ${i}0s"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "  [$i] status=$status, retrying in 10s..."
+            sleep 10
+          done
+          echo "==> /api/health failed after 3 minutes" >&2
+          cat /tmp/health.json 2>/dev/null || true
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Deployment"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| sidecar | \`${{ inputs.sidecar }}\` |"
+            echo "| tag | \`${{ inputs.tag }}\` |"
+            echo "| container app | \`${CONTAINER_APP_NAME}\` (${AZURE_RESOURCE_GROUP}) |"
+            echo "| url | https://${CONTAINER_APP_FQDN}/ |"
+          } >> "$GITHUB_STEP_SUMMARY"

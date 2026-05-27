@@ -50,6 +50,12 @@ export function ApiTokenPanel({
     : tokenQuery.error
       ? formatApiError(tokenQuery.error, "aks")
       : null;
+  // Backend tried to auto-heal a legacy `elb-openapi` deployment (no
+  // ELB_OPENAPI_API_TOKEN env entry) and the patch failed. Surface the
+  // exact code+message so the operator does not have to wonder why
+  // "Generate" appears to do nothing — it is usually an AKS admin RBAC
+  // gap on the cluster RG.
+  const selfHealError = token?.self_heal_error ?? null;
 
   return (
     <section
@@ -140,19 +146,28 @@ export function ApiTokenPanel({
           minWidth: 0,
         }}
       >
-        <code
-          style={{
-            color: configured ? "var(--text-primary)" : "var(--text-faint)",
-            fontSize: 12,
-            fontFamily: "var(--font-mono)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            minWidth: 0,
-          }}
-        >
-          {busy && !token ? "Loading token status..." : visibleToken}
-        </code>
+        {busy && !token ? (
+          <span
+            className="skeleton"
+            aria-label="Loading token status"
+            aria-busy="true"
+            style={{ height: 14, width: "62%", borderRadius: 4, display: "block" }}
+          />
+        ) : (
+          <code
+            style={{
+              color: configured ? "var(--text-primary)" : "var(--text-faint)",
+              fontSize: 12,
+              fontFamily: "var(--font-mono)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+            }}
+          >
+            {visibleToken}
+          </code>
+        )}
         <button
           type="button"
           className="glass-button"
@@ -180,6 +195,36 @@ export function ApiTokenPanel({
 
       {message && (
         <div style={{ fontSize: 12, color: "var(--danger)", lineHeight: 1.45 }}>{message}</div>
+      )}
+      {selfHealError && (
+        <div
+          role="alert"
+          style={{
+            fontSize: 12,
+            color: "var(--danger)",
+            lineHeight: 1.45,
+            background: "color-mix(in srgb, var(--danger) 8%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--danger) 35%, transparent)",
+            borderRadius: 6,
+            padding: "8px 10px",
+            display: "grid",
+            gap: 4,
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>
+            Auto-recovery failed: {selfHealError.code}
+          </div>
+          <div style={{ color: "var(--text-secondary)", fontWeight: 400 }}>
+            {selfHealError.message}
+          </div>
+          <div style={{ color: "var(--text-faint)", fontWeight: 400 }}>
+            The dashboard detected that the elb-openapi deployment is missing the
+            ELB_OPENAPI_API_TOKEN env entry and tried to patch it in place, but
+            the Kubernetes API rejected the patch. Verify the api sidecar
+            managed identity holds Azure Kubernetes Service RBAC Cluster Admin
+            on the cluster resource group, then click Generate to retry.
+          </div>
+        </div>
       )}
       {token?.updated_at && (
         <div style={{ fontSize: 11, color: "var(--text-faint)" }}>

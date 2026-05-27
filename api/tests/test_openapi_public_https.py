@@ -97,6 +97,181 @@ def test_dns_label_patch_uses_azure_annotation() -> None:
     )
 
 
+# --------------------------------------------------------------------- systempool patch
+# Anchors:
+#   - api/services/k8s/ingress.py::patch_manifest_for_system_pool
+#   - api/services/k8s/ingress.py::fetch_install_manifest_for_system_pool
+# Regression for the 2026-05-27 incident: cert-manager + ingress-nginx
+# install manifests from upstream ship with no tolerations, so on AKS
+# clusters whose nodes carry `CriticalAddonsOnly=true:NoSchedule`
+# (systempool) or `workload=blast:NoSchedule` (blastpool) every pod
+# lands in Pending forever ("0/3 nodes are available: 3 node(s) had
+# untolerated taint(s)") and the public-https pipeline trips on
+# `_wait_for_cert_manager_webhook`. The patch helper rewrites the
+# manifest so every Deployment / DaemonSet / Job lands on the systempool
+# only — we deliberately do **not** tolerate `workload=blast` because
+# control-plane add-ons must not consume CPU on the BLAST workload pool.
+
+
+def _safe_load_all(text: str) -> list[Any]:
+    import yaml as _yaml
+
+    return list(_yaml.safe_load_all(text))
+
+
+def test_patch_manifest_for_system_pool_injects_toleration_and_node_selector() -> None:
+    import yaml as _yaml
+    from api.services.k8s.ingress import patch_manifest_for_system_pool
+
+    raw = _yaml.safe_dump_all(
+        [
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": "cert-manager", "namespace": "cert-manager"},
+                "spec": {
+                    "template": {"spec": {"containers": [{"name": "controller"}]}},
+                },
+            },
+            {
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "metadata": {
+                    "name": "ingress-nginx-admission-create",
+                    "namespace": "ingress-nginx",
+                },
+                "spec": {
+                    "template": {"spec": {"containers": [{"name": "create"}]}},
+                },
+            },
+        ]
+    )
+
+    patched = _safe_load_all(patch_manifest_for_system_pool(raw))
+
+    for doc in patched:
+        pod_spec = doc["spec"]["template"]["spec"]
+        tolerations = pod_spec["tolerations"]
+        assert any(
+            t.get("key") == "CriticalAddonsOnly"
+            and t.get("operator") == "Exists"
+            and t.get("effect") == "NoSchedule"
+            for t in tolerations
+        ), f"missing systempool toleration on {doc['kind']}"
+        # We deliberately do NOT tolerate `workload=blast` — control-plane
+        # add-ons must not consume CPU on the BLAST workload pool.
+        assert not any(t.get("key") == "workload" for t in tolerations), (
+            f"{doc['kind']} must not tolerate workload=blast"
+        )
+        assert pod_spec["nodeSelector"]["kubernetes.azure.com/mode"] == "system"
+
+
+def test_patch_manifest_for_system_pool_preserves_existing_settings() -> None:
+    import yaml as _yaml
+    from api.services.k8s.ingress import patch_manifest_for_system_pool
+
+    raw = _yaml.safe_dump(
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "ingress-nginx-controller"},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [{"name": "controller"}],
+                        "tolerations": [
+                            {
+                                "key": "node-role.kubernetes.io/control-plane",
+                                "operator": "Exists",
+                                "effect": "NoSchedule",
+                            },
+                        ],
+                        "nodeSelector": {"kubernetes.io/os": "linux"},
+                    },
+                },
+            },
+        }
+    )
+
+    patched = _safe_load_all(patch_manifest_for_system_pool(raw))[0]
+    pod_spec = patched["spec"]["template"]["spec"]
+    keys = [t.get("key") for t in pod_spec["tolerations"]]
+    # Existing operator-managed toleration is preserved AND the systempool
+    # toleration is appended (rather than the list being replaced).
+    assert "node-role.kubernetes.io/control-plane" in keys
+    assert "CriticalAddonsOnly" in keys
+    # Existing nodeSelector keys must survive the patch.
+    assert pod_spec["nodeSelector"]["kubernetes.io/os"] == "linux"
+    assert pod_spec["nodeSelector"]["kubernetes.azure.com/mode"] == "system"
+
+
+def test_patch_manifest_for_system_pool_is_idempotent() -> None:
+    import yaml as _yaml
+    from api.services.k8s.ingress import patch_manifest_for_system_pool
+
+    raw = _yaml.safe_dump(
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "cert-manager-webhook"},
+            "spec": {"template": {"spec": {"containers": [{"name": "webhook"}]}}},
+        }
+    )
+
+    once = patch_manifest_for_system_pool(raw)
+    twice = patch_manifest_for_system_pool(once)
+
+    once_pod = _safe_load_all(once)[0]["spec"]["template"]["spec"]
+    twice_pod = _safe_load_all(twice)[0]["spec"]["template"]["spec"]
+    # Re-running the transform on already-patched YAML must not duplicate
+    # the systempool toleration (regression guard for "every retry of
+    # setup_openapi_public_https doubles the toleration list").
+    crit_count = sum(
+        1 for t in twice_pod["tolerations"] if t.get("key") == "CriticalAddonsOnly"
+    )
+    assert crit_count == 1
+    assert once_pod["nodeSelector"] == twice_pod["nodeSelector"]
+
+
+def test_patch_manifest_for_system_pool_passes_through_non_workload_docs() -> None:
+    import yaml as _yaml
+    from api.services.k8s.ingress import patch_manifest_for_system_pool
+
+    raw = _yaml.safe_dump_all(
+        [
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {"name": "ingress-nginx-controller"},
+                "data": {"allow-snippet-annotations": "false"},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {"name": "cert-manager"},
+            },
+            None,  # Empty `---` separator doc (trailing in cert-manager.yaml)
+        ]
+    )
+
+    serialised = patch_manifest_for_system_pool(raw)
+    docs = _safe_load_all(serialised)
+    # ConfigMap + Namespace must not have a spec.template injected.
+    cm = next(d for d in docs if d and d.get("kind") == "ConfigMap")
+    ns = next(d for d in docs if d and d.get("kind") == "Namespace")
+    assert "spec" not in cm or "template" not in cm.get("spec", {})
+    assert "spec" not in ns or "template" not in ns.get("spec", {})
+    # Empty/null docs MUST be dropped before re-serialising — otherwise
+    # the trailing `---` in upstream cert-manager.yaml becomes
+    # `--- null\n` after dump and `kubectl apply -f -` rejects the whole
+    # stream with "invalid Yaml document separator: null". Observed live
+    # on elb-cluster-01, 2026-05-27.
+    assert "null" not in serialised, (
+        "transformed manifest must not contain `--- null` separators "
+        "that kubectl rejects"
+    )
+
+
 # ------------------------------------------------------------------------ runtime cache
 
 
@@ -187,8 +362,19 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
         lambda **_kw: "/tmp/exec/kubeconfig-fake"  # noqa: S108 - fake path returned by mocked auth helper,
     )
 
-    # Stub kubectl invocations + remember sequence
+    # Stub the network fetch of upstream install manifests so the
+    # systempool patch flow goes through `apply -f -` with predictable
+    # stdin content the test can assert against. The real transform is
+    # exercised by `test_patch_manifest_for_system_pool_*` below.
+    monkeypatch.setattr(
+        task_module,
+        "fetch_install_manifest_for_system_pool",
+        lambda url, **_kw: f"# patched manifest fetched from {url}\n",
+    )
+
+    # Stub kubectl invocations + remember sequence (args + stdin)
     calls: list[list[str]] = []
+    stdins: list[str | None] = []
 
     def fake_kubectl_run(
         args: list[str],
@@ -198,6 +384,7 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
         timeout_seconds: int = 60,
     ) -> dict[str, Any]:
         calls.append(args)
+        stdins.append(stdin)
         # get-service jsonpath → return EXTERNAL-IP
         if args[:3] == ["get", "service", "ingress-nginx-controller"]:
             return _ok(stdout="20.41.1.2")
@@ -240,9 +427,38 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
     # Verify the 8 expected kubectl steps fired in order (the 9th is the
     # runtime cache write which doesn't go through kubectl)
     apply_targets = [c[2] for c in calls if c[:2] == ["apply", "-f"]]
-    # Step 1 + step 4 are URL applies, step 6 + step 7 are stdin applies
-    assert any("ingress-nginx" in t for t in apply_targets)
-    assert any("cert-manager" in t for t in apply_targets)
+    # Step 1 + step 4 now stream the patched manifest through stdin, so
+    # the args are always ["apply", "-f", "-"]. The upstream installer
+    # is identified by stdin content instead.
+    assert apply_targets, "expected at least one apply step"
+    assert all(t == "-" for t in apply_targets), (
+        "install manifests must stream through stdin so the systempool "
+        "patch can be injected"
+    )
+    install_stdins = [
+        s for c, s in zip(calls, stdins, strict=True)
+        if c[:3] == ["apply", "-f", "-"] and s and "patched manifest fetched" in s
+    ]
+    assert any("ingress-nginx" in s for s in install_stdins)
+    assert any("cert-manager" in s for s in install_stdins)
+    # The admission-webhook Job pre-delete must run before the
+    # ingress-nginx apply (immutable Job spec from a previous
+    # toleration-less install would otherwise block reconciliation).
+    delete_indexes = [
+        i for i, c in enumerate(calls)
+        if c[:1] == ["delete"]
+        and "job" in c
+        and "app.kubernetes.io/component=admission-webhook" in c
+    ]
+    assert delete_indexes, "expected admission-webhook Job pre-delete"
+    apply_indexes = [
+        i for i, c in enumerate(calls)
+        if c[:3] == ["apply", "-f", "-"]
+        and stdins[i] and "ingress-nginx" in (stdins[i] or "")
+    ]
+    assert apply_indexes and delete_indexes[0] < apply_indexes[0], (
+        "Job pre-delete must run before the ingress-nginx apply"
+    )
     # Step 2 patch, step 5 wait webhook, step 8 wait certificate
     assert any(c[:1] == ["patch"] for c in calls)
     assert any(
@@ -316,6 +532,13 @@ def test_setup_public_https_propagates_kubectl_failure(monkeypatch) -> None:
         task_module,
         "ensure_admin_kubeconfig",
         lambda **_kw: "/tmp/exec/kubeconfig-fake"  # noqa: S108 - fake path returned by mocked auth helper,
+    )
+    # Avoid hitting the network for the systempool-patch fetch — the
+    # apply step is what we are testing.
+    monkeypatch.setattr(
+        task_module,
+        "fetch_install_manifest_for_system_pool",
+        lambda url, **_kw: f"# stub for {url}\n",
     )
 
     def fake_kubectl_run(args: list[str], **_kw: Any) -> dict[str, Any]:
@@ -394,6 +617,12 @@ def test_wait_for_cert_manager_webhook_retries_rollout_status_then_waits(
     """
     from api.tasks.openapi import public_https as task_module
 
+    # The hardened wrapper sleeps between retries so a fast NotFound
+    # response does not collapse the advertised retry budget into
+    # milliseconds. The sleep is irrelevant for the unit test — what we
+    # want is to verify the retry contract — so monkeypatch it out.
+    monkeypatch.setattr(task_module.time, "sleep", lambda _seconds: None)
+
     calls: list[list[str]] = []
     rollout_attempts = 0
 
@@ -437,6 +666,58 @@ def test_wait_for_cert_manager_webhook_retries_rollout_status_then_waits(
     assert "--timeout=300s" in wait_calls[0]
 
 
+def test_wait_for_cert_manager_webhook_sleeps_between_rollout_retries(
+    monkeypatch,
+) -> None:
+    """Regression for the cold-cluster race: the hardened wrapper must
+    sleep between rollout-status retries, otherwise a fast ``NotFound``
+    response (kubectl rollout status returns immediately when the
+    Deployment object has not yet been created) burns through all 5
+    advertised retries in milliseconds and the pipeline fails before
+    cert-manager has had a chance to create the webhook Deployment.
+
+    The test records how many ``time.sleep`` calls fired and verifies
+    that the interval matches the documented constant. Without this
+    test, the only signal of the regression is the deploy pipeline
+    failing fast in production.
+    """
+    from api.tasks.openapi import public_https as task_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(task_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    def fake_kubectl_run(
+        args: list[str],
+        *,
+        kubeconfig_path: str,
+        stdin: str | None = None,
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        if args[:2] == ["rollout", "status"]:
+            return {
+                "exit_code": 1,
+                "stderr": (
+                    'Error from server (NotFound): '
+                    'deployments.apps "cert-manager-webhook" not found'
+                ),
+                "stdout": "",
+            }
+        return _ok()
+
+    monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
+
+    with pytest.raises(RuntimeError):
+        task_module._wait_for_cert_manager_webhook(kubeconfig_path="/fake")
+
+    # 5 retries → 4 sleeps (not after the last attempt). All at the same
+    # documented 15 s interval. Without these sleeps the whole 5-retry
+    # budget would collapse to <1 s of wall time when the Deployment
+    # object never appears server-side.
+    assert sleeps == [
+        task_module._CERT_MANAGER_WEBHOOK_PROBE_INTERVAL_SECONDS,
+    ] * 4
+
+
 def test_wait_for_cert_manager_webhook_raises_when_rollout_never_succeeds(
     monkeypatch,
 ) -> None:
@@ -444,6 +725,12 @@ def test_wait_for_cert_manager_webhook_raises_when_rollout_never_succeeds(
     clear RuntimeError (no fall-through to the Available wait).
     """
     from api.tasks.openapi import public_https as task_module
+
+    # Patch sleep so the test does not actually wait 4 × 15 s between the
+    # five exhausted probes. The contract under test is the raised error,
+    # not the wall-clock budget — that is covered separately in
+    # ``test_wait_for_cert_manager_webhook_sleeps_between_rollout_retries``.
+    monkeypatch.setattr(task_module.time, "sleep", lambda _seconds: None)
 
     wait_called = False
 
@@ -471,3 +758,95 @@ def test_wait_for_cert_manager_webhook_raises_when_rollout_never_succeeds(
         task_module._wait_for_cert_manager_webhook(kubeconfig_path="/fake")
 
     assert wait_called is False, "Available wait must not run when rollout probes exhausted"
+
+
+# ---------------------------------------------------------------------------
+# Certificate pre-existence probe (companion to the cert-manager webhook
+# hardening above — same NotFound race on a different resource).
+# Anchors:
+#   - api/tasks/openapi/public_https.py::_wait_for_certificate_object_to_exist
+#   - api/tasks/openapi/public_https.py::_wait_for_certificate_ready
+# ---------------------------------------------------------------------------
+
+
+def test_wait_for_certificate_ready_polls_existence_before_wait_condition(
+    monkeypatch,
+) -> None:
+    """cert-manager's ingress-shim creates the Certificate CR asynchronously
+    after the Ingress is applied. Without a pre-existence probe the
+    immediate ``kubectl wait --for=condition=Ready`` returns ``NotFound``
+    in <1 s on older kubectl builds. The hardened helper polls
+    ``kubectl get certificate`` with sleeps until the object exists,
+    then issues the wait once.
+    """
+    from api.tasks.openapi import public_https as task_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(task_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    get_attempts = 0
+    wait_called = False
+
+    def fake_kubectl_run(
+        args: list[str],
+        *,
+        kubeconfig_path: str,
+        stdin: str | None = None,
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        nonlocal get_attempts, wait_called
+        # The new existence probe uses `-o name` to keep the response small.
+        if args[:2] == ["get", "certificate"] and "name" in args:
+            get_attempts += 1
+            if get_attempts < 3:
+                return {"exit_code": 1, "stderr": 'Error from server (NotFound)', "stdout": ""}
+            return _ok(stdout=f"certificate.cert-manager.io/{args[2]}")
+        if args[:1] == ["wait"]:
+            wait_called = True
+            return _ok()
+        # The post-failure jsonpath probe and the expiry read should not
+        # fire on the happy path.
+        return _ok()
+
+    monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
+
+    task_module._wait_for_certificate_ready(kubeconfig_path="/fake", timeout_seconds=300)
+
+    # 2 not-found + 1 found = 3 probes; one wait after.
+    assert get_attempts == 3
+    assert wait_called is True
+    # Sleeps fire BETWEEN existence probes (not after the successful one),
+    # so 2 not-found responses → 2 sleeps, each at the documented interval.
+    assert sleeps == [
+        task_module._CERTIFICATE_EXISTS_PROBE_INTERVAL_SECONDS,
+    ] * 2
+
+
+def test_wait_for_certificate_object_to_exist_returns_silently_when_budget_exhausted(
+    monkeypatch,
+) -> None:
+    """When the Certificate CR never appears (cert-manager misconfigured or
+    ingress-shim never picked up the Ingress), the pre-existence probe
+    returns silently. The subsequent ``kubectl wait`` is left to surface
+    the eventual failure with its richer condition-message probe, so
+    operators never see a less informative "certificate not found" error
+    that hides the real cause.
+    """
+    from api.tasks.openapi import public_https as task_module
+
+    monkeypatch.setattr(task_module.time, "sleep", lambda _seconds: None)
+
+    def fake_kubectl_run(
+        args: list[str],
+        *,
+        kubeconfig_path: str,
+        stdin: str | None = None,
+        timeout_seconds: int = 60,
+    ) -> dict[str, Any]:
+        return {"exit_code": 1, "stderr": "NotFound", "stdout": ""}
+
+    monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
+
+    # Must not raise. The subsequent wait will eventually surface the
+    # error via _wait_for_certificate_ready's condition probe.
+    task_module._wait_for_certificate_object_to_exist(kubeconfig_path="/fake")

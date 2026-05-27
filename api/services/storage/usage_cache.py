@@ -2,7 +2,7 @@
 
 Responsibility: Cache best-effort Storage container usage totals for monitor cards.
 Edit boundaries: Keep only in-process usage snapshot caching here; Storage SDK enumeration stays
-in `api.services.storage_data` and HTTP response shaping stays in routes/services.
+in `api.services.storage.data` and HTTP response shaping stays in routes/services.
 Key entry points: `UsageCacheResult`, `cached_container_usage_summaries`,
 `reset_storage_usage_cache`
 Risky contracts: Cold cache misses must not block dashboard rendering on full blob enumeration.

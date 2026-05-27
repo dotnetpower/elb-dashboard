@@ -1,6 +1,6 @@
-"""Unit tests for the auto-sharding logic in api.services.blast_config.
+"""Unit tests for the auto-sharding logic in api.services.blast.config.
 
-Responsibility: Unit tests for the auto-sharding logic in api.services.blast_config
+Responsibility: Unit tests for the auto-sharding logic in api.services.blast.config
 Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
 Azure calls.
 Key entry points: `_parse`, `_base_params`,

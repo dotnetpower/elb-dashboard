@@ -158,3 +158,307 @@ def test_generate_openapi_token_patches_deployment_and_runtime_cache(monkeypatch
         "value": {"name": "ELB_OPENAPI_API_TOKEN", "value": "generated-token"},
     }
     assert session.closed is True
+
+
+def test_status_returns_existing_token_without_patch(monkeypatch) -> None:
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment("live-token"))
+    saved: list[str] = []
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+    monkeypatch.setattr(
+        openapi_token,
+        "save_openapi_api_token",
+        lambda token, **_kwargs: saved.append(token) or True,
+    )
+
+    result = openapi_token.get_openapi_api_token_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result["configured"] is True
+    assert result["token"] == "live-token"
+    assert result["generated"] is False
+    assert result["updated_at"] is None
+    assert result["self_heal_error"] is None
+    assert session.patches == []
+    assert saved == ["live-token"]
+
+
+def test_status_self_heals_legacy_deployment_without_token_env(monkeypatch) -> None:
+    """Pre-9d4e549 deployments shipped without `ELB_OPENAPI_API_TOKEN`.
+
+    The status endpoint must mint + patch one in place so the SPA panel does
+    not stay on "No API token generated" until the operator clicks Generate.
+    """
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment())
+    saved: list[str] = []
+    audit_events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+    monkeypatch.setattr(openapi_token, "_generate_token", lambda: "auto-healed-token")
+    monkeypatch.setattr(
+        openapi_token,
+        "save_openapi_api_token",
+        lambda token, **_kwargs: saved.append(token) or True,
+    )
+    monkeypatch.setattr(
+        openapi_token,
+        "_record_self_heal_audit",
+        lambda *, event, detail, **_kwargs: audit_events.append((event, detail)),
+    )
+    monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
+
+    result = openapi_token.get_openapi_api_token_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result["configured"] is True
+    assert result["token"] == "auto-healed-token"
+    assert result["generated"] is True
+    assert result["updated_at"] is not None
+    assert result["self_heal_error"] is None
+    assert saved == ["auto-healed-token"]
+    # Audit row emitted with the success event so /api/audit/log picks it up.
+    assert len(audit_events) == 1
+    event_name, event_detail = audit_events[0]
+    assert event_name == "openapi_token_self_healed"
+    assert event_detail["deployment_name"] == openapi_token.OPENAPI_DEPLOYMENT_NAME
+    # A JSON Patch went out — the self-heal path reuses _patch_deployment_token.
+    assert len(session.patches) == 1
+    assert session.patches[0]["headers"] == {"Content-Type": "application/json-patch+json"}
+    ops = session.patches[0]["json"]
+    token_op = ops[-1]
+    assert token_op == {
+        "op": "add",
+        "path": "/spec/template/spec/containers/0/env/-",
+        "value": {"name": "ELB_OPENAPI_API_TOKEN", "value": "auto-healed-token"},
+    }
+
+
+def test_status_self_heal_patch_failure_falls_back_to_empty(monkeypatch) -> None:
+    """If the env is empty but the patch fails (RBAC / webhook), the status
+    must report `configured=false` AND surface the failure code+message in
+    `self_heal_error` so the SPA panel can render an actionable red banner
+    (not the silent "No API token generated" placeholder).
+    """
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment())
+    audit_events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+    monkeypatch.setattr(openapi_token, "_generate_token", lambda: "would-be-token")
+    monkeypatch.setattr(
+        openapi_token,
+        "_record_self_heal_audit",
+        lambda *, event, detail, **_kwargs: audit_events.append((event, detail)),
+    )
+
+    def _explode(*_args, **_kwargs):
+        raise openapi_token.OpenApiTokenError(502, "openapi_token_patch_failed", "boom")
+
+    monkeypatch.setattr(openapi_token, "_patch_deployment_token", _explode)
+
+    result = openapi_token.get_openapi_api_token_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result["configured"] is False
+    assert result["token"] == ""
+    assert result["generated"] is False
+    assert result["updated_at"] is None
+    assert result["self_heal_error"] == {
+        "code": "openapi_token_patch_failed",
+        "message": "boom",
+    }
+    # Audit row carries the failure event with the K8s error fields so
+    # operators can correlate from the SPA audit table without re-reading
+    # api sidecar logs.
+    assert len(audit_events) == 1
+    event_name, event_detail = audit_events[0]
+    assert event_name == "openapi_token_self_heal_failed"
+    assert event_detail["error_code"] == "openapi_token_patch_failed"
+    assert event_detail["error_message"] == "boom"
+
+
+def test_self_heal_paths_never_leak_token_value(monkeypatch) -> None:
+    """Hardening contract: neither the audit payload nor the log message
+    may ever carry the minted token value. A regression here would ship
+    OpenAPI admin tokens into the audit table / Log Analytics, which is
+    a serious credential leak."""
+    from api.services.openapi import token as openapi_token
+
+    audit_events: list[tuple[str, dict[str, Any]]] = []
+    secret_token = "DO-NOT-LEAK-this-very-secret-token-value"
+    session = FakeSession(_deployment())
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+    monkeypatch.setattr(openapi_token, "_generate_token", lambda: secret_token)
+    monkeypatch.setattr(
+        openapi_token,
+        "save_openapi_api_token",
+        lambda token, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        openapi_token,
+        "_record_self_heal_audit",
+        lambda *, event, detail, **_kwargs: audit_events.append((event, detail)),
+    )
+    monkeypatch.delenv("ELB_OPENAPI_API_TOKEN", raising=False)
+
+    result = openapi_token.get_openapi_api_token_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    # Sanity: the test actually exercised the self-heal mint path.
+    assert result["token"] == secret_token
+    assert result["generated"] is True
+    # The audit payload must never carry the token value (search every
+    # nested value, not just top-level keys, so a future refactor that
+    # adds a sub-dict cannot quietly bypass this guard).
+    assert len(audit_events) == 1
+    _, detail = audit_events[0]
+
+    def _flatten(value: Any) -> list[str]:
+        if isinstance(value, dict):
+            out: list[str] = []
+            for v in value.values():
+                out.extend(_flatten(v))
+            return out
+        if isinstance(value, list | tuple):
+            out = []
+            for item in value:
+                out.extend(_flatten(item))
+            return out
+        return [str(value)]
+
+    for blob in _flatten(detail):
+        assert secret_token not in blob, (
+            f"audit detail leaked the OpenAPI token via value: {blob!r}"
+        )
+
+
+def test_self_heal_is_idempotent_when_env_already_populated(monkeypatch) -> None:
+    """Once a self-heal mint has populated the deployment env, subsequent
+    status calls must be pure reads — no second mint, no second audit row.
+    This guards against the auto-mint becoming a silent rotator if some
+    future refactor accidentally re-triggers the empty-env branch."""
+    from api.services.openapi import token as openapi_token
+
+    # First call: env empty → self-heal mints "minted-by-heal".
+    # Subsequent call (simulated by a fresh FakeSession that reflects the
+    # post-patch deployment) reads the live token and must not mint again.
+    session_after = FakeSession(_deployment("minted-by-heal"))
+    audit_events: list[str] = []
+    mint_count = {"n": 0}
+
+    def _counting_generate() -> str:
+        mint_count["n"] += 1
+        return f"unexpected-extra-mint-{mint_count['n']}"
+
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session_after, "https://k8s"),
+    )
+    monkeypatch.setattr(openapi_token, "_generate_token", _counting_generate)
+    monkeypatch.setattr(
+        openapi_token,
+        "save_openapi_api_token",
+        lambda token, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        openapi_token,
+        "_record_self_heal_audit",
+        lambda *, event, **_kwargs: audit_events.append(event),
+    )
+
+    result = openapi_token.get_openapi_api_token_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+    )
+
+    assert result["token"] == "minted-by-heal"
+    assert result["generated"] is False
+    assert result["self_heal_error"] is None
+    assert mint_count["n"] == 0, (
+        "self-heal must not run when the env entry is already populated"
+    )
+    assert audit_events == [], (
+        "no audit row must be written for read-only status checks"
+    )
+    assert session_after.patches == [], "no PATCH must be issued on read-only path"
+
+
+def test_self_heal_audit_inherits_caller_identity(monkeypatch) -> None:
+    """Audit rows must carry the triggering caller's oid/tenant so
+    `/api/audit/log` (which queries `list_for_owner(caller.object_id)`)
+    surfaces the event to the user. Without this the row would land
+    under `owner_oid="system"` and never appear in the SPA audit table.
+    """
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment())
+    captured: dict[str, Any] = {}
+
+    def _capture(*, event, detail, caller_oid="", tenant_id="", **_kwargs):
+        captured["event"] = event
+        captured["detail"] = detail
+        captured["caller_oid"] = caller_oid
+        captured["tenant_id"] = tenant_id
+
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+    monkeypatch.setattr(openapi_token, "_generate_token", lambda: "minted-with-caller")
+    monkeypatch.setattr(
+        openapi_token,
+        "save_openapi_api_token",
+        lambda token, **_kwargs: True,
+    )
+    monkeypatch.setattr(openapi_token, "_record_self_heal_audit", _capture)
+
+    openapi_token.get_openapi_api_token_status(
+        object(),
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="aks-elb",
+        caller_oid="caller-oid-abc123",
+        tenant_id="tenant-xyz",
+    )
+
+    assert captured["caller_oid"] == "caller-oid-abc123"
+    assert captured["tenant_id"] == "tenant-xyz"
+    assert captured["event"] == "openapi_token_self_healed"

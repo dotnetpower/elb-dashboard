@@ -1,5 +1,7 @@
 import { AlertTriangle, Loader2, Package } from "lucide-react";
 
+import { RepairPeeringButton } from "@/pages/apiReference/RepairPeeringButton";
+
 import { formatDeployPhase } from "./storageHelpers";
 import type { DeployState } from "./useDeployTask";
 
@@ -37,6 +39,20 @@ export interface DeployStatusBannerProps {
   deployError: string | null;
   deployCustomStatus: { phase?: string } | null | undefined;
   waitElapsed: number;
+  /** Envelope-root ``recovery_action`` from the deploy-status response.
+   *  When equal to ``"peer_with_platform"`` the banner additionally
+   *  renders {@link RepairPeeringButton} so the operator can fix the
+   *  VNet peering without leaving the panel. */
+  deployRecoveryAction?: string | null;
+  deployRecoveryHint?: string | null;
+  /** Required when {@link deployRecoveryAction} is set so the Repair
+   *  button can target the right cluster. */
+  subscriptionId?: string;
+  resourceGroup?: string;
+  clusterName?: string;
+  /** Called after the Repair button succeeds so the panel can refetch
+   *  service discovery. */
+  onRecoveryResolved?: () => void;
 }
 
 export function DeployStatusBanner({
@@ -45,6 +61,12 @@ export function DeployStatusBanner({
   deployError,
   deployCustomStatus,
   waitElapsed,
+  deployRecoveryAction,
+  deployRecoveryHint,
+  subscriptionId,
+  resourceGroup,
+  clusterName,
+  onRecoveryResolved,
 }: DeployStatusBannerProps) {
   if (deployState === "waiting") {
     return (
@@ -99,11 +121,14 @@ export function DeployStatusBanner({
     );
   }
   if (deployState === "error" && deployError) {
+    const showRepair =
+      deployRecoveryAction === "peer_with_platform" &&
+      Boolean(subscriptionId && resourceGroup && clusterName);
     return (
       <div
         style={{
           display: "flex",
-          alignItems: "flex-start",
+          flexDirection: "column",
           gap: 8,
           padding: "8px 12px",
           marginBottom: 12,
@@ -114,8 +139,34 @@ export function DeployStatusBanner({
           color: "var(--danger)",
         }}
       >
-        <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
-        <span style={{ wordBreak: "break-word" }}>{deployError}</span>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+          <AlertTriangle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span style={{ wordBreak: "break-word" }}>{deployError}</span>
+        </div>
+        {showRepair && (
+          <>
+            {deployRecoveryHint && (
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "var(--text-muted)",
+                  marginLeft: 20,
+                }}
+              >
+                {deployRecoveryHint}
+              </div>
+            )}
+            <div style={{ marginLeft: 20 }}>
+              <RepairPeeringButton
+                subscriptionId={subscriptionId!}
+                resourceGroup={resourceGroup!}
+                clusterName={clusterName!}
+                onResolved={() => onRecoveryResolved?.()}
+                size="compact"
+              />
+            </div>
+          </>
+        )}
       </div>
     );
   }

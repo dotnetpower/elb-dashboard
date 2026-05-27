@@ -284,10 +284,13 @@ function JobsSkeleton() {
             border: "1px solid var(--border-weak)",
           }}
         >
-          <SkeletonBar width="82%" height={12} />
-          <SkeletonBar width="60%" height={10} />
           <SkeletonBar width="70%" height={12} />
-          <SkeletonBar width="75%" height={10} />
+          <SkeletonBar width="80%" height={12} />
+          <SkeletonBar width="90%" height={12} />
+          <SkeletonBar width="60%" height={10} />
+          <SkeletonBar width="70%" height={10} />
+          <SkeletonBar width="60%" height={10} />
+          <SkeletonBar width="60%" height={10} />
         </div>
       ))}
     </div>
@@ -332,10 +335,13 @@ function JobsTableHeader({ showUser }: { showUser: boolean }) {
         borderBottom: "1px solid var(--border-weak)",
       }}
     >
-      <span>Job</span>
+      <span>Program</span>
+      <span>Database</span>
+      <span>Job title</span>
       {showUser && <span className="pulse-job-user">User</span>}
       <span style={{ textAlign: "center" }}>Status</span>
-      <span style={{ textAlign: "right" }}>Time</span>
+      <span style={{ textAlign: "right" }}>Age</span>
+      <span style={{ textAlign: "right" }}>Duration</span>
     </div>
   );
 }

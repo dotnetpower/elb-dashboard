@@ -16,11 +16,11 @@ from collections.abc import Mapping
 from datetime import UTC
 from typing import Any
 
-from api.services import blast_task_config as _blast_task_config
+from api.services.blast import task_config as _blast_task_config
 from api.services.blast.db_metadata import (
     resolve_db_metadata,  # noqa: F401  # re-exported for config_shims + tests
 )
-from api.services.blast_task_config import (
+from api.services.blast.task_config import (
     WarmupNotReadyError,  # noqa: F401  # re-exported for tests
 )
 from api.services.query_grouping import (

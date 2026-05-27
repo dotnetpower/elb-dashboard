@@ -124,7 +124,8 @@ fi
 start_detached_log_follower() {
   stop_existing_follower
   local latest_dir target_log
-  latest_dir=$(readlink -f "$log_base/latest" 2>/dev/null || true)
+  latest_dir="$log_base/latest"
+  mkdir -p "$latest_dir"
   target_log="$latest_dir/$container_log_service.log"
   local command=(
     "$run_with_log"

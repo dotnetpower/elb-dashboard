@@ -97,7 +97,7 @@ where the failure was found, but knowing them up front saves a lot of time.
    doing that will break in tests because there is no sys.path bridge anymore.
 3. **Never issue a SAS token to the browser** and never re-introduce
    `generate_blob_sas`, `get_user_delegation_key`, or
-   `BlobSasPermissions` in [api/services/storage_data.py](./api/services/storage_data.py).
+   `BlobSasPermissions` in [api/services/storage/data.py](./api/services/storage/data.py).
    See the load-bearing comment at the bottom of that file.
 4. **Never bind `ttyd` to anything other than `127.0.0.1`.** The api sidecar
    is the only legitimate client; the public ingress targets `:8080` only.
@@ -129,7 +129,7 @@ where the failure was found, but knowing them up front saves a lot of time.
      hand-running the three helpers when an agent or developer needs to
      debug as their real `az login` identity.
 
-   Local backend auto-open must go through `api.services.storage_public_access`
+   Local backend auto-open must go through `api.services.storage.public_access`
    and keep the `CONTAINER_APP_NAME` guard. Do not bypass the script with
    `--default-action Allow`, `bypass: AzureServices`, or a wider IP range — see
    [.github/copilot-instructions.md §9](./.github/copilot-instructions.md).

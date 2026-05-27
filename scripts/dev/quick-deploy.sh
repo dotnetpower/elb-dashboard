@@ -49,6 +49,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 . "$REPO_ROOT/scripts/dev/acr-build-access.sh"
 . "$REPO_ROOT/scripts/dev/terminal-base-image.sh"
+. "$REPO_ROOT/scripts/dev/az-context.sh"
 
 ts() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -153,37 +154,352 @@ if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${ACR_NAME:-}" || -z "${ACR_LOGIN_SE
   load_azd_env
 fi
 
-[[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal|all> [tag] [--logs] [--rebuild-terminal-base]"
+[[ $# -ge 1 ]] || die "usage: $0 <api|worker|beat|frontend|terminal|all> [tag] [--logs] [--rebuild-terminal-base] [--no-build|--build-only] [--yes]"
 
 SIDECAR="$1"; shift || true
 TAG=""
 TAIL_LOGS=false
 REBUILD_TERMINAL_BASE=false
+SKIP_CONFIRM=false
+# --no-build: skip the `az acr build` step and patch the Container App
+# straight to an EXISTING image tag in ACR. Used by the GitHub Actions
+# deploy workflow, which builds in a separate `build-images.yml` job and
+# then triggers deploy.yml with the resulting tag. When set, the frontend
+# PATCH also skips --set-env-vars so the runtime env baked at build time
+# (or applied by the last full deploy) is preserved.
+NO_BUILD=false
+# --build-only: opposite of --no-build. Build the image(s) via `az acr build`
+# and skip the `az containerapp update` PATCH. Used by build-images.yml in
+# GitHub Actions so a push to main produces images in ACR without changing
+# the running Container App; deploy.yml then triggers a separate run with
+# --no-build to actually swap the revision.
+BUILD_ONLY=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --logs) TAIL_LOGS=true ;;
     --rebuild-terminal-base) REBUILD_TERMINAL_BASE=true ;;
+    --no-build) NO_BUILD=true ;;
+    --build-only) BUILD_ONLY=true ;;
+    --yes|-y) SKIP_CONFIRM=true ;;
     -*)     die "unknown flag: $1" ;;
     *)      TAG="$1" ;;
   esac
   shift
 done
+$NO_BUILD && $BUILD_ONLY && die "--no-build and --build-only are mutually exclusive"
 [[ -n "$TAG" ]] || TAG="$(date +%Y%m%d%H%M%S)"
+# ELB_QUICK_DEPLOY_SKIP_CONFIRM=1 (env) is an alternative to --yes for
+# automation contexts that cannot easily inject a CLI flag (e.g. CI hooks
+# that re-shell into this script).
+[[ "${ELB_QUICK_DEPLOY_SKIP_CONFIRM:-0}" == "1" ]] && SKIP_CONFIRM=true
+
+# ---------------------------------------------------------------------------
+# Interactive confirmation. Show the discovered subscription/tenant/RG/ACR/
+# app so the operator can sanity-check the target before any ACR build or
+# Container App PATCH runs. Skipped when:
+#   - stdin is not a TTY (CI, piped, etc.)
+#   - --yes / -y is passed on the CLI
+#   - ELB_QUICK_DEPLOY_SKIP_CONFIRM=1 is exported
+#
+# Default-Enter = proceed, anything else = abort. The default is "proceed"
+# because the alternative (default-abort) would force every operator to
+# type a key on every deploy, even when the discovered target is exactly
+# what `az account show` already told them on the previous line.
+# ---------------------------------------------------------------------------
+confirm_deploy_target() {
+  $SKIP_CONFIRM && return 0
+  [[ -t 0 ]] || return 0
+  printf '\n' >&2
+  printf '\033[1m==> About to deploy to:\033[0m\n' >&2
+  printf '      subscription : %s  (%s)\n' "${AZURE_SUBSCRIPTION_ID:-?}" "$(az account show --query name -o tsv 2>/dev/null || printf '?')" >&2
+  printf '      tenant       : %s\n' "${AZURE_TENANT_ID:-?}" >&2
+  printf '      resourceGroup: %s\n' "${AZURE_RESOURCE_GROUP:-?}" >&2
+  printf '      acr          : %s\n' "${ACR_LOGIN_SERVER:-${ACR_NAME:-?}}" >&2
+  printf '      containerApp : %s\n' "${CONTAINER_APP_NAME:-?}" >&2
+  [[ -n "${CONTAINER_APP_FQDN:-}" ]] && printf '      fqdn         : https://%s\n' "$CONTAINER_APP_FQDN" >&2
+  printf '      sidecar(s)   : %s\n' "$SIDECAR" >&2
+  printf '      tag          : %s\n\n' "$TAG" >&2
+  local reply=""
+  read -r -p "Proceed? [Enter=yes, anything else=abort] " reply || true
+  if [[ -n "$reply" ]]; then
+    ts "aborted by user (input: '$reply')"
+    exit 1
+  fi
+}
 
 if [[ "$SIDECAR" == "all" ]]; then
-  ts "==> Deploying all quick-deploy targets with tag: $TAG"
-  for target in api frontend terminal; do
-    ts "==> Dispatching quick deploy target: $target"
-    if [[ "$target" == "terminal" && "$REBUILD_TERMINAL_BASE" == "true" ]]; then
-      "$REPO_ROOT/scripts/dev/quick-deploy.sh" "$target" "$TAG" --rebuild-terminal-base
-    else
-      "$REPO_ROOT/scripts/dev/quick-deploy.sh" "$target" "$TAG"
+  # ---------------------------------------------------------------------------
+  # Parallel-build path: api / frontend / terminal images build concurrently
+  # via three backgrounded `az acr build` jobs, then we PATCH the Container
+  # App containers SEQUENTIALLY. Two races make naive full parallelism
+  # unsafe and they're both worth re-stating:
+  #
+  #   1. ACR firewall toggle. acr_ensure_build_access / acr_restore_build_access
+  #      track state in subshell-local vars. If each per-target subshell ran
+  #      its own toggle, the first one to finish would close the firewall
+  #      while the others were still mid-build, and they'd fail with 401 /
+  #      "network not allowed". Open ONCE in the parent, close ONCE after
+  #      `wait`.
+  #
+  #   2. `az containerapp update --container-name X` is read-modify-write
+  #      against the same template with no ETag protection. Running three
+  #      PATCHes in parallel against a single Container App is a classic
+  #      last-write-wins race -- some sidecars get reverted on the final
+  #      active revision. PATCHes stay sequential.
+  #
+  # Net result vs the old recursive-sequential loop: build time drops from
+  # ~3 min (3 x ~60 s sequential) to ~60-90 s (parallel; bound by the
+  # slowest image). PATCH wall time is unchanged (~1 min). Total deploy
+  # ~3-4 min vs ~6-8 min.
+  # ---------------------------------------------------------------------------
+  ts "==> Deploying all quick-deploy targets with tag: $TAG (parallel-build mode)"
+  $NO_BUILD && ts "    --no-build: skipping ACR build, will only PATCH Container App"
+
+  # Discover/align env from the active az login BEFORE validating env vars,
+  # so a stale `/tmp/azd-env.sh` from a different sub does not block the
+  # deploy. The helper exports AZURE_*, ACR_*, CONTAINER_APP_*, etc. from
+  # ARM lookups in the active subscription.
+  assert_az_subscription_aligned
+
+  for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME; do
+    [[ -n "${!v:-}" ]] || die "$v is unset and az-context discovery could not populate it (run: az login + verify the active sub has an elb-dashboard RG)"
+  done
+  confirm_deploy_target
+  ensure_provider_registration_once
+
+  NEW_API="${ACR_LOGIN_SERVER}/elb-api:${TAG}"
+  NEW_FRONTEND="${ACR_LOGIN_SERVER}/elb-frontend:${TAG}"
+  NEW_TERMINAL="${ACR_LOGIN_SERVER}/elb-terminal:${TAG}"
+
+if ! $NO_BUILD; then
+  # Resolve frontend build args + per-PATCH env-vars on the host once. These
+  # mirror the single-sidecar `frontend` branch below (line ~228 onward) and
+  # MUST stay in sync with it -- if you add a new VITE_FEATURE_* there, add
+  # it here too.
+  API_CLIENT_ID_VAL="${VITE_AZURE_CLIENT_ID:-${API_CLIENT_ID:-}}"
+  [[ -n "$API_CLIENT_ID_VAL" ]] || die "API_CLIENT_ID/VITE_AZURE_CLIENT_ID is unset; set .env, web/.env.local, or azd env before deploying"
+  AZURE_TENANT_ID_VAL="${VITE_AZURE_TENANT_ID:-${AZURE_TENANT_ID:-common}}"
+  if [[ "$AZURE_TENANT_ID_VAL" == "common" && -n "${AZURE_TENANT_ID:-}" ]]; then
+    AZURE_TENANT_ID_VAL="$AZURE_TENANT_ID"
+  fi
+  VITE_AUTH_DEV_BYPASS_VAL="${VITE_AUTH_DEV_BYPASS:-false}"
+  VITE_API_BASE_URL_VAL="${VITE_API_BASE_URL:-}"
+  VITE_AZURE_REDIRECT_URI_VAL="${VITE_AZURE_REDIRECT_URI:-__RUNTIME__}"
+  VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
+  VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
+  VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
+
+  if [[ -n "$VITE_API_BASE_URL_VAL" ]] && \
+     [[ "$VITE_API_BASE_URL_VAL" =~ ^https?://(localhost|127\.|0\.0\.0\.0|\[::1\]) ]]; then
+    die "VITE_API_BASE_URL='$VITE_API_BASE_URL_VAL' points at the local host — refusing to bake that into the cloud frontend. Run 'unset VITE_API_BASE_URL' (or export VITE_API_BASE_URL='') and retry."
+  fi
+  if [[ "$VITE_AUTH_DEV_BYPASS_VAL" == "true" && "${ELB_ALLOW_AUTH_BYPASS_IN_CLOUD:-0}" != "1" ]]; then
+    die "VITE_AUTH_DEV_BYPASS=true — refusing to deploy a cloud frontend that skips MSAL while the api enforces bearer tokens. Run 'unset VITE_AUTH_DEV_BYPASS' (or export VITE_AUTH_DEV_BYPASS=false) and retry."
+  fi
+
+  APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"
+  APP_BUILD_NUMBER_VAL="${APP_BUILD_NUMBER:-$(release_build_number)}"
+  GIT_COMMIT_VAL="${GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)}"
+  BUILD_TIME_VAL="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+
+  LOG_DIR="$REPO_ROOT/.logs/quick-deploy/$TAG"
+  mkdir -p "$LOG_DIR"
+  ts "==> Per-image build logs:   $LOG_DIR/build-<image>.log"
+  ts "    Follow live in another terminal:"
+  ts "      tail -F $LOG_DIR/build-*.log"
+  ts ""
+
+  # Install the restore trap BEFORE opening the firewall. acr_ensure_build_access
+  # mutates ACR network state then waits for the policy to take effect; if any
+  # step inside the helper fails (set -e), we must still restore. The helper
+  # uses ACR_BUILD_ACCESS_RESTORE_NEEDED so a pre-open trap is a safe no-op.
+  trap 'acr_restore_build_access "$ACR_NAME"' EXIT
+  acr_ensure_build_access "$ACR_NAME"
+
+  # Resolve terminal base in the parent so the three build subshells don't
+  # race on `ensure_terminal_base_image` (it can build + push a base image
+  # on cache miss, and two concurrent runs of that helper would step on
+  # each other's `az acr import` / `az acr build`). When the base image is
+  # missing this is the longest single step of the deploy (~2-4 min); the
+  # tip above already pointed the operator at $LOG_DIR/build-elb-terminal-base.log.
+  TERMINAL_BASE_REBUILD="$REBUILD_TERMINAL_BASE" ensure_terminal_base_image
+  TERMINAL_BASE_IMAGE_VAL="$(terminal_base_image)"
+
+  ts "==> Building 3 images in parallel via az acr build"
+  {
+    echo "[build-elb-api] starting at $(date -u +%H:%M:%S)"
+    az acr build \
+      --registry "$ACR_NAME" \
+      --image "elb-api:${TAG}" \
+      --file "api/Dockerfile" \
+      "." \
+      -o none
+    rc=$?
+    echo "[build-elb-api] finished at $(date -u +%H:%M:%S), rc=$rc"
+    exit $rc
+  } > "$LOG_DIR/build-elb-api.log" 2>&1 &
+  PID_API=$!
+
+  {
+    echo "[build-elb-frontend] starting at $(date -u +%H:%M:%S)"
+    az acr build \
+      --registry "$ACR_NAME" \
+      --image "elb-frontend:${TAG}" \
+      --file "web/Dockerfile" \
+      --build-arg "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL" \
+      --build-arg "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL" \
+      --build-arg "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL" \
+      --build-arg "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
+      --build-arg "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL" \
+      --build-arg "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL" \
+      --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL" \
+      --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL" \
+      --build-arg "APP_VERSION=$APP_VERSION_VAL" \
+      --build-arg "APP_BUILD_NUMBER=$APP_BUILD_NUMBER_VAL" \
+      --build-arg "GIT_COMMIT=$GIT_COMMIT_VAL" \
+      --build-arg "BUILD_TIME=$BUILD_TIME_VAL" \
+      "." \
+      -o none
+    rc=$?
+    echo "[build-elb-frontend] finished at $(date -u +%H:%M:%S), rc=$rc"
+    exit $rc
+  } > "$LOG_DIR/build-elb-frontend.log" 2>&1 &
+  PID_FRONTEND=$!
+
+  {
+    echo "[build-elb-terminal] starting at $(date -u +%H:%M:%S)"
+    az acr build \
+      --registry "$ACR_NAME" \
+      --image "elb-terminal:${TAG}" \
+      --file "terminal/Dockerfile.runtime" \
+      --build-arg "TERMINAL_BASE_IMAGE=$TERMINAL_BASE_IMAGE_VAL" \
+      "terminal/" \
+      -o none
+    rc=$?
+    echo "[build-elb-terminal] finished at $(date -u +%H:%M:%S), rc=$rc"
+    exit $rc
+  } > "$LOG_DIR/build-elb-terminal.log" 2>&1 &
+  PID_TERMINAL=$!
+
+  ts "    elb-api:      pid=$PID_API"
+  ts "    elb-frontend: pid=$PID_FRONTEND"
+  ts "    elb-terminal: pid=$PID_TERMINAL"
+
+  declare -A RUNNING=(
+    ["elb-api"]=$PID_API
+    ["elb-frontend"]=$PID_FRONTEND
+    ["elb-terminal"]=$PID_TERMINAL
+  )
+  while [ ${#RUNNING[@]} -gt 0 ]; do
+    sleep 15
+    finished=()
+    for name in "${!RUNNING[@]}"; do
+      pid=${RUNNING["$name"]}
+      if ! kill -0 "$pid" 2>/dev/null; then
+        set +e
+        wait "$pid"
+        rc=$?
+        set -e
+        if [ "$rc" = "0" ]; then
+          ts "    ✓ $name finished (rc=0)"
+        else
+          ts "    ✗ $name FAILED (rc=$rc) — see $LOG_DIR/build-$name.log"
+          tail -30 "$LOG_DIR/build-$name.log" | sed "s/^/      [build-$name] /"
+        fi
+        finished+=("$name")
+      fi
+    done
+    for name in "${finished[@]}"; do
+      unset "RUNNING[$name]"
+    done
+    if [ ${#RUNNING[@]} -gt 0 ]; then
+      ts "    waiting for: ${!RUNNING[*]}"
     fi
   done
+
+  fail=0
+  for name in elb-api elb-frontend elb-terminal; do
+    if ! grep -q "rc=0$" "$LOG_DIR/build-$name.log" 2>/dev/null; then
+      fail=1
+      ts "✗ build $name did not produce rc=0"
+    fi
+  done
+  if [ "$fail" = "1" ]; then
+    ts "Aborting: at least one image build failed (ACR firewall will be restored on exit)."
+    exit 1
+  fi
+  ts "==> All 3 images built and pushed"
+
+  acr_restore_build_access "$ACR_NAME"
+  trap - EXIT
+fi  # end: if ! $NO_BUILD (all branch)
+
+if $BUILD_ONLY; then
+  ts "==> --build-only: skipping Container App PATCH. Built images:"
+  ts "      $NEW_API"
+  ts "      $NEW_FRONTEND"
+  ts "      $NEW_TERMINAL"
+  ts "==> Done. Tag was: $TAG"
+  exit 0
+fi
+
+  # Sequential PATCHes -- see the long comment at the top of this block.
+  # api / worker / beat share the elb-api image and are patched one at a
+  # time to keep the read-modify-write semantics deterministic.
+  declare -a PATCH_PLAN=(
+    "api:$NEW_API"
+    "worker:$NEW_API"
+    "beat:$NEW_API"
+    "frontend:$NEW_FRONTEND"
+    "terminal:$NEW_TERMINAL"
+  )
+  for spec in "${PATCH_PLAN[@]}"; do
+    tgt="${spec%%:*}"
+    img="${spec#*:}"
+    ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $img"
+    if [[ "$tgt" == "frontend" && "$NO_BUILD" != "true" ]]; then
+      # Full deploy resolved VITE_* / API_CLIENT_ID on the host; mirror them
+      # to the frontend runtime env so runtime-config.js stays in sync with
+      # the image we just built.
+      az containerapp update \
+        --name "$CONTAINER_APP_NAME" \
+        --resource-group "$AZURE_RESOURCE_GROUP" \
+        --container-name "$tgt" \
+        --image "$img" \
+        --set-env-vars \
+          "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL" \
+          "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL" \
+          "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL" \
+          "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
+          "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL" \
+          "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL" \
+          "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL" \
+          "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL" \
+          "API_CLIENT_ID=$API_CLIENT_ID_VAL" \
+          "AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL" \
+        -o none
+    else
+      # --no-build path (or non-frontend sidecar): swap image only and leave
+      # the container's existing runtime env vars untouched. The frontend's
+      # baked VITE_* values from the build stage are authoritative; runtime
+      # env from the last full deploy / Bicep stays as-is.
+      az containerapp update \
+        --name "$CONTAINER_APP_NAME" \
+        --resource-group "$AZURE_RESOURCE_GROUP" \
+        --container-name "$tgt" \
+        --image "$img" \
+        -o none
+    fi
+  done
+
+  ts "==> Latest revision:"
+  az containerapp revision list \
+    --name "$CONTAINER_APP_NAME" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "sort_by([], &properties.createdTime)[-1].{name:name, active:properties.active, state:properties.runningState, replicas:properties.replicas, created:properties.createdTime}" \
+    -o table || true
+
   if $TAIL_LOGS; then
-    for v in AZURE_RESOURCE_GROUP CONTAINER_APP_NAME; do
-      [[ -n "${!v:-}" ]] || die "$v is unset (try: source /tmp/azd-env.sh)"
-    done
     ts "==> Tailing logs (Ctrl-C to exit) for container 'api'"
     az containerapp logs show \
       --name "$CONTAINER_APP_NAME" \
@@ -192,6 +508,7 @@ if [[ "$SIDECAR" == "all" ]]; then
       --follow \
       --tail 20
   fi
+
   ts "==> Done. Tag was: $TAG"
   ts "    To roll back all fast-deployed images, rerun: scripts/dev/quick-deploy.sh all <previous-tag>"
   exit 0
@@ -204,12 +521,14 @@ case "$SIDECAR" in
   *) die "unknown sidecar '$SIDECAR' (expected: api|worker|beat|frontend|terminal|all)" ;;
 esac
 
+# Discover/align env from the active az login BEFORE validating env vars
+# (see the matching block in the `all` branch above for the rationale).
+assert_az_subscription_aligned
+
 for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME; do
-  [[ -n "${!v:-}" ]] || die "$v is unset (try: source /tmp/azd-env.sh)"
+  [[ -n "${!v:-}" ]] || die "$v is unset and az-context discovery could not populate it (run: az login + verify the active sub has an elb-dashboard RG)"
 done
-if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
-  az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-fi
+confirm_deploy_target
 ensure_provider_registration_once
 
 NEW_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${TAG}"
@@ -224,68 +543,79 @@ VITE_AZURE_REDIRECT_URI_VAL="${VITE_AZURE_REDIRECT_URI:-__RUNTIME__}"
 VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
 VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
 VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
-trap 'acr_restore_build_access "$ACR_NAME"' EXIT
+if ! $NO_BUILD; then
+  trap 'acr_restore_build_access "$ACR_NAME"' EXIT
 
-declare -a BUILD_ARGS=()
-if [[ "$SIDECAR" == "frontend" ]]; then
-  [[ -n "$API_CLIENT_ID_VAL" ]] || die "API_CLIENT_ID/VITE_AZURE_CLIENT_ID is unset; set .env, web/.env.local, or azd env before deploying frontend"
-  # Guard: a stale local-dev export (e.g. local-run.sh web) leaking
-  # VITE_API_BASE_URL=http://localhost:... into this shell would bake the
-  # loopback URL into the cloud frontend's runtime-config.js and break every
-  # /api/* call from the browser. Force the operator to unset it first.
-  if [[ -n "$VITE_API_BASE_URL_VAL" ]] && \
-     [[ "$VITE_API_BASE_URL_VAL" =~ ^https?://(localhost|127\.|0\.0\.0\.0|\[::1\]) ]]; then
-    die "VITE_API_BASE_URL='$VITE_API_BASE_URL_VAL' points at the local host — refusing to bake that into the cloud frontend. Run 'unset VITE_API_BASE_URL' (or export VITE_API_BASE_URL='') and retry."
+  declare -a BUILD_ARGS=()
+  if [[ "$SIDECAR" == "frontend" ]]; then
+    [[ -n "$API_CLIENT_ID_VAL" ]] || die "API_CLIENT_ID/VITE_AZURE_CLIENT_ID is unset; set .env, web/.env.local, or azd env before deploying frontend"
+    # Guard: a stale local-dev export (e.g. local-run.sh web) leaking
+    # VITE_API_BASE_URL=http://localhost:... into this shell would bake the
+    # loopback URL into the cloud frontend's runtime-config.js and break every
+    # /api/* call from the browser. Force the operator to unset it first.
+    if [[ -n "$VITE_API_BASE_URL_VAL" ]] && \
+       [[ "$VITE_API_BASE_URL_VAL" =~ ^https?://(localhost|127\.|0\.0\.0\.0|\[::1\]) ]]; then
+      die "VITE_API_BASE_URL='$VITE_API_BASE_URL_VAL' points at the local host — refusing to bake that into the cloud frontend. Run 'unset VITE_API_BASE_URL' (or export VITE_API_BASE_URL='') and retry."
+    fi
+    # Guard: VITE_AUTH_DEV_BYPASS=true makes the SPA skip MSAL while the api
+    # sidecar still enforces bearer tokens — users hit a sea of 401s. The flag
+    # is meant for local-debug only. Escape hatch (intentionally undocumented
+    # in the help text): ELB_ALLOW_AUTH_BYPASS_IN_CLOUD=1.
+    if [[ "$VITE_AUTH_DEV_BYPASS_VAL" == "true" && "${ELB_ALLOW_AUTH_BYPASS_IN_CLOUD:-0}" != "1" ]]; then
+      die "VITE_AUTH_DEV_BYPASS=true — refusing to deploy a cloud frontend that skips MSAL while the api enforces bearer tokens. Run 'unset VITE_AUTH_DEV_BYPASS' (or export VITE_AUTH_DEV_BYPASS=false) and retry."
+    fi
+    # Version stamp: ACR builds run without .git in context, so resolve on host.
+    APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"
+    APP_BUILD_NUMBER_VAL="${APP_BUILD_NUMBER:-$(release_build_number)}"
+    GIT_COMMIT_VAL="${GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)}"
+    BUILD_TIME_VAL="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    BUILD_ARGS=(
+      --build-arg "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL"
+      --build-arg "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL"
+      --build-arg "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL"
+      --build-arg "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL"
+      --build-arg "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL"
+      --build-arg "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL"
+      --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
+      --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
+      --build-arg "APP_VERSION=$APP_VERSION_VAL"
+      --build-arg "APP_BUILD_NUMBER=$APP_BUILD_NUMBER_VAL"
+      --build-arg "GIT_COMMIT=$GIT_COMMIT_VAL"
+      --build-arg "BUILD_TIME=$BUILD_TIME_VAL"
+    )
+  elif [[ "$SIDECAR" == "terminal" ]]; then
+    BUILD_ARGS=(
+      --build-arg "TERMINAL_BASE_IMAGE=$(terminal_base_image)"
+    )
   fi
-  # Guard: VITE_AUTH_DEV_BYPASS=true makes the SPA skip MSAL while the api
-  # sidecar still enforces bearer tokens — users hit a sea of 401s. The flag
-  # is meant for local-debug only. Escape hatch (intentionally undocumented
-  # in the help text): ELB_ALLOW_AUTH_BYPASS_IN_CLOUD=1.
-  if [[ "$VITE_AUTH_DEV_BYPASS_VAL" == "true" && "${ELB_ALLOW_AUTH_BYPASS_IN_CLOUD:-0}" != "1" ]]; then
-    die "VITE_AUTH_DEV_BYPASS=true — refusing to deploy a cloud frontend that skips MSAL while the api enforces bearer tokens. Run 'unset VITE_AUTH_DEV_BYPASS' (or export VITE_AUTH_DEV_BYPASS=false) and retry."
+
+  ts "==> Building $IMAGE_NAME:$TAG via ACR (no local Docker)"
+  ts "    dockerfile=$DOCKERFILE  context=$BUILD_CTX"
+  acr_ensure_build_access "$ACR_NAME"
+  if [[ "$SIDECAR" == "terminal" ]]; then
+    TERMINAL_BASE_REBUILD="$REBUILD_TERMINAL_BASE" ensure_terminal_base_image
   fi
-  # Version stamp: ACR builds run without .git in context, so resolve on host.
-  APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"
-  APP_BUILD_NUMBER_VAL="${APP_BUILD_NUMBER:-$(release_build_number)}"
-  GIT_COMMIT_VAL="${GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)}"
-  BUILD_TIME_VAL="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-  BUILD_ARGS=(
-    --build-arg "VITE_API_BASE_URL=$VITE_API_BASE_URL_VAL"
-    --build-arg "VITE_AUTH_DEV_BYPASS=$VITE_AUTH_DEV_BYPASS_VAL"
-    --build-arg "VITE_AZURE_REDIRECT_URI=$VITE_AZURE_REDIRECT_URI_VAL"
-    --build-arg "VITE_AZURE_TENANT_ID=$AZURE_TENANT_ID_VAL"
-    --build-arg "VITE_AZURE_CLIENT_ID=$API_CLIENT_ID_VAL"
-    --build-arg "VITE_FEATURE_CUSTOM_DB=$VITE_FEATURE_CUSTOM_DB_VAL"
-    --build-arg "VITE_FEATURE_LAB_TOOLS=$VITE_FEATURE_LAB_TOOLS_VAL"
-    --build-arg "VITE_FEATURE_TERMINAL=$VITE_FEATURE_TERMINAL_VAL"
-    --build-arg "APP_VERSION=$APP_VERSION_VAL"
-    --build-arg "APP_BUILD_NUMBER=$APP_BUILD_NUMBER_VAL"
-    --build-arg "GIT_COMMIT=$GIT_COMMIT_VAL"
-    --build-arg "BUILD_TIME=$BUILD_TIME_VAL"
-  )
-elif [[ "$SIDECAR" == "terminal" ]]; then
-  BUILD_ARGS=(
-    --build-arg "TERMINAL_BASE_IMAGE=$(terminal_base_image)"
-  )
+  az acr build \
+    --registry "$ACR_NAME" \
+    --image "${IMAGE_NAME}:${TAG}" \
+    --file "$DOCKERFILE" \
+    "${BUILD_ARGS[@]}" \
+    "$BUILD_CTX" \
+    -o none
+
+  acr_restore_build_access "$ACR_NAME"
+  trap - EXIT
+
+  ts "==> Build complete: $NEW_IMAGE"
+else
+  ts "==> --no-build: skipping ACR build; expecting tag '$TAG' to already exist for $IMAGE_NAME"
 fi
 
-ts "==> Building $IMAGE_NAME:$TAG via ACR (no local Docker)"
-ts "    dockerfile=$DOCKERFILE  context=$BUILD_CTX"
-acr_ensure_build_access "$ACR_NAME"
-if [[ "$SIDECAR" == "terminal" ]]; then
-  TERMINAL_BASE_REBUILD="$REBUILD_TERMINAL_BASE" ensure_terminal_base_image
+if $BUILD_ONLY; then
+  ts "==> --build-only: skipping Container App PATCH for $SIDECAR ($NEW_IMAGE)"
+  ts "==> Done. Tag was: $TAG"
+  exit 0
 fi
-az acr build \
-  --registry "$ACR_NAME" \
-  --image "${IMAGE_NAME}:${TAG}" \
-  --file "$DOCKERFILE" \
-  "${BUILD_ARGS[@]}" \
-  "$BUILD_CTX" \
-  -o none
-
-acr_restore_build_access "$ACR_NAME"
-
-ts "==> Build complete: $NEW_IMAGE"
 
 # --------------------------------------------------------------------------
 # api / worker / beat all share the elb-api image. When the user runs
@@ -305,7 +635,7 @@ esac
 
 for tgt in "${TARGETS[@]}"; do
   ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $NEW_IMAGE"
-  if [[ "$tgt" == "frontend" ]]; then
+  if [[ "$tgt" == "frontend" && "$NO_BUILD" != "true" ]]; then
     az containerapp update \
       --name "$CONTAINER_APP_NAME" \
       --resource-group "$AZURE_RESOURCE_GROUP" \

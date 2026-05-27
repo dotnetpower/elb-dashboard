@@ -49,6 +49,81 @@ def _mask_token(token: str) -> str:
     return f"{token[:4]}{'*' * 12}{token[-6:]}"
 
 
+def _record_self_heal_audit(
+    *,
+    event: str,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    detail: dict[str, Any],
+    caller_oid: str = "",
+    tenant_id: str = "",
+) -> None:
+    """Append an audit JobState row for OpenAPI token self-heal events.
+
+    Best-effort by design: the audit append must never block or fail the
+    status-read path. Mirrors the ``record_db_op`` pattern so the existing
+    ``/api/audit/log`` SPA surface picks the event up automatically.
+
+    ``caller_oid`` / ``tenant_id`` are wired through from the FastAPI
+    route's ``require_caller`` dependency so the audit row is owned by the
+    user who triggered the GET — without this, ``/api/audit/log`` (which
+    queries ``list_for_owner(caller.object_id)``) would never surface the
+    event, defeating the "leave a forensic trail" goal. When the trigger
+    is an internal path that has no caller (e.g. the OpenAPI proxy
+    fallback minting on a 401), the row falls back to
+    ``owner_oid="system"`` and is still queryable via direct table reads
+    or App Insights.
+
+    The synthetic job_id (``openapi-token:<event>:<cluster>:<ulid>``) is
+    prefixed so the audit table groups self-heal events separately from
+    BLAST / warmup / DB-ops jobs without a JobState schema change.
+
+    Token values are NEVER passed in ``detail`` — only metadata about the
+    cluster + the patch outcome. This keeps the audit row safe to render
+    in the SPA and to ship to Log Analytics.
+    """
+    try:
+        import uuid
+        from datetime import UTC, datetime
+
+        from api.services.state.job_state import JobState
+        from api.services.state_repo import get_state_repo
+
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        job_id = (
+            f"openapi-token:{event}:{cluster_name or 'unknown'}:{uuid.uuid4().hex[:12]}"
+        )
+        payload: dict[str, Any] = {
+            "event": event,
+            "subscription_id": subscription_id,
+            "resource_group": resource_group,
+            "cluster_name": cluster_name,
+            "ts": now,
+        }
+        payload.update({k: v for k, v in detail.items() if v is not None})
+        status = "failed" if event.endswith("_failed") else "completed"
+        repo = get_state_repo()
+        repo.create(
+            JobState(
+                job_id=job_id,
+                type="openapi_token_self_heal",
+                status=status,
+                phase=status,
+                owner_oid=caller_oid or "system",
+                tenant_id=tenant_id or "",
+                created_at=now,
+                updated_at=now,
+                payload=payload,
+            )
+        )
+        repo.append_history(job_id, event, payload)
+    except Exception as exc:
+        LOGGER.warning(
+            "openapi token self-heal audit append skipped: %s", type(exc).__name__
+        )
+
+
 def _generate_token() -> str:
     return secrets.token_urlsafe(32)
 
@@ -234,6 +309,7 @@ def _status_payload(
     updated_at: str | None = None,
     generated: bool = False,
     rotated: bool = False,
+    self_heal_error: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return {
         "configured": bool(token),
@@ -245,6 +321,14 @@ def _status_payload(
         "updated_at": updated_at,
         "generated": generated,
         "rotated": rotated,
+        # Populated only when GET /openapi/token tried to self-heal a
+        # legacy deployment (missing ELB_OPENAPI_API_TOKEN env entry)
+        # and the patch failed. The SPA panel renders this as a red
+        # banner so the operator immediately sees "Auto-recovery failed:
+        # <code> — <message>" instead of the silent "No API token
+        # generated" placeholder. `None` for the happy path so consumers
+        # can treat it as an optional discriminator.
+        "self_heal_error": self_heal_error,
     }
 
 
@@ -274,8 +358,28 @@ def get_openapi_api_token_status(
     resource_group: str,
     cluster_name: str,
     namespace: str = K8S_NAMESPACE,
+    caller_oid: str = "",
+    tenant_id: str = "",
 ) -> dict[str, Any]:
-    """Return the current OpenAPI API token status and value."""
+    """Return the current OpenAPI API token status and value.
+
+    Self-heals legacy deployments created before the deploy-side auto-mint
+    (commit 9d4e549): when the elb-openapi deployment exists but its
+    ``ELB_OPENAPI_API_TOKEN`` env entry is missing — the pre-fix manifest
+    omitted the entry when no token was cached — mint + patch one in place
+    so the SPA's API Reference panel does not stay on "No API token
+    generated" until the operator clicks "Generate". The mint is
+    equivalent to the user pressing Generate, idempotent (only triggers
+    when env is empty), and uses the same `_patch_deployment_token` path
+    as `ensure_openapi_api_token(regenerate=False)`.
+
+    ``caller_oid`` / ``tenant_id`` are wired through to the audit row so
+    ``/api/audit/log`` (which queries ``list_for_owner(caller.object_id)``)
+    can surface the self-heal event to the user who triggered it. The
+    route passes them via ``Depends(require_caller)``; internal callers
+    (proxy fallback) leave them empty and the audit row falls back to
+    ``owner_oid="system"``.
+    """
 
     session, server = _get_k8s_session(
         credential,
@@ -284,9 +388,90 @@ def get_openapi_api_token_status(
         cluster_name,
         admin=True,
     )
+    self_heal_error: dict[str, str] | None = None
     try:
         deployment = _read_deployment(session, server, namespace, OPENAPI_DEPLOYMENT_NAME)
         token = _container_env_value(deployment, OPENAPI_CONTAINER_NAME, OPENAPI_TOKEN_ENV)
+        generated = False
+        updated_at: str | None = None
+        if not token:
+            new_token = _generate_token()
+            try:
+                _patch_deployment_token(
+                    session,
+                    server,
+                    namespace=namespace,
+                    deployment_name=OPENAPI_DEPLOYMENT_NAME,
+                    container_name=OPENAPI_CONTAINER_NAME,
+                    token=new_token,
+                    deployment=deployment,
+                )
+                token = new_token
+                generated = True
+                updated_at = _now_iso()
+                # Promoted from INFO to WARNING so App Insights /
+                # operator alerts can fire on the self-heal event —
+                # silent fixes also mean silent regressions in the
+                # future. The event is also recorded in the audit log
+                # (see _record_self_heal_audit below) for forensic
+                # traceability.
+                LOGGER.warning(
+                    "openapi token self-healed: legacy deployment had no "
+                    "ELB_OPENAPI_API_TOKEN env entry; minted + patched "
+                    "cluster=%s rg=%s sub=%s",
+                    cluster_name,
+                    resource_group,
+                    subscription_id,
+                )
+                _record_self_heal_audit(
+                    event="openapi_token_self_healed",
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                    detail={
+                        "deployment_name": OPENAPI_DEPLOYMENT_NAME,
+                        "namespace": namespace,
+                        "updated_at": updated_at,
+                    },
+                    caller_oid=caller_oid,
+                    tenant_id=tenant_id,
+                )
+            except OpenApiTokenError as patch_exc:
+                # Patch failed (RBAC / webhook / 422). Keep the empty
+                # token in the response so the SPA still renders the
+                # Generate button — but ALSO ship the failure code +
+                # message in `self_heal_error` so the panel can show a
+                # red banner with the actionable reason. Logged at
+                # ERROR level so operators can spot the failure in
+                # App Insights without depending on the UI surface.
+                token = ""
+                generated = False
+                updated_at = None
+                self_heal_error = {
+                    "code": patch_exc.code,
+                    "message": patch_exc.message,
+                }
+                LOGGER.error(
+                    "openapi token self-heal failed cluster=%s rg=%s code=%s msg=%s",
+                    cluster_name,
+                    resource_group,
+                    patch_exc.code,
+                    patch_exc.message,
+                )
+                _record_self_heal_audit(
+                    event="openapi_token_self_heal_failed",
+                    subscription_id=subscription_id,
+                    resource_group=resource_group,
+                    cluster_name=cluster_name,
+                    detail={
+                        "deployment_name": OPENAPI_DEPLOYMENT_NAME,
+                        "namespace": namespace,
+                        "error_code": patch_exc.code,
+                        "error_message": patch_exc.message,
+                    },
+                    caller_oid=caller_oid,
+                    tenant_id=tenant_id,
+                )
     finally:
         session.close()
 
@@ -296,9 +481,16 @@ def get_openapi_api_token_status(
         "cluster_name": cluster_name,
         "deployment_name": OPENAPI_DEPLOYMENT_NAME,
         "namespace": namespace,
+        "generated": generated,
     }
     _sync_runtime_token(token, metadata)
-    return _status_payload(token=token, source="deployment_env")
+    return _status_payload(
+        token=token,
+        source="deployment_env",
+        updated_at=updated_at,
+        generated=generated,
+        self_heal_error=self_heal_error,
+    )
 
 
 def ensure_openapi_api_token(

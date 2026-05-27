@@ -174,7 +174,12 @@ def deploy_openapi_service(
     region = cluster.location
     num_nodes = blast_node_count(cluster)
 
-    image_tag = IMAGE_TAGS.get("elb-openapi", "4.9")
+    image_tag = IMAGE_TAGS["elb-openapi"]
+    # ``acr_resource_group`` is passed through from the SPA's saved config
+    # (web/src/pages/ApiReference.tsx -> OpenApiDeployPanel -> /aks/openapi/deploy).
+    # The hardcoded ``rg-elbacr-01`` fallback only fires for legacy callers that
+    # predate the SPA wiring; new deploys always carry the real ACR RG so the pod's
+    # ELB_ACR_RESOURCE_GROUP env matches the user's actual ACR.
     effective_acr_resource_group = acr_resource_group or "rg-elbacr-01"
     image = (
         f"{acr_name}.azurecr.io/elb-openapi:{image_tag}" if acr_name else f"elb-openapi:{image_tag}"

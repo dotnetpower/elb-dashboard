@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from api.services.blast_task_config import (
+from api.services.blast.task_config import (
     BlastDatabaseAvailabilityError,
     validate_blast_database_available,
 )
@@ -151,7 +151,7 @@ def test_preflight_blocks_missing_database(monkeypatch: pytest.MonkeyPatch) -> N
         lambda *_args, **_kwargs: [{"name": "aks-elb", "power_state": "Running"}],
     )
     monkeypatch.setattr(
-        "api.services.blast_task_config.validate_blast_database_available",
+        "api.services.blast.task_config.validate_blast_database_available",
         lambda **_kwargs: (_ for _ in ()).throw(
             BlastDatabaseAvailabilityError(
                 "BLAST database '16S_ribosomal_RNA' is not available in Storage.",

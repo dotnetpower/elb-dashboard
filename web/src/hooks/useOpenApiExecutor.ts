@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { fetchApiRawNoRedirect } from "@/api/client";
+import { fetchApiRawNoRedirect, getApiAccessToken } from "@/api/client";
+import { apiBaseUrl } from "@/config/runtime";
 import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
 
 interface OpenApiEndpoint {
@@ -105,7 +106,99 @@ export function useOpenApiExecutor({
     if (response) copyText(response.body, "openapi-response");
   }, [copyText, response]);
 
-  return { execute, response, loading, copyResponse };
+  const copyCurl = useCallback(async () => {
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    let bearerToken: string | null = null;
+    if (proxyInfo) {
+      try {
+        bearerToken = await getApiAccessToken();
+      } catch {
+        // Fall back to the placeholder if MSAL is unavailable (e.g. not signed
+        // in). The copied command is still useful as a template.
+        bearerToken = null;
+      }
+    }
+    const curl = buildCurl({
+      endpoint,
+      baseUrl,
+      proxyInfo,
+      paramValues,
+      bodyText,
+      apiBase: apiBaseUrl(),
+      origin,
+      bearerToken,
+    });
+    copyText(curl, "openapi-curl");
+  }, [baseUrl, bodyText, copyText, endpoint, paramValues, proxyInfo]);
+
+  return { execute, response, loading, copyResponse, copyCurl };
+}
+
+/**
+ * Build a `curl` command equivalent to what `execute()` would send.
+ *
+ * - Proxy mode (cluster-scoped endpoints) → goes through the dashboard's
+ *   `/api/aks/openapi/proxy` and needs an MSAL bearer token. When
+ *   `bearerToken` is provided it is inlined as-is (caller's responsibility:
+ *   the copied command then contains a live credential — handle accordingly).
+ *   When omitted, a `$AAD_TOKEN` placeholder is emitted instead so the
+ *   command can be pasted in chat / docs without leaking credentials.
+ * - Direct mode (`baseUrl` set) → curls the upstream URL straight, no
+ *   Authorization header (the upstream has its own auth posture).
+ */
+export function buildCurl({
+  endpoint,
+  baseUrl,
+  proxyInfo,
+  paramValues,
+  bodyText,
+  apiBase,
+  origin,
+  bearerToken,
+}: {
+  endpoint: OpenApiEndpoint;
+  baseUrl: string;
+  proxyInfo?: OpenApiProxyInfo;
+  paramValues: Record<string, string>;
+  bodyText: string;
+  apiBase: string;
+  origin: string;
+  bearerToken?: string | null;
+}): string {
+  const method = endpoint.method.toUpperCase();
+  const targetPath = buildTargetPath(endpoint.path, endpoint.parameters, paramValues);
+  const hasBody = Boolean(endpoint.requestBody && bodyText);
+
+  let url: string;
+  const headers: Array<[string, string]> = [];
+
+  if (proxyInfo) {
+    const params = new URLSearchParams({
+      subscription_id: proxyInfo.sub,
+      resource_group: proxyInfo.rg,
+      cluster_name: proxyInfo.clusterName,
+      path: targetPath,
+    });
+    const base = apiBase || origin;
+    url = `${base}/api/aks/openapi/proxy?${params.toString()}`;
+    headers.push(["Authorization", `Bearer ${bearerToken || "$AAD_TOKEN"}`]);
+  } else {
+    url = `${baseUrl}${targetPath}`;
+  }
+
+  if (hasBody) headers.push(["Content-Type", "application/json"]);
+
+  const parts = [`curl -X ${method} ${shellQuote(url)}`];
+  for (const [name, value] of headers) {
+    parts.push(`  -H ${shellQuote(`${name}: ${value}`)}`);
+  }
+  if (hasBody) parts.push(`  --data-raw ${shellQuote(bodyText)}`);
+  return parts.join(" \\\n");
+}
+
+function shellQuote(value: string): string {
+  // POSIX-safe single-quoting: close, escape, reopen.
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 export function buildTargetPath(

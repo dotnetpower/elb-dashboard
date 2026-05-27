@@ -31,6 +31,7 @@ def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
         acr_name="elbacr",
         acr_resource_group="rg-acr",
         num_nodes=10,
+        api_token="dummy-token-for-env-test",
     )
     docs = [json.loads(chunk) for chunk in manifest.split("\n---\n")]
     deployment = next(doc for doc in docs if doc["kind"] == "Deployment")
@@ -41,8 +42,40 @@ def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
 
     assert env["ELB_NUM_NODES"] == "10"
     assert env["ELB_CORE_NT_SHARDS"] == "10"
-    assert "ELB_OPENAPI_API_TOKEN" not in env
+    # Token entry is now mandatory — build_manifests refuses to emit a
+    # deployment without it (see test_build_manifests_rejects_empty_token).
+    assert env["ELB_OPENAPI_API_TOKEN"] == "dummy-token-for-env-test"
     assert "PYTHONPATH" not in env
+
+
+def test_build_manifests_rejects_empty_token() -> None:
+    """Refuse to emit a deployment without ELB_OPENAPI_API_TOKEN.
+
+    Shipping a manifest without the token env entry is the root cause of
+    the recurring "API token not visible" SPA bug. The guard must fail
+    loudly at the manifest boundary, not silently produce a broken
+    deployment.
+    """
+    import pytest
+
+    base_kwargs = {
+        "image": "elbacr.azurecr.io/elb-openapi:4.9",
+        "mi_client_id": "mi-client-id",
+        "cluster_name": "elb-cluster",
+        "resource_group": "rg-elb",
+        "storage_account": "elbstg",
+        "region": "koreacentral",
+        "tenant_id": "tenant-id",
+        "acr_name": "elbacr",
+        "acr_resource_group": "rg-acr",
+        "num_nodes": 10,
+    }
+    for bad_token in ("", "   ", "\t\n"):
+        with pytest.raises(ValueError, match="api_token must be a non-empty string"):
+            openapi._build_manifests(**base_kwargs, api_token=bad_token)
+    # Default empty argument must also be rejected.
+    with pytest.raises(ValueError, match="api_token must be a non-empty string"):
+        openapi._build_manifests(**base_kwargs)
 
 
 def test_build_manifests_preserves_openapi_api_token() -> None:
@@ -83,6 +116,7 @@ def test_build_manifests_hardens_for_ha() -> None:
         acr_name="elbacr",
         acr_resource_group="rg-acr",
         num_nodes=10,
+        api_token="dummy-token-for-ha-test",
     )
     docs = [json.loads(chunk) for chunk in manifest.split("\n---\n")]
     kinds = [doc["kind"] for doc in docs]

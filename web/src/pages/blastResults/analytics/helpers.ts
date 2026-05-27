@@ -173,7 +173,7 @@ export function parseLeadingTaxid(value: string | null | undefined): number | nu
 // Boundary tokens after which the remainder of a BLAST subject title is no
 // longer the scientific name (NCBI titles look like "Monkeypox virus isolate
 // 24MPX2634V genome assembly, complete genome"). Mirrors
-// `api/services/blast_result_analytics.py::extract_organism_from_stitle` so
+// `api/services/blast/result_analytics.py::extract_organism_from_stitle` so
 // the frontend can show NCBI's "Scientific Name" column for each row even
 // before the server-side Taxonomy enrichment runs.
 const STITLE_STOP_RE = new RegExp(

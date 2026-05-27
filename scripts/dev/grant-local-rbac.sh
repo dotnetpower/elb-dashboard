@@ -21,7 +21,7 @@
 #     - Storage Table Data Contributor   (data plane: jobstate / jobhistory rows)
 #     - Storage Account Contributor      (control plane: lets the local-debug
 #                                         auto-open helper toggle publicNetworkAccess
-#                                         + ipRules — see api/services/storage_public_access.py)
+#                                         + ipRules — see api/services/storage/public_access.py)
 #
 #   on workload Storage RG (e.g. rg-elb-01):
 #     - Reader                           (so /api/monitor/* can list AKS / storage / etc.)

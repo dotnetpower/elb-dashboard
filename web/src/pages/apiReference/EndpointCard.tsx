@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Link2, Loader2, Play, Zap } from "lucide-react";
+import { ChevronDown, Copy, Link2, Loader2, Play, Zap } from "lucide-react";
 
 import { METHOD_META } from "@/pages/apiReference/constants";
 import { JsonHighlight } from "@/pages/apiReference/JsonHighlight";
@@ -33,7 +33,7 @@ export function EndpointCard({
   const [selectedExample, setSelectedExample] = useState("");
   const [copiedAnchor, setCopiedAnchor] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const { execute, response, loading, copyResponse } = useOpenApiExecutor({
+  const { execute, response, loading, copyResponse, copyCurl } = useOpenApiExecutor({
     endpoint: ep,
     baseUrl,
     proxyInfo,
@@ -602,23 +602,35 @@ export function EndpointCard({
               }}
             >
               <SectionLabel style={{ margin: 0 }}>Try it</SectionLabel>
-              <button
-                type="button"
-                className="glass-button glass-button--primary"
-                onClick={execute}
-                disabled={loading}
-                style={{ fontSize: 11, gap: 5, padding: "5px 14px" }}
-              >
-                {loading ? (
-                  <>
-                    <Loader2 size={12} className="spin" /> Sending...
-                  </>
-                ) : (
-                  <>
-                    <Play size={12} /> Send Request
-                  </>
-                )}
-              </button>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="glass-button"
+                  onClick={copyCurl}
+                  title="Copy as curl (includes a live bearer token — handle as a secret)"
+                  aria-label="Copy as curl"
+                  style={{ fontSize: 11, gap: 5, padding: "5px 10px" }}
+                >
+                  <Copy size={12} /> Copy curl
+                </button>
+                <button
+                  type="button"
+                  className="glass-button glass-button--primary"
+                  onClick={execute}
+                  disabled={loading}
+                  style={{ fontSize: 11, gap: 5, padding: "5px 14px" }}
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 size={12} className="spin" /> Sending...
+                    </>
+                  ) : (
+                    <>
+                      <Play size={12} /> Send Request
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
 
             {pathParameters.length > 0 && (

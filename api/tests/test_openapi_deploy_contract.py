@@ -60,6 +60,40 @@ def test_openapi_deploy_route_forwards_storage_resource_group(
     assert captured["storage_resource_group"] == "rg-elb-dashboard"
 
 
+def test_openapi_deploy_route_forwards_acr_resource_group(
+    monkeypatch,
+) -> None:
+    """Regression guard for the SPA wiring: the ACR RG must reach the task so
+    the pod's ``ELB_ACR_RESOURCE_GROUP`` env matches the user's actual ACR
+    instead of the legacy ``rg-elbacr-01`` fallback baked into the task."""
+    captured: dict[str, Any] = {}
+
+    def fake_safe_delay(_task: object, **kwargs: Any) -> AsyncResultStub:
+        captured.update(kwargs)
+        return AsyncResultStub("task-openapi-acr")
+
+    monkeypatch.setattr(openapi_route, "_safe_delay", fake_safe_delay)
+
+    openapi_route.aks_openapi_deploy(
+        {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+            "acr_name": "elbacr",
+            "acr_resource_group": "rg-shared-acr",
+        },
+        CallerIdentity(
+            object_id="caller-oid",
+            tenant_id="tenant-id",
+            upn="researcher@example.test",
+            raw_token="token",
+            claims={},
+        ),
+    )
+
+    assert captured["acr_resource_group"] == "rg-shared-acr"
+
+
 def test_setup_workload_identity_uses_storage_resource_group_for_storage_role(
     monkeypatch,
 ) -> None:

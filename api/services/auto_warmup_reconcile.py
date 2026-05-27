@@ -175,6 +175,98 @@ InflightAcquire = Callable[[str, str, str, str], bool]
 SendTask = Callable[..., Any]
 
 
+def _seed_auto_warmup_job_state(
+    *,
+    job_id: str,
+    pref: AutoWarmupPreference,
+    db_name: str,
+    machine_type: str,
+    num_nodes: int,
+    program: str,
+    expected_node_count: int,
+) -> bool:
+    """Create the `JobState` row for an auto-warmup task before enqueue.
+
+    The `warmup_database` task writes phase checkpoints via
+    `state_repo.update()`, which is `get_entity` + patch under the hood.
+    Without a pre-seeded row the first two checkpoints raise
+    `ResourceNotFoundError` (caught as `KeyError`) and surface as red 404
+    Dependency failures in App Insights, while the SPA loses progress
+    visibility for the auto-warmup job. Returns True when the row exists
+    (created or already present); False on unexpected create failure so
+    the caller can still enqueue rather than block reconciliation.
+    """
+
+    from datetime import UTC, datetime
+
+    from api.services.state.job_state import JobState
+    from api.services.state_repo import get_state_repo
+
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    payload = {
+        "subscription_id": pref.subscription_id,
+        "resource_group": pref.resource_group,
+        "storage_account": pref.storage_account,
+        "database_name": db_name,
+        "db": db_name,
+        "cluster_name": pref.cluster_name,
+        "machine_type": machine_type,
+        "num_nodes": num_nodes,
+        "acr_resource_group": pref.acr_resource_group,
+        "acr_name": pref.acr_name,
+        "program": program,
+        "caller_oid": pref.owner_oid,
+        "require_all_warmup_nodes": True,
+        "auto_warmup": True,
+        "expected_node_count": expected_node_count,
+    }
+    state = JobState(
+        job_id=job_id,
+        type="warmup",
+        status="queued",
+        phase="queued",
+        owner_oid=pref.owner_oid or None,
+        tenant_id=None,
+        created_at=now,
+        updated_at=now,
+        payload=payload,
+        db=db_name,
+        program=program,
+        subscription_id=pref.subscription_id,
+        resource_group=pref.resource_group,
+        cluster_name=pref.cluster_name,
+        storage_account=pref.storage_account,
+    )
+    try:
+        get_state_repo().create(state)
+        return True
+    except Exception as exc:
+        LOGGER.warning(
+            "auto warm JobState seed failed job_id=%s db=%s: %s",
+            job_id,
+            db_name,
+            type(exc).__name__,
+        )
+        return False
+
+
+def _attach_auto_warmup_task_id(*, job_id: str, task_id: str) -> None:
+    """Best-effort attach of the Celery `task_id` to a freshly enqueued auto-warmup job."""
+
+    if not task_id:
+        return
+    try:
+        from api.services.state_repo import get_state_repo
+
+        get_state_repo().update(job_id, task_id=task_id)
+    except Exception as exc:
+        LOGGER.warning(
+            "auto warm task_id attach failed job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+
+
 def reconcile_auto_warmup_preferences(
     *,
     credential: Any,
@@ -314,26 +406,39 @@ def reconcile_auto_warmup_preferences(
                 ):
                     result["skipped"].append({"db": db_name, "reason": "inflight"})
                     continue
+                job_id = f"auto-warmup-{pref.cluster_name}-{db_name}-{int(time.time())}"
+                machine_type = pref.machine_type or str((cluster or {}).get("node_sku") or "")
+                num_nodes = int(ready_gate.get("expected_node_count") or 0)
+                program = pref.programs.get(db_name, "blastn")
+                _seed_auto_warmup_job_state(
+                    job_id=job_id,
+                    pref=pref,
+                    db_name=db_name,
+                    machine_type=machine_type,
+                    num_nodes=num_nodes,
+                    program=program,
+                    expected_node_count=num_nodes,
+                )
                 task = send_task(
                     "api.tasks.storage.warmup_database",
                     kwargs={
-                        "job_id": f"auto-warmup-{pref.cluster_name}-{db_name}-{int(time.time())}",
+                        "job_id": job_id,
                         "subscription_id": pref.subscription_id,
                         "resource_group": pref.resource_group,
                         "storage_account": pref.storage_account,
                         "database_name": db_name,
                         "cluster_name": pref.cluster_name,
-                        "machine_type": pref.machine_type
-                        or str((cluster or {}).get("node_sku") or ""),
-                        "num_nodes": int(ready_gate.get("expected_node_count") or 0),
+                        "machine_type": machine_type,
+                        "num_nodes": num_nodes,
                         "acr_resource_group": pref.acr_resource_group,
                         "acr_name": pref.acr_name,
-                        "program": pref.programs.get(db_name, "blastn"),
+                        "program": program,
                         "caller_oid": pref.owner_oid,
                         "require_all_warmup_nodes": True,
                     },
                     queue="storage",
                 )
+                _attach_auto_warmup_task_id(job_id=job_id, task_id=getattr(task, "id", ""))
                 result["enqueued"].append({"db": db_name, "task_id": task.id})
 
             mark_auto_warmup_ready_state(pref, ready=True, triggered=bool(result["enqueued"]))

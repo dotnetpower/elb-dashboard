@@ -4,10 +4,11 @@
  * tick so we render at most one timer for the whole jobs list (instead
  * of one per row).
  *
- * Layout is a single horizontal line reading
- * `{program} | {db} | {title}  USER  STATUS  {age}(age) | {duration}(duration)`
- * so the AKS card preview and the dedicated Jobs page stay scan-friendly
- * at a glance instead of stacking the title above program/db chips.
+ * Layout is a tabular row with explicit columns:
+ * `PROGRAM | DATABASE | JOB TITLE | (USER) | STATUS | AGE | DURATION`
+ * so the AKS card preview reads like a proper table — column headers in
+ * `<JobsTableHeader>` carry the (age)/(duration) labels so individual
+ * cells stay compact.
  */
 
 import { useNavigate } from "react-router-dom";
@@ -25,8 +26,11 @@ import { ownerLabel, summariseNote } from "./helpers";
 
 export const JOB_ROW_GRID_GAP = 10;
 
-const JOB_ROW_GRID_WITH_USER = "minmax(0, 1fr) 72px 92px 160px";
-const JOB_ROW_GRID_WITHOUT_USER = "minmax(0, 1fr) 92px 160px";
+// Column widths: PROGRAM | DATABASE | JOB TITLE | (USER) | STATUS | AGE | DURATION
+const JOB_ROW_GRID_WITH_USER =
+  "64px 140px minmax(0, 1fr) 72px 92px 64px 76px";
+const JOB_ROW_GRID_WITHOUT_USER =
+  "64px 140px minmax(0, 1fr) 92px 64px 76px";
 
 export function jobRowGridTemplate(showUser: boolean): string {
   return showUser ? JOB_ROW_GRID_WITH_USER : JOB_ROW_GRID_WITHOUT_USER;
@@ -95,13 +99,21 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
       title={fullHoverText}
       aria-label={`Open job ${titleText}, ${job.state}, ${timingAria}.`}
     >
-      <div
-        className="pulse-job-identity"
+      <span
+        className="pulse-job-program"
         style={{
-          display: "flex",
+          display: "inline-flex",
           alignItems: "center",
           gap: 6,
           minWidth: 0,
+          color: "var(--accent)",
+          fontWeight: 600,
+          fontSize: 11.5,
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
         }}
       >
         <span
@@ -135,64 +147,42 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
             />
           )}
         </span>
-        <span
-          className="pulse-job-meta"
-          style={{
-            display: "inline-flex",
-            alignItems: "baseline",
-            gap: 6,
-            minWidth: 0,
-            flex: 1,
-            fontSize: 11.5,
-            lineHeight: 1.3,
-            fontFamily:
-              "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-          }}
-        >
-          <span
-            className="pulse-job-program"
-            style={{
-              color: "var(--accent)",
-              fontWeight: 600,
-              whiteSpace: "nowrap",
-              flexShrink: 0,
-            }}
-          >
-            {job.program}
-          </span>
-          <PipeSep />
-          <span
-            className="pulse-job-db"
-            style={{
-              color: "var(--text-primary)",
-              fontWeight: 500,
-              whiteSpace: "nowrap",
-              flexShrink: 0,
-              maxWidth: 140,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            }}
-          >
-            {job.db}
-          </span>
-          <PipeSep />
-          <span
-            className="pulse-job-title"
-            style={{
-              color: "var(--text-primary)",
-              fontWeight: 600,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              minWidth: 0,
-              flex: 1,
-              fontFamily: "inherit",
-            }}
-          >
-            {titleText}
-          </span>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+          {job.program}
         </span>
-      </div>
+      </span>
+      <span
+        className="pulse-job-db"
+        title={job.db}
+        style={{
+          color: "var(--text-primary)",
+          fontWeight: 500,
+          fontSize: 11.5,
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          minWidth: 0,
+        }}
+      >
+        {job.db}
+      </span>
+      <span
+        className="pulse-job-title"
+        title={titleText}
+        style={{
+          color: "var(--text-primary)",
+          fontWeight: 600,
+          fontSize: 11.5,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          minWidth: 0,
+        }}
+      >
+        {titleText}
+      </span>
       {showUser && (
         <span
           title={submitter.title}
@@ -228,47 +218,32 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
           {job.state}
         </span>
       </span>
-      <div
-        className="pulse-job-timeblock"
-        style={{
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          gap: 6,
-          fontVariantNumeric: "tabular-nums",
-          minWidth: 0,
-        }}
+      <span
+        className="pulse-job-timeago"
         title={createdAt ? new Date(createdAt).toLocaleString() : ""}
+        style={{
+          fontSize: 10,
+          color: "var(--text-muted)",
+          whiteSpace: "nowrap",
+          textAlign: "right",
+          fontVariantNumeric: "tabular-nums",
+        }}
       >
-        <span
-          className="pulse-job-timeago"
-          style={{
-            fontSize: 10,
-            color: "var(--text-muted)",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {timeAgoLabel}
-          <span style={{ color: "var(--text-muted)", marginLeft: 1 }}>(age)</span>
-        </span>
-        {createdAt && (
-          <>
-            <span style={{ color: "var(--text-faint)", fontSize: 10 }}>|</span>
-            <span
-              className="pulse-job-duration"
-              style={{
-                fontSize: 10,
-                color: "var(--text-muted)",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {durationLabel}
-              <span style={{ color: "var(--text-muted)", marginLeft: 1 }}>({durationCaption})</span>
-            </span>
-          </>
-        )}
-      </div>
+        {timeAgoLabel}
+      </span>
+      <span
+        className="pulse-job-duration"
+        title={createdAt ? `${durationCaption}: ${durationLabel}` : ""}
+        style={{
+          fontSize: 10,
+          color: "var(--text-muted)",
+          whiteSpace: "nowrap",
+          textAlign: "right",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {createdAt ? durationLabel : "—"}
+      </span>
       {noteText && (
         <div
           className={`pulse-job-stripe pulse-job-stripe--${noteTone}`}
@@ -311,17 +286,6 @@ export function JobLine({ job, ownerUpn, nowMs, showUser }: Props) {
         </div>
       )}
     </div>
-  );
-}
-
-function PipeSep() {
-  return (
-    <span
-      aria-hidden="true"
-      style={{ color: "var(--text-faint)", flexShrink: 0 }}
-    >
-      |
-    </span>
   );
 }
 

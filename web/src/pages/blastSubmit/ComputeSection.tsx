@@ -394,7 +394,7 @@ interface ShardingPreviewProps {
  *
  * Visible only when both the selected DB has been warmed/sharded and the
  * cluster context is known. Mirrors the backend selection in
- * `api/services/blast_config.py::generate_config` (auto_shard_eligible
+ * `api/services/blast/config.py::generate_config` (auto_shard_eligible
  * branch) so the user sees the same N before they submit.
  *
  * The opt-out is intentionally low-prominence ("Disable sharding" with a

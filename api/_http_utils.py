@@ -67,7 +67,7 @@ class BlastSubmitRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_storage_blob_urls(self) -> BlastSubmitRequest:
-        from api.services.blast_task_config import validate_storage_blob_reference
+        from api.services.blast.task_config import validate_storage_blob_reference
 
         validate_storage_blob_reference(
             storage_account=self.storage_account,

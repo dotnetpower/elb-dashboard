@@ -1,5 +1,5 @@
 /**
- * Client-side mirror of `api/services/db_sharding.py::select_partitions_for_submit`.
+ * Client-side mirror of `api/services/db/sharding.py::select_partitions_for_submit`.
  *
  * Used by the submit form to render an "auto-shard preview" so the user can
  * see which preset N will be applied by the backend before they click Submit.
@@ -154,7 +154,7 @@ export function planPartitionsForSubmit(
  *
  * If no preset satisfies both, returns the largest preset (best effort).
  *
- * Mirrors `select_partitions_for_submit` in `api/services/db_sharding.py`.
+ * Mirrors `select_partitions_for_submit` in `api/services/db/sharding.py`.
  */
 export function selectPartitionsForSubmit(
   dbTotalBytes: number,

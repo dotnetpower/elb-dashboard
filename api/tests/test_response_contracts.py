@@ -67,7 +67,7 @@ def test_preflight_returns_admission_decision(
         ],
     )
     monkeypatch.setattr(
-        "api.services.blast_task_config.validate_blast_database_available",
+        "api.services.blast.task_config.validate_blast_database_available",
         lambda *, storage_account, database: {
             "container": "blast-db",
             "blob_prefix": f"{database}/{database}",
@@ -79,7 +79,7 @@ def test_preflight_returns_admission_decision(
     # check. Stub the wrapper at the facade so the route picks it up via its
     # lazy import.
     monkeypatch.setattr(
-        "api.services.blast_task_config.validate_blast_database_ready",
+        "api.services.blast.task_config.validate_blast_database_ready",
         lambda *, storage_account, database: {
             "container": "blast-db",
             "blob_prefix": f"{database}/{database}",

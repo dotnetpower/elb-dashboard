@@ -21,6 +21,7 @@ export interface UseDeployTaskArgs {
   resourceGroup: string;
   clusterName: string;
   acrName: string;
+  acrResourceGroup: string;
   storageAccount: string;
   storageResourceGroup: string;
   imageBuilt: boolean;
@@ -38,6 +39,7 @@ export function useDeployTask({
   resourceGroup,
   clusterName,
   acrName,
+  acrResourceGroup,
   storageAccount,
   storageResourceGroup,
   imageBuilt,
@@ -87,6 +89,15 @@ export function useDeployTask({
     | { phase?: string }
     | null
     | undefined;
+  // Surface the additive envelope-root recovery affordance the backend
+  // injects on upstream-reach (VNet peering) failures. The SPA passes
+  // this down to DeployStatusBanner which renders <RepairPeeringButton>.
+  // Falls back to the thrown ApiError body when the status query itself
+  // errors out (e.g. the route returned 502 with the same payload).
+  const deployRecoveryAction =
+    (deployStatusQuery.data?.recovery_action as string | undefined) ?? null;
+  const deployRecoveryHint =
+    (deployStatusQuery.data?.recovery_hint as string | undefined) ?? null;
   const deploySucceeded =
     deployStatusQuery.data?.runtime_status === "Completed" &&
     deployOutput?.status === "succeeded";
@@ -199,10 +210,26 @@ export function useDeployTask({
     storageKey,
   ]);
 
-  const handleCancelTracking = () => {
+  const handleCancelTracking = async () => {
+    const taskId = deployInstanceId;
+    // Always clear local tracking first so the UI is responsive even if
+    // the revoke call hangs / fails. The backend route is idempotent so
+    // a duplicate cancel from a re-clicked button is a no-op.
     setDeployInstanceId(null);
     setDeployError(null);
     clearStoredDeploy(storageKey);
+    if (!taskId) return;
+    try {
+      await aksApi.cancelOpenApiDeploy(taskId);
+    } catch (err: unknown) {
+      // Surface the failure but keep the UI unlocked — the worker may
+      // still be running, but the user explicitly chose to stop
+      // tracking. They can hit Deploy again to retry; the new task id
+      // will replace this one in localStorage.
+      setDeployError(
+        `Deploy cancel sent to server but the response was not OK: ${formatApiError(err)}. The Celery task may still be running; refresh to re-discover.`,
+      );
+    }
   };
 
   const canDeploy =
@@ -223,6 +250,7 @@ export function useDeployTask({
         acrName,
         storageAccount,
         storageResourceGroup,
+        acrResourceGroup,
       );
       const startedAt = Date.now();
       setDeployStartedAt(startedAt);
@@ -245,5 +273,7 @@ export function useDeployTask({
     canDeploy,
     handleDeploy,
     handleCancelTracking,
+    deployRecoveryAction,
+    deployRecoveryHint,
   } as const;
 }

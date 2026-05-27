@@ -1,0 +1,148 @@
+name: Build Images
+
+# Auto-build the api / frontend / terminal images on every push to main that
+# touches application or container code. The Container App is NOT updated
+# here — deployment is gated behind the manual `Deploy to Container App`
+# workflow (.github/workflows/deploy.yml), which the maintainer triggers from
+# the Actions UI and points at a specific tag built by this workflow.
+#
+# Tagging convention:
+#   - gha-<short-sha>   immutable, points at this exact commit
+#   - latest-main       moving alias, always points at the newest build on main
+#
+# Required repository secrets (set up via scripts/dev/setup-gha-oidc.sh):
+#   AZURE_CLIENT_ID         App Registration with federated credential for this repo
+#   AZURE_TENANT_ID
+#   AZURE_SUBSCRIPTION_ID
+#
+# Required repository variables (Settings → Secrets and variables → Actions → Variables):
+#   ACR_NAME                short name, e.g. crelbXYZ
+#   ACR_LOGIN_SERVER        e.g. crelbXYZ.azurecr.io
+#   API_CLIENT_ID           App Registration ID baked into the SPA (VITE_AZURE_CLIENT_ID)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/**"
+      - "web/**"
+      - "terminal/**"
+      - "scripts/dev/quick-deploy.sh"
+      - "scripts/dev/acr-build-access.sh"
+      - "scripts/dev/terminal-base-image.sh"
+      - "scripts/dev/az-context.sh"
+      - ".github/workflows/build-images.yml"
+  workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: "Optional extra tag suffix (e.g. 'hotfix-1'). Empty = only gha-<sha> + latest-main."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write  # required for OIDC federated login to Azure
+  contents: read
+
+concurrency:
+  group: build-images-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+      # Frontend build args. The SPA's auth bypass MUST stay false in the
+      # cloud image; quick-deploy.sh dies otherwise (charter §9 + 2026-05-25).
+      API_CLIENT_ID: ${{ vars.API_CLIENT_ID }}
+      VITE_AZURE_CLIENT_ID: ${{ vars.API_CLIENT_ID }}
+      VITE_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      VITE_AUTH_DEV_BYPASS: "false"
+      VITE_API_BASE_URL: ""
+    steps:
+      - name: Checkout (full history for version stamp)
+        uses: actions/checkout@v4
+        with:
+          # quick-deploy.sh frontend resolves APP_BUILD_NUMBER from
+          # `git rev-list --count <latest-tag>..HEAD`, so we need full
+          # history + tags or the build number will be 0.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate ACR access
+        run: |
+          set -euo pipefail
+          az account show -o table
+          az acr show --name "$ACR_NAME" --query "{name:name, loginServer:loginServer, sku:sku.name}" -o table
+
+      - name: Build images (api + frontend + terminal in parallel)
+        env:
+          # Skip interactive deploy-target confirmation (no TTY anyway, but
+          # quick-deploy also reads this env var directly).
+          ELB_QUICK_DEPLOY_SKIP_CONFIRM: "1"
+          # GHA runner IPs change — acr-build-access.sh opens the firewall for
+          # this run's outbound IP and restores it on exit. Disable provider
+          # registration check (the GHA principal only has ACR + Container App
+          # scopes; it cannot register subscription-level providers).
+          SKIP_PROVIDER_REGISTRATION: "true"
+        run: |
+          set -euo pipefail
+          TAG="gha-${GITHUB_SHA::7}"
+          echo "Building tag: $TAG"
+          bash scripts/dev/quick-deploy.sh all "$TAG" --build-only --yes
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Tag images as latest-main
+        run: |
+          set -euo pipefail
+          for image in elb-api elb-frontend elb-terminal; do
+            echo "==> Tagging $image:$TAG as $image:latest-main"
+            az acr import \
+              --name "$ACR_NAME" \
+              --source "${ACR_LOGIN_SERVER}/${image}:${TAG}" \
+              --image "${image}:latest-main" \
+              --force \
+              -o none
+          done
+
+      - name: Optional extra tag
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_suffix != '' }}
+        run: |
+          set -euo pipefail
+          extra="${{ inputs.tag_suffix }}"
+          for image in elb-api elb-frontend elb-terminal; do
+            echo "==> Tagging $image:$TAG as $image:$extra"
+            az acr import \
+              --name "$ACR_NAME" \
+              --source "${ACR_LOGIN_SERVER}/${image}:${TAG}" \
+              --image "${image}:${extra}" \
+              --force \
+              -o none
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "## Built images"
+            echo ""
+            echo "| image | immutable tag | alias |"
+            echo "|---|---|---|"
+            for image in elb-api elb-frontend elb-terminal; do
+              echo "| $image | \`$TAG\` | \`latest-main\` |"
+            done
+            echo ""
+            echo "Deploy with the **Deploy to Container App** workflow → pick \`$TAG\` (or \`latest-main\`)."
+          } >> "$GITHUB_STEP_SUMMARY"

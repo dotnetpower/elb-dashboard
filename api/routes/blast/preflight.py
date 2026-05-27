@@ -223,7 +223,7 @@ def blast_pre_flight(
 
     if db and storage:
         try:
-            from api.services.blast_task_config import validate_blast_database_ready
+            from api.services.blast.task_config import validate_blast_database_ready
 
             availability = validate_blast_database_ready(
                 storage_account=str(storage),

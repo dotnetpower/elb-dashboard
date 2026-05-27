@@ -1,11 +1,11 @@
-"""Test-monkeypatch-friendly aliases over ``api.services.blast_task_config``.
+"""Test-monkeypatch-friendly aliases over ``api.services.blast.task_config``.
 
-Responsibility: Thin alias layer over ``blast_task_config`` (URL builders, INI config
+Responsibility: Thin alias layer over ``blast.task_config`` (URL builders, INI config
 content, option normalisers, sharding suppression, node-warmup gate) so tests can
 monkeypatch ``blast._X`` and so cross-submodule callers can stage shared logic without
 reimporting ``_blast_task_config`` everywhere.
 Edit boundaries: Each public function is one or two lines that delegate to
-``api.services.blast_task_config`` (or ``api.services.blast_db_metadata.resolve_db_metadata``
+``api.services.blast.task_config`` (or ``api.services.blast.db_metadata.resolve_db_metadata``
 for the warmup / config builders). New domain logic belongs in those service modules,
 not here.
 Key entry points: ``_storage_url``, ``_relative_blob_path``, ``_normalise_query_url``,
@@ -25,8 +25,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
-from api.services import blast_task_config as _blast_task_config
-from api.services.blast_task_config import BlastDatabaseAvailabilityError
+from api.services.blast import task_config as _blast_task_config
+from api.services.blast.task_config import BlastDatabaseAvailabilityError
 from api.tasks import blast as _blast
 from api.tasks.blast.split_constants import STRICT_TIE_ORDER_MIN_TARGET_SEQS
 

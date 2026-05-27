@@ -1,6 +1,6 @@
-"""Tests for api.services.storage_public_access - local-debug helper.
+"""Tests for api.services.storage.public_access - local-debug helper.
 
-Responsibility: Tests for api.services.storage_public_access - local-debug helper
+Responsibility: Tests for api.services.storage.public_access - local-debug helper
 Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
 Azure calls.
 Key entry points: `_clear_env`, `test_gate_disabled_by_default`,

@@ -11,7 +11,6 @@ import { ApiHero } from "@/pages/apiReference/ApiHero";
 import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
 import { ApiResponseContractPanel } from "@/pages/apiReference/ApiResponseContractPanel";
 import { ApiTokenPanel } from "@/pages/apiReference/ApiTokenPanel";
-import { PublicHttpsPanel } from "@/pages/apiReference/PublicHttpsPanel";
 import {
   RepairPeeringButton,
   isPeerWithPlatformRecovery,
@@ -123,8 +122,8 @@ export function ApiReference() {
   // has installed ingress-nginx + cert-manager + a Let's Encrypt-signed
   // Ingress, so we flip `baseUrl` from the internal LB IP path to the
   // HTTPS public FQDN. That makes the API Reference "Try it" surface, the
-  // Swagger UI link, and any future "Copy curl" affordance all point at
-  // the externally-reachable URL.
+  // Swagger UI link, and the "Copy curl" button all point at the
+  // externally-reachable URL.
   const publicHttpsQuery = useQuery({
     queryKey: ["openapi-public-https"],
     queryFn: () => aksApi.openApiPublicHttpsStatus(),
@@ -137,11 +136,16 @@ export function ApiReference() {
       ? publicHttpsQuery.data.public_base_url
       : null;
 
-  const baseUrl = publicHttpsBaseUrl
-    ? publicHttpsBaseUrl
-    : svcQuery.data?.external_ip
-      ? `http://${svcQuery.data.external_ip}`
-      : null;
+  // Internal LB URL — always shown in the hero so operators can see the
+  // in-VNet endpoint even when the public HTTPS endpoint is exposed.
+  const internalBaseUrl = svcQuery.data?.external_ip
+    ? `http://${svcQuery.data.external_ip}`
+    : null;
+
+  // `baseUrl` drives spec parsing + curl examples — prefer the public
+  // HTTPS endpoint when present so the "Try it" surface points at the
+  // externally-reachable URL.
+  const baseUrl = publicHttpsBaseUrl ?? internalBaseUrl;
   const serviceMissingOrPending = svcQuery.isSuccess && !svcQuery.data?.external_ip;
 
   const specQuery = useQuery({
@@ -196,7 +200,8 @@ export function ApiReference() {
     <div className="page-stack mono-page api-reference-page">
       <ApiHero
         spec={spec}
-        baseUrl={baseUrl}
+        baseUrl={internalBaseUrl ?? baseUrl}
+        publicHttpsUrl={publicHttpsBaseUrl}
         onRefresh={() => specQuery.refetch()}
         refreshing={specQuery.isFetching}
       />
@@ -235,6 +240,7 @@ export function ApiReference() {
           resourceGroup={clusterRg}
           clusterName={clusterName}
           acrName={acrName}
+          acrResourceGroup={acrRg}
           storageAccount={savedConfig?.storageAccountName ?? ""}
           storageResourceGroup={anchorRg}
           imageBuilt={hasOpenApiImage}
@@ -266,6 +272,7 @@ export function ApiReference() {
               resourceGroup={clusterRg}
               clusterName={clusterName}
               acrName={acrName}
+              acrResourceGroup={acrRg}
               storageAccount={savedConfig?.storageAccountName ?? ""}
               storageResourceGroup={anchorRg}
               imageBuilt={hasOpenApiImage}
@@ -315,15 +322,6 @@ export function ApiReference() {
           subscriptionId={sub}
           resourceGroup={clusterRg}
           clusterName={clusterName}
-        />
-      )}
-
-      {baseUrl && hasOpenApiImage && clusterName && (
-        <PublicHttpsPanel
-          subscriptionId={sub}
-          resourceGroup={clusterRg}
-          clusterName={clusterName}
-          onStateChange={() => publicHttpsQuery.refetch()}
         />
       )}
 

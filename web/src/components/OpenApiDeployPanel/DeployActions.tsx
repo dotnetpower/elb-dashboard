@@ -92,7 +92,7 @@ export function DeployActions({
           type="button"
           className="glass-button"
           onClick={onCancelTracking}
-          title="Stop tracking this deploy task and re-enable the Deploy button. Does not stop the underlying Celery task if it is actually running."
+          title="Revoke the running deploy_openapi_service Celery task on the server and re-enable the Deploy button. The worker honours SIGTERM at the next probe yield (~10 s)."
           style={{ fontSize: 12 }}
         >
           <X size={12} /> Cancel

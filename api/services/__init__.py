@@ -86,7 +86,7 @@ def reset_credential() -> None:
     # Lazy imports to avoid a cycle (downstream modules import services
     # indirectly via get_credential helpers).
     for module_name, attr in (
-        ("api.services.storage_data", "reset_blob_service_pool"),
+        ("api.services.storage.data", "reset_blob_service_pool"),
         ("api.services.job_artifacts", "_reset_artifact_table_pool"),
         ("api.services.auto_warmup", "_reset_autowarmup_table_pool"),
         ("api.services.redis_clients", "reset_redis_clients"),

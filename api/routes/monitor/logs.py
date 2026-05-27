@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from api.auth import CallerIdentity, require_caller
 from api.services.sidecar_logs import (
@@ -80,10 +80,22 @@ async def logs_recent(
 async def logs_events(
     container: str,
     ticket: str | None = Query(default=None),
-) -> StreamingResponse:
-    """Server-Sent Events stream for one sidecar log tail."""
+) -> Response:
+    """Server-Sent Events stream for one sidecar log tail.
+
+    Ticket gating returns **HTTP 204** (not 401) when the ticket is
+    missing, already consumed, or expired. Per the HTML spec, browsers
+    must NOT auto-reconnect EventSource on 204, which terminates the
+    phantom retry loop after an SSE drop: the browser closes the
+    connection cleanly, the frontend's onerror handler fires and runs
+    its own bounded retry path with a fresh ticket. The previous 401
+    response triggered native EventSource auto-retry against the same
+    URL whose ticket had just been popped, generating 1+ phantom 401
+    per drop and flooding App Insights with red Dependency failures.
+    """
     sidecar = _parse_container(container)
-    await _consume_log_ticket(ticket)
+    if (await _consume_log_ticket(ticket)) is None:
+        return Response(status_code=204)
 
     async def event_stream() -> AsyncGenerator[str, None]:
         yield ": ready\n\n"
@@ -112,15 +124,21 @@ async def logs_events(
     )
 
 
-async def _consume_log_ticket(token: str | None) -> _LogTicket:
+async def _consume_log_ticket(token: str | None) -> _LogTicket | None:
+    """Pop and validate a logs SSE ticket. Returns None if missing/invalid/expired.
+
+    Callers that surface a hard error (e.g. tests, future authenticated
+    paths) should compare for ``None`` and respond with their own status
+    code. The SSE route uses 204 — see ``logs_events`` for the reason.
+    """
     if not token:
-        raise HTTPException(401, "ticket required")
+        return None
     async with _log_tickets_lock:
         entry = _log_tickets.pop(token, None)
     if entry is None:
-        raise HTTPException(401, "invalid or expired ticket")
+        return None
     if entry.expires_at <= time.time():
-        raise HTTPException(401, "ticket expired")
+        return None
     return entry
 
 

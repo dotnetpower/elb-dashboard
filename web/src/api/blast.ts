@@ -212,7 +212,7 @@ export interface BlastDatabaseMetadata {
   description?: string;
   /**
    * Human label such as "mixed DNA" / "protein" — populated by the
-   * dashboard's `api/services/blast_db_metadata.py`. Do NOT swap this
+   * dashboard's `api/services/blast/db_metadata.py`. Do NOT swap this
    * source for elb-openapi's `/v1/databases/{name}.molecule_type` field
    * (which carries the lowercase token `dna` / `protein`); use the
    * `molecule_label` field from that schema instead.
@@ -337,7 +337,7 @@ export interface BlastDatabase {
   /**
    * Server-computed warmup feasibility. Only present when listDatabases was
    * called with cluster topology (num_nodes + machine_type). See Phase 1 of
-   * the warmup pipeline (api/services/warmup_planner.py).
+   * the warmup pipeline (api/services/warmup/planner.py).
    */
   warmup_plan?: BlastWarmupPlan;
 }

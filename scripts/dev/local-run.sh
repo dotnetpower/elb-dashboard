@@ -3,16 +3,19 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: scripts/dev/local-run.sh <start|stop|restart|status|api|worker|beat|web|redis|terminal-exec|smoke|storage-on|storage-off|storage-status|auth-on|auth-off|auth-status|compose-full|compose-local> [-- extra args]
+usage: scripts/dev/local-run.sh <start|stop|restart|status|logs|logs-clean|api|worker|beat|web|redis|terminal-exec|smoke|storage-on|storage-off|storage-status|auth-on|auth-off|auth-status|compose-full|compose-local> [-- extra args]
 
-Starts one local development process through run-with-log.sh so direct terminal
-runs and VS Code tasks both write to .logs/local/latest/.
+Starts one local development process through run-with-log.sh. All output goes
+to a single per-service file under .logs/local/latest/<service>.log so there
+is exactly one place to look when something fails.
 
 Examples:
   scripts/dev/local-run.sh start           # launch host-mode servers in the background and return immediately
   scripts/dev/local-run.sh stop            # stop host-mode servers, compose stacks, and local Redis
   scripts/dev/local-run.sh restart         # stop, then launch host-mode servers in the background
   scripts/dev/local-run.sh status          # inspect local server ports/processes
+  scripts/dev/local-run.sh logs            # list .logs/local/latest/*.log with sizes
+  scripts/dev/local-run.sh logs-clean      # archive everything under .logs/local/latest into _archive/<ts>/
   scripts/dev/local-run.sh api
   scripts/dev/local-run.sh web
   scripts/dev/local-run.sh worker
@@ -252,15 +255,57 @@ describe_port_owner() {
   fi
 }
 
-new_local_log_session() {
+ensure_log_dir() {
   local log_base=${LOCAL_LOG_BASE:-"$project_root/.logs/local"}
-  local session now
-  now=$(date -u +%s)
-  session=${LOCAL_LOG_SESSION:-$(date -u +%Y%m%dT%H%M%SZ)-server}
-  mkdir -p "$log_base/$session"
-  printf '%s %s\n' "$session" "$now" > "$log_base/.current-session"
-  ln -sfn "$session" "$log_base/latest"
-  printf '%s\n' "$session"
+  mkdir -p "$log_base"
+  # Replace any leftover `latest` symlink (from the retired session-folder
+  # layout) with a real directory so logs land in one stable location.
+  if [[ -L "$log_base/latest" ]]; then
+    rm -f "$log_base/latest"
+  fi
+  mkdir -p "$log_base/latest"
+  printf '%s\n' "$log_base/latest"
+}
+
+prune_legacy_log_layout() {
+  # One-shot migration: move any leftover artifacts from the retired
+  # session-folder layout into .logs/local/_archive/<utc-ts>/ so the active
+  # directory only ever shows `latest/` plus a handful of state files.
+  # Idempotent: when there is nothing legacy to move, this is a no-op.
+  local log_base=${LOCAL_LOG_BASE:-"$project_root/.logs/local"}
+  [[ -d "$log_base" ]] || return 0
+
+  local archive_ts archive_dir entry name moved=0
+  archive_ts=$(date -u +%Y%m%dT%H%M%SZ)
+  archive_dir="$log_base/_archive/$archive_ts"
+
+  shopt -s nullglob dotglob
+  for entry in "$log_base"/*; do
+    name=$(basename -- "$entry")
+    case "$name" in
+      latest|_archive|.|..)
+        continue
+        ;;
+    esac
+    # Keep stable state files in place. Everything else (timestamped session
+    # dirs, web-debug, log-guarantee-*, web-detached-*, .current-session, etc.)
+    # belongs to the legacy layout.
+    case "$name" in
+      api-*.lock|web.launch.pid|web.launch.log|state|monitor|health-check|provider-registration.*|deploy-*.log)
+        continue
+        ;;
+    esac
+    if (( moved == 0 )); then
+      mkdir -p "$archive_dir"
+    fi
+    mv -- "$entry" "$archive_dir/" 2>/dev/null || true
+    moved=1
+  done
+  shopt -u nullglob dotglob
+
+  if (( moved == 1 )); then
+    echo "[local-run] archived legacy log artifacts -> $archive_dir" >&2
+  fi
 }
 
 service_is_running() {
@@ -296,11 +341,10 @@ service_is_running() {
 
 start_detached_service() {
   local service_name=$1
-  local session=$2
   local log_base=${LOCAL_LOG_BASE:-"$project_root/.logs/local"}
-  local session_dir="$log_base/$session"
-  local launch_log="$session_dir/start.log"
-  local launcher_pid_file="$session_dir/$service_name.launch.pid"
+  local log_dir="$log_base/latest"
+  local launch_log="$log_dir/$service_name.launch.log"
+  local launcher_pid_file="$log_dir/$service_name.launch.pid"
   local script_path="$script_dir/local-run.sh"
 
   if service_is_running "$service_name"; then
@@ -312,7 +356,6 @@ start_detached_service() {
   (
     cd "$project_root"
     nohup env \
-      LOCAL_LOG_SESSION="$session" \
       LOCAL_LOG_CONSOLE=false \
       "$script_path" "$service_name" \
       >> "$launch_log" 2>&1 < /dev/null &
@@ -342,19 +385,19 @@ terminate_matching_processes() {
 }
 
 run_server_start() {
-  local session
   with_common_env
-  session=$(new_local_log_session)
-  export LOCAL_LOG_SESSION="$session"
+  prune_legacy_log_layout
+  local log_dir
+  log_dir=$(ensure_log_dir)
   export LOCAL_LOG_CONSOLE=false
 
   run_redis
   for service_name in terminal-exec api worker beat web; do
-    start_detached_service "$service_name" "$session"
+    start_detached_service "$service_name"
   done
 
   echo "local servers are launching in the background"
-  echo "logs: .logs/local/$session/"
+  echo "logs: $log_dir/<service>.log   (tail -f $log_dir/api.log)"
   echo "api: http://127.0.0.1:${API_PORT:-8085}/api/health"
   echo "web: http://127.0.0.1:${WEB_PORT:-8090}/"
 }
@@ -578,6 +621,36 @@ case "$service" in
     ;;
   redis)
     run_redis "$@"
+    ;;
+  logs)
+    log_dir=$(ensure_log_dir)
+    echo "log directory: $log_dir"
+    if command -v ls >/dev/null 2>&1; then
+      ls -lah "$log_dir" 2>/dev/null || true
+    fi
+    ;;
+  logs-clean)
+    log_dir=$(ensure_log_dir)
+    log_base=${LOCAL_LOG_BASE:-"$project_root/.logs/local"}
+    archive_ts=$(date -u +%Y%m%dT%H%M%SZ)
+    archive_dir="$log_base/_archive/$archive_ts"
+    shopt -s nullglob dotglob
+    moved=0
+    for entry in "$log_dir"/*; do
+      name=$(basename -- "$entry")
+      [[ "$name" == "." || "$name" == ".." ]] && continue
+      if (( moved == 0 )); then
+        mkdir -p "$archive_dir"
+      fi
+      mv -- "$entry" "$archive_dir/" 2>/dev/null || true
+      moved=1
+    done
+    shopt -u nullglob dotglob
+    if (( moved == 1 )); then
+      echo "archived current logs -> $archive_dir"
+    else
+      echo "nothing to archive in $log_dir"
+    fi
     ;;
   storage-on)
     run_storage_public_access on "$@"

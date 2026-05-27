@@ -33,7 +33,7 @@ from api.services.blast.oracles import (
     upload_db_order_oracle_pointer_if_available,
     upload_tie_order_oracle_if_present,
 )
-from api.services.blast_task_config import WarmupNotReadyError
+from api.services.blast.task_config import WarmupNotReadyError
 from api.services.terminal_exec import TerminalExecError
 from api.tasks import blast as _blast
 from api.tasks.blast.cli_parsing import ELASTIC_BLAST_CFG_FILE

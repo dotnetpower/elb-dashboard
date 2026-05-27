@@ -11,6 +11,7 @@ export interface OpenApiDeployPanelProps {
   resourceGroup: string;
   clusterName: string;
   acrName: string;
+  acrResourceGroup: string;
   storageAccount: string;
   storageResourceGroup: string;
   imageBuilt: boolean;
@@ -35,6 +36,7 @@ export function OpenApiDeployPanel({
   resourceGroup,
   clusterName,
   acrName,
+  acrResourceGroup,
   storageAccount,
   storageResourceGroup,
   imageBuilt,
@@ -54,11 +56,14 @@ export function OpenApiDeployPanel({
     canDeploy,
     handleDeploy,
     handleCancelTracking,
+    deployRecoveryAction,
+    deployRecoveryHint,
   } = useDeployTask({
     subscriptionId,
     resourceGroup,
     clusterName,
     acrName,
+    acrResourceGroup,
     storageAccount,
     storageResourceGroup,
     imageBuilt,
@@ -93,6 +98,12 @@ export function OpenApiDeployPanel({
         deployError={deployError}
         deployCustomStatus={deployCustomStatus}
         waitElapsed={waitElapsed}
+        deployRecoveryAction={deployRecoveryAction}
+        deployRecoveryHint={deployRecoveryHint}
+        subscriptionId={subscriptionId}
+        resourceGroup={resourceGroup}
+        clusterName={clusterName}
+        onRecoveryResolved={onRetry}
       />
 
       <DeployActions

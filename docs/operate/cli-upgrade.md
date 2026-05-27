@@ -144,7 +144,7 @@ deployed dashboard. It is paired with the script
 | Sidecar layout / probes / scale rules changed (anything outside container images) | `cli-upgrade.sh full` — runs the full [`postprovision.sh`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/postprovision.sh) template swap. |
 | The SPA is down — the browser cannot drive a rollback | `cli-upgrade.sh rollback` against the snapshot file. |
 | You only edited code in `api/` and want a 60-second cycle | `quick-deploy.sh api` directly (no snapshot envelope). |
-| You need to refresh **all three custom images** (api+worker+beat / frontend / terminal) but **did not** touch sidecar layout / Bicep / secrets | [`quick-deploy.sh all`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/quick-deploy.sh) — three sequential `az acr build` + per-container PATCH, no template swap, no snapshot envelope. Faster than `cli-upgrade.sh full` (skips the Bicep redeploy) but also **skips** the snapshot + `/api/health` auto-rollback safety net. |
+| You need to refresh **all three custom images** (api+worker+beat / frontend / terminal) but **did not** touch sidecar layout / Bicep / secrets | [`quick-deploy.sh all`](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/quick-deploy.sh) — three **parallel** `az acr build` jobs + per-container PATCH (sequential, to avoid a Container App revision read-modify-write race), no template swap, no snapshot envelope. Faster than `cli-upgrade.sh full` (skips the Bicep redeploy) but also **skips** the snapshot + `/api/health` auto-rollback safety net. |
 
 ## What the script does (envelope around `quick-deploy.sh` / `postprovision.sh`)
 
@@ -209,6 +209,7 @@ The script enforces these automatically and refuses to proceed if any fails:
 | Check | What it guards against |
 |-------|------------------------|
 | `az account show` succeeds | Stale or missing `az login` |
+| `az account show` subscription is treated as the source of truth; if it differs from `AZURE_SUBSCRIPTION_ID` in azd env, the script auto-syncs azd env (`azd env set AZURE_SUBSCRIPTION_ID <current>` plus `AZURE_TENANT_ID` when different) and exports the values in-process before continuing | Silently pushing the new image to the wrong ACR / Container App when your `az login` and `azd env` point at different subscriptions. The script never switches `az account set` for you, so `az account show` keeps showing the subscription you actually selected. |
 | `AZURE_RESOURCE_GROUP`, `ACR_NAME`, `ACR_LOGIN_SERVER`, `CONTAINER_APP_NAME`, `CONTAINER_APP_FQDN` are set (auto-loaded from `azd env get-values`) | Pointing at the wrong app |
 | `git status --porcelain` is empty | Building with uncommitted edits silently shipping debug code (override with `--allow-dirty`) |
 | `--pull` only on the branch you started on | Accidental `pull` of a feature branch into `main` |
@@ -307,7 +308,9 @@ scripts/dev/quick-deploy.sh all --logs   # same, then tail the api revision logs
 
 Tradeoffs vs `cli-upgrade.sh full`:
 
-- ✅ Skips the ~2-3 min Bicep template swap and runs builds back-to-back instead of through `postprovision.sh`.
+- ✅ Builds api / frontend / terminal **in parallel** (per-image logs at `.logs/quick-deploy/<tag>/build-<image>.log`) and opens the ACR firewall once for all three. Wall time bounded by the slowest image, not the sum.
+- ✅ Skips the ~2-3 min Bicep template swap that `postprovision.sh` runs.
+- ⚠ PATCHes stay sequential (api → worker → beat → frontend → terminal) because `az containerapp update --container-name` has no ETag protection — parallel PATCHes would race and silently revert some sidecars on the final revision.
 - ⚠ No snapshot file is written, so there is **no auto-rollback on `/api/health` failure** — verify manually with `curl -fsS "https://$CONTAINER_APP_FQDN/api/health/ready"` and roll back with the [manual rollback steps below](#manual-rollback-when-the-script-is-unavailable) if needed.
 - ⚠ No dirty-tree / fast-forward / Storage parity / RBAC preflight. Run those checks (`git status`, `scripts/dev/check-mi-rbac.sh`) yourself, or fall back to `cli-upgrade.sh full` when in doubt.
 - ❌ Do **not** use this when sidecar layout, secrets, probes, scale rules, or the terminal base image changed — those require `cli-upgrade.sh full` (Bicep template swap).

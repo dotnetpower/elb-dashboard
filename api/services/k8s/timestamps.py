@@ -1,6 +1,6 @@
 """Pure helpers for parsing Kubernetes timestamps and timespans.
 
-Used by [api/services/k8s_monitoring.py](./k8s_monitoring.py) when summarising
+Used by [api/services/k8s/monitoring.py](./monitoring.py) when summarising
 pod / container start and completion times into job-level progress payloads.
 
 Responsibility: Parse Kubernetes RFC3339 / ISO-8601 timestamps and compute

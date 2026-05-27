@@ -1,6 +1,6 @@
-"""Tests for `api.services.blast_results_parser`.
+"""Tests for `api.services.blast.results_parser`.
 
-Responsibility: Tests for `api.services.blast_results_parser`
+Responsibility: Tests for `api.services.blast.results_parser`
 Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
 Azure calls.
 Key entry points: `test_parse_outfmt6_default_columns`, `test_parse_outfmt7_uses_field_header`,

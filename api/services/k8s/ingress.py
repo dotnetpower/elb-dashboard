@@ -10,7 +10,8 @@ Edit boundaries: No Azure or Kubernetes I/O here. The Celery task pipes these st
     through unchanged.
 Key entry points: `INGRESS_NGINX_INSTALL_URL`, `CERT_MANAGER_INSTALL_URL`,
     `build_cluster_issuer`, `build_openapi_ingress`, `dns_label_for_cluster`,
-    `cloudapp_fqdn`.
+    `cloudapp_fqdn`, `patch_manifest_for_system_pool`,
+    `fetch_install_manifest_for_system_pool`.
 Risky contracts: The pinned installer URLs MUST match versions tested against the
     repo's AKS K8s baseline (1.34+). Bumping either pin without rerunning the
     cert-manager webhook readiness probe + Certificate issuance test will silently
@@ -22,6 +23,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.request
+from typing import Any
+
+import yaml as _yaml
 
 # Pinned to the latest minor that supports K8s 1.27+ (current AKS LTS baseline
 # is 1.34). The cloud installer file ships ingress-nginx Deployment +
@@ -54,6 +59,110 @@ OPENAPI_CLUSTER_ISSUER_NAME = "letsencrypt-prod"
 OPENAPI_NAMESPACE = "default"
 OPENAPI_SERVICE_NAME = "elb-openapi"
 OPENAPI_SERVICE_PORT = 80
+
+# AKS systempool / blastpool both carry a NoSchedule taint
+# (`CriticalAddonsOnly=true` on systempool, `workload=blast` on blastpool).
+# The upstream cert-manager and ingress-nginx install manifests carry no
+# tolerations, so every pod they ship lands in `Pending` forever on these
+# clusters. ``patch_manifest_for_system_pool`` injects the minimum
+# toleration + nodeSelector that lets these control-plane add-ons land on
+# the systempool only — we deliberately do **not** add a `workload=blast`
+# toleration because cert-manager / ingress-nginx must not consume CPU on
+# nodes reserved for the BLAST workload.
+SYSTEM_POOL_TOLERATION: dict[str, str] = {
+    "key": "CriticalAddonsOnly",
+    "operator": "Exists",
+    "effect": "NoSchedule",
+}
+SYSTEM_POOL_NODE_SELECTOR: dict[str, str] = {
+    "kubernetes.azure.com/mode": "system",
+}
+# Workload kinds whose podTemplate must carry the systempool patch. We
+# patch Jobs too because ingress-nginx ships admission-webhook bootstrap
+# Jobs whose Pods would otherwise be Pending.
+_SYSTEM_POOL_WORKLOAD_KINDS: frozenset[str] = frozenset(
+    {"Deployment", "DaemonSet", "StatefulSet", "Job", "ReplicaSet"}
+)
+# Label selector for the ingress-nginx admission-webhook Jobs. Jobs are
+# spec-immutable, so an earlier failed install (toleration-less) leaves
+# Pending pods behind that ``kubectl apply -f -`` cannot reconcile. The
+# task pre-deletes them by this label before applying the patched
+# manifest so the systempool-tolerating Jobs can be recreated cleanly.
+INGRESS_NGINX_ADMISSION_JOB_SELECTOR = "app.kubernetes.io/component=admission-webhook"
+
+
+def patch_manifest_for_system_pool(raw_manifest: str) -> str:
+    """Inject systempool toleration + nodeSelector into every workload doc.
+
+    Pure transform — accepts a multi-doc YAML string (the kind shipped
+    by the upstream cert-manager / ingress-nginx install URLs) and
+    returns the same documents with each Deployment / DaemonSet /
+    StatefulSet / Job / ReplicaSet podTemplate carrying:
+
+    - tolerations: an entry equivalent to ``SYSTEM_POOL_TOLERATION``
+      (added only if no existing entry already keys on
+      ``CriticalAddonsOnly``).
+    - nodeSelector: ``kubernetes.azure.com/mode=system`` (added only if
+      that key is not already set; other selector keys are preserved).
+
+    Non-workload kinds (CRDs, ServiceAccounts, RBAC, Services, ConfigMaps,
+    Secrets, WebhookConfigurations, …) pass through unchanged. Empty
+    `---` separator docs are preserved.
+
+    Network-free so callers can unit-test it without hitting GitHub.
+    """
+    docs: list[Any] = list(_yaml.safe_load_all(raw_manifest))
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("kind") not in _SYSTEM_POOL_WORKLOAD_KINDS:
+            continue
+        spec = doc.setdefault("spec", {})
+        if not isinstance(spec, dict):
+            continue
+        template = spec.setdefault("template", {})
+        if not isinstance(template, dict):
+            continue
+        pod_spec = template.setdefault("spec", {})
+        if not isinstance(pod_spec, dict):
+            continue
+
+        tolerations = pod_spec.get("tolerations")
+        if not isinstance(tolerations, list):
+            tolerations = []
+            pod_spec["tolerations"] = tolerations
+        if not any(
+            isinstance(t, dict) and t.get("key") == SYSTEM_POOL_TOLERATION["key"]
+            for t in tolerations
+        ):
+            tolerations.append(dict(SYSTEM_POOL_TOLERATION))
+
+        node_selector = pod_spec.get("nodeSelector")
+        if not isinstance(node_selector, dict):
+            node_selector = {}
+            pod_spec["nodeSelector"] = node_selector
+        for k, v in SYSTEM_POOL_NODE_SELECTOR.items():
+            node_selector.setdefault(k, v)
+
+    # Drop empty / null documents before re-serialising. Upstream
+    # cert-manager.yaml ends with a trailing `---` whose `safe_load`
+    # value is ``None``; `safe_dump_all` would then emit `--- null\n`
+    # which kubectl rejects with
+    # `invalid Yaml document separator: null` and aborts the apply.
+    return _yaml.safe_dump_all([d for d in docs if d is not None], sort_keys=False)
+
+
+def fetch_install_manifest_for_system_pool(url: str, *, timeout_seconds: int = 60) -> str:
+    """Fetch an upstream install manifest and inject the systempool patch.
+
+    Thin network wrapper around :func:`patch_manifest_for_system_pool`.
+    The patched bytes are what the public-HTTPS Celery task pipes into
+    ``kubectl apply -f -`` so cert-manager / ingress-nginx land on the
+    only node pool that will admit them.
+    """
+    with urllib.request.urlopen(url, timeout=timeout_seconds) as resp:  # noqa: S310 - pinned upstream URL list.
+        raw = resp.read().decode("utf-8")
+    return patch_manifest_for_system_pool(raw)
 
 
 def dns_label_for_cluster(*, subscription_id: str, cluster_name: str) -> str:

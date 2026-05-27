@@ -110,13 +110,13 @@ function acrPayload() {
     expected_image_tags: {
       "elb-api": "2026.05.21",
       "elb-worker": "2026.05.21",
-      "elb-openapi": "2026.05.21",
+      "elb-openapi": "4.14",
       "elb-terminal": "2026.05.21",
     },
     actual_tags: {
       "elb-api": ["2026.05.21"],
       "elb-worker": ["2026.05.21"],
-      "elb-openapi": ["2026.05.21"],
+      "elb-openapi": ["4.14"],
       "elb-terminal": ["2026.05.21"],
     },
     building_images: [],
@@ -900,9 +900,9 @@ function matchApi(path: string, method: string): Response | null {
       deployment_name: "elb-openapi",
       container_name: "openapi",
       namespace: "default",
-      image: `${workspaceConfig.acrName}.azurecr.io/elb-openapi:2026.05.21`,
+      image: `${workspaceConfig.acrName}.azurecr.io/elb-openapi:4.14`,
       image_repository: "elb-openapi",
-      image_tag: "2026.05.21",
+      image_tag: "4.14",
     });
   }
   if (path === "/api/aks/openapi/token") {

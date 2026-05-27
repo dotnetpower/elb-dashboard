@@ -46,7 +46,7 @@ RE_DB_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 # out separately because their absence does not block BLAST.
 #
 # Keep this list in lock-step with `_DB_EXTS` in
-# api/services/storage_data.py:list_databases — both must agree on what
+# api/services/storage/data.py:list_databases — both must agree on what
 # counts as a BLAST DB file or the dashboard's "downloaded" detection drifts
 # from the preview's "volume_count".
 _BLAST_VOLUME_SUFFIXES = (

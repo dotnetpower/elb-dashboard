@@ -12,7 +12,7 @@
 | [`preflight-check.sh`](./preflight-check.sh) | Pre-`azd up` sanity. |
 | [`setup-app-registration.sh`](./setup-app-registration.sh) | One-shot Entra ID app registration creation. |
 | [`grant-local-rbac.sh`](./grant-local-rbac.sh) | One-shot: grant your `az login` user the minimum RBAC (Storage Blob Data Contributor, Storage Account Contributor, RG Reader, AcrPull) needed to drive a deployed environment from a local api sidecar. Idempotent; run once per fresh clone. |
-| [`storage-public-access.sh`](./storage-public-access.sh) | Manually flip a workload Storage account's `publicNetworkAccess` on (IP-allowlisted) / off for local debugging. The api also auto-opens it when `LOCAL_DEBUG_AUTO_OPEN_STORAGE=true` — see `api/services/storage_public_access.py`. |
+| [`storage-public-access.sh`](./storage-public-access.sh) | Manually flip a workload Storage account's `publicNetworkAccess` on (IP-allowlisted) / off for local debugging. The api also auto-opens it when `LOCAL_DEBUG_AUTO_OPEN_STORAGE=true` — see `api/services/storage/public_access.py`. |
 | [`local-run.sh`](./local-run.sh) | Direct terminal and VS Code task entrypoint for detached `start` / `stop` / `restart` / `status`, individual services (`api`, `worker`, `beat`, `web`, `redis`, `terminal-exec`), `smoke`, `compose-full`, and `compose-local`; always routes through local logging. |
 | [`e2e-ui.sh`](./e2e-ui.sh) | One-command UI E2E session launcher. Starts local api + web in dev-bypass mode without Azure login, or delegates to `auth-on` for real MSAL login, then exports headed/headless scenario environment. |
 | [`run-with-log.sh`](./run-with-log.sh) | Lower-level wrapper that mirrors any local dev command's stdout/stderr into `.logs/local/latest/*.log` for warning/error review. |
@@ -22,42 +22,60 @@
 ## Local logs
 
 VS Code dev tasks and direct terminal runs through `scripts/dev/local-run.sh`
-write project-local logs under `.logs/local/` so failures are visible from the
-workspace without relying on terminal scrollback:
+write project-local logs under **a single fixed location** so failures are
+visible from the workspace without relying on terminal scrollback:
 
 ```text
 .logs/local/
-  latest -> 20260515T143012Z-12345
-  20260515T143012Z-12345/
+  latest/                   # the only place logs ever land
     api.log
+    api.log.1               # rotated chunks (ring, see LOCAL_LOG_MAX_CHUNKS)
     worker.log
     beat.log
     web.log
     redis.log
-    smoke.log
+    terminal-exec.log
     compose-full.log
     compose-full-containers.log
+    <service>.launch.log    # detached-launcher stdout for `local-run.sh start`
+    <service>.launch.pid
+  _archive/                 # legacy session folders or `logs-clean` archives
+  api-<port>.lock           # api start lock (flock)
 ```
+
+There are **no** timestamped session folders, no `latest` symlink, no
+`.current-session` marker, no `.lock/` directory. One service → one file →
+ring rotation.
 
 Rules:
 
-- keep the newest 20 log sessions;
-- cap each log chunk at 1 MiB by default (`LOCAL_LOG_MAX_BYTES=1048576`);
-- keep at most 16 chunks per service in a session (`LOCAL_LOG_MAX_CHUNKS=16`),
-  rotating as a bounded ring so long-running debug sessions cannot grow
-  without limit;
-- flush the first few lines immediately, then batch file flushes every 50 lines
-  (`LOCAL_LOG_FLUSH_LINES=50`) to avoid per-line filesystem pressure;
+- one fixed log file per service: `.logs/local/latest/<service>.log`;
+- appended across runs so a `restart` does not lose the previous traceback;
+- cap each chunk at 1 MiB by default (`LOCAL_LOG_MAX_BYTES=1048576`) and keep
+  at most 5 chunks per service in a ring (`LOCAL_LOG_MAX_CHUNKS=5`), so each
+  service stays under ~5 MiB on disk no matter how long you debug;
+- flush the first few lines immediately, then batch file flushes every 50
+  lines (`LOCAL_LOG_FLUSH_LINES=50`) to avoid per-line filesystem pressure;
 - keep console output unchanged while mirroring it to files;
 - set `LOCAL_LOG_CONSOLE=false` for high-volume runs when terminal rendering is
   the bottleneck and file logs are enough;
-- reuse one freshly-created session for parallel task startup
-  (`LOCAL_LOG_SESSION_TTL_SECONDS=120`);
-- reject unsafe `LOCAL_LOG_SESSION` names and recover stale lock directories
-  (`LOCAL_LOG_LOCK_STALE_SECONDS=30`) so logging cannot hang future starts;
 - replay only the newest 200 lines when starting a detached Docker Compose log
   follower (`COMPOSE_LOG_TAIL=200`);
 - ignore `.logs/` in git.
+
+Inspecting and tidying:
+
+```bash
+scripts/dev/local-run.sh logs        # list .logs/local/latest/ contents with sizes
+scripts/dev/local-run.sh logs-clean  # move current logs into .logs/local/_archive/<ts>/
+tail -f .logs/local/latest/api.log   # always the right file, no symlink chasing
+```
+
+`local-run.sh start` also performs a one-shot migration on first run: any
+leftover artifacts from the retired session-folder layout (timestamped
+`20260515T...` directories, `web-debug`, `log-guarantee-*`, `.current-session`,
+etc.) are moved into `.logs/local/_archive/<utc-ts>/` so the active directory
+stays clean. Nothing is deleted.
 
 Use `.logs/local/latest/api.log` first when looking for API warnings/errors,
 then compare `worker.log`, `beat.log`, and `web.log` to verify the local

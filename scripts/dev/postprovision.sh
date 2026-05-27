@@ -555,6 +555,45 @@ ENV_RID="/subscriptions/$SUB_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/M
 PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL="$(resolve_platform_private_endpoint_subnet_id)"
 ts "    Private endpoint subnet: $PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL"
 
+# Resolve the Live Wall LA workspace from the Container Apps Environment
+# itself when the operator's shell did not export LOG_ANALYTICS_WORKSPACE_ID.
+# Container Apps strips env entries with empty values, so deploying with an
+# empty string here leaves the api sidecar with NO LOG_ANALYTICS_WORKSPACE_ID
+# at all — `_use_la_fallback()` returns False and the Live Wall stays blank.
+if [ -z "$LOG_ANALYTICS_WORKSPACE_ID_VAL" ]; then
+  LOG_ANALYTICS_WORKSPACE_ID_VAL="$(az containerapp env show \
+    --name "${CONTAINER_ENV_NAME:-cae-elb-dashboard}" \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query 'properties.appLogsConfiguration.logAnalyticsConfiguration.customerId' \
+    -o tsv 2>/dev/null || true)"
+  if [ -n "$LOG_ANALYTICS_WORKSPACE_ID_VAL" ]; then
+    ts "    Live Wall LA workspace resolved from env: $LOG_ANALYTICS_WORKSPACE_ID_VAL"
+  else
+    ts "    Live Wall LA workspace: unset (Live Wall tiles will stay blank)"
+  fi
+fi
+
+# Grant Log Analytics Reader on the workspace the env actually uses. The
+# monitoring.bicep grant only covers the workspace it creates — if a prior
+# deployment wired the env to a different workspace (e.g. azd template
+# regenerated the resource token) the api sidecar would 403 on KQL and the
+# Live Wall would stay blank even with the env var set.
+if [ -n "$LOG_ANALYTICS_WORKSPACE_ID_VAL" ] && [ -n "${SHARED_IDENTITY_PRINCIPAL_ID:-}" ]; then
+  LA_WS_RID="$(az monitor log-analytics workspace list \
+    --resource-group "$AZURE_RESOURCE_GROUP" \
+    --query "[?customerId=='$LOG_ANALYTICS_WORKSPACE_ID_VAL'].id | [0]" \
+    -o tsv 2>/dev/null || true)"
+  if [ -n "$LA_WS_RID" ]; then
+    az role assignment create \
+      --assignee-object-id "$SHARED_IDENTITY_PRINCIPAL_ID" \
+      --assignee-principal-type ServicePrincipal \
+      --role "Log Analytics Reader" \
+      --scope "$LA_WS_RID" \
+      --only-show-errors >/dev/null 2>&1 || true
+    ts "    Log Analytics Reader granted to shared UAMI on $LA_WS_RID"
+  fi
+fi
+
 az deployment group create \
   --resource-group "$AZURE_RESOURCE_GROUP" \
   --name "$DEPLOY_NAME" \

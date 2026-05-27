@@ -55,9 +55,9 @@ never `azure.mgmt.*` directly outside `services/`.
 |------|---------|
 | [azure_clients.py](../../api/services/azure_clients.py) | `DefaultAzureCredential` singleton + `resource_client`, `network_client`, `compute_client`, … factories. **Only place that imports `azure.mgmt.*`.** |
 | [keyvault.py](../../api/services/keyvault.py) | KV provisioning + access policy + Secrets Officer role assignment. |
-| [storage_data.py](../../api/services/storage_data.py) | Blob streaming (1 MiB chunks). **Never imports `generate_blob_sas` / `get_user_delegation_key`** — load-bearing comment at file bottom. |
-| [storage_network.py](../../api/services/storage_network.py) | Private endpoint wiring for workload Storage. |
-| [storage_public_access.py](../../api/services/storage_public_access.py) | Local-debug IP-allowlist toggle. `CONTAINER_APP_NAME` guard so deployed apps cannot flip Storage open. |
+| [storage/data.py](../../api/services/storage/data.py) | Blob streaming (1 MiB chunks). **Never imports `generate_blob_sas` / `get_user_delegation_key`** — load-bearing comment at file bottom. |
+| [storage/network.py](../../api/services/storage/network.py) | Private endpoint wiring for workload Storage. |
+| [storage/public_access.py](../../api/services/storage/public_access.py) | Local-debug IP-allowlist toggle. `CONTAINER_APP_NAME` guard so deployed apps cannot flip Storage open. |
 | [network.py](../../api/services/network.py) | VNet/subnet/NSG provisioning for workload network. |
 | [passwords.py](../../api/services/passwords.py) | `generate_admin_password()` for VM creation paths (legacy, kept for tests). |
 
@@ -66,23 +66,23 @@ never `azure.mgmt.*` directly outside `services/`.
 | File | Purpose |
 |------|---------|
 | [auto_warmup_reconcile.py](../../api/services/auto_warmup_reconcile.py) | Auto warmup reconcile policy, workload-node readiness gate, and Redis inflight dedupe. |
-| [blast_config.py](../../api/services/blast_config.py) | `generate_config()` — ElasticBLAST YAML composer. |
-| [blast_db_metadata.py](../../api/services/blast_db_metadata.py) | DB name normalisation + metadata resolution. |
-| [blast_job_state.py](../../api/services/blast_job_state.py) | BLAST job projection, external OpenAPI context/cache, Table sync, file preview, and read authorization helpers re-exported by `_blast_shared.py`. |
-| [blast_oracles.py](../../api/services/blast_oracles.py) | Tie-order + DB-order oracle upload to Storage. |
-| [blast_result_analytics.py](../../api/services/blast_result_analytics.py) | Result blob validation, hit annotation, filtering/sorting, subject rollups, taxonomy rollups. |
-| [blast_results_parser.py](../../api/services/blast_results_parser.py) | XML/tabular parser + hit aggregation. |
-| [blast_submit_payload.py](../../api/services/blast_submit_payload.py) | Submit body normalization, option extraction, inline query upload, Web BLAST `searchsp` defaulting. |
-| [blast/task_config.py](../../api/services/blast/task_config.py) | BLAST Celery task config URL/path normalization and node-warmup submit readiness policy. Compatibility wrapper: [blast_task_config.py](../../api/services/blast_task_config.py). |
-| [db_order_oracle.py](../../api/services/db_order_oracle.py) | `DbOrderOracleJobPlan` builder. |
-| [db_sharding.py](../../api/services/db_sharding.py) | `ShardLayout` + `read_blastdb_stats` for sharded DBs. |
+| [blast/config.py](../../api/services/blast/config.py) | `generate_config()` — ElasticBLAST YAML composer. |
+| [blast/db_metadata.py](../../api/services/blast/db_metadata.py) | DB name normalisation + metadata resolution. |
+| [blast/job_state.py](../../api/services/blast/job_state.py) | BLAST job projection, external OpenAPI context/cache, Table sync, file preview, and read authorization helpers re-exported by `_blast_shared.py`. |
+| [blast/oracles.py](../../api/services/blast/oracles.py) | Tie-order + DB-order oracle upload to Storage. |
+| [blast/result_analytics.py](../../api/services/blast/result_analytics.py) | Result blob validation, hit annotation, filtering/sorting, subject rollups, taxonomy rollups. |
+| [blast/results_parser.py](../../api/services/blast/results_parser.py) | XML/tabular parser + hit aggregation. |
+| [blast/submit_payload.py](../../api/services/blast/submit_payload.py) | Submit body normalization, option extraction, inline query upload, Web BLAST `searchsp` defaulting. |
+| [blast/task_config.py](../../api/services/blast/task_config.py) | BLAST Celery task config URL/path normalization and node-warmup submit readiness policy. |
+| [db/order_oracle.py](../../api/services/db/order_oracle.py) | `DbOrderOracleJobPlan` builder. |
+| [db/sharding.py](../../api/services/db/sharding.py) | `ShardLayout` + `read_blastdb_stats` for sharded DBs. |
 | [external_blast.py](../../api/services/external_blast.py) | Streaming downloads from external BLAST sources. |
 | [query_grouping.py](../../api/services/query_grouping.py) | `QueryGroupPlan` + split planning. |
 | [query_metadata.py](../../api/services/query_metadata.py) | FASTA parser → `QueryRecordSummary`. |
 | [sharding_precision.py](../../api/services/sharding_precision.py) | Outfmt merge compatibility + `PrecisionReport`. |
-| [warmup_jobs.py](../../api/services/warmup_jobs.py) | `WarmupJobPlan` + warmup ConfigMap builder. |
-| [warmup_planner.py](../../api/services/warmup_planner.py) | `compute_warmup_feasibility` + SKU upgrade recs. |
-| [warmup/task_planning.py](../../api/services/warmup/task_planning.py) | Storage warmup task shard selection, molecule type, and ELB image planning helpers. Compatibility wrapper: [warmup_task_planning.py](../../api/services/warmup_task_planning.py). |
+| [warmup/jobs.py](../../api/services/warmup/jobs.py) | `WarmupJobPlan` + warmup ConfigMap builder. |
+| [warmup/planner.py](../../api/services/warmup/planner.py) | `compute_warmup_feasibility` + SKU upgrade recs. |
+| [warmup/task_planning.py](../../api/services/warmup/task_planning.py) | Storage warmup task shard selection, molecule type, and ELB image planning helpers. |
 | [auto_warmup.py](../../api/services/auto_warmup.py) | Auto-warmup preferences (Table-backed). |
 | [web_blast_searchsp.py](../../api/services/web_blast_searchsp.py) | NCBI Web BLAST `searchsp` defaults (see `docs/blast-searchsp-discovery.md`). |
 | [taxonomy.py](../../api/services/taxonomy.py) | NCBI taxonomy search + cache. |
@@ -93,9 +93,9 @@ never `azure.mgmt.*` directly outside `services/`.
 | File | Purpose |
 |------|---------|
 | [monitoring.py](../../api/services/monitoring.py) | `list_aks_clusters`, `get_storage_summary`, `set_storage_public_access`. **Use `k8s_*` helpers — NEVER `begin_run_command`** (charter §11). |
-| [k8s/client.py](../../api/services/k8s/client.py) | AKS kubeconfig credential cache and direct Kubernetes `requests.Session` setup. Compatibility wrapper: [k8s_client.py](../../api/services/k8s_client.py). |
-| [k8s/nodes.py](../../api/services/k8s/nodes.py) | Kubernetes node list projection and Ready warmup-node selection. Compatibility wrapper: [k8s_nodes.py](../../api/services/k8s_nodes.py). |
-| [k8s_monitoring.py](../../api/services/k8s_monitoring.py) | Direct K8s API facade for warmup, BLAST job, pod, service, metric, and event helpers. |
+| [k8s/client.py](../../api/services/k8s/client.py) | AKS kubeconfig credential cache and direct Kubernetes `requests.Session` setup. |
+| [k8s/nodes.py](../../api/services/k8s/nodes.py) | Kubernetes node list projection and Ready warmup-node selection. |
+| [k8s/monitoring.py](../../api/services/k8s/monitoring.py) | Direct K8s API facade for warmup, BLAST job, pod, service, metric, and event helpers. |
 | [monitor_cache.py](../../api/services/monitor_cache.py) | Cached snapshot for dashboard polling. |
 | [state_repo.py](../../api/services/state_repo.py) | `JobStateRepository` — Azure Tables (`jobstate`/`jobhistory`) + local JSON fallback (repo-root anchored, `fcntl.flock`). |
 | [request_metrics.py](../../api/services/request_metrics.py) | Per-sidecar request percentiles. |
@@ -103,7 +103,7 @@ never `azure.mgmt.*` directly outside `services/`.
 | [event_emitter.py](../../api/services/event_emitter.py) | Redis-backed event channel (dashboard SSE). |
 | [aks_skus.py](../../api/services/aks_skus.py) | `SkuCatalogEntry` + allowlist. |
 | [image_tags.py](../../api/services/image_tags.py) | `IMAGE_TAGS` dict — cross-check vs `dotnetpower/elastic-blast-azure` `src/elastic_blast/constants.py`. |
-| [openapi_runtime.py](../../api/services/openapi_runtime.py) | OpenAPI base-url store (Redis). |
+| [openapi/runtime.py](../../api/services/openapi/runtime.py) | OpenAPI base-url store (Redis). |
 | [cgroup_reporter.py](../../api/services/cgroup_reporter.py) | Container resource snapshot (CPU/mem). |
 
 ### Terminal exec channel

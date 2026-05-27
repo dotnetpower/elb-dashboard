@@ -117,19 +117,6 @@
       "console": "internalConsole"
     },
     {
-      "name": "Pytest: All (api/tests)",
-      "type": "debugpy",
-      "request": "launch",
-      "module": "pytest",
-      "args": ["-q", "api/tests"],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}"
-      },
-      "justMyCode": false,
-      "console": "internalConsole"
-    },
-    {
       "name": "Web: Vite Dev",
       "type": "chrome",
       "request": "launch",
@@ -140,33 +127,9 @@
         "webpack:///src/*": "${workspaceFolder}/web/src/*"
       },
       "preLaunchTask": "web: dev"
-    },
-    {
-      "name": "Full Stack: Compose (6 sidecars)",
-      "type": "chrome",
-      "request": "launch",
-      "url": "http://127.0.0.1:18080/",
-      "webRoot": "${workspaceFolder}/web",
-      "sourceMapPathOverrides": {
-        "/src/*": "${workspaceFolder}/web/src/*",
-        "webpack:///src/*": "${workspaceFolder}/web/src/*"
-      },
-      "preLaunchTask": "fullstack: compose start"
     }
   ],
   "compounds": [
-    {
-      "name": "Full Stack (compose 6 sidecars)",
-      "configurations": ["Full Stack: Compose (6 sidecars)"],
-      "stopAll": true,
-      "presentation": { "order": 1 }
-    },
-    {
-      "name": "Full Stack (api + web)",
-      "configurations": ["API: FastAPI (uvicorn)", "Web: Vite Dev"],
-      "stopAll": true,
-      "presentation": { "order": 2 }
-    },
     {
       "name": "Backend (api + worker + beat)",
       "configurations": [
@@ -175,10 +138,10 @@
         "Beat: Celery Beat"
       ],
       "stopAll": true,
-      "presentation": { "order": 3 }
+      "presentation": { "order": 1 }
     },
     {
-      "name": "Full Stack + Worker + Beat",
+      "name": "Full Stack (Host Mode)",
       "configurations": [
         "API: FastAPI (uvicorn)",
         "Worker: Celery",
@@ -187,7 +150,7 @@
         "Web: Vite Dev"
       ],
       "stopAll": true,
-      "presentation": { "order": 4 }
+      "presentation": { "order": 2 }
     }
   ]
 }

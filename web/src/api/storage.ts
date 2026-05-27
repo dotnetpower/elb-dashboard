@@ -5,7 +5,7 @@ import { api } from "@/api/client";
  * running inside a Container App. The backend is the source of truth for
  * "are we local?"; the SPA never decides this on its own.
  *
- * See `api/services/storage_public_access.py` and project policy §9.
+ * See `api/services/storage/public_access.py` and project policy §9.
  */
 
 export interface StorageLocalDebugStatus {

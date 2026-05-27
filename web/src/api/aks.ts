@@ -90,6 +90,15 @@ export interface OpenApiTokenStatus {
   updated_at?: string | null;
   generated?: boolean;
   rotated?: boolean;
+  /**
+   * Populated only when GET /aks/openapi/token tried to self-heal a
+   * legacy deployment (missing ELB_OPENAPI_API_TOKEN env entry) and the
+   * patch failed. The panel renders this as a red banner so the operator
+   * immediately sees the actionable failure code+message instead of the
+   * silent "No API token generated" placeholder. `null` on the happy
+   * path — both "token already configured" and "self-heal succeeded".
+   */
+  self_heal_error?: { code: string; message: string } | null;
 }
 
 export interface OpenApiDeploymentStatus {
@@ -316,12 +325,14 @@ export const aksApi = {
     acrName?: string,
     storageAccount?: string,
     storageResourceGroup?: string,
+    acrResourceGroup?: string,
   ) =>
     api.post<{ id: string; statusQueryGetUri?: string }>("/aks/openapi/deploy", {
       subscription_id: subscriptionId,
       resource_group: rg,
       cluster_name: clusterName,
       acr_name: acrName,
+      acr_resource_group: acrResourceGroup,
       storage_account: storageAccount,
       storage_resource_group: storageResourceGroup,
     }),
@@ -334,8 +345,24 @@ export const aksApi = {
         status?: string;
         openapi_deploy?: { error?: string };
         workload_identity?: { error?: string };
-      }>
+      }> & {
+        /** Additive envelope-root recovery affordance — set when the
+         *  failed task looks like an upstream-reach (VNet peering)
+         *  problem. The SPA's RepairPeeringButton keys off this. */
+        recovery_action?: string;
+        recovery_hint?: string;
+      }
     >(`/aks/openapi/deploy/${encodeURIComponent(instanceId)}/status`),
+
+  /** Revoke a running ``deploy_openapi_service`` Celery task. Response
+   *  shape mirrors {@link AksCancelProvisionResponse} so the SPA can
+   *  reuse its cancel-toast UX. Idempotent — already-terminal tasks
+   *  return 200 with ``was_running: false``. */
+  cancelOpenApiDeploy: (taskId: string) =>
+    api.post<AksCancelProvisionResponse>(
+      `/aks/openapi/deploy/${encodeURIComponent(taskId)}/cancel`,
+      {},
+    ),
 
   proxyOpenApiSpec: (subscriptionId: string, rg: string, clusterName: string) =>
     api.get<Record<string, unknown>>(

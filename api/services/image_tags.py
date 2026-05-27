@@ -11,6 +11,11 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+# ``elb-openapi`` tag uses the dashboard-specific ``4.x`` scheme (dashboard tracks
+# the upstream FastAPI app's ``VERSION`` in commit messages: 4.14 == upstream
+# 3.6.0 cache hardening). Bump in lock-step with the sibling repo's
+# ``docker-openapi/app/main.py`` ``VERSION`` constant and record the mapping in
+# the per-bump change note under ``docs/features_change/``.
 IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",

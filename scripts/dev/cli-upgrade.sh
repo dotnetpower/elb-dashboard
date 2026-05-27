@@ -234,19 +234,19 @@ load_simple_env_file "$REPO_ROOT/.env.local"
 if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${CONTAINER_APP_NAME:-}" ]]; then
   load_azd_env
 fi
+
+# ---------------------------------------------------------------------------
+# Preflight: az login + active subscription. The helper discovers and
+# exports AZURE_*, ACR_*, CONTAINER_APP_* etc. from ARM lookups against the
+# active az login subscription, so the env validation below sees fresh
+# values even when a stale `azd env get-values` was sourced earlier.
+# ---------------------------------------------------------------------------
+. "$REPO_ROOT/scripts/dev/az-context.sh"
+assert_az_subscription_aligned
+
 for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME CONTAINER_APP_FQDN; do
   [[ -n "${!v:-}" ]] || die "$v is unset. Run \`azd env refresh\` or export it."
 done
-
-# ---------------------------------------------------------------------------
-# Preflight: az login + active subscription.
-# ---------------------------------------------------------------------------
-if ! az account show -o none >/dev/null 2>&1; then
-  die "Not logged in to Azure CLI. Run 'az login' first."
-fi
-if [[ -n "${AZURE_SUBSCRIPTION_ID:-}" ]]; then
-  az account set --subscription "$AZURE_SUBSCRIPTION_ID" >/dev/null
-fi
 
 # ---------------------------------------------------------------------------
 # Preflight: Storage isolation parity check.

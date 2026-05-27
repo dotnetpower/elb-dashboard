@@ -1,6 +1,18 @@
 import type { ReactNode } from "react";
-import { BookOpen, ExternalLink, Hash, RefreshCw, Server, Zap } from "lucide-react";
+import {
+  BookOpen,
+  Check,
+  Copy,
+  ExternalLink,
+  Globe,
+  Hash,
+  Network,
+  RefreshCw,
+  Server,
+  Zap,
+} from "lucide-react";
 
+import { useClipboardFeedback } from "@/hooks/useClipboardFeedback";
 import type { ParsedSpec } from "@/pages/apiReference/types";
 
 // `baseUrl` is the resolved Service IP (typically the AKS internal
@@ -36,16 +48,23 @@ function isReachableUpstream(baseUrl: string): boolean {
 export function ApiHero({
   spec,
   baseUrl,
+  publicHttpsUrl,
   onRefresh,
   refreshing,
 }: {
   spec: ParsedSpec | null;
   baseUrl: string | null;
+  publicHttpsUrl?: string | null;
   onRefresh: () => void;
   refreshing: boolean;
 }) {
   const totalEndpoints = spec?.endpoints.length ?? 0;
   const methods = spec ? [...new Set(spec.endpoints.map((endpoint) => endpoint.method))] : [];
+  const { copied, copyText } = useClipboardFeedback();
+  // Prefer the public HTTPS URL for the Swagger UI link when present —
+  // the internal LB IP is unreachable from the browser anyway.
+  const swaggerHref = publicHttpsUrl ?? baseUrl;
+  const showSwagger = Boolean(swaggerHref && isReachableUpstream(swaggerHref));
 
   return (
     <div className="mono-header api-hero">
@@ -94,47 +113,119 @@ export function ApiHero({
           )}
         </div>
 
-        <div className="api-hero__actions" style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+        <div className="api-hero__actions" style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>
           {baseUrl && (
-            <>
-              <span
-                className="api-hero__base-url"
-                style={{
-                  fontSize: 10,
-                  fontFamily: "var(--font-mono)",
-                  color: "var(--text-faint)",
-                  padding: "3px 8px",
-                  background: "var(--bg-tertiary)",
-                  borderRadius: 5,
-                }}
-              >
-                {baseUrl}
-              </span>
-              {isReachableUpstream(baseUrl) && (
-                <a
-                  href={`${baseUrl}/docs`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="glass-button api-hero__swagger"
-                  style={{ fontSize: 11, textDecoration: "none" }}
-                >
-                  <ExternalLink size={11} /> Swagger UI
-                </a>
-              )}
-              <button
-                type="button"
-                className="glass-button"
-                onClick={onRefresh}
-                disabled={refreshing}
-                style={{ fontSize: 11 }}
-              >
-                <RefreshCw size={11} className={refreshing ? "spin" : ""} />
-              </button>
-            </>
+            <UrlChip
+              icon={<Network size={11} />}
+              label="Internal LB"
+              value={baseUrl}
+              copied={copied === "api-hero-internal"}
+              onCopy={() => copyText(baseUrl, "api-hero-internal")}
+              tone="muted"
+            />
+          )}
+          {publicHttpsUrl && (
+            <UrlChip
+              icon={<Globe size={11} />}
+              label="Public HTTPS"
+              value={publicHttpsUrl}
+              copied={copied === "api-hero-public"}
+              onCopy={() => copyText(publicHttpsUrl, "api-hero-public")}
+              tone="success"
+            />
+          )}
+          {showSwagger && swaggerHref && (
+            <a
+              href={`${swaggerHref}/docs`}
+              target="_blank"
+              rel="noreferrer"
+              className="glass-button api-hero__swagger"
+              style={{ fontSize: 11, textDecoration: "none" }}
+            >
+              <ExternalLink size={11} /> Swagger UI
+            </a>
+          )}
+          {baseUrl && (
+            <button
+              type="button"
+              className="glass-button"
+              onClick={onRefresh}
+              disabled={refreshing}
+              style={{ fontSize: 11 }}
+              title="Refresh API spec"
+              aria-label="Refresh API spec"
+            >
+              <RefreshCw size={11} className={refreshing ? "spin" : ""} />
+            </button>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+function UrlChip({
+  icon,
+  label,
+  value,
+  copied,
+  onCopy,
+  tone,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  copied: boolean;
+  onCopy: () => void;
+  tone: "muted" | "success";
+}) {
+  const accent = tone === "success" ? "var(--success)" : "var(--text-faint)";
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={copied ? "Copied" : `Click to copy: ${value}`}
+      aria-label={`${label}: ${value}. ${copied ? "Copied" : "Click to copy"}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "3px 8px",
+        background: "var(--bg-tertiary)",
+        border: "1px solid var(--border-weak)",
+        borderRadius: 5,
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        color: "var(--text-faint)",
+        cursor: "pointer",
+        maxWidth: 360,
+        minWidth: 0,
+      }}
+    >
+      <span style={{ color: accent, display: "inline-flex" }}>{icon}</span>
+      <span
+        style={{
+          color: tone === "success" ? "var(--text-primary)" : "var(--text-faint)",
+          fontWeight: tone === "success" ? 600 : 500,
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          color: "var(--text-muted)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          minWidth: 0,
+        }}
+      >
+        {value}
+      </span>
+      <span style={{ color: copied ? "var(--success)" : "var(--text-faint)", display: "inline-flex" }}>
+        {copied ? <Check size={11} /> : <Copy size={11} />}
+      </span>
+    </button>
   );
 }
 

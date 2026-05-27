@@ -461,7 +461,7 @@ def prepare_db(
     # account's public network surface to this caller's IP so the server-side
     # copy below can actually reach the data plane. In production the api
     # sidecar already reaches Storage via the private endpoint and this is a
-    # no-op. See api/services/storage_public_access.py and project policy §9.
+    # no-op. See api/services/storage/public_access.py and project policy §9.
     from api.services.storage.public_access import ensure_local_storage_access
 
     access = ensure_local_storage_access(cred, sub, storage_rg, account_name)

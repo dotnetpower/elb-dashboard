@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.auth import CallerIdentity, require_caller
@@ -107,17 +107,28 @@ async def blast_job_logs_ticket(
     return {"ticket": token, "ttl_seconds": _LOG_TICKET_TTL_SEC}
 
 
-async def _consume_log_ticket(job_id: str, token: str | None) -> _LogTicket:
+async def _consume_log_ticket(job_id: str, token: str | None) -> _LogTicket | None:
+    """Pop and validate a BLAST job logs ticket.
+
+    Returns ``None`` when the ticket is missing, already consumed, expired,
+    or bound to a different ``job_id``. The SSE route maps ``None`` to
+    HTTP 204 so the browser's native EventSource stops auto-reconnecting
+    after a stream drop (per spec, 204 is the documented "no reconnect"
+    signal). Returning 401/403 here previously generated phantom App
+    Insights Dependency failures on every drop, because the browser would
+    auto-retry the same URL whose ticket had just been popped.
+    """
+
     if not token:
-        raise HTTPException(401, "ticket required")
+        return None
     async with _tickets_lock:
         entry = _tickets.pop(token, None)
     if entry is None:
-        raise HTTPException(401, "invalid or expired ticket")
+        return None
     if entry.expires_at <= time.time():
-        raise HTTPException(401, "ticket expired")
+        return None
     if entry.job_id != job_id:
-        raise HTTPException(403, "ticket job mismatch")
+        return None
     return entry
 
 
@@ -125,7 +136,7 @@ async def _consume_log_ticket(job_id: str, token: str | None) -> _LogTicket:
 async def blast_job_logs_events(
     job_id: str = Path(...),
     ticket: str | None = Query(default=None),
-) -> StreamingResponse:
+) -> Response:
     """Server-Sent Events stream of live BLAST job logs.
 
     Event types:
@@ -133,9 +144,15 @@ async def blast_job_logs_events(
       * ``log``: one terminal or Kubernetes log line;
       * ``status``: source discovery / degraded notices;
       * comments: heartbeat frames while idle.
+
+    Ticket validation failures return **HTTP 204**, not 401/403, so the
+    browser's native EventSource stops auto-retrying after a stream drop
+    (see ``_consume_log_ticket``).
     """
 
     entry = await _consume_log_ticket(job_id, ticket)
+    if entry is None:
+        return Response(status_code=204)
     queue: asyncio.Queue[str | None] = asyncio.Queue(
         maxsize=max(1, int(os.environ.get("BLAST_LOG_SSE_QUEUE_MAXSIZE", "256")))
     )

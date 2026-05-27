@@ -43,7 +43,24 @@ def build_manifests(
 
     kubectl happily accepts JSON documents separated by ``---`` (it parses
     them as YAML). Building JSON sidesteps the need for PyYAML.
+
+    ``api_token`` is required. Shipping a deployment without the
+    ``ELB_OPENAPI_API_TOKEN`` env entry is the root cause of the
+    recurring "API token not visible" SPA bug — the pre-9d4e549 guard
+    silently emitted a broken manifest when the caller passed an empty
+    token. Refuse to build instead so the failure is loud at the deploy
+    task boundary, not buried as ``configured=false`` in the API panel
+    hours later.
     """
+    if not api_token or not api_token.strip():
+        raise ValueError(
+            "build_manifests: api_token must be a non-empty string. "
+            "The elb-openapi deployment fails-closed when "
+            "ELB_OPENAPI_API_TOKEN is unset, so this builder refuses to "
+            "emit a manifest without it. Resolve / mint a token in the "
+            "calling task (api.tasks.openapi.deploy.deploy_openapi_service) "
+            "before invoking build_manifests."
+        )
 
     sa_manifest = {
         "apiVersion": "v1",
@@ -75,9 +92,13 @@ def build_manifests(
                 "/sbin:/bin"
             ),
         },
+        # api_token is guaranteed non-empty by the build_manifests guard
+        # above — no conditional append. Shipping a deployment without
+        # this env entry is what produced the recurring "API token not
+        # visible" SPA bug; keeping the entry unconditional makes the
+        # contract obvious to future readers.
+        {"name": "ELB_OPENAPI_API_TOKEN", "value": api_token},
     ]
-    if api_token:
-        openapi_env.append({"name": "ELB_OPENAPI_API_TOKEN", "value": api_token})
 
     deploy_manifest = {
         "apiVersion": "apps/v1",

@@ -55,15 +55,31 @@ _OPENAPI_PROXY_ALLOWED_PATH_PREFIXES: tuple[str, ...] = (
 
 # Substrings that are always denied even if they appear inside an
 # allowlisted prefix. Defence-in-depth against an upstream that exposes
-# admin routes under /v1/admin/ or similar — the elb-openapi service
-# should not, but this layer must not assume that.
+# admin / internal / debug routes under /v1/admin/ or similar — the
+# elb-openapi service should not, but this layer must not assume that.
+# Variants with a trailing `-` catch dasherised siblings (``/admin-api/``,
+# ``/internal-tools/``, ``/debug-info/``, ``/private-keys/``,
+# ``/sudo-mode/``); `/private/` and `/sudo/` cover the common
+# privileged-route naming conventions used by adjacent FastAPI services.
+# Each privileged family carries the same three-way coverage (``/x/`` for
+# segment, ``/x?`` for query-stripped exact, ``/x-`` for dashed sibling)
+# so adding a new family is a single block edit.
 _OPENAPI_PROXY_DENIED_PATH_TOKENS: tuple[str, ...] = (
     "/admin/",
     "/admin?",
+    "/admin-",
     "/internal/",
     "/internal?",
+    "/internal-",
     "/debug/",
     "/debug?",
+    "/debug-",
+    "/private/",
+    "/private?",
+    "/private-",
+    "/sudo/",
+    "/sudo?",
+    "/sudo-",
 )
 
 _OPENAPI_K8S_NAMESPACE = "default"
@@ -335,6 +351,7 @@ def aks_openapi_deploy(
         resource_group=rg,
         cluster_name=cluster_name,
         acr_name=acr_name,
+        acr_resource_group=body.get("acr_resource_group", "") or "",
         storage_account=body.get("storage_account", "") or "",
         storage_resource_group=body.get("storage_resource_group", "") or "",
         tenant_id=caller.tenant_id or "",
@@ -349,6 +366,61 @@ def aks_openapi_deploy(
     }
 
 
+def _deploy_failure_is_upstream_reach(output: dict[str, Any] | None) -> bool:
+    """Return True when a failed deploy payload looks like an upstream-reach
+    (likely VNet peering) issue rather than image / scheduling / identity.
+
+    Signals checked, in order of confidence:
+
+    1. ``openapi_deploy.status == 'no_ready_replica'`` AND
+       ``external_ip`` is empty — the LoadBalancer never got an IP, which
+       on AKS-auto VNets is almost always a peering / NSG / outbound
+       routing problem the ``/api/aks/peer-with-platform`` helper can fix.
+    2. Diagnostic events mention "no endpoints available" — the Service
+       exists but Kubernetes can't reach the pod's endpoints (the same
+       symptom the proxy sees when peering breaks mid-flight).
+    3. The error string contains canonical upstream-reach phrases
+       (``unreachable``, ``timed out``, ``no route to host``, ``i/o timeout``)
+       that the SPA otherwise would have to parse from free-form text.
+
+    Returning True only injects an additive ``recovery_action`` /
+    ``recovery_hint`` pair into the envelope — never changes the
+    runtime_status, output, or other existing fields — so legacy SPA
+    builds keep working.
+    """
+    if not isinstance(output, dict):
+        return False
+    deploy = output.get("openapi_deploy")
+    if not isinstance(deploy, dict):
+        return False
+    if deploy.get("status") == "no_ready_replica":
+        external_ip = str(deploy.get("external_ip") or "").strip()
+        if not external_ip:
+            return True
+        diagnostics = deploy.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            events = diagnostics.get("events") or []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                message = str(event.get("message") or "").lower()
+                if "no endpoints available" in message:
+                    return True
+    error_text = str(deploy.get("error") or "").lower()
+    if any(
+        token in error_text
+        for token in (
+            "unreachable",
+            "timed out",
+            "no route to host",
+            "i/o timeout",
+            "connection refused",
+        )
+    ):
+        return True
+    return False
+
+
 @router.get("/openapi/deploy/{instance_id}/status")
 def aks_openapi_deploy_status(
     instance_id: str = Path(...),
@@ -358,6 +430,13 @@ def aks_openapi_deploy_status(
     the orchestrator-style envelope (``runtime_status`` + ``custom_status``
     + ``output``) the SPA's ``OpenApiDeployPanel`` was originally written
     against.
+
+    When a failed task looks like an upstream-reach (VNet peering)
+    problem, the envelope additionally carries top-level
+    ``recovery_action`` / ``recovery_hint`` keys so the SPA can render
+    the "Repair VNet peering" affordance without parsing free-form
+    error strings. See ``_deploy_failure_is_upstream_reach`` and the
+    sibling ``_peering_recovery_hint``.
     """
 
     from celery.result import AsyncResult
@@ -407,11 +486,102 @@ def aks_openapi_deploy_status(
             "openapi_deploy": {"error": err},
         }
 
-    return {
+    envelope: dict[str, Any] = {
         "instance_id": instance_id,
         "runtime_status": runtime_status,
         "custom_status": custom_status,
         "output": output,
+    }
+    if (
+        runtime_status in ("Failed", "Terminated", "Completed")
+        and _deploy_failure_is_upstream_reach(output)
+    ):
+        envelope.update(_peering_recovery_hint())
+    return envelope
+
+
+@router.post("/openapi/deploy/{task_id}/cancel")
+def aks_openapi_deploy_cancel(
+    task_id: str = Path(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Revoke a running ``deploy_openapi_service`` Celery task.
+
+    Mirrors the contract of ``POST /api/aks/cancel-provision/{task_id}``
+    so the SPA can share its toast / banner code: the response shape is
+    identical (``task_id``, ``job_id``, ``previous_status``,
+    ``was_running``, ``cancelled``, ``settle_after_seconds``) and the
+    route is idempotent — calling on an already-terminal task returns
+    200 with ``was_running=False`` and never re-invokes ``revoke()``.
+
+    OpenAPI deploy does not currently write a ``JobState`` row (the task
+    only emits Celery ``PROGRESS`` updates), so ``job_id`` is typically
+    ``None`` and the ownership gate falls through to a no-op. That matches
+    the upstream cancel-provision behaviour for orphan tasks
+    (``test_cancel_passes_through_when_no_state_row``) and remains
+    behind ``require_caller`` so anonymous browsers cannot reach it.
+    """
+    # Sibling import — `_enforce_task_ownership` is intentionally
+    # duplicated across routes/tasks.py, routes/operations.py and
+    # routes/aks/cancel.py; reusing the cancel.py copy avoids a fourth
+    # near-identical block here while keeping the cancel surface honest.
+    from api.routes.aks.cancel import _enforce_task_ownership
+
+    _enforce_task_ownership(task_id, caller)
+
+    from celery.result import AsyncResult
+
+    from api.celery_app import celery_app
+    from api.services.state_repo import JobStateRepository
+    from api.tasks.azure.helpers import update_state
+
+    result = AsyncResult(task_id, app=celery_app)
+    status = str(result.status or "PENDING").upper()
+    was_running = status in {"PENDING", "RECEIVED", "STARTED", "RETRY"}
+
+    if was_running:
+        try:
+            # ``terminate=True`` with SIGTERM matches the cancel-provision
+            # route. The deploy task spends most of its time inside K8s
+            # API polling loops, so the worker honors the signal at the
+            # next yield (typically <= 10 s — the ready-replica probe
+            # interval is 5 s, the LB IP probe interval is 10 s).
+            celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+        except Exception as exc:
+            LOGGER.warning(
+                "openapi deploy revoke failed task_id=%s err=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "revoke_failed", "retryable": True},
+            ) from exc
+
+    job_id: str | None = None
+    try:
+        state = JobStateRepository().find_by_task_id(task_id)
+        if state is not None:
+            job_id = state.job_id
+            update_state(
+                job_id,
+                "cancelled_by_user",
+                status="cancelled",
+                error_code="cancelled_by_user",
+            )
+    except Exception as exc:
+        LOGGER.debug("openapi deploy state update on cancel failed: %s", type(exc).__name__)
+
+    return {
+        "task_id": task_id,
+        "job_id": job_id,
+        "previous_status": status,
+        "was_running": was_running,
+        "cancelled": True,
+        # The deploy task probe loop yields every ~5-10 s, so the worker
+        # honors SIGTERM well within the upstream cancel-provision's
+        # 20 s ARM-poll budget. Match that budget for SPA consistency.
+        "settle_after_seconds": 10 if was_running else 0,
     }
 
 
@@ -452,13 +622,14 @@ def aks_openapi_token(
     from api.services import get_credential
     from api.services.openapi.token import get_openapi_api_token_status
 
-    del caller
     try:
         return get_openapi_api_token_status(
             get_credential(),
             subscription_id=subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
             resource_group=resource_group,
             cluster_name=cluster_name,
+            caller_oid=caller.object_id or "",
+            tenant_id=caller.tenant_id or "",
         )
     except Exception as exc:
         _raise_openapi_route_error(exc)

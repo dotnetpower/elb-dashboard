@@ -27,6 +27,7 @@ describe("aksApi", () => {
       "elbacr",
       "stelbdashboardmul5oh5j44",
       "rg-elb-dashboard",
+      "rg-elbacr",
     );
 
     expect(mocks.post).toHaveBeenCalledWith("/aks/openapi/deploy", {
@@ -34,8 +35,32 @@ describe("aksApi", () => {
       resource_group: "rg-elb-cluster",
       cluster_name: "elb-cluster-01",
       acr_name: "elbacr",
+      acr_resource_group: "rg-elbacr",
       storage_account: "stelbdashboardmul5oh5j44",
       storage_resource_group: "rg-elb-dashboard",
     });
+  });
+
+  it("posts to the openapi deploy cancel route with the URL-encoded task id", async () => {
+    mocks.post.mockResolvedValue({
+      task_id: "task with space",
+      job_id: null,
+      previous_status: "STARTED",
+      was_running: true,
+      cancelled: true,
+      settle_after_seconds: 10,
+    });
+
+    const result = await aksApi.cancelOpenApiDeploy("task with space");
+
+    // The route is /aks/openapi/deploy/{task_id}/cancel — the SPA must
+    // URL-encode the id so a task id ever ending up with /, ?, # etc.
+    // does not corrupt the path. Mirrors aksApi.cancelProvision.
+    expect(mocks.post).toHaveBeenCalledWith(
+      "/aks/openapi/deploy/task%20with%20space/cancel",
+      {},
+    );
+    expect(result.was_running).toBe(true);
+    expect(result.settle_after_seconds).toBe(10);
   });
 });

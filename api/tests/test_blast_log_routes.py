@@ -72,3 +72,69 @@ def test_log_sse_path_is_excluded_from_http_inspector() -> None:
     from api.main import _inspector_should_capture
 
     assert _inspector_should_capture("/api/blast/logs/job-1/events") is False
+
+
+def test_log_sse_returns_204_when_ticket_missing(monkeypatch) -> None:
+    """SSE endpoint must return 204 (not 401) when no ticket is provided.
+
+    Per the HTML spec, 204 is the only documented response that tells a
+    browser's EventSource to stop auto-reconnecting. Returning 401 here
+    used to generate App Insights phantom failures on every drop.
+    """
+
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    from api.main import app
+
+    response = TestClient(app).get("/api/blast/logs/job-1/events")
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+def test_log_sse_returns_204_when_ticket_invalid(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    from api.main import app
+    from api.routes.blast import logs
+
+    logs._tickets.clear()
+    response = TestClient(app).get("/api/blast/logs/job-1/events?ticket=not-a-real-ticket")
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+def test_log_sse_returns_204_when_ticket_bound_to_other_job(monkeypatch) -> None:
+    """A ticket for job A used against the URL for job B must 204, not 403.
+
+    The auto-retry storm that motivated the 204 conversion applies to
+    every error-status path the SSE endpoint can emit — keep the mismatch
+    case silent for the same reason.
+    """
+
+    import time as _time
+
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    from api.main import app
+    from api.routes.blast import logs
+
+    logs._tickets.clear()
+    logs._tickets["mismatch-ticket"] = logs._LogTicket(
+        owner_oid="caller",
+        job_id="job-OTHER",
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        namespace="default",
+        tail_lines=120,
+        expires_at=_time.time() + 30,
+    )
+
+    response = TestClient(app).get("/api/blast/logs/job-1/events?ticket=mismatch-ticket")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    # Mismatched ticket is still consumed to prevent replay against another job.
+    assert "mismatch-ticket" not in logs._tickets

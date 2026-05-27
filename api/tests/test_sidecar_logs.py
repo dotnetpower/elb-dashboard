@@ -81,6 +81,65 @@ def test_logs_recent_rejects_unknown_container(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_logs_events_returns_204_when_ticket_missing(client: TestClient) -> None:
+    """SSE endpoint must return 204 (not 401) when no ticket is provided.
+
+    204 is the documented EventSource "do not reconnect" signal, which
+    breaks the phantom App Insights 401 storm caused by browsers
+    auto-retrying the same URL after a stream drop popped the ticket.
+    """
+
+    response = client.get("/api/monitor/logs/api/events")
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+def test_logs_events_returns_204_when_ticket_invalid(client: TestClient) -> None:
+    response = client.get("/api/monitor/logs/api/events?ticket=not-a-real-ticket")
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+def test_logs_events_returns_204_for_unknown_container_with_invalid_ticket(
+    client: TestClient,
+) -> None:
+    """Container validation runs before ticket consumption.
+
+    Unknown containers must still 404 so frontends can detect a typo
+    in the URL, but a valid container with a missing ticket falls
+    through to 204.
+    """
+
+    response = client.get("/api/monitor/logs/not-a-sidecar/events")
+
+    assert response.status_code == 404
+
+
+def test_logs_events_returns_204_on_reused_ticket(client: TestClient) -> None:
+    """Simulate the browser's native EventSource auto-retry after a drop.
+
+    First valid use pops the ticket; a second request with the same
+    ticket must return 204 so the browser stops auto-reconnecting and
+    the frontend's bounded retry path takes over with a fresh ticket.
+    We pop the ticket manually here because a first valid GET would
+    block on the live SSE stream.
+    """
+
+    from api.routes.monitor import logs as logs_module
+
+    issued = client.post("/api/monitor/logs/ticket")
+    assert issued.status_code == 200
+    ticket = issued.json()["ticket"]
+
+    logs_module._log_tickets.pop(ticket, None)
+
+    response = client.get(f"/api/monitor/logs/api/events?ticket={ticket}")
+    assert response.status_code == 204
+    assert response.content == b""
+
+
 def test_log_routes_precede_frontend_catchall() -> None:
     positions: dict[tuple[str, str], int] = {}
     for position, route in enumerate(app.routes):

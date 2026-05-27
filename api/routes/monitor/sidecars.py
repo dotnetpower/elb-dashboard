@@ -22,8 +22,8 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response, StreamingResponse
 
 from api.auth import CallerIdentity, require_caller
 from api.routes.monitor.common import _graceful
@@ -95,20 +95,29 @@ async def sidecars_ticket(
     return {"ticket": token, "ttl_seconds": _SIDECAR_TICKET_TTL_SEC}
 
 
-async def _consume_sidecar_ticket(token: str | None) -> _SidecarTicket:
+async def _consume_sidecar_ticket(token: str | None) -> _SidecarTicket | None:
+    """Pop and validate a sidecar SSE ticket. Returns None if missing/invalid/expired.
+
+    The SSE route maps ``None`` to **HTTP 204** so the browser's native
+    EventSource stops auto-reconnecting after a stream drop (per spec,
+    204 is the documented "no reconnect" signal). The frontend's own
+    onerror handler still fires and retries with a fresh ticket. Using
+    401 here previously generated phantom App Insights Dependency
+    failures on every drop.
+    """
     if not token:
-        raise HTTPException(401, "ticket required")
+        return None
     async with _sidecar_tickets_lock:
         entry = _sidecar_tickets.pop(token, None)
     if entry is None:
-        raise HTTPException(401, "invalid or expired ticket")
+        return None
     if entry.expires_at <= _time.time():
-        raise HTTPException(401, "ticket expired")
+        return None
     return entry
 
 
 @router.get("/sidecars/events")
-async def sidecars_events(ticket: str | None = Query(default=None)) -> StreamingResponse:
+async def sidecars_events(ticket: str | None = Query(default=None)) -> Response:
     """Server-Sent Events stream of sidecar metric snapshots.
 
     Protocol:
@@ -118,6 +127,8 @@ async def sidecars_events(ticket: str | None = Query(default=None)) -> Streaming
         proxy keeps the connection alive (idle ws/SSE timeout is 240s).
       * Client should reconnect on any close (TanStack Query / EventSource
         does this automatically with ``last-event-id``).
+      * Ticket validation failures return **HTTP 204**, not 401 — see
+        ``_consume_sidecar_ticket``.
 
     Multi-subscriber model: a single in-process broadcaster owns the
     Redis hash drain. Each connected SSE stream is just a subscriber to
@@ -126,7 +137,8 @@ async def sidecars_events(ticket: str | None = Query(default=None)) -> Streaming
     tick — no consumer can steal another's events. See
     ``_SidecarBroadcaster``.
     """
-    await _consume_sidecar_ticket(ticket)
+    if (await _consume_sidecar_ticket(ticket)) is None:
+        return Response(status_code=204)
 
     from api.routes import monitor as monitor_package
 

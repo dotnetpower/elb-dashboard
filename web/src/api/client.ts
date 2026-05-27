@@ -253,6 +253,19 @@ export function fetchApiRawNoRedirect(
   return fetchApi(path, init, { redirectOnUnauthorized: false });
 }
 
+/**
+ * Returns the current MSAL bearer token (cached when fresh, silently refreshed
+ * otherwise). Returns `null` in dev-bypass mode where no token is attached.
+ *
+ * Exposed for tooling that needs the same Authorization header the dashboard
+ * itself would send — currently the API Reference "Copy curl" button. Do not
+ * use this for normal API calls; route those through `api.*` / `fetchApiRaw*`
+ * so the standard 401-handling / retry / refresh paths apply.
+ */
+export function getApiAccessToken(): Promise<string | null> {
+  return getAccessToken({ redirectOnUnauthorized: false });
+}
+
 // ---------------------------------------------------------------------------
 // RBAC-friendly error formatting
 // ---------------------------------------------------------------------------
