@@ -167,3 +167,100 @@ def test_patch_azure_cli_glue_clears_cleanup_stack_for_json_submit_success(
     assert "Dashboard JSON submit has its own log/state collectors" in once
     assert "clean_up_stack.clear()" in once
     assert once.index("clean_up_stack.clear()") < once.index("result = SubmitResult(")
+
+
+_CREATE_WORKSPACE_DAEMONSET_TEMPLATE = """---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: create-workspace
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: create-dir
+        image: busybox
+      volumes:
+      - name: host-workspace
+        hostPath:
+          path: /workspace
+          type: DirectoryOrCreate
+      nodeSelector:
+        kubernetes.io/os: linux
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-ssd-${BLAST_ELB_JOB_ID_SHORT}-${NODE_ORDINAL}
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: blast
+        effect: NoSchedule
+      nodeSelector:
+        workload: blast
+"""
+
+
+def _write_create_workspace_templates(root: Path) -> list[Path]:
+    template_dir = root / "src" / "elastic_blast" / "templates"
+    template_dir.mkdir(parents=True)
+    paths = []
+    for name in (
+        "job-init-local-ssd-aks.yaml.template",
+        "job-init-ssd-shard-aks.yaml.template",
+    ):
+        path = template_dir / name
+        path.write_text(_CREATE_WORKSPACE_DAEMONSET_TEMPLATE)
+        paths.append(path)
+    return paths
+
+
+def test_patch_create_workspace_daemonset_tolerations_adds_blast_toleration(
+    tmp_path: Path,
+) -> None:
+    patch_module = _load_patch_module()
+    paths = _write_create_workspace_templates(tmp_path)
+
+    patch_module.patch_create_workspace_daemonset_tolerations(tmp_path)
+
+    expected_block = (
+        "          type: DirectoryOrCreate\n"
+        "      tolerations:\n"
+        "      - key: workload\n"
+        "        operator: Equal\n"
+        "        value: blast\n"
+        "        effect: NoSchedule\n"
+        "      nodeSelector:\n"
+        "        kubernetes.io/os: linux\n"
+    )
+    for path in paths:
+        text = path.read_text()
+        # DaemonSet now tolerates the blast pool taint.
+        assert expected_block in text
+        # The Job below the DaemonSet still keeps its own workload nodeSelector
+        # and toleration - we did not touch it.
+        assert "        workload: blast\n" in text
+        # Patch only injects one toleration block (DaemonSet); the Job already
+        # had one, so the file ends with two toleration occurrences total.
+        assert text.count("- key: workload\n") == 2
+
+
+def test_patch_create_workspace_daemonset_tolerations_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    patch_module = _load_patch_module()
+    paths = _write_create_workspace_templates(tmp_path)
+
+    patch_module.patch_create_workspace_daemonset_tolerations(tmp_path)
+    snapshots = {path: path.read_text() for path in paths}
+    patch_module.patch_create_workspace_daemonset_tolerations(tmp_path)
+
+    for path in paths:
+        assert path.read_text() == snapshots[path]

@@ -11,6 +11,7 @@ import { ApiHero } from "@/pages/apiReference/ApiHero";
 import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
 import { ApiResponseContractPanel } from "@/pages/apiReference/ApiResponseContractPanel";
 import { ApiTokenPanel } from "@/pages/apiReference/ApiTokenPanel";
+import { PublicHttpsPanel } from "@/pages/apiReference/PublicHttpsPanel";
 import { resolveApiReferenceClusterContext } from "@/pages/apiReference/clusterContext";
 import { SVC_NAME } from "@/pages/apiReference/constants";
 import { parseSpec } from "@/pages/apiReference/spec";
@@ -64,9 +65,31 @@ export function ApiReference() {
     staleTime: 300_000,
     retry: 1,
   });
-  const baseUrl = svcQuery.data?.external_ip
-    ? `http://${svcQuery.data.external_ip}`
-    : null;
+
+  // Public HTTPS state lives in the api sidecar's runtime cache (no kubectl
+  // round trip). When `enabled=true` the `setup_openapi_public_https` task
+  // has installed ingress-nginx + cert-manager + a Let's Encrypt-signed
+  // Ingress, so we flip `baseUrl` from the internal LB IP path to the
+  // HTTPS public FQDN. That makes the API Reference "Try it" surface, the
+  // Swagger UI link, and any future "Copy curl" affordance all point at
+  // the externally-reachable URL.
+  const publicHttpsQuery = useQuery({
+    queryKey: ["openapi-public-https"],
+    queryFn: () => aksApi.openApiPublicHttpsStatus(),
+    enabled,
+    staleTime: 60_000,
+    retry: 1,
+  });
+  const publicHttpsBaseUrl =
+    publicHttpsQuery.data?.enabled && publicHttpsQuery.data.public_base_url
+      ? publicHttpsQuery.data.public_base_url
+      : null;
+
+  const baseUrl = publicHttpsBaseUrl
+    ? publicHttpsBaseUrl
+    : svcQuery.data?.external_ip
+      ? `http://${svcQuery.data.external_ip}`
+      : null;
   const serviceMissingOrPending = svcQuery.isSuccess && !svcQuery.data?.external_ip;
 
   const specQuery = useQuery({
@@ -211,6 +234,15 @@ export function ApiReference() {
           subscriptionId={sub}
           resourceGroup={clusterRg}
           clusterName={clusterName}
+        />
+      )}
+
+      {baseUrl && hasOpenApiImage && clusterName && (
+        <PublicHttpsPanel
+          subscriptionId={sub}
+          resourceGroup={clusterRg}
+          clusterName={clusterName}
+          onStateChange={() => publicHttpsQuery.refetch()}
         />
       )}
 

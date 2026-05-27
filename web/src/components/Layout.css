@@ -180,7 +180,72 @@
   display: none;
 }
 
-@media (max-width: 1320px) {
+/* ---------------------------------------------------------------------
+ * Responsive nav tiers
+ *
+ * Tier A (>=1320 px) — full horizontal nav (default styles above).
+ * Tier B (720–1320 px) — the React component swaps Tools group items
+ *   into a "More ▾" dropdown. Only style adjustments needed:
+ *     - hide the inline Tools group label/separator (handled in JSX),
+ *     - render the dropdown trigger as a normal nav item.
+ * Tier C (<720 px) — hamburger drawer takes over (full vertical menu).
+ *
+ * The breakpoint sits at 720 px because the desktop tier with the More
+ * dropdown is still usable down to that width; below it the drawer's
+ * vertical list is the right fit.
+ * ------------------------------------------------------------------- */
+
+/* Tier B dropdown styling (active in both A and B; A simply does not
+ * render the trigger because the React component chooses inline mode). */
+.layout__nav-more {
+  position: relative;
+  display: inline-flex;
+}
+
+.layout__nav-more-trigger {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+}
+
+.layout__nav-more-trigger[aria-expanded="true"] {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.layout__nav-more-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 4px;
+}
+
+.layout__nav-more-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-medium);
+  border-radius: 10px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  z-index: 120;
+}
+
+.layout__nav-more-panel .layout__nav-item {
+  padding: 8px 12px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
   .layout .layout__hamburger {
     display: flex;
   }

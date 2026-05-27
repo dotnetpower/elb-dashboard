@@ -18,6 +18,7 @@ from api.services.azure_clients import acr_client, aks_client, storage_client
 # Re-export k8s.* symbols for callers that historically used
 # `from api.services.monitoring import k8s_get_pods` etc.
 from api.services.k8s.monitoring import (
+    SYSTEM_NAMESPACES,
     _get_k8s_session,
     k8s_cancel_blast_job,
     k8s_check_blast_status,
@@ -26,6 +27,7 @@ from api.services.k8s.monitoring import (
     k8s_get_pods,
     k8s_get_service_ip,
     k8s_list_events,
+    k8s_pod_delete,
     k8s_pod_describe,
     k8s_pod_logs,
     k8s_top_nodes,
@@ -132,6 +134,7 @@ __all__ = [
     "ACR_PUSH_ROLE_ID",
     "BLAST_POOL_NAME",
     "STORAGE_BLOB_DATA_CONTRIBUTOR_ROLE_ID",
+    "SYSTEM_NAMESPACES",
     "_auto_assign_role",
     "_get_k8s_session",
     "acr_client",
@@ -148,6 +151,7 @@ __all__ = [
     "k8s_get_pods",
     "k8s_get_service_ip",
     "k8s_list_events",
+    "k8s_pod_delete",
     "k8s_pod_describe",
     "k8s_pod_logs",
     "k8s_top_nodes",

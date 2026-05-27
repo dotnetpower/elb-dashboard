@@ -1,9 +1,10 @@
 import { useState, useCallback } from "react";
-import { ChevronDown, FileText, Loader2, Terminal } from "lucide-react";
+import { ChevronDown, FileText, Loader2, Terminal, Trash2 } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import type { K8sPod } from "@/api/endpoints";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 import { formatAge } from "./k8sFormat";
 import { PodDescribeDialog } from "./PodDescribeDialog";
@@ -11,16 +12,29 @@ import { PodLogsDialog } from "./PodLogsDialog";
 import { SectionShimmerBar } from "./SectionShimmerBar";
 
 /**
- * Collapsible table of active pods with a one-click "Logs" action that
- * pops the `PodLogsDialog`. Owns the log-fetch lifecycle (target + output
- * + loading) so the dialog itself stays presentation-only.
+ * Collapsible table of active pods. Owns the per-row action lifecycle
+ * (Logs / Describe / Delete). The Delete action gates on system-managed
+ * namespaces both here (button hidden) and on the backend route
+ * (`/api/monitor/aks/pod` returns 403); the SPA-side gate is convenience,
+ * the route is authoritative.
  */
+const SYSTEM_NAMESPACES = new Set([
+  "kube-system",
+  "kube-public",
+  "kube-node-lease",
+  "gatekeeper-system",
+  "azure-arc",
+  "calico-system",
+  "tigera-operator",
+]);
+
 interface K8sPodsQuery {
   isLoading: boolean;
   isFetching?: boolean;
   isError: boolean;
   data?: { pods: K8sPod[] } | null;
   error?: unknown;
+  refetch?: () => void;
 }
 
 export function K8sPodsSection({
@@ -46,6 +60,15 @@ export function K8sPodsSection({
   } | null>(null);
   const [describeOutput, setDescribeOutput] = useState<string | null>(null);
   const [describeLoading, setDescribeLoading] = useState(false);
+  // Confirm dialog target. `pendingDelete` is null when the dialog is closed;
+  // setting it opens the dialog. `deleting` flips during the in-flight DELETE
+  // so we can disable the confirm button and avoid double-submits.
+  const [pendingDelete, setPendingDelete] = useState<{
+    namespace: string;
+    pod: string;
+  } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const pods = query.data?.pods ?? [];
   const sc = (s: string) => {
     const v = s.toLowerCase();
@@ -108,6 +131,37 @@ export function K8sPodsSection({
     setDescribeTarget(null);
     setDescribeOutput(null);
   };
+  const requestDelete = useCallback((ns: string, pod: string) => {
+    setDeleteError(null);
+    setPendingDelete({ namespace: ns, pod });
+  }, []);
+  const cancelDelete = useCallback(() => {
+    if (deleting) return;
+    setPendingDelete(null);
+    setDeleteError(null);
+  }, [deleting]);
+  const performDelete = useCallback(async () => {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await monitoringApi.k8sPodDelete(
+        subscriptionId,
+        resourceGroup,
+        clusterName,
+        pendingDelete.namespace,
+        pendingDelete.pod,
+      );
+      setPendingDelete(null);
+      // Surface the deletion immediately. The backend already invalidated
+      // the pods snapshot cache so the next refetch returns fresh state.
+      query.refetch?.();
+    } catch (e) {
+      setDeleteError(formatApiError(e, "aks"));
+    } finally {
+      setDeleting(false);
+    }
+  }, [pendingDelete, deleting, subscriptionId, resourceGroup, clusterName, query]);
   return (
     <div
       style={{
@@ -267,33 +321,32 @@ export function K8sPodsSection({
                         <button
                           className="glass-button k8s-pods-logs-button"
                           onClick={() => fetchLogs(p.namespace, p.name)}
-                          style={{
-                            fontSize: 9,
-                            padding: "2px 6px",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 3,
-                            whiteSpace: "nowrap",
-                          }}
+                          style={iconButtonStyle}
                           title={`Logs: ${p.name}`}
+                          aria-label={`View logs for pod ${p.name}`}
                         >
-                          <Terminal size={9} /> Logs
+                          <Terminal size={12} strokeWidth={1.5} />
                         </button>
                         <button
                           className="glass-button k8s-pods-describe-button"
                           onClick={() => fetchDescribe(p.namespace, p.name)}
-                          style={{
-                            fontSize: 9,
-                            padding: "2px 6px",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 3,
-                            whiteSpace: "nowrap",
-                          }}
+                          style={iconButtonStyle}
                           title={`Describe: ${p.name}`}
+                          aria-label={`Describe pod ${p.name}`}
                         >
-                          <FileText size={9} /> Describe
+                          <FileText size={12} strokeWidth={1.5} />
                         </button>
+                        {!SYSTEM_NAMESPACES.has(p.namespace) && (
+                          <button
+                            className="glass-button glass-button--danger k8s-pods-delete-button"
+                            onClick={() => requestDelete(p.namespace, p.name)}
+                            style={iconButtonStyle}
+                            title={`Delete pod: ${p.name}`}
+                            aria-label={`Delete pod ${p.name}`}
+                          >
+                            <Trash2 size={12} strokeWidth={1.5} />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -323,6 +376,35 @@ export function K8sPodsSection({
           onClose={closeDescribe}
         />
       )}
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete pod?"
+          message={`${pendingDelete.namespace} / ${pendingDelete.pod}`}
+          details={[
+            "A controller (Deployment / ReplicaSet / StatefulSet) may recreate it on its own — this is normal Kubernetes behaviour.",
+            "Pods backed by a Job will not restart; the Job will be marked failed if no other pods complete the work.",
+          ]}
+          footnote={
+            deleteError
+              ? `Last attempt failed: ${deleteError}`
+              : "Logs from this pod will be lost unless they have already been shipped off-cluster."
+          }
+          confirmLabel={deleting ? "Deleting…" : "Delete"}
+          tone="danger"
+          onConfirm={performDelete}
+          onCancel={cancelDelete}
+        />
+      )}
     </div>
   );
 }
+
+// Compact square icon-only button. Square padding keeps the three actions
+// visually balanced and matches the dense table row height.
+const iconButtonStyle: React.CSSProperties = {
+  padding: "4px 6px",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  lineHeight: 0,
+};

@@ -34,7 +34,13 @@ from api.services.k8s.nodes import (
     k8s_get_nodes,
     k8s_ready_warmup_node_names,
 )
-from api.services.k8s.observability import k8s_list_events, k8s_pod_describe, k8s_pod_logs
+from api.services.k8s.observability import (
+    SYSTEM_NAMESPACES,
+    k8s_list_events,
+    k8s_pod_delete,
+    k8s_pod_describe,
+    k8s_pod_logs,
+)
 from api.services.k8s.timestamps import (
     k8s_timestamp_span_payload as _k8s_timestamp_span_payload,
 )
@@ -58,6 +64,7 @@ _K8S_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]{1,63}$")
 _SAFE_K8S_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 __all__ = [
+    "SYSTEM_NAMESPACES",
     "_candidate_warmup_node_names",
     "_ensure_job_manifests",
     "_get_k8s_credential_material",
@@ -73,6 +80,7 @@ __all__ = [
     "k8s_get_pods",
     "k8s_get_service_ip",
     "k8s_list_events",
+    "k8s_pod_delete",
     "k8s_pod_describe",
     "k8s_pod_logs",
     "k8s_ready_warmup_node_names",

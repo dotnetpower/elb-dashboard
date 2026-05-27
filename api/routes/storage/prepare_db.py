@@ -39,6 +39,7 @@ from api.routes.storage.common import (
     _check,
     _list_keys,
     _resolve_latest_dir,
+    shared_taxonomy_keys,
 )
 from api.services import get_credential
 from api.services.sanitise import sanitise
@@ -75,6 +76,15 @@ _PREPARE_DB_STALE_SECONDS = 2 * 60 * 60
 _COPY_POLL_INTERVAL_SECONDS = 60.0
 _COPY_POLL_MAX_SECONDS = 24 * 60 * 60
 _COPY_POLL_BATCH_SIZE = max(32, int(os.environ.get("PREPARE_DB_COPY_POLL_BATCH_SIZE", "256")))
+# When true (default), prepare-db also stages the snapshot-root taxonomy
+# files (`taxdb.btd`, `taxdb.bti`, `taxonomy4blast.sqlite3`) under
+# `blast-db/<db>/` so the warmup script finds them in the same folder. Set
+# to "false" to skip — useful only when the workload's blastn invocations
+# do not request taxonomy columns AND the dataset is v5-only (per-DB
+# `.nhi/.ntf/.nto` are still copied via `_list_keys`).
+_INCLUDE_SHARED_TAXONOMY = (
+    os.environ.get("PREPARE_DB_INCLUDE_TAXONOMY", "true").lower() != "false"
+)
 
 
 def _prepare_db_lock(account_name: str, db_name: str) -> threading.Lock:
@@ -495,6 +505,37 @@ def prepare_db(
                 "publishing the snapshot — wait a few minutes and retry."
             ),
         )
+
+    # Append the snapshot-root taxonomy files (`taxdb.btd`, `taxdb.bti`,
+    # `taxonomy4blast.sqlite3`) so the warmup script finds them inside the
+    # per-DB folder. Without these, `blastn -outfmt '... staxid ssciname
+    # scomname sblastname'` returns N/A for the taxonomy columns and v4
+    # DBs miss their entire taxonomy lookup path. NCBI 502 / 403 here is
+    # logged but non-fatal — the rest of the DB still goes through; the
+    # warmup script already tolerates a `TAXDB_SKIP` outcome.
+    if _INCLUDE_SHARED_TAXONOMY:
+        try:
+            tax_keys = shared_taxonomy_keys(latest_dir)
+        except Exception as exc:
+            LOGGER.warning(
+                "shared taxonomy HEAD probe failed for snapshot %s: %s — "
+                "proceeding without taxdb staging",
+                latest_dir,
+                type(exc).__name__,
+            )
+            tax_keys = []
+        if tax_keys:
+            # dict.fromkeys preserves order and drops accidental duplicates
+            # (e.g. a hypothetical custom db_name="taxdb" would otherwise
+            # have its volumes listed twice — once by _list_keys, once by
+            # the shared-taxonomy probe).
+            all_keys = list(dict.fromkeys(list(all_keys) + tax_keys))
+            LOGGER.info(
+                "prepare_db staging %d shared taxonomy files for db=%s: %s",
+                len(tax_keys),
+                db_name,
+                ", ".join(key.rsplit("/", 1)[-1] for key in tax_keys),
+            )
 
     # Acquire the per-(account, db) lock BEFORE building any clients so a
     # 409 is fast for the second-clicker. If a stale flag is in the metadata

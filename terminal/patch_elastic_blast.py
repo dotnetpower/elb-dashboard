@@ -631,6 +631,48 @@ def patch_unique_init_ssd_job_names(root: Path) -> None:
         )
 
 
+def patch_create_workspace_daemonset_tolerations(root: Path) -> None:
+    # The create-workspace DaemonSet (kube-system) bind-mounts a hostPath and
+    # creates /workspace on every node so the init-ssd Jobs can later mount it.
+    # Upstream ships it without tolerations, so it cannot land on the blast pool
+    # nodes (taint workload=blast:NoSchedule). When the init-ssd Job is then
+    # scheduled on a blast node, kubelet fails to bind-mount /workspace and the
+    # pod sticks in CreateContainerConfigError with
+    # "stat /workspace: no such file or directory". Add the matching toleration
+    # so the DaemonSet runs on the blast pool too.
+    templates = [
+        "job-init-local-ssd-aks.yaml.template",
+        "job-init-ssd-shard-aks.yaml.template",
+    ]
+    old = (
+        "          type: DirectoryOrCreate\n"
+        "      nodeSelector:\n"
+        "        kubernetes.io/os: linux\n"
+    )
+    new = (
+        "          type: DirectoryOrCreate\n"
+        "      tolerations:\n"
+        "      - key: workload\n"
+        "        operator: Equal\n"
+        "        value: blast\n"
+        "        effect: NoSchedule\n"
+        "      nodeSelector:\n"
+        "        kubernetes.io/os: linux\n"
+    )
+    marker = (
+        "      tolerations:\n"
+        "      - key: workload\n"
+        "        operator: Equal\n"
+        "        value: blast\n"
+        "        effect: NoSchedule\n"
+        "      nodeSelector:\n"
+        "        kubernetes.io/os: linux\n"
+    )
+    for name in templates:
+        path = root / "src/elastic_blast/templates" / name
+        _replace_once_unless_present(path, old, new, marker)
+
+
 def patch_init_job_wait_filters(root: Path) -> None:
     path = root / "src/elastic_blast/kubernetes.py"
     _replace_once_unless_present(
@@ -697,6 +739,7 @@ def main() -> int:
     patch_init_shard_script(root)
     patch_aks_workload_tolerations(root)
     patch_unique_init_ssd_job_names(root)
+    patch_create_workspace_daemonset_tolerations(root)
     patch_init_job_wait_filters(root)
     print("patched elastic-blast-azure finalizer for sharded result merge")
     return 0

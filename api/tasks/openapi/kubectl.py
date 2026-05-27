@@ -2,39 +2,40 @@
 
 Responsibility: Bridge the api/worker sidecars (which intentionally do not ship `az`
     or `kubectl`) to the terminal sidecar's allowlisted exec server. Fetches a one-shot
-    admin kubeconfig with `az aks get-credentials`, then runs `kubectl apply -f -`.
+    admin kubeconfig with `az aks get-credentials`, then runs `kubectl apply -f -` or
+    any other kubectl subcommand against that kubeconfig.
 Edit boundaries: Shell-only work that requires the terminal sidecar binaries. Do not
     invoke `subprocess` here — go through `api.services.terminal_exec.run` so the
     exec-token + concurrency + allowlist contract is enforced.
-Key entry points: `kubectl_apply`.
+Key entry points: `kubectl_apply`, `ensure_admin_kubeconfig`, `kubectl_run`.
 Risky contracts: Calls fail with a clear RuntimeError when the terminal sidecar is
     unavailable — do not silently swallow that case (the OpenAPI deploy would otherwise
     "succeed" without applying anything). Temp kubeconfig path uses /tmp/exec (the
     sidecar's shared writable dir) and a random uuid to avoid concurrent collisions.
-Validation: `uv run pytest -q api/tests/test_smoke.py`.
+Validation: `uv run pytest -q api/tests/test_smoke.py api/tests/test_openapi_task.py`.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
+from typing import Any
 
 
-def kubectl_apply(
+def ensure_admin_kubeconfig(
     *,
     subscription_id: str,
     resource_group: str,
     cluster_name: str,
-    manifest: str,
 ) -> str:
-    """Apply a multi-doc manifest via the terminal sidecar's kubectl.
+    """Fetch an admin kubeconfig in the terminal sidecar; return its path.
 
-    Strategy: fetch a one-shot kubeconfig with ``az aks get-credentials
-    --file -`` into a temp path, then ``KUBECONFIG=… kubectl apply -f -``.
-    Both invocations run in the terminal sidecar where the allowlisted
-    binaries live; the api / worker images intentionally do not ship them.
-
-    Returns kubectl's stdout. Raises on non-zero exit.
+    Logs in with the workload MI if `az account show` reports no active
+    session, then writes a fresh kubeconfig under ``/tmp/exec`` with a
+    random uuid suffix so concurrent callers cannot collide. Callers are
+    free to reuse the returned path across many `kubectl_run` calls in
+    the same Celery task — the underlying file lives until the exec
+    server's tmpdir GC sweeps it.
     """
 
     from api.services.terminal_exec import TerminalExecError
@@ -85,9 +86,58 @@ def kubectl_apply(
             "az aks get-credentials failed: "
             f"{(az_result.get('stderr') or az_result.get('stdout') or '').strip()[:500]}"
         )
+    return kubeconfig_path
 
-    apply_argv = ["kubectl", "--kubeconfig", kubeconfig_path, "apply", "-f", "-"]
-    apply_result = exec_run(apply_argv, stdin=manifest, timeout_seconds=180)
+
+def kubectl_run(
+    args: list[str],
+    *,
+    kubeconfig_path: str,
+    stdin: str | None = None,
+    timeout_seconds: int = 60,
+) -> dict[str, Any]:
+    """Run an arbitrary `kubectl ...` subcommand against `kubeconfig_path`.
+
+    Returns the raw exec-server result dict (``exit_code``, ``stdout``,
+    ``stderr``, ``duration_ms``, ``timed_out``). The caller decides how to
+    treat non-zero exits — some kubectl subcommands (``wait``, ``patch``,
+    ``get -o jsonpath``) are expected to fail under perfectly normal
+    branches (resource not yet present, status condition not yet True),
+    so this helper deliberately does NOT raise on non-zero.
+    """
+
+    from api.services.terminal_exec import run as exec_run
+
+    argv = ["kubectl", "--kubeconfig", kubeconfig_path, *args]
+    return exec_run(argv, stdin=stdin, timeout_seconds=timeout_seconds)
+
+
+def kubectl_apply(
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    manifest: str,
+) -> str:
+    """Apply a multi-doc manifest via the terminal sidecar's kubectl.
+
+    Thin wrapper around ``ensure_admin_kubeconfig`` + ``kubectl_run`` for
+    the common "fetch creds, apply YAML/JSON over stdin" flow used by the
+    elb-openapi deploy. Raises on non-zero kubectl exit so the deploy
+    task can short-circuit to a failed payload.
+    """
+
+    kubeconfig_path = ensure_admin_kubeconfig(
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    apply_result = kubectl_run(
+        ["apply", "-f", "-"],
+        kubeconfig_path=kubeconfig_path,
+        stdin=manifest,
+        timeout_seconds=180,
+    )
     if apply_result.get("exit_code", 1) != 0:
         raise RuntimeError(
             "kubectl apply failed: "

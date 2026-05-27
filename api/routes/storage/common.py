@@ -3,11 +3,12 @@
 Responsibility: Shared Storage route helpers
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `_check`, `_resolve_latest_dir`, `_list_keys`
+Key entry points: `_check`, `_resolve_latest_dir`, `_list_keys`, `shared_taxonomy_keys`
 Risky contracts: Never issue browser SAS URLs; local public Storage access remains debug-only
-and IP-allowlisted.
+and IP-allowlisted. `shared_taxonomy_keys` must keep negative results uncached so a transient
+NCBI 5xx cannot pin the next hour of prepare-db runs into a taxonomy-less state.
 Validation: `uv run pytest -q api/tests/test_storage_data.py
-api/tests/test_storage_public_access.py`.
+api/tests/test_storage_public_access.py api/tests/test_storage_shared_taxonomy.py`.
 """
 
 from __future__ import annotations
@@ -183,7 +184,23 @@ _LIST_KEYS_CACHE_TTL_SECONDS = float(
 )
 _LATEST_DIR_CACHE: dict[str, tuple[float, str]] = {}
 _LIST_KEYS_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
+_SHARED_TAXONOMY_KEYS_CACHE: dict[str, tuple[float, list[str]]] = {}
 _NCBI_CACHE_LOCK = threading.Lock()
+
+# Snapshot-root files that ``blastn``/``blastp`` need for taxonomy-aware
+# output (``-outfmt '... staxid ssciname scomname sblastname'``) and for the
+# v4 taxonomy lookup path. Each NCBI snapshot publishes these at
+# ``{latest_dir}/<name>`` (i.e. they are NOT prefixed by any database name).
+# ``_list_keys`` uses ``{latest_dir}/{db_name}`` so it never picks these up —
+# the prepare-db pipeline therefore needs to stage them explicitly. The
+# basename is preserved on the destination so the warmup script's existing
+# ``--include-pattern "...;taxdb.btd;taxdb.bti;taxonomy4blast.sqlite3;..."``
+# finds them inside each per-DB folder without any pattern change.
+SHARED_TAXONOMY_FILES: tuple[str, ...] = (
+    "taxdb.btd",
+    "taxdb.bti",
+    "taxonomy4blast.sqlite3",
+)
 
 # Circuit breaker — after `_NCBI_BREAKER_THRESHOLD` consecutive 403 / 5xx
 # events from NCBI we open the circuit for `_NCBI_BREAKER_COOLDOWN` seconds.
@@ -234,5 +251,73 @@ def reset_ncbi_catalogue_cache() -> None:
     with _NCBI_CACHE_LOCK:
         _LATEST_DIR_CACHE.clear()
         _LIST_KEYS_CACHE.clear()
+        _SHARED_TAXONOMY_KEYS_CACHE.clear()
         _NCBI_BREAKER_STATE["failures"] = 0
         _NCBI_BREAKER_STATE["opened_at"] = 0.0
+
+
+def shared_taxonomy_keys(latest_dir: str) -> list[str]:
+    """Return the subset of ``SHARED_TAXONOMY_FILES`` that exist in this
+    snapshot, as fully-qualified ``{latest_dir}/<name>`` S3 keys.
+
+    Done by issuing one HEAD per file (3 small requests) and keeping only
+    the 200 OK ones. The result is cached per ``latest_dir`` for
+    ``NCBI_LIST_KEYS_CACHE_TTL`` (same TTL as ``_list_keys``) because a
+    given snapshot directory is immutable once published.
+
+    Failure semantics mirror ``_list_keys``:
+      * 403 → ``NcbiAccessDenied`` (caller surfaces as 502 "throttled")
+      * 5xx / network → ``NcbiUnavailable``
+      * 404 on an individual file is NOT an error — that file is simply
+        absent from the snapshot and is skipped (NCBI occasionally drops
+        ``taxonomy4blast.sqlite3`` while regenerating). The remaining
+        files are still returned.
+      * Empty results are NOT cached so a transient outage cannot poison
+        the next hour of prepare-db calls into "no taxonomy files".
+
+    The circuit breaker is honoured so a sustained NCBI outage skips the
+    HEADs entirely rather than burning the cooldown on three more probes.
+    """
+    import httpx
+
+    now = time.monotonic()
+    with _NCBI_CACHE_LOCK:
+        cached = _SHARED_TAXONOMY_KEYS_CACHE.get(latest_dir)
+        if cached and cached[0] > now:
+            return list(cached[1])
+
+    _breaker_check()
+    found: list[str] = []
+    try:
+        from api.services.httpx_pool import get_pooled_client
+
+        client = get_pooled_client("ncbi-tax", timeout=15.0)
+        for name in SHARED_TAXONOMY_FILES:
+            key = f"{latest_dir}/{name}"
+            url = f"{_NCBI_S3_BASE}/{key}"
+            resp = client.head(url)
+            if resp.status_code == 200:
+                found.append(key)
+                continue
+            if resp.status_code == 404:
+                continue
+            if resp.status_code == 403:
+                _breaker_record_failure()
+                raise NcbiAccessDenied(
+                    f"NCBI bucket returned 403 on HEAD {key!r}"
+                )
+            if resp.status_code >= 500:
+                _breaker_record_failure()
+                raise NcbiUnavailable(
+                    f"NCBI bucket HTTP {resp.status_code} on HEAD {key!r}"
+                )
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        _breaker_record_failure()
+        raise NcbiUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    _breaker_record_success()
+    if found:
+        expires_at = time.monotonic() + _LIST_KEYS_CACHE_TTL_SECONDS
+        with _NCBI_CACHE_LOCK:
+            _SHARED_TAXONOMY_KEYS_CACHE[latest_dir] = (expires_at, list(found))
+    return found

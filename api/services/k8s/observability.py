@@ -3,9 +3,12 @@
 Responsibility: Kubernetes pod log and event observability helpers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
-Key entry points: `k8s_pod_logs`, `k8s_pod_describe`, `k8s_list_events`, `_capped`
+Key entry points: `k8s_pod_logs`, `k8s_pod_describe`, `k8s_pod_delete`, `k8s_list_events`,
+`_capped`, `SYSTEM_NAMESPACES`
 Risky contracts: Use direct Kubernetes API helpers; do not reintroduce Azure Run Command.
-Validation: `uv run pytest -q api/tests/test_k8s_list_events.py api/tests/test_k8s_pod_describe.py`.
+`k8s_pod_delete` MUST refuse system namespaces server-side — frontend gating is not enough.
+Validation: `uv run pytest -q api/tests/test_k8s_list_events.py api/tests/test_k8s_pod_describe.py
+api/tests/test_k8s_pod_delete.py`.
 """
 
 from __future__ import annotations
@@ -16,6 +19,21 @@ from typing import Any, cast
 from azure.core.credentials import TokenCredential
 
 _SAFE_K8S_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+
+# Cluster-managed namespaces that must never be touched from the dashboard.
+# Server-side enforcement — the SPA also hides the Delete button for these,
+# but treating frontend gating as authoritative would be an OWASP A01 fail.
+SYSTEM_NAMESPACES: frozenset[str] = frozenset(
+    {
+        "kube-system",
+        "kube-public",
+        "kube-node-lease",
+        "gatekeeper-system",
+        "azure-arc",
+        "calico-system",
+        "tigera-operator",
+    }
+)
 
 
 def k8s_pod_logs(
@@ -45,6 +63,71 @@ def k8s_pod_logs(
         return cast(str, response.text)
     finally:
         session.close()
+
+
+def k8s_pod_delete(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str,
+    pod_name: str,
+    *,
+    grace_period_seconds: int = 30,
+) -> dict[str, Any]:
+    """Delete a single pod via the Kubernetes API.
+
+    Refuses any namespace in `SYSTEM_NAMESPACES` — frontend hides the action
+    for those, but a hand-crafted DELETE must also be rejected here.
+
+    Returns a small status dict the route forwards to the SPA. 404 from the
+    cluster is treated as success (pod already gone) so a double-click does
+    not surface a scary error.
+    """
+
+    if not _SAFE_K8S_NAME_RE.match(namespace) or not _SAFE_K8S_NAME_RE.match(pod_name):
+        raise ValueError("Invalid namespace or pod name")
+    if namespace in SYSTEM_NAMESPACES:
+        raise PermissionError(f"namespace {namespace!r} is system-managed; refusing to delete")
+    if grace_period_seconds < 0 or grace_period_seconds > 600:
+        raise ValueError("grace_period_seconds must be in [0, 600]")
+
+    from api.services.k8s.monitoring import _get_k8s_session
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        response = session.delete(
+            f"{server}/api/v1/namespaces/{namespace}/pods/{pod_name}",
+            params={
+                "gracePeriodSeconds": grace_period_seconds,
+                "propagationPolicy": "Background",
+            },
+            timeout=15,
+        )
+    finally:
+        session.close()
+
+    if response.status_code in (200, 202):
+        return {
+            "status": "deleted",
+            "namespace": namespace,
+            "pod": pod_name,
+            "status_code": response.status_code,
+        }
+    if response.status_code == 404:
+        return {
+            "status": "not_found",
+            "namespace": namespace,
+            "pod": pod_name,
+            "status_code": 404,
+        }
+    return {
+        "status": "error",
+        "namespace": namespace,
+        "pod": pod_name,
+        "status_code": response.status_code,
+        "detail": (response.text or "")[:512],
+    }
 
 
 def k8s_list_events(
@@ -367,4 +450,10 @@ def _format_event_age(iso: str) -> str:
     return f"{days}d{rem_hr}h" if rem_hr else f"{days}d"
 
 
-__all__ = ["k8s_list_events", "k8s_pod_describe", "k8s_pod_logs"]
+__all__ = [
+    "SYSTEM_NAMESPACES",
+    "k8s_list_events",
+    "k8s_pod_delete",
+    "k8s_pod_describe",
+    "k8s_pod_logs",
+]

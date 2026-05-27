@@ -110,6 +110,10 @@ is_true() {
 
 need_cmd az
 need_cmd azd
+# jq is used by the post-deploy Storage reachability gate. Checking it up
+# front avoids a confusing pipefail abort AFTER azd up has already provisioned
+# everything (Azure CLI does not bundle jq).
+need_cmd jq
 
 bash "$repo_root/scripts/dev/azd-progress.sh" plan
 export ELB_AZD_PROGRESS_PLAN_SHOWN=true
@@ -283,7 +287,7 @@ else
     if [[ "$base_rg_exists" == "true" && "$base_rg_count" != "0" ]]; then
       export ELB_RESOURCE_NAME_SLOT="$existing_resource_slot"
     else
-      echo "==> Clearing stale numbered resource slot: $existing_resource_slot (rg-elb-dashboard is available)"
+      echo "==> Clearing stale numbered resource slot: $existing_resource_slot (rg-elb-dashboard is empty, reclaiming base RG)"
       export ELB_RESOURCE_NAME_SLOT=""
     fi
   else
@@ -447,7 +451,6 @@ fi
 # the role assignments out of band).
 # ---------------------------------------------------------------------------
 DOCTOR_SCRIPT="$repo_root/scripts/dev/check-mi-rbac.sh"
-DOCTOR_OUTPUT=""
 if [[ -x "$DOCTOR_SCRIPT" ]]; then
   doctor_args=(--subscription "$subscription_id")
   if is_true "${ELB_AUTO_FIX_RBAC:-true}"; then
@@ -458,9 +461,13 @@ if [[ -x "$DOCTOR_SCRIPT" ]]; then
     echo "==> Running MI RBAC doctor (read-only, ELB_AUTO_FIX_RBAC=false)"
     echo "    Set ELB_AUTO_FIX_RBAC=true (default) to also grant any missing roles in-line."
   fi
-  # Tee the doctor output to both the console and a variable so we can
-  # detect the "no cluster yet" branch and offer the bootstrap below.
-  if ! DOCTOR_OUTPUT="$(bash "$DOCTOR_SCRIPT" "${doctor_args[@]}" 2>&1 | tee /dev/tty)"; then
+  # Stream the doctor output to the operator. Older revisions piped through
+  # `tee /dev/tty` for both the console copy AND a captured variable, but the
+  # captured value was never read and `/dev/tty` fails to open in CI / when
+  # stdout is redirected, which (with pipefail) tripped the false-positive
+  # "unresolved gaps" message on clean runs. Run the doctor directly and let
+  # its own stdout/stderr flow to the terminal.
+  if ! bash "$DOCTOR_SCRIPT" "${doctor_args[@]}"; then
     echo "==> MI RBAC doctor reported unresolved gaps — see the fix commands above."
   fi
 fi

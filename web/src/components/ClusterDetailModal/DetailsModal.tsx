@@ -116,7 +116,16 @@ export function DetailsModal({
         {/* Scrollable body */}
         <div
           className="cluster-detail-modal-body"
-          style={{ overflowY: "auto", flex: 1, padding: "16px 24px 24px" }}
+          style={{
+            overflowY: "auto",
+            flex: 1,
+            padding: "16px 24px 24px",
+            // `.glass-dialog` sets `text-align: center` for the confirm-dialog
+            // family; the cluster details modal reuses that class for the
+            // glass surface but needs left-aligned text in the body
+            // (kubectl output, node tables, describe text, etc).
+            textAlign: "left",
+          }}
         >
           {kubeletObjectId && <IdentitySection kubeletObjectId={kubeletObjectId} />}
 

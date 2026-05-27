@@ -3,6 +3,36 @@ import { BookOpen, ExternalLink, Hash, RefreshCw, Server, Zap } from "lucide-rea
 
 import type { ParsedSpec } from "@/pages/apiReference/types";
 
+// `baseUrl` is the resolved Service IP (typically the AKS internal
+// LoadBalancer at 10.x.x.x). When that IP is RFC1918 / loopback / link-
+// local, the browser cannot reach it from the public dashboard origin —
+// and even if it could, it would mean a plain-HTTP top-level navigation
+// from an HTTPS page. The SPA's own API Reference page is the intended
+// surface in that case (it proxies every call through the api sidecar),
+// so hide the "Swagger UI" external link when the upstream is private.
+function isPrivateOrLoopbackIpv4Host(host: string): boolean {
+  const match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!match) return false;
+  const octets = match.slice(1, 5).map((value) => Number(value));
+  if (octets.some((value) => Number.isNaN(value) || value < 0 || value > 255)) return false;
+  const [a, b] = octets;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}
+
+function isReachableUpstream(baseUrl: string): boolean {
+  try {
+    const parsed = new URL(baseUrl);
+    return !isPrivateOrLoopbackIpv4Host(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function ApiHero({
   spec,
   baseUrl,
@@ -80,15 +110,17 @@ export function ApiHero({
               >
                 {baseUrl}
               </span>
-              <a
-                href={`${baseUrl}/docs`}
-                target="_blank"
-                rel="noreferrer"
-                className="glass-button api-hero__swagger"
-                style={{ fontSize: 11, textDecoration: "none" }}
-              >
-                <ExternalLink size={11} /> Swagger UI
-              </a>
+              {isReachableUpstream(baseUrl) && (
+                <a
+                  href={`${baseUrl}/docs`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="glass-button api-hero__swagger"
+                  style={{ fontSize: 11, textDecoration: "none" }}
+                >
+                  <ExternalLink size={11} /> Swagger UI
+                </a>
+              )}
               <button
                 type="button"
                 className="glass-button"

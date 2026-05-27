@@ -131,17 +131,22 @@ fi
 if [[ -z "$RESOURCE_GROUP" ]]; then
   RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-}"
 fi
-if [[ -z "$CONTAINER_APP" || -z "$RESOURCE_GROUP" ]]; then
-  if command -v azd >/dev/null 2>&1; then
-    while IFS='=' read -r key value; do
-      [[ -n "${key:-}" ]] || continue
-      value="${value%\"}"; value="${value#\"}"
-      case "$key" in
-        CONTAINER_APP_NAME)    [[ -z "$CONTAINER_APP"  ]] && CONTAINER_APP="$value" ;;
-        AZURE_RESOURCE_GROUP)  [[ -z "$RESOURCE_GROUP" ]] && RESOURCE_GROUP="$value" ;;
-      esac
-    done < <(azd env get-values 2>/dev/null || true)
-  fi
+# Also pull cluster RG + azd env name from the azd environment when --cluster-rg
+# was not passed. These power the tag-based auto-detect below so we can pick the
+# right AKS when a subscription hosts multiple clusters from different apps.
+AZD_ENV_NAME="${AZURE_ENV_NAME:-}"
+ENV_CLUSTER_RG="${ELB_CLUSTER_RG_NAME:-}"
+if command -v azd >/dev/null 2>&1; then
+  while IFS='=' read -r key value; do
+    [[ -n "${key:-}" ]] || continue
+    value="${value%\"}"; value="${value#\"}"
+    case "$key" in
+      CONTAINER_APP_NAME)    [[ -z "$CONTAINER_APP"   ]] && CONTAINER_APP="$value" ;;
+      AZURE_RESOURCE_GROUP)  [[ -z "$RESOURCE_GROUP"  ]] && RESOURCE_GROUP="$value" ;;
+      AZURE_ENV_NAME)        [[ -z "$AZD_ENV_NAME"    ]] && AZD_ENV_NAME="$value" ;;
+      ELB_CLUSTER_RG_NAME)   [[ -z "$ENV_CLUSTER_RG"  ]] && ENV_CLUSTER_RG="$value" ;;
+    esac
+  done < <(azd env get-values 2>/dev/null || true)
 fi
 
 # ---------------------------------------------------------------------------
@@ -169,32 +174,80 @@ fi
   || die "principal-id '$PRINCIPAL_ID' does not look like an Entra object id (GUID)"
 
 # ---------------------------------------------------------------------------
-# Resolve the AKS cluster RG. If --cluster-rg was passed, use it as-is.
-# Otherwise list AKS in the subscription and accept only the unambiguous
-# "exactly one" case. When no AKS clusters exist AND --cluster-rg was
-# not passed, print an actionable bootstrap hint instead of silently
-# returning 0 (which would hide the first-time-cluster-create RBAC gap).
+# Resolve the AKS cluster RG. Precedence:
+#   1. --cluster-rg flag (explicit operator intent — wins).
+#   2. $ELB_CLUSTER_RG_NAME from the shell or `azd env get-value`
+#      (deploy.sh already treats this as the canonical pointer to "this
+#      dashboard's cluster RG"; mirror it here so multi-AKS subscriptions
+#      don't need an explicit flag for the common case).
+#   3. `az aks list` filtered by the `managedBy=elb-dashboard` tag the
+#      dashboard always stamps on clusters it provisions, narrowed further
+#      by `azd-env-name` when an azd env is known. Refuse only if the
+#      filter still leaves more than one candidate — i.e. multi-env in the
+#      same subscription without a unique pointer.
+#   4. When no candidate exists AND --cluster-rg was not passed, print an
+#      actionable bootstrap hint instead of silently returning 0 (which
+#      would hide the first-time-cluster-create RBAC gap).
 # ---------------------------------------------------------------------------
 BOOTSTRAP_MODE=0
+if [[ -z "$CLUSTER_RG" && -n "$ENV_CLUSTER_RG" ]]; then
+  CLUSTER_RG="$ENV_CLUSTER_RG"
+  ts "  [auto] using cluster RG '$CLUSTER_RG' from ELB_CLUSTER_RG_NAME"
+fi
 if [[ -z "$CLUSTER_RG" ]]; then
-  AKS_LIST="$(az aks list "${SUB_FLAG[@]}" \
-    --query "[].{name:name, rg:resourceGroup}" -o tsv 2>/dev/null || true)"
+  AKS_JSON="$(az aks list "${SUB_FLAG[@]}" \
+    --query "[].{name:name, rg:resourceGroup, tags:tags}" -o json 2>/dev/null || echo '[]')"
+  AKS_LIST="$(AKS_JSON="$AKS_JSON" AZD_ENV="$AZD_ENV_NAME" python3 - <<'PY' 2>/dev/null || true
+import json, os
+try:
+    arr = json.loads(os.environ.get("AKS_JSON", "[]"))
+except Exception:
+    arr = []
+env = os.environ.get("AZD_ENV", "")
+mine = [c for c in arr if (c.get("tags") or {}).get("managedBy") == "elb-dashboard"]
+if env:
+    by_env = [c for c in mine if (c.get("tags") or {}).get("azd-env-name") == env]
+    if by_env:
+        mine = by_env
+for c in mine:
+    print(f"{c.get('name','')}\t{c.get('rg','')}")
+PY
+)"
   AKS_COUNT="$(printf '%s\n' "$AKS_LIST" | grep -c . || true)"
   if [[ "$AKS_COUNT" -eq 0 ]]; then
-    yellow "no AKS cluster found in subscription — nothing to grant in maintenance mode."
-    yellow "If you plan to create a NEW cluster via the SPA, the dashboard MI must have"
-    yellow "Contributor on the cluster RG so 'create_or_update(<cluster_rg>)' can succeed."
-    yellow "Re-run this script in bootstrap mode (creates RG + grants):"
-    yellow "  bash scripts/dev/grant-runtime-rbac.sh \\"
-    yellow "    --cluster-rg <rg-elb-cluster> --region <koreacentral> --yes"
-    exit 0
+    # Either the subscription has zero AKS clusters, OR none of them carry
+    # the managedBy=elb-dashboard tag (e.g. legacy clusters created before
+    # the tag contract). Distinguish the two so the operator gets an
+    # actionable next step.
+    SUB_AKS_COUNT="$(AKS_JSON="$AKS_JSON" python3 -c 'import json,os; print(len(json.loads(os.environ.get("AKS_JSON","[]"))))' 2>/dev/null || echo 0)"
+    if [[ "$SUB_AKS_COUNT" -eq 0 ]]; then
+      yellow "no AKS cluster found in subscription — nothing to grant in maintenance mode."
+      yellow "If you plan to create a NEW cluster via the SPA, the dashboard MI must have"
+      yellow "Contributor on the cluster RG so 'create_or_update(<cluster_rg>)' can succeed."
+      yellow "Re-run this script in bootstrap mode (creates RG + grants):"
+      yellow "  bash scripts/dev/grant-runtime-rbac.sh \\"
+      yellow "    --cluster-rg <rg-elb-cluster> --region <koreacentral> --yes"
+      exit 0
+    fi
+    red "no AKS cluster in this subscription carries managedBy=elb-dashboard${AZD_ENV_NAME:+ + azd-env-name=$AZD_ENV_NAME}."
+    red "Pass --cluster-rg explicitly, or set ELB_CLUSTER_RG_NAME (azd env set ELB_CLUSTER_RG_NAME <rg>):"
+    AKS_JSON="$AKS_JSON" python3 - >&2 2>/dev/null <<'PY' || true
+import json, os
+arr = json.loads(os.environ.get("AKS_JSON", "[]"))
+for c in arr:
+    name = c.get("name", "")
+    rg = c.get("rg") or c.get("resourceGroup", "")
+    print(f"  {name:40s}  {rg}")
+PY
+    exit 3
   fi
   if [[ "$AKS_COUNT" -gt 1 ]]; then
-    red "multiple AKS clusters found in subscription — be explicit with --cluster-rg:"
+    red "multiple elb-dashboard-managed AKS clusters match${AZD_ENV_NAME:+ (azd-env-name=$AZD_ENV_NAME)} — be explicit with --cluster-rg:"
     printf '%s\n' "$AKS_LIST" >&2
     exit 3
   fi
   CLUSTER_RG="$(printf '%s\n' "$AKS_LIST" | awk '{print $2}')"
+  ts "  [auto] picked cluster RG '$CLUSTER_RG' (managedBy=elb-dashboard${AZD_ENV_NAME:+, azd-env-name=$AZD_ENV_NAME})"
 fi
 
 # Bootstrap path: --cluster-rg was specified (explicitly or auto-derived) but

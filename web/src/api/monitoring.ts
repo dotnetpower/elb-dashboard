@@ -313,6 +313,29 @@ export const monitoringApi = {
       `/monitor/aks/pod-describe?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&pod_name=${encodeURIComponent(podName)}`,
     ),
 
+  /**
+   * Delete a single pod. The backend refuses system-managed namespaces
+   * (`kube-system`, `kube-public`, `kube-node-lease`, `gatekeeper-system`,
+   * etc.) — frontend hides the Delete button for those, but the route is
+   * the authoritative gate.
+   */
+  k8sPodDelete: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    namespace: string,
+    podName: string,
+  ) =>
+    api.del<{
+      status: "deleted" | "not_found" | "error";
+      namespace: string;
+      pod: string;
+      status_code: number;
+      detail?: string;
+    }>(
+      `/monitor/aks/pod?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&pod_name=${encodeURIComponent(podName)}`,
+    ),
+
   buildAcrImages: (
     subscriptionId: string,
     rg: string,

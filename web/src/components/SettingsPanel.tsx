@@ -3,6 +3,8 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Copy,
   ExternalLink,
   Eye,
@@ -24,6 +26,7 @@ import {
 import { formatApiError } from "@/api/client";
 import { settingsApi, type AppInsightsProvisionRequest } from "@/api/settings";
 import { tasksApi, type TaskStatusResponse } from "@/api/tasks";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { clearConfig, loadSavedConfig, type ResourceConfig } from "@/components/SetupWizard";
 import { useAppInsights } from "@/hooks/useAppInsights";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
@@ -157,6 +160,7 @@ export function SettingsPanel({ open, onClose }: Props) {
   const { reset } = usePreferences();
   const config = useMemo<ResourceConfig | null>(() => (open ? loadSavedConfig() : null), [open]);
   const showFooterActions = active !== "preview";
+  const [resetOpen, setResetOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -273,11 +277,7 @@ export function SettingsPanel({ open, onClose }: Props) {
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 className="glass-button"
-                onClick={() => {
-                  if (window.confirm("Reset theme, preview features, telemetry, and connection string preferences?")) {
-                    reset();
-                  }
-                }}
+                onClick={() => setResetOpen(true)}
                 style={{ fontSize: 12 }}
               >
                 Reset
@@ -286,6 +286,15 @@ export function SettingsPanel({ open, onClose }: Props) {
           )}
         </footer>
       </aside>
+      <ConfirmDialog
+        open={resetOpen}
+        title="Reset preferences?"
+        message="Reset theme, preview features, telemetry, and connection string preferences?"
+        confirmLabel="Reset"
+        confirmAriaLabel="Reset preferences"
+        onConfirm={() => { setResetOpen(false); reset(); }}
+        onCancel={() => setResetOpen(false)}
+      />
     </>
   );
 }
@@ -376,6 +385,8 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
   const [applyError, setApplyError] = useState<string | null>(null);
   const [clearError, setClearError] = useState<string | null>(null);
   const [form, setForm] = useState<ProvisionFormState>(() => defaultProvisionForm(config));
+  const [provisionConfirmOpen, setProvisionConfirmOpen] = useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const copyTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -488,13 +499,12 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
     }
   }, [isWellFormedUserString, userConnectionString]);
 
-  const clearFromDeployment = useCallback(async () => {
-    if (!window.confirm(
-      "Remove the App Insights connection string from api, worker, and beat?\n\n" +
-      "A new Container App revision will roll out. The api / worker / beat sidecars will fall back to whatever the deployment template provides.",
-    )) {
-      return;
-    }
+  const clearFromDeployment = useCallback(() => {
+    setClearConfirmOpen(true);
+  }, []);
+
+  const submitClearFromDeployment = useCallback(async () => {
+    setClearConfirmOpen(false);
     setClearError(null);
     setClearTask(null);
     try {
@@ -534,28 +544,19 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
     }
   }, [ai]);
 
-  const provision = useCallback(async () => {
+  const provision = useCallback(() => {
     const validation = validateProvisionForm(form);
     if (!validation.ok) {
       setError(validation.message);
       return;
     }
+    setError(null);
+    setProvisionConfirmOpen(true);
+  }, [form]);
+
+  const submitProvision = useCallback(async () => {
+    setProvisionConfirmOpen(false);
     const ws_rg = form.workspace_resource_group.trim();
-    const summaryLines = [
-      `Resource group: ${form.resource_group}`,
-      `App Insights: ${form.component_name} (${form.region})`,
-      `Log Analytics: ${form.workspace_name}${ws_rg && ws_rg !== form.resource_group ? ` in ${ws_rg}` : ""}`,
-      `Retention: ${form.retention_days} days`,
-    ];
-    if (
-      !window.confirm(
-        "Provision Application Insights?\n\n" +
-          summaryLines.join("\n") +
-          "\n\nThis creates Azure resources that may incur Log Analytics ingestion charges.",
-      )
-    ) {
-      return;
-    }
     setError(null);
     setTask(null);
     try {
@@ -573,6 +574,16 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
     } catch (err) {
       setError(formatApiError(err, "arm"));
     }
+  }, [form]);
+
+  const provisionSummaryLines = useMemo(() => {
+    const ws_rg = form.workspace_resource_group.trim();
+    return [
+      `Resource group: ${form.resource_group}`,
+      `App Insights: ${form.component_name} (${form.region})`,
+      `Log Analytics: ${form.workspace_name}${ws_rg && ws_rg !== form.resource_group ? ` in ${ws_rg}` : ""}`,
+      `Retention: ${form.retention_days} days`,
+    ];
   }, [form]);
 
   const copyConnectionString = useCallback(async () => {
@@ -593,6 +604,7 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
     isWellFormedUserString && userKeyTail !== "" && userKeyTail !== prefs.appInsightsLastAppliedKeyTail;
 
   return (
+    <>
     <Section heading="Telemetry">
       <Group>
         <Row
@@ -852,6 +864,28 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
         )}
       </Group>
     </Section>
+    <ConfirmDialog
+      open={provisionConfirmOpen}
+      title="Provision Application Insights?"
+      details={provisionSummaryLines}
+      footnote="This creates Azure resources that may incur Log Analytics ingestion charges."
+      confirmLabel="Provision"
+      confirmAriaLabel="Provision Application Insights"
+      tone="primary"
+      onConfirm={submitProvision}
+      onCancel={() => setProvisionConfirmOpen(false)}
+    />
+    <ConfirmDialog
+      open={clearConfirmOpen}
+      title="Remove the App Insights connection string?"
+      message="The connection string will be removed from api, worker, and beat."
+      footnote="A new Container App revision will roll out. The api / worker / beat sidecars will fall back to whatever the deployment template provides."
+      confirmLabel="Remove"
+      confirmAriaLabel="Remove connection string from deployment"
+      onConfirm={submitClearFromDeployment}
+      onCancel={() => setClearConfirmOpen(false)}
+    />
+    </>
   );
 }
 
@@ -1345,6 +1379,16 @@ function ProvisionForm({
   const datalistId = "elb-azure-regions";
   const idPrefix = "elb-prov";
 
+  const targetHasError = Boolean(
+    fieldErrors.subscription_id || fieldErrors.resource_group || fieldErrors.region,
+  );
+  const targetHasEmpty = !value.subscription_id || !value.resource_group || !value.region;
+  const targetForceExpand = targetHasError || targetHasEmpty || regionMismatch;
+  const [targetExpanded, setTargetExpanded] = useState(false);
+  const showTargetFields = targetExpanded || targetForceExpand;
+  const subscriptionTail = value.subscription_id.trim().slice(-12) || "(not set)";
+  const targetSummary = `${subscriptionTail} / ${value.resource_group || "(no RG)"} / ${value.region || "(no region)"}`;
+
   const [lookup, setLookup] = useState<{ state: "idle" | "checking" | "found" | "missing" | "error"; message?: string }>({ state: "idle" });
   const lookupAbort = useRef<AbortController | null>(null);
 
@@ -1403,6 +1447,45 @@ function ProvisionForm({
         disabled={busy}
         style={{ display: "grid", gap: 10, border: 0, padding: 0, margin: 0, minInlineSize: 0 }}
       >
+        <div style={{ display: "grid", gap: 6 }}>
+          <button
+            type="button"
+            onClick={() => setTargetExpanded((prev) => !prev)}
+            aria-expanded={showTargetFields}
+            aria-controls={`${idPrefix}-target-fields`}
+            disabled={targetForceExpand}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "6px 8px",
+              background: "transparent",
+              border: "1px solid var(--border-weak)",
+              borderRadius: 6,
+              color: "var(--text-secondary)",
+              fontSize: 12,
+              cursor: targetForceExpand ? "default" : "pointer",
+              textAlign: "left",
+            }}
+          >
+            {showTargetFields ? <ChevronDown size={12} strokeWidth={1.5} /> : <ChevronRight size={12} strokeWidth={1.5} />}
+            <span style={{ color: "var(--text-faint)" }}>Target</span>
+            <code style={{ fontSize: 11, color: "var(--text-secondary)" }}>{targetSummary}</code>
+            {regionMismatch && (
+              <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--warning)" }}>
+                region mismatch
+              </span>
+            )}
+            {!regionMismatch && !targetForceExpand && (
+              <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-faint)" }}>
+                {showTargetFields ? "Hide" : "Change"}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {showTargetFields && (
+        <div id={`${idPrefix}-target-fields`} style={{ display: "grid", gap: 10 }}>
         <ProvisionField
           id={`${idPrefix}-sub`}
           label="Subscription ID"
@@ -1473,6 +1556,8 @@ function ProvisionForm({
             ))}
           </datalist>
         </ProvisionField>
+        </div>
+        )}
 
         <ProvisionField
           id={`${idPrefix}-name`}

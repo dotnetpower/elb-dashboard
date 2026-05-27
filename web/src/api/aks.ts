@@ -102,6 +102,18 @@ export interface OpenApiDeploymentStatus {
   image_tag: string;
 }
 
+export interface OpenApiPublicHttpsStatus {
+  enabled: boolean;
+  fqdn?: string;
+  public_base_url?: string;
+  dns_label?: string;
+  region?: string;
+  ingress_lb_ip?: string;
+  cert_issuer?: string;
+  cert_expires_at?: string;
+  updated_at?: string;
+}
+
 export interface AksAvailableSkusResponse {
   region: string;
   /** SKU names that the subscription can actually deploy in this region.
@@ -336,4 +348,40 @@ export const aksApi = {
       cluster_name: clusterName,
       regenerate,
     }),
+
+  openApiPublicHttpsStatus: () =>
+    api.get<OpenApiPublicHttpsStatus>("/aks/openapi/public-https"),
+
+  enableOpenApiPublicHttps: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    operatorEmail: string,
+  ) =>
+    api.post<{ id: string; task_id: string; statusQueryGetUri: string; status: string }>(
+      "/aks/openapi/public-https",
+      {
+        subscription_id: subscriptionId,
+        resource_group: rg,
+        cluster_name: clusterName,
+        operator_email: operatorEmail,
+      },
+    ),
+
+  disableOpenApiPublicHttps: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.del<{ id: string; task_id: string; statusQueryGetUri: string; status: string }>(
+      `/aks/openapi/public-https?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+
+  openApiPublicHttpsTaskStatus: (taskId: string) =>
+    api.get<
+      OrchestrationStatus<{
+        status?: string;
+        fqdn?: string;
+        public_base_url?: string;
+        ingress_lb_ip?: string;
+        cert_expires_at?: string;
+        error?: string;
+      }>
+    >(`/aks/openapi/public-https/${encodeURIComponent(taskId)}/status`),
 };

@@ -55,6 +55,7 @@ _FLAT_SHIMS: tuple[tuple[str, str], ...] = (
     ("api.services.k8s_client", "api.services.k8s.client"),
     ("api.services.k8s_credentials", "api.services.k8s.credentials"),
     ("api.services.k8s_fanout", "api.services.k8s.fanout"),
+    ("api.services.k8s_ingress", "api.services.k8s.ingress"),
     ("api.services.k8s_manifests", "api.services.k8s.manifests"),
     ("api.services.k8s_metrics", "api.services.k8s.metrics"),
     ("api.services.k8s_monitoring", "api.services.k8s.monitoring"),

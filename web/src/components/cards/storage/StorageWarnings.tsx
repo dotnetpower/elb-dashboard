@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { AlertTriangle, ShieldAlert, X } from "lucide-react";
 
 const HNS_DISMISSED_KEY = "elb-hns-warning-dismissed";
@@ -6,6 +6,53 @@ const HNS_DISMISSED_KEY = "elb-hns-warning-dismissed";
 interface StorageWarningsProps {
   isPublic: boolean;
   isHnsEnabled: boolean | null;
+}
+
+const BANNER_STYLE: CSSProperties = {
+  padding: "8px 10px",
+  marginBottom: "var(--space-3)",
+  background: "rgba(240,198,116,0.08)",
+  border: "1px solid rgba(240,198,116,0.2)",
+  borderRadius: 6,
+  fontSize: 11,
+  color: "var(--warning)",
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 8,
+  lineHeight: 1.4,
+};
+
+const TEXT_COLUMN_STYLE: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  flex: 1,
+  minWidth: 0,
+};
+
+const SUBTEXT_STYLE: CSSProperties = {
+  color: "var(--text-secondary)",
+  fontSize: 10.5,
+};
+
+interface WarningBannerProps {
+  icon: ReactNode;
+  title: string;
+  detail: string;
+  action?: ReactNode;
+}
+
+function WarningBanner({ icon, title, detail, action }: WarningBannerProps) {
+  return (
+    <div className="storage-warning" style={BANNER_STYLE}>
+      <span style={{ display: "flex", paddingTop: 1 }}>{icon}</span>
+      <div style={TEXT_COLUMN_STYLE}>
+        <strong>{title}</strong>
+        <span style={SUBTEXT_STYLE}>{detail}</span>
+      </div>
+      {action}
+    </div>
+  );
 }
 
 /**
@@ -25,69 +72,41 @@ export function StorageWarnings({ isPublic, isHnsEnabled }: StorageWarningsProps
   return (
     <>
       {isPublic && (
-        <div
-          className="storage-warning"
-          style={{
-            padding: "6px 10px",
-            marginBottom: "var(--space-3)",
-            background: "rgba(240,198,116,0.08)",
-            border: "1px solid rgba(240,198,116,0.2)",
-            borderRadius: 6,
-            fontSize: 11,
-            color: "var(--warning)",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-          }}
-        >
-          <ShieldAlert size={13} strokeWidth={1.5} />
-          Public endpoint is enabled — expected state is{" "}
-          <strong>Private only</strong>. Investigate and remediate.
-        </div>
+        <WarningBanner
+          icon={<ShieldAlert size={13} strokeWidth={1.5} />}
+          title="Public network access is enabled"
+          detail="Expected: Private only · Investigate and remediate"
+        />
       )}
 
       {isHnsEnabled === false && !hnsDismissed && (
-        <div
-          className="storage-warning"
-          style={{
-            padding: "6px 10px",
-            marginBottom: "var(--space-3)",
-            background: "rgba(240,198,116,0.08)",
-            border: "1px solid rgba(240,198,116,0.2)",
-            borderRadius: 6,
-            fontSize: 11,
-            color: "var(--warning)",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-          }}
-        >
-          <AlertTriangle size={13} strokeWidth={1.5} />
-          <span style={{ flex: 1 }}>
-            HNS (Data Lake Gen2) is disabled. ElasticBLAST works best with HNS
-            enabled.
-          </span>
-          <button
-            onClick={() => {
-              setHnsDismissed(true);
-              try {
-                localStorage.setItem(HNS_DISMISSED_KEY, "1");
-              } catch {
-                /* noop */
-              }
-            }}
-            style={{
-              background: "none",
-              border: "none",
-              color: "var(--text-faint)",
-              cursor: "pointer",
-              padding: 2,
-            }}
-            title="Dismiss"
-          >
-            <X size={12} />
-          </button>
-        </div>
+        <WarningBanner
+          icon={<AlertTriangle size={13} strokeWidth={1.5} />}
+          title="HNS (Data Lake Gen2) is disabled"
+          detail="ElasticBLAST works best with HNS enabled"
+          action={
+            <button
+              onClick={() => {
+                setHnsDismissed(true);
+                try {
+                  localStorage.setItem(HNS_DISMISSED_KEY, "1");
+                } catch {
+                  /* noop */
+                }
+              }}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--text-faint)",
+                cursor: "pointer",
+                padding: 2,
+              }}
+              title="Dismiss"
+            >
+              <X size={12} />
+            </button>
+          }
+        />
       )}
     </>
   );

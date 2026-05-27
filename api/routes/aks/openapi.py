@@ -471,6 +471,163 @@ def aks_openapi_token_generate(
         raise
 
 
+class OpenApiPublicHttpsRequest(BaseModel):
+    subscription_id: str = ""
+    resource_group: str
+    cluster_name: str
+    operator_email: str = ""
+
+
+@router.get("/openapi/public-https")
+def aks_openapi_public_https_status(
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the cached public HTTPS endpoint state for the SPA panel.
+
+    Reads from ops Redis only — no kubectl round trip — so polling is
+    cheap. ``{enabled: false}`` means the operator has never run the
+    setup task (or ran the disable task afterwards).
+    """
+
+    from api.tasks.openapi import get_openapi_public_https_status
+
+    del caller
+    return get_openapi_public_https_status()
+
+
+@router.post("/openapi/public-https")
+def aks_openapi_public_https_enable(
+    body: OpenApiPublicHttpsRequest,
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Enqueue ``setup_openapi_public_https`` for the given AKS cluster.
+
+    The task is idempotent; re-running it on a cluster that already has
+    the public HTTPS path applied refreshes the Ingress + ClusterIssuer
+    without burning a Let's Encrypt rate-limit slot (cert-manager reuses
+    the existing Certificate Secret when present).
+    """
+
+    from api.tasks.openapi import setup_openapi_public_https
+
+    LOGGER.info(
+        "openapi public-https enable requested cluster=%s caller_oid=%s",
+        body.cluster_name,
+        caller.object_id,
+    )
+    result = _safe_delay(
+        setup_openapi_public_https,
+        subscription_id=body.subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
+        resource_group=body.resource_group,
+        cluster_name=body.cluster_name,
+        operator_email=body.operator_email,
+        caller_oid=caller.object_id or "",
+    )
+    return {
+        "id": result.id,
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/aks/openapi/public-https/{result.id}/status",
+        "status": "queued",
+    }
+
+
+@router.delete("/openapi/public-https")
+def aks_openapi_public_https_disable(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Enqueue ``disable_openapi_public_https`` — deletes Ingress + cert.
+
+    ingress-nginx and cert-manager remain installed (cheap, useful for
+    other apps + a future re-enable). The cached public base URL is
+    cleared so the SPA flips its baseUrl back to the internal LB IP.
+
+    Uses query params (not a JSON body) because some browser / proxy
+    combinations strip the body from a `DELETE` request, and the
+    SPA's authenticated fetch wrapper only routes JSON bodies through
+    POST / PUT.
+    """
+
+    from api.tasks.openapi import disable_openapi_public_https
+
+    LOGGER.info(
+        "openapi public-https disable requested cluster=%s caller_oid=%s",
+        cluster_name,
+        caller.object_id,
+    )
+    result = _safe_delay(
+        disable_openapi_public_https,
+        subscription_id=subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+        caller_oid=caller.object_id or "",
+    )
+    return {
+        "id": result.id,
+        "task_id": result.id,
+        "statusQueryGetUri": f"/api/aks/openapi/public-https/{result.id}/status",
+        "status": "queued",
+    }
+
+
+@router.get("/openapi/public-https/{task_id}/status")
+def aks_openapi_public_https_task_status(
+    task_id: str = Path(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Translate the Celery ``AsyncResult`` into a SPA-friendly envelope.
+
+    Mirrors ``aks_openapi_deploy_status`` shape so the SPA can reuse the
+    same polling helper for both flows.
+    """
+
+    from celery.result import AsyncResult
+
+    from api.celery_app import celery_app
+
+    del caller
+    result = AsyncResult(task_id, app=celery_app)
+    status = (result.status or "PENDING").upper()
+    runtime_status = {
+        "PENDING": "Pending",
+        "RECEIVED": "Pending",
+        "STARTED": "Running",
+        "RETRY": "Running",
+        "PROGRESS": "Running",
+        "SUCCESS": "Completed",
+        "FAILURE": "Failed",
+        "REVOKED": "Terminated",
+    }.get(status, "Running")
+    custom_status: dict[str, Any] = {"phase": status.lower()}
+    output: dict[str, Any] | None = None
+
+    if not result.ready():
+        info = result.info if isinstance(result.info, dict) else None
+        if info:
+            custom_status.update({k: v for k, v in info.items() if k != "exc_type"})
+    elif result.successful():
+        payload = result.result if isinstance(result.result, dict) else {}
+        custom_status.update({"phase": "completed"})
+        output = dict(payload)
+    else:
+        err = ""
+        try:
+            err = str(result.result or result.info or "")[:500]
+        except Exception:
+            err = "task failed"
+        custom_status.update({"phase": "failed"})
+        output = {"status": "failed", "error": err}
+
+    return {
+        "task_id": task_id,
+        "runtime_status": runtime_status,
+        "custom_status": custom_status,
+        "output": output,
+    }
+
+
 @router.get("/openapi/spec")
 def aks_openapi_spec(
     subscription_id: str = Query(default=""),

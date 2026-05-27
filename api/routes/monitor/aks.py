@@ -4,7 +4,7 @@ Responsibility: AKS monitor routes
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
 Key entry points: `list_aks`, `aks_nodes`, `aks_pods`, `aks_top_nodes`, `aks_pod_logs`,
-`aks_pod_describe`, `aks_service_ip`
+`aks_pod_describe`, `aks_pod_delete`, `aks_service_ip`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_route_contracts.py
@@ -184,6 +184,52 @@ def aks_pod_describe(
         )
 
 
+@router.delete("/aks/pod")
+def aks_pod_delete(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(...),
+    pod_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Delete a single pod. Refuses system-managed namespaces server-side.
+
+    The SPA hides the action for system namespaces, but this route also
+    enforces it — frontend-only authorization is an OWASP A01 violation."""
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+    from api.services.k8s.observability import SYSTEM_NAMESPACES
+
+    if namespace in SYSTEM_NAMESPACES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"namespace {namespace!r} is system-managed; refusing to delete",
+        )
+
+    cred = monitor_package.get_credential()
+    try:
+        result = monitoring_svc.k8s_pod_delete(
+            cred, sub, resource_group, cluster_name, namespace, pod_name
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        LOGGER.warning("aks_pod_delete failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"delete failed: {type(exc).__name__}") from exc
+
+    # Invalidate the pods list cache so the dashboard reflects the change on
+    # the next poll without waiting for the snapshot TTL.
+    from api.services.monitor_cache import invalidate_monitor_snapshot_prefix
+
+    invalidate_monitor_snapshot_prefix(
+        _cache_key("monitor", "aks", "pods", sub, resource_group, cluster_name)
+    )
+    return result
+
+
 @router.get("/aks/service-ip")
 def aks_service_ip(
     subscription_id: str = Query(default=""),
@@ -351,23 +397,26 @@ def aks_run_command(
 
     cred = monitor_package.get_credential()
     try:
-        # Use k8s_get_pods as a proxy for basic kubectl commands
-        if command.strip().startswith("get pods") or command.strip().startswith("kubectl get pods"):
+        normalized = command.strip()
+        # Strip optional leading "kubectl " so the matcher only has to deal
+        # with the verb + resource form.
+        if normalized.startswith("kubectl "):
+            normalized = normalized[len("kubectl ") :].lstrip()
+
+        # Accept both plural and singular resource forms — `kubectl` itself
+        # treats them interchangeably (`get pod` ≡ `get pods`).
+        if normalized.startswith("get pods") or normalized.startswith("get pod"):
             namespace = body.get("namespace")
             pods = monitoring_svc.k8s_get_pods(cred, sub, rg, cluster_name, namespace=namespace)
             import json
 
             return {"exit_code": 0, "output": json.dumps(pods, indent=2, default=str)}
-        elif command.strip().startswith("get nodes") or command.strip().startswith(
-            "kubectl get nodes"
-        ):
+        elif normalized.startswith("get nodes") or normalized.startswith("get node"):
             nodes = monitoring_svc.k8s_get_nodes(cred, sub, rg, cluster_name)
             import json
 
             return {"exit_code": 0, "output": json.dumps(nodes, indent=2, default=str)}
-        elif command.strip().startswith("top nodes") or command.strip().startswith(
-            "kubectl top nodes"
-        ):
+        elif normalized.startswith("top nodes") or normalized.startswith("top node"):
             metrics = monitoring_svc.k8s_top_nodes(cred, sub, rg, cluster_name)
             import json
 
@@ -376,8 +425,8 @@ def aks_run_command(
             return {
                 "exit_code": 1,
                 "output": (
-                    "Command not supported via API proxy. Supported: get pods, get nodes, "
-                    "top nodes. Use the Browser Terminal for arbitrary kubectl commands."
+                    "Command not supported via API proxy. Supported: get pod(s), get node(s), "
+                    "top node(s). Use the Browser Terminal for arbitrary kubectl commands."
                 ),
             }
     except Exception as exc:

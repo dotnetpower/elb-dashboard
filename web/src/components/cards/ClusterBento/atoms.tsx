@@ -19,8 +19,6 @@ import {
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
-import { BlastJobIdentity } from "@/components/cards/BlastJobIdentity";
-
 import type { DisplayJobState, JobRowView } from "./jobTypes";
 
 /* -------------------------------------------------------------------------- */
@@ -457,63 +455,112 @@ function rowBackground(state: DisplayJobState): string {
   }
 }
 
+/**
+ * Single-line job row for the AKS card "Active jobs" cell.
+ *
+ * Layout (pipe-separated):
+ *   {program} | {db} | {title} | {STATE} | {age}(age) | {duration}(duration)
+ *
+ * - State is rendered as bold uppercase text in the state tone (no pill —
+ *   the row's left-edge colored bar plus the colored state text are the
+ *   visual signal).
+ * - `age` is wall-clock time since `createdAt` (keeps ticking even for
+ *   terminal jobs). `duration` is the actual compute time
+ *   (`elapsedSec`), which freezes when the job reaches a terminal state.
+ * - Title overflow is ellipsized; the full title is in the row's
+ *   `title` tooltip.
+ */
 export function JobRow({ j, dense = false }: { j: JobRowView; dense?: boolean }) {
   const tone = JOB_STATE_TONES[j.state].color;
   const bg = rowBackground(j.state);
-  const elapsed =
-    j.elapsedSec != null
-      ? j.elapsedSec
-      : j.createdAt
-        ? Math.max(0, (Date.now() - new Date(j.createdAt).getTime()) / 1000)
-        : null;
-  const splitsDone = j.splitsDone ?? 0;
-  const splitsTotal = j.splitsTotal ?? 0;
+  const createdMs = j.createdAt ? Date.parse(j.createdAt) : NaN;
+  const ageSec = Number.isFinite(createdMs)
+    ? Math.max(0, (Date.now() - createdMs) / 1000)
+    : null;
+  const durationSec =
+    j.elapsedSec != null && Number.isFinite(j.elapsedSec) ? j.elapsedSec : ageSec;
+  const displayTitle = j.title || j.jobId;
+  const fullTitle = `${j.program} | ${j.db} | ${displayTitle} | ${j.state.toUpperCase()}`;
   return (
     <div
+      title={fullTitle}
       style={{
-        display: "grid",
-        gridTemplateColumns: "auto minmax(0, 1fr) auto",
+        display: "flex",
         alignItems: "center",
-        gap: 12,
-        padding: dense ? "6px 10px" : "8px 12px",
+        minWidth: 0,
+        padding: dense ? "5px 10px" : "7px 12px",
         borderRadius: 7,
         background: bg,
         border: "1px solid rgba(255,255,255,0.04)",
+        borderLeft: `3px solid ${tone}`,
         fontSize: 11.5,
+        fontFamily: "var(--font-mono)",
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+        gap: 0,
       }}
     >
-      <JobStateBadge s={j.state} />
-      <BlastJobIdentity
-        title={j.title}
-        fallbackTitle={j.jobId}
-        program={j.program}
-        db={j.db}
-        query={j.query}
-        clusterName={j.clusterName}
-        note={j.note}
-        noteTone={tone}
-        compact
-      />
+      <JobSegment>{j.program}</JobSegment>
+      <JobPipe />
+      <JobSegment>{j.db}</JobSegment>
+      <JobPipe />
       <span
         style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          fontVariantNumeric: "tabular-nums",
-          fontSize: 11,
-          color: "var(--text-muted)",
-          textAlign: "right",
-          whiteSpace: "nowrap",
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          color: "var(--text-primary)",
         }}
       >
-        <SplitProgress done={splitsDone} total={splitsTotal} color={tone} />
-        {j.state === "Pending"
-          ? "queued"
-          : j.etaSec
-            ? `${fmtDuration(elapsed)} · ETA ${fmtDuration(j.etaSec)}`
-            : fmtDuration(elapsed)}
+        {displayTitle}
+      </span>
+      <JobPipe />
+      <span style={{ color: tone, fontWeight: 600, letterSpacing: "0.04em" }}>
+        {j.state.toUpperCase()}
+      </span>
+      <JobPipe />
+      <span>
+        <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+          {fmtDuration(ageSec)}
+        </strong>
+        <span style={{ color: "var(--text-faint)", marginLeft: 2 }}>(age)</span>
+      </span>
+      <JobPipe />
+      <span>
+        <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+          {fmtDuration(durationSec)}
+        </strong>
+        <span style={{ color: "var(--text-faint)", marginLeft: 2 }}>(duration)</span>
       </span>
     </div>
+  );
+}
+
+function JobSegment({ children }: { children: ReactNode }) {
+  return (
+    <span
+      style={{
+        color: "var(--text-muted)",
+        flexShrink: 0,
+        maxWidth: 200,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function JobPipe() {
+  return (
+    <span
+      aria-hidden="true"
+      style={{ color: "var(--text-faint)", margin: "0 8px", flexShrink: 0 }}
+    >
+      |
+    </span>
   );
 }
 

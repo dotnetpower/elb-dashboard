@@ -219,11 +219,52 @@ def deploy_openapi_service(
             },
         }
 
+    # Resolve (or mint) the API token BEFORE building manifests. The
+    # sibling elb-openapi pod fails-closed with HTTP 503 when its
+    # ELB_OPENAPI_API_TOKEN env is unset (see docker-openapi
+    # require_api_token). Without this auto-mint, the very first deploy
+    # leaves the deployment without the env entry — the SPA's API menu
+    # then has to be opened and "Generate" clicked before any /v1/* call
+    # works, which is a hidden, undocumented post-deploy step. Mint a
+    # token here when nothing is cached so the deploy is self-contained;
+    # subsequent rotations still go through the API menu's POST
+    # /api/aks/openapi/token path.
     api_token = os.environ.get("ELB_OPENAPI_API_TOKEN", "").strip()
+    token_source = "env" if api_token else ""
     if not api_token:
         from api.services.openapi.runtime import get_openapi_api_token
 
         api_token = get_openapi_api_token()
+        if api_token:
+            token_source = "runtime_cache"  # noqa: S105 - source label, not a credential.
+    if not api_token:
+        import secrets
+
+        from api.services.openapi.runtime import save_openapi_api_token
+
+        api_token = secrets.token_urlsafe(32)
+        token_source = "auto_generated"  # noqa: S105 - source label, not a credential.
+        os.environ["ELB_OPENAPI_API_TOKEN"] = api_token
+        try:
+            save_openapi_api_token(
+                api_token,
+                metadata={
+                    "subscription_id": subscription_id,
+                    "resource_group": resource_group,
+                    "cluster_name": cluster_name,
+                    "deployment_name": "elb-openapi",
+                    "source": "deploy_openapi_service",
+                },
+            )
+        except Exception as exc:
+            # Cache write is best-effort; the token still ships in the
+            # manifest, so the deploy succeeds either way. Subsequent api
+            # sidecar reads will fall back to reading the env from the
+            # deployment via get_openapi_api_token_status.
+            LOGGER.warning(
+                "openapi deploy: runtime token cache write skipped: %s",
+                type(exc).__name__,
+            )
 
     # ----- 2. kubectl apply --------------------------------------------------
     record_progress(self, "applying_manifests", image=image, mi_client_id=mi_client_id[:8])
@@ -367,6 +408,7 @@ def deploy_openapi_service(
             "external_ip": external_ip,
             "ready_replicas": ready_replicas,
             "desired_replicas": desired_replicas,
+            "api_token_source": token_source,
             "apply_output": apply_output[:1000],
         },
         "elapsed_seconds": elapsed,

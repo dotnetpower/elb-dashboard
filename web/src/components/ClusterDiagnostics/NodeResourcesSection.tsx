@@ -1,4 +1,5 @@
-import { Loader2, AlertTriangle } from "lucide-react";
+import { Loader2, AlertTriangle, ChevronDown } from "lucide-react";
+import { useState } from "react";
 
 import type { K8sNodeMetrics } from "@/api/endpoints";
 
@@ -26,6 +27,10 @@ interface NodeResourcesQuery {
 }
 
 export function NodeResourcesSection({ query }: { query: NodeResourcesQuery }) {
+  // Default expanded — Node Resources is the most common reason the modal
+  // is opened, so showing it on first paint matches the user's intent.
+  // Users can still collapse it like Nodes / Active Pods below.
+  const [collapsed, setCollapsed] = useState(false);
   const metrics = query.data?.nodes ?? [];
 
   // Cluster aggregate — sum all nodes for the header summary line.
@@ -79,18 +84,34 @@ export function NodeResourcesSection({ query }: { query: NodeResourcesQuery }) {
       }}
     >
       <SectionShimmerBar active={Boolean(query.isFetching)} />
-      <div
+      <button
+        onClick={() => setCollapsed((v) => !v)}
         style={{
           padding: "8px 12px",
-          background: "var(--bg-tertiary)",
+          background: collapsed ? "transparent" : "var(--bg-tertiary)",
           fontSize: 11,
           fontWeight: 500,
           display: "flex",
           alignItems: "center",
           gap: 10,
-          borderBottom: "1px solid var(--border-weak)",
+          borderBottom: collapsed ? "none" : "1px solid var(--border-weak)",
+          width: "100%",
+          border: "none",
+          color: "var(--text-primary)",
+          cursor: "pointer",
+          textAlign: "left",
         }}
+        aria-expanded={!collapsed}
+        aria-label={`${collapsed ? "Expand" : "Collapse"} Node Resources`}
       >
+        <ChevronDown
+          size={12}
+          style={{
+            transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)",
+            color: "var(--text-faint)",
+            transition: "transform 0.15s",
+          }}
+        />
         <span>Node Resources</span>
         {metrics.length > 0 && (
           <span
@@ -137,75 +158,77 @@ export function NodeResourcesSection({ query }: { query: NodeResourcesQuery }) {
             ✓
           </span>
         )}
-      </div>
-      <div style={{ padding: "10px 12px" }}>
-        {query.isLoading && metrics.length === 0 && (
-          <div
-            className="muted"
-            style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}
-          >
-            <Loader2 size={12} className="spin" /> Fetching node metrics...
-          </div>
-        )}
-        {query.isError && (
-          <div
-            style={{
-              fontSize: 11,
-              color: "var(--text-muted)",
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-            }}
-          >
-            <AlertTriangle size={12} style={{ color: "var(--warning)" }} />
-            Node metrics unavailable — the cluster API may still be warming up. Try
-            Refresh All in a moment.
-          </div>
-        )}
-        {metrics.length > 0 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {orderedPools.map(([pool, rows]) => (
-              <div key={pool}>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    fontSize: 10,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.07em",
-                    color: "var(--text-faint)",
-                    paddingBottom: 4,
-                  }}
-                >
-                  <span
+      </button>
+      {!collapsed && (
+        <div style={{ padding: "10px 12px" }}>
+          {query.isLoading && metrics.length === 0 && (
+            <div
+              className="muted"
+              style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6 }}
+            >
+              <Loader2 size={12} className="spin" /> Fetching node metrics...
+            </div>
+          )}
+          {query.isError && (
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <AlertTriangle size={12} style={{ color: "var(--warning)" }} />
+              Node metrics unavailable — the cluster API may still be warming up. Try
+              Refresh All in a moment.
+            </div>
+          )}
+          {metrics.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {orderedPools.map(([pool, rows]) => (
+                <div key={pool}>
+                  <div
                     style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: 2,
-                      background: poolAccent(pool),
-                    }}
-                  />
-                  <span>{isSystemPool(pool) ? "System" : "User"}</span>
-                  <span
-                    style={{
-                      color: "var(--text-muted)",
-                      fontFamily: "var(--font-mono)",
-                      textTransform: "none",
-                      letterSpacing: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      fontSize: 10,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.07em",
+                      color: "var(--text-faint)",
+                      paddingBottom: 4,
                     }}
                   >
-                    · {pool} · {rows.length} {rows.length === 1 ? "node" : "nodes"}
-                  </span>
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: 2,
+                        background: poolAccent(pool),
+                      }}
+                    />
+                    <span>{isSystemPool(pool) ? "System" : "User"}</span>
+                    <span
+                      style={{
+                        color: "var(--text-muted)",
+                        fontFamily: "var(--font-mono)",
+                        textTransform: "none",
+                        letterSpacing: 0,
+                      }}
+                    >
+                      · {pool} · {rows.length} {rows.length === 1 ? "node" : "nodes"}
+                    </span>
+                  </div>
+                  {rows.map((n) => (
+                    <NodeRow key={n.name} metric={n} />
+                  ))}
                 </div>
-                {rows.map((n) => (
-                  <NodeRow key={n.name} metric={n} />
-                ))}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

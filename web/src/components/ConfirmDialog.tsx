@@ -5,8 +5,11 @@ interface Props {
   open?: boolean;
   title: string;
   message?: string;
+  details?: string[];
+  footnote?: string;
   confirmLabel?: string;
   confirmAriaLabel?: string;
+  tone?: "danger" | "primary";
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -15,8 +18,11 @@ export function ConfirmDialog({
   open = true,
   title,
   message,
+  details,
+  footnote,
   confirmLabel = "Confirm",
   confirmAriaLabel,
+  tone = "danger",
   onConfirm,
   onCancel,
 }: Props) {
@@ -36,6 +42,10 @@ export function ConfirmDialog({
 
   if (!open) return null;
 
+  const defaultAriaLabel = tone === "danger"
+    ? `Permanently ${confirmLabel.toLowerCase()}`
+    : confirmLabel;
+
   return (
     <div
       className="glass-dialog-backdrop"
@@ -51,6 +61,14 @@ export function ConfirmDialog({
       >
         <h3 style={{ marginTop: 0 }}>{title}</h3>
         {message && <p className="muted">{message}</p>}
+        {details && details.length > 0 && (
+          <ul className="muted" style={{ margin: "0 0 12px 0", paddingLeft: 20, lineHeight: 1.6 }}>
+            {details.map((line, idx) => (
+              <li key={idx}>{line}</li>
+            ))}
+          </ul>
+        )}
+        {footnote && <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>{footnote}</p>}
         <div className="glass-dialog__actions">
           <button
             className="glass-button"
@@ -59,9 +77,9 @@ export function ConfirmDialog({
             Cancel
           </button>
           <button
-            className="glass-button glass-button--danger"
+            className={`glass-button glass-button--${tone}`}
             onClick={onConfirm}
-            aria-label={confirmAriaLabel ?? `Permanently ${confirmLabel.toLowerCase()}`}
+            aria-label={confirmAriaLabel ?? defaultAriaLabel}
           >
             {confirmLabel}
           </button>

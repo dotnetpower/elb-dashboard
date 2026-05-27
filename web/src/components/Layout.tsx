@@ -5,12 +5,14 @@ import { Activity, Terminal as TerminalIcon, Search, List, Menu, X, HelpCircle, 
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { useKeyboardShortcuts, ShortcutOverlay } from "@/components/KeyboardShortcuts";
 import { LatestJobChip } from "@/components/LatestJobChip";
+import { NavMoreDropdown } from "@/components/NavMoreDropdown";
 import { UpgradeBadge } from "@/components/UpgradeBadge";
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { apiLoginRequest } from "@/auth/msal";
 import { subscribeAuthSessionIssues, type AuthSessionIssue } from "@/auth/sessionEvents";
 import { useClusterReadiness, useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useSettingsPanel } from "@/hooks/useSettingsPanel";
 import { usePreviewFeatureEnabled } from "@/hooks/usePreferences";
 import { isFeatureEnabled } from "@/config/runtime";
@@ -193,6 +195,14 @@ export function Layout({ children }: PropsWithChildren) {
   const labToolsEnabled = usePreviewFeatureEnabled("labTools");
   const liveWallEnabled = usePreviewFeatureEnabled("liveWall");
   const terminalEnabled = isFeatureEnabled("terminal");
+  // Responsive nav tiers. Tier A (>=1320 px) shows the full horizontal nav.
+  // Tier B (720–1320 px) collapses the Tools group (Lab Tools / Terminal /
+  // API) into a "More ▾" dropdown so Dashboard / New Search / Recent
+  // searches stay first-class. Tier C (<720 px) falls back to the existing
+  // hamburger drawer where every item is listed vertically.
+  const isCompactNav = useMediaQuery("(max-width: 1320px)");
+  const isMobileNav = useMediaQuery("(max-width: 720px)");
+  const useToolsDropdown = isCompactNav && !isMobileNav;
   const terminalSidecar = useTerminalSidecarHealth(terminalEnabled);
   const clusterNeedsAttention = !cluster.isLoading && !cluster.isError && !cluster.hasRunningCluster;
   const clusterAttentionTitle = clusterNeedsAttention
@@ -287,27 +297,62 @@ export function Layout({ children }: PropsWithChildren) {
               <Database size={14} strokeWidth={1.5} /> Custom DB
             </NavLink>
           )}
-          {showToolsGroup && <span className="layout__nav-sep" />}
-          {showToolsGroup && <span className="layout__nav-group-label">Tools</span>}
-          {labToolsEnabled && (
-            <NavLink to="/tools" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
-              <ArrowRightLeft size={14} strokeWidth={1.5} /> Lab Tools
-            </NavLink>
-          )}
-          {terminalEnabled && (
-            <NavLink
-              to="/terminal"
-              className="layout__nav-item"
-              onClick={() => setMobileNavOpen(false)}
-              title={terminalBlocked ? "Terminal sidecar is not available in this environment" : undefined}
+          {useToolsDropdown ? (
+            <NavMoreDropdown
+              label="Tools"
+              title={[
+                labToolsEnabled ? "Lab Tools" : null,
+                terminalEnabled ? "Terminal" : null,
+                "API",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
             >
-              <TerminalIcon size={14} strokeWidth={1.5} /> Terminal
-              {terminalBlocked && <NavWarnDot />}
-            </NavLink>
+              {labToolsEnabled && (
+                <NavLink to="/tools" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+                  <ArrowRightLeft size={14} strokeWidth={1.5} /> Lab Tools
+                </NavLink>
+              )}
+              {terminalEnabled && (
+                <NavLink
+                  to="/terminal"
+                  className="layout__nav-item"
+                  onClick={() => setMobileNavOpen(false)}
+                  title={terminalBlocked ? "Terminal sidecar is not available in this environment" : undefined}
+                >
+                  <TerminalIcon size={14} strokeWidth={1.5} /> Terminal
+                  {terminalBlocked && <NavWarnDot />}
+                </NavLink>
+              )}
+              <NavLink to="/docs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+                <Code2 size={14} strokeWidth={1.5} /> API
+              </NavLink>
+            </NavMoreDropdown>
+          ) : (
+            <>
+              {showToolsGroup && <span className="layout__nav-sep" />}
+              {showToolsGroup && <span className="layout__nav-group-label">Tools</span>}
+              {labToolsEnabled && (
+                <NavLink to="/tools" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+                  <ArrowRightLeft size={14} strokeWidth={1.5} /> Lab Tools
+                </NavLink>
+              )}
+              {terminalEnabled && (
+                <NavLink
+                  to="/terminal"
+                  className="layout__nav-item"
+                  onClick={() => setMobileNavOpen(false)}
+                  title={terminalBlocked ? "Terminal sidecar is not available in this environment" : undefined}
+                >
+                  <TerminalIcon size={14} strokeWidth={1.5} /> Terminal
+                  {terminalBlocked && <NavWarnDot />}
+                </NavLink>
+              )}
+              <NavLink to="/docs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
+                <Code2 size={14} strokeWidth={1.5} /> API
+              </NavLink>
+            </>
           )}
-          <NavLink to="/docs" className="layout__nav-item" onClick={() => setMobileNavOpen(false)}>
-            <Code2 size={14} strokeWidth={1.5} /> API
-          </NavLink>
         </nav>
 
         <div className="layout__spacer" />
