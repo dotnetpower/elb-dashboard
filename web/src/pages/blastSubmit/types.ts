@@ -35,6 +35,9 @@ export interface DatabaseSectionProps {
   warmupKnown: boolean;
   dbWarning: string | null;
   dbMissingFromStorage: boolean;
+  /** True when the selected DB exists in Storage but is mid-copy / mid-update. */
+  dbNotReady?: boolean;
+  dbNotReadyReason?: string | null;
   dbBaseName: string;
 }
 

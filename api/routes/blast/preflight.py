@@ -106,6 +106,50 @@ def blast_pre_flight(
             }
         )
 
+    # ACR images gate: a fresh deployment that never ran the build task has an
+    # empty registry, which makes BLAST submits sit in `queued` forever
+    # because the Kubernetes pod hits ImagePullBackOff. Surface it here with a
+    # `build_acr_images` action so the SPA can offer a one-click remediation.
+    acr_name = str(body.get("acr_name") or "")
+    acr_rg = str(body.get("acr_resource_group") or "") or rg
+    try:
+        from api.services.blast import submit_gates
+
+        acr_gate = submit_gates._gate_acr_images(acr_name=acr_name)
+        if acr_gate.status == "ok":
+            acr_status = "pass"
+        elif acr_gate.status == "fail":
+            acr_status = "fail"
+        else:
+            acr_status = "warn"
+        check_row: dict[str, Any] = {
+            "id": "acr_images",
+            "status": acr_status,
+            "title": "ACR Images",
+            "detail": acr_gate.message,
+            "severity": "critical" if acr_gate.status == "fail" else None,
+            "action": acr_gate.action,
+            "action_type": acr_gate.action_type,
+        }
+        if acr_gate.action_type == "build_acr_images":
+            check_row["action_params"] = {
+                "subscription_id": str(sub),
+                "resource_group": acr_rg,
+                "registry_name": acr_name,
+            }
+        checks.append(check_row)
+        if acr_gate.status == "fail":
+            critical += 1
+    except Exception as exc:
+        checks.append(
+            {
+                "id": "acr_images",
+                "status": "warn",
+                "title": "ACR Images",
+                "detail": f"Could not verify ACR images: {type(exc).__name__}",
+            }
+        )
+
     try:
         from api.services import get_credential
         from api.services.monitoring import list_aks_clusters
@@ -179,9 +223,9 @@ def blast_pre_flight(
 
     if db and storage:
         try:
-            from api.services.blast_task_config import validate_blast_database_available
+            from api.services.blast_task_config import validate_blast_database_ready
 
-            availability = validate_blast_database_available(
+            availability = validate_blast_database_ready(
                 storage_account=str(storage),
                 database=str(db),
             )
@@ -194,13 +238,23 @@ def blast_pre_flight(
                 }
             )
         except Exception as exc:
+            # Map readiness vs missing to distinct labels so the SPA can
+            # render the right remediation hint without parsing the message.
+            code = getattr(exc, "code", "") or "database_not_found"
+            if code == "database_not_ready":
+                title = "BLAST Database Preparing"
+            elif code == "database_updating":
+                title = "BLAST Database Updating"
+            else:
+                title = "BLAST Database"
             checks.append(
                 {
                     "id": "database",
                     "status": "fail",
-                    "title": "BLAST Database",
+                    "title": title,
                     "detail": sanitise(str(exc))[:300],
                     "severity": "critical",
+                    "error_code": str(code),
                 }
             )
             critical += 1

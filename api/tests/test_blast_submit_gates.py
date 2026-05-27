@@ -197,6 +197,66 @@ def test_blast_database_gate_unknown_when_storage_unreachable(
     assert result.status == "unknown"
 
 
+def _stub_acr_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    missing: set[str] | None = None,
+    raise_exc: Exception | None = None,
+) -> None:
+    from api.services.upgrade import acr_inventory
+
+    def _fake(refs: list[str]) -> list[acr_inventory.ImageInfo]:
+        if raise_exc is not None:
+            raise raise_exc
+        out: list[acr_inventory.ImageInfo] = []
+        for ref in refs:
+            repo_tag = ref.split("/", 1)[-1]
+            if missing and repo_tag in missing:
+                out.append(
+                    acr_inventory.ImageInfo(image_ref=ref, exists=False, error="TagNotFound")
+                )
+            else:
+                out.append(acr_inventory.ImageInfo(image_ref=ref, exists=True))
+        return out
+
+    monkeypatch.setattr("api.services.upgrade.acr_inventory.lookup_images", _fake)
+
+
+def test_acr_images_gate_unknown_when_acr_name_empty() -> None:
+    result = submit_gates._gate_acr_images(acr_name="")
+    assert result.status == "unknown"
+    assert result.error_code == "acr_not_configured"
+
+
+def test_acr_images_gate_ok_when_all_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_acr_lookup(monkeypatch)
+    result = submit_gates._gate_acr_images(acr_name="acrelb")
+    assert result.status == "ok"
+    assert result.action_type is None
+
+
+def test_acr_images_gate_fail_when_some_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from api.services.image_tags import IMAGE_TAGS
+
+    missing_repo = next(iter(IMAGE_TAGS))
+    missing_tag = IMAGE_TAGS[missing_repo]
+    _stub_acr_lookup(monkeypatch, missing={f"{missing_repo}:{missing_tag}"})
+    result = submit_gates._gate_acr_images(acr_name="acrelb")
+    assert result.status == "fail"
+    assert result.error_code == "acr_images_missing"
+    assert result.action_type == "build_acr_images"
+    assert missing_repo in result.message
+
+
+def test_acr_images_gate_unknown_when_lookup_blows_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_acr_lookup(monkeypatch, raise_exc=RuntimeError("RBAC denied"))
+    result = submit_gates._gate_acr_images(acr_name="acrelb")
+    assert result.status == "unknown"
+    assert result.error_code == "acr_check_unavailable"
+
+
 # --------------------------- aggregate evaluator -----------------------------
 
 
@@ -248,6 +308,7 @@ def test_evaluate_ok_when_all_gates_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         "broker",
         "aks_cluster",
         "blast_database",
+        "acr_images",
     }
 
 

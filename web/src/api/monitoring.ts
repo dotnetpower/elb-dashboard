@@ -74,6 +74,15 @@ export interface WarmupDbInfo {
   pod_statuses?: WarmupPodStatus[];
   source_version?: string;
   source_versions?: string[];
+  /**
+   * Origin signals merged into this entry. `"warmup"` means at least one
+   * explicit dashboard warmup Job/DaemonSet contributed (the New Search
+   * "Warmed database" profile only auto-selects when this is present).
+   * `"setup"` means the DB cache was seeded by an ElasticBLAST submit-side
+   * `init-ssd-*` stager Job — useful state, but not the same intent as
+   * "the user clicked Warmup".
+   */
+  sources?: ("setup" | "warmup")[];
 }
 
 export interface WarmupPodStatus {

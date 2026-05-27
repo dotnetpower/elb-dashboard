@@ -125,6 +125,35 @@ def warmup_database(
             _update_state(job_id, "failed", status="failed", error_code=error)
             return {"database": database_name, "status": "failed", "error": error}
 
+        # Defense in depth: a warmup against an in-flight prepare-db produces
+        # confusing failures (auto-shard / vmtouch run against incomplete
+        # volumes and report cryptic per-pod errors several minutes later).
+        # ``copy_status.phase == "completed"`` is the authoritative signal;
+        # legacy DBs predating the hardening have no ``copy_status`` and fall
+        # back to the existing "file_count > 0" gate above.
+        copy_status = match.get("copy_status")
+        if isinstance(copy_status, dict):
+            phase = str(copy_status.get("phase") or "")
+            if phase and phase != "completed":
+                success = int(copy_status.get("success") or 0)
+                total = int(copy_status.get("total_files") or 0)
+                progress = f", {success}/{total} files" if total else ""
+                error = (
+                    f"database {database_name!r} prepare-db is not complete "
+                    f"(phase={phase}{progress})"
+                )
+                _update_state(job_id, "failed", status="failed", error_code=error)
+                return {"database": database_name, "status": "failed", "error": error}
+        if match.get("update_in_progress"):
+            target = match.get("updating_to_source_version")
+            suffix = f" to {target}" if isinstance(target, str) and target else ""
+            error = (
+                f"database {database_name!r} is updating{suffix}; "
+                "retry warmup after the update completes"
+            )
+            _update_state(job_id, "failed", status="failed", error_code=error)
+            return {"database": database_name, "status": "failed", "error": error}
+
         # Auto-shard step — sharding is a hard prereq for warmup (the
         # daemonset vmtouches the per-shard layout files, not the raw
         # NCBI volumes). Doing it here means the user can click

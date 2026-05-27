@@ -6,6 +6,10 @@ import {
   type FormState,
 } from "@/pages/blastSubmitModel";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
+import {
+  blastDbBlockedReason,
+  getBlastDbReadiness,
+} from "@/utils/blastDbReady";
 
 import {
   databaseExists,
@@ -41,6 +45,11 @@ export interface SubmitValidationResult {
   dbListResolved: boolean;
   dbBaseName: string;
   dbMissingFromStorage: boolean;
+  /** True when the selected DB exists in Storage but is not yet usable
+   *  (copy_status.phase !== "completed", update_in_progress, etc.). */
+  dbNotReady: boolean;
+  /** Human reason for `dbNotReady` (mirrors `blastDbBlockedReason`). */
+  dbNotReadyReason: string | null;
   dbWarning: string | null;
   canSubmit: boolean;
   missing: MissingItem[];
@@ -69,8 +78,15 @@ export function deriveSubmitValidation({
   const knownDbs = dbQueryData?.databases ?? [];
   const dbListResolved = dbQueryIsSuccess && knownDbs.length > 0;
   const dbBaseName = getDbBaseName(form.db);
+  const selectedDb = knownDbs.find((database) => database.name === dbBaseName);
   const dbMissingFromStorage =
     Boolean(form.db) && dbListResolved && !databaseExists(knownDbs, form.db);
+  // The DB is in the listing but not yet usable (mid-copy / mid-update). This
+  // is distinct from "missing" and gets a different remediation message.
+  const readiness = selectedDb ? getBlastDbReadiness(selectedDb) : null;
+  const dbNotReady =
+    Boolean(form.db) && !dbMissingFromStorage && readiness != null && !readiness.ready;
+  const dbNotReadyReason = readiness && !readiness.ready ? blastDbBlockedReason(readiness) : null;
   const hasTaxid = form.taxid.trim().length > 0;
   const taxidValid = !hasTaxid || parsePositiveTaxid(form.taxid) !== null;
   const taxidOptionConflict =
@@ -87,6 +103,7 @@ export function deriveSubmitValidation({
     selectedCluster &&
     isAksWorkloadReady(selectedCluster) &&
     !dbMissingFromStorage &&
+    !dbNotReady &&
     !warmupBlocked &&
     !shardingBlockedReason &&
     !dataLoading &&
@@ -104,6 +121,13 @@ export function deriveSubmitValidation({
   else if (dbMissingFromStorage)
     missing.push({
       text: `Database '${form.db.split("/").pop()}' is not in storage — download it from the Dashboard first`,
+      link: "/",
+    });
+  else if (dbNotReady)
+    missing.push({
+      text:
+        dbNotReadyReason ??
+        `Database '${form.db.split("/").pop()}' is not ready yet — wait for the download to complete`,
       link: "/",
     });
   if (!storageAccount) missing.push({ text: "Storage account", link: "/" });
@@ -130,7 +154,6 @@ export function deriveSubmitValidation({
   }
 
   const dbWarning = getDatabaseWarning(form, programMeta);
-  const selectedDb = knownDbs.find((database) => database.name === dbBaseName);
   const searchspSummary = selectedDb?.web_blast_searchsp
     ? ` · Searchsp: ${selectedDb.web_blast_searchsp}`
     : "";
@@ -143,7 +166,7 @@ export function deriveSubmitValidation({
   const readySteps = [
     { ok: Boolean(subId && workloadRg), label: "Config" },
     { ok: Boolean(form.query_data && seqStats.isFasta), label: "Sequence" },
-    { ok: Boolean(form.db), label: "Database" },
+    { ok: Boolean(form.db) && !dbMissingFromStorage && !dbNotReady, label: "Database" },
     { ok: taxonomyReady, label: "Taxonomy" },
     {
       ok: Boolean(selectedCluster && isAksWorkloadReady(selectedCluster)),
@@ -157,6 +180,8 @@ export function deriveSubmitValidation({
     dbListResolved,
     dbBaseName,
     dbMissingFromStorage,
+    dbNotReady,
+    dbNotReadyReason,
     dbWarning,
     canSubmit,
     missing,

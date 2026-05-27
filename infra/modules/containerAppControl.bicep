@@ -59,6 +59,9 @@ param featureTerminal string = 'true'
 @description('App Insights connection string for telemetry from inside the containers.')
 param applicationInsightsConnectionString string
 
+@description('Log Analytics workspace id (customerId GUID). Used by the api sidecar to KQL `ContainerAppConsoleLogs_CL` for the Live Wall log tail when the historical project-local log files are not available (i.e. always, in deployment). Empty disables the LA fallback and the Live Wall log tiles stay blank.')
+param logAnalyticsWorkspaceId string = ''
+
 @description('Platform Storage account name (used to derive the table endpoint for jobstate / jobhistory access).')
 param platformStorageAccountName string = ''
 
@@ -181,6 +184,11 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'FRONTEND_UPSTREAM', value: 'http://127.0.0.1:8081' }
             { name: 'TERMINAL_UPSTREAM', value: 'http://127.0.0.1:7681' }
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
+            // Live Wall log-tail fallback target. When non-empty,
+            // `api.services.sidecar_logs` switches from local file tailing
+            // to KQL against the LA workspace. Empty disables the fallback
+            // and the tiles render `: ready` + heartbeats only.
+            { name: 'LOG_ANALYTICS_WORKSPACE_ID', value: logAnalyticsWorkspaceId }
             // Display-only contract for /api/terminal/ticket. The actual
             // browser caller comes from the validated MSAL token; the shell
             // process itself runs as this fixed Unix account in the terminal

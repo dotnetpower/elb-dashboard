@@ -24,7 +24,7 @@ function validate(form: FormState) {
       power_state: "Running",
       provisioning_state: "Succeeded",
     } as never,
-    dbQueryData: { databases: [{ name: "core_nt" }] } as never,
+    dbQueryData: { databases: [{ name: "core_nt", file_count: 800 }] } as never,
     dbQueryIsSuccess: true,
     warmupBlocked: false,
     selectedDbPlan: null,
@@ -62,7 +62,7 @@ describe("blast submit taxonomy readiness", () => {
         power_state: "Running",
         provisioning_state: "Succeeded",
       } as never,
-      dbQueryData: { databases: [{ name: "core_nt" }] } as never,
+      dbQueryData: { databases: [{ name: "core_nt", file_count: 800 }] } as never,
       dbQueryIsSuccess: true,
       warmupBlocked: false,
       selectedDbPlan: null,
@@ -74,5 +74,42 @@ describe("blast submit taxonomy readiness", () => {
     expect(result.missing.map((item) => item.text)).toContain(
       "Runtime data is still loading",
     );
+  });
+
+  it("blocks submit while the selected DB is still being copied", () => {
+    const result = deriveSubmitValidation({
+      form: makeForm(),
+      programMeta: PROGRAMS[0],
+      subId: "sub-1",
+      workloadRg: "rg-elb",
+      storageAccount: "elbstg01",
+      selectedCluster: {
+        name: "elb-cluster",
+        power_state: "Running",
+        provisioning_state: "Succeeded",
+      } as never,
+      dbQueryData: {
+        databases: [
+          {
+            name: "core_nt",
+            file_count: 30,
+            copy_status: { phase: "copying", success: 30, total_files: 800 },
+          },
+        ],
+      } as never,
+      dbQueryIsSuccess: true,
+      warmupBlocked: false,
+      selectedDbPlan: null,
+      submitPending: false,
+    });
+
+    expect(result.dbNotReady).toBe(true);
+    expect(result.canSubmit).toBe(false);
+    expect(
+      result.readySteps.find((step) => step.label === "Database")?.ok,
+    ).toBe(false);
+    expect(
+      result.missing.map((item) => item.text).some((text) => /Download in progress/.test(text)),
+    ).toBe(true);
   });
 });

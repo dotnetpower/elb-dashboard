@@ -44,6 +44,14 @@ jsonld: |
       },
       {
         "@type": "Question",
+        "name": "Who actually downloads BLAST databases from NCBI — the api sidecar, the terminal sidecar, or AKS?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "None of them transfer the bytes. The api sidecar's /api/storage/prepare-db route orchestrates the work by issuing per-file Azure Blob server-side copies (start_copy_from_url) from the public NCBI S3 mirror straight into the workload Storage account's blast-db container. Azure Storage itself performs the copy; the api sidecar only kicks off the operations, polls copy.status in a background daemon, and promotes the new source_version once every file reaches success. The terminal sidecar and AKS are not involved in the download path."
+        }
+      },
+      {
+        "@type": "Question",
         "name": "Does it support AWS or GCP?",
         "acceptedAnswer": {
           "@type": "Answer",
@@ -216,6 +224,20 @@ No. Every workload Storage account stays `publicNetworkAccess: Disabled`;
 uploads and downloads of queries and results stream through the `api`
 sidecar (1 MiB chunks, 4 MiB block uploads, semaphore-capped to four
 concurrent transfers). The browser never receives a SAS URL.
+
+### Who actually downloads BLAST databases from NCBI — the `api` sidecar, the `terminal` sidecar, or AKS?
+
+None of them transfer the bytes. The `api` sidecar's
+`POST /api/storage/prepare-db` route orchestrates the work by issuing per-file
+Azure Blob server-side copies (`start_copy_from_url`) from the public
+[NCBI BLAST S3 mirror](https://registry.opendata.aws/ncbi-blast-databases/)
+straight into the workload Storage account's `blast-db` container. Azure
+Storage itself performs the copy; the `api` sidecar only kicks off the
+operations, polls `copy.status` in a background daemon every 60 s, and
+only promotes the new `source_version` once every file reaches `success`
+(atomic generation cut-over). The `terminal` sidecar and AKS are not
+involved in the download path — AKS only enters later for the warmup
+`vmtouch` DaemonSet and the BLAST job pods themselves.
 
 ### Does it support AWS or GCP?
 

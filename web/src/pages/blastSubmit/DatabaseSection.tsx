@@ -8,6 +8,11 @@ import { DB_DESCRIPTIONS } from "@/pages/blastSubmitModel";
 import type { DatabaseSectionProps } from "@/pages/blastSubmit/types";
 import { SectionHeader, Tip } from "@/pages/blastSubmit/ui";
 import { formatBytes } from "@/components/cards/storageDbCatalog";
+import {
+  blastDbReadinessLabel,
+  getBlastDbReadiness,
+  isBlastDbReady,
+} from "@/utils/blastDbReady";
 
 export type SearchSetCategory = "standard" | "rna" | "genomic" | "custom";
 
@@ -40,7 +45,11 @@ export function firstDatabasePathForCategory(
   databases: BlastDatabase[] | undefined,
   category: SearchSetCategory,
 ): string {
-  const first = databases?.find((database) => databaseCategory(database) === category);
+  // Skip mid-copy / mid-update DBs so switching categories never auto-selects
+  // a not-ready DB and silently leaves the Submit button blocked.
+  const first = databases?.find(
+    (database) => databaseCategory(database) === category && isBlastDbReady(database),
+  );
   return first ? buildDatabasePath(first) : "";
 }
 
@@ -90,6 +99,8 @@ export function DatabaseSection({
   warmupKnown,
   dbWarning,
   dbMissingFromStorage,
+  dbNotReady = false,
+  dbNotReadyReason = null,
   dbBaseName,
 }: DatabaseSectionProps) {
   const [category, setCategory] = useState<SearchSetCategory>(() =>
@@ -158,14 +169,25 @@ export function DatabaseSection({
               aria-label="Database category"
             >
               {SEARCH_SET_CATEGORIES.map((item) => {
-                const downloadedCount = databases.filter(
-                  (database) => databaseCategory(database) === item.value,
+                // Count only DBs that are actually usable for search. In-flight
+                // copies stay visible inside the category (so users can see
+                // progress) but they must not inflate the tab's "downloaded"
+                // counter or unlock the tab when nothing is truly ready.
+                const readyCount = databases.filter(
+                  (database) =>
+                    databaseCategory(database) === item.value && isBlastDbReady(database),
+                ).length;
+                const inFlightCount = databases.filter(
+                  (database) =>
+                    databaseCategory(database) === item.value && !isBlastDbReady(database),
                 ).length;
                 const isActive = category === item.value;
                 const tabTitle =
-                  downloadedCount === 0
-                    ? "No databases in this category"
-                    : `${downloadedCount} downloaded`;
+                  readyCount === 0
+                    ? inFlightCount > 0
+                      ? `${inFlightCount} preparing…`
+                      : "No databases in this category"
+                    : `${readyCount} ready${inFlightCount > 0 ? ` · ${inFlightCount} preparing` : ""}`;
                 return (
                   <button
                     key={item.value}
@@ -173,13 +195,13 @@ export function DatabaseSection({
                     className={`blast-search-set-tab${isActive ? " blast-search-set-tab--active" : ""}`}
                     aria-checked={isActive}
                     role="radio"
-                    disabled={downloadedCount === 0}
+                    disabled={readyCount === 0 && inFlightCount === 0}
                     onClick={() => handleCategoryChange(item.value)}
                     title={tabTitle}
                   >
                     <span className="blast-search-set-tab__radio" aria-hidden="true" />
                     <span className="blast-search-set-tab__label">{item.label}</span>
-                    <small>{downloadedCount}</small>
+                    <small>{readyCount}</small>
                   </button>
                 );
               })}
@@ -197,24 +219,36 @@ export function DatabaseSection({
                   const isSelected = form.db === path;
                   const warmInfo = warmDbs?.get(database.name);
                   const typeLabel = databaseTypeLabel(database, programMeta.dbType);
-                  const statusLabel = isSelected
-                    ? warmInfo
-                      ? "Selected · warmed"
-                      : "Selected · ready"
-                    : warmInfo
-                      ? `Warmed ${warmInfo.nodes_ready}/${warmInfo.total_jobs}`
-                      : warmupKnown
-                        ? "Downloaded"
-                        : "Ready";
+                  const readiness = getBlastDbReadiness(database);
+                  const ready = readiness.ready;
+                  // In-flight DBs (copying / partial / updating) stay visible so the
+                  // user sees the progress and is not confused about "where did
+                  // core_nt go". They are NOT selectable; the row is dimmed and
+                  // the status pill carries the readiness label.
+                  const statusLabel = !ready
+                    ? blastDbReadinessLabel(readiness)
+                    : isSelected
+                      ? warmInfo
+                        ? "Selected · warmed"
+                        : "Selected · ready"
+                      : warmInfo
+                        ? `Warmed ${warmInfo.nodes_ready}/${warmInfo.total_jobs}`
+                        : warmupKnown
+                          ? "Downloaded"
+                          : "Ready";
 
                   return (
                     <button
                       key={path}
                       type="button"
-                      className={`blast-db-table__row${isSelected ? " blast-db-table__row--selected" : ""}`}
+                      className={`blast-db-table__row${isSelected ? " blast-db-table__row--selected" : ""}${ready ? "" : " blast-db-table__row--disabled"}`}
                       role="radio"
                       aria-checked={isSelected}
-                      onClick={() => set("db", path)}
+                      aria-disabled={!ready}
+                      disabled={!ready}
+                      onClick={ready ? () => set("db", path) : undefined}
+                      title={ready ? undefined : statusLabel}
+                      style={ready ? undefined : { opacity: 0.55, cursor: "not-allowed" }}
                     >
                       <span className="blast-db-table__database">
                         <span className="blast-db-table__radio" aria-hidden="true" />
@@ -254,7 +288,8 @@ export function DatabaseSection({
                 {databases
                   .filter(
                     (database) =>
-                      DB_DESCRIPTIONS[database.name]?.type === programMeta.dbType,
+                      DB_DESCRIPTIONS[database.name]?.type === programMeta.dbType &&
+                      isBlastDbReady(database),
                   )
                   .slice(0, 4)
                   .map((database) => {
@@ -333,6 +368,16 @@ export function DatabaseSection({
           {dbBaseName && `(${dbBaseName}) `}
           <Link to="/" style={{ color: "var(--accent)" }}>
             Download it from the Dashboard
+          </Link>
+          .
+        </div>
+      )}
+      {form.db && databases && !dbMissingFromStorage && dbNotReady && (
+        <div className="blast-warning-box">
+          <AlertTriangle size={14} />
+          {dbNotReadyReason ?? "This database is still being prepared."}{" "}
+          <Link to="/" style={{ color: "var(--accent)" }}>
+            Open the Dashboard
           </Link>
           .
         </div>

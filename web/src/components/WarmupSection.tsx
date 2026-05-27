@@ -617,7 +617,7 @@ function WarmupDbRow({
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", fontSize: 10 }}>
           <StatusPill
             label={row.storageLabel}
-            tone={row.storageLabel === "Storage DB ready" ? "ok" : "neutral"}
+            tone={row.storageTone}
           />
           <StatusPill
             label={row.shardLabel}
@@ -846,7 +846,7 @@ function StatusPill({
   toneColor,
 }: {
   label: string;
-  tone?: "ok" | "accent" | "neutral";
+  tone?: "ok" | "accent" | "neutral" | "loading" | "blocked";
   toneColor?: string;
 }) {
   const color =
@@ -855,7 +855,11 @@ function StatusPill({
       ? "var(--success)"
       : tone === "accent"
         ? "var(--accent)"
-        : "var(--text-muted)");
+        : tone === "loading"
+          ? "var(--accent)"
+          : tone === "blocked"
+            ? "var(--danger)"
+            : "var(--text-muted)");
   return (
     <span
       style={{

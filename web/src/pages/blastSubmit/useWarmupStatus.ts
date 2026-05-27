@@ -32,8 +32,18 @@ export function useWarmupStatus({
 
   const warmDbs = useMemo(() => {
     const dbs = warmupQuery.data?.databases ?? [];
+    // Only treat a DB as "warm" when an explicit warmup Job/DaemonSet
+    // contributed. `init-ssd-*` setup jobs from a prior BLAST submit also
+    // cache the DB on node SSDs, but using their presence to auto-select
+    // the "Warmed database" run profile confuses researchers who never
+    // ran an explicit warmup. The `sources` discriminator is set by
+    // `k8s_warmup_status` / `database_status_from_warmup_jobs`.
     return new Map(
-      dbs.filter((d) => d.status === "Ready").map((d) => [d.name, d]),
+      dbs
+        .filter(
+          (d) => d.status === "Ready" && (d.sources ?? []).includes("warmup"),
+        )
+        .map((d) => [d.name, d]),
     );
   }, [warmupQuery.data]);
 

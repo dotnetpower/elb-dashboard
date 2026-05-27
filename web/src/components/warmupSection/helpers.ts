@@ -21,6 +21,13 @@
 import type { K8sNodeMetrics, WarmupDbInfo } from "@/api/endpoints";
 import type { BlastDatabase, BlastWarmupPlan } from "@/api/blast";
 import { isSystemPool } from "@/components/ClusterDetailModal/k8sFormat";
+import {
+  blastDbBlockedReason,
+  blastDbReadinessLabel,
+  blastDbReadinessTone,
+  getBlastDbReadiness,
+  type BlastDbReadinessTone,
+} from "@/utils/blastDbReady";
 
 export const WARMUP_CANDIDATES = [
   {
@@ -67,6 +74,10 @@ export interface WarmupRow {
   label: string;
   sizeLabel: string;
   storageLabel: string;
+  /** Tone hint for the storage status pill (replaces hard-coded label match). */
+  storageTone: BlastDbReadinessTone;
+  /** True when the underlying storage DB is genuinely ready for warmup. */
+  storageReady: boolean;
   shardLabel: string;
   cacheLabel: string;
   cacheTone: "ready" | "loading" | "blocked" | "pressure" | "neutral";
@@ -134,8 +145,17 @@ export function buildWarmupRows({
       const warm = warmupDbs.find((item) => item.name === name);
       const candidate = WARMUP_CANDIDATES.find((item) => item.value === name);
       const plan = planByName.get(name);
-      const downloaded = Boolean(db);
-      const storageReady = downloaded || warm != null;
+      // Authoritative readiness — `Boolean(db)` is NOT enough because
+      // prepare-db writes the metadata blob (and thus surfaces the DB in
+      // /api/blast/databases) the moment a copy starts. Only
+      // `copy_status.phase === "completed"` (or legacy `file_count > 0`)
+      // means the on-disk volumes are usable.
+      const readiness = getBlastDbReadiness(db ?? undefined);
+      const storageReady = readiness.ready;
+      // An already-warm DB on AKS is implicitly Storage-ready (warmup could
+      // not have started without complete files). This keeps the row
+      // green for legacy DBs whose metadata blob is missing entirely.
+      const effectiveStorageReady = storageReady || warm != null;
       const sharded = Boolean(db?.sharded && (db.shard_sets?.length ?? 0) > 0);
       const warmReady = warm?.status === "Ready";
       const warming = warm?.status === "Loading";
@@ -173,7 +193,11 @@ export function buildWarmupRows({
         cacheTone = "blocked";
       }
 
-      const canWarm = downloaded && !warming && !blocked && !warmReady;
+      // Warm action requires a genuinely ready DB — never let the user fire
+      // a warmup task against an in-flight copy (the warmup task would auto-
+      // shard / vmtouch incomplete volumes and surface as a confusing
+      // failure several minutes later).
+      const canWarm = storageReady && !warming && !blocked && !warmReady;
       const canRelease = Boolean(warm);
       const primaryAction: WarmupRow["primaryAction"] = warmReady
         ? "release"
@@ -189,22 +213,40 @@ export function buildWarmupRows({
           : warm
             ? `AKS cache shards · ${warm.shards?.length || warm.total_jobs}`
             : "Shard layouts unknown";
+      const inFlightBlockedReason = !storageReady && db ? blastDbBlockedReason(readiness) : null;
       const detail = plan
         ? `Needs about ${plan.per_node_gib.toFixed(1)} GiB per node; safe budget ${plan.safe_node_budget_gib.toFixed(1)} GiB.`
-        : downloaded
-          ? "Warmup fit has not been estimated for this cluster yet."
-          : warm
-            ? "AKS warmup is running; Storage catalogue details are not available in this panel yet."
-            : "Prepare this database in Storage before warming it on AKS nodes.";
+        : inFlightBlockedReason
+          ? inFlightBlockedReason
+          : storageReady
+            ? "Warmup fit has not been estimated for this cluster yet."
+            : warm
+              ? "AKS warmup is running; Storage catalogue details are not available in this panel yet."
+              : "Prepare this database in Storage before warming it on AKS nodes.";
       const warmupProgress = warm ? formatWarmupProgress(warm) : undefined;
 
+      // Storage-side pill: use readiness verdict for downloaded DBs, fall
+      // back to legacy ready/not-ready for the warm-only / completely
+      // unknown rows. We never show "Storage DB ready" for an in-flight DB.
+      const storageLabel = db
+        ? blastDbReadinessLabel(readiness)
+        : effectiveStorageReady
+          ? "Storage DB ready"
+          : "Storage DB not ready";
+      const storageTone: BlastDbReadinessTone = db
+        ? blastDbReadinessTone(readiness)
+        : effectiveStorageReady
+          ? "ok"
+          : "neutral";
       return {
         name,
         label: candidate?.label ?? name,
         sizeLabel: db?.total_bytes
           ? formatBytes(db.total_bytes)
           : (candidate?.size ?? "—"),
-        storageLabel: storageReady ? "Storage DB ready" : "Storage DB not ready",
+        storageLabel,
+        storageTone,
+        storageReady: effectiveStorageReady,
         shardLabel,
         cacheLabel,
         cacheTone,
@@ -216,12 +258,18 @@ export function buildWarmupRows({
         primaryAction,
         blockedReason: blocked
           ? plan!.message
-          : storageReady
-            ? undefined
-            : "Storage DB is not ready.",
+          : inFlightBlockedReason
+            ? inFlightBlockedReason
+            : effectiveStorageReady
+              ? undefined
+              : "Storage DB is not ready.",
       };
     })
-    .filter((row) => row.storageLabel === "Storage DB ready" || row.warm != null)
+    // Keep rows visible when (a) the DB is genuinely ready, (b) it's mid-copy
+    // / mid-update (so the user sees progress instead of the row vanishing),
+    // or (c) an AKS warmup record exists. Pure catalogue entries that have
+    // never been touched stay hidden as before.
+    .filter((row) => row.storageReady || row.warm != null || row.storageTone !== "neutral")
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

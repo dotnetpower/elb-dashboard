@@ -23,6 +23,11 @@ coverage
 test-results
 docs
 legacy
+# `site/` is the mkdocs build output. It can carry broken symlinks (e.g.
+# `site/assets/images/social/...`) that crash `az acr build`'s upload
+# tarball with `[Errno 2] No such file or directory`, and the Container
+# App images never read documentation.
+site
 *.zip
 *.tgz
 *.tar.gz

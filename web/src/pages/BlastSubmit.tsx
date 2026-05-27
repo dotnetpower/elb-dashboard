@@ -377,6 +377,8 @@ export function BlastSubmit() {
               warmupKnown={warmupQuery.isSuccess}
               dbWarning={validation.dbWarning}
               dbMissingFromStorage={validation.dbMissingFromStorage}
+              dbNotReady={validation.dbNotReady}
+              dbNotReadyReason={validation.dbNotReadyReason}
               dbBaseName={validation.dbBaseName}
             />
           </div>

@@ -175,6 +175,11 @@ module monitoring 'modules/monitoring.bicep' = {
     logAnalyticsWorkspaceName: logAnalyticsName
     applicationInsightsName: appInsightsName
     enableApplicationInsights: enableApplicationInsights
+    // Grant Log Analytics Reader on the workspace so the api sidecar's
+    // Live Wall fallback can KQL `ContainerAppConsoleLogs_CL`. Without
+    // this, LogsQueryClient returns AuthorizationFailed and the SPA tiles
+    // stay blank in deployment (file tail path only exists in local dev).
+    uamiPrincipalId: identity.outputs.identityPrincipalId
     tags: workspaceTags
   }
 }
@@ -353,8 +358,8 @@ module controlApp 'modules/containerAppControl.bicep' = {
     featureLabTools: featureLabTools
     featureTerminal: featureTerminal
     applicationInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
+    logAnalyticsWorkspaceId: monitoring.outputs.workspaceCustomerId
     platformStorageAccountName: storage.outputs.storageAccountName
-    platformPrivateEndpointSubnetId: network.outputs.privateEndpointsSubnetId
     subscriptionId: subscription().subscriptionId
     allowedOrigins: allowedOriginsArray
     // First deploy uses the bootstrap image so the Container App provisions
@@ -382,6 +387,7 @@ output KEY_VAULT_NAME string = keyvault.outputs.keyVaultName
 output KEY_VAULT_URI string = keyvault.outputs.keyVaultUri
 
 output APPLICATIONINSIGHTS_CONNECTION_STRING string = monitoring.outputs.appInsightsConnectionString
+output LOG_ANALYTICS_WORKSPACE_ID string = monitoring.outputs.workspaceCustomerId
 
 output CONTAINER_ENV_NAME string = containerEnvName
 output CONTAINER_APP_NAME string = controlApp.outputs.controlAppName

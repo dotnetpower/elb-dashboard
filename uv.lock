@@ -381,6 +381,20 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-monitor-query"
+version = "1.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+    { name = "isodate" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/93/c5/26eee462559e254ec69b1a8585528aa0d2bfb814c31a8640af872a151e7a/azure_monitor_query-1.4.1.tar.gz", hash = "sha256:71824e2b577d25df0d3bebbbb054c06a1ae3ebcb91831a9bac0bb344d0addf68", size = 162946, upload-time = "2025-01-14T23:00:47.263Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/71/bdf03aef699d9a17d80bcaa8255c20e596ed591daa8a42a21854ddc4277d/azure_monitor_query-1.4.1-py3-none-any.whl", hash = "sha256:192c5d8efec48b434f803aa3850ce73b869975507a12b3a823012fc100056ac0", size = 157978, upload-time = "2025-01-14T23:00:50.661Z" },
+]
+
+[[package]]
 name = "azure-storage-blob"
 version = "12.23.1"
 source = { registry = "https://pypi.org/simple" }
@@ -692,6 +706,7 @@ dependencies = [
     { name = "azure-mgmt-resource" },
     { name = "azure-mgmt-storage" },
     { name = "azure-monitor-opentelemetry" },
+    { name = "azure-monitor-query" },
     { name = "azure-storage-blob" },
     { name = "celery" },
     { name = "defusedxml" },
@@ -743,6 +758,7 @@ requires-dist = [
     { name = "azure-mgmt-resource", specifier = "==23.2.0" },
     { name = "azure-mgmt-storage", specifier = "==21.2.1" },
     { name = "azure-monitor-opentelemetry", specifier = "==1.6.4" },
+    { name = "azure-monitor-query", specifier = "==1.4.1" },
     { name = "azure-storage-blob", specifier = "==12.23.1" },
     { name = "celery", specifier = "==5.4.0" },
     { name = "defusedxml", specifier = "==0.7.1" },

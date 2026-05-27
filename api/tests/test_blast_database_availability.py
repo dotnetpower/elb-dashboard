@@ -159,6 +159,24 @@ def test_preflight_blocks_missing_database(monkeypatch: pytest.MonkeyPatch) -> N
             )
         ),
     )
+    # The preflight route now goes through `validate_blast_database_ready`
+    # (which wraps `validate_blast_database_available` plus a metadata-blob
+    # readiness check). Patch the inner availability function at its source
+    # module so the wrapped call sees the boom too.
+    monkeypatch.setattr(
+        "api.services.blast.task_config.validate_blast_database_available",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            BlastDatabaseAvailabilityError(
+                "BLAST database '16S_ribosomal_RNA' is not available in Storage.",
+                code="database_not_found",
+            )
+        ),
+    )
+    # The readiness verdict is cached per-process for 5s; clear it so this
+    # test does not pick up a stale OK from a sibling test that ran first.
+    from api.services.blast.task_config import reset_blast_database_readiness_cache
+
+    reset_blast_database_readiness_cache()
 
     from api.main import app
 

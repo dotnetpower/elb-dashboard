@@ -210,6 +210,23 @@ When work is tied to a registered GitHub issue, do not leave the issue silent. B
 * Infra changes: `az deployment sub what-if` (or `azd provision --preview`) output attached to the change note. For the bundled Container App, also confirm `postprovision.sh` still applies the six-sidecar template diff cleanly.
 * **Do not** rely on `func start` for new work — the Azure Functions tree has been removed from the repository.
 
+### Post-implementation self-review (NON-NEGOTIABLE for code changes)
+After every code change and **before** calling `task_complete`, run a self-review pass without waiting for the user to ask. The goal is to catch broken contracts, missed consumers, and stale fixtures that the focused test you already ran would not surface.
+
+Mandatory checklist (skip only the steps that obviously do not apply to the change):
+
+1. **Consumer search** — for each modified function, route, response field, or TypeScript type, grep the workspace for every caller. Verify each one still works with the new contract. Pay special attention to:
+   * other routes / services / tasks reading the same payload field;
+   * frontend hooks, components, tests, and mocks that consume the same API;
+   * tests that compare exact dict / object equality (these break silently on additive fields).
+2. **Backward-compat check** — new fields default to optional / nullable; removed fields have a deprecation path; renamed symbols keep a re-export shim if any external caller might still use them.
+3. **Wide test sweep** — run the full relevant suite, not just the focused file you wrote tests in. Backend: `uv run pytest -q api/tests`. Frontend: `cd web && npm test -- --run`. Infra: re-run the preview.
+4. **Lint + build** — `uv run ruff check api/` on touched paths and `cd web && npm run build` whenever any `web/src/**` file changed.
+5. **Diff audit** — `git status --short` + `git diff --stat <my files>` to confirm only the files you intended to touch are dirty, and the insertion/deletion counts match the plan. Investigate any unexpected file.
+6. **Fixture / mock parity** — search `web/src/mocks/**`, `api/tests/**` fixtures, and any sample payloads in docs for the changed field shape and update them so they keep matching the live contract.
+
+Report the self-review outcome in the final user-facing message (one short paragraph: what was checked, what passed, anything flagged). If anything is unresolved, do **not** call `task_complete` — fix it or escalate to the user with the specific blocker.
+
 ### Do NOT redeploy for ordinary code changes (NON-NEGOTIABLE)
 Validation = pytest + local smoke (`uv run uvicorn …`, `npm run dev`, or the `fullstack: start` VS Code task — see [scripts/dev/README.md](../scripts/dev/README.md) "three-tier debug loop"). Do **not** run `scripts/dev/quick-deploy.sh`, `scripts/dev/postprovision.sh`, `az acr build`, or `azd provision` unless **both** of the following hold:
 

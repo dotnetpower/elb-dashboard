@@ -93,7 +93,6 @@ nav:
       - Get Started: get-started.md
       - Join Existing Deployment: joining-existing-deployment.md
       - Troubleshooting: troubleshooting.md
-      - Glossary: glossary.md
       - Change Log: changelog.md
       - Tags: tags.md
       - Releases:
@@ -141,6 +140,7 @@ nav:
           - Glass UI: copilot/glass-ui.md
           - Version Management: copilot/version-management.md
           - Security Audit Follow-up: copilot/security-audit-followup.md
+  - Glossary: glossary.md
 
 extra_javascript:
   - javascripts/external-links.js

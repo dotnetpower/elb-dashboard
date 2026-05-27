@@ -208,6 +208,11 @@ def database_status_from_warmup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
                 "shard_nodes": {},
                 "shard_host_paths": {},
                 "progress_pct": 0,
+                # `warmup` marks the entry as coming from an explicit
+                # dashboard warmup Job (label `app={DEFAULT_WARMUP_APP_LABEL}`),
+                # which the New Search run-profile picker requires before
+                # auto-selecting the "Warmed database" profile.
+                "sources": ["warmup"],
             },
         )
         succeeded = int(status.get("succeeded") or 0)

@@ -212,6 +212,126 @@ def validate_blast_database_available(
     )
 
 
+# In-process TTL cache for readiness verdicts. prepare-db / warmup callers
+# spam this gate at sub-second cadence (submit retries, /api/blast/pre-flight
+# poll); a 5s cache amortises the metadata blob GET without masking the
+# user's "prepare-db just completed" transition.
+_READINESS_CACHE_TTL_SECONDS = 5.0
+_readiness_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def _readiness_cache_get(key: str) -> dict[str, str] | None:
+    from time import monotonic
+
+    entry = _readiness_cache.get(key)
+    if entry is None:
+        return None
+    ts, value = entry
+    if monotonic() - ts > _READINESS_CACHE_TTL_SECONDS:
+        _readiness_cache.pop(key, None)
+        return None
+    return value
+
+
+def _readiness_cache_set(key: str, value: dict[str, str]) -> None:
+    from time import monotonic
+
+    _readiness_cache[key] = (monotonic(), value)
+
+
+def reset_blast_database_readiness_cache() -> None:
+    """Clear the per-process readiness cache. Tests use this between cases."""
+    _readiness_cache.clear()
+
+
+def validate_blast_database_ready(
+    *,
+    storage_account: str,
+    database: str,
+) -> dict[str, str]:
+    """Fail when the selected BLAST DB has on-disk markers but the prepare-db
+    pipeline has not finished writing them.
+
+    Wraps :func:`validate_blast_database_available` (which checks for marker
+    blobs) with a metadata.json readiness check: if
+    ``copy_status.phase != "completed"`` or ``update_in_progress`` is set,
+    raise ``BlastDatabaseAvailabilityError`` with ``code="database_not_ready"``
+    or ``code="database_updating"`` so submit / preflight reject the request
+    before queuing a Celery task that would BLAST against incomplete volumes.
+
+    Falls back to availability-only semantics when the metadata blob does not
+    exist (legacy DB prepared before the hardening shipped) or when the
+    Storage read fails (transient — availability already enforces fail-fast on
+    persistent errors via ``database_check_unavailable``).
+    """
+    cache_key = f"{storage_account}::{database}"
+    cached = _readiness_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    info = validate_blast_database_available(
+        storage_account=storage_account, database=database
+    )
+    db_name = extract_db_name(database) or database
+    try:
+        import json
+
+        from api.services import get_credential
+        from api.services.storage.blob_io import read_metadata_blob_text
+        from api.services.storage.data import _blob_service
+
+        svc = _blob_service(get_credential(), storage_account)
+        cc = svc.get_container_client("blast-db")
+        bc = cc.get_blob_client(f"{db_name}-metadata.json")
+        try:
+            raw = read_metadata_blob_text(
+                bc, max_bytes=1024 * 1024, label="db-metadata.json"
+            )
+        except Exception:
+            # Legacy DB without metadata.json, or transient Storage error.
+            # Availability already passed — keep current behaviour.
+            _readiness_cache_set(cache_key, info)
+            return info
+        try:
+            meta = json.loads(raw)
+        except Exception:
+            _readiness_cache_set(cache_key, info)
+            return info
+        if not isinstance(meta, dict):
+            _readiness_cache_set(cache_key, info)
+            return info
+        copy_status = meta.get("copy_status")
+        if isinstance(copy_status, dict):
+            phase = str(copy_status.get("phase") or "")
+            if phase and phase != "completed":
+                success = int(copy_status.get("success") or 0)
+                total = int(copy_status.get("total_files") or 0)
+                progress = f", {success}/{total} files" if total else ""
+                raise BlastDatabaseAvailabilityError(
+                    f"BLAST database '{db_name}' is not ready "
+                    f"(phase={phase}{progress}). "
+                    "Wait for the download to finish before submitting.",
+                    code="database_not_ready",
+                )
+        if meta.get("update_in_progress"):
+            target = meta.get("updating_to_source_version")
+            suffix = f" to {target}" if isinstance(target, str) and target else ""
+            raise BlastDatabaseAvailabilityError(
+                f"BLAST database '{db_name}' is updating{suffix}. "
+                "Wait for the update to finish before submitting.",
+                code="database_updating",
+            )
+    except BlastDatabaseAvailabilityError:
+        raise
+    except Exception:
+        # Never let an unexpected error in the readiness branch downgrade a
+        # database that availability already accepted. The error is logged by
+        # callers if needed; here we fall back to existing semantics.
+        _readiness_cache_set(cache_key, info)
+        return info
+    _readiness_cache_set(cache_key, info)
+    return info
+
+
 def results_job_url(storage_account: str, job_id: str) -> str:
     return storage_url(storage_account, "results", relative_blob_path(job_id, "job_id"))
 

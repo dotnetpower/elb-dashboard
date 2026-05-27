@@ -200,6 +200,7 @@ def test_database_status_from_warmup_jobs_aggregates_shards() -> None:
             "shard_host_paths": {},
             "progress_pct": 66.7,
             "status": "Failed",
+            "sources": ["warmup"],
         }
     ]
 

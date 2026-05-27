@@ -77,8 +77,14 @@ def read_recent_lines(
     """Return the latest sanitized lines for one sidecar.
 
     Missing logs are normal in partial local sessions, so this returns an empty
-    list instead of raising.
+    list instead of raising. In a Container Apps sidecar (no local log files
+    exist) we transparently fall through to the Log Analytics query path —
+    see `api.services.sidecar_logs_la`.
     """
+    if _use_la_fallback():
+        from api.services import sidecar_logs_la
+
+        return sidecar_logs_la.read_recent_lines_la(container, tail=max(1, min(2_000, tail)))
     path = log_path_for(container, log_base=log_base)
     raw_lines = _tail_file(path, max(1, min(2_000, tail)))
     return [_to_log_line(raw) for raw in raw_lines]
@@ -93,7 +99,13 @@ def read_lines_since(
     """Return sanitized log lines appended after byte `offset`.
 
     If the file was rotated or truncated, reading resumes from byte zero.
+    In LA fallback mode `offset` is reinterpreted as a UTC epoch ms cursor
+    — see `api.services.sidecar_logs_la.read_lines_since_la`.
     """
+    if _use_la_fallback():
+        from api.services import sidecar_logs_la
+
+        return sidecar_logs_la.read_lines_since_la(container, offset)
     path = log_path_for(container, log_base=log_base)
     if not path.exists() or not path.is_file():
         return [], 0
@@ -110,11 +122,28 @@ def read_lines_since(
 
 
 def end_offset(container: SidecarContainer, *, log_base: Path | None = None) -> int:
-    """Return the current byte length of a sidecar log file."""
+    """Return the current byte length of a sidecar log file (or LA cursor)."""
+    if _use_la_fallback():
+        from api.services import sidecar_logs_la
+
+        return sidecar_logs_la.end_offset_la(container)
     path = log_path_for(container, log_base=log_base)
     if not path.exists() or not path.is_file():
         return 0
     return path.stat().st_size
+
+
+def _use_la_fallback() -> bool:
+    """True iff this process is a Container Apps sidecar AND the LA workspace
+    id is wired in. Operators can force-disable with
+    `LIVE_WALL_LA_DISABLE=true` (returns to the file-tail path, useful when
+    the LA workspace is being recreated and we want a clean degraded state).
+    """
+    if os.environ.get("LIVE_WALL_LA_DISABLE", "").strip().lower() == "true":
+        return False
+    if not os.environ.get("CONTAINER_APP_NAME", "").strip():
+        return False
+    return bool(os.environ.get("LOG_ANALYTICS_WORKSPACE_ID", "").strip())
 
 
 def _default_log_base() -> Path:
@@ -139,13 +168,27 @@ def _tail_file(path: Path, tail: int) -> list[str]:
 
 
 def _to_log_line(raw: str) -> LogLine:
-    text = _mask_secrets(raw.strip())[:_MAX_LINE_CHARS]
-    level = _infer_level(text)
+    return _render_log_line(
+        raw.strip(),
+        datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    )
+
+
+def _render_log_line(text: str, ts_iso: str) -> LogLine:
+    """Shared formatter — used by both the file tail and the LA fallback.
+
+    `text` is masked + truncated here; `ts_iso` is a pre-formatted ISO8601
+    timestamp in UTC (Z suffix). The LA path passes the real `TimeGenerated`
+    from the workspace; the file path passes "now" because the file lines
+    have no embedded timestamp.
+    """
+    cleaned = _mask_secrets(text)[:_MAX_LINE_CHARS]
+    level = _infer_level(cleaned)
     stream: LogStream = "stderr" if level in {"WARN", "ERR"} else "stdout"
     payload: LogLine = {
-        "ts": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "ts": ts_iso,
         "stream": stream,
-        "text": text,
+        "text": cleaned,
     }
     if level is not None:
         payload["level"] = level

@@ -669,7 +669,12 @@ function sidecarRequestsPayload() {
       request_body_truncated: false,
       response_headers: jsonHeaders,
       response_body: JSON.stringify(
-        { warm: true, databases: [{ name: "core_nt", status: "Ready", nodes_ready: 4 }] },
+        {
+          warm: true,
+          databases: [
+            { name: "core_nt", status: "Ready", nodes_ready: 4, sources: ["warmup"] },
+          ],
+        },
         null,
         2,
       ),

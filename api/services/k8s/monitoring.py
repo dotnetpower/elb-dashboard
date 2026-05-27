@@ -842,6 +842,12 @@ def _database_status_from_setup_jobs(jobs: list[dict[str, Any]]) -> list[dict[st
                 "nodes_active": 0,
                 "total_jobs": 0,
                 "shards": [],
+                # `setup` means the entry was derived from an ElasticBLAST
+                # `init-ssd-*` submit-side stager Job, not from an explicit
+                # dashboard warmup. The New Search run-profile picker uses
+                # this to avoid auto-flipping to "Warmed database" just
+                # because a prior BLAST submit happened to cache the DB.
+                "sources": ["setup"],
             },
         )
         job_status = job.get("status", {})
@@ -881,6 +887,11 @@ def _merge_database_statuses(result: dict[str, Any], incoming: list[dict[str, An
             if database.get("shards"):
                 current["shards"] = sorted(
                     set(current.get("shards", [])) | set(database.get("shards", []))
+                )
+            incoming_sources = database.get("sources") or []
+            if incoming_sources:
+                current["sources"] = sorted(
+                    set(current.get("sources", [])) | set(incoming_sources)
                 )
             for key in (
                 "progress_pct",
@@ -995,6 +1006,7 @@ def _append_warmup_daemonsets(result: dict[str, Any], daemonsets: list[dict[str,
                 "nodes_active": desired - ready,
                 "total_jobs": desired,
                 "status": "Ready" if ready == desired else "Loading",
+                "sources": ["warmup"],
             }
         )
         if ready > 0:

@@ -156,6 +156,10 @@ fi
 ensure_spa_redirect_uri "$API_CLIENT_ID_VAL" "https://$CONTAINER_APP_FQDN"
 progress "done" 4 "App registration"
 APPLICATIONINSIGHTS_CONNECTION_STRING_VAL="${APPLICATIONINSIGHTS_CONNECTION_STRING:-}"
+# Live Wall log-tail fallback target. Empty is acceptable (the api sidecar
+# then renders the historical "blank tile" state); when present, the api
+# uses LogsQueryClient to KQL `ContainerAppConsoleLogs_CL`.
+LOG_ANALYTICS_WORKSPACE_ID_VAL="${LOG_ANALYTICS_WORKSPACE_ID:-}"
 VITE_FEATURE_CUSTOM_DB_VAL="${VITE_FEATURE_CUSTOM_DB:-true}"
 VITE_FEATURE_LAB_TOOLS_VAL="${VITE_FEATURE_LAB_TOOLS:-true}"
 VITE_FEATURE_TERMINAL_VAL="${VITE_FEATURE_TERMINAL:-true}"
@@ -573,6 +577,7 @@ az deployment group create \
       featureLabTools="$VITE_FEATURE_LAB_TOOLS_VAL" \
       featureTerminal="$VITE_FEATURE_TERMINAL_VAL" \
       applicationInsightsConnectionString="$APPLICATIONINSIGHTS_CONNECTION_STRING_VAL" \
+      logAnalyticsWorkspaceId="$LOG_ANALYTICS_WORKSPACE_ID_VAL" \
       platformStorageAccountName="${STORAGE_ACCOUNT_NAME:-}" \
       platformPrivateEndpointSubnetId="$PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL" \
       subscriptionId="$(az account show --query id -o tsv)" \

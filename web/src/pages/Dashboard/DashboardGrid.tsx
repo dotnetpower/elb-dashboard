@@ -5,6 +5,7 @@ import { StorageCard } from "@/components/cards/StorageCard";
 import { TerminalCard } from "@/components/cards/TerminalCard";
 import type { ResourceConfig } from "@/components/SetupWizard";
 import { isFeatureEnabled } from "@/config/runtime";
+import { useScrollToHash } from "@/hooks/useScrollToHash";
 
 export interface DashboardGridProps {
   config: ResourceConfig;
@@ -12,6 +13,11 @@ export interface DashboardGridProps {
 
 export function DashboardGrid({ config }: DashboardGridProps) {
   const terminalEnabled = isFeatureEnabled("terminal");
+  // Mounted only after workspace discovery completes, so `#acr-card`
+  // (and any future card anchors) are guaranteed to be in the DOM when
+  // the deep-link scroll fires. Putting this in `Dashboard` would race
+  // the DiscoveryLoading splash and silently no-op.
+  useScrollToHash();
 
   return (
     <div className="dashboard-workspace">
@@ -50,11 +56,13 @@ export function DashboardGrid({ config }: DashboardGridProps) {
           Resource plane
         </div>
         <div className="dashboard-grid dashboard-grid--resources">
-          <AcrCard
-            subscriptionId={config.subscriptionId}
-            resourceGroup={config.acrResourceGroup}
-            registryName={config.acrName}
-          />
+          <div id="acr-card">
+            <AcrCard
+              subscriptionId={config.subscriptionId}
+              resourceGroup={config.acrResourceGroup}
+              registryName={config.acrName}
+            />
+          </div>
           <StorageCard
             subscriptionId={config.subscriptionId}
             resourceGroup={config.workloadResourceGroup}

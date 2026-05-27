@@ -160,6 +160,13 @@ where the failure was found, but knowing them up front saves a lot of time.
    default auto, or `--release` / `--minor`, then wait for maintainer approval
    before running the non-dry-run command. `--patch` is intentionally rejected
    because the patch segment is the build number.
+13. **Self-review before `task_complete` for any code change.** Do not wait
+    for the user to ask "검수해" / "review". After implementing, run the
+    consumer-search → wide test sweep → lint/build → diff audit → fixture
+    parity checklist from [.github/copilot-instructions.md §13](./.github/copilot-instructions.md)
+    "Post-implementation self-review", then summarise the outcome in the
+    final user-facing message. If any check is unresolved, fix it or
+    escalate — do not mark the task done.
 
 ---
 

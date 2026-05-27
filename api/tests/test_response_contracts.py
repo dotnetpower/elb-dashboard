@@ -74,6 +74,18 @@ def test_preflight_returns_admission_decision(
             "marker_blob": f"{database}/{database}.nsq",
         },
     )
+    # Preflight now goes through `validate_blast_database_ready`, which wraps
+    # `validate_blast_database_available` with a metadata-blob readiness
+    # check. Stub the wrapper at the facade so the route picks it up via its
+    # lazy import.
+    monkeypatch.setattr(
+        "api.services.blast_task_config.validate_blast_database_ready",
+        lambda *, storage_account, database: {
+            "container": "blast-db",
+            "blob_prefix": f"{database}/{database}",
+            "marker_blob": f"{database}/{database}.nsq",
+        },
+    )
     monkeypatch.setattr(celery_app, "connection", lambda: FakeConnection())
 
     response = client.post(

@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { formatApiError } from "@/api/client";
 import { blastApi, monitoringApi, storageApi } from "@/api/endpoints";
 import type { StorageLocalDebugStatus } from "@/api/storage";
+import { isBlastDbReady } from "@/utils/blastDbReady";
 
 /**
  * Single source of truth for "what BLAST databases exist in this storage account
@@ -204,20 +205,11 @@ export function useBlastDb({
   }, [dbQuery.data?.databases, locallyDownloaded]);
 
   /**
-   * Authoritative "this DB is genuinely usable for BLAST" predicate.
-   * Modern entries (post-hardening) carry ``copy_status.phase`` — only
-   * ``completed`` counts. Legacy entries without ``copy_status`` fall back
-   * to "has files and is not mid-update", which preserves the behaviour
-   * for DBs prepared before the hardening shipped.
+   * Authoritative "this DB is genuinely usable for BLAST" predicate. Delegates
+   * to the shared `isBlastDbReady` so Warmup / Storage card / Submit all agree.
    */
-  const isDbReady = (meta: DownloadedDbMeta | undefined): boolean => {
-    if (!meta) return false;
-    if (meta.copy_status?.phase) {
-      return meta.copy_status.phase === "completed";
-    }
-    if (meta.update_in_progress) return false;
-    return Boolean(meta.file_count && meta.file_count > 0);
-  };
+  const isDbReady = (meta: DownloadedDbMeta | undefined): boolean =>
+    isBlastDbReady(meta);
 
   const updatesAvailable = useMemo(() => {
     // Prefer the server-side per-DB list (compares NCBI ETag against the

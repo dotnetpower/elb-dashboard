@@ -338,4 +338,35 @@ def list_databases(
             info.setdefault("web_blast_searchsp", default_searchsp.value)
             info.setdefault("web_blast_searchsp_scope", default_searchsp.scope)
             info.setdefault("web_blast_searchsp_evidence", default_searchsp.evidence)
+        # Derived readiness fields — let SPA / preflight read one boolean
+        # instead of re-deriving "copy_status.phase == 'completed'" four
+        # different ways. Keep the upstream `copy_status` / `update_in_progress`
+        # fields untouched so any consumer that wants the raw lifecycle still
+        # gets it.
+        _ready, _not_ready_reason = _derive_db_readiness(info)
+        info["ready"] = _ready
+        info["not_ready_reason"] = _not_ready_reason
     return sorted(db_info.values(), key=lambda d: d["name"])
+
+
+def _derive_db_readiness(info: dict[str, Any]) -> tuple[bool, str | None]:
+    """Mirror the SPA's `getBlastDbReadiness` so a single contract lives on the
+    server. Returns ``(ready, reason)`` where ``reason`` is one of
+    ``copying`` / ``partial`` / ``init_failed`` / ``cancelled`` /
+    ``unknown_phase`` / ``updating`` / ``empty`` / ``None``.
+    """
+    copy_status = info.get("copy_status")
+    if isinstance(copy_status, dict):
+        phase = str(copy_status.get("phase") or "")
+        if phase:
+            if phase == "completed":
+                return True, None
+            if phase in {"copying", "partial", "init_failed", "cancelled"}:
+                return False, phase
+            return False, "unknown_phase"
+    if info.get("update_in_progress"):
+        return False, "updating"
+    file_count = info.get("file_count")
+    if isinstance(file_count, (int, float)) and file_count > 0:
+        return True, None
+    return False, "empty"

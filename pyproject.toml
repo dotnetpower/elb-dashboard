@@ -42,6 +42,10 @@ dependencies = [
   # Azure Monitor OpenTelemetry distro — server-side telemetry (api + worker).
   # Browser telemetry uses the App Insights JS SDK separately (web/).
   "azure-monitor-opentelemetry==1.6.4",
+  # Live Wall log-tail fallback: when the api runs as a Container Apps sidecar
+  # the historical project-local log files do not exist, so `api.services.
+  # sidecar_logs` falls back to KQL against the LA workspace via this SDK.
+  "azure-monitor-query==1.4.1",
   "opentelemetry-instrumentation-fastapi==0.49b2",
   "opentelemetry-instrumentation-celery==0.49b2",
 

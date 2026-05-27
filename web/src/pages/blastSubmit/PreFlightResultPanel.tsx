@@ -1,11 +1,47 @@
 import { AlertTriangle, Check, CheckCircle2 } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
+import { monitoringApi } from "@/api/endpoints";
 import type { PreFlightCheck, PreFlightResult } from "./usePreFlight";
 
 export interface PreFlightResultPanelProps {
   result: PreFlightResult;
   onPickDb: (path: string) => void;
+}
+
+function BuildAcrButton({ c }: { c: PreFlightCheck }) {
+  const params = c.action_params ?? {};
+  const sub = params.subscription_id ?? "";
+  const rg = params.resource_group ?? "";
+  const registry = params.registry_name ?? "";
+  const buildMutation = useMutation({
+    mutationFn: () => monitoringApi.buildAcrImages(sub, rg, registry),
+  });
+  const ready = Boolean(sub && rg && registry);
+  if (!ready) {
+    return <>{c.action}</>;
+  }
+  if (buildMutation.isSuccess) {
+    return (
+      <>
+        Build queued.{" "}
+        <Link to="/#acr-card">View progress on Dashboard →</Link>
+      </>
+    );
+  }
+  if (buildMutation.isError) {
+    return <>Build failed: {(buildMutation.error as Error).message}</>;
+  }
+  return (
+    <button
+      className="blast-preflight__suggestion-btn"
+      onClick={() => buildMutation.mutate()}
+      disabled={buildMutation.isPending}
+    >
+      {buildMutation.isPending ? "Queuing build…" : `${c.action} →`}
+    </button>
+  );
 }
 
 function CheckRow({ c }: { c: PreFlightCheck }) {
@@ -30,7 +66,13 @@ function CheckRow({ c }: { c: PreFlightCheck }) {
       {c.detail && <span className="blast-preflight__row-detail">— {c.detail}</span>}
       {c.action && c.status === "fail" && (
         <span className="blast-preflight__row-action">
-          {c.action_type === "download_db" ? <Link to="/">{c.action} →</Link> : c.action}
+          {c.action_type === "download_db" ? (
+            <Link to="/">{c.action} →</Link>
+          ) : c.action_type === "build_acr_images" ? (
+            <BuildAcrButton c={c} />
+          ) : (
+            c.action
+          )}
         </span>
       )}
     </div>
