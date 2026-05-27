@@ -65,6 +65,17 @@ ts "GitHub repo         : $GITHUB_REPO"
 ts "App Registration    : $APP_NAME"
 echo ""
 
+# Align az CLI to the target subscription so `az acr show` / `az containerapp
+# show` / `az role assignment` all hit the right place. azd env's
+# AZURE_SUBSCRIPTION_ID is authoritative; an unaligned `az login` profile
+# (e.g. a different demo sub set as the default) would otherwise fail with
+# "resource not found" at the RBAC step.
+current_sub="$(az account show --query id -o tsv 2>/dev/null || true)"
+if [[ "$current_sub" != "$AZURE_SUBSCRIPTION_ID" ]]; then
+  ts "==> Switching active az subscription: $current_sub -> $AZURE_SUBSCRIPTION_ID"
+  az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+fi
+
 # ---------------------------------------------------------------------------
 # 1. App Registration + service principal
 # ---------------------------------------------------------------------------
