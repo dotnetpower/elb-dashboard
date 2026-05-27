@@ -7,7 +7,10 @@
 #      repo on (a) push to main, (b) pull_request, (c) "production"
 #      environment deployments
 #   3. RBAC role assignments at the minimum required scope:
-#        - AcrPush          on the ACR (image builds + import)
+#        - Contributor      on the ACR (image builds + import + ACR Tasks
+#                           `listBuildSourceUploadUrl/action` — `AcrPush`
+#                           alone does not cover `az acr build`'s context
+#                           upload step)
 #        - Contributor      on the Container App (revision swap)
 #        - Reader           on the resource group (so quick-deploy.sh
 #                           can `az containerapp show`, `az acr show`, etc.)
@@ -146,7 +149,7 @@ ensure_role_assignment() {
 }
 
 ts "==> Ensuring RBAC at minimum scope"
-ensure_role_assignment "AcrPush"      "$ACR_ID"
+ensure_role_assignment "Contributor"  "$ACR_ID"
 ensure_role_assignment "Contributor"  "$CA_ID"
 ensure_role_assignment "Reader"       "$RG_ID"
 
