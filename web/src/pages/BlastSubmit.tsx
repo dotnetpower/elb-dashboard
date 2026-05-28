@@ -33,6 +33,8 @@ import {
   useSubmitMutation,
 } from "@/pages/blastSubmit/useSubmitMutation";
 import { useWarmupStatus } from "@/pages/blastSubmit/useWarmupStatus";
+import { permissionDeniedTooltip } from "@/components/PermissionGate";
+import { usePermissions } from "@/hooks/usePermissions";
 import { parsePositiveTaxid, PROGRAMS } from "@/pages/blastSubmitModel";
 import { isAksWorkloadReady } from "@/utils/aksStatus";
 import {
@@ -293,8 +295,28 @@ export function BlastSubmit() {
     submitPending: submitMutation.isPending,
   });
 
+  // Critique #6: gate the Submit button behind the caller's BLAST-submit
+  // capability at the selected cluster's scope. Degrade-open while the
+  // permission probe is loading so there is no flash-of-disabled state;
+  // ARM still enforces real authorization at submit time.
+  const { permissions: submitPermissions } = usePermissions(
+    subId,
+    selectedCluster?.resource_group || workloadRg,
+    selectedCluster?.name,
+  );
+  const submitPermissionDenied =
+    !submitPermissions.can_submit_blast && !submitPermissions.degraded;
+  const submitPermissionTooltip = submitPermissionDenied
+    ? permissionDeniedTooltip("can_submit_blast", submitPermissions)
+    : undefined;
+  const effectiveCanSubmit = validation.canSubmit && !submitPermissionDenied;
+
   const handleSubmit = () => {
     if (!selectedCluster) return;
+    if (submitPermissionDenied) {
+      toast(submitPermissionTooltip ?? "Insufficient permission to submit", "error");
+      return;
+    }
     if (!validation.canSubmit) {
       toast(
         validation.missing[0]?.text ?? "Complete the required BLAST submit fields first.",
@@ -525,13 +547,14 @@ export function BlastSubmit() {
               toast={toast}
               missing={validation.missing}
               searchSummary={validation.searchSummary}
-              canSubmit={validation.canSubmit}
+              canSubmit={effectiveCanSubmit}
               submitPending={submitMutation.isPending}
               submitError={submitMutation.isError ? submitMutation.error : null}
               preFlightResult={preFlightResult}
               preFlightPending={preFlightMutation.isPending}
               effectiveSearchSpace={selectedDbInfo?.web_blast_searchsp}
               lastSavedAt={lastSavedAt}
+              permissionTooltip={submitPermissionTooltip}
               onPreFlight={() => preFlightMutation.mutate()}
               onSubmit={handleSubmit}
             />
@@ -548,12 +571,13 @@ export function BlastSubmit() {
           missing={validation.missing}
           searchSummary={validation.searchSummary}
           paramsSummary={validation.paramsSummary}
-          canSubmit={validation.canSubmit}
+          canSubmit={effectiveCanSubmit}
           submitPending={submitMutation.isPending}
           preFlightResult={preFlightResult}
           preFlightPending={preFlightMutation.isPending}
           effectiveSearchSpace={selectedDbInfo?.web_blast_searchsp}
           lastSavedAt={lastSavedAt}
+          permissionTooltip={submitPermissionTooltip}
           set={set}
           onPreFlight={() => preFlightMutation.mutate()}
           onSubmit={handleSubmit}

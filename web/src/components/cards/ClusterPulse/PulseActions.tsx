@@ -7,6 +7,8 @@ import { ExternalLink, Info, Loader2, Play, Square, Trash2 } from "lucide-react"
 
 import type { AksClusterSummary } from "@/api/endpoints";
 import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
+import { permissionDeniedTooltip } from "@/components/PermissionGate";
+import { usePermissions } from "@/hooks/usePermissions";
 import { isAksProvisioned } from "@/utils/aksStatus";
 
 import { ActionBtn } from "./atoms";
@@ -49,6 +51,17 @@ export function PulseActions({
 }: Props) {
   const canControlPower = isAksProvisioned(c);
   const busy = actionLoading !== null;
+  // Critique #6: gate Start/Stop/Delete behind the caller's Azure RBAC
+  // at the cluster scope so a user without Contributor sees the button
+  // already disabled with a "you need Contributor" tooltip instead of
+  // clicking through to a silent 403. The hook caches for 60 s + falls
+  // back to OPEN_PERMISSIONS while loading so there is no flash-of-
+  // disabled state.
+  const { permissions } = usePermissions(
+    subscriptionId,
+    c.resource_group,
+    c.name,
+  );
   const portalHref = subscriptionId
     ? clusterPortalUrl({
         subscriptionId,
@@ -112,58 +125,78 @@ export function PulseActions({
           justifyContent: "flex-end",
         }}
       >
-        {!trans && canControlPower && c.power_state === "Stopped" && (
-          <span title="Start the AKS cluster (~5 min to ready)">
-            <ActionBtn
-              tone="success"
-              disabled={busy}
-              onClick={() => onStartStop(c.name, "start")}
-              icon={
-                actionLoading === `start-${c.name}` ? (
-                  <Loader2 size={11} className="spin" aria-hidden="true" />
-                ) : (
-                  <Play size={11} aria-hidden="true" />
-                )
-              }
-            >
-              Start
-            </ActionBtn>
-          </span>
-        )}
-        {!trans && canControlPower && c.power_state === "Running" && (
-          <span title="Stop the AKS cluster - paused billing, no running jobs">
-            <ActionBtn
-              tone="warning"
-              disabled={busy}
-              onClick={() => onStartStop(c.name, "stop")}
-              icon={
-                actionLoading === `stop-${c.name}` ? (
-                  <Loader2 size={11} className="spin" aria-hidden="true" />
-                ) : (
-                  <Square size={11} aria-hidden="true" />
-                )
-              }
-            >
-              Stop
-            </ActionBtn>
-          </span>
-        )}
-        <span title="Delete the cluster and its node pools (irreversible)">
-          <ActionBtn
-            tone="danger"
-            disabled={busy}
-            onClick={() => onDelete(c.name)}
-            icon={
-              actionLoading === `delete-${c.name}` ? (
-                <Loader2 size={11} className="spin" aria-hidden="true" />
-              ) : (
-                <Trash2 size={11} aria-hidden="true" />
-              )
-            }
-          >
-            Delete
-          </ActionBtn>
-        </span>
+        {!trans && canControlPower && c.power_state === "Stopped" && (() => {
+          const denied = !permissions.can_start_stop && !permissions.degraded;
+          const tooltip = denied
+            ? permissionDeniedTooltip("can_start_stop", permissions)
+            : "Start the AKS cluster (~5 min to ready)";
+          return (
+            <span title={tooltip}>
+              <ActionBtn
+                tone="success"
+                disabled={busy || denied}
+                onClick={() => onStartStop(c.name, "start")}
+                icon={
+                  actionLoading === `start-${c.name}` ? (
+                    <Loader2 size={11} className="spin" aria-hidden="true" />
+                  ) : (
+                    <Play size={11} aria-hidden="true" />
+                  )
+                }
+              >
+                Start
+              </ActionBtn>
+            </span>
+          );
+        })()}
+        {!trans && canControlPower && c.power_state === "Running" && (() => {
+          const denied = !permissions.can_start_stop && !permissions.degraded;
+          const tooltip = denied
+            ? permissionDeniedTooltip("can_start_stop", permissions)
+            : "Stop the AKS cluster - paused billing, no running jobs";
+          return (
+            <span title={tooltip}>
+              <ActionBtn
+                tone="warning"
+                disabled={busy || denied}
+                onClick={() => onStartStop(c.name, "stop")}
+                icon={
+                  actionLoading === `stop-${c.name}` ? (
+                    <Loader2 size={11} className="spin" aria-hidden="true" />
+                  ) : (
+                    <Square size={11} aria-hidden="true" />
+                  )
+                }
+              >
+                Stop
+              </ActionBtn>
+            </span>
+          );
+        })()}
+        {(() => {
+          const denied = !permissions.can_delete && !permissions.degraded;
+          const tooltip = denied
+            ? permissionDeniedTooltip("can_delete", permissions)
+            : "Delete the cluster and its node pools (irreversible)";
+          return (
+            <span title={tooltip}>
+              <ActionBtn
+                tone="danger"
+                disabled={busy || denied}
+                onClick={() => onDelete(c.name)}
+                icon={
+                  actionLoading === `delete-${c.name}` ? (
+                    <Loader2 size={11} className="spin" aria-hidden="true" />
+                  ) : (
+                    <Trash2 size={11} aria-hidden="true" />
+                  )
+                }
+              >
+                Delete
+              </ActionBtn>
+            </span>
+          );
+        })()}
       </div>
     </div>
   );

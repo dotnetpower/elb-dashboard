@@ -52,6 +52,24 @@ _EXCEPTION_DETAIL_MAX_CHARS = 500
 _SUBMIT_RETRY_AFTER_SECONDS = 5
 
 
+def _safe_exc_message(exc: BaseException) -> str:
+    """Render an exception for an HTTPException ``detail.message`` payload.
+
+    Critique #7: every BLAST submit error path used to write ``str(exc)``
+    straight into the response body. Azure SDK errors regularly carry
+    full Storage URLs with embedded SAS query strings, subscription
+    IDs, and request-correlation tokens \u2014 leaking those into a
+    user-visible 4xx body broke the sanitisation contract enforced
+    elsewhere by ``api.services.sanitise``. This helper centralises
+    both the truncation policy and the sanitisation pass so future
+    error sites stay safe by construction.
+    """
+    from api.services.sanitise import sanitise
+
+    raw = str(exc)
+    return sanitise(raw)[:_EXCEPTION_DETAIL_MAX_CHARS]
+
+
 def _submit_job_id(body: dict[str, Any], caller: CallerIdentity) -> str:
     idempotency_key = body.get("idempotency_key")
     if isinstance(idempotency_key, str) and 0 < len(idempotency_key) <= 256:
@@ -137,7 +155,7 @@ def _validate_submit_contracts(body: dict[str, Any]) -> dict[str, Any]:
             422,
             detail={
                 "code": "sharding_precision_invalid",
-                "message": str(exc)[:_EXCEPTION_DETAIL_MAX_CHARS],
+                "message": _safe_exc_message(exc),
             },
         ) from exc
 
@@ -195,7 +213,7 @@ def blast_submit(
             422,
             detail={
                 "code": "validation_error",
-                "message": str(exc)[:_EXCEPTION_DETAIL_MAX_CHARS],
+                "message": _safe_exc_message(exc),
             },
         ) from exc
 
@@ -256,7 +274,7 @@ def blast_submit(
             422,
             detail={
                 "code": "sharding_precision_invalid",
-                "message": str(exc)[:_EXCEPTION_DETAIL_MAX_CHARS],
+                "message": _safe_exc_message(exc),
             },
         ) from exc
 
@@ -318,12 +336,18 @@ def blast_submit(
         allow_unverified=allow_unverified,
     )
     if gates_report.blocking:
+        from api.services.sanitise import sanitise
+
         summary = "; ".join(g.message for g in gates_report.blocking)
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "blocked_by_preflight",
-                "message": summary[:_EXCEPTION_DETAIL_MAX_CHARS],
+                # Critique #7: sanitise + cap to keep ``str(exc)`` /
+                # gate-supplied messages free of SAS tokens / Storage
+                # URLs that might leak in from an Azure SDK exception
+                # included in a gate's ``message``.
+                "message": sanitise(summary)[:_EXCEPTION_DETAIL_MAX_CHARS],
                 "blocking_gates": [g.to_dict() for g in gates_report.blocking],
                 "gates": [g.to_dict() for g in gates_report.gates],
             },
@@ -473,7 +497,7 @@ def blast_job_submit(
             422,
             detail={
                 "code": "validation_error",
-                "message": str(exc)[:_EXCEPTION_DETAIL_MAX_CHARS],
+                "message": _safe_exc_message(exc),
             },
         ) from exc
 

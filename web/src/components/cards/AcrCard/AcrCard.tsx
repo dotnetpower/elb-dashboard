@@ -3,6 +3,8 @@ import { Hammer } from "lucide-react";
 import { formatApiError } from "@/api/client";
 import { MonitorCard } from "@/components/MonitorCard";
 import { degradedStatusOverride } from "@/components/cards/cardStatusOverride";
+import { permissionDeniedTooltip } from "@/components/PermissionGate";
+import { usePermissions } from "@/hooks/usePermissions";
 import { getDegradedInfo } from "@/utils/monitorDegraded";
 
 import { AcrImageTable, ExpandedErrorBlock } from "./AcrImageTable";
@@ -25,6 +27,15 @@ export interface AcrCardProps {
 
 export function AcrCard({ subscriptionId, resourceGroup, registryName }: AcrCardProps) {
   const state = useAcrBuilds({ subscriptionId, resourceGroup, registryName });
+  // Critique #6: gate the Build button behind the caller's ACR-build
+  // capability at the ACR's resource-group scope so a user without
+  // Contributor sees a disabled control with a "you need Contributor"
+  // tooltip instead of clicking through to a silent 403.
+  const { permissions } = usePermissions(subscriptionId, resourceGroup);
+  const buildDenied = !permissions.can_build_acr && !permissions.degraded;
+  const buildPermissionTooltip = buildDenied
+    ? permissionDeniedTooltip("can_build_acr", permissions)
+    : undefined;
   const {
     enabled,
     query,
@@ -83,6 +94,8 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: AcrCard
                 <button
                   className="glass-button glass-button--primary"
                   onClick={() => setShowConfirm(true)}
+                  disabled={buildDenied}
+                  title={buildPermissionTooltip}
                   style={{ fontSize: 10 }}
                 >
                   <Hammer size={11} strokeWidth={1.5} /> Build
@@ -117,7 +130,10 @@ export function AcrCard({ subscriptionId, resourceGroup, registryName }: AcrCard
             buildStatus={buildStatus}
             singleBuilding={singleBuilding}
             onToggleError={(img) => setExpandedError(expandedError === img ? null : img)}
-            onBuildSingle={handleBuildSingle}
+            onBuildSingle={(img) => {
+              if (buildDenied) return;
+              handleBuildSingle(img);
+            }}
           />
           <ExpandedErrorBlock expandedError={expandedError} buildResults={buildResults} />
         </>

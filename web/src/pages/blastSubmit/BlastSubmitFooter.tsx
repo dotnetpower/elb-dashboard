@@ -33,6 +33,10 @@ export interface BlastSubmitFooterProps {
   effectiveSearchSpace?: number;
   /** Wall-clock time of the last successful draft auto-save (N1). */
   lastSavedAt?: Date | null;
+  /** When set, overrides the submit-button title with the
+   *  "you do not have permission to submit BLAST jobs" tooltip
+   *  computed by ``permissionDeniedTooltip``. Critique #6. */
+  permissionTooltip?: string;
   onPreFlight: () => void;
   onSubmit: () => void;
 }
@@ -62,6 +66,7 @@ export function BlastSubmitFooter({
   preFlightPending,
   effectiveSearchSpace,
   lastSavedAt,
+  permissionTooltip,
   onPreFlight,
   onSubmit,
 }: BlastSubmitFooterProps) {
@@ -86,11 +91,17 @@ export function BlastSubmitFooter({
   const preFlightBlocked =
     preFlightResult != null && preFlightResult.ready === false;
   const runDisabled = !canSubmit || preFlightBlocked || submitPending;
-  const runTitle = preFlightBlocked
-    ? `Resolve ${preFlightResult?.critical_blockers ?? 0} pre-flight blocker(s) before submitting`
-    : !canSubmit
-      ? "Fill in the required fields above"
-      : undefined;
+  // Critique #6: ``permissionTooltip`` wins over the generic
+  // "fill in the required fields" hint when the caller lacks
+  // ``can_submit_blast`` at the cluster scope, so the user sees WHY
+  // submission is blocked.
+  const runTitle = permissionTooltip
+    ? permissionTooltip
+    : preFlightBlocked
+      ? `Resolve ${preFlightResult?.critical_blockers ?? 0} pre-flight blocker(s) before submitting`
+      : !canSubmit
+        ? "Fill in the required fields above"
+        : undefined;
 
   // Focus + pulse the Run BLAST button on the first transition into ready
   // state, skipping focus while the user is still typing in a text field.

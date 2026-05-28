@@ -39,6 +39,10 @@ export interface SubmitSummaryRailProps {
   preFlightPending: boolean;
   effectiveSearchSpace?: number;
   lastSavedAt?: Date | null;
+  /** When set, overrides the submit-button title with the
+   *  "you do not have permission to submit BLAST jobs" tooltip
+   *  computed by ``permissionDeniedTooltip``. Critique #6. */
+  permissionTooltip?: string;
   set: <K extends keyof FormState>(key: K, value: FormState[K]) => void;
   onPreFlight: () => void;
   onSubmit: () => void;
@@ -64,6 +68,7 @@ export function SubmitSummaryRail({
   preFlightPending,
   effectiveSearchSpace,
   lastSavedAt,
+  permissionTooltip,
   set,
   onPreFlight,
   onSubmit,
@@ -71,11 +76,15 @@ export function SubmitSummaryRail({
 }: SubmitSummaryRailProps) {
   const preFlightBlocked = preFlightResult != null && preFlightResult.ready === false;
   const runDisabled = !canSubmit || preFlightBlocked || submitPending;
-  const runTitle = preFlightBlocked
-    ? `Resolve ${preFlightResult?.critical_blockers ?? 0} pre-flight blocker(s) before submitting`
-    : !canSubmit
-      ? "Fill in the required fields above"
-      : undefined;
+  // Critique #6: ``permissionTooltip`` wins so the user sees WHY
+  // submission is blocked when they lack ``can_submit_blast``.
+  const runTitle = permissionTooltip
+    ? permissionTooltip
+    : preFlightBlocked
+      ? `Resolve ${preFlightResult?.critical_blockers ?? 0} pre-flight blocker(s) before submitting`
+      : !canSubmit
+        ? "Fill in the required fields above"
+        : undefined;
 
   // Focus + pulse the Run BLAST button when validation transitions to ready,
   // but never steal focus from an active text input the user is still typing in.

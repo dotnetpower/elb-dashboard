@@ -227,6 +227,45 @@ confirm_deploy_target() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# preflight_permission_check (critique #8) — fail fast with a clear
+# remediation message when the caller lacks the four ARM read permissions
+# the script will need a few seconds later: read on the resource group,
+# read on the ACR, read on the Container App, and an `az acr build`
+# preflight (which exercises both ACR read and AcrPush). The read probes
+# are cheap (~200 ms each) so the cost is negligible; the value is that
+# a 401 / 403 surfaces here with the exact role the operator needs
+# instead of after a 30-90 s build.
+#
+# Skip entirely with ELB_QUICK_DEPLOY_SKIP_PREFLIGHT=1 (CI runners with
+# pre-validated SPs do not need this).
+# ---------------------------------------------------------------------------
+preflight_permission_check() {
+  [[ "${ELB_QUICK_DEPLOY_SKIP_PREFLIGHT:-0}" == "1" ]] && return 0
+  command -v az >/dev/null 2>&1 || die "az CLI not found on PATH"
+
+  local who=""
+  who="$(az account show --query 'user.name' -o tsv 2>/dev/null || true)"
+  if [[ -z "$who" ]]; then
+    die "Not signed in to Azure CLI. Run 'az login' (or 'az-jungha' for the demo profile) and retry."
+  fi
+  ts "preflight: signed-in as $who"
+
+  if ! az group show -n "$AZURE_RESOURCE_GROUP" -o none 2>/dev/null; then
+    die "Cannot read resource group '$AZURE_RESOURCE_GROUP'. The signed-in identity needs at least 'Reader' on the subscription or RG. Run 'az role assignment list --assignee $who --resource-group $AZURE_RESOURCE_GROUP' to inspect."
+  fi
+
+  if ! az acr show -n "$ACR_NAME" -g "$AZURE_RESOURCE_GROUP" -o none 2>/dev/null; then
+    die "Cannot read ACR '$ACR_NAME' in '$AZURE_RESOURCE_GROUP'. The signed-in identity needs 'Reader' (or higher). Without 'Contributor' the subsequent 'az acr update' (firewall toggle) and 'az acr build' will fail with AuthorizationFailed."
+  fi
+
+  if ! az containerapp show -n "$CONTAINER_APP_NAME" -g "$AZURE_RESOURCE_GROUP" -o none 2>/dev/null; then
+    die "Cannot read Container App '$CONTAINER_APP_NAME' in '$AZURE_RESOURCE_GROUP'. The signed-in identity needs 'Contributor' on the Container App for the upcoming 'az containerapp update' to succeed."
+  fi
+
+  ts "preflight: ARM read access OK on rg/acr/containerApp"
+}
+
 if [[ "$SIDECAR" == "all" ]]; then
   # ---------------------------------------------------------------------------
   # Parallel-build path: api / frontend / terminal images build concurrently
@@ -265,6 +304,7 @@ if [[ "$SIDECAR" == "all" ]]; then
     [[ -n "${!v:-}" ]] || die "$v is unset and az-context discovery could not populate it (run: az login + verify the active sub has an elb-dashboard RG)"
   done
   confirm_deploy_target
+  preflight_permission_check
   ensure_provider_registration_once
 
   NEW_API="${ACR_LOGIN_SERVER}/elb-api:${TAG}"
@@ -529,6 +569,7 @@ for v in AZURE_RESOURCE_GROUP ACR_NAME ACR_LOGIN_SERVER CONTAINER_APP_NAME; do
   [[ -n "${!v:-}" ]] || die "$v is unset and az-context discovery could not populate it (run: az login + verify the active sub has an elb-dashboard RG)"
 done
 confirm_deploy_target
+preflight_permission_check
 ensure_provider_registration_once
 
 NEW_IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:${TAG}"
