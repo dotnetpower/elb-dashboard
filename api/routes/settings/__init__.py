@@ -16,9 +16,11 @@ from fastapi import APIRouter
 
 from api.routes.settings import aks_observability as _aks_observability_routes
 from api.routes.settings import app_insights as _app_insights_routes
+from api.routes.settings import vnet_peering as _vnet_peering_routes
 
 settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
 settings_router.include_router(_app_insights_routes.router, prefix="/app-insights")
 settings_router.include_router(
     _aks_observability_routes.router, prefix="/aks-observability"
 )
+settings_router.include_router(_vnet_peering_routes.router)

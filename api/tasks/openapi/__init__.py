@@ -18,6 +18,12 @@ Validation: `uv run pytest -q api/tests/test_smoke.py`.
 
 from __future__ import annotations
 
+from api.tasks.openapi.auto_deploy import (
+    AUTO_DEPLOY_ENV,
+    auto_deploy_enabled,
+    build_auto_openapi_payload,
+    enqueue_openapi_deploy_after_aks_event,
+)
 from api.tasks.openapi.deploy import deploy_openapi_service
 from api.tasks.openapi.kubectl import kubectl_apply as _kubectl_apply
 from api.tasks.openapi.manifests import build_manifests as _build_manifests
@@ -34,12 +40,16 @@ from api.tasks.openapi.rbac import (
 )
 
 __all__ = (
+    "AUTO_DEPLOY_ENV",
     "_assign_role_idempotent",
     "_build_manifests",
     "_kubectl_apply",
     "_setup_workload_identity",
+    "auto_deploy_enabled",
+    "build_auto_openapi_payload",
     "deploy_openapi_service",
     "disable_openapi_public_https",
+    "enqueue_openapi_deploy_after_aks_event",
     "get_openapi_public_https_status",
     "setup_openapi_public_https",
 )

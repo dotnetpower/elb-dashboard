@@ -510,6 +510,8 @@ def test_start_aks_enqueues_openapi_after_cluster_start(monkeypatch) -> None:
     monkeypatch.setattr(azure, "get_credential", lambda: object())
     monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-aaa")
+    monkeypatch.delenv("ELB_AUTO_OPENAPI_DEPLOY", raising=False)
 
     result = azure.start_aks.run(
         subscription_id="sub-1",
@@ -527,15 +529,112 @@ def test_start_aks_enqueues_openapi_after_cluster_start(monkeypatch) -> None:
     assert sent_tasks[0] == {"started": "rg-elb/elb-cluster"}
     assert sent_tasks[1]["task_name"] == "api.tasks.openapi.deploy_openapi_service"
     assert sent_tasks[1]["queue"] == "azure"
-    assert sent_tasks[1]["kwargs"] == {
-        "subscription_id": "sub-1",
-        "resource_group": "rg-elb",
-        "cluster_name": "elb-cluster",
-        "acr_name": "elbacr01",
-        "acr_resource_group": "rg-elbacr",
-        "storage_account": "elbstg01",
-        "storage_resource_group": "rg-storage",
-    }
+    # The auto-deploy helper merges caller-supplied overrides with env-derived
+    # defaults (tenant_id from AZURE_TENANT_ID) and always includes
+    # `tenant_id` + `caller_oid` so the deploy task can label k8s objects.
+    kwargs = sent_tasks[1]["kwargs"]
+    assert kwargs["subscription_id"] == "sub-1"
+    assert kwargs["resource_group"] == "rg-elb"
+    assert kwargs["cluster_name"] == "elb-cluster"
+    assert kwargs["acr_name"] == "elbacr01"
+    assert kwargs["acr_resource_group"] == "rg-elbacr"
+    assert kwargs["storage_account"] == "elbstg01"
+    assert kwargs["storage_resource_group"] == "rg-storage"
+    assert kwargs["tenant_id"] == "tenant-aaa"
+    assert kwargs["caller_oid"] == ""
+
+
+def test_start_aks_auto_deploys_when_no_explicit_payload(monkeypatch) -> None:
+    """Without an explicit `auto_openapi` payload, the lifecycle task must
+    still enqueue `deploy_openapi_service` using env-derived defaults so a
+    dashboard-initiated AKS start always brings the OpenAPI Service back up.
+    """
+
+    sent_tasks: list[dict[str, Any]] = []
+
+    class FakePoller:
+        def result(self) -> None:
+            return None
+
+    class FakeManagedClusters:
+        def begin_start(self, *_args: Any) -> FakePoller:
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    def fake_send_task(
+        task_name: str,
+        *,
+        kwargs: dict[str, Any],
+        queue: str | None = None,
+    ) -> AsyncResultStub:
+        sent_tasks.append({"task_name": task_name, "kwargs": kwargs, "queue": queue})
+        return AsyncResultStub("task-openapi-auto")
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    monkeypatch.setenv("PLATFORM_ACR_NAME", "platformacr")
+    monkeypatch.setenv("PLATFORM_ACR_RESOURCE_GROUP", "rg-platform-acr")
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "platformstg")
+    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-platform")
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-bbb")
+    monkeypatch.delenv("ELB_AUTO_OPENAPI_DEPLOY", raising=False)
+
+    result = azure.start_aks.run(
+        subscription_id="sub-2",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster-02",
+    )
+
+    assert result["openapi_task_id"] == "task-openapi-auto"
+    assert sent_tasks, "deploy_openapi_service must be enqueued by default"
+    assert sent_tasks[0]["task_name"] == "api.tasks.openapi.deploy_openapi_service"
+    kwargs = sent_tasks[0]["kwargs"]
+    assert kwargs["acr_name"] == "platformacr"
+    assert kwargs["acr_resource_group"] == "rg-platform-acr"
+    assert kwargs["storage_account"] == "platformstg"
+    assert kwargs["storage_resource_group"] == "rg-platform"
+    assert kwargs["tenant_id"] == "tenant-bbb"
+
+
+def test_start_aks_skips_openapi_when_opt_out_env_set(monkeypatch) -> None:
+    """`ELB_AUTO_OPENAPI_DEPLOY=false` must suppress the auto enqueue so an
+    operator running their own GitOps pipeline is not double-deployed.
+    """
+
+    sent_tasks: list[dict[str, Any]] = []
+
+    class FakePoller:
+        def result(self) -> None:
+            return None
+
+    class FakeManagedClusters:
+        def begin_start(self, *_args: Any) -> FakePoller:
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    def fake_send_task(*_args: Any, **_kwargs: Any) -> AsyncResultStub:
+        sent_tasks.append({"args": _args, "kwargs": _kwargs})
+        return AsyncResultStub("should-not-be-used")
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send_task)
+    monkeypatch.setenv("PLATFORM_ACR_NAME", "platformacr")
+    monkeypatch.setenv("ELB_AUTO_OPENAPI_DEPLOY", "false")
+
+    result = azure.start_aks.run(
+        subscription_id="sub-3",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster-03",
+    )
+
+    assert result["openapi_task_id"] == ""
+    assert sent_tasks == [], "deploy_openapi_service must not be enqueued when opted out"
 
 
 class _FakePoller:

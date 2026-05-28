@@ -64,20 +64,31 @@ from api.tasks.openapi.kubectl import ensure_admin_kubeconfig, kubectl_run
 LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_OPERATOR_EMAIL_ENV = "ELB_OPERATOR_EMAIL"
-# Let's Encrypt accepts any RFC 5322 valid address; this fallback is used only
-# when the operator did not supply an email via env or POST body. Expiry-warning
-# mail will black-hole, but the cert still issues + renews.
-_FALLBACK_OPERATOR_EMAIL = "noreply@elb-dashboard.local"
 
 
 def _resolve_operator_email(provided: str = "") -> str:
+    """Return the operator email, preferring the caller-provided value.
+
+    The dashboard SPA auto-fills this field from `/api/me` (validated MSAL
+    `upn`), and the FastAPI route rejects empty / private-TLD values before
+    the task is enqueued (see `OpenApiPublicHttpsRequest`). The env
+    `ELB_OPERATOR_EMAIL` is the operator-side fallback when the env is set
+    deliberately. We deliberately do **not** ship a hard-coded `.local`
+    fallback because Let's Encrypt rejects ACME registration on any private
+    TLD with `urn:ietf:params:acme:error:invalidContact` and the whole
+    public-https pipeline silently fails (regression on elb-cluster-01,
+    2026-05-27).
+    """
     provided = (provided or "").strip()
     if provided:
         return provided
     env_value = os.environ.get(_DEFAULT_OPERATOR_EMAIL_ENV, "").strip()
     if env_value:
         return env_value
-    return _FALLBACK_OPERATOR_EMAIL
+    raise ValueError(
+        "operator_email is required — caller must pass a public-TLD email "
+        "(SPA auto-fills from /api/me) or set ELB_OPERATOR_EMAIL"
+    )
 
 
 def _kubectl_or_raise(
@@ -697,7 +708,16 @@ def setup_openapi_public_https(
             "error": "Could not resolve AKS cluster region",
         }
 
-    email = _resolve_operator_email(operator_email)
+    email = ""
+    try:
+        email = _resolve_operator_email(operator_email)
+    except ValueError as exc:
+        LOGGER.warning("public-https: missing operator_email — task aborted")
+        return {
+            "status": "failed",
+            "step": "resolve_operator_email",
+            "error": str(exc),
+        }
     dns_label = dns_label_for_cluster(
         subscription_id=subscription_id,
         cluster_name=cluster_name,

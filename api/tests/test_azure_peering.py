@@ -40,6 +40,7 @@ def _install_clients(
     *,
     cluster_obj=None,
     node_rg_vnets: list[str] | None = None,
+    resource_lists: dict[str, list[str]] | None = None,
     peering_recorder: list[dict[str, Any]] | None = None,
     peering_raises: dict[str, Exception] | None = None,
 ) -> dict[str, Any]:
@@ -54,6 +55,7 @@ def _install_clients(
         "peering_raises": peering_raises or {},
         "cluster_obj": cluster_obj or _make_cluster(),
         "node_rg_vnets": node_rg_vnets if node_rg_vnets is not None else [],
+        "resource_lists": resource_lists or {},
     }
 
     class _FakePoller:
@@ -90,7 +92,8 @@ def _install_clients(
             state["list_calls"] += 1
             state["last_list_rg"] = rg
             state["last_list_filter"] = filter
-            return [_make_resource(v) for v in state["node_rg_vnets"]]
+            resources = state["resource_lists"].get(rg, state["node_rg_vnets"])
+            return [_make_resource(v) for v in resources]
 
     class _FakeResourceClient:
         resources = _FakeResources()
@@ -322,6 +325,58 @@ def test_helper_reads_dashboard_vnet_from_env(monkeypatch) -> None:
         "Microsoft.Network/virtualNetworks/vnet-elb-dashboard"
     )
     assert result["dashboard_vnet"] == expected_dash
+
+
+def test_helper_peers_target_vnet_and_probes_private_ip(monkeypatch) -> None:
+    """A remote VNet can be peered into the AKS auto-VNet and the private
+    endpoint path can be probed in the same helper payload.
+    """
+    aks_vnet = (
+        "/subscriptions/sub-1/resourceGroups/MC_rg-elb-cluster_elb-cluster-01_koreacentral/"
+        "providers/Microsoft.Network/virtualNetworks/aks-vnet-23268255"
+    )
+    target_vnet = (
+        "/subscriptions/sub-2/resourceGroups/rg-target/providers/"
+        "Microsoft.Network/virtualNetworks/vnet-target"
+    )
+
+    class _ProbeResponse:
+        is_success = True
+        status_code = 200
+        reason_phrase = "OK"
+
+    def _fake_get(url: str, timeout: float) -> _ProbeResponse:
+        assert url == "http://10.224.0.7/openapi.json"
+        assert timeout == 2.0
+        return _ProbeResponse()
+
+    state = _install_clients(
+        monkeypatch,
+        node_rg_vnets=[aks_vnet],
+        resource_lists={"rg-target": [target_vnet]},
+    )
+    from api.tasks.azure.peering import ensure_vnet_peering_with_target
+
+    monkeypatch.setattr("api.tasks.azure.peering.httpx.get", _fake_get)
+
+    result = ensure_vnet_peering_with_target(
+        object(),
+        subscription_id="sub-1",
+        cluster_resource_group="rg-elb-cluster",
+        cluster_name="elb-cluster-01",
+        target_subscription_id="sub-2",
+        target_resource_group="rg-target",
+        target_vnet_name="vnet-target",
+        target_ip="10.224.0.7",
+        target_path="/openapi.json",
+    )
+
+    assert result["target_vnet"] == target_vnet
+    assert result["probe"]["reachable"] is True
+    assert result["probe"]["status_code"] == 200
+    directions = [p["direction"] for p in result["peerings"]]
+    assert directions == ["target_to_aks", "aks_to_target"]
+    assert len(state["peering_recorder"]) == 2
 
 
 # ---------------------------------------------------------------------------

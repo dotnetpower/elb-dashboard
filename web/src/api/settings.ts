@@ -81,6 +81,54 @@ export interface AksObservabilityStatusQuery {
   cluster_name: string;
 }
 
+export interface VnetPeeringRequest {
+  /** Subscription that hosts the AKS cluster (i.e. the dashboard subscription). */
+  subscription_id: string;
+  /** Resource group of the AKS cluster (NOT the auto MC_* node RG). */
+  resource_group: string;
+  cluster_name: string;
+  /** Subscription that owns the remote VNet whose VMs need to reach `target_ip`. */
+  target_subscription_id: string;
+  target_resource_group: string;
+  target_vnet_name: string;
+  /** Optional override. Defaults to the elb-openapi internal-LB IP `10.224.0.7`. */
+  target_ip?: string;
+  /** Optional path component of the probe URL. Defaults to `/openapi.json`. */
+  target_path?: string;
+}
+
+export interface VnetPeeringDirection {
+  direction: string;
+  name: string;
+  state: string;
+}
+
+export interface VnetPeeringProbe {
+  target_ip: string;
+  target_path: string;
+  url: string;
+  reachable: boolean;
+  status_code: number | null;
+  latency_ms: number;
+  message: string;
+}
+
+export interface VnetPeeringResponse {
+  target_subscription_id?: string;
+  target_resource_group?: string;
+  target_vnet_name?: string;
+  target_vnet?: string;
+  aks_vnet?: string;
+  node_resource_group?: string;
+  peerings?: VnetPeeringDirection[];
+  probe?: VnetPeeringProbe;
+  recovery_command?: string;
+  /** Helper-level partial-failure or skip explanation. */
+  error?: string;
+  skipped?: boolean;
+  reason?: string;
+}
+
 function querystring(params: Record<string, string>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) usp.set(k, v);
@@ -130,4 +178,10 @@ export const settingsApi = {
       "/settings/aks-observability/disable",
       body,
     ),
+
+  /** Peer a target VNet with the AKS auto-VNet and probe the elb-openapi
+   *  private IP from the dashboard's api sidecar. Synchronous — the
+   *  backend returns the summary payload (peerings + probe) in one shot. */
+  peerVnet: (body: VnetPeeringRequest) =>
+    api.post<VnetPeeringResponse>("/settings/vnet-peering", body),
 };

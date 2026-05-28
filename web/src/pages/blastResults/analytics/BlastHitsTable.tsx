@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   ExternalLink,
   Download,
@@ -10,6 +10,7 @@ import {
 
 import type { BlastHit } from "@/api/endpoints";
 import { TaxonomyDetailModal } from "@/components/taxonomy/TaxonomyDetailModal";
+import { Tooltip } from "@/components/Tooltip";
 import {
   formatDecimal,
   formatEvalue,
@@ -23,6 +24,7 @@ import {
   parseLeadingTaxid,
   taxidLabel,
 } from "./helpers";
+import { ReviewBadgePopover } from "./ReviewBadgePopover";
 import {
   hitKey,
   type BlastAnalyticsState,
@@ -146,7 +148,24 @@ export function BlastHitsTable({
                   title={allSelected ? "Deselect all" : "Select all on this page"}
                 />
               </th>
-              <th style={{ textAlign: "left" }}>Review</th>
+              <th style={{ textAlign: "left" }}>
+                Review
+                <Tooltip
+                  width={340}
+                  content={
+                    <>
+                      <strong>Review classification</strong>
+                      <div style={{ marginTop: 6 }}>
+                        A per-HSP quality tier (Strong / Review / Low / Weak /
+                        Unknown) computed from <code>% identity</code>,{" "}
+                        <code>HSP cover</code>, and <code>E-value</code>. Hover
+                        the badge in any row for the exact thresholds and how
+                        that row matched them.
+                      </div>
+                    </>
+                  }
+                />
+              </th>
               <th style={{ textAlign: "left" }}>Accession</th>
               <th style={{ textAlign: "left" }}>Description</th>
               <th style={{ textAlign: "left" }}>Scientific Name</th>
@@ -156,6 +175,22 @@ export function BlastHitsTable({
                 align="right"
                 applied={applied}
                 onSort={handleHeaderSort}
+                hint={
+                  <>
+                    <strong>HSP query coverage</strong>
+                    <div style={{ marginTop: 6 }}>
+                      Percent of the query covered by{" "}
+                      <em>this single HSP</em> only — computed from{" "}
+                      <code>qstart / qend / qlen</code>.
+                    </div>
+                    <div className="tt-note">
+                      Not the same as NCBI Web BLAST's{" "}
+                      <em>Query Cover</em> column, which is the union of all
+                      HSPs per subject. Use the Alignments tab for the
+                      per-subject view.
+                    </div>
+                  </>
+                }
               />
               <SortableHeader
                 column="pident"
@@ -163,6 +198,17 @@ export function BlastHitsTable({
                 align="right"
                 applied={applied}
                 onSort={handleHeaderSort}
+                hint={
+                  <>
+                    <strong>Percent identity</strong>
+                    <div style={{ marginTop: 6 }}>
+                      Fraction of identical residues across the aligned HSP.
+                    </div>
+                    <div className="tt-note">
+                      Cell color: green when ≥ 90, amber when ≥ 70, red below 70.
+                    </div>
+                  </>
+                }
               />
               <SortableHeader
                 column="length"
@@ -177,6 +223,19 @@ export function BlastHitsTable({
                 align="right"
                 applied={applied}
                 onSort={handleHeaderSort}
+                hint={
+                  <>
+                    <strong>Expect value</strong>
+                    <div style={{ marginTop: 6 }}>
+                      Expected number of chance hits with this score against a
+                      database of this size. Smaller means stronger.
+                    </div>
+                    <div className="tt-note">
+                      ≤ 1e-20 is essentially certain; ≤ 1e-5 is the usual
+                      significance cutoff.
+                    </div>
+                  </>
+                }
               />
               <SortableHeader
                 column="bitscore"
@@ -184,7 +243,21 @@ export function BlastHitsTable({
                 align="right"
                 applied={applied}
                 onSort={handleHeaderSort}
-                title="Max bit score on this HSP / total bit score summed across every HSP for this subject on the visible page"
+                hint={
+                  <>
+                    <strong>Max / Total bit score</strong>
+                    <div style={{ marginTop: 6 }}>
+                      <code>Max</code> is the bit score of this single HSP.{" "}
+                      <code>Total</code> is the sum of bit scores across every
+                      HSP that aligns this subject to this query in the filtered
+                      result set.
+                    </div>
+                    <div className="tt-note">
+                      Max and Total are equal when there is only one HSP per
+                      subject.
+                    </div>
+                  </>
+                }
               />
               <th style={{ textAlign: "right" }}>Query Range</th>
             </tr>
@@ -212,7 +285,7 @@ export function BlastHitsTable({
                     />
                   </td>
                   <td>
-                    <ReviewBadge hit={hit} />
+                    <ReviewBadgePopover hit={hit} />
                   </td>
                   <td
                     style={{
@@ -509,6 +582,13 @@ interface SortableHeaderProps {
   applied: { sortBy: HitSortBy; sortDir: "asc" | "desc" };
   onSort: (column: HitSortBy) => void;
   title?: string;
+  /**
+   * Optional rich tooltip rendered next to the column label. Use this
+   * to explain non-obvious BLAST terminology (HSP cover vs query
+   * cover, E-value scale, etc.). The (?) icon does not steal sort
+   * clicks because it is its own `<button>`.
+   */
+  hint?: ReactNode;
 }
 
 /**
@@ -526,6 +606,7 @@ function SortableHeader({
   applied,
   onSort,
   title,
+  hint,
 }: SortableHeaderProps) {
   const active = applied.sortBy === column;
   const Icon = active && applied.sortDir === "asc" ? ChevronUp : ChevronDown;
@@ -578,43 +659,15 @@ function SortableHeader({
             transition: "opacity 150ms ease-out",
           }}
         />
+        {hint && (
+          <span
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <Tooltip content={hint} width={340} />
+          </span>
+        )}
       </span>
     </th>
-  );
-}
-
-function ReviewBadge({ hit }: { hit: BlastHit }) {
-  const status = hit.review_status ?? "unclassified";
-  const labelByStatus: Record<NonNullable<BlastHit["review_status"]>, string> = {
-    strong_match: "Strong",
-    review_priority: "Review",
-    low_confidence: "Low",
-    weak_hit: "Weak",
-    unclassified: "Unknown",
-  };
-  const colorByStatus: Record<NonNullable<BlastHit["review_status"]>, string> = {
-    strong_match: "var(--success)",
-    review_priority: "var(--warning)",
-    low_confidence: "var(--accent)",
-    weak_hit: "var(--text-muted)",
-    unclassified: "var(--text-muted)",
-  };
-  return (
-    <span
-      title={hit.review_reason}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        border: `1px solid ${colorByStatus[status]}`,
-        borderRadius: 999,
-        color: colorByStatus[status],
-        fontSize: 11,
-        fontWeight: 600,
-        padding: "2px 7px",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {labelByStatus[status]}
-    </span>
   );
 }

@@ -118,6 +118,10 @@ def warmup_start(
         subscription_id=body.get("subscription_id", ""),
         resource_group=body.get("resource_group", ""),
         storage_account=body.get("storage_account", ""),
+        # The Storage account may live in a different RG than the AKS cluster;
+        # forwarding the explicit value avoids the historical silent fall-back
+        # to the cluster RG that broke RBAC ensure in `warmup_database`.
+        storage_resource_group=body.get("storage_resource_group", ""),
         database_name=database_name,
         cluster_name=body.get("aks_cluster_name") or body.get("cluster_name", ""),
         machine_type=body.get("machine_type", ""),

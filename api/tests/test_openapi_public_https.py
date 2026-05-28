@@ -97,20 +97,19 @@ def test_dns_label_patch_uses_azure_annotation() -> None:
     )
 
 
-# --------------------------------------------------------------------- systempool patch
+# --------------------------------------------------------------------- workload-pool patch
 # Anchors:
-#   - api/services/k8s/ingress.py::patch_manifest_for_system_pool
-#   - api/services/k8s/ingress.py::fetch_install_manifest_for_system_pool
-# Regression for the 2026-05-27 incident: cert-manager + ingress-nginx
-# install manifests from upstream ship with no tolerations, so on AKS
-# clusters whose nodes carry `CriticalAddonsOnly=true:NoSchedule`
-# (systempool) or `workload=blast:NoSchedule` (blastpool) every pod
-# lands in Pending forever ("0/3 nodes are available: 3 node(s) had
-# untolerated taint(s)") and the public-https pipeline trips on
-# `_wait_for_cert_manager_webhook`. The patch helper rewrites the
-# manifest so every Deployment / DaemonSet / Job lands on the systempool
-# only — we deliberately do **not** tolerate `workload=blast` because
-# control-plane add-ons must not consume CPU on the BLAST workload pool.
+#   - api/services/k8s/ingress.py::patch_manifest_for_workload_pool
+#   - api/services/k8s/ingress.py::fetch_install_manifest_for_workload_pool
+# Regression for the 2026-05-28 incident: the previous systempool-only patch
+# left ingress-nginx Pending on default DS2_v2 (2 vCPU) systempools whose
+# allocatable was 99% requested by AKS system add-ons. The patch now moves
+# ingress-nginx + cert-manager onto the BLAST workload pool, which is large
+# (D4s+) and has CPU headroom. The toleration switches from
+# `CriticalAddonsOnly:Exists` to `workload=blast:NoSchedule` and the
+# nodeSelector switches from `mode=system` to `mode=user`. Backward-compat
+# import names (`patch_manifest_for_system_pool`, `SYSTEM_POOL_*`) still
+# work — they now alias to the workload-pool variant.
 
 
 def _safe_load_all(text: str) -> list[Any]:
@@ -153,17 +152,19 @@ def test_patch_manifest_for_system_pool_injects_toleration_and_node_selector() -
         pod_spec = doc["spec"]["template"]["spec"]
         tolerations = pod_spec["tolerations"]
         assert any(
-            t.get("key") == "CriticalAddonsOnly"
-            and t.get("operator") == "Exists"
+            t.get("key") == "workload"
+            and t.get("operator") == "Equal"
+            and t.get("value") == "blast"
             and t.get("effect") == "NoSchedule"
             for t in tolerations
-        ), f"missing systempool toleration on {doc['kind']}"
-        # We deliberately do NOT tolerate `workload=blast` — control-plane
-        # add-ons must not consume CPU on the BLAST workload pool.
-        assert not any(t.get("key") == "workload" for t in tolerations), (
-            f"{doc['kind']} must not tolerate workload=blast"
-        )
-        assert pod_spec["nodeSelector"]["kubernetes.azure.com/mode"] == "system"
+        ), f"missing workload=blast toleration on {doc['kind']}"
+        # systempool toleration must NOT be injected — the policy moved to
+        # the blastpool (user-mode pool), so `CriticalAddonsOnly` would
+        # incorrectly admit the pod onto the starved systempool.
+        assert not any(
+            t.get("key") == "CriticalAddonsOnly" for t in tolerations
+        ), f"{doc['kind']} must not tolerate CriticalAddonsOnly anymore"
+        assert pod_spec["nodeSelector"]["kubernetes.azure.com/mode"] == "user"
 
 
 def test_patch_manifest_for_system_pool_preserves_existing_settings() -> None:
@@ -196,13 +197,13 @@ def test_patch_manifest_for_system_pool_preserves_existing_settings() -> None:
     patched = _safe_load_all(patch_manifest_for_system_pool(raw))[0]
     pod_spec = patched["spec"]["template"]["spec"]
     keys = [t.get("key") for t in pod_spec["tolerations"]]
-    # Existing operator-managed toleration is preserved AND the systempool
+    # Existing operator-managed toleration is preserved AND the workload-pool
     # toleration is appended (rather than the list being replaced).
     assert "node-role.kubernetes.io/control-plane" in keys
-    assert "CriticalAddonsOnly" in keys
+    assert "workload" in keys
     # Existing nodeSelector keys must survive the patch.
     assert pod_spec["nodeSelector"]["kubernetes.io/os"] == "linux"
-    assert pod_spec["nodeSelector"]["kubernetes.azure.com/mode"] == "system"
+    assert pod_spec["nodeSelector"]["kubernetes.azure.com/mode"] == "user"
 
 
 def test_patch_manifest_for_system_pool_is_idempotent() -> None:
@@ -224,12 +225,12 @@ def test_patch_manifest_for_system_pool_is_idempotent() -> None:
     once_pod = _safe_load_all(once)[0]["spec"]["template"]["spec"]
     twice_pod = _safe_load_all(twice)[0]["spec"]["template"]["spec"]
     # Re-running the transform on already-patched YAML must not duplicate
-    # the systempool toleration (regression guard for "every retry of
+    # the workload-pool toleration (regression guard for "every retry of
     # setup_openapi_public_https doubles the toleration list").
-    crit_count = sum(
-        1 for t in twice_pod["tolerations"] if t.get("key") == "CriticalAddonsOnly"
+    workload_count = sum(
+        1 for t in twice_pod["tolerations"] if t.get("key") == "workload"
     )
-    assert crit_count == 1
+    assert workload_count == 1
     assert once_pod["nodeSelector"] == twice_pod["nodeSelector"]
 
 
@@ -507,6 +508,7 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
         subscription_id="sub-1",
         resource_group="rg-elb",
         cluster_name="elb-cluster",
+        operator_email="ops@example.com",
     )
 
     assert result["status"] == "succeeded"
@@ -724,6 +726,7 @@ def test_setup_public_https_propagates_kubectl_failure(monkeypatch) -> None:
         subscription_id="sub-1",
         resource_group="rg-elb",
         cluster_name="elb-cluster",
+        operator_email="ops@example.com",
     )
 
     assert result["status"] == "failed"
@@ -731,16 +734,56 @@ def test_setup_public_https_propagates_kubectl_failure(monkeypatch) -> None:
 
 
 def test_operator_email_resolution(monkeypatch) -> None:
+    import pytest as _pytest
     from api.tasks.openapi import public_https as task_module
 
     monkeypatch.delenv("ELB_OPERATOR_EMAIL", raising=False)
-    assert task_module._resolve_operator_email("") == "noreply@elb-dashboard.local"
+    # No caller value and no env override \u2192 the task must refuse to run.
+    # Let's Encrypt rejects ACME account registration on the previous
+    # `noreply@elb-dashboard.local` fallback with
+    # `urn:ietf:params:acme:error:invalidContact`, and the SPA already
+    # blocks empty values via the Enable button gate \u2014 a stale call
+    # path must surface the misconfiguration loudly instead of silently
+    # bricking the public-https pipeline.
+    with _pytest.raises(ValueError):
+        task_module._resolve_operator_email("")
     assert task_module._resolve_operator_email("user@example.com") == "user@example.com"
 
     monkeypatch.setenv("ELB_OPERATOR_EMAIL", "env@example.com")
     assert task_module._resolve_operator_email("") == "env@example.com"
     # Explicit body value still wins over env
     assert task_module._resolve_operator_email("override@example.com") == "override@example.com"
+
+
+def test_route_validate_operator_email_blocks_private_tlds() -> None:
+    """Public-https enable route must reject `.local` / empty emails up
+    front so a stale browser tab can never re-introduce the
+    `noreply@elb-dashboard.local` regression (Let's Encrypt rejects ACME
+    registration on private-use TLDs with `invalidContact`).
+    """
+    import pytest as _pytest
+    from api.routes.aks.openapi import _validate_operator_email
+    from fastapi import HTTPException
+
+    with _pytest.raises(HTTPException) as exc_info:
+        _validate_operator_email("")
+    assert exc_info.value.status_code == 400
+
+    for bad in (
+        "noreply@elb-dashboard.local",
+        "ops@elb.internal",
+        "x@localhost",
+        "ops@example",  # no TLD
+        "not-an-email",
+    ):
+        with _pytest.raises(HTTPException) as exc_info:
+            _validate_operator_email(bad)
+        assert exc_info.value.status_code == 400, bad
+
+    assert _validate_operator_email("ops@example.com") == "ops@example.com"
+    assert _validate_operator_email("  user.name+tag@sub.example.co.kr  ") == (
+        "user.name+tag@sub.example.co.kr"
+    )
 
 
 def test_email_masking_does_not_leak_local_part() -> None:

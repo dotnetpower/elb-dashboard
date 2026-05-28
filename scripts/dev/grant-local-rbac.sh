@@ -47,6 +47,10 @@
 
 set -Eeuo pipefail
 
+# Documentation example fallback (matches docs/auth.md). Real values come
+# from `azd env get-values` whenever the caller does not pass explicit flags,
+# so a fresh `azd up` deployment with auto-suffixed names (stelbdashboard…,
+# acrelbdashboard…, rg-elb-dashboard) Just Works.
 STORAGE_DEFAULT="elbstg01"
 STORAGE_RG_DEFAULT="rg-elb-01"
 ACR_DEFAULT="elbacr01"
@@ -63,10 +67,10 @@ usage() {
   exit "${1:-1}"
 }
 
-STORAGE="$STORAGE_DEFAULT"
-STORAGE_RG="$STORAGE_RG_DEFAULT"
-ACR="$ACR_DEFAULT"
-ACR_RG="$ACR_RG_DEFAULT"
+STORAGE=""
+STORAGE_RG=""
+ACR=""
+ACR_RG=""
 SUBSCRIPTION=""
 USER_ID=""
 DRY_RUN=0
@@ -93,6 +97,52 @@ if [[ -z "$SUBSCRIPTION" ]]; then
   [[ -n "$SUBSCRIPTION" ]] || die "no subscription set; run 'az login' or pass --subscription"
 fi
 SUB_FLAG=(--subscription "$SUBSCRIPTION")
+
+# Auto-fill any unset names from `azd env get-values` (real deployment
+# values), then fall back to the docs example defaults. Mirrors the
+# resolution flow in local-debug-auth.sh.
+if command -v azd >/dev/null 2>&1; then
+  azd_values="$(azd env get-values 2>/dev/null || true)"
+  if [[ -n "$azd_values" ]]; then
+    azd_kv() {
+      awk -F= -v key="$1" '$1==key {gsub(/"/,"",$2); print $2; exit}' <<<"$azd_values"
+    }
+    [[ -z "$STORAGE" ]]    && STORAGE="$(azd_kv STORAGE_ACCOUNT_NAME)"
+    [[ -z "$STORAGE_RG" ]] && STORAGE_RG="$(azd_kv AZURE_RESOURCE_GROUP)"
+    [[ -z "$ACR" ]]        && ACR="$(azd_kv ACR_NAME)"
+    [[ -z "$ACR_RG" ]]     && ACR_RG="$STORAGE_RG"
+  fi
+fi
+[[ -z "$STORAGE" ]]    && STORAGE="$STORAGE_DEFAULT"
+[[ -z "$STORAGE_RG" ]] && STORAGE_RG="$STORAGE_RG_DEFAULT"
+[[ -z "$ACR" ]]        && ACR="$ACR_DEFAULT"
+[[ -z "$ACR_RG" ]]     && ACR_RG="$ACR_RG_DEFAULT"
+
+# Final fallback: if the chosen storage name does not exist, try to find
+# exactly one stelbdashboard* account in the subscription and use it.
+if ! az storage account show "${SUB_FLAG[@]}" -g "$STORAGE_RG" -n "$STORAGE" -o none 2>/dev/null; then
+  matches="$(az storage account list "${SUB_FLAG[@]}" \
+      --query "[?starts_with(name,'stelbdashboard')].{name:name,rg:resourceGroup}" -o tsv 2>/dev/null || true)"
+  count="$(printf '%s\n' "$matches" | grep -c . || true)"
+  if [[ "$count" == "1" ]]; then
+    STORAGE="$(awk '{print $1}' <<<"$matches")"
+    STORAGE_RG="$(awk '{print $2}' <<<"$matches")"
+    yellow "auto-resolved storage: $STORAGE (rg: $STORAGE_RG)"
+  fi
+fi
+
+# Same fallback for ACR — pick the single acrelbdashboard* registry if the
+# named one is missing (azd env may be out of date after a redeploy).
+if ! az acr show "${SUB_FLAG[@]}" -g "$ACR_RG" -n "$ACR" -o none 2>/dev/null; then
+  acr_matches="$(az acr list "${SUB_FLAG[@]}" \
+      --query "[?starts_with(name,'acrelbdashboard')].{name:name,rg:resourceGroup}" -o tsv 2>/dev/null || true)"
+  acr_count="$(printf '%s\n' "$acr_matches" | grep -c . || true)"
+  if [[ "$acr_count" == "1" ]]; then
+    ACR="$(awk '{print $1}' <<<"$acr_matches")"
+    ACR_RG="$(awk '{print $2}' <<<"$acr_matches")"
+    yellow "auto-resolved acr: $ACR (rg: $ACR_RG)"
+  fi
+fi
 
 # Resolve principal we are granting to.
 if [[ -z "$USER_ID" ]]; then

@@ -426,6 +426,14 @@ def reconcile_auto_warmup_preferences(
                         "subscription_id": pref.subscription_id,
                         "resource_group": pref.resource_group,
                         "storage_account": pref.storage_account,
+                        # The storage account may live in a different RG
+                        # than the AKS cluster. Forwarding the preference's
+                        # storage_resource_group is required so the warmup
+                        # task's RBAC ensure (ARM lookup) targets the right
+                        # RG. Omitting it falls back to the cluster RG and
+                        # produces a ResourceNotFound that silently skips
+                        # the role assignment.
+                        "storage_resource_group": pref.storage_resource_group,
                         "database_name": db_name,
                         "cluster_name": pref.cluster_name,
                         "machine_type": machine_type,

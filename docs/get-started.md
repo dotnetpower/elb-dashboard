@@ -389,6 +389,19 @@ Each step below expands to show *what it does*, *what you should see*, and *comm
     <!-- TODO: screenshot — final "Deployment complete:" line + cluster-RG bootstrap summary. -->
     <!-- Save as: docs/images/screenshots/deploy-post-complete.png -->
 
+## Update An Existing Deployment
+
+`./deploy.sh` is for the first deployment and for changes that touch infrastructure (Bicep under `infra/`, sidecar layout, secrets, or environment variables). For code-only changes in `api/`, `web/`, or `terminal/`, the fast cycle is `git pull` + the bundled quick-deploy helper:
+
+```bash
+git pull
+./scripts/dev/quick-deploy.sh all
+```
+
+`quick-deploy.sh all` rebuilds the `api`, `frontend`, and `terminal` images via [`az acr build`](https://learn.microsoft.com/cli/azure/acr#az-acr-build) and patches the existing Container App revision in place (the `worker` and `beat` sidecars share the `api` image and are repointed to the new tag in the same ARM transaction). It does not touch the sidecar layout, secrets, probes, or scale rules — those still require `./deploy.sh` (or `scripts/dev/postprovision.sh`).
+
+The helper reads `AZURE_RESOURCE_GROUP`, `ACR_NAME`, `ACR_LOGIN_SERVER`, and `CONTAINER_APP_NAME` from the active [azd environment](https://learn.microsoft.com/azure/developer/azure-developer-cli/environment-management) via `azd env get-values`, so no manual `export` is needed in the same clone. To rebuild only one sidecar — for example after a frontend-only fix — replace `all` with `api`, `frontend`, `terminal`, `worker`, or `beat`. Append `--logs` to tail the new revision's logs after the patch lands.
+
 ## Open The Dashboard
 
 When deployment finishes, open the URL printed by the helper:

@@ -83,24 +83,20 @@ def start_aks(
         except Exception as exc:
             LOGGER.warning("auto warm reconcile enqueue failed after AKS start: %s", exc)
     openapi_task_id = ""
-    if auto_openapi:
-        try:
-            from api.celery_app import celery_app
+    try:
+        from api.tasks.openapi.auto_deploy import (
+            enqueue_openapi_deploy_after_aks_event,
+        )
 
-            openapi_payload = {
-                **auto_openapi,
-                "subscription_id": subscription_id,
-                "resource_group": resource_group,
-                "cluster_name": cluster_name,
-            }
-            task = celery_app.send_task(
-                "api.tasks.openapi.deploy_openapi_service",
-                kwargs=openapi_payload,
-                queue="azure",
-            )
-            openapi_task_id = task.id
-        except Exception as exc:
-            LOGGER.warning("openapi deploy enqueue failed after AKS start: %s", exc)
+        openapi_task_id = enqueue_openapi_deploy_after_aks_event(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            overrides=auto_openapi if isinstance(auto_openapi, dict) else None,
+            trigger="aks_start",
+        )
+    except Exception as exc:
+        LOGGER.warning("openapi deploy enqueue failed after AKS start: %s", exc)
     return {
         "cluster_name": cluster_name,
         "action": "start",

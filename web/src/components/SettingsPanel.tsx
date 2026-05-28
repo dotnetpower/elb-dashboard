@@ -26,8 +26,22 @@ import {
 
 import { formatApiError } from "@/api/client";
 import { aksApi, type OpenApiPublicHttpsStatus } from "@/api/aks";
+import { meApi } from "@/api/me";
+import { msalInstance } from "@/auth/msal";
+import {
+  listResourceGroups,
+  listSubscriptions,
+  listVnets,
+  type ResourceGroupSummary,
+  type SubscriptionSummary,
+  type VirtualNetworkSummary,
+} from "@/api/arm";
 import { type AksClusterSummary, monitoringApi } from "@/api/monitoring";
-import { settingsApi, type AppInsightsProvisionRequest } from "@/api/settings";
+import {
+  settingsApi,
+  type AppInsightsProvisionRequest,
+  type VnetPeeringResponse,
+} from "@/api/settings";
 import { tasksApi, type TaskStatusResponse } from "@/api/tasks";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { clearConfig, loadSavedConfig, type ResourceConfig } from "@/components/SetupWizard";
@@ -44,6 +58,7 @@ type SectionId =
   | "telemetry"
   | "aks"
   | "public-https"
+  | "vnet-peering"
   | "sizing"
   | "resources";
 type TaskState = {
@@ -109,6 +124,7 @@ const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> =
   { id: "telemetry", label: "Telemetry", icon: <Activity size={14} strokeWidth={1.5} /> },
   { id: "aks", label: "AKS Observability", icon: <Monitor size={14} strokeWidth={1.5} /> },
   { id: "public-https", label: "Public HTTPS", icon: <Globe size={14} strokeWidth={1.5} /> },
+  { id: "vnet-peering", label: "VNet peering", icon: <Globe size={14} strokeWidth={1.5} /> },
   { id: "sizing", label: "Sizing", icon: <Gauge size={14} strokeWidth={1.5} /> },
   { id: "resources", label: "Resources", icon: <SettingsIcon size={14} strokeWidth={1.5} /> },
 ];
@@ -268,6 +284,7 @@ export function SettingsPanel({ open, onClose }: Props) {
             {active === "telemetry" && <TelemetrySection config={config} />}
             {active === "aks" && <AksSection config={config} />}
             {active === "public-https" && <PublicHttpsSection config={config} />}
+            {active === "vnet-peering" && <VnetPeeringSection config={config} />}
             {active === "sizing" && <SizingSection />}
             {active === "resources" && <ResourcesSection config={config} />}
           </main>
@@ -1217,6 +1234,41 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
   );
 }
 
+// Let's Encrypt rejects ACME account registration when the contact
+// email's domain has no public TLD (`urn:ietf:params:acme:error:invalidContact`).
+// `.local` / `.localhost` / `.internal` / `.test` / `.example` / `.invalid`
+// are the IANA reserved private-use TLDs that trip it most often in our
+// deployments (the old `_FALLBACK_OPERATOR_EMAIL = noreply@elb-dashboard.local`
+// hit exactly this on elb-cluster-01 on 2026-05-27).
+const PRIVATE_USE_TLDS = new Set([
+  "local",
+  "localhost",
+  "internal",
+  "test",
+  "example",
+  "invalid",
+  "lan",
+  "home",
+  "corp",
+  "private",
+]);
+
+function isPublicLetsEncryptEmail(value: string): boolean {
+  const text = (value ?? "").trim();
+  if (!text || text.length > 254) return false;
+  const at = text.indexOf("@");
+  if (at <= 0 || at !== text.lastIndexOf("@")) return false;
+  const local = text.slice(0, at);
+  const domain = text.slice(at + 1).toLowerCase();
+  if (!local || !domain || domain.includes("..") || domain.endsWith(".")) return false;
+  const labels = domain.split(".");
+  if (labels.length < 2 || labels.some((label) => !label)) return false;
+  const tld = labels[labels.length - 1];
+  if (!/^[a-z]{2,}$/.test(tld)) return false;
+  if (PRIVATE_USE_TLDS.has(tld)) return false;
+  return /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$/.test(text);
+}
+
 /**
  * Public HTTPS endpoint settings — drives `setup_openapi_public_https`
  * / `disable_openapi_public_https`. Installs ingress-nginx + cert-manager
@@ -1233,10 +1285,42 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
   const [status, setStatus] = useState<OpenApiPublicHttpsStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [email, setEmail] = useState("");
+  const [emailEdited, setEmailEdited] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [taskRunning, setTaskRunning] = useState(false);
   const [taskPhase, setTaskPhase] = useState<string>("");
   const pollTimer = useRef<number | null>(null);
+
+  // Auto-fill the operator email from the validated caller identity
+  // (`/api/me`'s `upn`) with MSAL `account.username` as a fallback.
+  // Let's Encrypt rejects `.local` / `.localhost` / `.internal` TLDs at
+  // ACME account registration time with `urn:ietf:params:acme:error:invalidContact`,
+  // so the Enable button is gated on a public TLD even when the field
+  // is auto-populated.
+  useEffect(() => {
+    if (emailEdited) return;
+    let cancelled = false;
+    void (async () => {
+      let candidate = "";
+      try {
+        const me = await meApi.get();
+        candidate = (me.upn ?? "").trim();
+      } catch {
+        candidate = "";
+      }
+      if (!candidate) {
+        const account = msalInstance.getActiveAccount();
+        candidate = (account?.username ?? "").trim();
+      }
+      if (cancelled || !candidate || !isPublicLetsEncryptEmail(candidate)) {
+        return;
+      }
+      setEmail((current) => (current ? current : candidate));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [emailEdited]);
 
   useEffect(
     () => () => {
@@ -1254,7 +1338,9 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
     "";
 
   const subscriptionId = config?.subscriptionId ?? "";
+  const emailValid = isPublicLetsEncryptEmail(email);
   const canAct = Boolean(subscriptionId && selectedClusterRg && clusterName);
+  const canEnable = canAct && emailValid;
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -1356,7 +1442,7 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
   );
 
   const enable = async () => {
-    if (!canAct) return;
+    if (!canEnable) return;
     setError(null);
     setTaskRunning(true);
     setTaskPhase("queued");
@@ -1436,15 +1522,23 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
         </Field>
         {!enabled && (
           <Field
-            label="Operator email (optional)"
-            hint="Used by Let's Encrypt to send certificate-expiry notifications."
+            label="Operator email"
+            hint={
+              email && !emailValid
+                ? "Let's Encrypt rejects .local / .localhost / .internal — enter a public TLD email."
+                : "Auto-filled from your signed-in identity. Used by Let's Encrypt to send certificate-expiry notifications."
+            }
           >
             <input
               type="email"
               value={email}
-              onChange={(event) => setEmail(event.target.value)}
+              onChange={(event) => {
+                setEmailEdited(true);
+                setEmail(event.target.value);
+              }}
               placeholder="ops@example.com"
               style={INPUT_STYLE}
+              required
             />
           </Field>
         )}
@@ -1513,7 +1607,14 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
             <button
               className="glass-button glass-button--primary"
               onClick={enable}
-              disabled={!canAct || taskRunning}
+              disabled={!canEnable || taskRunning}
+              title={
+                !canAct
+                  ? "Select an AKS cluster first"
+                  : !emailValid
+                    ? "Enter a valid operator email with a public TLD (Let's Encrypt rejects .local / .internal)."
+                    : undefined
+              }
               style={{ fontSize: 12 }}
             >
               Enable
@@ -1536,6 +1637,404 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
               .filter(Boolean)
               .join(" · ")}
           </StatusLine>
+        )}
+        {error && <StatusLine kind="error">{error}</StatusLine>}
+      </Group>
+    </Section>
+  );
+}
+
+/**
+ * Peer a remote VNet with the AKS auto-VNet so VMs in that VNet can
+ * `curl http://<openapi-private-ip>/openapi.json`. The default target
+ * IP `10.224.0.7` matches the current elb-openapi internal-LoadBalancer
+ * assignment; operators can override per-cluster.
+ *
+ * The dashboard's MI must hold `Network Contributor` on the target
+ * resource group AND on the AKS auto-RG (MC_*) for both peering
+ * directions to land. On partial failure the backend returns the
+ * recovery command verbatim so the operator can paste it.
+ */
+function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
+  const [clusterName, setClusterName] = useState("");
+  const [availableClusters, setAvailableClusters] = useState<AksClusterSummary[]>([]);
+  const [clustersLoading, setClustersLoading] = useState(false);
+  const [clustersLoaded, setClustersLoaded] = useState(false);
+
+  const [targetSubscriptionId, setTargetSubscriptionId] = useState("");
+  const [subscriptions, setSubscriptions] = useState<SubscriptionSummary[]>([]);
+  const [subsLoading, setSubsLoading] = useState(false);
+  const [targetResourceGroup, setTargetResourceGroup] = useState("");
+  const [resourceGroups, setResourceGroups] = useState<ResourceGroupSummary[]>([]);
+  const [rgLoading, setRgLoading] = useState(false);
+  const [targetVnetName, setTargetVnetName] = useState("");
+  const [vnets, setVnets] = useState<VirtualNetworkSummary[]>([]);
+  const [vnetsLoading, setVnetsLoading] = useState(false);
+  const [targetIp, setTargetIp] = useState("10.224.0.7");
+  const [targetPath, setTargetPath] = useState("/openapi.json");
+
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<VnetPeeringResponse | null>(null);
+
+  const subscriptionId = config?.subscriptionId ?? "";
+  const selectedClusterRg =
+    availableClusters.find((c) => c.name === clusterName)?.resource_group ??
+    config?.workloadResourceGroup ??
+    "";
+
+  // Subscription dropdown — mirror the ARM hop the wizard uses so an
+  // operator can pick a *different* subscription as the peering target
+  // (the dashboard's MI must have Network Contributor on both sides).
+  useEffect(() => {
+    let cancelled = false;
+    setSubsLoading(true);
+    void (async () => {
+      try {
+        const subs = await listSubscriptions();
+        if (cancelled) return;
+        setSubscriptions(subs);
+        setTargetSubscriptionId((current) => {
+          if (current && subs.some((s) => s.subscriptionId === current)) return current;
+          return subscriptionId || subs[0]?.subscriptionId || "";
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setError(formatApiError(err, "arm"));
+      } finally {
+        if (!cancelled) setSubsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [subscriptionId]);
+
+  // Resource-group dropdown for the target subscription.
+  useEffect(() => {
+    if (!targetSubscriptionId) {
+      setResourceGroups([]);
+      return;
+    }
+    let cancelled = false;
+    setRgLoading(true);
+    void (async () => {
+      try {
+        const rgs = await listResourceGroups(targetSubscriptionId);
+        if (cancelled) return;
+        setResourceGroups(rgs);
+        setTargetResourceGroup((current) =>
+          current && rgs.some((r) => r.name === current) ? current : "",
+        );
+      } catch (err) {
+        if (cancelled) return;
+        setError(formatApiError(err, "arm"));
+        setResourceGroups([]);
+      } finally {
+        if (!cancelled) setRgLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [targetSubscriptionId]);
+
+  // VNets in the selected RG.
+  useEffect(() => {
+    if (!targetSubscriptionId || !targetResourceGroup) {
+      setVnets([]);
+      return;
+    }
+    let cancelled = false;
+    setVnetsLoading(true);
+    void (async () => {
+      try {
+        const items = await listVnets(targetSubscriptionId, targetResourceGroup);
+        if (cancelled) return;
+        setVnets(items);
+        setTargetVnetName((current) =>
+          current && items.some((v) => v.name === current) ? current : items[0]?.name ?? "",
+        );
+      } catch (err) {
+        if (cancelled) return;
+        setError(formatApiError(err, "arm"));
+        setVnets([]);
+      } finally {
+        if (!cancelled) setVnetsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [targetSubscriptionId, targetResourceGroup]);
+
+  // AKS cluster discovery — same shape as PublicHttpsSection so an
+  // ElasticBLAST workload cluster outside the anchor RG still shows up.
+  useEffect(() => {
+    if (!subscriptionId) return;
+    let cancelled = false;
+    setClustersLoading(true);
+    void (async () => {
+      try {
+        const response = await monitoringApi.aks(subscriptionId);
+        if (cancelled) return;
+        const clusters = (response.clusters ?? []).filter((c) => c.name);
+        setAvailableClusters(clusters);
+        setClustersLoaded(true);
+        setClusterName((current) => {
+          if (current && clusters.some((c) => c.name === current)) return current;
+          const preferred = pickPreferredCluster(clusters, {
+            resourceGroup: config?.workloadResourceGroup,
+          });
+          return preferred?.name ?? current;
+        });
+      } catch {
+        if (cancelled) return;
+        setAvailableClusters([]);
+        setClustersLoaded(true);
+      } finally {
+        if (!cancelled) setClustersLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [subscriptionId, config?.workloadResourceGroup]);
+
+  const canSubmit = Boolean(
+    subscriptionId &&
+      selectedClusterRg &&
+      clusterName &&
+      targetSubscriptionId &&
+      targetResourceGroup &&
+      targetVnetName &&
+      targetIp,
+  );
+
+  const peer = async () => {
+    if (!canSubmit) return;
+    setError(null);
+    setResult(null);
+    setRunning(true);
+    try {
+      const response = await settingsApi.peerVnet({
+        subscription_id: subscriptionId,
+        resource_group: selectedClusterRg,
+        cluster_name: clusterName,
+        target_subscription_id: targetSubscriptionId,
+        target_resource_group: targetResourceGroup,
+        target_vnet_name: targetVnetName,
+        target_ip: targetIp || undefined,
+        target_path: targetPath || undefined,
+      });
+      setResult(response);
+    } catch (err) {
+      setError(formatApiError(err, "settings"));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const probe = result?.probe;
+  const peerings = result?.peerings ?? [];
+  const probeTone: "success" | "muted" | "warning" = probe
+    ? probe.reachable
+      ? "success"
+      : "warning"
+    : "muted";
+
+  return (
+    <Section heading="VNet peering (OpenAPI access)">
+      <Group>
+        <StatusLine kind="info">
+          Peer a remote VNet with this cluster&apos;s AKS auto-VNet so VMs in
+          that VNet can reach the elb-openapi private IP (default
+          <code> 10.224.0.7</code>). Bidirectional peering is created
+          idempotently; the dashboard&apos;s managed identity needs
+          <code> Network Contributor</code> on both sides.
+        </StatusLine>
+        <Field
+          label="AKS cluster"
+          hint={
+            clustersLoading
+              ? "Discovering AKS clusters in this subscription..."
+              : availableClusters.length === 0 && clustersLoaded
+                ? "No ELB-managed AKS clusters were found in this subscription."
+                : "The cluster whose auto-VNet hosts elb-openapi."
+          }
+        >
+          {availableClusters.length > 1 ? (
+            <select
+              value={clusterName}
+              onChange={(event) => setClusterName(event.target.value)}
+              style={INPUT_STYLE}
+            >
+              {availableClusters.map((c) => (
+                <option key={`${c.resource_group}/${c.name}`} value={c.name}>
+                  {c.name} ({c.power_state ?? "?"})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={clusterName}
+              onChange={(event) => setClusterName(event.target.value)}
+              placeholder={
+                clustersLoaded && availableClusters.length === 0
+                  ? "No AKS cluster detected"
+                  : "aks-..."
+              }
+              style={INPUT_STYLE}
+            />
+          )}
+        </Field>
+        <Field
+          label="Target subscription"
+          hint={subsLoading ? "Loading..." : "Subscription that owns the remote VNet."}
+        >
+          <select
+            value={targetSubscriptionId}
+            onChange={(event) => setTargetSubscriptionId(event.target.value)}
+            style={INPUT_STYLE}
+          >
+            <option value="">Select subscription…</option>
+            {subscriptions.map((s) => (
+              <option key={s.subscriptionId} value={s.subscriptionId}>
+                {s.displayName} ({s.subscriptionId.slice(0, 8)}…)
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field
+          label="Target resource group"
+          hint={rgLoading ? "Loading resource groups..." : "Resource group that holds the target VNet."}
+        >
+          <select
+            value={targetResourceGroup}
+            onChange={(event) => setTargetResourceGroup(event.target.value)}
+            disabled={!targetSubscriptionId || rgLoading}
+            style={INPUT_STYLE}
+          >
+            <option value="">Select resource group…</option>
+            {resourceGroups.map((rg) => (
+              <option key={rg.name} value={rg.name}>
+                {rg.name} ({rg.location})
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field
+          label="Target VNet"
+          hint={
+            vnetsLoading
+              ? "Loading virtual networks..."
+              : vnets.length === 0 && targetResourceGroup
+                ? "No virtual networks in this resource group."
+                : "The VNet whose VMs need to reach the OpenAPI private IP."
+          }
+        >
+          <select
+            value={targetVnetName}
+            onChange={(event) => setTargetVnetName(event.target.value)}
+            disabled={!targetResourceGroup || vnetsLoading}
+            style={INPUT_STYLE}
+          >
+            <option value="">Select VNet…</option>
+            {vnets.map((v) => (
+              <option key={v.name} value={v.name}>
+                {v.name} [{v.addressPrefixes.join(", ") || "?"}]
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field
+          label="OpenAPI private IP"
+          hint="Internal-LB IP exposed by the elb-openapi Service inside the AKS auto-VNet."
+        >
+          <input
+            value={targetIp}
+            onChange={(event) => setTargetIp(event.target.value)}
+            placeholder="10.224.0.7"
+            style={INPUT_STYLE}
+          />
+        </Field>
+        <Field label="Probe path" hint="Path appended to the IP for the post-peering reachability check.">
+          <input
+            value={targetPath}
+            onChange={(event) => setTargetPath(event.target.value)}
+            placeholder="/openapi.json"
+            style={INPUT_STYLE}
+          />
+        </Field>
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            flexWrap: "wrap",
+            paddingBottom: 14,
+          }}
+        >
+          <button
+            className="glass-button glass-button--primary"
+            onClick={peer}
+            disabled={!canSubmit || running}
+            style={{ fontSize: 12 }}
+          >
+            {running ? "Peering..." : "Peer & probe"}
+          </button>
+          {running && (
+            <span
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+            >
+              <Loader2 size={12} className="spin" /> creating peerings + probing
+            </span>
+          )}
+        </div>
+        {result && (
+          <>
+            <Row
+              label="Probe"
+              control={
+                <Badge tone={probeTone}>
+                  {probe
+                    ? probe.reachable
+                      ? `${probe.status_code ?? 200} OK · ${probe.latency_ms}ms`
+                      : `Unreachable${probe.status_code ? ` (${probe.status_code})` : ""}`
+                    : "n/a"}
+                </Badge>
+              }
+              hint={probe?.url}
+            />
+            {peerings.length > 0 && (
+              <StatusLine kind="info">
+                {peerings
+                  .map((p) => `${p.direction}: ${p.name} → ${p.state}`)
+                  .join(" · ")}
+              </StatusLine>
+            )}
+            {result.skipped && result.reason && (
+              <StatusLine kind="info">Skipped: {result.reason}</StatusLine>
+            )}
+            {result.error && (
+              <StatusLine kind="error">{result.error}</StatusLine>
+            )}
+            {probe && !probe.reachable && probe.message && (
+              <StatusLine kind="error">Probe error: {probe.message}</StatusLine>
+            )}
+            {result.recovery_command && (
+              <StatusLine kind="info">
+                Recovery (paste in terminal):{" "}
+                <code>{result.recovery_command}</code>
+              </StatusLine>
+            )}
+          </>
         )}
         {error && <StatusLine kind="error">{error}</StatusLine>}
       </Group>

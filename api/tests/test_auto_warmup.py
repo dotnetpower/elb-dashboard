@@ -97,6 +97,10 @@ def test_reconcile_auto_warmup_enqueues_downloaded_db(
     assert calls[0]["kwargs"]["machine_type"] == "Standard_E16s_v5"
     assert calls[0]["kwargs"]["num_nodes"] == 10
     assert calls[0]["kwargs"]["require_all_warmup_nodes"] is True
+    # Regression: the Storage account's RG must be forwarded explicitly. The
+    # reconciler historically omitted this kwarg, which made warmup_database
+    # fall back to the AKS cluster RG and silently skip the RBAC ensure.
+    assert calls[0]["kwargs"]["storage_resource_group"] == "rg-elb"
 
 
 def test_reconcile_auto_warmup_seeds_job_state_before_enqueue(
@@ -646,6 +650,7 @@ def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
         resource_group="rg-elb",
         storage_account="elbstg01",
         database_name="core_nt",
+        storage_resource_group="rg-elb",
         cluster_name="elb-cluster",
         machine_type="Standard_E16s_v5",
         num_nodes=10,
@@ -661,6 +666,65 @@ def test_warmup_database_auto_strict_waits_for_requested_ready_nodes(
     assert build_calls == []
     assert any(update["phase"] == "waiting_for_warmup_nodes" for update in state_updates)
     assert any(progress["phase"] == "waiting_for_warmup_nodes" for progress in task_progress)
+
+
+def test_warmup_database_fails_fast_when_storage_resource_group_missing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """warmup_database must refuse to run without a Storage RG.
+
+    Regression guard for the silent ARM-404 path: when the caller forgets to
+    forward `storage_resource_group`, the task previously fell back to the
+    AKS cluster RG, looked the Storage account up there, got a benign
+    ResourceNotFound, swallowed the exception and proceeded with no RBAC
+    ensure. The downstream K8s warmup Job then failed per-node because the
+    AKS kubelet identity could not read the storage container.
+    """
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr("api.tasks.storage.get_credential", lambda: object())
+
+    state_updates: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.tasks.storage._update_state",
+        lambda job_id, phase, status="running", **extra: state_updates.append(
+            {"job_id": job_id, "phase": phase, "status": status, **extra}
+        ),
+    )
+    monkeypatch.setattr(
+        "api.tasks.storage._record_task_progress",
+        lambda task, phase, **meta: None,
+    )
+
+    # If validation is bypassed, this would be reached and raise — the test
+    # would still pass via the exception, but the assertion below pins the
+    # contract that validation runs *before* any storage access.
+    def _should_not_be_called(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("list_databases must not be called when validation fails")
+
+    monkeypatch.setattr("api.services.storage.data.list_databases", _should_not_be_called)
+
+    result = warmup_database.run(
+        job_id="auto-warmup-elb-cluster-core_nt-1",
+        subscription_id="sub-1",
+        resource_group="rg-elb-cluster",
+        storage_account="stelbdashboardxyz",
+        database_name="core_nt",
+        # storage_resource_group intentionally omitted ↓ — defaults to "".
+        cluster_name="elb-cluster",
+        machine_type="Standard_E16s_v5",
+        num_nodes=4,
+        acr_name="elbacr01",
+        require_all_warmup_nodes=True,
+    )
+
+    assert result["status"] == "failed"
+    assert "storage_resource_group" in result["error"]
+    assert any(
+        update["status"] == "failed" and "storage_resource_group" in update.get("error_code", "")
+        for update in state_updates
+    )
 
 
 def test_auto_warmup_file_store_handles_concurrent_saves(monkeypatch, tmp_path) -> None:

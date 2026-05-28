@@ -672,6 +672,70 @@ class OpenApiPublicHttpsRequest(BaseModel):
     operator_email: str = ""
 
 
+# IANA reserved + commonly-private TLDs that Let's Encrypt rejects at
+# ACME account registration time with
+# `urn:ietf:params:acme:error:invalidContact` ("Domain name does not end
+# with a valid public suffix (TLD)"). Mirrored in
+# `web/src/components/SettingsPanel.tsx::PRIVATE_USE_TLDS` so the SPA
+# disables the Enable button before the request even leaves the browser.
+_PRIVATE_USE_TLDS: frozenset[str] = frozenset(
+    {
+        "local",
+        "localhost",
+        "internal",
+        "test",
+        "example",
+        "invalid",
+        "lan",
+        "home",
+        "corp",
+        "private",
+    }
+)
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$")
+
+
+def _validate_operator_email(value: str) -> str:
+    """Reject empty / private-TLD emails before enqueuing the Celery task.
+
+    Defence-in-depth for the SPA gate — a stale browser tab or a
+    hand-crafted POST must not be able to enqueue
+    `setup_openapi_public_https` with `noreply@elb-dashboard.local` and
+    silently fail half-way through the install (regression on
+    elb-cluster-01, 2026-05-27).
+    """
+    text = (value or "").strip()
+    if not text or len(text) > 254 or not _EMAIL_RE.match(text):
+        raise HTTPException(
+            status_code=400,
+            detail="operator_email is required and must be a valid RFC 5322 address",
+        )
+    domain = text.split("@", 1)[1].lower()
+    if ".." in domain or domain.endswith("."):
+        raise HTTPException(
+            status_code=400, detail="operator_email domain is malformed"
+        )
+    labels = domain.split(".")
+    if len(labels) < 2 or any(not label for label in labels):
+        raise HTTPException(
+            status_code=400, detail="operator_email domain must include a public TLD"
+        )
+    tld = labels[-1]
+    if not tld.isalpha() or len(tld) < 2:
+        raise HTTPException(
+            status_code=400, detail="operator_email TLD must be alphabetic"
+        )
+    if tld in _PRIVATE_USE_TLDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Let's Encrypt rejects private-use TLDs "
+                f"(.{tld}). Use a public TLD email such as ops@example.com."
+            ),
+        )
+    return text
+
+
 @router.get("/openapi/public-https")
 def aks_openapi_public_https_status(
     caller: CallerIdentity = Depends(require_caller),
@@ -704,6 +768,7 @@ def aks_openapi_public_https_enable(
 
     from api.tasks.openapi import setup_openapi_public_https
 
+    email = _validate_operator_email(body.operator_email)
     LOGGER.info(
         "openapi public-https enable requested cluster=%s caller_oid=%s",
         body.cluster_name,
@@ -714,7 +779,7 @@ def aks_openapi_public_https_enable(
         subscription_id=body.subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
         resource_group=body.resource_group,
         cluster_name=body.cluster_name,
-        operator_email=body.operator_email,
+        operator_email=email,
         caller_oid=caller.object_id or "",
     )
     return {
@@ -953,14 +1018,20 @@ async def aks_openapi_proxy(
             LOGGER.warning("openapi/proxy: k8s_get_service_ip failed: %s", exc)
 
         if not ip:
+            # Include a Retry-After hint so the SPA's SwaggerTryIt /
+            # OpenApiPanel can back off instead of retrying every render
+            # cycle while the Service IP is still being provisioned
+            # (typical “cluster just started” window).
             raise HTTPException(
                 status_code=503,
                 detail={
                     "code": "openapi_service_not_reachable",
                     "message": "The elb-openapi service is not reachable yet.",
                     "retryable": True,
+                    "retry_after_seconds": 15,
                     **_peering_recovery_hint(),
                 },
+                headers={"Retry-After": "15"},
             )
 
         # Refuse to forward when the resolved Service IP is *not* private:

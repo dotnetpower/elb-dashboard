@@ -101,6 +101,26 @@ def warmup_database(
     _record_task_progress(self, "starting", database=database_name)
     _update_state(job_id, "starting")
 
+    if not storage_resource_group:
+        # Workload Storage frequently lives in a different RG than the AKS
+        # cluster, so silently falling back to the cluster RG would make the
+        # downstream RBAC ensure a no-op (ARM 404) and lead to node-local
+        # warmup failures. Fail fast and force the caller to plumb the value.
+        _update_state(
+            job_id,
+            "failed",
+            status="failed",
+            error_code="missing storage_resource_group",
+        )
+        return {
+            "status": "failed",
+            "error": (
+                "storage_resource_group is required; the caller must pass "
+                "the Storage account's resource group (do not rely on the "
+                "AKS cluster RG)"
+            ),
+        }
+
     db_info = BLAST_DATABASES.get(database_name)
     if not db_info:
         _update_state(
@@ -390,12 +410,22 @@ def warmup_database(
                     )
 
                     if acr_name:
+                        if not acr_resource_group:
+                            # Same fail-fast rationale as storage_resource_group:
+                            # ACR commonly lives in a different RG (charter default
+                            # is rg-elbacr-01). Silently falling back to the AKS
+                            # cluster RG used to hide the misrouted ARM 404.
+                            raise RuntimeError(
+                                "acr_resource_group is required when acr_name "
+                                "is set; the caller must pass the ACR's resource "
+                                "group (do not rely on the AKS cluster RG)"
+                            )
                         _attach_acr(
                             cred,
                             subscription_id,
                             resource_group,
                             cluster_name,
-                            acr_resource_group or resource_group,
+                            acr_resource_group,
                             acr_name,
                         )
                     _grant_storage_blob_contributor_to_aks(
@@ -403,7 +433,7 @@ def warmup_database(
                         subscription_id,
                         resource_group,
                         cluster_name,
-                        storage_resource_group or resource_group,
+                        storage_resource_group,
                         storage_account,
                     )
                     role_summary = {"status": "ensured"}

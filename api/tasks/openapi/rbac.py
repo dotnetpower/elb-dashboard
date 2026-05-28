@@ -160,15 +160,30 @@ def setup_workload_identity(
         "Contributor",
     )
     if storage_account:
-        storage_rg = storage_resource_group or resource_group
-        _try(
-            (
-                f"/subscriptions/{subscription_id}/resourceGroups/{storage_rg}/"
-                f"providers/Microsoft.Storage/storageAccounts/{storage_account}"
-            ),
-            ROLE_STORAGE_BLOB_DATA_CONTRIBUTOR,
-            "StorageBlobDataContributor",
-        )
+        if not storage_resource_group:
+            # Refuse to silently fall back to the AKS cluster RG: the
+            # workload Storage account commonly lives in a different RG,
+            # and routing the role assignment at the cluster RG produces
+            # a confusing ARM 404 ("storage account not found in
+            # rg-elb-cluster") that masks the real issue (caller did not
+            # plumb storage_resource_group through). Surface it cleanly.
+            roles_failed.append(
+                (
+                    "StorageBlobDataContributor",
+                    "storage_resource_group is required when storage_account "
+                    "is set; the caller must pass the Storage account's "
+                    "resource group (do not rely on the AKS cluster RG)",
+                )
+            )
+        else:
+            _try(
+                (
+                    f"/subscriptions/{subscription_id}/resourceGroups/{storage_resource_group}/"
+                    f"providers/Microsoft.Storage/storageAccounts/{storage_account}"
+                ),
+                ROLE_STORAGE_BLOB_DATA_CONTRIBUTOR,
+                "StorageBlobDataContributor",
+            )
     _try(
         (
             f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/"

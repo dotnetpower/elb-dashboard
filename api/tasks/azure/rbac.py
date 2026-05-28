@@ -629,7 +629,10 @@ def assign_aks_roles(
         cluster_name,
         acr_resource_group=acr_resource_group,
         acr_name=acr_name,
-        storage_resource_group=storage_resource_group or resource_group,
+        # Do not fall back to the AKS cluster RG — see provision_aks for
+        # the rationale. `ensure_aks_runtime_rbac` does its own env-based
+        # default when this is empty.
+        storage_resource_group=storage_resource_group,
         storage_account=storage_account,
     )
     failed = summary.get("roles_failed") or {}

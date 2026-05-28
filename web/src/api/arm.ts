@@ -274,3 +274,39 @@ export async function listVms(
     .map((v) => ({ name: v.name, location: v.location, resourceGroup }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+export interface VirtualNetworkSummary {
+  name: string;
+  location: string;
+  resourceGroup: string;
+  addressPrefixes: string[];
+  id: string;
+}
+
+/** Lists Microsoft.Network/virtualNetworks in a resource group.
+ *  Used by the Settings → VNet peering dialog so the operator can pick a
+ *  target VNet by name (and visually confirm address-space overlap with
+ *  the AKS auto-VNet `10.224.0.0/12`).
+ */
+export async function listVnets(
+  subscriptionId: string,
+  resourceGroup: string,
+): Promise<VirtualNetworkSummary[]> {
+  const items = await armPagedList<{
+    name: string;
+    location: string;
+    id: string;
+    properties?: { addressSpace?: { addressPrefixes?: string[] } };
+  }>(
+    `https://management.azure.com/subscriptions/${encodeURIComponent(subscriptionId)}/resourceGroups/${encodeURIComponent(resourceGroup)}/providers/Microsoft.Network/virtualNetworks?api-version=2023-11-01`,
+  );
+  return items
+    .map((v) => ({
+      name: v.name,
+      location: v.location,
+      resourceGroup,
+      addressPrefixes: v.properties?.addressSpace?.addressPrefixes ?? [],
+      id: v.id,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}

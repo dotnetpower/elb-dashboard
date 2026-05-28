@@ -505,7 +505,13 @@ def provision_aks(
         cluster_name,
         acr_resource_group=acr_resource_group,
         acr_name=acr_name,
-        storage_resource_group=storage_resource_group or resource_group,
+        # Do not fall back to the AKS cluster RG here. The workload Storage
+        # account commonly lives in a different RG; the historical fallback
+        # silently routed the role assignment at the cluster RG and ARM 404'd,
+        # leaving the kubelet without Storage Blob Data Contributor. When the
+        # caller omits the RG, `_resolve_workload_storage_defaults` inside
+        # `ensure_aks_runtime_rbac` reads `AZURE_RESOURCE_GROUP` from env.
+        storage_resource_group=storage_resource_group,
         storage_account=storage_account,
         progress_callback=_rbac_progress,
     )
@@ -613,6 +619,29 @@ def provision_aks(
         dashboard_mi_rbac=mi_summary,
         vnet_peering=peering_summary,
     )
+    # Auto-deploy the `elb-openapi` Service so a freshly-provisioned
+    # cluster comes up with the OpenAPI surface ready without a separate
+    # "Deploy elb-openapi" click. Best-effort: a failed enqueue does NOT
+    # roll back the provision result — the dashboard's OpenAPI panel
+    # surfaces the missing Deployment and the operator can click Deploy
+    # manually. Set `ELB_AUTO_OPENAPI_DEPLOY=false` on the api/worker
+    # sidecar to opt out.
+    openapi_task_id = ""
+    try:
+        from api.tasks.openapi.auto_deploy import (
+            enqueue_openapi_deploy_after_aks_event,
+        )
+
+        openapi_task_id = enqueue_openapi_deploy_after_aks_event(
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            trigger="aks_provision",
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "auto OpenAPI deploy enqueue failed after AKS provision: %s", exc
+        )
     return {
         "cluster_name": cluster_name,
         "provisioning_state": "Succeeded",
@@ -624,6 +653,7 @@ def provision_aks(
         "roles_failed": rbac_summary["roles_failed"],
         "dashboard_mi_rbac": mi_summary,
         "vnet_peering": peering_summary,
+        "openapi_task_id": openapi_task_id,
         "pools": [
             {"name": SYSTEM_POOL_NAME, "mode": "System", "vm_size": sys_sku, "count": sys_count},
             {"name": BLAST_POOL_NAME, "mode": "User", "vm_size": blast_sku, "count": blast_count},

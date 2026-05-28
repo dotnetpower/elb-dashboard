@@ -35,6 +35,8 @@ import pytest
 _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.azure.assign_aks_roles",  # .delay
     "api.tasks.azure.peering.ensure_vnet_peering_with_cluster",
+    "api.tasks.azure.peering.ensure_vnet_peering_with_target",
+    "api.tasks.azure.peering.httpx.get",
     "api.tasks.azure.start_aks",  # .delay
     "api.tasks.blast.submit",  # .delay
     "api.tasks.storage._autowarmup_inflight_acquire",
@@ -45,9 +47,31 @@ _FACADE_CONTRACT: tuple[str, ...] = (
 
 
 def _resolve(dotted_path: str) -> object:
-    parent_path, _, attr = dotted_path.rpartition(".")
-    module = importlib.import_module(parent_path)
-    return getattr(module, attr)
+    """Resolve a dotted attribute path the way `monkeypatch.setattr` does.
+
+    `monkeypatch.setattr("api.tasks.azure.peering.httpx.get", …)` imports the
+    deepest importable prefix (`api.tasks.azure.peering`) and then walks the
+    remaining attributes (`httpx`, `get`). Mirror that so attribute paths that
+    pass through a third-party namespace re-imported into a facade module still
+    resolve from this guard.
+    """
+    parts = dotted_path.split(".")
+    module = None
+    last_imported = 0
+    for i in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:i])
+        try:
+            module = importlib.import_module(candidate)
+        except ImportError:
+            continue
+        last_imported = i
+        break
+    if module is None:
+        raise ImportError(f"could not import any prefix of {dotted_path!r}")
+    obj: object = module
+    for attr in parts[last_imported:]:
+        obj = getattr(obj, attr)
+    return obj
 
 
 @pytest.mark.parametrize("target", _FACADE_CONTRACT)

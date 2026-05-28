@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
+
+import httpx
 
 from api.services.azure_clients import network_client, resource_client
 
@@ -186,6 +189,219 @@ def _create_peering(
         raise
 
 
+def _resolve_vnet_id(
+    cred: Any,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    vnet_name: str,
+) -> str:
+    rc = resource_client(cred, subscription_id)
+    for resource in rc.resources.list_by_resource_group(
+        resource_group,
+        filter="resourceType eq 'Microsoft.Network/virtualNetworks'",
+    ):
+        resource_name = getattr(resource, "name", None) or ""
+        resource_id = getattr(resource, "id", None) or ""
+        if resource_name == vnet_name or resource_id.rstrip("/").endswith(
+            f"/virtualNetworks/{vnet_name}"
+        ):
+            return str(resource_id)
+    raise KeyError(
+        f"virtual network '{vnet_name}' not found in resource group '{resource_group}'"
+    )
+
+
+def probe_private_ip(
+    *,
+    target_ip: str,
+    target_path: str = "/openapi.json",
+    timeout: float = 2.0,
+) -> dict[str, Any]:
+    path = (target_path or "/openapi.json").strip()
+    if not path.startswith("/"):
+        path = f"/{path}"
+    url = f"http://{target_ip}{path}"
+    started = time.monotonic()
+    try:
+        response = httpx.get(url, timeout=timeout)
+        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+        return {
+            "target_ip": target_ip,
+            "target_path": path,
+            "url": url,
+            "reachable": response.is_success,
+            "status_code": response.status_code,
+            "latency_ms": elapsed_ms,
+            "message": response.reason_phrase,
+        }
+    except httpx.HTTPError as exc:
+        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+        return {
+            "target_ip": target_ip,
+            "target_path": path,
+            "url": url,
+            "reachable": False,
+            "status_code": None,
+            "latency_ms": elapsed_ms,
+            "message": str(exc),
+        }
+
+
+def _peer_vnets(
+    cred: Any,
+    *,
+    local_vnet_id: str,
+    remote_vnet_id: str,
+    local_label: str,
+    remote_label: str,
+) -> dict[str, Any]:
+    peerings: list[dict[str, str]] = []
+    error_parts: list[str] = []
+
+    try:
+        name, state = _create_peering(
+            cred,
+            subscription_id="",
+            local_vnet_id=local_vnet_id,
+            remote_vnet_id=remote_vnet_id,
+        )
+        peerings.append({
+            "direction": f"{local_label}_to_{remote_label}",
+            "name": name,
+            "state": state,
+        })
+    except Exception as exc:
+        error_parts.append(f"{local_label}_to_{remote_label}: {str(exc)[:300]}")
+
+    try:
+        name, state = _create_peering(
+            cred,
+            subscription_id="",
+            local_vnet_id=remote_vnet_id,
+            remote_vnet_id=local_vnet_id,
+        )
+        peerings.append({
+            "direction": f"{remote_label}_to_{local_label}",
+            "name": name,
+            "state": state,
+        })
+    except Exception as exc:
+        error_parts.append(f"{remote_label}_to_{local_label}: {str(exc)[:300]}")
+
+    return {
+        "peerings": peerings,
+        "error": "; ".join(error_parts) if error_parts else None,
+    }
+
+
+def ensure_vnet_peering_with_target(
+    cred: Any,
+    *,
+    subscription_id: str,
+    cluster_resource_group: str,
+    cluster_name: str,
+    target_subscription_id: str,
+    target_resource_group: str,
+    target_vnet_name: str,
+    target_ip: str = "10.224.0.7",
+    target_path: str = "/openapi.json",
+) -> dict[str, Any]:
+    from api.services.azure_clients import aks_client
+
+    aks_cl = aks_client(cred, subscription_id)
+    try:
+        cluster = aks_cl.managed_clusters.get(cluster_resource_group, cluster_name)
+    except Exception as exc:
+        return {
+            "error": f"aks_client.managed_clusters.get failed: {type(exc).__name__}",
+            "recovery_command": _recovery_command(
+                subscription_id=subscription_id,
+                cluster_resource_group=cluster_resource_group,
+                cluster_name=cluster_name,
+            ),
+            "probe": probe_private_ip(target_ip=target_ip, target_path=target_path),
+        }
+
+    node_rg = (getattr(cluster, "node_resource_group", None) or "").strip()
+    if not node_rg:
+        return {
+            "skipped": True,
+            "reason": "cluster has no node_resource_group",
+            "recovery_command": _recovery_command(
+                subscription_id=subscription_id,
+                cluster_resource_group=cluster_resource_group,
+                cluster_name=cluster_name,
+            ),
+            "probe": probe_private_ip(target_ip=target_ip, target_path=target_path),
+        }
+
+    aks_vnet_id = _resolve_aks_node_vnet(
+        cred,
+        subscription_id=subscription_id,
+        node_resource_group=node_rg,
+    )
+    if not aks_vnet_id:
+        return {
+            "skipped": True,
+            "reason": "aks_node_rg_has_no_vnet",
+            "node_resource_group": node_rg,
+            "recovery_command": _recovery_command(
+                subscription_id=subscription_id,
+                cluster_resource_group=cluster_resource_group,
+                cluster_name=cluster_name,
+            ),
+            "probe": probe_private_ip(target_ip=target_ip, target_path=target_path),
+        }
+
+    try:
+        target_vnet_id = _resolve_vnet_id(
+            cred,
+            subscription_id=target_subscription_id,
+            resource_group=target_resource_group,
+            vnet_name=target_vnet_name,
+        )
+    except Exception as exc:
+        return {
+            "error": f"target_vnet lookup failed: {str(exc)[:200]}",
+            "aks_vnet": aks_vnet_id,
+            "node_resource_group": node_rg,
+            "recovery_command": _recovery_command(
+                subscription_id=subscription_id,
+                cluster_resource_group=cluster_resource_group,
+                cluster_name=cluster_name,
+            ),
+            "probe": probe_private_ip(target_ip=target_ip, target_path=target_path),
+        }
+
+    pair_summary = _peer_vnets(
+        cred,
+        local_vnet_id=target_vnet_id,
+        remote_vnet_id=aks_vnet_id,
+        local_label="target",
+        remote_label="aks",
+    )
+
+    payload: dict[str, Any] = {
+        "target_subscription_id": target_subscription_id,
+        "target_resource_group": target_resource_group,
+        "target_vnet_name": target_vnet_name,
+        "target_vnet": target_vnet_id,
+        "aks_vnet": aks_vnet_id,
+        "node_resource_group": node_rg,
+        "peerings": pair_summary["peerings"],
+        "probe": probe_private_ip(target_ip=target_ip, target_path=target_path),
+        "recovery_command": _recovery_command(
+            subscription_id=subscription_id,
+            cluster_resource_group=cluster_resource_group,
+            cluster_name=cluster_name,
+        ),
+    }
+    if pair_summary["error"]:
+        payload["error"] = pair_summary["error"]
+    return payload
+
+
 def ensure_vnet_peering_with_cluster(
     cred: Any,
     *,
@@ -276,46 +492,25 @@ def ensure_vnet_peering_with_cluster(
             ),
         }
 
-    peerings: list[dict[str, str]] = []
-    error: str | None = None
-    # dashboard → AKS
-    try:
-        name, state = _create_peering(
-            cred,
-            subscription_id=subscription_id,
-            local_vnet_id=dash_vnet,
-            remote_vnet_id=aks_vnet_id,
-        )
-        peerings.append({"direction": "dashboard_to_aks", "name": name, "state": state})
-    except Exception as exc:
-        LOGGER.warning("vnet peering dashboard→aks failed: %s", str(exc)[:200])
-        error = f"dashboard_to_aks: {str(exc)[:300]}"
-
-    # AKS → dashboard
-    try:
-        name, state = _create_peering(
-            cred,
-            subscription_id=subscription_id,
-            local_vnet_id=aks_vnet_id,
-            remote_vnet_id=dash_vnet,
-        )
-        peerings.append({"direction": "aks_to_dashboard", "name": name, "state": state})
-    except Exception as exc:
-        LOGGER.warning("vnet peering aks→dashboard failed: %s", str(exc)[:200])
-        suffix = f"aks_to_dashboard: {str(exc)[:300]}"
-        error = f"{error}; {suffix}" if error else suffix
+    pair_summary = _peer_vnets(
+        cred,
+        local_vnet_id=dash_vnet,
+        remote_vnet_id=aks_vnet_id,
+        local_label="dashboard",
+        remote_label="aks",
+    )
 
     payload: dict[str, Any] = {
         "dashboard_vnet": dash_vnet,
         "aks_vnet": aks_vnet_id,
         "node_resource_group": node_rg,
-        "peerings": peerings,
+        "peerings": pair_summary["peerings"],
         "recovery_command": _recovery_command(
             subscription_id=subscription_id,
             cluster_resource_group=cluster_resource_group,
             cluster_name=cluster_name,
         ),
     }
-    if error:
-        payload["error"] = error
+    if pair_summary["error"]:
+        payload["error"] = pair_summary["error"]
     return payload

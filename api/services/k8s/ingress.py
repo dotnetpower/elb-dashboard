@@ -10,8 +10,8 @@ Edit boundaries: No Azure or Kubernetes I/O here. The Celery task pipes these st
     through unchanged.
 Key entry points: `INGRESS_NGINX_INSTALL_URL`, `CERT_MANAGER_INSTALL_URL`,
     `build_cluster_issuer`, `build_openapi_ingress`, `dns_label_for_cluster`,
-    `cloudapp_fqdn`, `patch_manifest_for_system_pool`,
-    `fetch_install_manifest_for_system_pool`.
+    `cloudapp_fqdn`, `patch_manifest_for_workload_pool`,
+    `fetch_install_manifest_for_workload_pool`.
 Risky contracts: The pinned installer URLs MUST match versions tested against the
     repo's AKS K8s baseline (1.34+). Bumping either pin without rerunning the
     cert-manager webhook readiness probe + Certificate issuance test will silently
@@ -73,41 +73,46 @@ OPENAPI_SERVICE_PORT = 80
 # (`CriticalAddonsOnly=true` on systempool, `workload=blast` on blastpool).
 # The upstream cert-manager and ingress-nginx install manifests carry no
 # tolerations, so every pod they ship lands in `Pending` forever on these
-# clusters. ``patch_manifest_for_system_pool`` injects the minimum
+# clusters. ``patch_manifest_for_workload_pool`` injects the minimum
 # toleration + nodeSelector that lets these control-plane add-ons land on
-# the systempool only — we deliberately do **not** add a `workload=blast`
-# toleration because cert-manager / ingress-nginx must not consume CPU on
-# nodes reserved for the BLAST workload.
-SYSTEM_POOL_TOLERATION: dict[str, str] = {
-    "key": "CriticalAddonsOnly",
-    "operator": "Exists",
+# the **blastpool** (user-mode pool). The systempool is intentionally
+# starved (DS2_v2 = 2 vCPU, ~99% requested by AKS system add-ons on a
+# 1-node default) and on elb-cluster-01 the ingress-nginx controller
+# spent 15h Pending with `0/3 nodes are available: 1 Insufficient cpu,
+# 2 node(s) had untolerated taint(s)`. Moving to the user-mode pool
+# unblocks the schedule and only consumes ~30m CPU on a pool that runs
+# BLAST workers at 16+ vCPU each.
+WORKLOAD_POOL_TOLERATION: dict[str, str] = {
+    "key": "workload",
+    "operator": "Equal",
+    "value": "blast",
     "effect": "NoSchedule",
 }
-SYSTEM_POOL_NODE_SELECTOR: dict[str, str] = {
-    "kubernetes.azure.com/mode": "system",
+WORKLOAD_POOL_NODE_SELECTOR: dict[str, str] = {
+    "kubernetes.azure.com/mode": "user",
 }
+# Backward-compatible aliases. Existing callers (tests, the public-https
+# Celery task) import these names; renaming them in a separate change
+# keeps the diff focused on the pool move.
+SYSTEM_POOL_TOLERATION = WORKLOAD_POOL_TOLERATION
+SYSTEM_POOL_NODE_SELECTOR = WORKLOAD_POOL_NODE_SELECTOR
 # Lowered resource *requests* injected on every container of the patched
-# workloads so cert-manager + ingress-nginx fit on the AKS default
-# systempool node (Standard_D2s_v3 = 2 vCPU; the upstream ingress-nginx
-# manifest requests 100m CPU which on a single-node systempool already
-# carrying coredns / azure-wi-webhook / Container Insights ama-metrics
-# overflows allocation and leaves the controller Pod in `Pending`
-# forever — observed in production on elb-cluster-01: scheduler reported
-# "0/3 nodes are available: 1 Insufficient cpu, 2 node(s) had untolerated
-# taint(s)"). The lowered numbers reflect idle usage measured by
-# kubectl top pod on a steady-state install (controller ~5-15m CPU,
-# webhook ~2-5m CPU, ~30-80Mi memory). We only lower the *request* — any
-# existing `resources.limits` is left untouched so peak usage is not
-# capped. The patch is monotonic-decreasing: if the upstream already
-# requests less than these floors, the existing (lower) request wins.
-SYSTEM_POOL_LOW_CPU_REQUEST = "20m"
-SYSTEM_POOL_LOW_MEMORY_REQUEST = "64Mi"
-# Workload kinds whose podTemplate must carry the systempool patch. We
+# workloads. The blastpool nodes are large (D4s+ … 16+ vCPU each) so the
+# original upstream 100m/90Mi would fit, but keeping the conservative
+# floor means cert-manager + ingress-nginx do not steal scheduling room
+# from the BLAST workers when the controller Pod is the first thing on
+# a freshly autoscaled blastpool node.
+WORKLOAD_POOL_LOW_CPU_REQUEST = "20m"
+WORKLOAD_POOL_LOW_MEMORY_REQUEST = "64Mi"
+SYSTEM_POOL_LOW_CPU_REQUEST = WORKLOAD_POOL_LOW_CPU_REQUEST
+SYSTEM_POOL_LOW_MEMORY_REQUEST = WORKLOAD_POOL_LOW_MEMORY_REQUEST
+# Workload kinds whose podTemplate must carry the workload-pool patch. We
 # patch Jobs too because ingress-nginx ships admission-webhook bootstrap
 # Jobs whose Pods would otherwise be Pending.
-_SYSTEM_POOL_WORKLOAD_KINDS: frozenset[str] = frozenset(
+_WORKLOAD_POOL_WORKLOAD_KINDS: frozenset[str] = frozenset(
     {"Deployment", "DaemonSet", "StatefulSet", "Job", "ReplicaSet"}
 )
+_SYSTEM_POOL_WORKLOAD_KINDS = _WORKLOAD_POOL_WORKLOAD_KINDS
 
 
 def _parse_cpu_to_millicores(value: object) -> int | None:
@@ -161,12 +166,12 @@ def _parse_memory_to_bytes(value: object) -> int | None:
         return None
 
 
-_LOW_CPU_MILLICORES = _parse_cpu_to_millicores(SYSTEM_POOL_LOW_CPU_REQUEST) or 20
-_LOW_MEMORY_BYTES = _parse_memory_to_bytes(SYSTEM_POOL_LOW_MEMORY_REQUEST) or (64 * 1024**2)
+_LOW_CPU_MILLICORES = _parse_cpu_to_millicores(WORKLOAD_POOL_LOW_CPU_REQUEST) or 20
+_LOW_MEMORY_BYTES = _parse_memory_to_bytes(WORKLOAD_POOL_LOW_MEMORY_REQUEST) or (64 * 1024**2)
 
 
 def _shrink_container_requests(container: Any) -> None:
-    """Lower the container's CPU/memory *requests* to fit the systempool.
+    """Lower the container's CPU/memory *requests* to fit the workload pool.
 
     Monotonic-decreasing: if an upstream container is already requesting
     less than the floor, the existing request is preserved. Limits and
@@ -184,11 +189,11 @@ def _shrink_container_requests(container: Any) -> None:
 
     cpu_existing = _parse_cpu_to_millicores(requests.get("cpu"))
     if cpu_existing is None or cpu_existing > _LOW_CPU_MILLICORES:
-        requests["cpu"] = SYSTEM_POOL_LOW_CPU_REQUEST
+        requests["cpu"] = WORKLOAD_POOL_LOW_CPU_REQUEST
 
     mem_existing = _parse_memory_to_bytes(requests.get("memory"))
     if mem_existing is None or mem_existing > _LOW_MEMORY_BYTES:
-        requests["memory"] = SYSTEM_POOL_LOW_MEMORY_REQUEST
+        requests["memory"] = WORKLOAD_POOL_LOW_MEMORY_REQUEST
 # Label selector for the ingress-nginx admission-webhook Jobs. Jobs are
 # spec-immutable, so an earlier failed install (toleration-less) leaves
 # Pending pods behind that ``kubectl apply -f -`` cannot reconcile. The
@@ -197,18 +202,17 @@ def _shrink_container_requests(container: Any) -> None:
 INGRESS_NGINX_ADMISSION_JOB_SELECTOR = "app.kubernetes.io/component=admission-webhook"
 
 
-def patch_manifest_for_system_pool(raw_manifest: str) -> str:
-    """Inject systempool toleration + nodeSelector into every workload doc.
+def patch_manifest_for_workload_pool(raw_manifest: str) -> str:
+    """Inject blastpool toleration + nodeSelector into every workload doc.
 
     Pure transform — accepts a multi-doc YAML string (the kind shipped
     by the upstream cert-manager / ingress-nginx install URLs) and
     returns the same documents with each Deployment / DaemonSet /
     StatefulSet / Job / ReplicaSet podTemplate carrying:
 
-    - tolerations: an entry equivalent to ``SYSTEM_POOL_TOLERATION``
-      (added only if no existing entry already keys on
-      ``CriticalAddonsOnly``).
-    - nodeSelector: ``kubernetes.azure.com/mode=system`` (added only if
+    - tolerations: an entry equivalent to ``WORKLOAD_POOL_TOLERATION``
+      (added only if no existing entry already keys on ``workload``).
+    - nodeSelector: ``kubernetes.azure.com/mode=user`` (added only if
       that key is not already set; other selector keys are preserved).
 
     Non-workload kinds (CRDs, ServiceAccounts, RBAC, Services, ConfigMaps,
@@ -221,7 +225,7 @@ def patch_manifest_for_system_pool(raw_manifest: str) -> str:
     for doc in docs:
         if not isinstance(doc, dict):
             continue
-        if doc.get("kind") not in _SYSTEM_POOL_WORKLOAD_KINDS:
+        if doc.get("kind") not in _WORKLOAD_POOL_WORKLOAD_KINDS:
             continue
         spec = doc.setdefault("spec", {})
         if not isinstance(spec, dict):
@@ -238,25 +242,24 @@ def patch_manifest_for_system_pool(raw_manifest: str) -> str:
             tolerations = []
             pod_spec["tolerations"] = tolerations
         if not any(
-            isinstance(t, dict) and t.get("key") == SYSTEM_POOL_TOLERATION["key"]
+            isinstance(t, dict) and t.get("key") == WORKLOAD_POOL_TOLERATION["key"]
             for t in tolerations
         ):
-            tolerations.append(dict(SYSTEM_POOL_TOLERATION))
+            tolerations.append(dict(WORKLOAD_POOL_TOLERATION))
 
         node_selector = pod_spec.get("nodeSelector")
         if not isinstance(node_selector, dict):
             node_selector = {}
             pod_spec["nodeSelector"] = node_selector
-        for k, v in SYSTEM_POOL_NODE_SELECTOR.items():
+        for k, v in WORKLOAD_POOL_NODE_SELECTOR.items():
             node_selector.setdefault(k, v)
 
         # Shrink CPU/memory requests so the controller + webhook Pods
-        # fit on the default single-node D2s_v3 systempool (the upstream
-        # 100m CPU request was the actual blocker on elb-cluster-01).
-        # See SYSTEM_POOL_LOW_CPU_REQUEST docstring for the measurement
-        # basis. Init-containers get the same treatment because they
-        # also count against the node's allocatable CPU at scheduling
-        # time.
+        # land cleanly even when the blastpool is autoscaled to a single
+        # warm node. See WORKLOAD_POOL_LOW_CPU_REQUEST docstring for the
+        # measurement basis. Init-containers get the same treatment
+        # because they also count against the node's allocatable CPU at
+        # scheduling time.
         for container in pod_spec.get("containers", []) or []:
             _shrink_container_requests(container)
         for init_container in pod_spec.get("initContainers", []) or []:
@@ -270,17 +273,25 @@ def patch_manifest_for_system_pool(raw_manifest: str) -> str:
     return _yaml.safe_dump_all([d for d in docs if d is not None], sort_keys=False)
 
 
-def fetch_install_manifest_for_system_pool(url: str, *, timeout_seconds: int = 60) -> str:
-    """Fetch an upstream install manifest and inject the systempool patch.
+# Backward-compat alias — existing imports use the old name.
+patch_manifest_for_system_pool = patch_manifest_for_workload_pool
 
-    Thin network wrapper around :func:`patch_manifest_for_system_pool`.
+
+def fetch_install_manifest_for_workload_pool(url: str, *, timeout_seconds: int = 60) -> str:
+    """Fetch an upstream install manifest and inject the workload-pool patch.
+
+    Thin network wrapper around :func:`patch_manifest_for_workload_pool`.
     The patched bytes are what the public-HTTPS Celery task pipes into
     ``kubectl apply -f -`` so cert-manager / ingress-nginx land on the
-    only node pool that will admit them.
+    only node pool whose taint (``workload=blast``) they tolerate.
     """
     with urllib.request.urlopen(url, timeout=timeout_seconds) as resp:  # noqa: S310 - pinned upstream URL list.
         raw = resp.read().decode("utf-8")
-    return patch_manifest_for_system_pool(raw)
+    return patch_manifest_for_workload_pool(raw)
+
+
+# Backward-compat alias — existing imports use the old name.
+fetch_install_manifest_for_system_pool = fetch_install_manifest_for_workload_pool
 
 
 def dns_label_for_cluster(*, subscription_id: str, cluster_name: str) -> str:
