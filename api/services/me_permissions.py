@@ -20,6 +20,7 @@ Validation: `uv run pytest -q api/tests/test_me_permissions.py`.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -28,6 +29,17 @@ from typing import Any
 from azure.core.credentials import TokenCredential
 
 LOGGER = logging.getLogger(__name__)
+
+# Entra/Azure AD object id format is a strict UUID. We pin this here so
+# the OData ``filter`` interpolation below cannot smuggle additional
+# clauses (critique-round-1 C5). Real callers come from a validated JWT
+# whose ``oid`` is already a UUID, so this guard only kicks in for
+# malformed test fixtures or a future caller that bypasses the JWT
+# pipeline.
+_OID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 # Built-in role definition GUIDs (stable across tenants).
 # https://learn.microsoft.com/azure/role-based-access-control/built-in-roles
@@ -203,7 +215,18 @@ def _enumerate_role_assignments(
     Returns ``(rows, error)`` where each row is ``(role_guid_lower,
     scope_lower)``. On enumeration failure returns ``([], reason)`` so
     the caller can produce a ``degraded=True`` response.
+
+    Critique-round-1 C5: ``caller_oid`` is interpolated into an OData
+    ``filter`` string and ARM is not the strongest defence against an
+    injection here (a malformed oid could escape the quotes and append
+    additional clauses). Real callers come from a validated JWT whose
+    ``oid`` is already a UUID, but we reject anything non-UUID
+    defensively so a future caller that bypasses the JWT layer cannot
+    smuggle OData.
     """
+    if not _OID_RE.match(caller_oid):
+        return [], "invalid_oid_format"
+
     try:
         from azure.mgmt.authorization import AuthorizationManagementClient
     except Exception as exc:

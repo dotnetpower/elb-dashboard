@@ -37,6 +37,7 @@ from api.services.response_contracts import (
     build_target,
     request_id_from_scope,
 )
+from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -63,10 +64,15 @@ def _safe_exc_message(exc: BaseException) -> str:
     elsewhere by ``api.services.sanitise``. This helper centralises
     both the truncation policy and the sanitisation pass so future
     error sites stay safe by construction.
-    """
-    from api.services.sanitise import sanitise
 
+    Critique-round-1 M8: empty ``str(exc)`` (e.g. ``RuntimeError()``)
+    fell through as an empty string with no diagnostic value; fall
+    back to ``repr(exc)`` so the user at least sees the exception
+    class name.
+    """
     raw = str(exc)
+    if not raw:
+        raw = repr(exc)
     return sanitise(raw)[:_EXCEPTION_DETAIL_MAX_CHARS]
 
 
@@ -336,8 +342,6 @@ def blast_submit(
         allow_unverified=allow_unverified,
     )
     if gates_report.blocking:
-        from api.services.sanitise import sanitise
-
         summary = "; ".join(g.message for g in gates_report.blocking)
         raise HTTPException(
             status_code=409,

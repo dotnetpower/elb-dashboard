@@ -61,8 +61,15 @@ def test_safe_exc_message_truncates_to_max_chars() -> None:
 def test_safe_exc_message_handles_empty_and_unicode() -> None:
     """The helper must not raise for an empty exception body or a
     unicode message, and must return a regular ``str``.
+
+    Critique-round-1 M8: an empty ``str(exc)`` (e.g. bare
+    ``RuntimeError()``) used to surface as an empty body; the helper
+    now falls back to ``repr(exc)`` so the user at least sees the
+    exception class name.
     """
-    assert _safe_exc_message(RuntimeError("")) == ""
+    out_empty = _safe_exc_message(RuntimeError(""))
+    assert out_empty != ""
+    assert "RuntimeError" in out_empty
     out = _safe_exc_message(RuntimeError("\ub300\uc18c\ubb38\uc790\uc5f4 OK"))
     assert isinstance(out, str)
     assert "OK" in out
@@ -95,3 +102,27 @@ def test_safe_exc_message_passes_clean_text_through(exc_text: str) -> None:
             # URL / kv-pair fragments may be rewritten \u2014 skip.
             continue
         assert word in out
+
+
+def test_safe_exc_message_redacts_azure_sdk_style_error() -> None:
+    """Round-2 R2-M5: the realistic shape we want to defend against is
+    an Azure SDK ``HttpResponseError`` whose ``str()`` includes the
+    full request URL, all SAS query keys, AND a correlation id. Pin
+    the redaction so a regression in the sanitiser is caught here.
+    """
+    azure_style = (
+        "(AuthorizationFailure) This request is not authorized to perform "
+        "this operation.\n"
+        "RequestId:abc-123-correlation\n"
+        "Time:2026-05-29T10:00:00Z\n"
+        "ErrorCode:AuthorizationFailure\n"
+        "Url: https://elbstg01.blob.core.windows.net/queries/q.fa"
+        "?sv=2024-08-04&ss=b&srt=co&sp=rwdlacx&se=2026-12-31T00:00:00Z"
+        "&sig=A1b2C3d4%2BE5fG6h7"
+    )
+    out = _safe_exc_message(RuntimeError(azure_style))
+    # The signature must be gone\u2026
+    assert "A1b2C3d4" not in out
+    # \u2026and the request id stays (it is not a secret) so a support
+    # case can be correlated.
+    assert "abc-123-correlation" in out

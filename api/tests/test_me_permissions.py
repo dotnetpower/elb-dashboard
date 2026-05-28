@@ -80,7 +80,7 @@ def test_owner_at_sub_scope_grants_every_capability(monkeypatch: pytest.MonkeyPa
 
     perms = compute_caller_permissions(
         object(),
-        caller_oid="user-oid",
+        caller_oid="11111111-2222-3333-4444-555555555555",
         subscription_id="SUB",
         resource_group="rg-elb",
         cluster_name="elb-cluster",
@@ -108,7 +108,7 @@ def test_reader_at_rg_scope_grants_read_but_blocks_writes(
 
     perms = compute_caller_permissions(
         object(),
-        caller_oid="user-oid",
+        caller_oid="11111111-2222-3333-4444-555555555555",
         subscription_id="SUB",
         resource_group="rg-elb",
     )
@@ -135,7 +135,7 @@ def test_contributor_grants_writes_but_not_delete_or_grant(
 
     perms = compute_caller_permissions(
         object(),
-        caller_oid="user-oid",
+        caller_oid="11111111-2222-3333-4444-555555555555",
         subscription_id="SUB",
         resource_group="rg-elb",
     )
@@ -158,7 +158,7 @@ def test_uaa_grants_rbac_but_not_writes(monkeypatch: pytest.MonkeyPatch) -> None
 
     perms = compute_caller_permissions(
         object(),
-        caller_oid="user-oid",
+        caller_oid="11111111-2222-3333-4444-555555555555",
         subscription_id="SUB",
     )
 
@@ -181,7 +181,7 @@ def test_assignment_at_cluster_scope_is_visible_at_cluster_query(
 
     perms = compute_caller_permissions(
         object(),
-        caller_oid="user-oid",
+        caller_oid="11111111-2222-3333-4444-555555555555",
         subscription_id="SUB",
         resource_group="rg-elb",
         cluster_name="elb-cluster",
@@ -208,7 +208,7 @@ def test_descendant_scope_assignment_does_not_grant_parent_scope(
     # NOT bubble up.
     perms = compute_caller_permissions(
         object(),
-        caller_oid="user-oid",
+        caller_oid="11111111-2222-3333-4444-555555555555",
         subscription_id="SUB",
     )
     assert perms.can_write is False
@@ -236,7 +236,7 @@ def test_enumeration_failure_degrades_open(monkeypatch: pytest.MonkeyPatch) -> N
 
     perms = compute_caller_permissions(
         object(),
-        caller_oid="user-oid",
+        caller_oid="11111111-2222-3333-4444-555555555555",
         subscription_id="SUB",
     )
 
@@ -273,7 +273,7 @@ def test_caller_permissions_are_cached_per_scope(monkeypatch: pytest.MonkeyPatch
     for _ in range(5):
         compute_caller_permissions(
             object(),
-            caller_oid="user-oid",
+            caller_oid="11111111-2222-3333-4444-555555555555",
             subscription_id="SUB",
             resource_group="rg-elb",
         )
@@ -291,12 +291,45 @@ def test_different_scopes_get_independent_cache_entries(
         [_row("8e3af657-a8ff-443c-a75c-2fe8c4bcb635", "/subscriptions/SUB")],
     )
 
-    compute_caller_permissions(object(), caller_oid="u", subscription_id="SUB")
+    _OID = "11111111-2222-3333-4444-555555555555"
+    compute_caller_permissions(object(), caller_oid=_OID, subscription_id="SUB")
     compute_caller_permissions(
-        object(), caller_oid="u", subscription_id="SUB", resource_group="rg-A"
+        object(), caller_oid=_OID, subscription_id="SUB", resource_group="rg-A"
     )
     compute_caller_permissions(
-        object(), caller_oid="u", subscription_id="SUB", resource_group="rg-B"
+        object(), caller_oid=_OID, subscription_id="SUB", resource_group="rg-B"
     )
 
     assert len(fake.role_assignments.calls) == 3
+
+
+def test_invalid_oid_format_degrades_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Critique-round-1 C5: ``caller_oid`` is interpolated into an OData
+    ``filter`` string, so a non-UUID value (which would never come from
+    a validated JWT) must be rejected up-front to prevent OData clause
+    injection. Rejection takes the same degrade-open path as a
+    transient ARM failure so a defensive false-positive never locks
+    the operator out.
+    """
+    fake = _patch_client(
+        monkeypatch,
+        [_row("8e3af657-a8ff-443c-a75c-2fe8c4bcb635", "/subscriptions/SUB")],
+    )
+
+    perms = compute_caller_permissions(
+        object(),
+        caller_oid="user-oid' or 1=1--",  # OData injection attempt
+        subscription_id="SUB",
+    )
+
+    # The injection attempt never reaches ARM \u2014 ``fake`` records
+    # zero calls.
+    assert len(fake.role_assignments.calls) == 0
+    # Degrade-open: all capabilities true so the UX does not break,
+    # but ``degraded=true`` so the SPA can render the diagnostic
+    # banner.
+    assert perms.degraded is True
+    assert perms.reason == "invalid_oid_format"
+    assert perms.can_write is True  # degrade-open
+    # No real matched roles because we never enumerated.
+    assert perms.matched_roles == ()

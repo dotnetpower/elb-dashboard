@@ -244,15 +244,28 @@ preflight_permission_check() {
   [[ "${ELB_QUICK_DEPLOY_SKIP_PREFLIGHT:-0}" == "1" ]] && return 0
   command -v az >/dev/null 2>&1 || die "az CLI not found on PATH"
 
-  local who=""
+  local who="" user_type=""
   who="$(az account show --query 'user.name' -o tsv 2>/dev/null || true)"
+  user_type="$(az account show --query 'user.type' -o tsv 2>/dev/null || true)"
   if [[ -z "$who" ]]; then
     die "Not signed in to Azure CLI. Run 'az login' (or 'az-jungha' for the demo profile) and retry."
   fi
-  ts "preflight: signed-in as $who"
+  # Critique-round-1 M2: differentiate user-vs-SP in the diagnostic so
+  # a service-principal session in CI does not see a misleading
+  # "Run az login" hint when its assignments are missing.
+  if [[ "$user_type" == "servicePrincipal" ]]; then
+    ts "preflight: signed-in as service principal $who"
+  else
+    ts "preflight: signed-in as $who"
+  fi
+
+  local _hint_who="$who"
+  if [[ "$user_type" == "servicePrincipal" ]]; then
+    _hint_who="<sp-object-id>"  # az role assignment list --assignee expects the SP object id, not appId
+  fi
 
   if ! az group show -n "$AZURE_RESOURCE_GROUP" -o none 2>/dev/null; then
-    die "Cannot read resource group '$AZURE_RESOURCE_GROUP'. The signed-in identity needs at least 'Reader' on the subscription or RG. Run 'az role assignment list --assignee $who --resource-group $AZURE_RESOURCE_GROUP' to inspect."
+    die "Cannot read resource group '$AZURE_RESOURCE_GROUP'. The signed-in identity needs at least 'Reader' on the subscription or RG. Run 'az role assignment list --assignee $_hint_who --resource-group $AZURE_RESOURCE_GROUP' to inspect."
   fi
 
   if ! az acr show -n "$ACR_NAME" -g "$AZURE_RESOURCE_GROUP" -o none 2>/dev/null; then
