@@ -150,11 +150,27 @@ def _audit_session(
         yield audit_job_id, _set_terminal
     finally:
         if not state["recorded"] and audit_job_id:
-            _record_audit_event(
+            # Critique #16: the interrupted-write is the LAST chance to
+            # explain the missing terminal row on the Audit screen. If
+            # this ALSO fails (audit backend down for the entire
+            # request), swallowing the bool means the operator sees a
+            # row stuck in ``started`` forever with zero log breadcrumb.
+            # Log a WARNING with the job id so an operator chasing the
+            # phantom row can grep the api log.
+            interrupted_ok = _record_audit_event(
                 audit_job_id,
                 "interrupted",
                 {"reason": "no_terminal_event_recorded"},
             )
+            if not interrupted_ok:
+                LOGGER.error(
+                    "settings/vnet-peering audit interrupted-write failed "
+                    "audit_job=%s op=%s nsg=%s \u2014 audit row stays in 'started' "
+                    "until manual cleanup",
+                    audit_job_id,
+                    op,
+                    target_nsg_name,
+                )
 
 _RE_SUB = re.compile(r"^[0-9a-fA-F-]{36}$")
 _RE_RG = re.compile(r"^[-\w._()]{1,90}$")

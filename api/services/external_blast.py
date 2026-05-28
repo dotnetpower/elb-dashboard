@@ -65,6 +65,17 @@ _READY_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
 _READY_INFLIGHT_WAIT_SECONDS = float(
     os.environ.get("OPENAPI_READY_INFLIGHT_WAIT_SECONDS", "6.0")
 )
+# Maximum number of "wait on a sibling leader, then re-check the cache"
+# rounds a non-leader caller will perform before giving up and firing its
+# own upstream probe. Capped (critique #20.12) so that a pathological
+# leader-swap loop (leader A times out, B becomes leader, B times out, \u2026)
+# cannot pin a single caller for an unbounded duration: total worst-case
+# wait = ``_READY_INFLIGHT_MAX_WAIT_ROUNDS * _READY_INFLIGHT_WAIT_SECONDS``.
+# Keep this small \u2014 the cache is the optimisation target, not waiting
+# itself.
+_READY_INFLIGHT_MAX_WAIT_ROUNDS = int(
+    os.environ.get("OPENAPI_READY_INFLIGHT_MAX_WAIT_ROUNDS", "2")
+)
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 # Submit retries on transient transport failures (connection refused /
 # reset / read timeout). Only applied when the payload carries an
@@ -515,29 +526,29 @@ def ready(*, base_url: str | None = None, api_token: str | None = None) -> dict[
     is_leader, inflight_event = _ready_inflight_acquire(cache_key)
     if not is_leader:
         # Another caller is firing the upstream HTTP probe right now. Wait
-        # for them, then re-read the cache. If they failed silently (no
-        # cache entry written for any reason), fall through and fire our
-        # own probe — acceptable degradation vs deadlock.
-        inflight_event.wait(timeout=_READY_INFLIGHT_WAIT_SECONDS)
-        cached_entry = _ready_cache_lookup(cache_key)
-        if cached_entry is not None:
-            cached_value, cached_age = cached_entry
-            if isinstance(cached_value, HTTPException):
-                raise cached_value
-            return cached_value
-        # Leader did not store anything; we become the new leader.
-        is_leader, inflight_event = _ready_inflight_acquire(cache_key)
-        if not is_leader:
-            # Race: yet another caller is now leader. Wait once more, then
-            # whatever the cache holds is our final answer.
+        # for them, then re-read the cache. The leader-swap loop is bounded
+        # by ``_READY_INFLIGHT_MAX_WAIT_ROUNDS`` (critique #20.12) so a
+        # pathological "leader keeps timing out and a new caller takes over"
+        # cycle cannot pin us forever \u2014 after the cap we fall through
+        # and fire our own probe, accepting one extra upstream request as
+        # the price of a bounded latency.
+        for _round in range(_READY_INFLIGHT_MAX_WAIT_ROUNDS):
             inflight_event.wait(timeout=_READY_INFLIGHT_WAIT_SECONDS)
             cached_entry = _ready_cache_lookup(cache_key)
             if cached_entry is not None:
-                cached_value, _age = cached_entry
+                cached_value, cached_age = cached_entry
                 if isinstance(cached_value, HTTPException):
                     raise cached_value
                 return cached_value
-            # Last resort: fire our own probe without leader status.
+            # Try to become leader ourselves \u2014 if we win, exit the
+            # wait loop and probe upstream. If a sibling beat us to it,
+            # loop and wait on the new leader.
+            is_leader, inflight_event = _ready_inflight_acquire(cache_key)
+            if is_leader:
+                break
+        # Loop exited without leadership: cap reached. Fire our own probe
+        # without leader status (the active leader still owns the slot;
+        # we simply do not register a new one).
 
     try:
         return _ready_probe_upstream(cache_key, resolved_base, api_token=api_token)

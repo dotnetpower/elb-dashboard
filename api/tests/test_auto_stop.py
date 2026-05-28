@@ -93,6 +93,24 @@ def test_save_and_get_roundtrip_file_backend(monkeypatch, tmp_path) -> None:
     assert loaded.owner_oid == "oid-1"
 
 
+def test_file_backend_save_does_not_create_lock_sentinel(monkeypatch, tmp_path) -> None:
+    """Critique #14: the file backend used to leave an orphan
+    ``auto_stop.json.lock`` sentinel after every save. The fix swaps the
+    sibling-file ``fcntl.flock`` pattern for an in-process
+    ``threading.Lock`` keyed by the state file path, so no ``.lock``
+    file is created at all.
+    """
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+
+    save_auto_stop_preference(_make(enabled=True))
+    save_auto_stop_preference(_make(cluster_name="elb-cluster-2", enabled=False))
+
+    files = {p.name for p in tmp_path.iterdir()}
+    assert "auto_stop.json" in files
+    assert not any(name.endswith(".lock") for name in files), files
+
+
 def test_list_auto_stop_preferences_file_backend(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
     monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))

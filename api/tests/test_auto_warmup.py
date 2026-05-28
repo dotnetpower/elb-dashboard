@@ -803,3 +803,39 @@ def test_auto_warmup_table_store_uses_dedicated_table(monkeypatch) -> None:
     assert writes[0]["table_name"] == "autowarmup"
     assert writes[0]["PartitionKey"] == "auto_warmup:sub-1:rg-elb:elb-cluster"
     assert writes[0]["type"] == "auto_warmup"
+
+
+def test_auto_warmup_file_backend_save_does_not_create_lock_sentinel(
+    monkeypatch, tmp_path
+) -> None:
+    """Critique #14 (auto_warmup mirror): the file backend used to leave
+    an orphan ``auto_warmup.json.lock`` sentinel after every save. The
+    fix replaces the sibling-file ``fcntl.flock`` with an in-process
+    ``threading.Lock`` keyed by the state file path, so no ``.lock``
+    file is created at all.
+    """
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+
+    save_auto_warmup_preference(
+        AutoWarmupPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            storage_account="elbstg01",
+            storage_resource_group="rg-elb",
+        )
+    )
+    save_auto_warmup_preference(
+        AutoWarmupPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster-2",
+            storage_account="elbstg01",
+            storage_resource_group="rg-elb",
+        )
+    )
+
+    files = {p.name for p in tmp_path.iterdir()}
+    assert "auto_warmup.json" in files
+    assert not any(name.endswith(".lock") for name in files), files

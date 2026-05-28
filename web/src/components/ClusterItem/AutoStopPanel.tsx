@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock, Loader2, Power, PowerOff } from "lucide-react";
 
@@ -7,6 +7,7 @@ import type {
   AutoStopPreferenceResponse,
   AutoStopStatusResponse,
 } from "@/api/aks";
+import { useToast } from "@/components/Toast";
 
 // Glassmorphic Idle Auto-Stop control surfaced inside the expanded
 // cluster card. Two visual states:
@@ -72,6 +73,7 @@ export function AutoStopPanel({
   clusterIsRunning: boolean;
 }) {
   const qc = useQueryClient();
+  const { toast } = useToast();
   const prefKey = useMemo(
     () => ["aks", "autostop", "pref", subscriptionId, resourceGroup, clusterName],
     [subscriptionId, resourceGroup, clusterName],
@@ -93,11 +95,17 @@ export function AutoStopPanel({
     queryFn: () => aksApi.autoStop.status(subscriptionId, resourceGroup, clusterName),
     staleTime: STATUS_POLL_MS,
     // Poll the status briskly only while the cluster is running AND
-    // auto-stop is enabled — a stopped/disabled cluster cannot transition
-    // to "warn" without user input.
+    // auto-stop is actively armed. A stopped cluster, an opt-out
+    // preference (verdict==="disabled"), or a degraded read all stop
+    // polling entirely (critique #9.8) \u2014 the next foreground refetch
+    // is triggered by the user re-enabling auto-stop or the
+    // ``clusterIsRunning`` flip in the parent (critique #17).
     refetchInterval: (query) => {
       const data = query.state.data as AutoStopStatusResponse | undefined;
       if (!clusterIsRunning) {
+        return false;
+      }
+      if (!data?.enabled && data?.verdict === "disabled") {
         return false;
       }
       if (!data?.enabled) {
@@ -123,6 +131,40 @@ export function AutoStopPanel({
     setDraftIdleMinutes(pref.idle_minutes ?? 60);
   }, [pref?.enabled, pref?.idle_minutes, pref]);
 
+  // Critique #17: when the parent flips ``clusterIsRunning`` from true
+  // to false (Start/Stop button, external az CLI, idle auto-stop tick,
+  // \u2026) the cached ``status`` payload becomes immediately stale \u2014
+  // ``enabled`` is still true but ``verdict`` should now be
+  // ``power_state:Stopped`` and the warn-banner / countdown must
+  // disappear. Without this, the dashboard sits on the last-running
+  // snapshot until the next ``STATUS_POLL_MS`` tick (up to one minute).
+  // Invalidate on the rising edge of the stopped state so the panel
+  // refetches once and converges immediately.
+  const prevClusterRunningRef = useRef<boolean>(clusterIsRunning);
+  useEffect(() => {
+    if (prevClusterRunningRef.current && !clusterIsRunning) {
+      qc.invalidateQueries({ queryKey: statusKey });
+    }
+    prevClusterRunningRef.current = clusterIsRunning;
+  }, [clusterIsRunning, qc, statusKey]);
+
+  // Snapshot the pre-mutation draft so we can roll back the optimistic
+  // toggle when the server PUT/POST fails (critique #9.1). The previous
+  // implementation silently swallowed the error: the checkbox stayed
+  // ``checked`` even though the server still had ``enabled=false``,
+  // which is a data-loss-feeling UX for the operator.
+  const lastCommittedRef = useRef<{ enabled: boolean; idle_minutes: number }>({
+    enabled: false,
+    idle_minutes: 60,
+  });
+  useEffect(() => {
+    if (!pref) return;
+    lastCommittedRef.current = {
+      enabled: pref.enabled,
+      idle_minutes: pref.idle_minutes ?? 60,
+    };
+  }, [pref?.enabled, pref?.idle_minutes, pref]);
+
   const saveMutation = useMutation({
     mutationFn: (next: { enabled: boolean; idle_minutes: number }) =>
       aksApi.autoStop.save({
@@ -139,6 +181,20 @@ export function AutoStopPanel({
       qc.setQueryData(prefKey, data);
       qc.invalidateQueries({ queryKey: prefKey });
       qc.invalidateQueries({ queryKey: statusKey });
+      lastCommittedRef.current = {
+        enabled: data.enabled,
+        idle_minutes: data.idle_minutes ?? 60,
+      };
+    },
+    onError: (error: unknown) => {
+      // Critique #9.1: roll the optimistic UI back to the last known
+      // server state so the checkbox / dropdown match reality, then
+      // surface the error so the operator sees WHY their toggle did
+      // not take. Hidden failure was the original bug.
+      setDraftEnabled(lastCommittedRef.current.enabled);
+      setDraftIdleMinutes(lastCommittedRef.current.idle_minutes);
+      const message = error instanceof Error ? error.message : String(error);
+      toast(`Could not save auto-stop preference: ${message}`, "error");
     },
   });
 
@@ -149,6 +205,11 @@ export function AutoStopPanel({
       qc.setQueryData(prefKey, data);
       qc.invalidateQueries({ queryKey: prefKey });
       qc.invalidateQueries({ queryKey: statusKey });
+    },
+    onError: (error: unknown) => {
+      // Critique #9.1 sibling: extend failure must also surface.
+      const message = error instanceof Error ? error.message : String(error);
+      toast(`Could not extend auto-stop deadline: ${message}`, "error");
     },
   });
 

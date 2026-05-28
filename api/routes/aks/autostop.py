@@ -16,6 +16,8 @@ Validation: `uv run pytest -q api/tests/test_aks_autostop_route.py`.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import threading
 import time
@@ -31,6 +33,7 @@ from api.auth import (
 )
 from api.services.auto_stop import (
     ALLOWED_IDLE_MINUTES,
+    DEFAULT_COOLDOWN_MINUTES,
     DEFAULT_IDLE_MINUTES,
     EXTEND_GRANT_MINUTES,
     AutoStopPreference,
@@ -52,27 +55,47 @@ router = APIRouter()
 # researcher who needs more time can simply re-press Extend.
 MAX_EXTEND_MINUTES = 4 * 60
 
-# Per-cluster status cache. The SPA polls /autostop/status every 60s for
-# every visible cluster card; N clusters × M browsers without a cache
-# means N*M Table reads + ARM lookups per minute. A short TTL collapses
-# concurrent polls to one fan-out per cluster.
+# Per-cluster status cache (two-tier).
 #
-# MULTI-WORKER CAVEAT: the api sidecar runs uvicorn with 2 workers, so
-# this cache is per-process. A PUT routed to worker-1 invalidates only
-# worker-1's cache; worker-2 keeps serving its own cached row for up to
-# ``_STATUS_TTL_SECONDS``. The TTL is therefore kept SHORT (5 s) so the
-# worst-case cross-worker stale window is below human perception
-# instead of the original 30 s. A future Redis-backed cache + pub/sub
-# invalidation would close this fully; until then, 5 s is the
-# pragmatic trade-off between SPA fan-in collapse and cross-worker
-# coherence.
-_STATUS_TTL_SECONDS = 5.0
+# Why two tiers? The SPA polls /autostop/status every 60s for every
+# visible cluster card. N clusters \u00d7 M browsers without a cache
+# would mean N*M Table reads + ARM lookups per minute. A short TTL
+# collapses the fan-in to one compute per cluster.
+#
+# L1 (in-process) collapses concurrent polls hitting the SAME uvicorn
+# worker. Tiny TTL (``_STATUS_L1_TTL_SECONDS=2``) so a PUT on this
+# worker is reflected on the very next read.
+#
+# L2 (Redis, ``autostop:status:<key>``) collapses concurrent polls
+# hitting DIFFERENT uvicorn workers (charter pins ``minReplicas=1
+# maxReplicas=1`` but the api sidecar runs 2 uvicorn workers per
+# replica; a browser polling at 60s round-robins between them).
+# ``_STATUS_L2_TTL_SECONDS=5`` matches the original single-tier TTL
+# so cross-worker stale window stays in the same envelope. Critique
+# #18: previously L1 was the only cache, so a PUT on worker-A was
+# invisible to worker-B for up to 5 s and idempotent re-polls re-ran
+# the entire compute on worker-B \u2014 wasted Table+ARM lookups.
+#
+# Both tiers cache identical JSON payloads. Redis unreachable degrades
+# to L1-only; ``get_ops_redis_client`` short-timeout means we never
+# stall the request waiting for Redis.
+_STATUS_L1_TTL_SECONDS = 2.0
+_STATUS_L2_TTL_SECONDS = 5
+_STATUS_TTL_SECONDS = _STATUS_L1_TTL_SECONDS  # kept for tests that still import this name
 _STATUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _STATUS_CACHE_LOCK = threading.Lock()
+_STATUS_REDIS_KEY_PREFIX = "autostop:status:"
 # Per-key in-flight gate. Without this, cache-miss thunderstorms (M
 # browsers polling the same cluster simultaneously) all run
 # ``_compute_status`` in parallel. The gate lets the first caller
 # compute and subsequent callers wait for the result.
+#
+# Cross-loop / cross-thread shareable via ``threading.Event``. The
+# async route never calls ``gate.wait()`` directly — it wraps the
+# wait in ``asyncio.to_thread`` (critique #9.4) so the event-loop
+# thread is not blocked while a follower waits for the leader's
+# compute. Threadpool slots are still consumed during the wait, but
+# only briefly (TTL = 5 s) and only when the cache is empty.
 _STATUS_INFLIGHT: dict[str, threading.Event] = {}
 _STATUS_INFLIGHT_LOCK = threading.Lock()
 
@@ -95,6 +118,79 @@ def _status_cache_key(subscription_id: str, resource_group: str, cluster_name: s
     return f"{subscription_id}|{resource_group}|{cluster_name}"
 
 
+def _status_redis_key(cache_key: str) -> str:
+    return f"{_STATUS_REDIS_KEY_PREFIX}{cache_key}"
+
+
+def _status_redis_client() -> Any | None:
+    """Return the ops Redis client or ``None`` if unreachable.
+
+    Imported lazily so tests that never need Redis don't pay the import
+    cost, and so the module loads in environments without redis-py.
+    """
+    try:
+        from api.services.redis_clients import get_ops_redis_client
+
+        return get_ops_redis_client(socket_timeout=0.5)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.debug("autostop status redis unavailable: %s", type(exc).__name__)
+        return None
+
+
+def _status_redis_get(cache_key: str) -> dict[str, Any] | None:
+    """Read a cached status body from Redis. Returns ``None`` on miss
+    or any Redis error \u2014 the caller then falls through to compute."""
+    client = _status_redis_client()
+    if client is None:
+        return None
+    try:
+        raw = client.get(_status_redis_key(cache_key))
+    except Exception as exc:
+        LOGGER.debug("autostop status redis get failed: %s", type(exc).__name__)
+        return None
+    if not raw:
+        return None
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        body = json.loads(raw)
+        if isinstance(body, dict):
+            return body
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def _status_redis_set(cache_key: str, body: dict[str, Any]) -> None:
+    """Cache a status body in Redis for ``_STATUS_L2_TTL_SECONDS``.
+
+    No-op on Redis error \u2014 L1 still serves the same worker; other
+    workers will simply recompute on their next poll.
+    """
+    client = _status_redis_client()
+    if client is None:
+        return
+    try:
+        client.setex(
+            _status_redis_key(cache_key),
+            _STATUS_L2_TTL_SECONDS,
+            json.dumps(body),
+        )
+    except Exception as exc:
+        LOGGER.debug("autostop status redis setex failed: %s", type(exc).__name__)
+
+
+def _status_redis_delete(cache_key: str) -> None:
+    """Drop the cached body across all workers."""
+    client = _status_redis_client()
+    if client is None:
+        return
+    try:
+        client.delete(_status_redis_key(cache_key))
+    except Exception as exc:
+        LOGGER.debug("autostop status redis del failed: %s", type(exc).__name__)
+
+
 def _invalidate_status_cache(
     subscription_id: str, resource_group: str, cluster_name: str
 ) -> None:
@@ -102,17 +198,24 @@ def _invalidate_status_cache(
 
     Called from any route that mutates the underlying preference so the
     SPA sees a fresh verdict on the very next poll instead of waiting up
-    to ``_STATUS_TTL_SECONDS``.
+    to ``_STATUS_TTL_SECONDS``. Drops BOTH L1 (this worker) and L2
+    (cross-worker) so a PUT propagates to siblings within one Redis
+    round-trip (critique #18).
     """
     key = _status_cache_key(subscription_id, resource_group, cluster_name)
     with _STATUS_CACHE_LOCK:
         _STATUS_CACHE.pop(key, None)
+    _status_redis_delete(key)
 
 
 def _reset_status_cache() -> None:
-    """Test hook — drop every cached row and any leftover in-flight gates."""
+    """Test hook \u2014 drop every cached row (both tiers) and any
+    leftover in-flight gates."""
     with _STATUS_CACHE_LOCK:
+        keys = list(_STATUS_CACHE.keys())
         _STATUS_CACHE.clear()
+    for key in keys:
+        _status_redis_delete(key)
     with _STATUS_INFLIGHT_LOCK:
         for evt in _STATUS_INFLIGHT.values():
             evt.set()
@@ -181,7 +284,7 @@ def _pref_response(
             "cluster_name": cluster_name,
             "enabled": False,
             "idle_minutes": DEFAULT_IDLE_MINUTES,
-            "cooldown_minutes": 0,
+            "cooldown_minutes": DEFAULT_COOLDOWN_MINUTES,
             "allowed_idle_minutes": list(ALLOWED_IDLE_MINUTES),
             "last_stop_at": "",
             "last_stop_reason": "",
@@ -250,11 +353,15 @@ def _check_ownership(pref: AutoStopPreference | None, caller: CallerIdentity) ->
     """
     if _caller_owns(pref, caller):
         return
+    # Critique #9.10: never log the full caller object_id (PII /
+    # correlation surface). Last 8 chars are enough to grep a single
+    # operator's trail in App Insights without exposing the GUID itself.
+    pref_owner = (pref.owner_oid if pref else "") or ""
     LOGGER.warning(
         "autostop ownership refusal cluster=%s pref_owner=%s caller=%s",
         pref.cluster_name if pref else "?",
-        pref.owner_oid if pref else "?",
-        caller.object_id,
+        f"...{pref_owner[-8:]}" if pref_owner else "?",
+        f"...{caller.object_id[-8:]}" if caller.object_id else "?",
     )
     raise HTTPException(
         status_code=403,
@@ -416,7 +523,7 @@ def extend_autostop(
 
 
 @router.get("/autostop/status")
-def autostop_status(
+async def autostop_status(
     subscription_id: str = Query(..., min_length=1),
     resource_group: str = Query(..., min_length=1),
     cluster_name: str = Query(..., min_length=1),
@@ -447,10 +554,14 @@ def autostop_status(
     rows are reported as ``disabled`` to the non-owner so a researcher
     cannot infer another user's idle patterns from this surface.
 
-    Concurrency: a per-cluster ``threading.Event`` collapses concurrent
+    Concurrency: a per-cluster ``asyncio.Event`` collapses concurrent
     cache-miss requests to one underlying compute — without it, N
     browsers polling the same cluster all run ``_compute_status`` in
     parallel and produce a thundering herd on ARM + state-repo.
+    Critique #9.4: the route is async so the singleflight wait does
+    not block a uvicorn threadpool slot; the storage/evaluator calls
+    are wrapped with ``asyncio.to_thread`` so the event-loop thread
+    itself is never blocked.
     Degraded results (state-repo / ARM blip / evaluator failure) are
     NOT cached so the next poll re-attempts immediately.
     """
@@ -460,7 +571,9 @@ def autostop_status(
     # cheap (single Table get) and lets us short-circuit before paying
     # for the evaluator + ARM lookup.
     try:
-        pref_peek = get_auto_stop_preference(subscription_id, resource_group, cluster_name)
+        pref_peek = await asyncio.to_thread(
+            get_auto_stop_preference, subscription_id, resource_group, cluster_name
+        )
     except Exception as exc:
         LOGGER.debug("autostop_status pref peek failed: %s", type(exc).__name__)
         pref_peek = None
@@ -469,33 +582,66 @@ def autostop_status(
 
     key = _status_cache_key(subscription_id, resource_group, cluster_name)
     now = time.monotonic()
+    # L1 check (this worker only). Tiny TTL so a PUT on this worker is
+    # reflected on the very next read.
     with _STATUS_CACHE_LOCK:
         cached = _STATUS_CACHE.get(key)
-        if cached is not None and (now - cached[0]) < _STATUS_TTL_SECONDS:
+        if cached is not None and (now - cached[0]) < _STATUS_L1_TTL_SECONDS:
             return cached[1]
+    # L2 check (shared across uvicorn workers via Redis). On miss we
+    # fall through to singleflight + compute; on hit we backfill L1 so
+    # rapid repeat polls on the same worker stop hitting Redis.
+    redis_body = await asyncio.to_thread(_status_redis_get, key)
+    if redis_body is not None:
+        with _STATUS_CACHE_LOCK:
+            _STATUS_CACHE[key] = (time.monotonic(), redis_body)
+        return redis_body
 
-    # Singleflight: at most one compute per key at a time.
+    # Singleflight: at most one compute per key at a time. The gate is
+    # a cross-thread ``threading.Event`` so it works regardless of which
+    # event loop / worker process the caller is on. The wait is wrapped
+    # in ``asyncio.to_thread`` so the event-loop thread is never blocked
+    # (critique #9.4). Followers consume a threadpool slot during the
+    # wait but never the loop slot.
+    leader = False
     with _STATUS_INFLIGHT_LOCK:
         gate = _STATUS_INFLIGHT.get(key)
-        leader = gate is None
-        if leader:
+        if gate is None:
             gate = threading.Event()
             _STATUS_INFLIGHT[key] = gate
+            leader = True
     if not leader:
-        # Follower: wait for the leader, then read the cache it
-        # populated (or fall through to compute if leader failed to
-        # cache, e.g. degraded result).
-        assert gate is not None
-        gate.wait(timeout=_STATUS_TTL_SECONDS)
+        # `gate` is guaranteed non-None here — we only enter this branch
+        # when we observed a non-None value above. Bind to a local with
+        # an explicit type-narrow so static checkers + a runtime guard
+        # cover the case where _reset_status_cache cleared the dict
+        # between the check and the wait (critique #9.5 — no `assert`).
+        wait_gate = gate
+        if wait_gate is None:
+            raise RuntimeError("singleflight gate vanished between check and wait")
+        await asyncio.to_thread(wait_gate.wait, _STATUS_L2_TTL_SECONDS)
         with _STATUS_CACHE_LOCK:
             cached = _STATUS_CACHE.get(key)
             if cached is not None:
                 return cached[1]
+        # Leader may have populated L2 even if our L1 was cleared.
+        redis_body = await asyncio.to_thread(_status_redis_get, key)
+        if redis_body is not None:
+            with _STATUS_CACHE_LOCK:
+                _STATUS_CACHE[key] = (time.monotonic(), redis_body)
+            return redis_body
         # Fall through to compute (leader produced a non-cacheable
         # degraded result, or timed out).
 
     try:
-        body = _compute_status(subscription_id, resource_group, cluster_name, caller)
+        body = await asyncio.to_thread(
+            _compute_status,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            caller,
+            pref_peek,
+        )
         reason = body.get("reason") or ""
         # Only cache stable, non-degraded answers. Caching a transient
         # "state_repo_unreachable" would freeze the SPA banner on a
@@ -503,13 +649,20 @@ def autostop_status(
         if reason not in _NON_CACHEABLE_REASONS:
             with _STATUS_CACHE_LOCK:
                 _STATUS_CACHE[key] = (time.monotonic(), body)
+            # Write-through to Redis so sibling workers see the same
+            # body on their next poll. Fire-and-forget on Redis errors.
+            await asyncio.to_thread(_status_redis_set, key, body)
         return body
     finally:
         if leader:
             with _STATUS_INFLIGHT_LOCK:
-                _STATUS_INFLIGHT.pop(key, None)
-            assert gate is not None
-            gate.set()
+                stale = _STATUS_INFLIGHT.pop(key, None)
+            # Critique #9.5: explicit guard, not `assert` (would be
+            # stripped under ``python -O``).
+            if stale is not None:
+                stale.set()
+            elif gate is not None:
+                gate.set()
 
 
 def _disabled_status_shape(
@@ -543,9 +696,19 @@ def _compute_status(
     resource_group: str,
     cluster_name: str,
     caller: CallerIdentity,
+    pref_peek: AutoStopPreference | None = None,
 ) -> dict[str, Any]:
-    """Body of `/autostop/status` minus the cache layer."""
-    pref = get_auto_stop_preference(subscription_id, resource_group, cluster_name)
+    """Body of `/autostop/status` minus the cache layer.
+
+    Critique #9.7: when the route already loaded ``pref`` for the
+    ownership check, pass it in via ``pref_peek`` to avoid a second
+    Table read. Falls back to a fresh read when called without it
+    (e.g. tests / direct callers).
+    """
+    if pref_peek is not None:
+        pref: AutoStopPreference | None = pref_peek
+    else:
+        pref = get_auto_stop_preference(subscription_id, resource_group, cluster_name)
     if pref is None:
         return _disabled_status_shape(subscription_id, resource_group, cluster_name)
 

@@ -302,10 +302,14 @@ def test_evaluate_idle_clusters_batches_power_state(
 
     def fake_batch(prefs):
         batch_calls["n"] += 1
-        return {
+        states = {
             (p.subscription_id, p.resource_group, p.cluster_name): "Running"
             for p in prefs
         }
+        # Critique #15: ``_batch_power_states`` returns ``(states, summary)``
+        # so the beat fan-out can attribute ARM failures by (sub, rg).
+        summary = {"rg_groups": 0, "rg_failed": 0, "failed_rgs": []}
+        return states, summary
 
     monkeypatch.setattr(idle_autostop, "_power_state", fake_per_cluster)
     monkeypatch.setattr(idle_autostop, "_batch_power_states", fake_batch)
@@ -382,9 +386,13 @@ def test_batch_power_states_groups_by_rg(monkeypatch: pytest.MonkeyPatch) -> Non
             cluster_name="cluster-c",
         ),
     ]
-    result = idle_autostop._batch_power_states(prefs)
+    states, summary = idle_autostop._batch_power_states(prefs)
     # One list call per (sub, rg) tuple → 2 calls total, NOT 3.
     assert len(list_calls) == 2
     # Matched clusters carry the right power_state; unknown ones absent.
-    assert result[("sub-1", "rg-elb", "cluster-a")] == "Running"
-    assert result[("sub-1", "rg-elb", "cluster-b")] == "Stopped"
+    assert states[("sub-1", "rg-elb", "cluster-a")] == "Running"
+    assert states[("sub-1", "rg-elb", "cluster-b")] == "Stopped"
+    # Summary attributes RG-level success/failure for log aggregation.
+    assert summary["rg_groups"] == 2
+    assert summary["rg_failed"] == 0
+    assert summary["failed_rgs"] == []

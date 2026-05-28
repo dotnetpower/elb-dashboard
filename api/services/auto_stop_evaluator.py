@@ -257,9 +257,21 @@ def evaluate_cluster(
 
     if latest is None:
         # No jobs ever observed on this cluster. Anchor the idle clock to
-        # the preference's `updated_at` so a freshly-enabled cluster still
-        # gets at least `idle_minutes` before the first stop.
-        raw = pref.updated_at
+        # the preference's ``created_at`` so a freshly-enabled cluster
+        # still gets at least ``idle_minutes`` before the first stop.
+        #
+        # Critique #9.2: ``updated_at`` USED to be the anchor, but
+        # ``mark_auto_stop_event`` writes ``updated_at`` AND
+        # ``last_skip_at`` on every warn tick. Anchoring on those means
+        # the 60-min idle clock keeps getting pushed forward by warn
+        # ticks themselves — the cluster ends up stopping at 90-120 min
+        # instead of the configured 60 min, costing 30-50% of the
+        # cost-saver's value. ``created_at`` is stamped exactly once on
+        # first save (``normalise_preference``) and is never touched by
+        # warn ticks, so the deadline stays anchored where the user set
+        # it. Legacy rows that pre-date the ``created_at`` field fall
+        # back to the old behaviour until they next get re-saved.
+        raw = pref.created_at or pref.updated_at
         anchor: datetime
         try:
             anchor_text = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw

@@ -523,3 +523,189 @@ def test_status_singleflight_collapses_concurrent_polls(
     # Exactly ONE compute despite 8 concurrent callers — followers wait
     # for the leader's cache fill instead of running in parallel.
     assert call_count["n"] == 1
+
+
+class _FakeRedis:
+    """Minimal in-memory Redis stub for autostop L2 cache tests
+    (critique #18). Implements only the three methods the cache uses:
+    ``get`` / ``setex`` / ``delete``.
+    """
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+
+    def get(self, key: str) -> bytes | None:
+        value = self.store.get(key)
+        return value.encode("utf-8") if value is not None else None
+
+    def setex(self, key: str, ttl: int, value: str) -> None:
+        self.store[key] = value
+
+    def delete(self, *keys: str) -> int:
+        removed = 0
+        for k in keys:
+            if k in self.store:
+                self.store.pop(k)
+                removed += 1
+        return removed
+
+
+def test_status_writes_to_l2_redis_for_cross_worker_sharing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Critique #18: when a status compute succeeds, the body must be
+    written to Redis (L2) so a sibling uvicorn worker serves the same
+    cached body instead of re-running the entire Table+ARM+evaluator
+    pipeline within the L2 TTL window.
+    """
+    fake = _FakeRedis()
+    monkeypatch.setattr(
+        "api.routes.aks.autostop._status_redis_client", lambda: fake
+    )
+
+    client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 60,
+        },
+    )
+
+    monkeypatch.setattr(
+        "api.routes.aks.autostop.evaluate_cluster",
+        lambda pref, *, repo, power_state="": IdleDecision(
+            verdict="keep", reason="active", cluster_power_state=power_state
+        ),
+    )
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_a, **_kw: {"power_state": "Running", "healthy": True},
+    )
+
+    r1 = client.get(f"/api/aks/autostop/status?{_qs()}")
+    assert r1.status_code == 200
+    body1 = r1.json()
+    expected_key = "autostop:status:sub-1|rg-elb|elb-cluster"
+    assert expected_key in fake.store
+    import json
+
+    cached = json.loads(fake.store[expected_key])
+    assert cached["verdict"] == body1["verdict"]
+    assert cached["reason"] == body1["reason"]
+
+
+def test_status_serves_l2_redis_hit_without_running_evaluator(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Critique #18: a sibling worker that already populated L2 must
+    serve the cached body — the evaluator must NOT run again until
+    the L2 entry expires or is invalidated.
+    """
+    fake = _FakeRedis()
+    monkeypatch.setattr(
+        "api.routes.aks.autostop._status_redis_client", lambda: fake
+    )
+
+    client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 60,
+        },
+    )
+
+    # Reset both tiers so the PUT-side write does not poison the assertion.
+    from api.routes.aks.autostop import _reset_status_cache
+
+    _reset_status_cache()
+    fake.store.clear()
+
+    import json
+
+    seeded = {
+        "exists": True,
+        "editable": True,
+        "owner_oid": "owner-oid",
+        "enabled": True,
+        "verdict": "warn",
+        "reason": "idle:55m",
+        "seconds_until_stop": 12,
+        "next_stop_at": "",
+        "active_job_count": 0,
+        "idle_minutes": 60,
+        "cooldown_minutes": 15,
+    }
+    fake.store["autostop:status:sub-1|rg-elb|elb-cluster"] = json.dumps(seeded)
+
+    eval_calls = {"n": 0}
+
+    def boom_eval(pref, *, repo, power_state=""):
+        eval_calls["n"] += 1
+        return IdleDecision(verdict="keep", reason="active")
+
+    monkeypatch.setattr("api.routes.aks.autostop.evaluate_cluster", boom_eval)
+
+    r = client.get(f"/api/aks/autostop/status?{_qs()}")
+    assert r.status_code == 200
+    body = r.json()
+    # Must surface the L2 body verbatim instead of running the evaluator.
+    assert body["verdict"] == "warn"
+    assert body["reason"] == "idle:55m"
+    assert eval_calls["n"] == 0
+
+
+def test_put_drops_l2_redis_entry(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Critique #18: a PUT mutates the underlying preference, so it
+    must delete the L2 cache entry too — otherwise a sibling worker
+    keeps serving the pre-PUT body for up to ``_STATUS_L2_TTL_SECONDS``.
+    """
+    fake = _FakeRedis()
+    monkeypatch.setattr(
+        "api.routes.aks.autostop._status_redis_client", lambda: fake
+    )
+
+    client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 60,
+        },
+    )
+
+    monkeypatch.setattr(
+        "api.routes.aks.autostop.evaluate_cluster",
+        lambda pref, *, repo, power_state="": IdleDecision(
+            verdict="keep", reason="active", cluster_power_state=power_state
+        ),
+    )
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_a, **_kw: {"power_state": "Running", "healthy": True},
+    )
+
+    client.get(f"/api/aks/autostop/status?{_qs()}")
+    assert "autostop:status:sub-1|rg-elb|elb-cluster" in fake.store
+
+    client.put(
+        "/api/aks/autostop",
+        json={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+            "enabled": True,
+            "idle_minutes": 30,
+        },
+    )
+    # The PUT both wrote the new pref and dropped the L2 entry.
+    assert "autostop:status:sub-1|rg-elb|elb-cluster" not in fake.store

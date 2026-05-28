@@ -339,6 +339,25 @@ def _state_file() -> Path:
     return root / "auto_warmup.json"
 
 
+# Per-state-file ``threading.Lock`` registry. See the matching note in
+# ``api.services.auto_stop`` (critique #14): replaces the sibling
+# ``.lock`` file pattern which leaked an empty sentinel file every time
+# the file backend ran. The file backend is dev-only (Container Apps
+# always use the Table backend) so an in-process lock is enough.
+_FILE_BACKEND_LOCKS: dict[str, threading.Lock] = {}
+_FILE_BACKEND_LOCKS_GUARD = threading.Lock()
+
+
+def _file_backend_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _FILE_BACKEND_LOCKS_GUARD:
+        lock = _FILE_BACKEND_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_BACKEND_LOCKS[key] = lock
+    return lock
+
+
 def _read_file_state() -> dict[str, Any]:
     path = _state_file()
     if not path.exists():
@@ -358,24 +377,13 @@ def _write_file_state(data: dict[str, Any]) -> None:
 
 
 def _save_file(pref: AutoWarmupPreference) -> None:
-    lock_path = _state_file().with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a", encoding="utf-8") as lock_file:
-        try:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            pass
+    path = _state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = _file_backend_lock(path)
+    with lock:
         data = _read_file_state()
         data[pref.key] = pref.to_dict()
         _write_file_state(data)
-        try:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        except (ImportError, OSError):
-            pass
 
 
 def _get_file(key: str) -> AutoWarmupPreference | None:

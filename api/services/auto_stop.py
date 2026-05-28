@@ -98,6 +98,15 @@ class AutoStopPreference:
     last_skip_reason: str = ""
     extend_until: str = ""
     updated_at: str = ""
+    # Critique #9.2: ``updated_at`` and ``last_skip_at`` BOTH drift forward
+    # on every warn tick because ``mark_auto_stop_event`` writes them.
+    # The evaluator needs a STABLE anchor for the "no jobs ever observed"
+    # branch (otherwise the 60-min idle clock keeps getting pushed back
+    # by warn ticks themselves and the cluster takes 90-120 min to stop).
+    # ``created_at`` is set ONCE on first save and never touched again.
+    # Legacy rows (no ``created_at``) keep the old drifting behaviour;
+    # next time the user toggles the pref the field will populate.
+    created_at: str = ""
     owner_oid: str = ""
     tenant_id: str = ""
 
@@ -119,6 +128,7 @@ class AutoStopPreference:
             "last_skip_reason": self.last_skip_reason,
             "extend_until": self.extend_until,
             "updated_at": self.updated_at,
+            "created_at": self.created_at,
             "owner_oid": self.owner_oid,
             "tenant_id": self.tenant_id,
         }
@@ -138,6 +148,7 @@ class AutoStopPreference:
             last_skip_reason=str(value.get("last_skip_reason") or ""),
             extend_until=str(value.get("extend_until") or ""),
             updated_at=str(value.get("updated_at") or ""),
+            created_at=str(value.get("created_at") or ""),
             owner_oid=str(value.get("owner_oid") or ""),
             tenant_id=str(value.get("tenant_id") or ""),
         )
@@ -158,6 +169,10 @@ def normalise_preference(value: dict[str, Any]) -> AutoStopPreference:
         raise ValueError("cluster_name is required")
     pref.idle_minutes = _clamp_idle_minutes(pref.idle_minutes)
     pref.updated_at = _now_iso()
+    # Critique #9.2: stamp created_at exactly once. If the input value
+    # already carried one (e.g. import / migration path), preserve it.
+    if not pref.created_at:
+        pref.created_at = pref.updated_at
     return pref
 
 
@@ -403,6 +418,26 @@ def _state_file() -> Path:
     return root / "auto_stop.json"
 
 
+# Per-state-file ``threading.Lock`` registry. Replaces the previous
+# sibling ``.lock`` file pattern (critique #14) which leaked an empty
+# sentinel file every time the file backend ran. The file backend is
+# intentionally single-process (local dev only \u2014 deployed Container
+# Apps always uses the Table backend), so a plain in-process lock is
+# enough to serialise read-modify-write on the JSON state file.
+_FILE_BACKEND_LOCKS: dict[str, threading.Lock] = {}
+_FILE_BACKEND_LOCKS_GUARD = threading.Lock()
+
+
+def _file_backend_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _FILE_BACKEND_LOCKS_GUARD:
+        lock = _FILE_BACKEND_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_BACKEND_LOCKS[key] = lock
+    return lock
+
+
 def _read_file_state() -> dict[str, Any]:
     path = _state_file()
     if not path.exists():
@@ -422,24 +457,22 @@ def _write_file_state(data: dict[str, Any]) -> None:
 
 
 def _save_file(pref: AutoStopPreference) -> None:
-    lock_path = _state_file().with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a", encoding="utf-8") as lock_file:
-        try:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            pass
+    # Critique #14: the previous implementation opened a sibling
+    # ``<state>.lock`` file with ``open("a")`` and ``fcntl.flock`` for
+    # cross-process exclusion. That leaves an orphan ``auto_stop.json.lock``
+    # file forever (no cleanup) AND the file backend is intentionally
+    # single-process (dev/local-run only \u2014 the Container App always
+    # uses the Table backend), so the cross-process flock was never
+    # exercised in production. A plain ``threading.Lock`` keyed by the
+    # state file path is enough: serialises concurrent writes from the
+    # same process without spawning a ``.lock`` sentinel.
+    path = _state_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = _file_backend_lock(path)
+    with lock:
         data = _read_file_state()
         data[pref.key] = pref.to_dict()
         _write_file_state(data)
-        try:
-            import fcntl
-
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        except (ImportError, OSError):
-            pass
 
 
 def _get_file(key: str) -> AutoStopPreference | None:

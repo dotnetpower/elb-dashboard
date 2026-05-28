@@ -702,3 +702,169 @@ def test_redis_token_bucket_falls_back_on_redis_failure(
     # quickly. The test would hang or raise if the fallback did not
     # engage.
     _eutils._consume_token(timeout_seconds=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Per-caller quota (critique #10, #11, #13, #19)
+# ---------------------------------------------------------------------------
+def test_caller_bucket_key_namespaces_dev_bypass_by_upn() -> None:
+    """Critique #10: two dev-bypass identities with distinct upns must not
+    collide in the per-caller bucket so concurrent local dashboards do not
+    starve each other."""
+    from api.auth import DEV_BYPASS_OID, CallerIdentity
+    from api.routes.ncbi import _caller_bucket_key
+
+    a = CallerIdentity(
+        object_id=DEV_BYPASS_OID,
+        tenant_id="t",
+        upn="alice@local",
+        raw_token="",
+        claims={"dev_bypass": True},
+    )
+    b = CallerIdentity(
+        object_id=DEV_BYPASS_OID,
+        tenant_id="t",
+        upn="bob@local",
+        raw_token="",
+        claims={"dev_bypass": True},
+    )
+    assert _caller_bucket_key(a) != _caller_bucket_key(b)
+    assert _caller_bucket_key(a).startswith("dev-bypass:")
+
+
+def test_caller_bucket_key_real_caller_uses_oid() -> None:
+    from api.auth import CallerIdentity
+    from api.routes.ncbi import _caller_bucket_key
+
+    caller = CallerIdentity(
+        object_id="11111111-2222-3333-4444-555555555555",
+        tenant_id="t",
+        upn="real@user",
+        raw_token="tok",
+        claims={},
+    )
+    assert _caller_bucket_key(caller) == "11111111-2222-3333-4444-555555555555"
+
+
+def test_caller_quota_rejects_empty_oid_with_401() -> None:
+    """Critique #10: real caller with empty oid must NOT silently share an
+    'anonymous' bucket with every other empty-oid caller — 401 instead."""
+    from api.auth import CallerIdentity
+    from api.routes.ncbi import _check_caller_quota, _reset_caller_quota_for_tests
+    from fastapi import HTTPException
+
+    _reset_caller_quota_for_tests()
+    caller = CallerIdentity(
+        object_id="",
+        tenant_id="t",
+        upn="",
+        raw_token="tok",
+        claims={},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _check_caller_quota(caller)
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["code"] == "missing_caller_identity"
+
+
+def test_caller_bucket_lru_evicts_when_over_soft_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Critique #11: the per-caller dict must not grow unboundedly.
+
+    Forces the cap to a low value so the test runs in <50ms.
+    """
+    from api.auth import CallerIdentity
+    from api.routes import ncbi as ncbi_routes
+
+    monkeypatch.setattr(ncbi_routes, "_CALLER_BUCKETS_MAX_KEYS", 4)
+    ncbi_routes._reset_caller_quota_for_tests()
+    for i in range(10):
+        ncbi_routes._check_caller_quota(
+            CallerIdentity(
+                object_id=f"00000000-0000-0000-0000-00000000000{i}",
+                tenant_id="t",
+                upn="",
+                raw_token="tok",
+                claims={},
+            )
+        )
+    assert len(ncbi_routes._CALLER_BUCKETS) <= 4
+
+
+def test_caller_quota_refund_pops_most_recent_timestamp() -> None:
+    """Critique #13: refund must drop the slot just charged so a tight
+    client retrying on shared-bucket 429 does not pay double quota."""
+    from api.auth import CallerIdentity
+    from api.routes.ncbi import (
+        _CALLER_BUCKETS,
+        _check_caller_quota,
+        _refund_caller_quota,
+        _reset_caller_quota_for_tests,
+    )
+
+    _reset_caller_quota_for_tests()
+    caller = CallerIdentity(
+        object_id="aaaaaaaa-1111-2222-3333-444444444444",
+        tenant_id="t",
+        upn="real@user",
+        raw_token="tok",
+        claims={},
+    )
+    key = _check_caller_quota(caller)
+    assert len(_CALLER_BUCKETS[key]) == 1
+    _refund_caller_quota(key)
+    # Bucket entirely empty AND key garbage-collected from dict.
+    assert key not in _CALLER_BUCKETS
+
+
+def test_caller_quota_refund_handles_unknown_key() -> None:
+    """Refund must be a no-op when the key is empty or already absent."""
+    from api.routes.ncbi import _refund_caller_quota, _reset_caller_quota_for_tests
+
+    _reset_caller_quota_for_tests()
+    _refund_caller_quota("")  # empty key
+    _refund_caller_quota("nonexistent")  # unknown key — must not raise
+
+
+def test_caller_buckets_guard_is_initialised_at_module_load() -> None:
+    """Critique #19: the lock must be initialised at import time, not lazily.
+
+    Lazy init has a microsecond-scale race where two threads see ``None``
+    simultaneously and construct independent locks; the loser's
+    ``acquire`` then does not serialise with the winner's. Module-level
+    init costs one ``Lock()`` constructor call at import and is the
+    safer pattern.
+    """
+    from api.routes import ncbi as ncbi_routes
+
+    # Lock object — not None — even before any quota call.
+    assert ncbi_routes._CALLER_BUCKETS_GUARD is not None
+    # Acquiring it must not raise.
+    with ncbi_routes._CALLER_BUCKETS_GUARD:
+        pass
+
+
+def test_route_summary_refunds_quota_on_shared_bucket_throttle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end refund: an upstream 429 must not consume the caller's slot."""
+    _clear_caches()
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.routes import ncbi as ncbi_routes
+    from api.services import ncbi as ncbi_service
+    from api.services.ncbi import NcbiRateLimited, nuccore
+
+    ncbi_routes._reset_caller_quota_for_tests()
+
+    def fake_fetch(_accession: str) -> dict[str, Any]:
+        raise NcbiRateLimited("shared bucket exhausted")
+
+    monkeypatch.setattr(nuccore, "fetch_nuccore_summary", fake_fetch)
+    monkeypatch.setattr(ncbi_service, "fetch_nuccore_summary", fake_fetch)
+
+    response = TestClient(app).get("/api/ncbi/nuccore/NM_000546.6")
+    assert response.status_code == 429
+    assert response.json()["code"] == "ncbi_rate_limited"
+    # Bucket must be empty — the refund cleared the slot we briefly
+    # reserved before calling NCBI.
+    assert all(len(b) == 0 for b in ncbi_routes._CALLER_BUCKETS.values())

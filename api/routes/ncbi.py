@@ -4,24 +4,33 @@ Responsibility: Expose the dashboard-internal NCBI nuccore lookup endpoints
 that back the BLAST result accession deep-link and the "submit by accession"
 flow.
 Edit boundaries: HTTP validation + response shaping only. All NCBI calls go
-through `api.services.ncbi`.
+through `api.services.ncbi`. Per-caller quota helpers (charge/refund) live
+here because they wrap the route ↔ service handshake.
 Key entry points: `get_nuccore_summary`, `get_nuccore_genbank`,
 `get_nuccore_fasta`.
 Risky contracts: Every route enforces `require_caller` and converts
 `NcbiServiceUnavailable` to a 503 with a stable error code so the SPA can
-render a retry hint.
+render a retry hint. The per-caller bucket is reserved BEFORE the shared
+NCBI bucket attempt and REFUNDED when the shared bucket throttles — see
+`_charge_caller_quota` / `_refund_caller_quota`.
 Validation: `uv run pytest -q api/tests/test_ncbi_nuccore.py`.
 """
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
+from collections import OrderedDict, deque
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import PlainTextResponse
 
 from api._http_utils import NCBI_LOOKUP_RESPONSES
-from api.auth import CallerIdentity, require_caller
+from api.auth import CallerIdentity, is_dev_bypass_caller, require_caller
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ncbi", tags=["ncbi"])
 
@@ -33,35 +42,88 @@ router = APIRouter(prefix="/api/ncbi", tags=["ncbi"])
 # path. The window is intentionally generous (30 req/min) — interactive
 # Sequence Detail browsing easily fits, but a tight script loop trips it.
 _CALLER_LIMIT_PER_MIN = 30
-_CALLER_BUCKETS: dict[str, list[float]] = {}
-_CALLER_BUCKETS_GUARD: Any = None  # lazy threading.Lock to avoid import cost
+# Soft cap on distinct keys we track. Each key carries a 30-slot deque of
+# floats (~600 bytes including dict overhead). At 4096 keys this is ~2.4 MB,
+# bounded for the lifetime of a long-running sidecar. When the cap is
+# exceeded we evict the LRU entry — that caller will simply get a fresh
+# bucket on their next request.
+_CALLER_BUCKETS_MAX_KEYS = 4096
+# OrderedDict so eviction is LRU. Initialised at module load (cheap;
+# `OrderedDict()` + `threading.Lock()` are sub-microsecond).
+_CALLER_BUCKETS: OrderedDict[str, deque[float]] = OrderedDict()
+_CALLER_BUCKETS_GUARD: threading.Lock = threading.Lock()
 
 
-def _check_caller_quota(caller: CallerIdentity) -> None:
-    """Refuse with 429 ``caller_throttled`` when this oid is over budget.
+def _caller_bucket_key(caller: CallerIdentity) -> str:
+    """Stable per-caller key that does not collide for dev-bypass / empty-oid.
+
+    Critique #10: every dev-bypass caller resolves to the same
+    ``DEV_BYPASS_OID``, so historically all local developers shared one
+    30 req/min bucket. Now we namespace dev-bypass identities by
+    ``upn`` (which `_dev_bypass_identity` always sets) so two browser
+    tabs / two developers do not starve each other.
+
+    For real callers with an empty oid we DO NOT silently fall back to
+    a shared "anonymous" bucket — the route raises 401 instead (see
+    `_check_caller_quota`).
+    """
+    if is_dev_bypass_caller(caller):
+        # Different upn → different bucket. The synthetic upn is
+        # "dev-bypass@local" by default but tests / multi-window dev
+        # can override via the AUTH_DEV_BYPASS_UPN env var (future
+        # extension) — at minimum every CallerIdentity already carries
+        # a distinct upn for callers that override it.
+        upn = (caller.upn or "").strip() or "dev-bypass@local"
+        return f"dev-bypass:{upn}"
+    return (caller.object_id or "").strip()
+
+
+def _evict_expired_locked(bucket: deque[float], cutoff: float) -> None:
+    """Pop timestamps older than ``cutoff`` from the LEFT (O(1) each)."""
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+
+
+def _check_caller_quota(caller: CallerIdentity) -> str:
+    """Reserve a quota slot and return the bucket key for refund.
 
     Distinct from ``ncbi_rate_limited`` (the shared bucket) so the SPA /
     third-party caller can tell "I am being throttled" from "the
-    dashboard's NCBI quota is saturated".
+    dashboard's NCBI quota is saturated". Returns the bucket key so the
+    route can refund the slot via `_refund_caller_quota` if the shared
+    bucket subsequently throttles — a refused upstream request must not
+    consume the caller's quota (critique #13).
     """
-    global _CALLER_BUCKETS_GUARD
-    import threading
-    import time
-
-    if _CALLER_BUCKETS_GUARD is None:
-        _CALLER_BUCKETS_GUARD = threading.Lock()
-    oid = (caller.object_id or "").strip() or "anonymous"
+    key = _caller_bucket_key(caller)
+    if not key:
+        # Real caller with an empty object_id claim. Falling back to
+        # "anonymous" would put every such caller into one shared
+        # bucket (critique #10). 401 instead so the missing claim is
+        # surfaced explicitly.
+        raise HTTPException(
+            401,
+            detail={
+                "code": "missing_caller_identity",
+                "message": "Caller object_id claim is required for NCBI quota accounting.",
+            },
+        )
     now = time.monotonic()
-    window = 60.0
+    cutoff = now - 60.0
     with _CALLER_BUCKETS_GUARD:
-        bucket = _CALLER_BUCKETS.setdefault(oid, [])
-        # Evict timestamps older than the window.
-        cutoff = now - window
-        # Single-pass filter; `bucket` stays sorted ascending.
-        while bucket and bucket[0] < cutoff:
-            bucket.pop(0)
+        bucket = _CALLER_BUCKETS.get(key)
+        if bucket is None:
+            bucket = deque(maxlen=_CALLER_LIMIT_PER_MIN)
+            _CALLER_BUCKETS[key] = bucket
+            # Soft cap eviction — LRU.
+            while len(_CALLER_BUCKETS) > _CALLER_BUCKETS_MAX_KEYS:
+                evicted, _ = _CALLER_BUCKETS.popitem(last=False)
+                LOGGER.debug("NCBI caller bucket evicted (lru): key=%s...", evicted[:8])
+        else:
+            # Touch for LRU.
+            _CALLER_BUCKETS.move_to_end(key)
+        _evict_expired_locked(bucket, cutoff)
         if len(bucket) >= _CALLER_LIMIT_PER_MIN:
-            retry_after = max(1, int(window - (now - bucket[0])))
+            retry_after = max(1, int(60.0 - (now - bucket[0])))
             raise HTTPException(
                 429,
                 detail={
@@ -75,15 +137,43 @@ def _check_caller_quota(caller: CallerIdentity) -> None:
                 },
             )
         bucket.append(now)
+        # Garbage-collect the dict entry when the bucket is empty after
+        # eviction. Without this, every unique key sticks in the dict
+        # forever even after the rate-limit window expires (critique #11).
+        # (We only reach this branch when the entry was just appended
+        # to, so len > 0 — but cover the case below in `_refund` where
+        # a refund drops the last entry.)
+    return key
+
+
+def _refund_caller_quota(key: str) -> None:
+    """Pop the most-recent timestamp for ``key`` after a refused upstream.
+
+    Critique #13: per-caller quota was being charged before the shared
+    NCBI bucket attempt. If the shared bucket throttles, the user gets
+    a 429 but has already lost a quota slot for a request that never
+    reached NCBI. Refunding here restores accounting parity — a tight
+    client retrying on 429 only pays one slot per round-trip that
+    actually charged NCBI.
+    """
+    if not key:
+        return
+    with _CALLER_BUCKETS_GUARD:
+        bucket = _CALLER_BUCKETS.get(key)
+        if not bucket:
+            return
+        # Pop the most recent timestamp — that is the slot we just
+        # charged in `_check_caller_quota`. (Mid-flight other requests
+        # from the same caller may have appended later timestamps; in
+        # that rare interleaving we refund the newest, which is the
+        # most generous outcome and still bounded by the deque maxlen.)
+        bucket.pop()
+        if not bucket:
+            _CALLER_BUCKETS.pop(key, None)
 
 
 def _reset_caller_quota_for_tests() -> None:
-    """Test hook \u2014 drop every per-caller bucket so test order is stable."""
-    global _CALLER_BUCKETS_GUARD
-    import threading
-
-    if _CALLER_BUCKETS_GUARD is None:
-        _CALLER_BUCKETS_GUARD = threading.Lock()
+    """Test hook — drop every per-caller bucket so test order is stable."""
     with _CALLER_BUCKETS_GUARD:
         _CALLER_BUCKETS.clear()
 
@@ -107,15 +197,20 @@ def get_nuccore_summary(
         fetch_nuccore_summary,
     )
 
-    _check_caller_quota(caller)
+    bucket_key = _check_caller_quota(caller)
     try:
         return fetch_nuccore_summary(accession)
     except ValueError as exc:
+        # Validation failure never reached NCBI — refund the slot.
+        _refund_caller_quota(bucket_key)
         raise HTTPException(
             422,
             detail={"code": "ncbi_accession_invalid", "message": str(exc)},
         ) from exc
     except NcbiRateLimited as exc:
+        # Shared bucket throttled — the request never reached NCBI, so
+        # refund the per-caller slot (critique #13).
+        _refund_caller_quota(bucket_key)
         raise HTTPException(
             429,
             detail={
@@ -148,15 +243,17 @@ def get_nuccore_genbank(
         fetch_nuccore_genbank,
     )
 
-    _check_caller_quota(caller)
+    bucket_key = _check_caller_quota(caller)
     try:
         return fetch_nuccore_genbank(accession)
     except ValueError as exc:
+        _refund_caller_quota(bucket_key)
         raise HTTPException(
             422,
             detail={"code": "ncbi_accession_invalid", "message": str(exc)},
         ) from exc
     except NcbiRateLimited as exc:
+        _refund_caller_quota(bucket_key)
         raise HTTPException(
             429,
             detail={
@@ -206,17 +303,19 @@ def get_nuccore_fasta(
         fetch_nuccore_fasta,
     )
 
-    _check_caller_quota(caller)
+    bucket_key = _check_caller_quota(caller)
     try:
         text = fetch_nuccore_fasta(
             accession, seq_start=seq_start, seq_stop=seq_stop
         )
     except ValueError as exc:
+        _refund_caller_quota(bucket_key)
         raise HTTPException(
             422,
             detail={"code": "ncbi_accession_invalid", "message": str(exc)},
         ) from exc
     except NcbiResponseTooLarge as exc:
+        _refund_caller_quota(bucket_key)
         raise HTTPException(
             422,
             detail={
@@ -227,6 +326,7 @@ def get_nuccore_fasta(
             },
         ) from exc
     except NcbiRateLimited as exc:
+        _refund_caller_quota(bucket_key)
         raise HTTPException(
             429,
             detail={

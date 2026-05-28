@@ -3,6 +3,16 @@ import { AlertTriangle } from "lucide-react";
 
 import { aksApi } from "@/api/endpoints";
 
+// Critique #20.6: replace hand-rolled ``rgba(255, 196, 0, …)`` literals
+// with ``color-mix`` against the theme ``--warning`` token so a future
+// theme rotation (light mode, high-contrast, etc.) propagates here
+// without the banner staying stuck on its hard-coded amber. Exported
+// for the unit test so the colour pipeline is locked-in.
+export const PLS_BANNER_BORDER_COLOR =
+  "color-mix(in srgb, var(--warning) 50%, transparent)";
+export const PLS_BANNER_BACKGROUND_COLOR =
+  "color-mix(in srgb, var(--warning) 8%, transparent)";
+
 /**
  * Render a single yellow banner when the deploy environment has PLS enabled
  * (``OPENAPI_PLS_ENABLED=1``) but the live ``elb-openapi`` Service is missing
@@ -44,8 +54,8 @@ export function PlsTransitionBanner({
       role="alert"
       aria-live="polite"
       style={{
-        borderColor: "var(--warning-border, rgba(255, 196, 0, 0.5))",
-        background: "var(--warning-surface, rgba(255, 196, 0, 0.08))",
+        borderColor: PLS_BANNER_BORDER_COLOR,
+        background: PLS_BANNER_BACKGROUND_COLOR,
         padding: 16,
         display: "flex",
         gap: 12,

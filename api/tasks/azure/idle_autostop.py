@@ -65,7 +65,7 @@ def _power_state(pref: AutoStopPreference) -> str:
 
 def _batch_power_states(
     prefs: list[AutoStopPreference],
-) -> dict[tuple[str, str, str], str]:
+) -> tuple[dict[tuple[str, str, str], str], dict[str, Any]]:
     """Resolve power_state for every pref using one ARM `list_by_resource_group`
     per ``(subscription_id, resource_group)`` group.
 
@@ -75,28 +75,37 @@ def _batch_power_states(
     5 min). With the batch path 1 RG = 1 call regardless of cluster
     count.
 
-    Failures are non-fatal — clusters whose ARM result we could not
-    fetch get ``""`` (unknown), and the evaluator's "stop requires
-    Running" guard takes it from there.
+    Returns ``(power_state_map, batch_summary)`` where ``batch_summary``
+    surfaces RG-level failures so the beat task can count them toward
+    its visible ``errors`` total (critique #15: a silent ARM RBAC failure
+    means the auto-stop never fires for the whole RG, but the previous
+    debug-level log left no breadcrumb).
     """
     out: dict[tuple[str, str, str], str] = {}
+    batch_summary: dict[str, Any] = {
+        "rg_groups": 0,
+        "rg_failed": 0,
+        "failed_rgs": [],
+    }
     if not prefs:
-        return out
+        return out, batch_summary
     # Group by (sub, rg)
     grouped: dict[tuple[str, str], list[str]] = {}
     for pref in prefs:
         grouped.setdefault(
             (pref.subscription_id, pref.resource_group), []
         ).append(pref.cluster_name)
-    try:
-        from api.services import get_credential
-        from api.services.azure_clients import aks_client
-    except Exception as exc:
-        LOGGER.warning("auto_stop batch power_state imports failed: %s", exc)
-        return out
-    cred = get_credential()
+    batch_summary["rg_groups"] = len(grouped)
     for (sub, rg), names in grouped.items():
         try:
+            # Critique #9.3: import + credential acquisition must be
+            # inside the try so a transient token refresh failure (or a
+            # missing managed identity in dev) does not abort the whole
+            # beat tick — only that one RG group is skipped.
+            from api.services import get_credential
+            from api.services.azure_clients import aks_client
+
+            cred = get_credential()
             client = aks_client(cred, sub)
             for cluster in client.managed_clusters.list_by_resource_group(rg):
                 name = getattr(cluster, "name", "") or ""
@@ -108,14 +117,23 @@ def _batch_power_states(
                     ps = getattr(state, "code", "") or ""
                 out[(sub, rg, name)] = ps
         except Exception as exc:
-            LOGGER.debug(
-                "auto_stop batch power_state list failed sub=%s rg=%s: %s",
+            # Critique #15: an RG-wide ARM failure means auto-stop is
+            # silently broken for that group until ARM recovers. Log at
+            # WARNING (not DEBUG) and surface in the beat task summary
+            # so the operator notices in App Insights / the audit log.
+            LOGGER.warning(
+                "auto_stop batch power_state list failed sub=%s rg=%s: %s (%s)",
                 sub,
                 rg,
+                type(exc).__name__,
                 exc,
             )
+            batch_summary["rg_failed"] += 1
+            # Cap the surfaced list at 20 to bound the summary size.
+            if len(batch_summary["failed_rgs"]) < 20:
+                batch_summary["failed_rgs"].append(f"{sub}:{rg}")
             continue
-    return out
+    return out, batch_summary
 
 
 @shared_task(
@@ -224,6 +242,13 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
         "kept_running": 0,
         "warnings": 0,
         "errors": 0,
+        # Critique #15: surface RG-level batch failures so an operator
+        # can spot when auto-stop has been silently broken for a whole
+        # resource group (typical cause: ARM RBAC missing for the
+        # platform managed identity on that subscription).
+        "power_state_rg_groups": 0,
+        "power_state_rg_failed": 0,
+        "power_state_failed_rgs": [],
     }
     try:
         prefs = list_auto_stop_preferences(limit=500)
@@ -237,7 +262,15 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     # Resolve all power_state values in one ARM call per (sub, rg) — without
     # batching, a 100-cluster fleet would issue 100 ARM `get` calls per
     # 5-min tick and trip ARM throttling on busy subscriptions.
-    power_state_map = _batch_power_states(enabled_prefs)
+    power_state_map, batch_summary = _batch_power_states(enabled_prefs)
+    summary["power_state_rg_groups"] = batch_summary["rg_groups"]
+    summary["power_state_rg_failed"] = batch_summary["rg_failed"]
+    summary["power_state_failed_rgs"] = batch_summary["failed_rgs"]
+    # An RG-level failure means we lost the power-state signal for
+    # every cluster in that RG, so count it toward the visible error
+    # total (the evaluator will keep them running, which is safe
+    # behaviour but represents lost cost savings).
+    summary["errors"] += batch_summary["rg_failed"]
     for pref in enabled_prefs:
         summary["evaluated"] += 1
         try:
@@ -296,13 +329,32 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
                 # Roll back the cooldown stamp so the next beat tick
                 # re-evaluates this cluster fresh instead of waiting
                 # the full cooldown window on a fake stop.
+                #
+                # Critique #12: re-fetch the latest persisted row before
+                # writing back. Using ``AutoStopPreference.from_dict(
+                # pref.to_dict())`` from the stale beat-tick snapshot
+                # would silently revert a concurrent user toggle (e.g.
+                # the user disabled the feature between the beat snapshot
+                # and the rollback). Restore ONLY the bookkeeping
+                # fields (``last_stop_at`` / ``last_stop_reason``) onto
+                # the freshly-read row so user-owned fields are
+                # preserved.
                 try:
-                    rollback = AutoStopPreference.from_dict(pref.to_dict())
-                    rollback.last_stop_at = previous_last_stop_at
-                    rollback.last_stop_reason = previous_last_stop_reason
                     from api.services.auto_stop import save_auto_stop_preference
 
-                    save_auto_stop_preference(rollback)
+                    fresh = get_auto_stop_preference(
+                        pref.subscription_id,
+                        pref.resource_group,
+                        pref.cluster_name,
+                    )
+                    if fresh is None:
+                        # User deleted the row in the meantime —
+                        # nothing to roll back to. Skip.
+                        pass
+                    else:
+                        fresh.last_stop_at = previous_last_stop_at
+                        fresh.last_stop_reason = previous_last_stop_reason
+                        save_auto_stop_preference(fresh)
                 except Exception as rb_exc:
                     LOGGER.warning(
                         "evaluate_idle_clusters rollback failed cluster=%s: %s",

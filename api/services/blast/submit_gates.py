@@ -429,22 +429,15 @@ def _openapi_action_for_code(code: str) -> tuple[str | None, str | None]:
 # The contract test in api/tests/test_openapi_upstream_codes_contract.py
 # fails the build when the SPA hint table drops a code that exists here.
 #
-# ``OPENAPI_NESTED_UPSTREAM_CODES`` are the codes that arrive as
-# ``detail.upstream_code`` inside a dashboard ``openapi_not_ready`` wrapper
-# (i.e. the sibling /v1/ready 503 codes). These MUST match the SPA's
-# ``OPENAPI_UPSTREAM_HINTS`` table keys 1:1.
-# ``openapi_unreachable`` is a dashboard-only top-level code (transport
-# failure wrap) and is handled by its own SPA branch, not by the hints
-# table — keep it out of the nested set.
-OPENAPI_NESTED_UPSTREAM_CODES: frozenset[str] = frozenset(
-    {
-        "k8s_unreachable",
-        "no_workload_nodes",
-        "openapi_pod_not_ready",
-        "workload_pool_check_failed",
-        "openapi_pod_check_failed",
-    }
-)
+# Single source of truth (critique #20.5): ``OPENAPI_UPSTREAM_ACTIONS``
+# carries the (label, action_id) for every code we know how to remediate,
+# including top-level dashboard-only wrappers like ``openapi_unreachable``.
+# ``OPENAPI_NESTED_UPSTREAM_CODES`` is *derived* from that mapping by
+# subtracting the explicit top-level wrappers, so adding a new sibling
+# ``/v1/ready`` code only requires touching one place \u2014 the actions
+# table \u2014 instead of two. Previously the two were hand-maintained in
+# parallel and drift was caught only by the contract test, after the SPA
+# already shipped.
 OPENAPI_UPSTREAM_ACTIONS: dict[str, tuple[str, str]] = {
     "k8s_unreachable": ("Start cluster", "start_cluster"),
     "no_workload_nodes": ("Scale up workload pool", "scale_up_workload_pool"),
@@ -453,6 +446,16 @@ OPENAPI_UPSTREAM_ACTIONS: dict[str, tuple[str, str]] = {
     "openapi_pod_check_failed": ("Check AKS health", "check_aks_health"),
     "openapi_unreachable": ("Start cluster", "start_cluster"),
 }
+
+# Dashboard-only top-level codes that wrap transport / configuration
+# failures BEFORE the sibling /v1/ready ever runs. These are handled by
+# dedicated SPA branches, not the ``OPENAPI_UPSTREAM_HINTS`` hint table,
+# so they MUST NOT appear in ``OPENAPI_NESTED_UPSTREAM_CODES``.
+_OPENAPI_TOP_LEVEL_CODES: frozenset[str] = frozenset({"openapi_unreachable"})
+
+OPENAPI_NESTED_UPSTREAM_CODES: frozenset[str] = frozenset(
+    OPENAPI_UPSTREAM_ACTIONS.keys()
+) - _OPENAPI_TOP_LEVEL_CODES
 
 
 def openapi_known_upstream_codes() -> frozenset[str]:
