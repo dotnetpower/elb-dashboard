@@ -49,6 +49,13 @@ Environment overrides:
                                rg-elb-cluster) for the bootstrap above.
   ELB_CLUSTER_RG_REGION        Override the region (default: $AZURE_LOCATION) for the
                                bootstrap above.
+  ELB_SKIP_AUTO_PEER           false (default). Set true to skip the postprovision
+                               self-heal call that runs peer-cluster-network.sh
+                               to ensure bidirectional VNet peering between the
+                               platform VNet and any existing AKS-auto VNet in
+                               the dashboard's cluster RG. Skip when an external
+                               operator manages peering out of band, or when the
+                               cluster does not yet exist on first azd up.
 
 USAGE
 }

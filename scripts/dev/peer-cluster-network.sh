@@ -86,7 +86,13 @@ az account set "${SUB_FLAG[@]}" >/dev/null 2>&1 || die "could not set subscripti
 # --- Container App auto-detect ---------------------------------------------
 if [[ -z "$CONTAINER_APP" ]]; then CONTAINER_APP="${CONTAINER_APP_NAME:-}"; fi
 if [[ -z "$RESOURCE_GROUP" ]]; then RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-}"; fi
-if [[ -z "$CONTAINER_APP" || -z "$RESOURCE_GROUP" ]]; then
+# Also pull azd env name + cluster RG hint from the azd env when not on the
+# command line. They power the tag-based AKS filter below so a subscription
+# with multiple clusters (very common: dev/test/prod side-by-side) doesn't
+# force the operator to type --cluster-name/--cluster-rg every time.
+AZD_ENV_NAME="${AZURE_ENV_NAME:-}"
+ENV_CLUSTER_RG="${ELB_CLUSTER_RG_NAME:-}"
+if [[ -z "$CONTAINER_APP" || -z "$RESOURCE_GROUP" || -z "$AZD_ENV_NAME" || -z "$ENV_CLUSTER_RG" ]]; then
   if command -v azd >/dev/null 2>&1; then
     while IFS='=' read -r key value; do
       [[ -n "${key:-}" ]] || continue
@@ -94,6 +100,8 @@ if [[ -z "$CONTAINER_APP" || -z "$RESOURCE_GROUP" ]]; then
       case "$key" in
         CONTAINER_APP_NAME)    [[ -z "$CONTAINER_APP"  ]] && CONTAINER_APP="$value" ;;
         AZURE_RESOURCE_GROUP)  [[ -z "$RESOURCE_GROUP" ]] && RESOURCE_GROUP="$value" ;;
+        AZURE_ENV_NAME)        [[ -z "$AZD_ENV_NAME"   ]] && AZD_ENV_NAME="$value" ;;
+        ELB_CLUSTER_RG_NAME)   [[ -z "$ENV_CLUSTER_RG" ]] && ENV_CLUSTER_RG="$value" ;;
       esac
     done < <(azd env get-values 2>/dev/null || true)
   fi
@@ -102,20 +110,66 @@ fi
   || die "need --container-app + --rg (or run from an azd env dir)"
 
 # --- AKS cluster auto-detect -----------------------------------------------
+# Precedence:
+#   1. --cluster-name + --cluster-rg flags (explicit operator intent).
+#   2. ELB_CLUSTER_RG_NAME (from env or azd env) — pick the single cluster
+#      living in that RG.
+#   3. Tag-based filter: managedBy=elb-dashboard, narrowed by azd-env-name
+#      when known. Mirrors grant-runtime-rbac.sh so a multi-cluster
+#      subscription works without explicit flags for the common case.
+#   4. Fall back to "subscription has exactly one AKS" (legacy behaviour).
+#   5. Refuse with an actionable error listing all clusters.
 if [[ -z "$CLUSTER_NAME" || -z "$CLUSTER_RG" ]]; then
-  AKS_LIST="$(az aks list "${SUB_FLAG[@]}" \
-    --query "[].{name:name, rg:resourceGroup}" -o tsv 2>/dev/null || true)"
-  AKS_COUNT="$(printf '%s\n' "$AKS_LIST" | grep -c . || true)"
+  AKS_JSON="$(az aks list "${SUB_FLAG[@]}" \
+    --query "[].{name:name, rg:resourceGroup, tags:tags}" -o json 2>/dev/null || echo '[]')"
+
+  # Step 2: ENV_CLUSTER_RG hint.
+  AKS_FILTERED=""
+  if [[ -z "$AKS_FILTERED" && -n "$ENV_CLUSTER_RG" ]]; then
+    AKS_FILTERED="$(AKS_JSON="$AKS_JSON" ENV_RG="$ENV_CLUSTER_RG" python3 - <<'PY' 2>/dev/null || true
+import json, os
+arr = json.loads(os.environ.get("AKS_JSON", "[]"))
+rg = os.environ.get("ENV_RG", "")
+for c in arr:
+    if (c.get("rg") or "").lower() == rg.lower():
+        print(f"{c.get('name','')}\t{c.get('rg','')}")
+PY
+)"
+  fi
+
+  # Step 3: managedBy + azd-env-name tag filter.
+  if [[ -z "$AKS_FILTERED" ]]; then
+    AKS_FILTERED="$(AKS_JSON="$AKS_JSON" AZD_ENV="$AZD_ENV_NAME" python3 - <<'PY' 2>/dev/null || true
+import json, os
+arr = json.loads(os.environ.get("AKS_JSON", "[]"))
+env = os.environ.get("AZD_ENV", "")
+mine = [c for c in arr if (c.get("tags") or {}).get("managedBy") == "elb-dashboard"]
+if env:
+    by_env = [c for c in mine if (c.get("tags") or {}).get("azd-env-name") == env]
+    if by_env:
+        mine = by_env
+for c in mine:
+    print(f"{c.get('name','')}\t{c.get('rg','')}")
+PY
+)"
+  fi
+
+  # Step 4: legacy fallback when the subscription only has one cluster.
+  if [[ -z "$AKS_FILTERED" ]]; then
+    AKS_FILTERED="$(AKS_JSON="$AKS_JSON" python3 -c 'import json,os; a=json.loads(os.environ.get("AKS_JSON","[]")); print("\n".join(f"{c.get(\"name\",\"\")}\t{c.get(\"rg\",\"\")}" for c in a))' 2>/dev/null || true)"
+  fi
+
+  AKS_COUNT="$(printf '%s\n' "$AKS_FILTERED" | grep -c . || true)"
   if [[ "$AKS_COUNT" -eq 0 ]]; then
     die "no AKS cluster in subscription — nothing to peer."
   fi
   if [[ "$AKS_COUNT" -gt 1 && ( -z "$CLUSTER_NAME" || -z "$CLUSTER_RG" ) ]]; then
-    red "multiple AKS clusters — be explicit with --cluster-name + --cluster-rg:"
-    printf '%s\n' "$AKS_LIST" >&2
+    red "multiple AKS clusters match — be explicit with --cluster-name + --cluster-rg, or set ELB_CLUSTER_RG_NAME:"
+    printf '%s\n' "$AKS_FILTERED" >&2
     exit 3
   fi
-  AUTO_NAME="$(printf '%s\n' "$AKS_LIST" | awk '{print $1}')"
-  AUTO_RG="$(printf '%s\n' "$AKS_LIST" | awk '{print $2}')"
+  AUTO_NAME="$(printf '%s\n' "$AKS_FILTERED" | awk '{print $1}')"
+  AUTO_RG="$(printf '%s\n' "$AKS_FILTERED" | awk '{print $2}')"
   [[ -z "$CLUSTER_NAME" ]] && CLUSTER_NAME="$AUTO_NAME"
   [[ -z "$CLUSTER_RG" ]] && CLUSTER_RG="$AUTO_RG"
 fi
@@ -146,9 +200,12 @@ fi
 # --- Get an Entra access token for the dashboard's API audience ------------
 # The dashboard's `require_caller` validates the MSAL bearer token against
 # its own App Registration. We use the SPA's `API_CLIENT_ID` audience.
+# JMESPath note: `containers[?name=='api'].env[?name=='X']` returns `[]` under
+# az CLI (the inner filter on a filter-projection drops matches). Flatten
+# `env[]` first and pipe the filter — same pattern works for both lookups.
 API_CLIENT_ID="$(az containerapp show "${SUB_FLAG[@]}" \
   -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
-  --query "properties.template.containers[?name=='api'].env[?name=='API_CLIENT_ID'].value | [0] | [0]" \
+  --query "properties.template.containers[?name=='api'].env[] | [?name=='API_CLIENT_ID'].value | [0]" \
   -o tsv 2>/dev/null || true)"
 [[ -n "$API_CLIENT_ID" ]] || die "could not read API_CLIENT_ID from Container App 'api' sidecar env"
 
@@ -161,7 +218,7 @@ resolve_dashboard_vnet_id() {
   local subnet_id
   subnet_id="$(az containerapp show "${SUB_FLAG[@]}" \
     -n "$CONTAINER_APP" -g "$RESOURCE_GROUP" \
-    --query "properties.template.containers[?name=='api'].env[?name=='PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID'].value | [0] | [0]" \
+    --query "properties.template.containers[?name=='api'].env[] | [?name=='PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID'].value | [0]" \
     -o tsv 2>/dev/null || true)"
   [[ -n "$subnet_id" ]] || return 1
   # /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<name>/subnets/<subnet>

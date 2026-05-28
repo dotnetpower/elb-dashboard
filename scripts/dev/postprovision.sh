@@ -715,6 +715,47 @@ if [[ -x "$RBAC_SCRIPT" ]]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# 5. VNet peering self-heal.
+#
+# `api.tasks.azure.provision.provision_aks` (2026-05-27+) auto-peers the
+# platform VNet with the cluster's aks-auto VNet at create time. Existing
+# clusters created before that step shipped (or "join existing deployment"
+# flows where the dashboard never created the cluster) skip that path,
+# leaving the SPA's API Reference / BLAST submit at
+# `openapi_upstream_unreachable` until the operator manually runs
+# `peer-cluster-network.sh`. Call it here so the very first SPA click
+# already works.
+#
+# Soft-fail: RBAC propagation (1-5 min) may race the peer attempt; the
+# user can re-trigger via the SPA's "Repair VNet peering" button or a
+# manual re-run. Skip entirely when ELB_SKIP_AUTO_PEER=true.
+# ---------------------------------------------------------------------------
+PEER_SCRIPT="$REPO_ROOT/scripts/dev/peer-cluster-network.sh"
+if [[ "${ELB_SKIP_AUTO_PEER:-false}" == "true" ]]; then
+  ts "==> Self-heal: VNet peering SKIPPED (ELB_SKIP_AUTO_PEER=true)"
+elif [[ -x "$PEER_SCRIPT" ]]; then
+  ts "==> Self-heal: ensuring VNet peering with workload cluster (best-effort)..."
+  if "$PEER_SCRIPT" \
+        --container-app "$CONTAINER_APP_NAME" \
+        --rg "$AZURE_RESOURCE_GROUP" \
+        --subscription "$(az account show --query id -o tsv)" \
+        --yes 2>&1 | sed 's/^/    /'; then
+    ts "    ✓ VNet peering OK"
+  else
+    rc=$?
+    case "$rc" in
+      3) ts "    ⓘ VNet peering skipped (no AKS cluster yet, or ambiguous — pass --cluster-name + --cluster-rg)" ;;
+      2) ts "    ⚠ VNet peering partial — at least one direction failed."
+         ts "      Often a transient RBAC-propagation race; re-run:"
+         ts "        scripts/dev/peer-cluster-network.sh --yes"
+         ts "      Or click 'Repair VNet peering' in the SPA's API Reference page." ;;
+      *) ts "    ⚠ VNet peering self-heal failed (rc=$rc)."
+         ts "      Manual recovery:  scripts/dev/peer-cluster-network.sh --yes" ;;
+    esac
+  fi
+fi
+
 # Soft-fail policy: do not break azd up just because health was slow to
 # come up. Hard-fail above stays for image-build / swap-deploy errors.
 exit 0

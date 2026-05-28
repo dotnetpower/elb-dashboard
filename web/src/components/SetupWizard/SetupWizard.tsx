@@ -4,6 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { armProxyApi, resourceApi } from "@/api/endpoints";
 import { listSubscriptions as armListSubs } from "@/api/arm";
 import { isAksManagedResourceGroup } from "@/lib/aksManagedRg";
+import { listWithMiFallback } from "@/lib/armWithMiFallback";
 
 import { saveConfig } from "./configStorage";
 import { Step1Subscription } from "./steps/Step1Subscription";
@@ -57,15 +58,19 @@ export function SetupWizard({ onComplete, onClose }: Props) {
     queryKey: ["wizard-subs"],
     queryFn: async () => {
       if (DEV_BYPASS) return armProxyApi.listSubscriptions();
-      try {
-        const subs = await armListSubs();
-        return subs.map((s) => ({
-          subscriptionId: s.subscriptionId,
-          displayName: s.displayName,
-        }));
-      } catch {
-        return armProxyApi.listSubscriptions();
-      }
+      // Mirror useWorkspaceDiscovery: fall back to the backend MI proxy
+      // on either a thrown ARM error OR an empty list so a collaborator
+      // with zero subscription-scope RBAC still gets a usable dropdown.
+      return listWithMiFallback(
+        async () => {
+          const subs = await armListSubs();
+          return subs.map((s) => ({
+            subscriptionId: s.subscriptionId,
+            displayName: s.displayName,
+          }));
+        },
+        () => armProxyApi.listSubscriptions(),
+      );
     },
     staleTime: 5 * 60_000,
     retry: 1,

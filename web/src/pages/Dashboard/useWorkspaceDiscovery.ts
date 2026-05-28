@@ -12,6 +12,7 @@ import {
   type ResourceConfig,
 } from "@/components/SetupWizard";
 import { isDevBypassEnabled } from "@/config/runtime";
+import { listWithMiFallback } from "@/lib/armWithMiFallback";
 
 import { configFromTags } from "./configFromTags";
 
@@ -61,17 +62,21 @@ export function useWorkspaceDiscovery() {
     queryKey: ["auto-discover-subs"],
     queryFn: async () => {
       if (DEV_BYPASS) return armProxyApi.listSubscriptions();
-      // Try direct ARM call first (no OBO needed), fall back to backend
-      // proxy for tenants where the SPA token cannot be exchanged.
-      try {
-        const subs = await armListSubs();
-        return subs.map((s) => ({
-          subscriptionId: s.subscriptionId,
-          displayName: s.displayName,
-        }));
-      } catch {
-        return armProxyApi.listSubscriptions();
-      }
+      // Try direct ARM (uses the user's MSAL token), fall back to the
+      // backend MI proxy when the user has zero subscription-scope RBAC
+      // — an empty array there is the failure mode we care about, not
+      // just a thrown error. The backend's shared MI sees the workload
+      // subscription regardless of per-user assignments.
+      return listWithMiFallback(
+        async () => {
+          const subs = await armListSubs();
+          return subs.map((s) => ({
+            subscriptionId: s.subscriptionId,
+            displayName: s.displayName,
+          }));
+        },
+        () => armProxyApi.listSubscriptions(),
+      );
     },
     enabled: needsDiscovery,
     staleTime: 5 * 60_000,
@@ -94,19 +99,22 @@ export function useWorkspaceDiscovery() {
         }[];
       }[] = [];
       for (const sub of subs) {
-        try {
-          const rgList = DEV_BYPASS
-            ? await armProxyApi.listResourceGroups(sub.subscriptionId)
-            : await armListRGs(sub.subscriptionId);
-          const rgs = rgList.map((r) => ({
-            name: r.name,
-            location: r.location,
-            tags: r.tags,
-          }));
-          results.push({ subscriptionId: sub.subscriptionId, rgs });
-        } catch {
-          /* skip inaccessible subs */
-        }
+        // Same MI-fallback rationale as the subs query above: a user with
+        // only RG-scope Reader (or no RBAC at all) gets an empty list
+        // from direct ARM and needs the backend MI proxy to surface the
+        // elb-tagged workspace RG so auto-discovery can find it.
+        const rgList = DEV_BYPASS
+          ? await armProxyApi.listResourceGroups(sub.subscriptionId)
+          : await listWithMiFallback(
+              () => armListRGs(sub.subscriptionId),
+              () => armProxyApi.listResourceGroups(sub.subscriptionId),
+            );
+        const rgs = rgList.map((r) => ({
+          name: r.name,
+          location: r.location,
+          tags: r.tags,
+        }));
+        results.push({ subscriptionId: sub.subscriptionId, rgs });
       }
       return results;
     },

@@ -22,9 +22,18 @@
 # Without those roles the user clicks "Deploy elb-openapi" and the SPA
 # shows: "workload identity setup failed; OpenAPI pod would have no AZURE_CLIENT_ID."
 #
-# This script closes that gap by granting on the AKS cluster RG:
-#   - Contributor                  (MI + federated cred CRUD, AKS cluster read/get-credentials)
-#   - User Access Administrator    (role assignment writes inside that RG and on the cluster itself)
+# Separately, `api.tasks.azure.peering.ensure_vnet_peering_with_cluster`
+# needs `Microsoft.Network/virtualNetworks/peer/action` + write on the
+# AKS-auto VNet (lives in the cluster's node RG `MC_<rg>_<cluster>_<region>`)
+# to bidirectionally peer the platform VNet with the cluster's VNet. Without
+# that the SPA's API Reference / BLAST submit hangs at `openapi_upstream_unreachable`
+# until the operator manually grants Network Contributor and re-runs
+# `peer-cluster-network.sh`.
+#
+# This script closes both gaps by granting:
+#   - Contributor                  on the AKS cluster RG (MI + federated cred CRUD, AKS read/get-credentials)
+#   - User Access Administrator    on the AKS cluster RG (role assignment writes inside that RG and on the cluster itself)
+#   - Network Contributor          on each cluster's aks-auto VNet (bidirectional VNet peering for elb-openapi reachability)
 #
 # Roles are NEVER revoked — to remove them later use
 #   az role assignment delete --assignee <oid> --role <name> --scope <id>
@@ -281,26 +290,61 @@ fi
 CLUSTER_RG_SCOPE="/subscriptions/${SUBSCRIPTION}/resourceGroups/${CLUSTER_RG}"
 
 # ---------------------------------------------------------------------------
-# Plan summary.
+# Build the (role, scope) plan FIRST so the summary + prompt can show the
+# full list (the Network Contributor entries below depend on dynamic AKS
+# lookup, so we cannot hardcode them in a static literal).
+# ---------------------------------------------------------------------------
+ASSIGNMENTS=(
+  "Contributor|$CLUSTER_RG_SCOPE"
+  "User Access Administrator|$CLUSTER_RG_SCOPE"
+)
+
+# Append Network Contributor on each existing cluster's aks-auto VNet so
+# the dashboard MI can bidirectionally peer the platform VNet with the
+# cluster's VNet (required for `openapi_upstream_unreachable` recovery and
+# for any future `elastic-blast submit` that reaches the in-cluster
+# OpenAPI service). The aks-auto VNet lives in the AKS *node* RG
+# (`MC_<cluster_rg>_<cluster>_<region>`), NOT in $CLUSTER_RG, so the
+# Contributor grant above does NOT cover this scope. Skip when:
+#   * BOOTSTRAP_MODE=1 (RG was just created, no clusters yet);
+#   * the cluster uses BYO-VNet (no VNet in the node RG).
+if [[ $BOOTSTRAP_MODE -eq 0 ]]; then
+  while IFS= read -r aks_name; do
+    [[ -n "$aks_name" ]] || continue
+    aks_node_rg="$(az aks show "${SUB_FLAG[@]}" -g "$CLUSTER_RG" -n "$aks_name" \
+      --query nodeResourceGroup -o tsv 2>/dev/null || true)"
+    [[ -n "$aks_node_rg" ]] || continue
+    aks_vnet_id="$(az network vnet list "${SUB_FLAG[@]}" -g "$aks_node_rg" \
+      --query "[0].id" -o tsv 2>/dev/null || true)"
+    if [[ -z "$aks_vnet_id" ]]; then
+      yellow "  [info] $aks_name has no aks-auto VNet in $aks_node_rg (BYO-VNet?); skipping Network Contributor"
+      continue
+    fi
+    ASSIGNMENTS+=("Network Contributor|$aks_vnet_id")
+  done < <(az aks list "${SUB_FLAG[@]}" --resource-group "$CLUSTER_RG" \
+             --query "[].name" -o tsv 2>/dev/null || true)
+fi
+
+# ---------------------------------------------------------------------------
+# Plan summary + confirmation. Printed AFTER ASSIGNMENTS is finalised so
+# the operator sees the exact role-to-scope plan (including dynamically
+# resolved aks-auto VNet scopes for Network Contributor).
 # ---------------------------------------------------------------------------
 ts "Subscription:    $SUBSCRIPTION"
 ts "Container App:   ${CONTAINER_APP:-<not used>} (${RESOURCE_GROUP:-<not used>})"
 ts "Dashboard MI:    $PRINCIPAL_ID"
 ts "AKS cluster RG:  $CLUSTER_RG${BOOTSTRAP_MODE:+ (bootstrap)}"
+ts "Plan (${#ASSIGNMENTS[@]} role assignment(s)):"
+for entry in "${ASSIGNMENTS[@]}"; do
+  ts "  - ${entry%%|*} @ ${entry##*|}"
+done
 [[ $DRY_RUN -eq 1 ]] && yellow "(dry-run — no role assignments will be created)"
 
 if [[ $ASSUME_YES -ne 1 && $DRY_RUN -ne 1 ]]; then
-  printf 'Grant Contributor + User Access Administrator on %s to %s? [y/N] ' \
-    "$CLUSTER_RG_SCOPE" "$PRINCIPAL_ID"
+  printf 'Grant the listed roles to %s? [y/N] ' "$PRINCIPAL_ID"
   read -r ANS
   [[ "$ANS" == "y" || "$ANS" == "Y" ]] || die "aborted by user" 1
 fi
-
-# (role-name, scope) pairs.
-ASSIGNMENTS=(
-  "Contributor|$CLUSTER_RG_SCOPE"
-  "User Access Administrator|$CLUSTER_RG_SCOPE"
-)
 
 CREATED=0
 SKIPPED=0
