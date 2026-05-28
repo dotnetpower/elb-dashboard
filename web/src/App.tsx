@@ -39,6 +39,11 @@ const ToolsPage = lazy(() =>
 const LiveWall = lazy(() =>
   import("@/pages/Monitor/LiveWall").then((module) => ({ default: module.LiveWall })),
 );
+const SequenceDetail = lazy(() =>
+  import("@/pages/sequence/SequenceDetail").then((module) => ({
+    default: module.SequenceDetail,
+  })),
+);
 
 function OptionalFeatureRoute({
   enabled,
@@ -113,6 +118,14 @@ function AppRoutes() {
           <Route path="/blast/jobs" element={<BlastJobs />} />
           <Route path="/blast/jobs/:jobId" element={<BlastResults />} />
           <Route path="/blast/jobs/:jobId/analytics" element={<BlastAnalytics />} />
+          <Route
+            path="/sequence/:accession"
+            element={
+              <Suspense fallback={<RouteLoadingSkeleton />}>
+                <SequenceDetail />
+              </Suspense>
+            }
+          />
           <Route
             path="/blast/databases/build"
             element={

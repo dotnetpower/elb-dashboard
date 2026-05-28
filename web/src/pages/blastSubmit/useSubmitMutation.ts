@@ -133,7 +133,6 @@ export function buildSubmitRequest({
 }: BuildSubmitRequestArgs): BlastSubmitRequest {
   const workloadNodeSku = getWorkloadNodeSku(selectedCluster);
   const workloadNodeCount = getWorkloadNodeCount(selectedCluster);
-  const opts = buildEffectiveAdditionalOptions(form);
 
   const dbShort = form.db.split("/").pop() || form.db;
   const autoTitle =
@@ -154,6 +153,26 @@ export function buildSubmitRequest({
     hasPreparedShardLayout && !form.disable_sharding ? form.sharding_mode : "off";
   const useSharding = effectiveShardingMode !== "off";
 
+  // Accession is forwarded only when no inline FASTA is present. When set,
+  // the backend resolves it via NCBI E-utilities and stages the result like
+  // any inline query. `query_from` / `query_to` map to the efetch subrange so
+  // we do NOT also let `-query_loc` get applied to the resolved FASTA.
+  const inlineQuery = form.query_data.trim();
+  const accession = form.query_accession.trim();
+  const useAccession = !inlineQuery && accession.length > 0;
+  const parseSubrange = (value: string): number | undefined => {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const parsed = Number.parseInt(trimmed, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  };
+
+  // When the query came from an accession the subrange travels in
+  // `query_accession_seq_start/stop`, so suppress the form-driven `-query_loc`
+  // that `buildEffectiveAdditionalOptions` would otherwise append.
+  const formForOptions = useAccession ? { ...form, query_from: "", query_to: "" } : form;
+  const opts = buildEffectiveAdditionalOptions(formForOptions);
+
   return {
     subscription_id: subId,
     resource_group: workloadRg,
@@ -161,6 +180,9 @@ export function buildSubmitRequest({
     program: form.program,
     db: form.db,
     query_data: form.query_data || undefined,
+    query_accession: useAccession ? accession : undefined,
+    query_accession_seq_start: useAccession ? parseSubrange(form.query_from) : undefined,
+    query_accession_seq_stop: useAccession ? parseSubrange(form.query_to) : undefined,
     job_title: autoTitle,
     evalue: form.evalue,
     max_target_seqs: form.max_target_seqs,

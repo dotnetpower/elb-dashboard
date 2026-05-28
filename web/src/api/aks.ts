@@ -123,6 +123,31 @@ export interface OpenApiPublicHttpsStatus {
   updated_at?: string;
 }
 
+/**
+ * Live Private Link Service (PLS) annotation state for the ``elb-openapi``
+ * Service. Returned by ``GET /aks/openapi/pls``.
+ *
+ * ``available=false`` means the dashboard could not probe the live state
+ * (RBAC missing, K8s API unreachable, deploy never ran). The SPA renders
+ * those as an "unknown" cell instead of a hard error.
+ *
+ * ``transition_pending=true`` means the operator has enabled PLS via env
+ * (``OPENAPI_PLS_ENABLED=1``) but the Service does not yet carry the
+ * ``azure-pls-create`` annotation — the next deploy must re-create the
+ * Service (the AKS LB controller silently ignores in-place PLS annotation
+ * updates) and the operator needs to acknowledge that explicitly.
+ */
+export interface OpenApiPlsStatus {
+  available: boolean;
+  pls_enabled_env: boolean;
+  pls_name: string;
+  service_exists: boolean | null;
+  service_has_pls_annotation: boolean | null;
+  transition_pending: boolean;
+  confirm_recreate_required: boolean;
+  reason?: string | null;
+}
+
 export interface AksAvailableSkusResponse {
   region: string;
   /** SKU names that the subscription can actually deploy in this region.
@@ -374,6 +399,15 @@ export const aksApi = {
       `/aks/openapi/deployment?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
     ),
 
+  /** Live Private Link Service annotation state — used by the API
+   * Reference page to render a "PLS transition pending" banner when the
+   * deploy environment says PLS but the Service does not yet have the
+   * annotation set. */
+  openApiPls: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<OpenApiPlsStatus>(
+      `/aks/openapi/pls?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+
   openApiToken: (subscriptionId: string, rg: string, clusterName: string) =>
     api.get<OpenApiTokenStatus>(
       `/aks/openapi/token?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
@@ -394,6 +428,17 @@ export const aksApi = {
 
   openApiPublicHttpsStatus: () =>
     api.get<OpenApiPublicHttpsStatus>("/aks/openapi/public-https"),
+
+  /**
+   * Fetch the operator-email validator rules (private-use TLDs the
+   * backend rejects + canonical regex + max length). Used so the SPA
+   * client gate cannot drift from the server rule when a new private
+   * TLD is added in `_PRIVATE_USE_TLDS` without touching the SPA.
+   */
+  openApiOperatorEmailRules: () =>
+    api.get<{ private_use_tlds: string[]; email_regex: string; max_length: number }>(
+      "/aks/openapi/public-https/operator-email-rules",
+    ),
 
   enableOpenApiPublicHttps: (
     subscriptionId: string,
@@ -440,4 +485,102 @@ export const aksApi = {
       resource_group: rg,
       cluster_name: clusterName,
     }),
+
+  /** Idle auto-stop cost saver — opt-in toggle + countdown banner.
+   *  See docs/features_change/2026-05/2026-05-29-aks-idle-auto-stop.md. */
+  autoStop: {
+    get: (subscriptionId: string, rg: string, clusterName: string) =>
+      api.get<AutoStopPreferenceResponse>(
+        `/aks/autostop?subscription_id=${encodeURIComponent(subscriptionId)}` +
+          `&resource_group=${encodeURIComponent(rg)}` +
+          `&cluster_name=${encodeURIComponent(clusterName)}`,
+      ),
+    save: (req: {
+      subscription_id: string;
+      resource_group: string;
+      cluster_name: string;
+      enabled: boolean;
+      idle_minutes: number;
+    }) => api.put<AutoStopPreferenceResponse>("/aks/autostop", req),
+    extend: (
+      subscriptionId: string,
+      rg: string,
+      clusterName: string,
+      minutes: number = 30,
+    ) =>
+      api.post<AutoStopPreferenceResponse>("/aks/autostop/extend", {
+        subscription_id: subscriptionId,
+        resource_group: rg,
+        cluster_name: clusterName,
+        minutes,
+      }),
+    status: (subscriptionId: string, rg: string, clusterName: string) =>
+      api.get<AutoStopStatusResponse>(
+        `/aks/autostop/status?subscription_id=${encodeURIComponent(subscriptionId)}` +
+          `&resource_group=${encodeURIComponent(rg)}` +
+          `&cluster_name=${encodeURIComponent(clusterName)}`,
+      ),
+  },
 };
+
+/** Persisted opt-in idle-auto-stop preference for a single AKS cluster.
+ *  Returned by `GET/PUT /api/aks/autostop` + `POST /api/aks/autostop/extend`. */
+export interface AutoStopPreferenceResponse {
+  exists: boolean;
+  /** False when the row is owned by a different real user — the SPA
+   *  MUST render the toggle as read-only in that case so the user
+   *  doesn't try to mutate someone else's preference. */
+  editable: boolean;
+  /** Always present (server returns "" when row absent). */
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+  enabled: boolean;
+  /** Selected idle window in minutes. One of `allowed_idle_minutes`. */
+  idle_minutes: number;
+  /** Always present (0 when row absent). */
+  cooldown_minutes: number;
+  /** Buckets the backend will accept — drives the dropdown options. */
+  allowed_idle_minutes: number[];
+  /** ISO 8601 (UTC) of the most recent auto-stop, or "" if never stopped. */
+  last_stop_at: string;
+  last_stop_reason: string;
+  last_skip_at: string;
+  last_skip_reason: string;
+  /** When non-empty, the user has temporarily extended this cluster — the
+   *  beat task will skip auto-stop until this timestamp passes. */
+  extend_until: string;
+  updated_at: string;
+  /** True when the read fell back to default values because the backend
+   *  storage layer was unreachable; the SPA should disable the Save button. */
+  degraded?: boolean;
+}
+
+/** Live evaluator verdict driving the SPA banner / cluster card chip.
+ *  Returned by `GET /api/aks/autostop/status`. */
+export interface AutoStopStatusResponse {
+  exists: boolean;
+  /** False for foreign-owned rows — the SPA should hide the banner. */
+  editable: boolean;
+  enabled: boolean;
+  idle_minutes: number;
+  /** "stop" → cluster is being stopped now;
+   *  "warn" → SPA should render the countdown banner;
+   *  "keep" → idle clock running but plenty of time left;
+   *  "disabled" → preference exists but `enabled=false` (no banner). */
+  verdict: "stop" | "warn" | "keep" | "disabled";
+  /** Free-form code (e.g. ``idle:60m``, ``active_jobs:2``,
+   *  ``cooldown``, ``extended``, ``power_state:Stopped``). Surfaced in
+   *  the banner tooltip. */
+  reason: string;
+  /** ISO 8601 (UTC) of the *projected* next stop, or "" when no
+   *  stop is on the horizon (verdict ∈ {keep, disabled}). */
+  next_stop_at: string;
+  /** Convenience seconds-to-`next_stop_at`. 0 when not applicable. */
+  seconds_until_stop: number;
+  active_job_count: number;
+  cluster_power_state: string;
+  last_stop_at: string;
+  last_skip_at: string;
+  extend_until: string;
+}

@@ -37,7 +37,12 @@ _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.azure.peering.ensure_vnet_peering_with_cluster",
     "api.tasks.azure.peering.ensure_vnet_peering_with_target",
     "api.tasks.azure.peering.httpx.get",
+    "api.tasks.azure.peering_nsg.apply_inbound_allow_rule",
+    "api.tasks.azure.peering_nsg.has_nsg_write_permission",
+    "api.tasks.azure.peering_nsg.resolve_nsg_context",
+    "api.tasks.azure.peering_nsg.resolve_vnet_pair_for_cluster",
     "api.tasks.azure.start_aks",  # .delay
+    "api.tasks.azure.stop_aks.run",
     "api.tasks.blast.submit",  # .delay
     "api.tasks.storage._autowarmup_inflight_acquire",
     "api.tasks.storage._record_task_progress",

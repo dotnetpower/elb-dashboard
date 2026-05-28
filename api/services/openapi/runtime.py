@@ -6,17 +6,29 @@ instead of duplicating SDK code.
 Key entry points: `_redis_url`, `_normalise_base_url`, `save_openapi_base_url`,
 `get_openapi_base_url`, `save_openapi_api_token`, `get_openapi_api_token`,
 `save_openapi_public_base_url`, `get_openapi_public_base_url`,
+`clear_openapi_public_base_url`, `list_openapi_public_base_urls`,
 `get_public_tls_base_url`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries. `get_public_tls_base_url` returns an empty string when neither
 `OPENAPI_PUBLIC_BASE_URL` env nor the public-base-url cache is set, so legacy
 call sites can short-circuit and keep using the IP-based path with zero
 behaviour change.
+Multi-cluster: when a setup / disable / reconcile call passes
+``cluster_arm_id`` the cache writes a per-cluster key under
+``openapi:runtime:public-base-url:cluster:<sha256[:16]>`` so a second
+cluster cannot silently overwrite the first cluster's entry. The legacy
+``openapi:runtime:public-base-url`` key is still maintained as the
+"most recently set cluster" display fallback for SPA polling routes
+that do not yet pass cluster context.
+``save_openapi_public_base_url`` returns False when the durable Storage
+Table write fails so the caller can mark the task partially-degraded
+even if the hot Redis write succeeded.
 Validation: `uv run pytest -q api/tests`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +42,7 @@ LOGGER = logging.getLogger(__name__)
 _RUNTIME_KEY = "openapi:runtime:base-url"
 _TOKEN_KEY = "openapi:runtime:api-token"  # noqa: S105 - Redis key name, not a secret value.
 _PUBLIC_BASE_URL_KEY = "openapi:runtime:public-base-url"
+_PUBLIC_BASE_URL_CLUSTER_PREFIX = f"{_PUBLIC_BASE_URL_KEY}:cluster:"
 
 
 def _redis_url() -> str:
@@ -38,6 +51,47 @@ def _redis_url() -> str:
 
 def _normalise_base_url(value: str) -> str:
     return value.strip().rstrip("/")
+
+
+def _normalise_cluster_arm_id(cluster_arm_id: str) -> str:
+    """Lower-case + strip so two callers that pass the same ARM id with
+    different casing (SDK quirks: ``managedClusters.get`` returns mixed
+    case but kubelet identity references are lower-cased) derive the
+    same per-cluster key and compare equal."""
+    return (cluster_arm_id or "").strip().lower()
+
+
+def _per_cluster_key(cluster_arm_id: str) -> str:
+    """Return the deterministic per-cluster cache key.
+
+    The ARM id is normalised to lower-case before hashing so two
+    callers (api sidecar vs worker, ARM SDK vs kubectl) that pass the
+    same cluster with different casing always derive the same key.
+    """
+    digest = hashlib.sha256(
+        _normalise_cluster_arm_id(cluster_arm_id).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{_PUBLIC_BASE_URL_CLUSTER_PREFIX}{digest}"
+
+
+def _cluster_arm_id_from_metadata(metadata: dict[str, Any]) -> str:
+    """Re-derive the lower-cased ARM id from a stored metadata dict.
+
+    Used by the dedupe pass in :func:`list_openapi_public_base_urls`
+    and the CAS guard in :func:`_clear_legacy` so per-cluster rows and
+    a legacy mirror that describe the same cluster never get processed
+    twice. Returns an empty string when any of the three fields is
+    missing.
+    """
+    sub = str(metadata.get("subscription_id") or "").strip()
+    rg = str(metadata.get("resource_group") or "").strip()
+    name = str(metadata.get("cluster_name") or "").strip()
+    if not (sub and rg and name):
+        return ""
+    return (
+        f"/subscriptions/{sub}/resourceGroups/{rg}"
+        f"/providers/Microsoft.ContainerService/managedClusters/{name}"
+    ).lower()
 
 
 def save_openapi_base_url(
@@ -138,72 +192,354 @@ def get_openapi_api_token(*, client: Any | None = None) -> str:
 _PUBLIC_BASE_URL_ENV = "OPENAPI_PUBLIC_BASE_URL"
 
 
-def save_openapi_public_base_url(
-    base_url: str,
-    *,
-    metadata: dict[str, Any] | None = None,
-    client: Any | None = None,
-) -> bool:
-    """Persist the public HTTPS endpoint (cloudapp.azure.com FQDN) in ops Redis.
-
-    Written by the `setup_openapi_public_https` Celery task after the
-    ingress-nginx + cert-manager + Ingress + Certificate pipeline turns
-    Ready. Read by `get_public_tls_base_url` as a fallback to the
-    `OPENAPI_PUBLIC_BASE_URL` env so the task can flip the dashboard to
-    HTTPS without restarting the api / worker sidecar (which would mean
-    a new Container App revision and a few seconds of cold start).
-    """
-    url = _normalise_base_url(base_url)
-    if not url:
-        return False
-    payload = {
+def _build_public_payload(
+    url: str, metadata: dict[str, Any] | None
+) -> dict[str, Any]:
+    return {
         "base_url": url,
         "metadata": metadata or {},
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    redis_client = client or get_ops_redis_client(socket_timeout=1.5)
+
+
+def _redis_set_safe(client: Any, key: str, payload: dict[str, Any]) -> bool:
     try:
-        redis_client.set(_PUBLIC_BASE_URL_KEY, json.dumps(payload, separators=(",", ":")))
+        client.set(key, json.dumps(payload, separators=(",", ":")))
         return True
     except Exception as exc:
-        LOGGER.warning("openapi public base url cache write failed: %s", exc)
+        LOGGER.warning("openapi public base url cache write failed for %s: %s", key, exc)
         return False
 
 
-def get_openapi_public_base_url(*, client: Any | None = None) -> dict[str, Any]:
-    """Return the cached public HTTPS endpoint payload, or `{}` if unavailable.
+def _durable_save_safe(key: str, payload: dict[str, Any]) -> bool:
+    try:
+        from api.services.state.singletons import save_singleton
 
-    Full payload (with metadata + updated_at) is returned so the SPA's
-    Public HTTPS panel can render the cert provenance / last-setup
-    timestamp without a second round trip. Callers that only need the
-    URL string should index `result.get("base_url", "")`.
+        ok = save_singleton(key, payload)
+        if not ok:
+            LOGGER.warning(
+                "openapi public base url durable write returned False for %s", key
+            )
+        return bool(ok)
+    except Exception as exc:
+        LOGGER.warning("openapi public base url durable write failed for %s: %s", key, exc)
+        return False
+
+
+def _normalise_metadata_cluster_fields(
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a shallow copy with subscription/RG/cluster fields lower-cased.
+
+    Azure ARM is case-insensitive on identity fields but the SDK
+    returns mixed case (``managedClusters.get`` capitalises Resource
+    Group as the operator typed it). Lower-casing the three identity
+    fields at write time keeps the SPA's display + the
+    ``_cluster_arm_id_from_metadata`` dedupe in lock-step regardless
+    of which call path created the row.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    out = dict(metadata)
+    for field in ("subscription_id", "resource_group", "cluster_name"):
+        value = out.get(field)
+        if isinstance(value, str) and value:
+            out[field] = value.lower()
+    return out
+
+
+def save_openapi_public_base_url(
+    base_url: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+    cluster_arm_id: str = "",
+    client: Any | None = None,
+) -> bool:
+    """Persist the public HTTPS endpoint URL durably (Storage Table) + Redis.
+
+    When ``cluster_arm_id`` is provided the value is keyed per-cluster so
+    a second cluster's setup cannot silently overwrite the first. The
+    legacy ``openapi:runtime:public-base-url`` key is also refreshed so
+    SPA polling routes that do not yet pass cluster context keep
+    surfacing the most-recently-set cluster's URL.
+
+    Returns ``False`` when the *durable* write (Storage Table) fails so
+    a caller can mark the task partially-degraded. The hot Redis write
+    is still attempted in that case — it just won't survive a Container
+    App revision restart, and the next reconcile tick may not be able
+    to rehydrate the cache from durable storage either.
+    """
+    url = _normalise_base_url(base_url)
+    if not url:
+        return False
+    normalised_metadata = _normalise_metadata_cluster_fields(metadata)
+    payload = _build_public_payload(url, normalised_metadata)
+    redis_client = client or get_ops_redis_client(socket_timeout=1.5)
+
+    if cluster_arm_id:
+        per_cluster_key = _per_cluster_key(cluster_arm_id)
+        durable_ok = _durable_save_safe(per_cluster_key, payload)
+        # Legacy single-key fallback gets a best-effort write so the SPA
+        # status route (which doesn't yet pass cluster context) keeps
+        # rendering "the most recently set cluster". Failures here do not
+        # affect the per-cluster authoritative durability bit.
+        _durable_save_safe(_PUBLIC_BASE_URL_KEY, payload)
+        _redis_set_safe(redis_client, per_cluster_key, payload)
+        _redis_set_safe(redis_client, _PUBLIC_BASE_URL_KEY, payload)
+        return durable_ok
+
+    # No cluster id supplied — legacy single-key path (kept for tests and
+    # any caller that has not adopted the new signature yet).
+    durable_ok = _durable_save_safe(_PUBLIC_BASE_URL_KEY, payload)
+    _redis_set_safe(redis_client, _PUBLIC_BASE_URL_KEY, payload)
+    return durable_ok
+
+
+def _load_public_payload(
+    redis_client: Any, key: str, *, recache_on_durable_hit: bool = True
+) -> dict[str, Any]:
+    """Read a single public-base-url payload (Redis fast path → durable cold path).
+
+    When ``recache_on_durable_hit`` is False the cold-path read does NOT
+    write the durable value back into Redis. The disable / CAS flow
+    sets this to avoid the awkward "we re-cached the legacy mirror and
+    then decided to skip the clear because of CAS" race where Redis
+    ends up with a freshly resurrected stale entry.
+    """
+    try:
+        raw = redis_client.get(key)
+    except Exception as exc:
+        LOGGER.debug("openapi public base url cache read failed for %s: %s", key, exc)
+        raw = None
+    redis_payload: dict[str, Any] = {}
+    if raw is not None:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(str(raw))
+        except json.JSONDecodeError:
+            url = _normalise_base_url(str(raw))
+            redis_payload = {"base_url": url} if url else {}
+        else:
+            if isinstance(parsed, dict):
+                redis_payload = parsed
+        if redis_payload:
+            redis_payload["base_url"] = _normalise_base_url(
+                str(redis_payload.get("base_url") or "")
+            )
+            if redis_payload["base_url"]:
+                return redis_payload
+    try:
+        from api.services.state.singletons import load_singleton
+
+        durable = load_singleton(key) or {}
+    except Exception as exc:
+        LOGGER.debug("openapi public base url durable read failed for %s: %s", key, exc)
+        return {}
+    durable_url = _normalise_base_url(str(durable.get("base_url") or ""))
+    if not durable_url:
+        return {}
+    durable["base_url"] = durable_url
+    if recache_on_durable_hit:
+        try:
+            redis_client.set(key, json.dumps(durable, separators=(",", ":")))
+        except Exception as exc:
+            LOGGER.debug("openapi public base url cache re-populate failed for %s: %s", key, exc)
+    return durable
+
+
+def get_openapi_public_base_url(
+    *,
+    cluster_arm_id: str = "",
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Return the cached public HTTPS endpoint payload, or ``{}``.
+
+    When ``cluster_arm_id`` is provided we read the per-cluster key
+    first. A miss falls back to the legacy single key only if that
+    legacy entry's metadata happens to match the same cluster ARM id —
+    otherwise we return ``{}`` so the SPA does not display a different
+    cluster's URL by accident.
+
+    Without ``cluster_arm_id`` the function returns the legacy single
+    key payload (same behaviour as the pre-multi-cluster version).
     """
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
+
+    if cluster_arm_id:
+        per_cluster = _load_public_payload(
+            redis_client, _per_cluster_key(cluster_arm_id)
+        )
+        if per_cluster:
+            return per_cluster
+        legacy = _load_public_payload(redis_client, _PUBLIC_BASE_URL_KEY)
+        legacy_meta = legacy.get("metadata") if isinstance(legacy, dict) else None
+        if not isinstance(legacy_meta, dict):
+            return {}
+        legacy_id = _cluster_arm_id_from_metadata(legacy_meta)
+        if legacy_id and legacy_id == _normalise_cluster_arm_id(cluster_arm_id):
+            return legacy
+        return {}
+
+    return _load_public_payload(redis_client, _PUBLIC_BASE_URL_KEY)
+
+
+def list_openapi_public_base_urls(
+    *, client: Any | None = None
+) -> list[dict[str, Any]]:
+    """Enumerate every per-cluster public HTTPS entry.
+
+    Returns a list of payload dicts (same shape as
+    ``get_openapi_public_base_url`` returns). The legacy single-key
+    entry is included only if no per-cluster row with the matching
+    ``metadata.subscription_id/resource_group/cluster_name`` exists, so
+    callers (the reconciler) do not process the same cluster twice.
+    """
+    del client  # durable path drives this — Redis is only a hot cache.
     try:
-        raw = redis_client.get(_PUBLIC_BASE_URL_KEY)
+        from api.services.state.singletons import list_singletons_by_prefix
+
+        per_cluster_rows = list_singletons_by_prefix(_PUBLIC_BASE_URL_CLUSTER_PREFIX)
     except Exception as exc:
-        LOGGER.debug("openapi public base url cache read failed: %s", exc)
-        return {}
-    if raw is None:
-        return {}
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
+        LOGGER.warning(
+            "openapi public base url enumerate failed: %s", type(exc).__name__
+        )
+        per_cluster_rows = []
+
+    results: list[dict[str, Any]] = []
+    seen_cluster_ids: set[str] = set()
+    for _row_key, payload in per_cluster_rows:
+        if not isinstance(payload, dict):
+            continue
+        url = _normalise_base_url(str(payload.get("base_url") or ""))
+        if not url:
+            continue
+        payload["base_url"] = url
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        cluster_id = _cluster_arm_id_from_metadata(metadata)
+        if cluster_id:
+            seen_cluster_ids.add(cluster_id)
+        results.append(payload)
+
+    # Pull the legacy entry only when it represents a cluster the
+    # per-cluster prefix didn't cover (covers the migration window for
+    # an existing deployment that hasn't gone through a per-cluster
+    # save yet).
     try:
-        payload = json.loads(str(raw))
-    except json.JSONDecodeError:
-        url = _normalise_base_url(str(raw))
-        return {"base_url": url} if url else {}
-    if not isinstance(payload, dict):
-        return {}
-    payload["base_url"] = _normalise_base_url(str(payload.get("base_url") or ""))
-    if not payload["base_url"]:
-        return {}
-    return payload
+        from api.services.state.singletons import load_singleton
+
+        legacy = load_singleton(_PUBLIC_BASE_URL_KEY) or {}
+    except Exception as exc:
+        LOGGER.debug("openapi public base url legacy load failed: %s", exc)
+        legacy = {}
+    legacy_meta = legacy.get("metadata") if isinstance(legacy, dict) else None
+    legacy_url = _normalise_base_url(str(legacy.get("base_url") or ""))
+    if isinstance(legacy_meta, dict) and legacy_url:
+        legacy_id = _cluster_arm_id_from_metadata(legacy_meta)
+        if legacy_id and legacy_id not in seen_cluster_ids:
+            legacy["base_url"] = legacy_url
+            results.append(legacy)
+    return results
 
 
-def clear_openapi_public_base_url(*, client: Any | None = None) -> bool:
-    """Drop the cached public HTTPS endpoint (used by DELETE / disable)."""
+def clear_openapi_public_base_url(
+    *,
+    cluster_arm_id: str = "",
+    client: Any | None = None,
+) -> bool:
+    """Drop the cached public HTTPS endpoint.
+
+    When ``cluster_arm_id`` is provided we clear the per-cluster entry
+    and *also* the legacy entry if the legacy entry's metadata matches
+    the same cluster (so disabling cluster A does not strand cluster
+    B's "current display" in the legacy key).
+    """
     redis_client = client or get_ops_redis_client(socket_timeout=1.5)
+    ok = True
+
+    if cluster_arm_id:
+        per_cluster_key = _per_cluster_key(cluster_arm_id)
+        try:
+            from api.services.state.singletons import clear_singleton
+
+            clear_singleton(per_cluster_key)
+        except Exception as exc:
+            LOGGER.debug(
+                "openapi public base url durable delete failed for %s: %s",
+                per_cluster_key,
+                exc,
+            )
+        try:
+            redis_client.delete(per_cluster_key)
+        except Exception as exc:
+            LOGGER.warning(
+                "openapi public base url cache delete failed for %s: %s",
+                per_cluster_key,
+                exc,
+            )
+            ok = False
+        # Legacy mirror only cleared when the displayed cluster matches.
+        # Read both Redis (hot) and durable (cold) but suppress the
+        # Redis re-cache side effect — otherwise a cold-path durable
+        # read would resurrect a stale legacy mirror into Redis right
+        # before we decide whether to clear it.
+        legacy = _load_public_payload(
+            redis_client,
+            _PUBLIC_BASE_URL_KEY,
+            recache_on_durable_hit=False,
+        )
+        legacy_meta = legacy.get("metadata") if isinstance(legacy, dict) else None
+        if isinstance(legacy_meta, dict):
+            legacy_id = _cluster_arm_id_from_metadata(legacy_meta)
+            if legacy_id and legacy_id == _normalise_cluster_arm_id(cluster_arm_id):
+                _clear_legacy(redis_client, expected_metadata=legacy_meta)
+        return ok
+
+    return _clear_legacy(redis_client)
+
+
+def _clear_legacy(
+    redis_client: Any,
+    *,
+    expected_metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Delete the legacy single-key entry.
+
+    When ``expected_metadata`` is provided we re-load the durable
+    legacy row first and compare cluster identity. If a different
+    cluster has just overwritten the mirror (e.g. a second operator
+    disabled their own cluster between our load + clear) we leave it
+    alone so we do not accidentally clobber the other cluster's
+    "currently displayed" entry. This is the compare-and-set guard for
+    the cross-operator race described in critique #8.
+    """
+    if expected_metadata is not None:
+        try:
+            from api.services.state.singletons import load_singleton
+
+            durable_now = load_singleton(_PUBLIC_BASE_URL_KEY) or {}
+        except Exception as exc:
+            LOGGER.debug(
+                "openapi public base url legacy CAS load failed: %s", exc
+            )
+            durable_now = {}
+        live_meta = durable_now.get("metadata") if isinstance(durable_now, dict) else None
+        if isinstance(live_meta, dict):
+            live_id = _cluster_arm_id_from_metadata(live_meta)
+            expected_id = _cluster_arm_id_from_metadata(expected_metadata)
+            if live_id and expected_id and live_id != expected_id:
+                LOGGER.info(
+                    "openapi public base url legacy mirror moved to a different "
+                    "cluster between load + clear; skipping clear to avoid "
+                    "clobbering the other operator's entry."
+                )
+                return True
+    try:
+        from api.services.state.singletons import clear_singleton
+
+        clear_singleton(_PUBLIC_BASE_URL_KEY)
+    except Exception as exc:
+        LOGGER.debug("openapi public base url durable delete failed: %s", exc)
     try:
         redis_client.delete(_PUBLIC_BASE_URL_KEY)
         return True
@@ -229,4 +565,3 @@ def get_public_tls_base_url() -> str:
         return env_url
     cached = get_openapi_public_base_url()
     return str(cached.get("base_url") or "")
-

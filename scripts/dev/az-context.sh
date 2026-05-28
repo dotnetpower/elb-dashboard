@@ -277,6 +277,34 @@ prepare_deploy_env_from_az_login() {
     exit 1
   fi
 
+  # Sub-mismatch guard. Two Container Apps in two different subs can
+  # easily share the same name (`ca-elb-dashboard` lives in both the
+  # company prod sub and a teammate's MCAP sub). Without this guard,
+  # quick-deploy.sh discovers the active-sub Container App + ACR by
+  # name and pushes to the wrong place — operator just sees green
+  # "Done" while the user-facing prod is unchanged (see the 2026-05-28
+  # incident). Forcing an explicit override on every cross-sub deploy
+  # makes the mistake noisy instead of silent.
+  if command -v azd >/dev/null 2>&1; then
+    local azd_sub
+    azd_sub="$(azd env get-values 2>/dev/null \
+      | awk -F'=' '/^AZURE_SUBSCRIPTION_ID=/{gsub(/"/,"",$2); print $2; exit}')"
+    if [[ -n "$azd_sub" && "$azd_sub" != "$current_sub" ]]; then
+      if [[ "${ELB_ALLOW_SUB_MISMATCH:-0}" != "1" ]]; then
+        printf '\033[31mERROR:\033[0m az login sub (%s) does NOT match azd env sub (%s).\n' \
+          "$current_sub" "$azd_sub" >&2
+        printf '       Deploying now would target the az-login sub, which is almost certainly NOT\n' >&2
+        printf '       the environment your azd env points at. To proceed anyway, re-run with:\n' >&2
+        printf '         ELB_ALLOW_SUB_MISMATCH=1 %s\n' "$0 $*" >&2
+        printf '       Or align them first:\n' >&2
+        printf '         az account set --subscription %s   # use azd env sub\n' "$azd_sub" >&2
+        printf '         azd env select <env-for-%s>        # use az login sub\n' "$current_sub" >&2
+        exit 2
+      fi
+      _az_context_warn "sub mismatch acknowledged via ELB_ALLOW_SUB_MISMATCH=1; deploying to az login sub $current_sub"
+    fi
+  fi
+
   local prior_sub="${AZURE_SUBSCRIPTION_ID:-}"
   export AZURE_SUBSCRIPTION_ID="$current_sub"
 

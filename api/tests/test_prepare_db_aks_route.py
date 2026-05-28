@@ -48,9 +48,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 class _FakeListedBlob:
     def __init__(self, name: str, status: str) -> None:
         self.name = name
-        self.copy = type(
-            "_Copy", (), {"status": status, "id": "copy-1", "status_description": ""}
-        )
+        self.copy = type("_Copy", (), {"status": status, "id": "copy-1", "status_description": ""})
 
 
 class _FakeBlob:
@@ -165,6 +163,21 @@ def _baseline_patches(
         lambda **_kw: "",
         raising=False,
     )
+    # ARM-level health gate: tests assume the cluster is reachable +
+    # Running unless they override below. Without this patch the real
+    # `get_cluster_health` makes a `ManagedClusters.get` ARM call that
+    # 404s in the test environment, blocking dispatch with a misleading
+    # `cluster_not_found`.
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_a, **_kw: {
+            "healthy": True,
+            "exists": True,
+            "power_state": "Running",
+            "reason": None,
+        },
+        raising=True,
+    )
 
 
 def test_mode_server_side_default_path_unchanged(
@@ -183,9 +196,7 @@ def test_mode_server_side_default_path_unchanged(
     def _boom(*_a, **_kw):
         raise AssertionError("k8s_ready_warmup_node_names must not be called for server-side mode")
 
-    monkeypatch.setattr(
-        "api.services.k8s.nodes.k8s_ready_warmup_node_names", _boom, raising=True
-    )
+    monkeypatch.setattr("api.services.k8s.nodes.k8s_ready_warmup_node_names", _boom, raising=True)
     # And no Celery dispatch.
     calls, fake_send = make_send_task_recorder("task-aks-not-called")
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
@@ -374,9 +385,7 @@ def test_mode_auto_falls_back_when_no_aks_coords(
     def _boom(*_a, **_kw):
         raise AssertionError("AKS probe must not run when no coords supplied for mode=auto")
 
-    monkeypatch.setattr(
-        "api.services.k8s.nodes.k8s_ready_warmup_node_names", _boom, raising=True
-    )
+    monkeypatch.setattr("api.services.k8s.nodes.k8s_ready_warmup_node_names", _boom, raising=True)
     calls, fake_send = make_send_task_recorder("task-not-aks")
     monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
 
@@ -430,9 +439,7 @@ def test_mode_auto_uses_aks_when_available(
     assert len(aks_calls) == 1
 
 
-def test_invalid_mode_returns_400(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_invalid_mode_returns_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     body = {
         "subscription_id": "00000000-0000-0000-0000-000000000001",
         "storage_resource_group": "rg-workload",
@@ -460,9 +467,7 @@ def test_mode_aks_probe_failure_returns_409(
     def _raise(*_a, **_kw):
         raise RuntimeError("AKS API down")
 
-    monkeypatch.setattr(
-        "api.services.k8s.nodes.k8s_ready_warmup_node_names", _raise, raising=True
-    )
+    monkeypatch.setattr("api.services.k8s.nodes.k8s_ready_warmup_node_names", _raise, raising=True)
 
     body = {
         "subscription_id": "00000000-0000-0000-0000-000000000001",
@@ -477,3 +482,383 @@ def test_mode_aks_probe_failure_returns_409(
     assert resp.status_code == 409
     detail = resp.json()
     assert detail["code"] == "aks_unavailable"
+
+
+def test_mode_aks_cluster_stopped_returns_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When `get_cluster_health` reports `cluster_stopped`, mode=aks should
+    return 409 with a specific `cluster_reason` field — better UX than the
+    generic `aks_unavailable` returned by an opaque K8s probe failure."""
+    from api.services.cluster_health import ClusterHealth
+
+    snapshot = "2026-05-21-01-05-02"
+    container = _FakeContainer()
+    _baseline_patches(
+        monkeypatch,
+        snapshot=snapshot,
+        keys_with_sizes=[(f"{snapshot}/core_nt.000.nhr", 1024)],
+        container=container,
+    )
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_a, **_kw: ClusterHealth(
+            healthy=False, exists=True, power_state="Stopped", reason="cluster_stopped"
+        ),
+        raising=True,
+    )
+    # If we make it to the K8s probe, the test fails — the health gate
+    # must short-circuit first.
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            AssertionError("k8s probe must not run when cluster is stopped")
+        ),
+        raising=True,
+    )
+
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+        "db_name": "core_nt",
+        "mode": "aks",
+        "aks_resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+    }
+    resp = client.post("/api/storage/prepare-db", json=body)
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()
+    assert detail["code"] == "aks_unavailable"
+    assert detail["cluster_reason"] == "cluster_stopped"
+    assert detail["cluster_power_state"] == "Stopped"
+
+
+def test_mode_auto_with_stopped_cluster_falls_back(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`mode=auto` + stopped cluster → silently use the server-side path."""
+    from api.services.cluster_health import ClusterHealth
+
+    snapshot = "2026-05-21-01-05-02"
+    container = _FakeContainer()
+    _baseline_patches(
+        monkeypatch,
+        snapshot=snapshot,
+        keys_with_sizes=[(f"{snapshot}/core_nt.000.nhr", 1024)],
+        container=container,
+    )
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_a, **_kw: ClusterHealth(
+            healthy=False, exists=True, power_state="Stopped", reason="cluster_stopped"
+        ),
+        raising=True,
+    )
+    calls, fake_send = make_send_task_recorder("task-server-side")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
+
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+        "db_name": "core_nt",
+        "mode": "auto",
+        "aks_resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+    }
+    resp = client.post("/api/storage/prepare-db", json=body)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload.get("mode") != "aks"
+    aks_calls = [c for c in calls if "prepare_db_via_aks" in c["task_name"]]
+    assert aks_calls == []
+
+
+def test_mode_aks_persists_aks_job_ref_in_metadata(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dispatching mode=aks must record `aks_job_ref` in metadata so the
+    cancel endpoint + a future revision-restart reconciler can rediscover
+    the live K8s Job."""
+    snapshot = "2026-05-21-01-05-02"
+    container = _FakeContainer()
+    _baseline_patches(
+        monkeypatch,
+        snapshot=snapshot,
+        keys_with_sizes=[(f"{snapshot}/core_nt.000.nhr", 1024)],
+        container=container,
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_kw: ["aks-node-1"],
+        raising=True,
+    )
+    _, fake_send = make_send_task_recorder("task-aks-ref")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
+
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+        "db_name": "core_nt",
+        "mode": "aks",
+        "aks_resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+    }
+    resp = client.post("/api/storage/prepare-db", json=body)
+    assert resp.status_code == 200, resp.text
+
+    ref = container._meta.get("aks_job_ref")
+    assert isinstance(ref, dict), container._meta
+    assert ref["subscription_id"] == "00000000-0000-0000-0000-000000000001"
+    assert ref["resource_group"] == "rg-elb"
+    assert ref["cluster_name"] == "aks-elb"
+    assert ref["namespace"] == "default"
+    # Deterministic from (db_name, source_version) — must match
+    # prepare_db_job_name() so cancel + reconciler can find the Job.
+    assert ref["job_name"].startswith("prepare-db-core-nt-")
+    assert ref["configmap_name"] == ref["job_name"]
+    assert ref["started_at"]
+
+
+def test_cancel_aks_path_deletes_k8s_job(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cancel endpoint must delete the K8s Job + ConfigMap when the
+    in-flight prepare-db was dispatched via mode=aks. Without this fix,
+    clicking Cancel during an AKS run is a no-op — the pods keep
+    uploading because `abort_copy` does not apply to azcopy block writes."""
+    container = _FakeContainer()
+    aks_ref = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+        "namespace": "default",
+        "job_name": "prepare-db-core-nt-260521010502",
+        "configmap_name": "prepare-db-core-nt-260521010502",
+        "started_at": "2026-05-28T00:00:00+00:00",
+    }
+    container._meta = {
+        "db_name": "core_nt",
+        "update_in_progress": True,
+        "copy_status": {"phase": "copying", "mode": "aks"},
+        "aks_job_ref": aks_ref,
+    }
+    monkeypatch.setattr(
+        "azure.storage.blob.BlobServiceClient",
+        lambda **_kw: _FakeBlobSvc(container),
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.public_access.ensure_local_storage_access",
+        lambda *_a, **_kw: {"action": "noop"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.db.ops_audit.record_db_op",
+        lambda **_kw: "",
+        raising=False,
+    )
+
+    delete_calls: list[dict[str, Any]] = []
+
+    def _fake_delete(
+        _cred,
+        sub: str,
+        rg: str,
+        cluster: str,
+        *,
+        namespace: str,
+        job_name: str,
+        configmap_name: Any = None,
+    ) -> dict[str, Any]:
+        delete_calls.append(
+            {
+                "sub": sub,
+                "rg": rg,
+                "cluster": cluster,
+                "namespace": namespace,
+                "job_name": job_name,
+                "configmap_name": configmap_name,
+            }
+        )
+        return {"status": "deleted", "job": {"ok": True}, "configmap": {"ok": True}}
+
+    monkeypatch.setattr(
+        "api.services.k8s.prepare_db_jobs.delete_prepare_db_job",
+        _fake_delete,
+        raising=True,
+    )
+
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+    }
+    resp = client.post("/api/storage/prepare-db/core_nt/cancel", json=body)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["aks_job_deleted"]["status"] == "deleted"
+
+    # Job-delete call shape
+    assert len(delete_calls) == 1
+    call = delete_calls[0]
+    assert call["rg"] == "rg-elb"
+    assert call["cluster"] == "aks-elb"
+    assert call["namespace"] == "default"
+    assert call["job_name"] == aks_ref["job_name"]
+    assert call["configmap_name"] == aks_ref["configmap_name"]
+
+    # Metadata cleared
+    assert container._meta["update_in_progress"] is False
+    assert container._meta["copy_status"]["phase"] == "cancelled"
+    assert container._meta["copy_status"]["mode"] == "aks"
+    assert container._meta["copy_status"]["aks_job_deleted"]["status"] == "deleted"
+    assert "aks_job_ref" not in container._meta
+
+
+def test_cancel_server_side_path_skips_aks_delete(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If `aks_job_ref` is absent (legacy server-side path), cancel must
+    NOT attempt to call the K8s delete helper."""
+    container = _FakeContainer()
+    container._meta = {
+        "db_name": "core_nt",
+        "update_in_progress": True,
+        "copy_status": {"phase": "copying"},
+    }
+    monkeypatch.setattr(
+        "azure.storage.blob.BlobServiceClient",
+        lambda **_kw: _FakeBlobSvc(container),
+    )
+    monkeypatch.setattr(
+        "api.services.storage.data._blob_service",
+        lambda _cred, _account: _FakeBlobSvc(container),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.storage.public_access.ensure_local_storage_access",
+        lambda *_a, **_kw: {"action": "noop"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        "api.services.db.ops_audit.record_db_op",
+        lambda **_kw: "",
+        raising=False,
+    )
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("delete_prepare_db_job must not be called for non-AKS cancel")
+
+    monkeypatch.setattr(
+        "api.services.k8s.prepare_db_jobs.delete_prepare_db_job",
+        _boom,
+        raising=True,
+    )
+
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+    }
+    resp = client.post("/api/storage/prepare-db/core_nt/cancel", json=body)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["aks_job_deleted"] is None
+
+
+def test_mode_aks_env_overrides_reach_task_kwargs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 1.5: the three new env vars
+    (`PREPARE_DB_AKS_AZCOPY_CONCURRENCY`, `PREPARE_DB_AKS_BACKOFF_LIMIT`,
+    `PREPARE_DB_AKS_TTL_SECONDS`) must be parsed by the route and forwarded
+    as Celery task kwargs. They were silently ignored before this PR."""
+    snapshot = "2026-05-21-01-05-02"
+    container = _FakeContainer()
+    _baseline_patches(
+        monkeypatch,
+        snapshot=snapshot,
+        keys_with_sizes=[(f"{snapshot}/core_nt.000.nhr", 1024)],
+        container=container,
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_kw: ["aks-node-1"],
+        raising=True,
+    )
+    monkeypatch.setenv("PREPARE_DB_AKS_AZCOPY_CONCURRENCY", "32")
+    monkeypatch.setenv("PREPARE_DB_AKS_BACKOFF_LIMIT", "5")
+    monkeypatch.setenv("PREPARE_DB_AKS_TTL_SECONDS", "7200")
+    calls, fake_send = make_send_task_recorder("task-aks-env")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
+
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+        "db_name": "core_nt",
+        "mode": "aks",
+        "aks_resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+    }
+    resp = client.post("/api/storage/prepare-db", json=body)
+    assert resp.status_code == 200, resp.text
+
+    aks_calls = [c for c in calls if c["task_name"] == "api.tasks.storage.prepare_db_via_aks"]
+    assert len(aks_calls) == 1
+    kwargs = aks_calls[0]["kwargs"]
+    assert kwargs["azcopy_concurrency"] == 32
+    assert kwargs["backoff_limit"] == 5
+    assert kwargs["ttl_seconds_after_finished"] == 7200
+
+
+def test_mode_aks_env_unset_omits_overrides(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the env vars set, the route must NOT pass override kwargs
+    — so the task picks up the module-level defaults
+    (`DEFAULT_AZCOPY_CONCURRENCY`, etc.) unchanged."""
+    snapshot = "2026-05-21-01-05-02"
+    container = _FakeContainer()
+    _baseline_patches(
+        monkeypatch,
+        snapshot=snapshot,
+        keys_with_sizes=[(f"{snapshot}/core_nt.000.nhr", 1024)],
+        container=container,
+    )
+    monkeypatch.setattr(
+        "api.services.k8s.nodes.k8s_ready_warmup_node_names",
+        lambda *_a, **_kw: ["aks-node-1"],
+        raising=True,
+    )
+    monkeypatch.delenv("PREPARE_DB_AKS_AZCOPY_CONCURRENCY", raising=False)
+    monkeypatch.delenv("PREPARE_DB_AKS_BACKOFF_LIMIT", raising=False)
+    monkeypatch.delenv("PREPARE_DB_AKS_TTL_SECONDS", raising=False)
+    calls, fake_send = make_send_task_recorder("task-aks-defaults")
+    monkeypatch.setattr("api.celery_app.celery_app.send_task", fake_send)
+
+    body = {
+        "subscription_id": "00000000-0000-0000-0000-000000000001",
+        "storage_resource_group": "rg-workload",
+        "account_name": "stworkload",
+        "db_name": "core_nt",
+        "mode": "aks",
+        "aks_resource_group": "rg-elb",
+        "cluster_name": "aks-elb",
+    }
+    resp = client.post("/api/storage/prepare-db", json=body)
+    assert resp.status_code == 200, resp.text
+
+    aks_calls = [c for c in calls if c["task_name"] == "api.tasks.storage.prepare_db_via_aks"]
+    assert len(aks_calls) == 1
+    kwargs = aks_calls[0]["kwargs"]
+    assert "azcopy_concurrency" not in kwargs
+    assert "backoff_limit" not in kwargs
+    assert "ttl_seconds_after_finished" not in kwargs

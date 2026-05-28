@@ -21,6 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request, Response
 
+from api._http_utils import BLAST_SUBMIT_RESPONSES
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _normalise_blast_submit_body, _stub_log
 from api.routes.blast.common import LAB_TOOL_PENDING
@@ -173,7 +174,7 @@ def _reset_jobs_list_cache() -> None:
         LOGGER.debug("jobs list cache reset skipped: %s", type(exc).__name__)
 
 
-@router.post("/submit")
+@router.post("/submit", responses=BLAST_SUBMIT_RESPONSES)
 def blast_submit(
     request: Request,
     response: Response,
@@ -436,7 +437,7 @@ def blast_submit(
     )
 
 
-@router.post("/jobs", status_code=202)
+@router.post("/jobs", status_code=202, responses=BLAST_SUBMIT_RESPONSES)
 def blast_job_submit(
     request: Request,
     response: Response,

@@ -19,6 +19,16 @@ export interface BlastSubmitRequest {
   db: string;
   query_data?: string;
   query_blob_url?: string;
+  /**
+   * NCBI nuccore accession (with or without `.version`). When supplied the
+   * backend resolves it to FASTA via E-utilities and stages it like any
+   * inline `query_data`. Ignored when `query_data` / `query_blob_url` is set.
+   */
+  query_accession?: string;
+  /** 1-based inclusive start (only used when `query_accession` is set). */
+  query_accession_seq_start?: number;
+  /** 1-based inclusive end (only used when `query_accession` is set). */
+  query_accession_seq_stop?: number;
   job_title?: string;
   evalue?: number;
   max_target_seqs?: number;

@@ -257,6 +257,96 @@ def _gate_aks_cluster(
     return result
 
 
+def _gate_openapi_ready() -> GateResult:
+    """Pre-flight the sibling elb-openapi ``/v1/ready`` probe.
+
+    Without this gate the internal ``POST /api/blast/submit`` route would
+    fall through to the slow 90s ``submit_job`` httpx call when AKS is
+    stopped — the same 90s opaque hang the external OpenAPI path eliminated
+    with PR1. The gate reuses ``api.services.external_blast.ready`` so it
+    shares the tiny in-process cache + 5s timeout + structured codes.
+
+    Outcomes:
+
+    * Sibling 200 / fail-open 404 → ``ok``.
+    * Sibling 503 ``openapi_not_ready`` (any upstream_code) → ``fail`` with
+      the upstream code mapped to a SPA action.
+    * Sibling 429 ``openapi_ready_rate_limited`` → ``unknown`` (so
+      ``allow_unverified=True`` can degrade it to a warning).
+    * Transport error ``openapi_unreachable`` → ``fail`` with a "start
+      cluster" action because the most common cause is AKS stopped.
+
+    Skipped entirely when ``ELB_OPENAPI_BASE_URL`` is unset *and* the
+    runtime cache has no endpoint — the cluster has no openapi sidecar
+    deployed yet, which is a different failure mode owned by
+    ``_gate_acr_images``.
+    """
+    try:
+        from api.services.external_blast import _base_url, ready
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("submit gate: external_blast import failed: %s", exc)
+        return GateResult(
+            id="openapi_ready",
+            status="unknown",
+            severity="critical",
+            error_code="openapi_check_unavailable",
+            message="Could not import the openapi readiness client.",
+        )
+    try:
+        _base_url()  # raises HTTPException if no base URL is configured
+    except Exception:
+        return GateResult(
+            id="openapi_ready",
+            status="ok",
+            severity="critical",
+            error_code="",
+            message="elb-openapi not configured — skipped.",
+        )
+    try:
+        ready()
+        return GateResult(
+            id="openapi_ready",
+            status="ok",
+            severity="critical",
+            error_code="",
+            message="elb-openapi /v1/ready passed all probes.",
+        )
+    except Exception as exc:
+        # HTTPException is the canonical shape from ready(); fall back to
+        # generic "unknown" for anything else.
+        detail = getattr(exc, "detail", None)
+        status_code = getattr(exc, "status_code", 503)
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or "openapi_unreachable")
+            upstream = str(detail.get("upstream_code") or "")
+            message = str(detail.get("message") or "")
+        else:
+            code = "openapi_unreachable"
+            upstream = ""
+            message = str(detail or exc)[:300]
+
+        if status_code == 429 or code == "openapi_ready_rate_limited":
+            return GateResult(
+                id="openapi_ready",
+                status="unknown",
+                severity="critical",
+                error_code="openapi_ready_rate_limited",
+                message=message or "Sibling /v1/ready is rate-limited; retry in 60s.",
+            )
+
+        # Map upstream code → SPA action hint.
+        action, action_type = _openapi_action_for_code(upstream or code)
+        return GateResult(
+            id="openapi_ready",
+            status="fail",
+            severity="critical",
+            error_code=code,
+            message=message or f"elb-openapi readiness probe failed ({code}).",
+            action=action,
+            action_type=action_type,
+        )
+
+
 def _gate_blast_database(*, storage_account: str, database: str) -> GateResult:
     """Confirm the selected BLAST database has at least one ``.nsq/.psq/.nal/.pal``
     marker blob under ``blast-db/<prefix>`` AND that prepare-db has finished
@@ -318,6 +408,66 @@ def _readiness_action_for_code(code: str) -> tuple[str | None, str | None]:
     if code == "database_updating":
         return ("Wait for update", "wait_for_update")
     return ("Prepare the database", "prepare_database")
+
+
+def _openapi_action_for_code(code: str) -> tuple[str | None, str | None]:
+    """Map a sibling /v1/ready ``upstream_code`` to the SPA remediation hint.
+
+    Kept separate from ``_readiness_action_for_code`` (which is DB-shaped) so
+    the SPA can route each gate independently and a new upstream code does not
+    silently collapse to the wrong action.
+    """
+    return OPENAPI_UPSTREAM_ACTIONS.get(code, (None, None))
+
+
+# Canonical set of sibling ``/v1/ready`` upstream codes the dashboard knows
+# how to remediate. Adding a new sibling code without an entry here makes the
+# SPA fall back to a generic "Check AKS cluster health" hint — keep this in
+# sync with both:
+#   * sibling elastic-blast-azure/docker-openapi/app/main.py::v1_ready
+#   * web/src/api/client.ts::OPENAPI_UPSTREAM_HINTS
+# The contract test in api/tests/test_openapi_upstream_codes_contract.py
+# fails the build when the SPA hint table drops a code that exists here.
+#
+# ``OPENAPI_NESTED_UPSTREAM_CODES`` are the codes that arrive as
+# ``detail.upstream_code`` inside a dashboard ``openapi_not_ready`` wrapper
+# (i.e. the sibling /v1/ready 503 codes). These MUST match the SPA's
+# ``OPENAPI_UPSTREAM_HINTS`` table keys 1:1.
+# ``openapi_unreachable`` is a dashboard-only top-level code (transport
+# failure wrap) and is handled by its own SPA branch, not by the hints
+# table — keep it out of the nested set.
+OPENAPI_NESTED_UPSTREAM_CODES: frozenset[str] = frozenset(
+    {
+        "k8s_unreachable",
+        "no_workload_nodes",
+        "openapi_pod_not_ready",
+        "workload_pool_check_failed",
+        "openapi_pod_check_failed",
+    }
+)
+OPENAPI_UPSTREAM_ACTIONS: dict[str, tuple[str, str]] = {
+    "k8s_unreachable": ("Start cluster", "start_cluster"),
+    "no_workload_nodes": ("Scale up workload pool", "scale_up_workload_pool"),
+    "openapi_pod_not_ready": ("Restart elb-openapi", "restart_openapi_pod"),
+    "workload_pool_check_failed": ("Check AKS health", "check_aks_health"),
+    "openapi_pod_check_failed": ("Check AKS health", "check_aks_health"),
+    "openapi_unreachable": ("Start cluster", "start_cluster"),
+}
+
+
+def openapi_known_upstream_codes() -> frozenset[str]:
+    """Return the upstream codes the dashboard has a mapped remediation for.
+
+    Public surface so the contract test (and any future doc generator) can
+    cross-check this set against the SPA's hint table without poking at the
+    private mapping table directly.
+
+    Returns the *nested* upstream codes only (those arriving as
+    ``detail.upstream_code``) so the SPA's hint table can be checked 1:1.
+    Top-level dashboard-only codes like ``openapi_unreachable`` are handled
+    by their own SPA branches and are intentionally excluded.
+    """
+    return OPENAPI_NESTED_UPSTREAM_CODES
 
 
 def _gate_acr_images(*, acr_name: str) -> GateResult:
@@ -442,6 +592,7 @@ def evaluate_submit_gates(
             resource_group=resource_group,
             cluster_name=cluster_name,
         ),
+        _gate_openapi_ready(),
         _gate_blast_database(
             storage_account=storage_account,
             database=database,

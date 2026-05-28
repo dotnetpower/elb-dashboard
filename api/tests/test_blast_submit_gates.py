@@ -197,6 +197,106 @@ def test_blast_database_gate_unknown_when_storage_unreachable(
     assert result.status == "unknown"
 
 
+# --------------------------- openapi_ready gate ------------------------------
+
+
+def test_openapi_ready_gate_skipped_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ELB_OPENAPI_BASE_URL and no cached runtime endpoint → gate skipped."""
+    monkeypatch.delenv("ELB_OPENAPI_BASE_URL", raising=False)
+    # Make _base_url raise to simulate "not configured".
+    from api.services import external_blast
+
+    def _raise(_v: object = None) -> str:
+        from fastapi import HTTPException
+
+        raise HTTPException(503, detail={"code": "openapi_not_configured"})
+
+    monkeypatch.setattr(external_blast, "_base_url", _raise)
+    result = submit_gates._gate_openapi_ready()
+    assert result.status == "ok"
+    assert "not configured" in result.message
+
+
+def test_openapi_ready_gate_ok_when_ready_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import external_blast
+
+    monkeypatch.setattr(external_blast, "_base_url", lambda _v=None: "http://openapi")
+    monkeypatch.setattr(external_blast, "ready", lambda **_k: {"ready": True})
+    result = submit_gates._gate_openapi_ready()
+    assert result.status == "ok"
+    assert result.id == "openapi_ready"
+
+
+def test_openapi_ready_gate_fail_surfaces_upstream_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import external_blast
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(external_blast, "_base_url", lambda _v=None: "http://openapi")
+
+    def _boom(**_k: object) -> None:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "openapi_not_ready",
+                "upstream_code": "no_workload_nodes",
+                "message": "No Ready nodes match label 'workload=blast'",
+            },
+        )
+
+    monkeypatch.setattr(external_blast, "ready", _boom)
+    result = submit_gates._gate_openapi_ready()
+    assert result.status == "fail"
+    assert result.error_code == "openapi_not_ready"
+    assert result.action_type == "scale_up_workload_pool"
+
+
+def test_openapi_ready_gate_unreachable_maps_to_start_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import external_blast
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(external_blast, "_base_url", lambda _v=None: "http://openapi")
+
+    def _boom(**_k: object) -> None:
+        raise HTTPException(
+            503,
+            detail={"code": "openapi_unreachable", "message": "ConnectError"},
+        )
+
+    monkeypatch.setattr(external_blast, "ready", _boom)
+    result = submit_gates._gate_openapi_ready()
+    assert result.status == "fail"
+    assert result.error_code == "openapi_unreachable"
+    assert result.action_type == "start_cluster"
+
+
+def test_openapi_ready_gate_rate_limited_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.services import external_blast
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(external_blast, "_base_url", lambda _v=None: "http://openapi")
+
+    def _boom(**_k: object) -> None:
+        raise HTTPException(
+            429,
+            detail={"code": "openapi_ready_rate_limited", "limit_per_minute": 30},
+        )
+
+    monkeypatch.setattr(external_blast, "ready", _boom)
+    result = submit_gates._gate_openapi_ready()
+    assert result.status == "unknown"
+    assert result.error_code == "openapi_ready_rate_limited"
+
+
 def _stub_acr_lookup(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -289,6 +389,9 @@ def _stub_all_ok(monkeypatch: pytest.MonkeyPatch) -> None:
             "marker_blob": "core_nt/core_nt.nsq",
         },
     )
+    # _gate_openapi_ready is opt-in via ELB_OPENAPI_BASE_URL; the default
+    # stub leaves it skipped (status=ok with "not configured" message).
+    monkeypatch.delenv("ELB_OPENAPI_BASE_URL", raising=False)
 
 
 def test_evaluate_ok_when_all_gates_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,6 +410,7 @@ def test_evaluate_ok_when_all_gates_pass(monkeypatch: pytest.MonkeyPatch) -> Non
         "terminal_sidecar",
         "broker",
         "aks_cluster",
+        "openapi_ready",
         "blast_database",
         "acr_images",
     }

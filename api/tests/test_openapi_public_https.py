@@ -60,7 +60,23 @@ def test_cluster_issuer_uses_letsencrypt_prod_with_http01() -> None:
     spec = issuer["spec"]["acme"]
     assert spec["server"].endswith("/acme-v02.api.letsencrypt.org/directory")
     assert spec["email"] == "ops@example.com"
-    assert spec["solvers"][0]["http01"]["ingress"]["class"] == "nginx"
+    http01 = spec["solvers"][0]["http01"]["ingress"]
+    assert http01["class"] == "nginx"
+    # The HTTP-01 solver Pod that cert-manager spawns per Challenge must
+    # carry the same blastpool toleration + user-mode nodeSelector as the
+    # ingress-nginx / cert-manager install patch — otherwise on a cluster
+    # whose only schedulable pool is the blastpool (`workload=blast:NoSchedule`)
+    # the solver Pod sits in `Pending` forever and Let's Encrypt times out
+    # the challenge with a 503. Regression on elb-cluster-01, 2026-05-28.
+    pod_spec = http01["podTemplate"]["spec"]
+    assert pod_spec["nodeSelector"] == {"kubernetes.azure.com/mode": "user"}
+    assert any(
+        t.get("key") == "workload"
+        and t.get("operator") == "Equal"
+        and t.get("value") == "blast"
+        and t.get("effect") == "NoSchedule"
+        for t in pod_spec["tolerations"]
+    )
 
 
 def test_ingress_manifest_has_tls_redirect_and_cert_issuer() -> None:
@@ -90,9 +106,7 @@ def test_dns_label_patch_uses_azure_annotation() -> None:
 
     patch = json.loads(build_dns_label_patch(dns_label="elb-openapi-abc123"))
     assert (
-        patch["metadata"]["annotations"][
-            "service.beta.kubernetes.io/azure-dns-label-name"
-        ]
+        patch["metadata"]["annotations"]["service.beta.kubernetes.io/azure-dns-label-name"]
         == "elb-openapi-abc123"
     )
 
@@ -107,9 +121,10 @@ def test_dns_label_patch_uses_azure_annotation() -> None:
 # ingress-nginx + cert-manager onto the BLAST workload pool, which is large
 # (D4s+) and has CPU headroom. The toleration switches from
 # `CriticalAddonsOnly:Exists` to `workload=blast:NoSchedule` and the
-# nodeSelector switches from `mode=system` to `mode=user`. Backward-compat
-# import names (`patch_manifest_for_system_pool`, `SYSTEM_POOL_*`) still
-# work — they now alias to the workload-pool variant.
+# nodeSelector switches from `mode=system` to `mode=user`. The
+# `SYSTEM_POOL_*` / `_for_system_pool` aliases were removed in the
+# follow-up clean-up; the canonical names live under `WORKLOAD_POOL_*`
+# and `_for_workload_pool`.
 
 
 def _safe_load_all(text: str) -> list[Any]:
@@ -118,9 +133,9 @@ def _safe_load_all(text: str) -> list[Any]:
     return list(_yaml.safe_load_all(text))
 
 
-def test_patch_manifest_for_system_pool_injects_toleration_and_node_selector() -> None:
+def test_patch_manifest_for_workload_pool_injects_toleration_and_node_selector() -> None:
     import yaml as _yaml
-    from api.services.k8s.ingress import patch_manifest_for_system_pool
+    from api.services.k8s.ingress import patch_manifest_for_workload_pool
 
     raw = _yaml.safe_dump_all(
         [
@@ -146,7 +161,7 @@ def test_patch_manifest_for_system_pool_injects_toleration_and_node_selector() -
         ]
     )
 
-    patched = _safe_load_all(patch_manifest_for_system_pool(raw))
+    patched = _safe_load_all(patch_manifest_for_workload_pool(raw))
 
     for doc in patched:
         pod_spec = doc["spec"]["template"]["spec"]
@@ -161,15 +176,15 @@ def test_patch_manifest_for_system_pool_injects_toleration_and_node_selector() -
         # systempool toleration must NOT be injected — the policy moved to
         # the blastpool (user-mode pool), so `CriticalAddonsOnly` would
         # incorrectly admit the pod onto the starved systempool.
-        assert not any(
-            t.get("key") == "CriticalAddonsOnly" for t in tolerations
-        ), f"{doc['kind']} must not tolerate CriticalAddonsOnly anymore"
+        assert not any(t.get("key") == "CriticalAddonsOnly" for t in tolerations), (
+            f"{doc['kind']} must not tolerate CriticalAddonsOnly anymore"
+        )
         assert pod_spec["nodeSelector"]["kubernetes.azure.com/mode"] == "user"
 
 
-def test_patch_manifest_for_system_pool_preserves_existing_settings() -> None:
+def test_patch_manifest_for_workload_pool_preserves_existing_settings() -> None:
     import yaml as _yaml
-    from api.services.k8s.ingress import patch_manifest_for_system_pool
+    from api.services.k8s.ingress import patch_manifest_for_workload_pool
 
     raw = _yaml.safe_dump(
         {
@@ -194,7 +209,7 @@ def test_patch_manifest_for_system_pool_preserves_existing_settings() -> None:
         }
     )
 
-    patched = _safe_load_all(patch_manifest_for_system_pool(raw))[0]
+    patched = _safe_load_all(patch_manifest_for_workload_pool(raw))[0]
     pod_spec = patched["spec"]["template"]["spec"]
     keys = [t.get("key") for t in pod_spec["tolerations"]]
     # Existing operator-managed toleration is preserved AND the workload-pool
@@ -206,9 +221,9 @@ def test_patch_manifest_for_system_pool_preserves_existing_settings() -> None:
     assert pod_spec["nodeSelector"]["kubernetes.azure.com/mode"] == "user"
 
 
-def test_patch_manifest_for_system_pool_is_idempotent() -> None:
+def test_patch_manifest_for_workload_pool_is_idempotent() -> None:
     import yaml as _yaml
-    from api.services.k8s.ingress import patch_manifest_for_system_pool
+    from api.services.k8s.ingress import patch_manifest_for_workload_pool
 
     raw = _yaml.safe_dump(
         {
@@ -219,24 +234,22 @@ def test_patch_manifest_for_system_pool_is_idempotent() -> None:
         }
     )
 
-    once = patch_manifest_for_system_pool(raw)
-    twice = patch_manifest_for_system_pool(once)
+    once = patch_manifest_for_workload_pool(raw)
+    twice = patch_manifest_for_workload_pool(once)
 
     once_pod = _safe_load_all(once)[0]["spec"]["template"]["spec"]
     twice_pod = _safe_load_all(twice)[0]["spec"]["template"]["spec"]
     # Re-running the transform on already-patched YAML must not duplicate
     # the workload-pool toleration (regression guard for "every retry of
     # setup_openapi_public_https doubles the toleration list").
-    workload_count = sum(
-        1 for t in twice_pod["tolerations"] if t.get("key") == "workload"
-    )
+    workload_count = sum(1 for t in twice_pod["tolerations"] if t.get("key") == "workload")
     assert workload_count == 1
     assert once_pod["nodeSelector"] == twice_pod["nodeSelector"]
 
 
-def test_patch_manifest_for_system_pool_passes_through_non_workload_docs() -> None:
+def test_patch_manifest_for_workload_pool_passes_through_non_workload_docs() -> None:
     import yaml as _yaml
-    from api.services.k8s.ingress import patch_manifest_for_system_pool
+    from api.services.k8s.ingress import patch_manifest_for_workload_pool
 
     raw = _yaml.safe_dump_all(
         [
@@ -255,7 +268,7 @@ def test_patch_manifest_for_system_pool_passes_through_non_workload_docs() -> No
         ]
     )
 
-    serialised = patch_manifest_for_system_pool(raw)
+    serialised = patch_manifest_for_workload_pool(raw)
     docs = _safe_load_all(serialised)
     # ConfigMap + Namespace must not have a spec.template injected.
     cm = next(d for d in docs if d and d.get("kind") == "ConfigMap")
@@ -268,17 +281,16 @@ def test_patch_manifest_for_system_pool_passes_through_non_workload_docs() -> No
     # stream with "invalid Yaml document separator: null". Observed live
     # on elb-cluster-01, 2026-05-27.
     assert "null" not in serialised, (
-        "transformed manifest must not contain `--- null` separators "
-        "that kubectl rejects"
+        "transformed manifest must not contain `--- null` separators that kubectl rejects"
     )
 
 
-def test_patch_manifest_for_system_pool_shrinks_container_requests() -> None:
+def test_patch_manifest_for_workload_pool_shrinks_container_requests() -> None:
     import yaml as _yaml
     from api.services.k8s.ingress import (
-        SYSTEM_POOL_LOW_CPU_REQUEST,
-        SYSTEM_POOL_LOW_MEMORY_REQUEST,
-        patch_manifest_for_system_pool,
+        WORKLOAD_POOL_LOW_CPU_REQUEST,
+        WORKLOAD_POOL_LOW_MEMORY_REQUEST,
+        patch_manifest_for_workload_pool,
     )
 
     raw = _yaml.safe_dump_all(
@@ -339,30 +351,32 @@ def test_patch_manifest_for_system_pool_shrinks_container_requests() -> None:
         ]
     )
 
-    patched = _safe_load_all(patch_manifest_for_system_pool(raw))
+    patched = _safe_load_all(patch_manifest_for_workload_pool(raw))
 
     # ingress-nginx-controller: 100m → 20m, 90Mi → 64Mi (both lowered);
     # init-container 250m → 20m; limits untouched.
     controller = next(d for d in patched if d["metadata"]["name"] == "ingress-nginx-controller")
     c_pod = controller["spec"]["template"]["spec"]
     c_main = c_pod["containers"][0]
-    assert c_main["resources"]["requests"]["cpu"] == SYSTEM_POOL_LOW_CPU_REQUEST
-    assert c_main["resources"]["requests"]["memory"] == SYSTEM_POOL_LOW_MEMORY_REQUEST
+    assert c_main["resources"]["requests"]["cpu"] == WORKLOAD_POOL_LOW_CPU_REQUEST
+    assert c_main["resources"]["requests"]["memory"] == WORKLOAD_POOL_LOW_MEMORY_REQUEST
     assert c_main["resources"]["limits"] == {"cpu": "1", "memory": "256Mi"}
-    assert c_pod["initContainers"][0]["resources"]["requests"]["cpu"] == SYSTEM_POOL_LOW_CPU_REQUEST
+    assert (
+        c_pod["initContainers"][0]["resources"]["requests"]["cpu"] == WORKLOAD_POOL_LOW_CPU_REQUEST
+    )
 
     # cert-manager controller had no resources block at all → floor written in.
     cm = next(d for d in patched if d["metadata"]["name"] == "cert-manager")
     cm_main = cm["spec"]["template"]["spec"]["containers"][0]
-    assert cm_main["resources"]["requests"]["cpu"] == SYSTEM_POOL_LOW_CPU_REQUEST
-    assert cm_main["resources"]["requests"]["memory"] == SYSTEM_POOL_LOW_MEMORY_REQUEST
+    assert cm_main["resources"]["requests"]["cpu"] == WORKLOAD_POOL_LOW_CPU_REQUEST
+    assert cm_main["resources"]["requests"]["memory"] == WORKLOAD_POOL_LOW_MEMORY_REQUEST
 
     # tiny-already had cpu=5m (below 20m floor) → preserved (monotonic decreasing).
     tiny = next(d for d in patched if d["metadata"]["name"] == "tiny-already")
     tiny_main = tiny["spec"]["template"]["spec"]["containers"][0]
     assert tiny_main["resources"]["requests"]["cpu"] == "5m"
     # memory had no existing request → floor written in.
-    assert tiny_main["resources"]["requests"]["memory"] == SYSTEM_POOL_LOW_MEMORY_REQUEST
+    assert tiny_main["resources"]["requests"]["memory"] == WORKLOAD_POOL_LOW_MEMORY_REQUEST
 
 
 # ------------------------------------------------------------------------ runtime cache
@@ -452,16 +466,16 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(
         task_module,
         "ensure_admin_kubeconfig",
-        lambda **_kw: "/tmp/exec/kubeconfig-fake"  # noqa: S108 - fake path returned by mocked auth helper,
+        lambda **_kw: "/tmp/exec/kubeconfig-fake",  # noqa: S108 - fake path returned by mocked auth helper,
     )
 
     # Stub the network fetch of upstream install manifests so the
     # systempool patch flow goes through `apply -f -` with predictable
     # stdin content the test can assert against. The real transform is
-    # exercised by `test_patch_manifest_for_system_pool_*` below.
+    # exercised by `test_patch_manifest_for_workload_pool_*` below.
     monkeypatch.setattr(
         task_module,
-        "fetch_install_manifest_for_system_pool",
+        "fetch_install_manifest_for_workload_pool",
         lambda url, **_kw: f"# patched manifest fetched from {url}\n",
     )
 
@@ -526,11 +540,11 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
     # is identified by stdin content instead.
     assert apply_targets, "expected at least one apply step"
     assert all(t == "-" for t in apply_targets), (
-        "install manifests must stream through stdin so the systempool "
-        "patch can be injected"
+        "install manifests must stream through stdin so the systempool patch can be injected"
     )
     install_stdins = [
-        s for c, s in zip(calls, stdins, strict=True)
+        s
+        for c, s in zip(calls, stdins, strict=True)
         if c[:3] == ["apply", "-f", "-"] and s and "patched manifest fetched" in s
     ]
     assert any("ingress-nginx" in s for s in install_stdins)
@@ -539,25 +553,24 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
     # ingress-nginx apply (immutable Job spec from a previous
     # toleration-less install would otherwise block reconciliation).
     delete_indexes = [
-        i for i, c in enumerate(calls)
+        i
+        for i, c in enumerate(calls)
         if c[:1] == ["delete"]
         and "job" in c
         and "app.kubernetes.io/component=admission-webhook" in c
     ]
     assert delete_indexes, "expected admission-webhook Job pre-delete"
     apply_indexes = [
-        i for i, c in enumerate(calls)
-        if c[:3] == ["apply", "-f", "-"]
-        and stdins[i] and "ingress-nginx" in (stdins[i] or "")
+        i
+        for i, c in enumerate(calls)
+        if c[:3] == ["apply", "-f", "-"] and stdins[i] and "ingress-nginx" in (stdins[i] or "")
     ]
     assert apply_indexes and delete_indexes[0] < apply_indexes[0], (
         "Job pre-delete must run before the ingress-nginx apply"
     )
     # Step 2 patch, step 5 wait webhook, step 8 wait certificate
     assert any(c[:1] == ["patch"] for c in calls)
-    assert any(
-        c[:1] == ["wait"] and "cert-manager-webhook" in " ".join(c) for c in calls
-    )
+    assert any(c[:1] == ["wait"] and "cert-manager-webhook" in " ".join(c) for c in calls)
     # Regression: must wait for the ingress-nginx controller Deployment
     # to be Available before applying the Ingress, otherwise the
     # admission webhook
@@ -565,9 +578,7 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
     # and the apply fails with "failed calling webhook
     # validate.nginx.ingress.kubernetes.io".
     assert any(
-        c[:1] == ["wait"]
-        and "deployment/ingress-nginx-controller" in " ".join(c)
-        for c in calls
+        c[:1] == ["wait"] and "deployment/ingress-nginx-controller" in " ".join(c) for c in calls
     ), "must wait for ingress-nginx controller Deployment Available"
     # Layered defense (regression for the 2026-05-27 incident family):
     # after the Deployment wait the pipeline must ALSO (b) wait for the
@@ -589,37 +600,34 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
         for c in calls
     ), "must wait for ingress-nginx-admission-patch Job Complete"
     assert any(
-        c[:2] == ["get", "endpoints"]
-        and "ingress-nginx-controller-admission" in c
-        for c in calls
+        c[:2] == ["get", "endpoints"] and "ingress-nginx-controller-admission" in c for c in calls
     ), "must poll admission Service endpoints before applying Ingress"
     # And the wait must come BEFORE the Ingress apply (which is the
     # second apply-from-stdin that streams the elb-openapi Ingress
     # YAML, after the ingress-nginx + cert-manager installs and the
     # ClusterIssuer).
     ingress_apply_indexes = [
-        i for i, c in enumerate(calls)
-        if c[:3] == ["apply", "-f", "-"]
-        and stdins[i] and "elb-openapi" in (stdins[i] or "")
+        i
+        for i, c in enumerate(calls)
+        if c[:3] == ["apply", "-f", "-"] and stdins[i] and "elb-openapi" in (stdins[i] or "")
     ]
     controller_wait_indexes = [
-        i for i, c in enumerate(calls)
-        if c[:1] == ["wait"]
-        and "deployment/ingress-nginx-controller" in " ".join(c)
+        i
+        for i, c in enumerate(calls)
+        if c[:1] == ["wait"] and "deployment/ingress-nginx-controller" in " ".join(c)
     ]
     admission_jobs_wait_indexes = [
-        i for i, c in enumerate(calls)
-        if c[:1] == ["wait"]
-        and "job/ingress-nginx-admission-" in " ".join(c)
+        i
+        for i, c in enumerate(calls)
+        if c[:1] == ["wait"] and "job/ingress-nginx-admission-" in " ".join(c)
     ]
     endpoints_probe_indexes = [
-        i for i, c in enumerate(calls)
-        if c[:2] == ["get", "endpoints"]
-        and "ingress-nginx-controller-admission" in c
+        i
+        for i, c in enumerate(calls)
+        if c[:2] == ["get", "endpoints"] and "ingress-nginx-controller-admission" in c
     ]
     assert ingress_apply_indexes and controller_wait_indexes, (
-        "expected both ingress-nginx controller wait and elb-openapi "
-        "Ingress apply to fire"
+        "expected both ingress-nginx controller wait and elb-openapi Ingress apply to fire"
     )
     assert controller_wait_indexes[0] < ingress_apply_indexes[0], (
         "ingress-nginx controller wait must run before the Ingress apply"
@@ -627,9 +635,9 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
     assert admission_jobs_wait_indexes and (
         admission_jobs_wait_indexes[0] < ingress_apply_indexes[0]
     ), "admission Jobs wait must run before the Ingress apply"
-    assert endpoints_probe_indexes and (
-        endpoints_probe_indexes[0] < ingress_apply_indexes[0]
-    ), "admission endpoints probe must run before the Ingress apply"
+    assert endpoints_probe_indexes and (endpoints_probe_indexes[0] < ingress_apply_indexes[0]), (
+        "admission endpoints probe must run before the Ingress apply"
+    )
     # And the layered defense MUST be in the documented order:
     # Deployment Available \u2192 Jobs Complete \u2192 endpoints published \u2192 apply.
     assert (
@@ -638,10 +646,7 @@ def test_setup_public_https_runs_full_pipeline(monkeypatch) -> None:
         < endpoints_probe_indexes[0]
         < ingress_apply_indexes[0]
     ), "layered defense steps must fire in the documented order"
-    assert any(
-        c[:1] == ["wait"] and "certificate/elb-openapi-tls" in " ".join(c)
-        for c in calls
-    )
+    assert any(c[:1] == ["wait"] and "certificate/elb-openapi-tls" in " ".join(c) for c in calls)
 
     # Cache contract: SPA's public-https GET reads from here without a
     # kubectl round trip.
@@ -657,9 +662,20 @@ def test_disable_public_https_clears_cache(monkeypatch) -> None:
 
     fake_redis = _FakeRedis()
     monkeypatch.setattr(runtime, "get_ops_redis_client", lambda **_kw: fake_redis)
-    # Pre-seed cache so disable has something to clear
+    # Pre-seed cache so disable has something to clear. Use the same
+    # cluster_arm_id metadata the task derives so the per-cluster +
+    # legacy clear paths both target the seeded entry.
     runtime.save_openapi_public_base_url(
         "https://elb-openapi-abc.koreacentral.cloudapp.azure.com",
+        cluster_arm_id=(
+            "/subscriptions/sub-1/resourceGroups/rg-elb"
+            "/providers/Microsoft.ContainerService/managedClusters/elb-cluster"
+        ),
+        metadata={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "elb-cluster",
+        },
         client=fake_redis,
     )
 
@@ -667,7 +683,7 @@ def test_disable_public_https_clears_cache(monkeypatch) -> None:
     monkeypatch.setattr(
         task_module,
         "ensure_admin_kubeconfig",
-        lambda **_kw: "/tmp/exec/kubeconfig-fake"  # noqa: S108 - fake path returned by mocked auth helper,
+        lambda **_kw: "/tmp/exec/kubeconfig-fake",  # noqa: S108 - fake path returned by mocked auth helper,
     )
 
     deleted: list[str] = []
@@ -681,7 +697,7 @@ def test_disable_public_https_clears_cache(monkeypatch) -> None:
     monkeypatch.setattr(
         task_module,
         "clear_openapi_public_base_url",
-        lambda: runtime.clear_openapi_public_base_url(client=fake_redis),
+        lambda **kw: runtime.clear_openapi_public_base_url(client=fake_redis, **kw),
     )
 
     result = task_module.disable_openapi_public_https.run(
@@ -705,13 +721,13 @@ def test_setup_public_https_propagates_kubectl_failure(monkeypatch) -> None:
     monkeypatch.setattr(
         task_module,
         "ensure_admin_kubeconfig",
-        lambda **_kw: "/tmp/exec/kubeconfig-fake"  # noqa: S108 - fake path returned by mocked auth helper,
+        lambda **_kw: "/tmp/exec/kubeconfig-fake",  # noqa: S108 - fake path returned by mocked auth helper,
     )
     # Avoid hitting the network for the systempool-patch fetch — the
     # apply step is what we are testing.
     monkeypatch.setattr(
         task_module,
-        "fetch_install_manifest_for_system_pool",
+        "fetch_install_manifest_for_workload_pool",
         lambda url, **_kw: f"# stub for {url}\n",
     )
 
@@ -797,201 +813,46 @@ def test_email_masking_does_not_leak_local_part() -> None:
     assert "ps" not in _mask_email("ops@example.com")
 
 
-@pytest.mark.parametrize(
-    "args, want_substr",
-    [
-        (["apply", "-f", "-"], "stdin"),
-        (["wait", "--for=condition=Ready=true"], "ready"),
-    ],
-)
-def test_kubectl_run_helper_signature(args: list[str], want_substr: str) -> None:
-    # Smoke check: ensure_admin_kubeconfig + kubectl_run are exported and
-    # accept the kwargs the task uses. The actual subprocess call is mocked
-    # in the higher-level tests above.
-    from api.tasks.openapi.kubectl import ensure_admin_kubeconfig, kubectl_run
-
-    assert callable(ensure_admin_kubeconfig)
-    assert callable(kubectl_run)
-    assert want_substr  # parametrise sanity
-    assert args  # parametrise sanity
-
-
 # ---------------------------------------------------------------------------
-# cert-manager webhook wait hardening (Pillar D — cold-cluster race fix)
+# rollout wait hardening (Pillar D — cold-cluster race fix)
 # Anchors:
 #   - api/tasks/openapi/public_https.py::_wait_for_cert_manager_webhook
-# ---------------------------------------------------------------------------
-
-
-def test_wait_for_cert_manager_webhook_retries_rollout_status_then_waits(
-    monkeypatch,
-) -> None:
-    """First few rollout-status probes fail (Deployment not yet created),
-    the wrapper retries; once rollout-status succeeds the Available wait
-    runs exactly once.
-    """
-    from api.tasks.openapi import public_https as task_module
-
-    # The hardened wrapper sleeps between retries so a fast NotFound
-    # response does not collapse the advertised retry budget into
-    # milliseconds. The sleep is irrelevant for the unit test — what we
-    # want is to verify the retry contract — so monkeypatch it out.
-    monkeypatch.setattr(task_module.time, "sleep", lambda _seconds: None)
-
-    calls: list[list[str]] = []
-    rollout_attempts = 0
-
-    def fake_kubectl_run(
-        args: list[str],
-        *,
-        kubeconfig_path: str,
-        stdin: str | None = None,
-        timeout_seconds: int = 60,
-    ) -> dict[str, Any]:
-        nonlocal rollout_attempts
-        calls.append(args)
-        if args[:2] == ["rollout", "status"]:
-            rollout_attempts += 1
-            if rollout_attempts < 3:
-                return {
-                    "exit_code": 1,
-                    "stderr": (
-                        'Error from server (NotFound): '
-                        'deployments.apps "cert-manager-webhook" not found'
-                    ),
-                    "stdout": "",
-                }
-            return _ok()
-        if args[:1] == ["wait"]:
-            return _ok()
-        return _ok()
-
-    monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
-
-    task_module._wait_for_cert_manager_webhook(kubeconfig_path="/fake")
-
-    rollout_calls = [c for c in calls if c[:2] == ["rollout", "status"]]
-    wait_calls = [c for c in calls if c[:1] == ["wait"]]
-    # 2 failures + 1 success = 3 rollout calls, then exactly 1 wait.
-    assert len(rollout_calls) == 3
-    assert len(wait_calls) == 1
-    assert "cert-manager-webhook" in " ".join(wait_calls[0])
-    # The Available wait MUST use the new generous 300s timeout, not the
-    # old 180s that timed out on cold clusters.
-    assert "--timeout=300s" in wait_calls[0]
-
-
-def test_wait_for_cert_manager_webhook_sleeps_between_rollout_retries(
-    monkeypatch,
-) -> None:
-    """Regression for the cold-cluster race: the hardened wrapper must
-    sleep between rollout-status retries, otherwise a fast ``NotFound``
-    response (kubectl rollout status returns immediately when the
-    Deployment object has not yet been created) burns through all 5
-    advertised retries in milliseconds and the pipeline fails before
-    cert-manager has had a chance to create the webhook Deployment.
-
-    The test records how many ``time.sleep`` calls fired and verifies
-    that the interval matches the documented constant. Without this
-    test, the only signal of the regression is the deploy pipeline
-    failing fast in production.
-    """
-    from api.tasks.openapi import public_https as task_module
-
-    sleeps: list[float] = []
-    monkeypatch.setattr(task_module.time, "sleep", lambda seconds: sleeps.append(seconds))
-
-    def fake_kubectl_run(
-        args: list[str],
-        *,
-        kubeconfig_path: str,
-        stdin: str | None = None,
-        timeout_seconds: int = 60,
-    ) -> dict[str, Any]:
-        if args[:2] == ["rollout", "status"]:
-            return {
-                "exit_code": 1,
-                "stderr": (
-                    'Error from server (NotFound): '
-                    'deployments.apps "cert-manager-webhook" not found'
-                ),
-                "stdout": "",
-            }
-        return _ok()
-
-    monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
-
-    with pytest.raises(RuntimeError):
-        task_module._wait_for_cert_manager_webhook(kubeconfig_path="/fake")
-
-    # N retries → N-1 sleeps (not after the last attempt). All at the
-    # same documented 15 s interval. Without these sleeps the whole
-    # retry budget would collapse to <1 s of wall time when the
-    # Deployment object never appears server-side.
-    assert sleeps == [
-        task_module._CERT_MANAGER_WEBHOOK_PROBE_INTERVAL_SECONDS,
-    ] * (task_module._CERT_MANAGER_WEBHOOK_PROBE_RETRIES - 1)
-
-
-def test_wait_for_cert_manager_webhook_raises_when_rollout_never_succeeds(
-    monkeypatch,
-) -> None:
-    """If the rollout probes exhaust without success, the wrapper raises a
-    clear RuntimeError (no fall-through to the Available wait).
-    """
-    from api.tasks.openapi import public_https as task_module
-
-    # Patch sleep so the test does not actually wait 4 × 15 s between the
-    # five exhausted probes. The contract under test is the raised error,
-    # not the wall-clock budget — that is covered separately in
-    # ``test_wait_for_cert_manager_webhook_sleeps_between_rollout_retries``.
-    monkeypatch.setattr(task_module.time, "sleep", lambda _seconds: None)
-
-    wait_called = False
-
-    def fake_kubectl_run(
-        args: list[str],
-        *,
-        kubeconfig_path: str,
-        stdin: str | None = None,
-        timeout_seconds: int = 60,
-    ) -> dict[str, Any]:
-        nonlocal wait_called
-        if args[:2] == ["rollout", "status"]:
-            return {
-                "exit_code": 1,
-                "stderr": "timed out",
-                "stdout": "",
-            }
-        if args[:1] == ["wait"]:
-            wait_called = True
-        return _ok()
-
-    monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
-
-    with pytest.raises(RuntimeError, match="rollout status cert-manager-webhook"):
-        task_module._wait_for_cert_manager_webhook(kubeconfig_path="/fake")
-
-    assert wait_called is False, "Available wait must not run when rollout probes exhausted"
-
-
-# ---------------------------------------------------------------------------
-# ingress-nginx controller wait (companion to the cert-manager webhook
-# hardening above — same NotFound race, same admission-webhook-without-
-# endpoints failure shape but a different Deployment / Service pair).
-# Anchors:
 #   - api/tasks/openapi/public_https.py::_wait_for_ingress_nginx_controller
 # ---------------------------------------------------------------------------
 
 
-def test_wait_for_ingress_nginx_controller_sleeps_between_rollout_retries(
+@pytest.mark.parametrize(
+    (
+        "helper_name",
+        "deployment_name",
+        "interval_name",
+        "retries_name",
+    ),
+    [
+        (
+            "_wait_for_cert_manager_webhook",
+            "cert-manager-webhook",
+            "_CERT_MANAGER_WEBHOOK_PROBE_INTERVAL_SECONDS",
+            "_CERT_MANAGER_WEBHOOK_PROBE_RETRIES",
+        ),
+        (
+            "_wait_for_ingress_nginx_controller",
+            "ingress-nginx-controller",
+            "_INGRESS_NGINX_CONTROLLER_PROBE_INTERVAL_SECONDS",
+            "_INGRESS_NGINX_CONTROLLER_PROBE_RETRIES",
+        ),
+    ],
+)
+def test_rollout_wait_helpers_sleep_between_rollout_retries(
     monkeypatch,
+    helper_name: str,
+    deployment_name: str,
+    interval_name: str,
+    retries_name: str,
 ) -> None:
-    """The retry sleep keeps the advertised ~5 min budget from collapsing
-    to <1 s of wall time when ``kubectl rollout status`` returns
-    ``NotFound`` immediately (the Deployment object does not yet exist
-    server-side). Same regression class as the cert-manager-webhook
-    sleep test above — guard both helpers identically.
+    """Regression for the cold-cluster race: rollout wrappers must
+    sleep between rollout-status retries, otherwise a fast ``NotFound``
+    response burns through the advertised retry budget in milliseconds.
     """
     from api.tasks.openapi import public_https as task_module
 
@@ -1009,8 +870,7 @@ def test_wait_for_ingress_nginx_controller_sleeps_between_rollout_retries(
             return {
                 "exit_code": 1,
                 "stderr": (
-                    'Error from server (NotFound): '
-                    'deployments.apps "ingress-nginx-controller" not found'
+                    f'Error from server (NotFound): deployments.apps "{deployment_name}" not found'
                 ),
                 "stdout": "",
             }
@@ -1019,19 +879,27 @@ def test_wait_for_ingress_nginx_controller_sleeps_between_rollout_retries(
     monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
 
     with pytest.raises(RuntimeError):
-        task_module._wait_for_ingress_nginx_controller(kubeconfig_path="/fake")
+        getattr(task_module, helper_name)(kubeconfig_path="/fake")
 
     assert sleeps == [
-        task_module._INGRESS_NGINX_CONTROLLER_PROBE_INTERVAL_SECONDS,
-    ] * (task_module._INGRESS_NGINX_CONTROLLER_PROBE_RETRIES - 1)
+        getattr(task_module, interval_name),
+    ] * (getattr(task_module, retries_name) - 1)
 
 
-def test_wait_for_ingress_nginx_controller_raises_when_rollout_never_succeeds(
+@pytest.mark.parametrize(
+    "helper_name,error_match",
+    [
+        ("_wait_for_cert_manager_webhook", "rollout status cert-manager-webhook"),
+        ("_wait_for_ingress_nginx_controller", "rollout status ingress-nginx-controller"),
+    ],
+)
+def test_rollout_wait_helpers_raise_when_rollout_never_succeeds(
     monkeypatch,
+    helper_name: str,
+    error_match: str,
 ) -> None:
     """If the rollout probes exhaust without success, the wrapper raises a
-    clear RuntimeError (no fall-through to the Available wait). Mirrors
-    the cert-manager-webhook contract.
+    clear RuntimeError with no fall-through to the Available wait.
     """
     from api.tasks.openapi import public_https as task_module
 
@@ -1059,19 +927,36 @@ def test_wait_for_ingress_nginx_controller_raises_when_rollout_never_succeeds(
 
     monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
 
-    with pytest.raises(RuntimeError, match="rollout status ingress-nginx-controller"):
-        task_module._wait_for_ingress_nginx_controller(kubeconfig_path="/fake")
+    with pytest.raises(RuntimeError, match=error_match):
+        getattr(task_module, helper_name)(kubeconfig_path="/fake")
 
     assert wait_called is False, "Available wait must not run when rollout probes exhausted"
 
 
-def test_wait_for_ingress_nginx_controller_succeeds_after_retries(
+@pytest.mark.parametrize(
+    "helper_name,deployment_name,wait_substrings",
+    [
+        (
+            "_wait_for_cert_manager_webhook",
+            "cert-manager-webhook",
+            ("cert-manager-webhook",),
+        ),
+        (
+            "_wait_for_ingress_nginx_controller",
+            "ingress-nginx-controller",
+            ("deployment/ingress-nginx-controller", "-n ingress-nginx"),
+        ),
+    ],
+)
+def test_rollout_wait_helpers_succeed_after_retries(
     monkeypatch,
+    helper_name: str,
+    deployment_name: str,
+    wait_substrings: tuple[str, ...],
 ) -> None:
     """Cold-cluster happy path: a few NotFound probes, then rollout flips
     to ready, then the single Available wait fires with the documented
-    generous 300 s timeout (must match the cert-manager-webhook wait
-    constant to keep the two helpers behaviourally symmetric).
+    generous 300 s timeout.
     """
     from api.tasks.openapi import public_https as task_module
 
@@ -1095,8 +980,8 @@ def test_wait_for_ingress_nginx_controller_succeeds_after_retries(
                 return {
                     "exit_code": 1,
                     "stderr": (
-                        'Error from server (NotFound): '
-                        'deployments.apps "ingress-nginx-controller" not found'
+                        "Error from server (NotFound): "
+                        f'deployments.apps "{deployment_name}" not found'
                     ),
                     "stdout": "",
                 }
@@ -1107,15 +992,15 @@ def test_wait_for_ingress_nginx_controller_succeeds_after_retries(
 
     monkeypatch.setattr(task_module, "kubectl_run", fake_kubectl_run)
 
-    task_module._wait_for_ingress_nginx_controller(kubeconfig_path="/fake")
+    getattr(task_module, helper_name)(kubeconfig_path="/fake")
 
     rollout_calls = [c for c in calls if c[:2] == ["rollout", "status"]]
     wait_calls = [c for c in calls if c[:1] == ["wait"]]
     assert len(rollout_calls) == 3
     assert len(wait_calls) == 1
-    assert "deployment/ingress-nginx-controller" in " ".join(wait_calls[0])
-    assert "-n ingress-nginx" in " ".join(wait_calls[0])
-    # Generous final readiness budget — same as cert-manager-webhook.
+    joined_wait = " ".join(wait_calls[0])
+    for expected in wait_substrings:
+        assert expected in joined_wait
     assert "--timeout=300s" in wait_calls[0]
 
 
@@ -1151,8 +1036,7 @@ def test_wait_for_ingress_nginx_admission_jobs_waits_for_each_job(monkeypatch) -
     task_module._wait_for_ingress_nginx_admission_jobs(kubeconfig_path="/fake")
 
     wait_targets = {
-        c[2] for c in calls
-        if c[:1] == ["wait"] and len(c) > 2 and c[2].startswith("job/")
+        c[2] for c in calls if c[:1] == ["wait"] and len(c) > 2 and c[2].startswith("job/")
     }
     assert wait_targets == {
         "job/ingress-nginx-admission-create",
@@ -1258,9 +1142,13 @@ def test_wait_for_admission_endpoints_ready_polls_until_ip_appears(monkeypatch) 
     assert probes == 4
     # Sleeps fire BETWEEN probes (not after the successful one): 3
     # not-ready responses \u2192 3 sleeps at the documented interval.
-    assert sleeps == [
-        task_module._ADMISSION_ENDPOINTS_PROBE_INTERVAL_SECONDS,
-    ] * 3
+    assert (
+        sleeps
+        == [
+            task_module._ADMISSION_ENDPOINTS_PROBE_INTERVAL_SECONDS,
+        ]
+        * 3
+    )
 
 
 def test_wait_for_admission_endpoints_ready_raises_when_never_appears(monkeypatch) -> None:
@@ -1300,7 +1188,7 @@ def test_apply_ingress_with_webhook_retry_retries_on_transient_error(monkeypatch
             return {
                 "exit_code": 1,
                 "stderr": (
-                    'Error from server (InternalError): error when creating '
+                    "Error from server (InternalError): error when creating "
                     '"STDIN": Internal error occurred: failed calling webhook '
                     '"validate.nginx.ingress.kubernetes.io": ... no endpoints '
                     'available for service "ingress-nginx-controller-admission"'
@@ -1336,8 +1224,8 @@ def test_apply_ingress_with_webhook_retry_fails_fast_on_non_transient_error(
         return {
             "exit_code": 1,
             "stderr": (
-                'Error from server (Forbidden): '
-                'ingresses.networking.k8s.io is forbidden: '
+                "Error from server (Forbidden): "
+                "ingresses.networking.k8s.io is forbidden: "
                 'User "system:serviceaccount:default:elb" cannot create '
                 'resource "ingresses" in API group "networking.k8s.io"'
             ),
@@ -1368,7 +1256,7 @@ def test_apply_ingress_with_webhook_retry_exhausts_and_raises(monkeypatch) -> No
         attempts += 1
         return {
             "exit_code": 1,
-            "stderr": "no endpoints available for service \"ingress-nginx-controller-admission\"",
+            "stderr": 'no endpoints available for service "ingress-nginx-controller-admission"',
             "stdout": "",
         }
 
@@ -1420,7 +1308,7 @@ def test_wait_for_certificate_ready_polls_existence_before_wait_condition(
         if args[:2] == ["get", "certificate"] and "name" in args:
             get_attempts += 1
             if get_attempts < 3:
-                return {"exit_code": 1, "stderr": 'Error from server (NotFound)', "stdout": ""}
+                return {"exit_code": 1, "stderr": "Error from server (NotFound)", "stdout": ""}
             return _ok(stdout=f"certificate.cert-manager.io/{args[2]}")
         if args[:1] == ["wait"]:
             wait_called = True
@@ -1438,9 +1326,13 @@ def test_wait_for_certificate_ready_polls_existence_before_wait_condition(
     assert wait_called is True
     # Sleeps fire BETWEEN existence probes (not after the successful one),
     # so 2 not-found responses → 2 sleeps, each at the documented interval.
-    assert sleeps == [
-        task_module._CERTIFICATE_EXISTS_PROBE_INTERVAL_SECONDS,
-    ] * 2
+    assert (
+        sleeps
+        == [
+            task_module._CERTIFICATE_EXISTS_PROBE_INTERVAL_SECONDS,
+        ]
+        * 2
+    )
 
 
 def test_wait_for_certificate_object_to_exist_returns_silently_when_budget_exhausted(

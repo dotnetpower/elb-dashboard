@@ -89,8 +89,10 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     expects to be the only source of truth.
     """
     from api.routes._blast_shared import _reset_external_jobs_cache as _reset
+    from api.routes.aks.autostop import _reset_status_cache as _reset_autostop_status_cache
     from api.routes.blast.jobs import _reset_blast_jobs_list_cache
     from api.routes.storage.common import reset_ncbi_catalogue_cache
+    from api.services.auto_stop import _reset_autostop_table_pool
     from api.services.auto_warmup import _reset_autowarmup_table_pool
     from api.services.blast.db_metadata import _reset_blast_db_metadata_cache
     from api.services.httpx_pool import close_all_clients as _reset_httpx_pool
@@ -124,6 +126,8 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_redis_clients()
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()
+    _reset_autostop_table_pool()
+    _reset_autostop_status_cache()
     _reset_httpx_pool()
     reset_openapi_rate_limit_state()
     yield
@@ -139,5 +143,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     reset_redis_clients()
     _reset_artifact_table_pool()
     _reset_autowarmup_table_pool()
+    _reset_autostop_table_pool()
+    _reset_autostop_status_cache()
     _reset_httpx_pool()
     reset_openapi_rate_limit_state()

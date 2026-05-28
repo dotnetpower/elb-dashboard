@@ -4,7 +4,7 @@ Responsibility: Client for the sibling ElasticBLAST OpenAPI execution plane
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `DownloadedFile`, `StreamedFile`, `_base_url`, `submit_job`, `get_job`,
-`list_jobs`
+`list_jobs`, `ready`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests`.
@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, cast
@@ -37,6 +38,33 @@ _API_AUTH_ENV = "ELB_OPENAPI_API_TOKEN"
 # the observed worst-case while keeping the user-perceived wait bounded.
 _DEFAULT_TIMEOUT_SECONDS = 90.0
 _LIST_TIMEOUT_SECONDS = float(os.environ.get("OPENAPI_LIST_TIMEOUT_SECONDS", "5.0"))
+# Readiness probe timeout. Sibling enforces a 2.5s hard budget internally; we
+# wait 2.5s longer so the sibling's structured 503 always arrives before our
+# client-side timeout converts it to an opaque ``openapi_unreachable``.
+_READY_TIMEOUT_SECONDS = float(os.environ.get("OPENAPI_READY_TIMEOUT_SECONDS", "5.0"))
+# Sliding-window cache for the readiness probe. The sibling probe is cheap
+# (~200 ms warm) but the SPA + the internal submit gate can call it back-to-back
+# within a single user click. A tiny TTL absorbs the burst without hiding a
+# real state change (AKS just started / stopped). Set TTL=0 to disable.
+_READY_CACHE_TTL_SECONDS = float(os.environ.get("OPENAPI_READY_CACHE_TTL_SECONDS", "5.0"))
+_READY_CACHE_LOCK = threading.Lock()
+_READY_CACHE: dict[
+    tuple[str, str], tuple[float, dict[str, Any] | HTTPException]
+] = {}
+# Per-key in-flight serialisation. When the cache is cold and N workers /
+# concurrent requests miss simultaneously, only the first one fires the
+# upstream HTTP probe; the rest wait on the same Event and then read the
+# freshly populated cache. Prevents the dashboard from melting its own
+# 30-req/min sibling budget under cold-cache load.
+_READY_INFLIGHT_LOCK = threading.Lock()
+_READY_INFLIGHT: dict[tuple[str, str], threading.Event] = {}
+# How long a waiter blocks on an in-flight upstream call before giving up
+# and firing its own request. Tuned slightly above the read timeout so the
+# leader always wins in the happy path; a fall-through to a parallel call
+# is acceptable degradation if the leader stalls.
+_READY_INFLIGHT_WAIT_SECONDS = float(
+    os.environ.get("OPENAPI_READY_INFLIGHT_WAIT_SECONDS", "6.0")
+)
 _STREAM_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 # Submit retries on transient transport failures (connection refused /
 # reset / read timeout). Only applied when the payload carries an
@@ -311,6 +339,323 @@ def list_jobs(*, base_url: str | None = None, api_token: str | None = None) -> d
                 },
             ) from exc
         return cast(dict[str, Any], resp.json())
+
+
+def reset_ready_cache() -> None:
+    """Drop the in-process /v1/ready cache.
+
+    Tests use this to keep TTL behaviour deterministic without juggling
+    ``time.monotonic``. Routes do not need to call it — the cache TTL is
+    intentionally short (default 5 s).
+    """
+    with _READY_CACHE_LOCK:
+        _READY_CACHE.clear()
+    with _READY_INFLIGHT_LOCK:
+        for event in _READY_INFLIGHT.values():
+            event.set()
+        _READY_INFLIGHT.clear()
+
+
+def _ready_cache_lookup(
+    key: tuple[str, str],
+) -> tuple[dict[str, Any] | HTTPException, float] | None:
+    """Return ``(value, age_seconds)`` for a hit, or ``None`` for a miss.
+
+    The age lets the caller emit a one-line ``ready_probe_cached`` log entry
+    so App Insights still sees an outage during the TTL window (without the
+    age, a 5 s cache turns a 30 s outage into a single WARN line).
+    """
+    if _READY_CACHE_TTL_SECONDS <= 0:
+        return None
+    import time as _time
+
+    now = _time.monotonic()
+    with _READY_CACHE_LOCK:
+        cached = _READY_CACHE.get(key)
+        if not cached:
+            return None
+        expires, value = cached
+        if expires < now:
+            _READY_CACHE.pop(key, None)
+            return None
+        # ``expires == stored_at + ttl`` → age = ttl - (expires - now).
+        age = max(0.0, _READY_CACHE_TTL_SECONDS - (expires - now))
+        return value, age
+
+
+def _ready_cache_store(
+    key: tuple[str, str], value: dict[str, Any] | HTTPException, *, ttl: float | None = None
+) -> None:
+    if _READY_CACHE_TTL_SECONDS <= 0:
+        return
+    import time as _time
+
+    effective_ttl = _READY_CACHE_TTL_SECONDS if ttl is None else ttl
+    if effective_ttl <= 0:
+        return
+    expires = _time.monotonic() + effective_ttl
+    with _READY_CACHE_LOCK:
+        _READY_CACHE[key] = (expires, value)
+
+
+def _ready_cache_key(base_url: str | None, api_token: str | None) -> tuple[str, str]:
+    """Cache key = normalised base URL + full hex digest of the token.
+
+    ``base`` is lower-cased and the trailing slash is stripped so callers that
+    happen to pass ``https://x.io`` and ``https://x.io/`` share one cache slot
+    (otherwise we silently halve the cache hit rate and double sibling load).
+
+    The token itself is never used as a key; we store its full SHA-256 hex
+    digest (64 chars) so different tokens can never collide — the original
+    ``[:8]`` truncation gave a birthday collision at ~65 k unique tokens.
+    """
+    import hashlib as _hashlib
+
+    base = (base_url or "").strip().rstrip("/").lower()
+    token = (api_token or "").strip()
+    digest = _hashlib.sha256(token.encode("utf-8", "ignore")).hexdigest() if token else ""
+    return base, digest
+
+
+def _ready_inflight_acquire(key: tuple[str, str]) -> tuple[bool, threading.Event]:
+    """Reserve the upstream slot for ``key``.
+
+    Returns ``(is_leader, event)``. The leader is responsible for firing the
+    HTTP probe and calling :func:`_ready_inflight_release` (always, in a
+    ``finally``) so waiters unblock even if the upstream call raises.
+    Waiters block on ``event.wait`` and then re-check the cache.
+    """
+    with _READY_INFLIGHT_LOCK:
+        existing = _READY_INFLIGHT.get(key)
+        if existing is not None:
+            return False, existing
+        event = threading.Event()
+        _READY_INFLIGHT[key] = event
+        return True, event
+
+
+def _ready_inflight_release(key: tuple[str, str]) -> None:
+    """Wake waiters and drop the slot.
+
+    Idempotent so callers can release in a ``finally`` without checking they
+    were actually the leader.
+    """
+    with _READY_INFLIGHT_LOCK:
+        event = _READY_INFLIGHT.pop(key, None)
+    if event is not None:
+        event.set()
+
+
+def ready(*, base_url: str | None = None, api_token: str | None = None) -> dict[str, Any]:
+    """Pre-flight the sibling's submit path before issuing ``submit_job``.
+
+    Returns the sibling's ``/v1/ready`` JSON on success. The sibling enforces
+    a hard ~2.5s budget and reports three independent probes (k8s API, workload
+    node pool, openapi pod). This client adds a 2.5s slack so the structured 503
+    always arrives first.
+
+    Successful and 503 responses are cached for ``OPENAPI_READY_CACHE_TTL_SECONDS``
+    seconds (default 5s) keyed by ``(base_url, sha256(token))`` so a burst
+    of probes from the SPA + the internal submit gate does not flood the
+    sibling. Concurrent cache-miss callers serialise on a per-key in-flight
+    Event so only one upstream HTTP probe fires even under N workers / N
+    parallel requests — prevents the dashboard from melting its own
+    30-req/min sibling budget on cold cache. The cache is intentionally
+    tiny — long enough to absorb a retry storm, short enough that an
+    operator starting AKS sees the gate clear almost immediately.
+
+    Failure modes (all raise ``HTTPException`` so the route handler can pass
+    the sanitised detail straight to the caller):
+
+    * ``503 openapi_not_ready``   — sibling answered 503; ``upstream_code`` carries
+      the specific sibling code (e.g. ``no_workload_nodes`` /
+      ``openapi_pod_not_ready``) so the SPA / 3rd-party caller can map a
+      remediation action.
+    * ``503 openapi_unreachable`` — transport-level failure. Most common cause is
+      AKS stopped; the sibling did not respond at all.
+    * Sibling lacking ``/v1/ready`` (older image) → caller-side fail-open:
+      returns ``{"ready": True, "skipped": "version_mismatch", "version":
+      "unknown"}`` so the submit can proceed. A WARNING is emitted on every
+      stale-sibling hit so operators can grep for ``ready_probe_stale_sibling``
+      and bump the elb-openapi image to the latest tag (≥ 4.15).
+    """
+    resolved_base = _base_url(base_url)
+    cache_key = _ready_cache_key(resolved_base, api_token)
+    cached_entry = _ready_cache_lookup(cache_key)
+    if cached_entry is not None:
+        cached_value, cached_age = cached_entry
+        if isinstance(cached_value, HTTPException):
+            detail = cached_value.detail if isinstance(cached_value.detail, dict) else {}
+            LOGGER.info(
+                "ready_probe cache hit (cached failure) status=%s code=%s age=%.2fs",
+                cached_value.status_code,
+                detail.get("code", "unspecified"),
+                cached_age,
+                extra={
+                    "event": "ready_probe_cached",
+                    "cached": True,
+                    "status": cached_value.status_code,
+                    "code": str(detail.get("code") or "unspecified"),
+                    "cached_age_seconds": round(cached_age, 3),
+                },
+            )
+            raise cached_value
+        LOGGER.debug(
+            "ready_probe cache hit (cached success) age=%.2fs",
+            cached_age,
+            extra={
+                "event": "ready_probe_cached",
+                "cached": True,
+                "status": 200,
+                "cached_age_seconds": round(cached_age, 3),
+            },
+        )
+        return cached_value
+
+    is_leader, inflight_event = _ready_inflight_acquire(cache_key)
+    if not is_leader:
+        # Another caller is firing the upstream HTTP probe right now. Wait
+        # for them, then re-read the cache. If they failed silently (no
+        # cache entry written for any reason), fall through and fire our
+        # own probe — acceptable degradation vs deadlock.
+        inflight_event.wait(timeout=_READY_INFLIGHT_WAIT_SECONDS)
+        cached_entry = _ready_cache_lookup(cache_key)
+        if cached_entry is not None:
+            cached_value, cached_age = cached_entry
+            if isinstance(cached_value, HTTPException):
+                raise cached_value
+            return cached_value
+        # Leader did not store anything; we become the new leader.
+        is_leader, inflight_event = _ready_inflight_acquire(cache_key)
+        if not is_leader:
+            # Race: yet another caller is now leader. Wait once more, then
+            # whatever the cache holds is our final answer.
+            inflight_event.wait(timeout=_READY_INFLIGHT_WAIT_SECONDS)
+            cached_entry = _ready_cache_lookup(cache_key)
+            if cached_entry is not None:
+                cached_value, _age = cached_entry
+                if isinstance(cached_value, HTTPException):
+                    raise cached_value
+                return cached_value
+            # Last resort: fire our own probe without leader status.
+
+    try:
+        return _ready_probe_upstream(cache_key, resolved_base, api_token=api_token)
+    finally:
+        _ready_inflight_release(cache_key)
+
+
+def _ready_probe_upstream(
+    cache_key: tuple[str, str],
+    resolved_base: str,
+    *,
+    api_token: str | None,
+) -> dict[str, Any]:
+    """Single upstream HTTP probe + cache store. Always called by the leader.
+
+    Split out of :func:`ready` so the in-flight serialisation in ``ready``
+    stays declarative.
+    """
+    with httpx.Client(
+        base_url=resolved_base,
+        timeout=_READY_TIMEOUT_SECONDS,
+        headers=_headers(api_token=api_token),
+    ) as client:
+        try:
+            resp = client.get("/v1/ready")
+        except httpx.HTTPError as exc:
+            err = HTTPException(
+                503,
+                detail={
+                    "code": "openapi_unreachable",
+                    "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+                    "probe": "ready",
+                },
+            )
+            # Transport errors get half-TTL so a reachable-but-flaky path
+            # recovers fast; we still rate-limit retry storms.
+            _ready_cache_store(cache_key, err, ttl=_READY_CACHE_TTL_SECONDS / 2)
+            raise err from exc
+        if resp.status_code == 404:
+            LOGGER.warning(
+                "openapi /v1/ready returned 404 — sibling image is pre-4.15 "
+                "and cannot report readiness. Failing open. Bump elb-openapi "
+                "to the latest tag to enable real submit-path gating.",
+                extra={"event": "ready_probe_stale_sibling"},
+            )
+            payload = {
+                "ready": True,
+                "skipped": "version_mismatch",
+                "version": "unknown",
+            }
+            _ready_cache_store(cache_key, payload)
+            return payload
+        if resp.status_code == 429:
+            # Sibling rate-limited the probe. Surface the same structured code
+            # so SPA / 3rd-party callers can back off cleanly without retrying.
+            try:
+                rl_payload: Any = _sanitise_detail(resp.json())
+            except Exception:
+                rl_payload = {"code": "openapi_ready_rate_limited"}
+            upstream_msg = ""
+            limit = 0
+            if isinstance(rl_payload, dict):
+                upstream_msg = str(rl_payload.get("message") or "")
+                try:
+                    limit = int(rl_payload.get("limit_per_minute") or 0)
+                except Exception:
+                    limit = 0
+            err = HTTPException(
+                429,
+                detail={
+                    "code": "openapi_ready_rate_limited",
+                    "message": upstream_msg
+                    or "Sibling /v1/ready rate-limited this caller. Retry after 60s.",
+                    "limit_per_minute": limit,
+                },
+            )
+            _ready_cache_store(cache_key, err, ttl=_READY_CACHE_TTL_SECONDS)
+            raise err
+        if resp.status_code == 503:
+            try:
+                detail_payload: Any = _sanitise_detail(resp.json())
+            except Exception:
+                detail_payload = {
+                    "code": "openapi_not_ready",
+                    "message": sanitise(resp.text[:500]),
+                }
+            upstream_code = ""
+            checks: Any = {}
+            upstream_message = ""
+            if isinstance(detail_payload, dict):
+                upstream_code = str(detail_payload.get("code") or "")
+                checks = detail_payload.get("checks") or {}
+                upstream_message = str(detail_payload.get("message") or "")
+            err = HTTPException(
+                503,
+                detail={
+                    "code": "openapi_not_ready",
+                    "upstream_code": upstream_code or "unspecified",
+                    "message": upstream_message
+                    or "Sibling OpenAPI reported the submit path is not ready.",
+                    "checks": checks,
+                },
+            )
+            LOGGER.warning(
+                "openapi_not_ready upstream_code=%s message=%s",
+                upstream_code or "unspecified",
+                _compact_log_detail(upstream_message, limit=300),
+                extra={"event": "ready_probe", "code": upstream_code or "unspecified"},
+            )
+            _ready_cache_store(cache_key, err)
+            raise err
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            _raise_upstream_error(exc)
+        payload = cast(dict[str, Any], resp.json())
+        _ready_cache_store(cache_key, payload)
+        return payload
 
 
 def download_file(

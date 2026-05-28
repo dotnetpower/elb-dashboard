@@ -44,6 +44,10 @@ from api.tasks.azure.helpers import (
 from api.tasks.azure.helpers import (
     update_state as _update_state,
 )
+from api.tasks.azure.idle_autostop import (
+    auto_stop_aks,
+    evaluate_idle_clusters,
+)
 from api.tasks.azure.lifecycle import delete_aks, start_aks, stop_aks
 from api.tasks.azure.peering import (
     ensure_vnet_peering_with_cluster as _ensure_vnet_peering_with_cluster,
@@ -78,11 +82,13 @@ __all__ = (
     "aks_client",
     "apply_app_insights_to_deployment",
     "assign_aks_roles",
+    "auto_stop_aks",
     "clear_app_insights_from_deployment",
     "delete_aks",
     "diag_noop",
     "disable_aks_container_insights",
     "enable_aks_container_insights",
+    "evaluate_idle_clusters",
     "get_credential",
     "provision_aks",
     "provision_app_insights",

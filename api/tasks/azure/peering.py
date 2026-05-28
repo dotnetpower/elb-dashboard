@@ -8,17 +8,22 @@ Edit boundaries: All VNet-peering writes belong here. Routes and the `provision_
     orchestrator only call into `ensure_vnet_peering_with_cluster`; everything Azure SDK
     related stays in this module.
 Key entry points: `ensure_vnet_peering_with_cluster`,
-    `_dashboard_vnet_id_from_env`, `_recovery_command`.
+    `_dashboard_vnet_id_from_env`, `_recovery_command`, `probe_private_ip`.
 Risky contracts: Treats `AlreadyExists` / `Conflict` as success. Any other failure is
     recorded into ``error`` and the caller (typically `provision_aks`) does **not**
     fail the task — the AKS cluster is fully usable; only OpenAPI proxy / spec / Try-It
     is unreachable until peering lands. The returned payload always includes a
     ``recovery_command`` string the SPA / operator can paste.
+    `probe_private_ip` is the SSRF chokepoint: it refuses any non-RFC1918 / loopback /
+    link-local / multicast target and any path with control characters so an
+    authenticated caller cannot redirect the api sidecar's outbound HTTP at Azure
+    IMDS (169.254.169.254) or other Container Apps Environment internal hosts.
 Validation: `uv run pytest -q api/tests/test_azure_peering.py`.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import time
@@ -212,15 +217,63 @@ def _resolve_vnet_id(
     )
 
 
+def _validate_private_target(target_ip: str, target_path: str) -> tuple[bool, str, str]:
+    """Refuse any IPv4 outside RFC1918 private space, plus any unsafe path.
+
+    Returns ``(ok, normalised_path, message)``. When ``ok`` is False the
+    caller must surface ``message`` and skip the probe — keeping the api
+    sidecar from being weaponised as an SSRF gateway against IMDS
+    (169.254.169.254), loopback services, public IPs, or random hosts in
+    the Container Apps Environment VNet. IPv6 is rejected outright because
+    (a) AKS auto-VNet is IPv4-only, (b) IPv4-mapped IPv6
+    (``::ffff:169.254.169.254``) is an easy bypass vector, and (c) the
+    plain ``http://{ip}{path}`` URL builder cannot express bracketed v6.
+    """
+    try:
+        addr = ipaddress.IPv4Address(target_ip)
+    except (ipaddress.AddressValueError, ValueError):
+        return False, target_path, f"invalid target_ip (IPv4 required): {target_ip!r}"
+    if (
+        not addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    ):
+        return (
+            False,
+            target_path,
+            "target_ip must be an RFC1918 private IPv4 address "
+            "(not loopback / link-local / multicast)",
+        )
+    path = (target_path or "/openapi.json").strip()
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if len(path) > 256:
+        return False, path, "target_path too long (max 256 chars)"
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        return False, path, "target_path contains control characters"
+    return True, path, ""
+
+
 def probe_private_ip(
     *,
     target_ip: str,
     target_path: str = "/openapi.json",
     timeout: float = 2.0,
 ) -> dict[str, Any]:
-    path = (target_path or "/openapi.json").strip()
-    if not path.startswith("/"):
-        path = f"/{path}"
+    ok, path, reason = _validate_private_target(target_ip, target_path)
+    if not ok:
+        return {
+            "target_ip": target_ip,
+            "target_path": path,
+            "url": "",
+            "reachable": False,
+            "status_code": None,
+            "latency_ms": 0.0,
+            "message": reason,
+        }
     url = f"http://{target_ip}{path}"
     started = time.monotonic()
     try:

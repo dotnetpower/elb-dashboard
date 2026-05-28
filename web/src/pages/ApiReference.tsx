@@ -11,6 +11,7 @@ import { ApiHero } from "@/pages/apiReference/ApiHero";
 import { ApiReferenceSidebar } from "@/pages/apiReference/ApiReferenceSidebar";
 import { ApiResponseContractPanel } from "@/pages/apiReference/ApiResponseContractPanel";
 import { ApiTokenPanel } from "@/pages/apiReference/ApiTokenPanel";
+import { PlsTransitionBanner } from "@/pages/apiReference/PlsTransitionBanner";
 import {
   RepairPeeringButton,
   isPeerWithPlatformRecovery,
@@ -314,6 +315,14 @@ export function ApiReference() {
           resourceGroup={clusterRg}
           clusterName={clusterName}
           onResolved={() => specQuery.refetch()}
+        />
+      )}
+
+      {baseUrl && hasOpenApiImage && clusterName && (
+        <PlsTransitionBanner
+          subscriptionId={sub}
+          resourceGroup={clusterRg}
+          clusterName={clusterName}
         />
       )}
 

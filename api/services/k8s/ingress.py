@@ -91,11 +91,6 @@ WORKLOAD_POOL_TOLERATION: dict[str, str] = {
 WORKLOAD_POOL_NODE_SELECTOR: dict[str, str] = {
     "kubernetes.azure.com/mode": "user",
 }
-# Backward-compatible aliases. Existing callers (tests, the public-https
-# Celery task) import these names; renaming them in a separate change
-# keeps the diff focused on the pool move.
-SYSTEM_POOL_TOLERATION = WORKLOAD_POOL_TOLERATION
-SYSTEM_POOL_NODE_SELECTOR = WORKLOAD_POOL_NODE_SELECTOR
 # Lowered resource *requests* injected on every container of the patched
 # workloads. The blastpool nodes are large (D4s+ … 16+ vCPU each) so the
 # original upstream 100m/90Mi would fit, but keeping the conservative
@@ -104,15 +99,12 @@ SYSTEM_POOL_NODE_SELECTOR = WORKLOAD_POOL_NODE_SELECTOR
 # a freshly autoscaled blastpool node.
 WORKLOAD_POOL_LOW_CPU_REQUEST = "20m"
 WORKLOAD_POOL_LOW_MEMORY_REQUEST = "64Mi"
-SYSTEM_POOL_LOW_CPU_REQUEST = WORKLOAD_POOL_LOW_CPU_REQUEST
-SYSTEM_POOL_LOW_MEMORY_REQUEST = WORKLOAD_POOL_LOW_MEMORY_REQUEST
 # Workload kinds whose podTemplate must carry the workload-pool patch. We
 # patch Jobs too because ingress-nginx ships admission-webhook bootstrap
 # Jobs whose Pods would otherwise be Pending.
 _WORKLOAD_POOL_WORKLOAD_KINDS: frozenset[str] = frozenset(
     {"Deployment", "DaemonSet", "StatefulSet", "Job", "ReplicaSet"}
 )
-_SYSTEM_POOL_WORKLOAD_KINDS = _WORKLOAD_POOL_WORKLOAD_KINDS
 
 
 def _parse_cpu_to_millicores(value: object) -> int | None:
@@ -274,7 +266,6 @@ def patch_manifest_for_workload_pool(raw_manifest: str) -> str:
 
 
 # Backward-compat alias — existing imports use the old name.
-patch_manifest_for_system_pool = patch_manifest_for_workload_pool
 
 
 def fetch_install_manifest_for_workload_pool(url: str, *, timeout_seconds: int = 60) -> str:
@@ -291,7 +282,6 @@ def fetch_install_manifest_for_workload_pool(url: str, *, timeout_seconds: int =
 
 
 # Backward-compat alias — existing imports use the old name.
-fetch_install_manifest_for_system_pool = fetch_install_manifest_for_workload_pool
 
 
 def dns_label_for_cluster(*, subscription_id: str, cluster_name: str) -> str:
@@ -313,12 +303,39 @@ def cloudapp_fqdn(*, dns_label: str, region: str) -> str:
     return f"{dns_label}.{region}.cloudapp.azure.com"
 
 
+def workload_pool_pod_template() -> dict[str, Any]:
+    """Return a `podTemplate` dict scheduling onto the blastpool.
+
+    Centralised so any new cert-manager Issuer / ACME solver / webhook
+    that we add later can reuse it without re-discovering the tolerations
+    + nodeSelector hand-wired in `build_cluster_issuer`. Without this
+    pattern the per-Challenge `cm-acme-http-solver-*` Pod sits in
+    `Pending` forever on clusters whose only schedulable pool is the
+    blastpool (`workload=blast:NoSchedule`) — regression observed on
+    elb-cluster-01, 2026-05-28. New Issuer-style objects should pass
+    the return value verbatim into their `podTemplate` field.
+    """
+    return {
+        "spec": {
+            "nodeSelector": dict(WORKLOAD_POOL_NODE_SELECTOR),
+            "tolerations": [dict(WORKLOAD_POOL_TOLERATION)],
+        }
+    }
+
+
 def build_cluster_issuer(*, email: str) -> str:
     """Return the ClusterIssuer manifest (JSON, kubectl-accepted) for LE prod.
 
     HTTP-01 with the nginx ingress class. DNS-01 would need workload-identity
     + an Azure DNS Zone; HTTP-01 only needs port 80 reachable to the
     ingress-nginx LB, which the AKS-provisioned Standard LB allows by default.
+
+    The solver carries a `podTemplate` produced by `workload_pool_pod_template`
+    so the per-Challenge `cm-acme-http-solver-*` Pod that cert-manager
+    spawns at issuance time tolerates the blastpool `workload=blast` taint
+    instead of staying `Pending` forever. Regression observed on
+    elb-cluster-01, 2026-05-28; Let's Encrypt times out the HTTP-01
+    challenge with a 503 response when the solver Pod cannot schedule.
     """
     issuer = {
         "apiVersion": "cert-manager.io/v1",
@@ -332,7 +349,10 @@ def build_cluster_issuer(*, email: str) -> str:
                 "solvers": [
                     {
                         "http01": {
-                            "ingress": {"class": "nginx"},
+                            "ingress": {
+                                "class": "nginx",
+                                "podTemplate": workload_pool_pod_template(),
+                            },
                         },
                     },
                 ],

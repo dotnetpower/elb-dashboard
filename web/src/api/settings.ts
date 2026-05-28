@@ -129,6 +129,76 @@ export interface VnetPeeringResponse {
   reason?: string;
 }
 
+export interface VnetPeeringNsgRuleRequest {
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+  target_subscription_id: string;
+  target_resource_group: string;
+  target_vnet_name: string;
+  target_ip?: string;
+  /** Allowlist subset of `{80, 443}`. Defaults to both on the backend. */
+  ports?: number[];
+  /**
+   * When true the backend resolves the NSG, runs every permission /
+   * collision / priority check, and returns the planned `rule` body
+   * (with `applied=false`, `skipped_reason="dry_run"`) without calling
+   * `begin_create_or_update`. The SPA uses this for the 2-step confirm
+   * UI (preview → commit).
+   */
+  dry_run?: boolean;
+}
+
+export interface VnetPeeringNsgContext {
+  target_subnet_id: string;
+  target_subnet_name: string;
+  target_subnet_prefixes: string[];
+  nsg_id: string | null;
+  nsg_resource_group: string | null;
+  nsg_name: string | null;
+  aks_vnet_address_prefixes: string[];
+  target_ip: string;
+}
+
+export interface VnetPeeringNsgRuleApplied {
+  applied: boolean;
+  rule_name: string;
+  nsg_id: string;
+  priority: number | null;
+  source_prefixes: string[];
+  destination_ip: string;
+  ports: number[];
+  skipped_reason: string | null;
+  conflict_existing: Record<string, unknown> | null;
+}
+
+export type VnetPeeringNsgSkipReason =
+  | "target_ip_not_in_any_subnet"
+  | "no_nsg_attached"
+  | "permission_denied"
+  | "already_present"
+  | "name_collision"
+  | "no_free_priority"
+  | "dry_run"
+  | null;
+
+export interface VnetPeeringNsgRuleResponse {
+  applied: boolean;
+  skipped_reason: VnetPeeringNsgSkipReason | string | null;
+  rule?: VnetPeeringNsgRuleApplied;
+  nsg_context?: VnetPeeringNsgContext;
+  /** Populated when `skipped_reason === "permission_denied"`. */
+  cli_hint?: string;
+  /** Populated when `skipped_reason === "target_ip_not_in_any_subnet"`. */
+  aks_vnet_id?: string;
+  target_vnet_id?: string;
+  target_ip?: string;
+  /** Deterministic rule name the backend would write (echoed even on dry-run). */
+  planned_rule_name?: string;
+  /** Echoes the request flag so the SPA can tell preview from commit response. */
+  dry_run?: boolean;
+}
+
 function querystring(params: Record<string, string>): string {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) usp.set(k, v);
@@ -184,4 +254,15 @@ export const settingsApi = {
    *  backend returns the summary payload (peerings + probe) in one shot. */
   peerVnet: (body: VnetPeeringRequest) =>
     api.post<VnetPeeringResponse>("/settings/vnet-peering", body),
+
+  /** Explicit follow-up action when the probe is unreachable: write an
+   *  inbound-allow rule on the target subnet's NSG (source = AKS VNet
+   *  CIDR, destination = target_ip/32, ports ⊆ {80, 443}). The backend
+   *  derives all sensitive parameters from the resolved VNet pair — the
+   *  caller never supplies CIDRs or wildcards. */
+  applyPeeringNsgRule: (body: VnetPeeringNsgRuleRequest) =>
+    api.post<VnetPeeringNsgRuleResponse>(
+      "/settings/vnet-peering/apply-nsg-rule",
+      body,
+    ),
 };

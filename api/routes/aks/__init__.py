@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from api.routes.aks import autostop as _autostop_routes
 from api.routes.aks import cancel as _cancel_routes
 from api.routes.aks import lifecycle as _lifecycle_routes
 from api.routes.aks import openapi as _openapi_routes
@@ -43,6 +44,9 @@ from api.routes.aks.openapi import (
     aks_openapi_deployment as aks_openapi_deployment,
 )
 from api.routes.aks.openapi import (
+    aks_openapi_pls as aks_openapi_pls,
+)
+from api.routes.aks.openapi import (
     aks_openapi_proxy as aks_openapi_proxy,
 )
 from api.routes.aks.openapi import (
@@ -69,3 +73,4 @@ aks_router.include_router(_openapi_routes.router)
 aks_router.include_router(_peering_routes.router)
 aks_router.include_router(_lifecycle_routes.router)
 aks_router.include_router(_roles_routes.router)
+aks_router.include_router(_autostop_routes.router)

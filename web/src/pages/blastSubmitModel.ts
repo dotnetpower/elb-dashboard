@@ -133,6 +133,8 @@ export interface FormState {
   program: BlastProgram;
   db: string;
   query_data: string;
+  /** NCBI nuccore accession. When set and `query_data` is empty, the backend resolves it via E-utilities at submit time. */
+  query_accession: string;
   query_from: string;
   query_to: string;
   job_title: string;
@@ -169,6 +171,7 @@ export const INITIAL: FormState = {
   program: "blastn",
   db: DEFAULT_DATABASE_PATH,
   query_data: "",
+  query_accession: "",
   query_from: "",
   query_to: "",
   job_title: "",

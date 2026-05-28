@@ -195,6 +195,48 @@ export function QuerySection({
       )}
 
       <div
+        className="blast-accession-row"
+        aria-disabled={!dbSelected}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 8,
+          opacity: dbSelected ? 1 : 0.55,
+        }}
+      >
+        <span
+          className="glass-label"
+          style={{ fontSize: 11, minWidth: "fit-content", marginBottom: 0 }}
+        >
+          Or fetch by NCBI accession
+          <Tip text="Submit the search using an NCBI nuccore accession (e.g. NM_000546.6). The backend fetches the FASTA via E-utilities at submit time. Inline FASTA above takes precedence when both are filled." />
+        </span>
+        <input
+          className="glass-input blast-small-input"
+          value={form.query_accession}
+          onChange={(event) => set("query_accession", event.target.value)}
+          placeholder="NM_000546.6"
+          maxLength={64}
+          disabled={!dbSelected}
+          spellCheck={false}
+          style={{ fontFamily: "var(--font-mono, monospace)", minWidth: 180 }}
+        />
+        {form.query_accession.trim() && (
+          <span
+            style={{
+              fontSize: 11,
+              color: form.query_data.trim() ? "var(--text-faint)" : "var(--success)",
+            }}
+          >
+            {form.query_data.trim()
+              ? "FASTA above will be used"
+              : "Will fetch at submit"}
+          </span>
+        )}
+      </div>
+
+      <div
         className={`blast-textarea-wrap${dragActive ? " blast-textarea-wrap--drag" : ""}`}
         aria-disabled={!dbSelected}
         style={!dbSelected ? { opacity: 0.55, pointerEvents: "none" } : undefined}

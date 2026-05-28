@@ -51,7 +51,7 @@ from api.services.k8s.ingress import (
     build_openapi_ingress,
     cloudapp_fqdn,
     dns_label_for_cluster,
-    fetch_install_manifest_for_system_pool,
+    fetch_install_manifest_for_workload_pool,
 )
 from api.services.openapi.runtime import (
     clear_openapi_public_base_url,
@@ -599,6 +599,78 @@ def _wait_for_certificate_object_to_exist(
             time.sleep(_CERTIFICATE_EXISTS_PROBE_INTERVAL_SECONDS)
 
 
+def _collect_cert_issuance_diagnostics(*, kubeconfig_path: str) -> str:
+    """Return a multi-line human-readable digest of Certificate/Order/Challenge state.
+
+    Used when `_wait_for_certificate_ready` times out so the SPA's error
+    banner surfaces the real reason (e.g. "Waiting for HTTP-01 challenge
+    propagation: wrong status code '503'") instead of the operator
+    needing to SSH and run `kubectl describe`. Every probe is best-effort;
+    any individual failure just produces an empty line so we never mask
+    the original timeout error with a diagnostic-collection error.
+    """
+    lines: list[str] = []
+
+    def _probe(name: str, args: list[str]) -> None:
+        result = kubectl_run(
+            args, kubeconfig_path=kubeconfig_path, timeout_seconds=15
+        )
+        text = (result.get("stdout") or "").strip()
+        if text:
+            lines.append(f"{name}: {text[:400]}")
+
+    _probe(
+        "certificate.condition",
+        [
+            "get",
+            "certificate",
+            OPENAPI_TLS_SECRET_NAME,
+            "-n",
+            OPENAPI_NAMESPACE,
+            "-o",
+            "jsonpath={range .status.conditions[*]}{.type}={.status}({.reason}): {.message}{'\\n'}{end}",  # noqa: E501
+        ],
+    )
+    _probe(
+        "order.state",
+        [
+            "get",
+            "order",
+            "-n",
+            OPENAPI_NAMESPACE,
+            "-l",
+            f"cert-manager.io/certificate-name={OPENAPI_TLS_SECRET_NAME}",
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}={.status.state}({.status.reason}){'\\n'}{end}",  # noqa: E501
+        ],
+    )
+    _probe(
+        "challenge.reason",
+        [
+            "get",
+            "challenge",
+            "-n",
+            OPENAPI_NAMESPACE,
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}={.status.state}: {.status.reason}{'\\n'}{end}",  # noqa: E501
+        ],
+    )
+    _probe(
+        "challenge.solverpod",
+        [
+            "get",
+            "pod",
+            "-n",
+            OPENAPI_NAMESPACE,
+            "-l",
+            "acme.cert-manager.io/http01-solver=true",
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}={.status.phase}({.status.conditions[?(@.type=='PodScheduled')].reason}: {.status.conditions[?(@.type=='PodScheduled')].message}){'\\n'}{end}",  # noqa: E501
+        ],
+    )
+    return "\n".join(lines)
+
+
 def _wait_for_certificate_ready(
     *,
     kubeconfig_path: str,
@@ -628,27 +700,17 @@ def _wait_for_certificate_ready(
     )
     if result.get("exit_code", 1) != 0:
         detail = (result.get("stderr") or result.get("stdout") or "").strip()[:600]
-        # Surface the Order/Challenge reason so the operator can tell
-        # "DNS not propagated" apart from "rate limited" apart from
-        # "challenge HTTP-01 fetch failed".
-        probe = kubectl_run(
-            [
-                "get",
-                "certificate",
-                OPENAPI_TLS_SECRET_NAME,
-                "-n",
-                OPENAPI_NAMESPACE,
-                "-o",
-                "jsonpath={.status.conditions[?(@.type=='Ready')].message}",
-            ],
-            kubeconfig_path=kubeconfig_path,
-            timeout_seconds=15,
+        # Collect Order + Challenge + solver-pod state so the SPA banner
+        # surfaces the actual root cause (private-TLD ACME registration,
+        # solver pod Pending due to untolerated taint, HTTP-01 503, etc.)
+        # instead of the operator needing to `kubectl describe`.
+        diagnostics = _collect_cert_issuance_diagnostics(
+            kubeconfig_path=kubeconfig_path
         )
-        probe_msg = (probe.get("stdout") or "").strip()
         raise RuntimeError(
             f"Certificate {OPENAPI_TLS_SECRET_NAME} did not become Ready: "
             f"{detail}"
-            + (f" | last condition: {probe_msg[:400]}" if probe_msg else "")
+            + (f"\n--- diagnostics ---\n{diagnostics[:1800]}" if diagnostics else "")
         )
 
 
@@ -670,6 +732,13 @@ def _read_certificate_expiry(*, kubeconfig_path: str) -> str:
     if result.get("exit_code", 1) != 0:
         return ""
     return (result.get("stdout") or "").strip()
+
+
+# Public alias so the reconciler and any future callers do not need to
+# import the underscore-prefixed implementation. The implementation
+# stays here because the kubectl runner already lives in this module's
+# import graph; only the name surface is widened.
+read_certificate_expiry = _read_certificate_expiry
 
 
 @shared_task(
@@ -748,7 +817,7 @@ def setup_openapi_public_https(
         # every Deployment / DaemonSet / Job from the install manifest
         # so the add-on lands on the systempool only.
         record_progress(self, "install_ingress_nginx")
-        ingress_nginx_manifest = fetch_install_manifest_for_system_pool(
+        ingress_nginx_manifest = fetch_install_manifest_for_workload_pool(
             INGRESS_NGINX_INSTALL_URL
         )
         # ingress-nginx ships admission-webhook bootstrap Jobs whose
@@ -811,7 +880,7 @@ def setup_openapi_public_https(
         # so no pre-delete is needed — strategic merge patch on the
         # existing Deployments is enough to roll Pending pods.
         record_progress(self, "install_cert_manager")
-        cert_manager_manifest = fetch_install_manifest_for_system_pool(
+        cert_manager_manifest = fetch_install_manifest_for_workload_pool(
             CERT_MANAGER_INSTALL_URL
         )
         _kubectl_or_raise(
@@ -885,8 +954,13 @@ def setup_openapi_public_https(
         record_progress(self, "persist_runtime_cache")
         public_base_url = f"https://{fqdn}"
         cert_expires_at = _read_certificate_expiry(kubeconfig_path=kubeconfig_path)
-        save_openapi_public_base_url(
+        cluster_arm_id = (
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.ContainerService/managedClusters/{cluster_name}"
+        )
+        durable_ok = save_openapi_public_base_url(
             public_base_url,
+            cluster_arm_id=cluster_arm_id,
             metadata={
                 "subscription_id": subscription_id,
                 "resource_group": resource_group,
@@ -899,11 +973,25 @@ def setup_openapi_public_https(
                 "source": "setup_openapi_public_https",
             },
         )
+        if not durable_ok:
+            LOGGER.warning(
+                "public-https: durable cache write failed for cluster=%s; "
+                "the next reconcile tick may not rehydrate Redis on cold start",
+                cluster_name,
+            )
     except Exception as exc:
         LOGGER.exception("public-https: pipeline failed")
+        diagnostics = ""
+        try:
+            diagnostics = _collect_cert_issuance_diagnostics(
+                kubeconfig_path=kubeconfig_path
+            )
+        except Exception as diag_exc:
+            LOGGER.debug("public-https: diagnostics collection failed: %s", diag_exc)
         return {
             "status": "failed",
             "error": str(exc)[:800],
+            "diagnostics": diagnostics[:2000] if diagnostics else "",
             "fqdn": fqdn,
             "elapsed_seconds": int(time.time() - started),
         }
@@ -981,7 +1069,11 @@ def disable_openapi_public_https(
                 (result.get("stderr") or "").strip()[:200],
             )
 
-    clear_openapi_public_base_url()
+    cluster_arm_id = (
+        f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+        f"/providers/Microsoft.ContainerService/managedClusters/{cluster_name}"
+    )
+    clear_openapi_public_base_url(cluster_arm_id=cluster_arm_id)
 
     return {
         "status": "succeeded",

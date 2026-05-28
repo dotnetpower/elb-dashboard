@@ -12,6 +12,7 @@ import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 import { DatabaseChipStrip } from "./DatabaseChipStrip";
 import { StartEstimatePanel } from "./StartEstimatePanel";
+import { AutoStopPanel } from "./AutoStopPanel";
 import { useClusterDbChips } from "./useClusterDbChips";
 import { useClusterShardMutation } from "./useClusterShardMutation";
 import type { ClusterTransitionKind } from "@/components/cards/ClusterCard/useClusterActions";
@@ -161,8 +162,7 @@ export function ClusterItem({
   });
 
   const expansionExtras =
-    showOperationalDetails &&
-    (dbChips.length > 0 || dbListDegraded || trans === "starting") ? (
+    showOperationalDetails || trans === "starting" ? (
       <div
         style={{
           display: "flex",
@@ -188,6 +188,14 @@ export function ClusterItem({
             shardError={shardError}
             clusterNumNodes={clusterNumNodes}
             clusterMachineType={clusterMachineType}
+          />
+        )}
+        {showOperationalDetails && (
+          <AutoStopPanel
+            subscriptionId={subscriptionId}
+            resourceGroup={resourceGroup}
+            clusterName={c.name}
+            clusterIsRunning={isRunning}
           />
         )}
       </div>

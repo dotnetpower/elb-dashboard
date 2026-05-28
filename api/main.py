@@ -51,6 +51,7 @@ from api.routes import (
     health,
     me,
     monitor,
+    ncbi,
     operations,
     resources,
     settings,
@@ -187,6 +188,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api")
     app.include_router(me.router, prefix="/api")
     app.include_router(monitor.router, prefix="/api/monitor")
+    app.include_router(ncbi.router)  # carries /api/ncbi prefix
     app.include_router(arm.router)  # carries /api/arm prefix
     app.include_router(resources.router)  # carries /api/resources prefix
     app.include_router(storage.router)  # carries /api/storage prefix

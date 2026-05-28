@@ -153,6 +153,47 @@ def aks_top_nodes(
         return cast(dict[str, Any], _graceful("aks_top_nodes", exc, empty={"nodes": []}))
 
 
+@router.get("/aks/node-pressure")
+def aks_node_pressure(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Per-pool CPU/memory request pressure with a 90% warning threshold.
+
+    Designed for the dashboard's "systempool is 99% requested" early
+    warning that the 2026-05-28 ingress-nginx Pending regression needed
+    an operator to discover by hand. The SPA renders pool name + CPU/MEM
+    percentage + a warning badge when either >=90%.
+    """
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+    from api.services.k8s.node_pressure import k8s_node_request_pressure
+
+    del caller
+    cred = monitor_package.get_credential()
+    try:
+        return cached_snapshot_with_cluster_gate(
+            _cache_key("monitor", "aks", "node-pressure", sub, resource_group, cluster_name),
+            lambda: k8s_node_request_pressure(cred, sub, resource_group, cluster_name),
+            credential=cred,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            empty={"reachable": False, "pools": {}},
+        )
+    except Exception as exc:
+        return cast(
+            dict[str, Any],
+            _graceful(
+                "aks_node_pressure",
+                exc,
+                empty={"reachable": False, "pools": {}},
+            ),
+        )
+
+
 @router.get("/aks/pod-logs")
 def aks_pod_logs(
     subscription_id: str = Query(default=""),

@@ -610,6 +610,46 @@ def aks_openapi_deployment(
         raise
 
 
+@router.get("/openapi/pls")
+def aks_openapi_pls(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return live Private Link Service (PLS) annotation state for ``elb-openapi``.
+
+    Pure-read endpoint. The SPA renders this card to show:
+      * whether PLS is enabled in the deploy environment
+        (``OPENAPI_PLS_ENABLED`` / ``OPENAPI_PLS_NAME`` / ``OPENAPI_PLS_LB_SUBNET``),
+      * whether the live Kubernetes Service already carries the
+        ``service.beta.kubernetes.io/azure-pls-create`` annotation set, and
+      * whether a transition is pending (env says PLS, Service says no) plus
+        whether the deploy task will require ``OPENAPI_PLS_CONFIRM_RECREATE=1``
+        to proceed.
+
+    Failure-by-design: cluster unreachable / RBAC missing / k8s session error
+    all degrade to ``available=False`` with ``reason=<short_code>`` so the SPA
+    can render an "unknown" cell instead of a hard error. The endpoint never
+    mutates state.
+    """
+    from api.services import get_credential
+    from api.services.openapi.pls_status import get_pls_status
+
+    del caller
+    try:
+        status = get_pls_status(
+            get_credential(),
+            subscription_id=subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", ""),
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+        return status.to_dict()
+    except Exception as exc:
+        _raise_openapi_route_error(exc)
+        raise
+
+
 @router.get("/openapi/token")
 def aks_openapi_token(
     subscription_id: str = Query(default=""),
@@ -751,6 +791,28 @@ def aks_openapi_public_https_status(
 
     del caller
     return get_openapi_public_https_status()
+
+
+@router.get("/openapi/public-https/operator-email-rules")
+def aks_openapi_operator_email_rules(
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Expose the validator rules so the SPA can sync its client gate.
+
+    Single source of truth: the backend's `_validate_operator_email`
+    rejects empty / private-TLD emails (otherwise Let's Encrypt rejects
+    ACME account registration with `urn:ietf:params:acme:error:invalidContact`).
+    The SPA mirrors the rule client-side so the Enable button can be
+    disabled without a round trip, but it fetches this list on mount so
+    the two sides cannot drift if we later add a new private-use TLD to
+    the backend without touching the SPA.
+    """
+    del caller
+    return {
+        "private_use_tlds": sorted(_PRIVATE_USE_TLDS),
+        "email_regex": _EMAIL_RE.pattern,
+        "max_length": 254,
+    }
 
 
 @router.post("/openapi/public-https")

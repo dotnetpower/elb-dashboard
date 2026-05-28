@@ -126,10 +126,66 @@ export function strandLabel(
   return b >= a ? "Plus/Plus" : "Plus/Minus";
 }
 
-/** NCBI accession → nuccore deep link. Falls back to all-databases search. */
+/**
+ * Extract the canonical accession (preserving the `.version` segment) from a
+ * BLAST `sseqid` field. Mirrors `api/services/ncbi/nuccore.py::normalise_accession`:
+ * walks the pipe-delimited parts in reverse and returns the first one that
+ * looks like an NCBI accession, so descriptive trailing segments
+ * (`ref|NM_001|name`) do not mask the real accession. Examples:
+ *  - `gi|123|ref|NM_000546.6|` → `NM_000546.6`
+ *  - `ref|NM_000546.6|Homo_sapiens_TP53` → `NM_000546.6`
+ *  - `NM_000546.6` → `NM_000546.6`
+ *  - `ref|XP_001|` → `XP_001`
+ * Returns the trimmed input untouched when no pipe is present, and the
+ * final pipe segment as a fallback when no segment matches the pattern.
+ */
+export function extractCanonicalAccession(accession: string): string {
+  const trimmed = (accession || "").trim();
+  if (!trimmed) return "";
+  if (!trimmed.includes("|")) return trimmed;
+  const parts = trimmed.split("|").filter((part) => part.length > 0);
+  if (parts.length === 0) return trimmed;
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const candidate = parts[i].trim();
+    if (candidate && ACCESSION_PATTERN.test(candidate.toUpperCase())) {
+      return candidate;
+    }
+  }
+  return parts[parts.length - 1];
+}
+
+/**
+ * Mirror of `api/services/ncbi/nuccore.py::_ACCESSION_RE`. We do the gate on
+ * the frontend so the in-app SequenceDetail link is only rendered for
+ * sseqids that NCBI would actually accept — internal BLAST identifiers like
+ * `Query_1`, `contig_42`, or custom DB IDs fall back to the external NCBI
+ * search link instead of producing a 422 on the dashboard.
+ */
+const ACCESSION_PATTERN = /^[A-Z]{1,4}_?[0-9]+(?:\.[0-9]{1,3})?$/;
+
+export function isNcbiAccessionLike(accession: string): boolean {
+  const canonical = extractCanonicalAccession(accession).toUpperCase();
+  if (!canonical || canonical.length > 32) return false;
+  return ACCESSION_PATTERN.test(canonical);
+}
+
+/** NCBI nuccore deep link (external). Preserves the .version segment. */
 export function ncbiNuccoreUrl(accession: string): string {
-  const trimmed = accession.split("|").pop()?.split(".")[0] ?? accession;
-  return `https://www.ncbi.nlm.nih.gov/nuccore/${encodeURIComponent(trimmed)}`;
+  const canonical = extractCanonicalAccession(accession);
+  return `https://www.ncbi.nlm.nih.gov/nuccore/${encodeURIComponent(canonical)}`;
+}
+
+/**
+ * Internal SequenceDetail route. The dashboard hosts a read-only sequence
+ * viewer at `/sequence/:accession` so researchers stay in-app for the common
+ * "inspect a BLAST hit" path; the external NCBI link is offered as a
+ * secondary action. Callers MUST gate on `isNcbiAccessionLike` first — this
+ * helper does not re-validate so non-accession sseqids would produce a 404
+ * once the SequenceDetail page calls NCBI.
+ */
+export function internalSequenceRoute(accession: string): string {
+  const canonical = extractCanonicalAccession(accession);
+  return `/sequence/${encodeURIComponent(canonical)}`;
 }
 
 export function ncbiSearchUrl(accession: string): string {

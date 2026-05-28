@@ -290,6 +290,49 @@ def _normalise_blast_submit_body(body: dict[str, Any], *, job_id: str) -> dict[s
         options,
     )
     normalised["use_local_ssd"] = True
+
+    # Accession-sourced query: resolve to FASTA up front so the existing
+    # ``query_data`` upload path handles staging unchanged. Skipped when the
+    # caller already supplied inline FASTA or a query_file pointer.
+    raw_accession = normalised.get("query_accession")
+    if isinstance(raw_accession, str) and raw_accession.strip():
+        # Reject mixed query sources explicitly so OpenAPI / dashboard /
+        # external callers all see the same error instead of silently
+        # dropping one input. Per-call precedence makes audit + replay
+        # ambiguous, so we treat this as a validation conflict.
+        if (
+            normalised.get("query_data")
+            or normalised.get("query_file")
+            or normalised.get("query_blob_url")
+        ):
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "conflicting_query_sources",
+                    "message": (
+                        "Specify either query_accession or one of "
+                        "query_data / query_file / query_blob_url, not both."
+                    ),
+                },
+            )
+        from api.services.blast.accession_resolver import resolve_accession_to_fasta
+
+        fasta_text, accession_metadata = resolve_accession_to_fasta(
+            raw_accession.strip(),
+            seq_start=normalised.get("query_accession_seq_start"),
+            seq_stop=normalised.get("query_accession_seq_stop"),
+        )
+        normalised["query_data"] = fasta_text
+        # Strip the accession-only fields so they do not leak into the
+        # downstream Pydantic model or the elastic-blast config.
+        for key in (
+            "query_accession",
+            "query_accession_seq_start",
+            "query_accession_seq_stop",
+        ):
+            normalised.pop(key, None)
+        normalised["_accession_metadata"] = accession_metadata
+
     query_data = normalised.get("query_data")
     if isinstance(query_data, str) and query_data.strip():
         try:
@@ -320,6 +363,15 @@ def _normalise_blast_submit_body(body: dict[str, Any], *, job_id: str) -> dict[s
             normalised["query_file"] = query_file
         normalised["query_metadata"] = query_metadata
         normalised.pop("query_data", None)
+
+    # Merge accession provenance into query_metadata after the upload path has
+    # filled in length/count fields. We do this last so a manual fasta upload
+    # cannot accidentally inherit accession metadata from a prior call.
+    accession_metadata = normalised.pop("_accession_metadata", None)
+    if isinstance(accession_metadata, dict):
+        merged = dict(normalised.get("query_metadata") or {})
+        merged.update(accession_metadata)
+        normalised["query_metadata"] = merged
 
     if options:
         normalised["options"] = options

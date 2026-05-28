@@ -41,6 +41,7 @@ import { type AksClusterSummary, monitoringApi } from "@/api/monitoring";
 import {
   settingsApi,
   type AppInsightsProvisionRequest,
+  type VnetPeeringNsgRuleResponse,
   type VnetPeeringResponse,
 } from "@/api/settings";
 import { tasksApi, type TaskStatusResponse } from "@/api/tasks";
@@ -1240,8 +1241,11 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
 // `.local` / `.localhost` / `.internal` / `.test` / `.example` / `.invalid`
 // are the IANA reserved private-use TLDs that trip it most often in our
 // deployments (the old `_FALLBACK_OPERATOR_EMAIL = noreply@elb-dashboard.local`
-// hit exactly this on elb-cluster-01 on 2026-05-27).
-const PRIVATE_USE_TLDS = new Set([
+// hit exactly this on elb-cluster-01 on 2026-05-27). The set below is the
+// SPA's fallback; on mount the panel fetches the canonical list from
+// `aksApi.openApiOperatorEmailRules()` so the client gate cannot drift
+// when a new TLD is added to the backend-only `_PRIVATE_USE_TLDS`.
+const DEFAULT_PRIVATE_USE_TLDS: readonly string[] = [
   "local",
   "localhost",
   "internal",
@@ -1252,7 +1256,12 @@ const PRIVATE_USE_TLDS = new Set([
   "home",
   "corp",
   "private",
-]);
+];
+let PRIVATE_USE_TLDS = new Set(DEFAULT_PRIVATE_USE_TLDS);
+
+function _setPrivateUseTldsForTesting(values: readonly string[]): void {
+  PRIVATE_USE_TLDS = new Set(values);
+}
 
 function isPublicLetsEncryptEmail(value: string): boolean {
   const text = (value ?? "").trim();
@@ -1268,6 +1277,156 @@ function isPublicLetsEncryptEmail(value: string): boolean {
   if (!/^[a-z]{2,}$/.test(tld)) return false;
   if (PRIVATE_USE_TLDS.has(tld)) return false;
   return /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$/.test(text);
+}
+
+// Ordered phases emitted by `setup_openapi_public_https.record_progress(...)`
+// in api/tasks/openapi/public_https.py. Keep the ids in sync with the task;
+// the SPA renders the stepper from this list and falls back to the raw
+// phase id when the backend ships a new phase before the SPA catches up.
+interface PublicHttpsPhaseMeta {
+  id: string;
+  label: string;
+  hint?: string;
+}
+const PUBLIC_HTTPS_PHASES: PublicHttpsPhaseMeta[] = [
+  { id: "queued", label: "Queued", hint: "Waiting for a Celery worker slot." },
+  { id: "ensure_kubeconfig", label: "Fetching AKS kubeconfig", hint: "Resolving cluster-admin credentials via ARM." },
+  { id: "install_ingress_nginx", label: "Installing ingress-nginx", hint: "Applying the upstream manifest patched for the blastpool." },
+  { id: "patch_dns_label", label: "Patching Azure DNS label", hint: "Annotating the LoadBalancer Service with a stable FQDN." },
+  { id: "wait_external_ip", label: "Waiting for public IP", hint: "Azure assigns the LB's EXTERNAL-IP. Usually 30-90s." },
+  { id: "install_cert_manager", label: "Installing cert-manager", hint: "Applying CRDs + controller + webhook." },
+  { id: "wait_cert_manager_webhook", label: "Waiting for cert-manager webhook", hint: "Webhook Pod must become Available before any Issuer applies." },
+  { id: "apply_cluster_issuer", label: "Applying ClusterIssuer", hint: "Registering the Let's Encrypt prod ACME account." },
+  { id: "wait_ingress_nginx_controller", label: "Waiting for ingress-nginx controller", hint: "Controller Pod must be Ready before the admission webhook can validate Ingresses." },
+  { id: "wait_admission_jobs_complete", label: "Waiting for admission bootstrap Jobs", hint: "Generates the admission webhook's TLS keypair." },
+  { id: "wait_admission_endpoints_ready", label: "Waiting for admission endpoints", hint: "EndpointSlice must list the controller Pod before applying the Ingress." },
+  { id: "apply_ingress", label: "Applying elb-openapi Ingress", hint: "Routing the cloudapp.azure.com FQDN to the in-cluster Service." },
+  { id: "wait_certificate_ready", label: "Waiting for TLS certificate", hint: "Let's Encrypt HTTP-01 challenge. First-time issuance takes 1-3 min." },
+  { id: "persist_runtime_cache", label: "Saving runtime cache", hint: "Storing the public base URL so the dashboard flips to HTTPS." },
+];
+const PUBLIC_HTTPS_PHASE_INDEX = new Map(PUBLIC_HTTPS_PHASES.map((p, i) => [p.id, i] as const));
+
+function lookupPublicHttpsPhase(phase: string): { meta: PublicHttpsPhaseMeta; index: number; total: number } {
+  const idx = PUBLIC_HTTPS_PHASE_INDEX.get(phase) ?? 0;
+  const meta = PUBLIC_HTTPS_PHASES[idx] ?? {
+    id: phase || "queued",
+    label: phase ? phase.replace(/_/g, " ") : "Queued",
+  };
+  return { meta, index: idx, total: PUBLIC_HTTPS_PHASES.length };
+}
+
+function formatElapsedSeconds(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0s";
+  const s = Math.floor(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
+}
+
+interface RunningPublicHttpsTask {
+  taskId: string;
+  startedAt: number;
+  cluster: string;
+  kind: "enable" | "disable";
+}
+// localStorage key carries the cluster so the operator can fire Enable
+// against two clusters back-to-back without the second one overwriting
+// the first's progress badge. Bumped to v2 when the cluster suffix
+// was introduced; legacy v1 entries (a single global slot) are migrated
+// transparently on first read.
+const PUBLIC_HTTPS_TASK_STORAGE_PREFIX = "elb.publicHttps.runningTask.v2";
+const PUBLIC_HTTPS_LEGACY_KEY = "elb.publicHttps.runningTask.v1";
+// 30 min ceiling — first-time install averages 3-5 min and the longest
+// observed run was ~12 min on a cold AKS cluster. A leftover record older
+// than this is almost certainly a worker crash and would just block the
+// Enable button forever, so we drop it on read.
+const PUBLIC_HTTPS_TASK_MAX_AGE_MS = 30 * 60 * 1000;
+
+function _storageKeyForCluster(cluster: string): string {
+  // RowKey-style sanitisation in case a cluster name ever contains
+  // characters Web Storage does not love (none today, future-proofing).
+  return `${PUBLIC_HTTPS_TASK_STORAGE_PREFIX}.${cluster.trim() || "_default"}`;
+}
+
+function _parseTask(raw: string | null): RunningPublicHttpsTask | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<RunningPublicHttpsTask> | null;
+    if (!parsed || typeof parsed !== "object") return null;
+    const taskId = typeof parsed.taskId === "string" ? parsed.taskId : "";
+    const startedAt = typeof parsed.startedAt === "number" ? parsed.startedAt : 0;
+    if (!taskId || !startedAt) return null;
+    if (Date.now() - startedAt > PUBLIC_HTTPS_TASK_MAX_AGE_MS) return null;
+    const cluster = typeof parsed.cluster === "string" ? parsed.cluster : "";
+    const kind: RunningPublicHttpsTask["kind"] = parsed.kind === "disable" ? "disable" : "enable";
+    return { taskId, startedAt, cluster, kind };
+  } catch {
+    return null;
+  }
+}
+
+function loadRunningPublicHttpsTask(cluster?: string): RunningPublicHttpsTask | null {
+  try {
+    if (cluster) {
+      const direct = _parseTask(window.localStorage.getItem(_storageKeyForCluster(cluster)));
+      if (direct) return direct;
+    }
+    // Fall back: scan every v2 key + the legacy v1 single-slot entry and
+    // pick the freshest non-expired record. This covers two cases:
+    //   1. The component mounts before cluster discovery completes so
+    //      the caller passes "" for cluster.
+    //   2. A previous build wrote to the legacy v1 slot — we want to
+    //      still show its progress instead of silently re-enabling Enable.
+    let best: RunningPublicHttpsTask | null = null;
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (!key) continue;
+      if (key !== PUBLIC_HTTPS_LEGACY_KEY && !key.startsWith(`${PUBLIC_HTTPS_TASK_STORAGE_PREFIX}.`)) {
+        continue;
+      }
+      const candidate = _parseTask(window.localStorage.getItem(key));
+      if (!candidate) {
+        // Clean up expired / malformed rows opportunistically.
+        try {
+          window.localStorage.removeItem(key);
+        } catch {
+          // ignore
+        }
+        continue;
+      }
+      if (!best || candidate.startedAt > best.startedAt) {
+        best = candidate;
+      }
+    }
+    return best;
+  } catch {
+    return null;
+  }
+}
+
+function saveRunningPublicHttpsTask(task: RunningPublicHttpsTask): void {
+  try {
+    window.localStorage.setItem(
+      _storageKeyForCluster(task.cluster),
+      JSON.stringify(task),
+    );
+  } catch {
+    // Quota / private-window failures are harmless — we just lose the
+    // resume-after-tab-switch convenience for this run.
+  }
+}
+
+function clearRunningPublicHttpsTask(cluster: string): void {
+  try {
+    window.localStorage.removeItem(_storageKeyForCluster(cluster));
+    // Best-effort sweep of the legacy single-slot key so the SPA never
+    // ends up looking at stale v1 state after the operator clicks
+    // Disable for the new-format cluster.
+    window.localStorage.removeItem(PUBLIC_HTTPS_LEGACY_KEY);
+  } catch {
+    // ignore
+  }
 }
 
 /**
@@ -1288,9 +1447,31 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
   const [email, setEmail] = useState("");
   const [emailEdited, setEmailEdited] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [taskRunning, setTaskRunning] = useState(false);
-  const [taskPhase, setTaskPhase] = useState<string>("");
+  // Running task is hydrated from localStorage so switching to another
+  // Settings tab (which unmounts this component) and coming back keeps
+  // the spinner + stepper showing the live Celery progress instead of
+  // re-enabling the Enable button while a setup is still running in the
+  // background.
+  const [runningTask, setRunningTask] = useState<RunningPublicHttpsTask | null>(() =>
+    typeof window === "undefined" ? null : loadRunningPublicHttpsTask(),
+  );
+  const [taskPhase, setTaskPhase] = useState<string>(() =>
+    runningTask ? "queued" : "",
+  );
+  const [elapsedSec, setElapsedSec] = useState<number>(() =>
+    runningTask ? Math.max(0, Math.floor((Date.now() - runningTask.startedAt) / 1000)) : 0,
+  );
   const pollTimer = useRef<number | null>(null);
+  const taskRunning = runningTask !== null;
+
+  // Tick the elapsed counter while a task is running.
+  useEffect(() => {
+    if (!runningTask) return;
+    const interval = window.setInterval(() => {
+      setElapsedSec(Math.max(0, Math.floor((Date.now() - runningTask.startedAt) / 1000)));
+    }, 1_000);
+    return () => window.clearInterval(interval);
+  }, [runningTask]);
 
   // Auto-fill the operator email from the validated caller identity
   // (`/api/me`'s `upn`) with MSAL `account.username` as a fallback.
@@ -1298,6 +1479,31 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
   // ACME account registration time with `urn:ietf:params:acme:error:invalidContact`,
   // so the Enable button is gated on a public TLD even when the field
   // is auto-populated.
+  useEffect(() => {
+    // Sync the SPA's private-TLD set with the backend so the client gate
+    // does not drift when a new TLD is added server-side. Best-effort;
+    // the hard-coded fallback set above is the safety net.
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rules = await aksApi.openApiOperatorEmailRules();
+        if (cancelled) return;
+        const union = new Set<string>(DEFAULT_PRIVATE_USE_TLDS);
+        for (const tld of rules.private_use_tlds ?? []) {
+          if (typeof tld === "string" && tld) union.add(tld.toLowerCase());
+        }
+        _setPrivateUseTldsForTesting(Array.from(union));
+      } catch {
+        // Backend route not yet deployed / 401 / network — fall back to
+        // the hard-coded default set, which is the same one the backend
+        // ships with today.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (emailEdited) return;
     let cancelled = false;
@@ -1409,7 +1615,6 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
           if (phase) setTaskPhase(phase);
           const runtime = result.runtime_status ?? "";
           if (runtime === "Completed" || runtime === "Failed" || runtime === "Terminated") {
-            setTaskRunning(false);
             // setup_openapi_public_https swallows pipeline errors and
             // returns `{status: 'failed', error: '...'}` as a normal task
             // result, so Celery reports `runtime_status: 'Completed'`
@@ -1420,19 +1625,44 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
             // to the success state.
             const dictFailed = result.output?.status === "failed";
             const taskFailed = runtime !== "Completed" || dictFailed;
+            const completedCluster = runningTask?.cluster || clusterName;
+            clearRunningPublicHttpsTask(completedCluster);
+            setRunningTask(null);
             if (!taskFailed) {
               await refresh();
             } else {
               const msg =
                 result.output?.error ||
                 `Task ${runtime.toLowerCase()} (phase=${phase || "n/a"})`;
-              setError(String(msg).slice(0, 600));
+              // Backend's pipeline-level except attaches a `diagnostics`
+              // string (Certificate / Order / Challenge / solver-pod
+              // state) when cert issuance fails — surface it so the
+              // operator can tell "wrong status code '503'" /
+              // "untolerated taint" / "invalidContact" apart without
+              // having to `kubectl describe`.
+              const diagnostics =
+                typeof (result.output as Record<string, unknown> | undefined)?.diagnostics === "string"
+                  ? ((result.output as Record<string, unknown>).diagnostics as string)
+                  : "";
+              const combined = diagnostics
+                ? `${String(msg).slice(0, 600)}\n\n${diagnostics.slice(0, 1500)}`
+                : String(msg).slice(0, 600);
+              setError(combined);
             }
             return;
           }
         } catch (err) {
-          setError(formatApiError(err, "aks"));
-          setTaskRunning(false);
+          // 404 here usually means "the Celery result expired" — stop
+          // polling and let the operator click Refresh status. We do
+          // NOT clear the running task on transient network errors so
+          // a flaky connection does not re-enable the Enable button
+          // mid-install.
+          const message = formatApiError(err, "aks");
+          if (/404|not[_ -]?found/i.test(message)) {
+            clearRunningPublicHttpsTask(runningTask?.cluster || clusterName);
+            setRunningTask(null);
+          }
+          setError(message);
           return;
         }
         pollTimer.current = window.setTimeout(tick, 3_000);
@@ -1442,10 +1672,26 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
     [refresh],
   );
 
+  // Resume polling on mount if a previous Enable/Disable click is still
+  // in flight (component was unmounted by switching Settings tabs but
+  // the Celery task is still running on the worker sidecar).
+  useEffect(() => {
+    if (!runningTask) return;
+    pollTask(runningTask.taskId);
+    return () => {
+      if (pollTimer.current !== null) {
+        window.clearTimeout(pollTimer.current);
+        pollTimer.current = null;
+      }
+    };
+    // Only resume once per mounted runningTask; pollTask is stable
+    // because `refresh` is wrapped in useCallback with an empty dep list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runningTask?.taskId]);
+
   const enable = async () => {
     if (!canEnable) return;
     setError(null);
-    setTaskRunning(true);
     setTaskPhase("queued");
     try {
       const res = await aksApi.enableOpenApiPublicHttps(
@@ -1454,17 +1700,27 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
         clusterName,
         email,
       );
-      pollTask(res.task_id || res.id);
+      const taskId = res.task_id || res.id;
+      const next: RunningPublicHttpsTask = {
+        taskId,
+        startedAt: Date.now(),
+        cluster: clusterName,
+        kind: "enable",
+      };
+      saveRunningPublicHttpsTask(next);
+      setRunningTask(next);
+      setElapsedSec(0);
+      pollTask(taskId);
     } catch (err) {
       setError(formatApiError(err, "aks"));
-      setTaskRunning(false);
+      clearRunningPublicHttpsTask(clusterName);
+      setRunningTask(null);
     }
   };
 
   const disable = async () => {
     if (!canAct) return;
     setError(null);
-    setTaskRunning(true);
     setTaskPhase("queued");
     try {
       const res = await aksApi.disableOpenApiPublicHttps(
@@ -1472,10 +1728,21 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
         selectedClusterRg,
         clusterName,
       );
-      pollTask(res.task_id || res.id);
+      const taskId = res.task_id || res.id;
+      const next: RunningPublicHttpsTask = {
+        taskId,
+        startedAt: Date.now(),
+        cluster: clusterName,
+        kind: "disable",
+      };
+      saveRunningPublicHttpsTask(next);
+      setRunningTask(next);
+      setElapsedSec(0);
+      pollTask(taskId);
     } catch (err) {
       setError(formatApiError(err, "aks"));
-      setTaskRunning(false);
+      clearRunningPublicHttpsTask(clusterName);
+      setRunningTask(null);
     }
   };
 
@@ -1623,10 +1890,54 @@ function PublicHttpsSection({ config }: { config: ResourceConfig | null }) {
           )}
           {taskRunning && (
             <span style={{ fontSize: 11, color: "var(--text-muted)", display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <Loader2 size={12} className="spin" /> {taskPhase || "queued"}
+              <Loader2 size={12} className="spin" />
+              {(() => {
+                const { meta, index, total } = lookupPublicHttpsPhase(taskPhase || "queued");
+                const stepLabel = taskPhase && taskPhase !== "queued"
+                  ? `Step ${index + 1}/${total}: ${meta.label}`
+                  : meta.label;
+                return `${stepLabel} \u00b7 ${formatElapsedSeconds(elapsedSec)} elapsed`;
+              })()}
             </span>
           )}
         </div>
+        {taskRunning && (() => {
+          const { meta, index, total } = lookupPublicHttpsPhase(taskPhase || "queued");
+          const progressPct = Math.max(2, Math.min(100, Math.round(((index + 1) / total) * 100)));
+          return (
+            <div style={{ marginTop: -4, marginBottom: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div
+                role="progressbar"
+                aria-valuenow={progressPct}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                style={{
+                  position: "relative",
+                  height: 4,
+                  borderRadius: 2,
+                  background: "var(--surface-2, rgba(255,255,255,0.06))",
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    width: `${progressPct}%`,
+                    height: "100%",
+                    background: "var(--accent, #5b8def)",
+                    transition: "width 200ms ease-out",
+                  }}
+                />
+              </div>
+              {meta.hint && (
+                <span style={{ fontSize: 10.5, color: "var(--text-muted)", lineHeight: 1.45 }}>
+                  {meta.hint}
+                  {runningTask?.cluster ? ` \u00b7 cluster ${runningTask.cluster}` : ""}
+                  {runningTask?.kind === "disable" ? " \u00b7 disable flow" : ""}
+                </span>
+              )}
+            </div>
+          );
+        })()}
         {enabled && status && (
           <StatusLine kind="info">
             {[
@@ -1677,6 +1988,10 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<VnetPeeringResponse | null>(null);
+
+  const [nsgRunning, setNsgRunning] = useState(false);
+  const [nsgError, setNsgError] = useState<string | null>(null);
+  const [nsgResult, setNsgResult] = useState<VnetPeeringNsgRuleResponse | null>(null);
 
   const subscriptionId = config?.subscriptionId ?? "";
   const selectedClusterRg =
@@ -1816,6 +2131,8 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
     if (!canSubmit) return;
     setError(null);
     setResult(null);
+    setNsgError(null);
+    setNsgResult(null);
     setRunning(true);
     try {
       const response = await settingsApi.peerVnet({
@@ -1834,6 +2151,59 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
     } finally {
       setRunning(false);
     }
+  };
+
+  const applyNsgRule = async (dryRun: boolean = true) => {
+    if (!canSubmit) return;
+    setNsgError(null);
+    if (dryRun) {
+      // Preview is a fresh round-trip — wipe any previous applied/skipped
+      // banner so the operator can't confuse a stale result with the new
+      // plan.
+      setNsgResult(null);
+    }
+    setNsgRunning(true);
+    try {
+      const response = await settingsApi.applyPeeringNsgRule({
+        subscription_id: subscriptionId,
+        resource_group: selectedClusterRg,
+        cluster_name: clusterName,
+        target_subscription_id: targetSubscriptionId,
+        target_resource_group: targetResourceGroup,
+        target_vnet_name: targetVnetName,
+        target_ip: targetIp || undefined,
+        dry_run: dryRun,
+      });
+      setNsgResult(response);
+      if (!dryRun && response.applied) {
+        // Re-run the probe so the operator sees the unblocked state in one go.
+        try {
+          const reProbe = await settingsApi.peerVnet({
+            subscription_id: subscriptionId,
+            resource_group: selectedClusterRg,
+            cluster_name: clusterName,
+            target_subscription_id: targetSubscriptionId,
+            target_resource_group: targetResourceGroup,
+            target_vnet_name: targetVnetName,
+            target_ip: targetIp || undefined,
+            target_path: targetPath || undefined,
+          });
+          setResult(reProbe);
+        } catch {
+          // Probe failure here is informational only — the NSG rule
+          // was applied; just leave the previous result on screen.
+        }
+      }
+    } catch (err) {
+      setNsgError(formatApiError(err, "settings"));
+    } finally {
+      setNsgRunning(false);
+    }
+  };
+
+  const cancelNsgPreview = () => {
+    setNsgResult(null);
+    setNsgError(null);
   };
 
   const probe = result?.probe;
@@ -2029,6 +2399,17 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
             {probe && !probe.reachable && probe.message && (
               <StatusLine kind="error">Probe error: {probe.message}</StatusLine>
             )}
+            {probe && !probe.reachable && (
+              <NsgRuleAction
+                running={nsgRunning}
+                disabled={!canSubmit}
+                onPreview={() => applyNsgRule(true)}
+                onConfirm={() => applyNsgRule(false)}
+                onCancel={cancelNsgPreview}
+                result={nsgResult}
+                error={nsgError}
+              />
+            )}
             {result.recovery_command && (
               <StatusLine kind="info">
                 Recovery (paste in terminal):{" "}
@@ -2040,6 +2421,371 @@ function VnetPeeringSection({ config }: { config: ResourceConfig | null }) {
         {error && <StatusLine kind="error">{error}</StatusLine>}
       </Group>
     </Section>
+  );
+}
+
+function NsgRuleAction({
+  running,
+  disabled,
+  onPreview,
+  onConfirm,
+  onCancel,
+  result,
+  error,
+}: {
+  running: boolean;
+  disabled: boolean;
+  onPreview: () => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+  result: VnetPeeringNsgRuleResponse | null;
+  error: string | null;
+}) {
+  const [copied, setCopied] = useState<"idle" | "ok" | "failed">("idle");
+  // Carry the priority the *preview* step quoted so we can flag a shift
+  // if another operator took our slot before the operator clicked
+  // Confirm. We capture in a ref to keep the effect dependency tight
+  // (effect only re-runs when ``result`` changes).
+  const previewedPriorityRef = useRef<number | null>(null);
+  const [priorityShift, setPriorityShift] = useState<{ from: number; to: number } | null>(null);
+
+  useEffect(() => {
+    if (!result) {
+      previewedPriorityRef.current = null;
+      setPriorityShift(null);
+      return;
+    }
+    if (result.dry_run === true) {
+      previewedPriorityRef.current = result.rule?.priority ?? null;
+      setPriorityShift(null);
+      return;
+    }
+    if (result.applied === true) {
+      const previewed = previewedPriorityRef.current;
+      const actual = result.rule?.priority;
+      if (
+        previewed !== null &&
+        typeof actual === "number" &&
+        actual !== previewed
+      ) {
+        setPriorityShift({ from: previewed, to: actual });
+      } else {
+        setPriorityShift(null);
+      }
+    }
+  }, [result]);
+
+  const copyCli = async () => {
+    if (!result?.cli_hint) return;
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      setCopied("failed");
+      window.setTimeout(() => setCopied("idle"), 2500);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(result.cli_hint);
+      setCopied("ok");
+      window.setTimeout(() => setCopied("idle"), 1500);
+    } catch {
+      // Clipboard API can refuse without user gesture or under permissions
+      // policies; surface a hint so the operator knows to select + Ctrl+C
+      // by hand instead of silently doing nothing.
+      setCopied("failed");
+      window.setTimeout(() => setCopied("idle"), 2500);
+    }
+  };
+
+  const skipReason = result?.skipped_reason;
+  const isAllowedBySkip = !!result && result.applied && skipReason === "already_present";
+  const isDryRunPreview = !!result && !result.applied && skipReason === "dry_run";
+  const previewRule = result?.rule;
+  const previewName = result?.planned_rule_name ?? previewRule?.rule_name ?? "(deterministic)";
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        padding: 12,
+        borderRadius: 8,
+        background: "var(--surface-2)",
+        border: "1px solid var(--border-subtle)",
+      }}
+    >
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+        {!isDryRunPreview && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onPreview}
+            disabled={running || disabled}
+            style={{ minWidth: 180 }}
+          >
+            {running ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <Loader2 size={12} className="spin" /> Checking NSG...
+              </span>
+            ) : (
+              "Preview NSG rule (80, 443)"
+            )}
+          </button>
+        )}
+        {isDryRunPreview && (
+          <>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={onConfirm}
+              disabled={running || disabled}
+              style={{ minWidth: 180 }}
+            >
+              {running ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <Loader2 size={12} className="spin" /> Applying NSG rule...
+                </span>
+              ) : (
+                "Confirm & apply"
+              )}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={onCancel}
+              disabled={running}
+            >
+              Cancel
+            </button>
+          </>
+        )}
+        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+          {isDryRunPreview
+            ? "Review the planned rule below, then confirm to write it to ARM."
+            : "Previews an inbound-allow rule on the target subnet's NSG (source = AKS VNet CIDR, destination = target_ip/32, ports = 80,443). No ARM write happens until you confirm."}{" "}
+          Requires{" "}
+          <code>Microsoft.Network/networkSecurityGroups/securityRules/write</code>.
+        </span>
+      </div>
+      {isDryRunPreview && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "max-content 1fr",
+            columnGap: 12,
+            rowGap: 4,
+            padding: "8px 12px",
+            borderRadius: 6,
+            background: "var(--surface-3)",
+            border: "1px solid var(--border-subtle)",
+            fontSize: 12,
+          }}
+        >
+          <span style={{ color: "var(--text-muted)" }}>Planned name</span>
+          <code>{previewName}</code>
+          <span style={{ color: "var(--text-muted)" }}>Planned priority</span>
+          <code>{previewRule?.priority ?? "(first free in 4000-4096)"}</code>
+          <span style={{ color: "var(--text-muted)" }}>Source CIDRs</span>
+          <code>{(previewRule?.source_prefixes ?? []).join(", ") || "(none)"}</code>
+          <span style={{ color: "var(--text-muted)" }}>Destination</span>
+          <code>{previewRule?.destination_ip}/32</code>
+          <span style={{ color: "var(--text-muted)" }}>Ports</span>
+          <code>{(previewRule?.ports ?? []).join(", ")}</code>
+          <span style={{ color: "var(--text-muted)" }}>NSG</span>
+          <code style={{ wordBreak: "break-all" }}>
+            {result?.nsg_context?.nsg_name ?? previewRule?.nsg_id}
+          </code>
+        </div>
+      )}
+      {result?.applied && (
+        <StatusLine kind="success">
+          {isAllowedBySkip
+            ? `Existing rule already covers this probe (${result.rule?.rule_name}, priority ${result.rule?.priority ?? "?"}).`
+            : `Rule applied: ${result.rule?.rule_name} (priority ${result.rule?.priority}, ports ${(result.rule?.ports ?? []).join(", ")}). Re-running probe...`}
+        </StatusLine>
+      )}
+      {priorityShift && (
+        <StatusLine kind="info">
+          Priority changed between preview and confirm:{" "}
+          <code>{priorityShift.from}</code> -&gt;{" "}
+          <code>{priorityShift.to}</code>. Another operator took your
+          slot; the rule still applied at the next free priority in
+          4000-4096.
+        </StatusLine>
+      )}
+      {result && !result.applied && skipReason === "no_nsg_attached" && (
+        <StatusLine kind="info">
+          The target subnet has no NSG attached, so nothing to update. If the
+          probe still fails, check the AKS subnet&apos;s NSG, Azure Firewall,
+          or User Defined Routes.
+        </StatusLine>
+      )}
+      {result && !result.applied && skipReason === "target_ip_not_in_any_subnet" && (
+        <StatusLine kind="error">
+          {result.target_ip} is not inside any subnet of the selected target VNet.
+        </StatusLine>
+      )}
+      {result && !result.applied && skipReason === "permission_denied" && (
+        <>
+          <StatusLine kind="info">
+            Your identity does not have NSG write permission. Run this with a
+            privileged identity instead:
+          </StatusLine>
+          {result.cli_hint && (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+              }}
+            >
+              <code style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                {result.cli_hint}
+              </code>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={copyCli}
+                  style={{ alignSelf: "flex-start" }}
+                >
+                  <Copy size={12} />{" "}
+                  {copied === "ok"
+                    ? "Copied!"
+                    : copied === "failed"
+                      ? "Copy failed"
+                      : "Copy CLI"}
+                </button>
+                {copied === "failed" && (
+                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    Clipboard blocked — select the snippet and press Ctrl+C
+                    (or &#8984;C) instead.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+      {result && !result.applied && skipReason === "name_collision" && (
+        <>
+          <StatusLine kind="error">
+            A rule with the same name already exists but its scope differs.
+            The dashboard will not overwrite operator rules — review the
+            existing rule below in Azure Portal before retrying.
+          </StatusLine>
+          {result.rule?.conflict_existing && (
+            <ConflictExistingPanel
+              conflict={result.rule.conflict_existing as Record<string, unknown>}
+            />
+          )}
+        </>
+      )}
+      {result && !result.applied && skipReason === "no_free_priority" && (
+        <StatusLine kind="error">
+          No free priority in the 4000-4096 reserved range. Free one in
+          Azure Portal and retry.
+        </StatusLine>
+      )}
+      {error && <StatusLine kind="error">{error}</StatusLine>}
+    </div>
+  );
+}
+
+/**
+ * Renders the existing NSG rule that collides with the deterministic
+ * dashboard rule name. Shape mirrors
+ * `api.tasks.azure.peering_nsg._summarise_rule` — every field is
+ * optional because the SDK can return either snake_case or
+ * SDK-attribute spellings via the helper.
+ */
+function ConflictExistingPanel({
+  conflict,
+}: {
+  conflict: Record<string, unknown>;
+}) {
+  const asString = (key: string): string => {
+    const v = conflict[key];
+    return v === null || v === undefined ? "" : String(v);
+  };
+  const asList = (key: string): string[] => {
+    const v = conflict[key];
+    return Array.isArray(v) ? v.map((item) => String(item)) : [];
+  };
+
+  const name = asString("name");
+  const priority = asString("priority");
+  const protocol = asString("protocol");
+  const access = asString("access");
+  const direction = asString("direction");
+  const sourcePrefixes = asList("source_address_prefixes").filter(Boolean);
+  const sourcePorts = asList("source_port_ranges").filter(Boolean);
+  const destPrefix = asString("destination_address_prefix");
+  // Azure NSG can return either `destination_address_prefix` (singular
+  // string) or `destination_address_prefixes` (list). The backend
+  // summariser surfaces both shapes; merge them so the panel renders
+  // the full destination set whichever form the existing rule used.
+  // `"*"` is Azure's explicit wildcard sentinel — render it as "Any"
+  // so operators don't read it as a literal CIDR.
+  const destPrefixesList = asList("destination_address_prefixes").filter(Boolean);
+  const renderWildcard = (raw: string): string => (raw === "*" ? "Any" : raw);
+  const destDisplay =
+    destPrefixesList.length > 0
+      ? destPrefixesList.map(renderWildcard).join(", ")
+      : destPrefix
+        ? renderWildcard(destPrefix)
+        : "(any)";
+  const destPorts = asList("destination_port_ranges").filter(Boolean);
+  const description = asString("description");
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "max-content 1fr",
+        columnGap: 12,
+        rowGap: 4,
+        padding: "8px 12px",
+        borderRadius: 6,
+        background: "var(--surface-3)",
+        border: "1px solid var(--border-subtle)",
+        fontSize: 12,
+      }}
+    >
+      <span style={{ color: "var(--text-muted)" }}>Existing name</span>
+      <code style={{ wordBreak: "break-all" }}>{name || "(unknown)"}</code>
+      <span style={{ color: "var(--text-muted)" }}>Priority</span>
+      <code>{priority || "(unknown)"}</code>
+      <span style={{ color: "var(--text-muted)" }}>Direction</span>
+      <code>{direction || "(unknown)"}</code>
+      <span style={{ color: "var(--text-muted)" }}>Access</span>
+      <code>{access || "(unknown)"}</code>
+      <span style={{ color: "var(--text-muted)" }}>Protocol</span>
+      <code>{protocol || "(unknown)"}</code>
+      <span style={{ color: "var(--text-muted)" }}>Source CIDRs</span>
+      <code style={{ wordBreak: "break-all" }}>
+        {sourcePrefixes.length
+          ? sourcePrefixes.map(renderWildcard).join(", ")
+          : "(any)"}
+      </code>
+      {sourcePorts.length > 0 && (
+        <>
+          <span style={{ color: "var(--text-muted)" }}>Source ports</span>
+          <code>{sourcePorts.map(renderWildcard).join(", ")}</code>
+        </>
+      )}
+      <span style={{ color: "var(--text-muted)" }}>Destination</span>
+      <code style={{ wordBreak: "break-all" }}>{destDisplay}</code>
+      <span style={{ color: "var(--text-muted)" }}>Destination ports</span>
+      <code>{destPorts.length ? destPorts.map(renderWildcard).join(", ") : "(any)"}</code>
+      {description && (
+        <>
+          <span style={{ color: "var(--text-muted)" }}>Description</span>
+          <code style={{ wordBreak: "break-all" }}>{description}</code>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -2862,7 +3608,7 @@ function Badge({ tone, icon, children }: { tone: "success" | "muted" | "warning"
 
 function StatusLine({ kind, children }: { kind: "info" | "success" | "error" | "loading"; children: React.ReactNode }) {
   const icon = kind === "success" ? <CheckCircle2 size={13} color="var(--success)" /> : kind === "error" ? <AlertCircle size={13} color="var(--danger)" /> : kind === "loading" ? <Loader2 size={13} /> : <Activity size={13} />;
-  return <div style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5, marginTop: 4 }}><span style={{ marginTop: 1 }}>{icon}</span><span style={{ wordBreak: "break-word" }}>{children}</span></div>;
+  return <div style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5, marginTop: 4 }}><span style={{ marginTop: 1 }}>{icon}</span><span style={{ wordBreak: "break-word", whiteSpace: "pre-wrap" }}>{children}</span></div>;
 }
 
 function TaskStatusLine({ task }: { task: TaskState }) {

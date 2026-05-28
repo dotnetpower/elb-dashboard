@@ -28,6 +28,7 @@ from api.services.azure_clients import aks_client
 from api.services.image_tags import IMAGE_TAGS
 from api.services.k8s.monitoring import k8s_get_deployment_ready_replicas, k8s_get_service_ip
 from api.services.k8s.observability import k8s_list_events
+from api.tasks.openapi.constants import pls_config_from_env
 from api.tasks.openapi.helpers import blast_node_count, record_progress
 from api.tasks.openapi.kubectl import kubectl_apply
 from api.tasks.openapi.manifests import build_manifests
@@ -138,6 +139,85 @@ def _classify_ready_failure(events: Sequence[dict[str, Any]]) -> str:
     if "failedscheduling" in text or "untolerated taint" in text or "insufficient cpu" in text:
         return "unschedulable"
     return "unknown"
+
+
+def _read_service_annotations(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str = "default",
+    service_name: str = "elb-openapi",
+) -> dict[str, str] | None:
+    """Return existing Service annotations, or None if the Service is absent.
+
+    Used by the PLS transition guard to detect "Service exists but has no
+    azure-pls-create annotation" so the deploy task can refuse to do an
+    in-place annotation update (which the AKS LB controller silently
+    ignores) and instead require an explicit
+    ``OPENAPI_PLS_CONFIRM_RECREATE=1`` opt-in.
+    """
+    # Import inline so test modules that monkeypatch deploy.* do not have
+    # to also patch the heavy k8s monitoring import graph.
+    from api.services.k8s.monitoring import _get_k8s_session
+
+    session, server = _get_k8s_session(cred, subscription_id, resource_group, cluster_name)
+    try:
+        response = session.get(
+            f"{server}/api/v1/namespaces/{namespace}/services/{service_name}",
+            timeout=10,
+        )
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            LOGGER.warning(
+                "openapi deploy: PLS service probe unexpected status=%s",
+                response.status_code,
+            )
+            return None
+        body = response.json() or {}
+        metadata = body.get("metadata") or {}
+        annotations = metadata.get("annotations") or {}
+        # Coerce all values to str so downstream comparisons are stable.
+        return {str(k): str(v) for k, v in annotations.items()}
+    except Exception as exc:
+        LOGGER.warning(
+            "openapi deploy: PLS service probe failed: %s", type(exc).__name__
+        )
+        return None
+    finally:
+        session.close()
+
+
+def _delete_openapi_service(
+    cred: Any,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str = "default",
+    service_name: str = "elb-openapi",
+) -> None:
+    """Delete the ``elb-openapi`` Service so the next apply re-creates it.
+
+    Only called after the PLS transition guard has verified the operator
+    set ``OPENAPI_PLS_CONFIRM_RECREATE=1``. Raises on transport / API
+    errors so the caller can surface a structured failure result.
+    """
+    from api.services.k8s.monitoring import _get_k8s_session
+
+    session, server = _get_k8s_session(cred, subscription_id, resource_group, cluster_name)
+    try:
+        response = session.delete(
+            f"{server}/api/v1/namespaces/{namespace}/services/{service_name}",
+            timeout=15,
+        )
+        if response.status_code not in (200, 202, 404):
+            raise RuntimeError(
+                f"kubectl delete svc {service_name} returned "
+                f"status={response.status_code}"
+            )
+    finally:
+        session.close()
 
 
 @shared_task(
@@ -273,6 +353,92 @@ def deploy_openapi_service(
 
     # ----- 2. kubectl apply --------------------------------------------------
     record_progress(self, "applying_manifests", image=image, mi_client_id=mi_client_id[:8])
+    try:
+        pls = pls_config_from_env()
+    except ValueError as exc:
+        LOGGER.error("openapi deploy: PLS env invalid: %s", exc)
+        return {
+            "status": "failed",
+            "cluster_name": cluster_name,
+            "resource_group": resource_group,
+            "workload_identity": wi_result,
+            "openapi_deploy": {
+                "image": image,
+                "error": str(exc),
+                "code": "openapi_pls_misconfigured",
+            },
+        }
+
+    # PLS transition guard. The AKS cloud-provider controller only honours
+    # the `azure-pls-*` annotations when the Service is *created*; updating
+    # an existing ILB-only Service in place does not actually stand up a
+    # Private Link Service. Detect the transition by reading the existing
+    # Service annotations and require an explicit confirm env so the
+    # operator can't accidentally cause a 1-2 min ingress outage.
+    if pls.enabled:
+        existing_annotations = _read_service_annotations(
+            cred,
+            subscription_id,
+            resource_group,
+            cluster_name,
+        )
+        if (
+            existing_annotations is not None
+            and existing_annotations.get(
+                "service.beta.kubernetes.io/azure-pls-create"
+            )
+            != "true"
+        ):
+            confirm = (
+                os.environ.get("OPENAPI_PLS_CONFIRM_RECREATE") or ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if not confirm:
+                LOGGER.error(
+                    "openapi deploy: PLS first-time activation blocked — "
+                    "existing elb-openapi Service has no azure-pls-create "
+                    "annotation. Set OPENAPI_PLS_CONFIRM_RECREATE=1 to "
+                    "delete + recreate the Service (~1-2 min ingress "
+                    "outage) on the next deploy."
+                )
+                return {
+                    "status": "blocked",
+                    "cluster_name": cluster_name,
+                    "resource_group": resource_group,
+                    "workload_identity": wi_result,
+                    "openapi_deploy": {
+                        "image": image,
+                        "code": "openapi_pls_recreate_required",
+                        "message": (
+                            "Enabling PLS on an existing Service requires "
+                            "kubectl delete svc elb-openapi first. Set "
+                            "OPENAPI_PLS_CONFIRM_RECREATE=1 to let the "
+                            "deploy task perform the recreate."
+                        ),
+                    },
+                }
+            # Operator opted in: delete the Service so the next apply
+            # creates a fresh one with the PLS annotations honoured.
+            try:
+                _delete_openapi_service(
+                    cred,
+                    subscription_id,
+                    resource_group,
+                    cluster_name,
+                )
+            except Exception as exc:
+                LOGGER.exception("openapi deploy: PLS Service delete failed")
+                return {
+                    "status": "failed",
+                    "cluster_name": cluster_name,
+                    "resource_group": resource_group,
+                    "workload_identity": wi_result,
+                    "openapi_deploy": {
+                        "image": image,
+                        "error": str(exc)[:500],
+                        "code": "openapi_pls_recreate_failed",
+                    },
+                }
+
     manifest = build_manifests(
         image=image,
         mi_client_id=mi_client_id,
@@ -285,6 +451,7 @@ def deploy_openapi_service(
         acr_resource_group=effective_acr_resource_group,
         num_nodes=num_nodes,
         api_token=api_token,
+        pls=pls,
     )
     try:
         apply_output = kubectl_apply(

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import pytest
 from api.services.k8s.prepare_db_jobs import (
+    DEFAULT_ACTIVE_DEADLINE_SECONDS,
+    DEFAULT_AZCOPY_IMAGE,
     DEFAULT_TTL_SECONDS_AFTER_FINISHED,
     PREPARE_DB_AKS_SCRIPT,
     SOURCE_VERSION_ANNOTATION,
@@ -156,15 +158,80 @@ def test_configmap_rejects_bad_name() -> None:
         build_prepare_db_scripts_configmap(shards=[["a"]], name="Bad Name")
 
 
-def test_manifest_volumes_include_scripts_and_tmp() -> None:
+def test_manifest_volumes_include_scripts_and_azcopy_cache_only() -> None:
+    """Phase 1.5: the PipeBlob refactor removed the 2 GiB tmpfs `/tmp`
+    volume because nothing on disk is staged anymore. Only `scripts` (the
+    ConfigMap) and `azcopy-cache` (small tmpfs for `~/.azcopy`) survive."""
     manifest = _baseline_manifest()
-    volumes = manifest["spec"]["template"]["spec"]["volumes"]
+    pod_spec = manifest["spec"]["template"]["spec"]
+    volumes = pod_spec["volumes"]
     by_name = {v["name"]: v for v in volumes}
-    assert "scripts" in by_name
+    assert set(by_name) == {"scripts", "azcopy-cache"}, by_name
     assert by_name["scripts"]["configMap"]["name"] == "prepare-db-corent-202605210105"
     assert by_name["scripts"]["configMap"]["defaultMode"] == 0o755
-    assert "tmp" in by_name
-    assert by_name["tmp"]["emptyDir"]["medium"] == "Memory"
+    assert by_name["azcopy-cache"]["emptyDir"]["medium"] == "Memory"
+    # Shrunk from 128Mi to 64Mi — PipeBlob mode does not write plan files,
+    # so we don't need the bigger reservation.
+    assert by_name["azcopy-cache"]["emptyDir"]["sizeLimit"] == "64Mi"
+    # And the matching volumeMount is the only one besides scripts.
+    container = pod_spec["containers"][0]
+    mount_names = {m["name"] for m in container["volumeMounts"]}
+    assert mount_names == {"scripts", "azcopy-cache"}
+
+
+def test_manifest_default_image_is_pinned() -> None:
+    """Charter §3: pin Azure CLI >= 2.81. `:latest` is forbidden."""
+    assert DEFAULT_AZCOPY_IMAGE == "mcr.microsoft.com/azure-cli:2.81.0"
+    manifest = _baseline_manifest()
+    container = manifest["spec"]["template"]["spec"]["containers"][0]
+    assert container["image"] == DEFAULT_AZCOPY_IMAGE
+    # Pinned tag => `IfNotPresent` is safe and avoids re-pulling on every
+    # backoff retry. With `:latest` this would have been racy.
+    assert container["imagePullPolicy"] == "IfNotPresent"
+
+
+def test_manifest_default_active_deadline_is_45_minutes() -> None:
+    """Phase 1.5: bumped from 30 -> 45 min so the slowest shard in a
+    5-node throttled run still has headroom for ~10-15 large `.nsq`
+    files after its peers finish."""
+    assert DEFAULT_ACTIVE_DEADLINE_SECONDS == 2700
+    manifest = _baseline_manifest()
+    assert manifest["spec"]["activeDeadlineSeconds"] == 2700
+
+
+def test_script_streams_via_pipeblob() -> None:
+    """The pod script must stream NCBI -> Azure Blob via
+    `azcopy --from-to=PipeBlob`. Anything else (server-side
+    `--from-to=BlobBlob`, on-disk staging via `mktemp`) reintroduces
+    the OOM or per-node-NAT regressions."""
+    assert "--from-to=PipeBlob" in PREPARE_DB_AKS_SCRIPT
+    # The old on-disk path used `mktemp /tmp/prepare-db-XXXXXX` — must be
+    # gone now or the `/tmp` emptyDir would still be required.
+    assert "mktemp" not in PREPARE_DB_AKS_SCRIPT
+    # `set -euo pipefail` is what makes a curl-side failure fail the
+    # shard cleanly.
+    assert "set -euo pipefail" in PREPARE_DB_AKS_SCRIPT
+
+
+def test_script_skips_already_uploaded_blobs() -> None:
+    """Per-file idempotency: `azcopy list` against the destination URL,
+    skip if it already has a ContentLength. This makes a backoffLimit
+    retry replay only the failed files instead of refetching all 750+."""
+    assert "azcopy list" in PREPARE_DB_AKS_SCRIPT
+    assert "ContentLength" in PREPARE_DB_AKS_SCRIPT
+    # `skip` counter is what the DONE log line surfaces, so the user can
+    # tell "0 skipped on first run vs N skipped on retry" at a glance.
+    assert "skip=$((skip + 1))" in PREPARE_DB_AKS_SCRIPT
+    assert "skip=${skip}" in PREPARE_DB_AKS_SCRIPT
+
+
+def test_script_bootstraps_azcopy_from_aka_ms() -> None:
+    """The pinned azure-cli image does not bundle azcopy or GNU tar, so
+    the script must download azcopy from aka.ms and extract it via
+    Python's stdlib tarfile module. Both pieces are load-bearing."""
+    assert "aka.ms/downloadazcopy-v10-linux" in PREPARE_DB_AKS_SCRIPT
+    assert "import tarfile" in PREPARE_DB_AKS_SCRIPT
+    assert "/usr/local/bin/azcopy" in PREPARE_DB_AKS_SCRIPT
 
 
 def test_labels_are_k8s_safe() -> None:

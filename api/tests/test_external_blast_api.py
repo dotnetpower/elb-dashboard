@@ -42,6 +42,7 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
         }
 
     monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    monkeypatch.setattr(external_blast, "ready", lambda **_kw: {"ready": True})
     client = TestClient(app)
 
     response = client.post(
@@ -216,6 +217,7 @@ def test_external_blast_defaults_taxid_to_inclusive(monkeypatch):
         return {"job_id": "aaaaaaaaaaaa", "status": "queued"}
 
     monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    monkeypatch.setattr(external_blast, "ready", lambda **_kw: {"ready": True})
     client = TestClient(app)
 
     response = client.post(
@@ -393,6 +395,7 @@ def test_external_blast_submit_backfills_empty_upstream_metadata(monkeypatch):
             "external_correlation_id": "",
         },
     )
+    monkeypatch.setattr(external_blast, "ready", lambda **_kw: {"ready": True})
     client = TestClient(app)
 
     response = client.post(
@@ -1431,3 +1434,383 @@ def test_canonical_jobs_list_refreshes_active_local_rows(monkeypatch):
     assert response.status_code == 200
     # Only the active row's phase ∈ _K8S_REFRESH_PHASES → refresh called once.
     assert refreshed_ids == ["active-row"]
+
+
+# ── /v1/ready integration ──────────────────────────────────────────────────
+
+
+class _FakeReadyClient:
+    """httpx.Client double for ``external_blast.ready`` tests.
+
+    ``status`` and ``payload`` describe the sibling response; ``exc`` instead
+    raises a transport error on ``.get()`` to exercise the openapi_unreachable
+    branch.
+    """
+
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        payload: dict[str, object] | None = None,
+        exc: Exception | None = None,
+    ) -> None:
+        self._status = status
+        self._payload = payload or {}
+        self._exc = exc
+        self.captured: dict[str, object] = {}
+
+    def __call__(self, **kwargs: object) -> _FakeReadyClient:
+        self.captured.update(kwargs)
+        return self
+
+    def __enter__(self) -> _FakeReadyClient:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def get(self, path: str) -> httpx.Response:
+        self.captured["path"] = path
+        if self._exc is not None:
+            raise self._exc
+        return httpx.Response(
+            status_code=self._status,
+            json=self._payload,
+            request=httpx.Request("GET", f"http://openapi{path}"),
+        )
+
+
+def test_external_blast_ready_returns_payload_on_200(monkeypatch) -> None:
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _FakeReadyClient(
+        status=200,
+        payload={
+            "ready": True,
+            "checks": {
+                "k8s_api": {"status": "ok"},
+                "workload_pool": {"status": "ok", "ready_nodes": 3},
+                "openapi_pod": {"status": "ok", "ready_replicas": 1},
+            },
+            "version": "3.7.0",
+        },
+    )
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+
+    result = external_blast.ready(base_url="http://openapi", api_token="t")
+
+    assert result["ready"] is True
+    assert result["version"] == "3.7.0"
+    assert fake.captured["timeout"] == external_blast._READY_TIMEOUT_SECONDS
+    assert fake.captured["path"] == "/v1/ready"
+
+
+def test_external_blast_ready_503_surfaces_upstream_code(monkeypatch) -> None:
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _FakeReadyClient(
+        status=503,
+        payload={
+            "ready": False,
+            "code": "no_workload_nodes",
+            "message": "No Ready nodes match label 'workload=blast'",
+            "checks": {
+                "k8s_api": {"status": "ok"},
+                "workload_pool": {
+                    "status": "error",
+                    "ready_nodes": 0,
+                    "label": "workload=blast",
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.ready(base_url="http://openapi")
+
+    assert raised.value.status_code == 503
+    detail = raised.value.detail
+    assert detail["code"] == "openapi_not_ready"
+    assert detail["upstream_code"] == "no_workload_nodes"
+    assert "workload_pool" in detail["checks"]
+
+
+def test_external_blast_ready_transport_error_is_openapi_unreachable(monkeypatch) -> None:
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _FakeReadyClient(exc=httpx.ConnectTimeout("AKS API server unreachable"))
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.ready(base_url="http://openapi")
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "openapi_unreachable"
+    assert raised.value.detail["probe"] == "ready"
+
+
+def test_external_blast_ready_404_fails_open(monkeypatch, caplog) -> None:
+    """Older sibling images lack /v1/ready — the gate must not block submit."""
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _FakeReadyClient(status=404, payload={"detail": "Not Found"})
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+
+    with caplog.at_level("WARNING", logger=external_blast.LOGGER.name):
+        result = external_blast.ready(base_url="http://openapi")
+
+    assert result["ready"] is True
+    assert result["skipped"] == "version_mismatch"
+    # Operators must see a structured warning so a pre-4.15 sibling cannot
+    # silently degrade the gate.
+    assert any(
+        getattr(rec, "event", None) == "ready_probe_stale_sibling"
+        for rec in caplog.records
+    )
+
+
+def test_external_blast_ready_caches_success_within_ttl(monkeypatch) -> None:
+    """A second call within TTL must not hit the sibling at all."""
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _FakeReadyClient(
+        status=200,
+        payload={"ready": True, "version": "3.7.1"},
+    )
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+
+    first = external_blast.ready(base_url="http://openapi", api_token="t")
+    # Mutate the fake to a fatal response. If the cache works, second call
+    # returns the cached success and never sees this.
+    fake._status = 503
+    fake._payload = {"code": "k8s_unreachable"}
+    second = external_blast.ready(base_url="http://openapi", api_token="t")
+
+    assert first == second
+    assert first["version"] == "3.7.1"
+
+
+def test_external_blast_ready_429_surfaces_rate_limit(monkeypatch) -> None:
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _FakeReadyClient(
+        status=429,
+        payload={
+            "ready": False,
+            "code": "rate_limited",
+            "message": "/v1/ready rate limit reached (30/min). Retry after 60s.",
+            "limit_per_minute": 30,
+        },
+    )
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.ready(base_url="http://openapi", api_token="t")
+
+    assert raised.value.status_code == 429
+    assert raised.value.detail["code"] == "openapi_ready_rate_limited"
+    assert raised.value.detail["limit_per_minute"] == 30
+
+
+def test_external_blast_ready_cache_key_normalises_base_url(monkeypatch) -> None:
+    """Trailing slash and case differences must hit the same cache slot."""
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    a = external_blast._ready_cache_key("https://x.io", "tok")
+    b = external_blast._ready_cache_key("https://x.io/", "tok")
+    c = external_blast._ready_cache_key("HTTPS://X.IO/", "tok")
+    assert a == b == c
+    # Token still hashed to a full sha256 hex (64 chars), not the old [:8].
+    assert len(a[1]) == 64
+
+
+def test_external_blast_ready_inflight_serialises_concurrent_callers(
+    monkeypatch,
+) -> None:
+    """N concurrent cache-miss callers must produce exactly one upstream call."""
+    import threading
+
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+
+    call_count = {"n": 0}
+    call_lock = threading.Lock()
+    block = threading.Event()
+    leader_in = threading.Event()
+
+    payload = {"ready": True, "version": "3.7.1"}
+
+    class _SlowClient:
+        def __call__(self, **_kwargs: object) -> _SlowClient:
+            return self
+
+        def __enter__(self) -> _SlowClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _path: str) -> httpx.Response:
+            with call_lock:
+                call_count["n"] += 1
+            leader_in.set()
+            # Hold the leader inside the upstream call so waiters pile up.
+            block.wait(timeout=2.0)
+            return httpx.Response(
+                status_code=200,
+                json=payload,
+                request=httpx.Request("GET", "http://openapi/v1/ready"),
+            )
+
+    monkeypatch.setattr(external_blast.httpx, "Client", _SlowClient())
+
+    results: list[dict[str, object]] = []
+    results_lock = threading.Lock()
+
+    def _probe() -> None:
+        out = external_blast.ready(base_url="http://openapi", api_token="t")
+        with results_lock:
+            results.append(out)
+
+    threads = [threading.Thread(target=_probe) for _ in range(8)]
+    for th in threads:
+        th.start()
+    # Make sure the leader is inside .get() before we release it.
+    assert leader_in.wait(timeout=1.0)
+    block.set()
+    for th in threads:
+        th.join(timeout=3.0)
+        assert not th.is_alive()
+
+    assert call_count["n"] == 1, f"expected single upstream call, saw {call_count['n']}"
+    assert len(results) == 8
+    assert all(r == payload for r in results)
+
+
+def test_external_blast_ready_cache_hit_logs_event(monkeypatch, caplog) -> None:
+    """Subsequent cache hits must still emit a ``ready_probe_cached`` log line.
+
+    Otherwise App Insights silently undercounts outage duration during the TTL
+    window. Failure cache hits log at INFO; success hits at DEBUG.
+    """
+    import logging as _logging
+
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _FakeReadyClient(
+        status=503,
+        payload={"ready": False, "code": "k8s_unreachable", "message": "down"},
+    )
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+
+    caplog.set_level(_logging.INFO, logger="api.services.external_blast")
+
+    # First call: real upstream (cached as HTTPException).
+    with pytest.raises(HTTPException):
+        external_blast.ready(base_url="http://openapi", api_token="t")
+    caplog.clear()
+
+    # Second call: cache hit. Must log ``ready_probe_cached`` at INFO with
+    # the failure code preserved.
+    with pytest.raises(HTTPException):
+        external_blast.ready(base_url="http://openapi", api_token="t")
+
+    cached_logs = [
+        rec for rec in caplog.records if getattr(rec, "event", None) == "ready_probe_cached"
+    ]
+    assert cached_logs, "expected a ready_probe_cached log on cache hit"
+    rec = cached_logs[0]
+    assert getattr(rec, "status", None) == 503
+    assert getattr(rec, "code", None) == "openapi_not_ready"
+    assert getattr(rec, "cached_age_seconds", None) is not None
+
+
+def test_external_blast_submit_aborts_when_ready_blocks(monkeypatch) -> None:
+    """Submit must surface the sibling's 503 verbatim and never call submit_job."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    submit_called = {"count": 0}
+
+    def fake_ready(**_kwargs: object) -> dict[str, object]:
+        raise HTTPException(
+            503,
+            detail={
+                "code": "openapi_not_ready",
+                "upstream_code": "openapi_pod_not_ready",
+                "message": "elb-openapi Deployment has zero ready replicas",
+                "checks": {"openapi_pod": {"status": "error", "ready_replicas": 0}},
+            },
+        )
+
+    def fake_submit(payload: dict[str, object]) -> dict[str, object]:
+        # pragma: no cover - asserted not called
+        submit_called["count"] += 1
+        return {"job_id": "ignored"}
+
+    monkeypatch.setattr(external_blast, "ready", fake_ready)
+    monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+        },
+    )
+
+    assert response.status_code == 503
+    detail = response.json()
+    assert detail["code"] == "openapi_not_ready"
+    assert detail["upstream_code"] == "openapi_pod_not_ready"
+    assert submit_called["count"] == 0
+
+
+def test_external_blast_submit_proceeds_when_ready_ok(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    call_order: list[str] = []
+
+    def fake_ready(**_kwargs: object) -> dict[str, object]:
+        call_order.append("ready")
+        return {"ready": True, "version": "3.7.0"}
+
+    def fake_submit(payload: dict[str, object]) -> dict[str, object]:
+        call_order.append("submit")
+        return {
+            "job_id": "abcdef123456",
+            "status": "queued",
+            "created_at": "2026-05-29T10:00:00Z",
+        }
+
+    monkeypatch.setattr(external_blast, "ready", fake_ready)
+    monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+        },
+    )
+
+    assert response.status_code == 202
+    assert call_order == ["ready", "submit"]
+    assert response.json()["job_id"] == "abcdef123456"

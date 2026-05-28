@@ -236,6 +236,36 @@ def _validate_token(token: str) -> CallerIdentity:
     return identity
 
 
+# Public sentinels reused by ownership / authorization gates. Keep these
+# in lockstep with `_dev_bypass_identity` — callers compare against the
+# constant rather than hardcoding the literal so a future bypass-oid
+# change does not silently break authorization helpers.
+DEV_BYPASS_OID: str = "00000000-0000-0000-0000-000000000000"
+
+
+def is_dev_bypass_caller(caller: CallerIdentity) -> bool:
+    """Return True when ``caller`` was produced by the AUTH_DEV_BYPASS path.
+
+    Use this from authorization helpers that need to short-circuit owner
+    checks during local development. Do NOT hardcode the sentinel oid
+    elsewhere — that's how the autostop ownership guard was silently
+    broken when the bypass oid changed shape.
+
+    SECURITY: deployed Container Apps always refuse to honour the dev
+    bypass even if ``AUTH_DEV_BYPASS=true`` slipped through to a cloud
+    revision (e.g. a stale ``.env`` import). In a deployed environment
+    ``CONTAINER_APP_NAME`` is set by the platform; when present we
+    refuse to recognise the bypass identity so the dev-bypass GUID
+    cannot turn into a privilege-escalation primitive on top of a real
+    operator action.
+    """
+    if not caller:
+        return False
+    if os.environ.get("CONTAINER_APP_NAME"):
+        return False
+    return caller.object_id == DEV_BYPASS_OID
+
+
 def _dev_bypass_identity() -> CallerIdentity:
     """Synthetic identity returned when AUTH_DEV_BYPASS=true.
 
@@ -244,7 +274,7 @@ def _dev_bypass_identity() -> CallerIdentity:
     use it for downstream auth will fail loudly rather than silently leak.
     """
     return CallerIdentity(
-        object_id="00000000-0000-0000-0000-000000000000",
+        object_id=DEV_BYPASS_OID,
         tenant_id=os.environ.get("AZURE_TENANT_ID", "dev-bypass"),
         upn="dev-bypass@local",
         raw_token="",

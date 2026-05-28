@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { useToast } from "@/components/Toast";
@@ -51,6 +51,7 @@ export function BlastSubmit() {
   const [now, setNow] = useState(() => Date.now());
   const sectionRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { toast } = useToast();
 
   // One-shot hydration from a "Duplicate / Re-run" handoff. The
@@ -91,6 +92,54 @@ export function BlastSubmit() {
     }
     // Mount-only — re-applying on every render would defeat the one-shot
     // semantics and trample the researcher's edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // One-shot prefill from `/sequence/:accession` → "Use in BLAST" or
+  // "BLAST range" buttons. We consume the params once and strip them from
+  // the URL so a manual edit + reload does not re-apply stale handoff data.
+  useEffect(() => {
+    const accession = (searchParams.get("accession") || "").trim();
+    const from = (searchParams.get("from") || "").trim();
+    const to = (searchParams.get("to") || "").trim();
+    if (!accession && !from && !to) return;
+
+    // Preserve an in-progress FASTA draft. The backend already rejects
+    // `query_accession` + `query_data` with 422 `conflicting_query_sources`,
+    // so we MUST NOT silently wipe the inline FASTA on handoff — the
+    // researcher might have spent time pasting it. Read the draft from the
+    // outer-scope `form` (this effect runs once on mount, so `form` is the
+    // initial state hydrated by `useDraftForm`).
+    const hasExistingDraft = (form.query_data || "").trim().length > 0;
+    const applyAccession = accession && !hasExistingDraft;
+    // `from`/`to` are coordinates against the handed-off accession. Applying
+    // them to a researcher's existing inline FASTA draft would silently mis-
+    // range the submission, so we gate the range on the same flag as the
+    // accession itself. Standalone `from`/`to` (no accession) is still
+    // honoured for the manual sub-range entry path.
+    const applyRange = applyAccession || !accession;
+
+    setForm((current) => ({
+      ...current,
+      ...(applyAccession ? { query_accession: accession, query_data: "" } : null),
+      ...(applyRange && from ? { query_from: from } : null),
+      ...(applyRange && to ? { query_to: to } : null),
+    }));
+    if (applyAccession) {
+      toast(`Loaded NCBI accession ${accession} into the query field.`, "info");
+    } else if (accession && hasExistingDraft) {
+      toast(
+        `Kept your existing FASTA draft; ignoring accession handoff for ${accession}.` +
+          " Clear the query box first if you want to use the accession instead.",
+        "info",
+      );
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("accession");
+    next.delete("from");
+    next.delete("to");
+    setSearchParams(next, { replace: true });
+    // Mount-only; we consume the URL handoff once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

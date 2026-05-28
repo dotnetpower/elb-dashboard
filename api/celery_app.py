@@ -147,6 +147,16 @@ celery_app.conf.update(
             "schedule": float(os.environ.get("CELERY_BEAT_AKS_PROVISION_RECONCILE_SECONDS", "300")),
             "options": {"queue": "azure"},
         },
+        "aks-idle-autostop-evaluate": {
+            "task": "api.tasks.azure.evaluate_idle_clusters",
+            "schedule": float(os.environ.get("CELERY_BEAT_AKS_IDLE_AUTOSTOP_SECONDS", "300")),
+            "options": {"queue": "azure"},
+        },
+        "openapi-public-https-reconcile": {
+            "task": "api.tasks.openapi.reconcile_public_https",
+            "schedule": float(os.environ.get("CELERY_BEAT_OPENAPI_PUBLIC_HTTPS_SECONDS", "120")),
+            "options": {"queue": "azure"},
+        },
     },
     timezone="UTC",
     enable_utc=True,

@@ -172,6 +172,69 @@ class TaskAcceptedResponse(BaseModel):
     status_url: str  # GET /api/tasks/{task_id}
 
 
+# ---------------------------------------------------------------------------
+# OpenAPI response templates for the NCBI/accession integration paths.
+#
+# FastAPI merges these into the route's `responses` dict so the generated
+# OpenAPI schema documents every error code the SPA may receive. Codes are
+# advisory — the actual response body is the standard ``ErrorResponse``
+# envelope and the runtime code (str slug) is set by the raising route.
+# ---------------------------------------------------------------------------
+NCBI_LOOKUP_RESPONSES: dict[int | str, dict[str, Any]] = {
+    422: {
+        "model": ErrorResponse,
+        "description": (
+            "Caller-fixable validation error. Possible `code` values: "
+            "`ncbi_accession_invalid` (bad accession or sub-range), "
+            "`ncbi_query_too_large` (response exceeds the byte cap — supply "
+            "a sub-range)."
+        ),
+    },
+    429: {
+        "model": ErrorResponse,
+        "description": (
+            "Dashboard rate limiter exhausted (`ncbi_rate_limited`). NCBI "
+            "itself is healthy; retry after ~1 second."
+        ),
+    },
+    503: {
+        "model": ErrorResponse,
+        "description": (
+            "NCBI E-utilities upstream unavailable (`ncbi_lookup_unavailable`). "
+            "Already retried once; safe to retry after ~30 seconds."
+        ),
+    },
+}
+
+BLAST_SUBMIT_RESPONSES: dict[int | str, dict[str, Any]] = {
+    422: {
+        "model": ErrorResponse,
+        "description": (
+            "Caller-fixable validation error. Possible `code` values: "
+            "`validation_error`, `invalid_query_fasta`, "
+            "`conflicting_query_sources` (accession + inline FASTA / file / "
+            "blob URL set at once), `ncbi_accession_invalid`, "
+            "`ncbi_query_too_large`."
+        ),
+    },
+    429: {
+        "model": ErrorResponse,
+        "description": (
+            "Dashboard rate limiter exhausted (`ncbi_rate_limited`) while "
+            "resolving the accession. Retry after ~1 second."
+        ),
+    },
+    503: {
+        "model": ErrorResponse,
+        "description": (
+            "NCBI lookup failed (`ncbi_lookup_unavailable`) while resolving "
+            "the accession. Retry after ~30 seconds, or submit without an "
+            "accession."
+        ),
+    },
+}
+
+
 def new_job_id() -> str:
     return str(uuid.uuid4())
 

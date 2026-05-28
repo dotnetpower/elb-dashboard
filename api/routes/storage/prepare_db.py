@@ -166,8 +166,44 @@ def _try_dispatch_aks_mode(
     except ValueError:
         min_idle_nodes = 3
 
-    # Lazy import — k8s helpers pull in the Azure SDK transitively.
+    # Lazy imports — k8s helpers pull in the Azure SDK transitively.
+    from api.services.cluster_health import get_cluster_health
     from api.services.k8s.nodes import k8s_ready_warmup_node_names
+
+    # ARM-level powerState check first — a stopped cluster yields a cleaner
+    # error than letting the K8s API time out (~10 s) per dispatch attempt.
+    try:
+        health = get_cluster_health(cred, sub, aks_rg, cluster_name)
+    except Exception as exc:
+        LOGGER.debug(
+            "cluster_health probe raised for AKS prepare-db dispatch: %s",
+            type(exc).__name__,
+        )
+        health = None
+    if health is not None and not health.get("healthy", True):
+        reason = health.get("reason")
+        power_state = health.get("power_state")
+        if mode == "aks":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "aks_unavailable",
+                    "message": (
+                        "AKS cluster is not Running "
+                        f"(reason={reason}, power_state={power_state}). "
+                        "Start the cluster from the dashboard or use mode=server-side."
+                    ),
+                    "ready_nodes": 0,
+                    "required_nodes": min_idle_nodes,
+                    "cluster_reason": reason,
+                    "cluster_power_state": power_state,
+                },
+            )
+        LOGGER.info(
+            "prepare_db mode=auto AKS cluster not healthy (%s); falling back",
+            reason,
+        )
+        return None
 
     try:
         ready_nodes = k8s_ready_warmup_node_names(cred, sub, aks_rg, cluster_name)
@@ -208,10 +244,70 @@ def _try_dispatch_aks_mode(
             )
         return None
 
+    # RBAC pre-flight: confirm the kubelet identity already carries
+    # Storage Blob Data Contributor (or a superset role) on the workload
+    # storage account. Without it every pod's `azcopy login --identity`
+    # succeeds but every PUT returns 403, surfacing as a generic
+    # azcopy exit 3 only ~30 s into the Job. The probe is best-effort —
+    # a "probe_failed" outcome (e.g. caller lacks
+    # Microsoft.Authorization/roleAssignments/read) falls through so the
+    # operator still gets the existing post-dispatch error path.
+    from api.services.k8s.prepare_db_preflight import kubelet_storage_blob_data_access
+
+    rbac = kubelet_storage_blob_data_access(
+        cred,
+        subscription_id=sub,
+        resource_group=aks_rg,
+        cluster_name=cluster_name,
+        storage_resource_group=storage_rg,
+        storage_account=account_name,
+    )
+    if rbac.should_block:
+        message = (
+            "AKS kubelet identity is missing 'Storage Blob Data Contributor' "
+            f"on storage account {account_name}; prepare-db pods would 403. "
+            "Run warmup (which grants this role) or assign it manually before "
+            "retrying."
+            if rbac.status == "missing"
+            else (
+                f"AKS cluster {cluster_name} has no kubelet managed identity "
+                "(service-principal mode?); the AKS-fanout prepare-db path "
+                "requires a managed identity. Use mode=server-side."
+            )
+        )
+        if mode == "aks":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "kubelet_rbac_missing",
+                    "message": message,
+                    "kubelet_object_id": rbac.kubelet_object_id,
+                    "storage_account": account_name,
+                },
+            )
+        LOGGER.info(
+            "prepare_db mode=auto kubelet RBAC pre-flight blocked "
+            "(%s); falling back to server-side",
+            rbac.status,
+        )
+        return None
+    if rbac.status == "probe_failed":
+        LOGGER.info(
+            "prepare_db: kubelet RBAC pre-flight indeterminate (%s); "
+            "proceeding optimistically",
+            rbac.reason,
+        )
+
     from api.routes._blast_shared import _safe_send_task
     from api.routes.storage.common import (
         NcbiAccessDenied,
         _list_keys_with_sizes,
+    )
+    from api.services.k8s.prepare_db_jobs import (
+        DEFAULT_NAMESPACE as _AKS_DEFAULT_NAMESPACE,
+    )
+    from api.services.k8s.prepare_db_jobs import (
+        prepare_db_job_name as _prepare_db_job_name,
     )
     from api.services.storage.data import _blob_service
     from api.services.storage.public_access import ensure_local_storage_access
@@ -305,6 +401,22 @@ def _try_dispatch_aks_mode(
 
         previous_source_version = str(previous_metadata.get("source_version") or "")
         started_at = datetime.now(UTC).isoformat()
+        aks_namespace = os.environ.get(
+            "PREPARE_DB_AKS_NAMESPACE", _AKS_DEFAULT_NAMESPACE
+        )
+        aks_job_name = _prepare_db_job_name(db_name, latest_dir)
+        # Persisted so the cancel route + a future reconciler can find the
+        # in-flight Job after the api/worker revision restarts (Redis is
+        # ephemeral, so the Celery task id alone is not enough).
+        aks_job_ref = {
+            "subscription_id": sub,
+            "resource_group": aks_rg,
+            "cluster_name": cluster_name,
+            "namespace": aks_namespace,
+            "job_name": aks_job_name,
+            "configmap_name": aks_job_name,
+            "started_at": started_at,
+        }
 
         def _start_mutator(meta: dict[str, Any]) -> dict[str, Any]:
             meta["db_name"] = db_name
@@ -320,6 +432,7 @@ def _try_dispatch_aks_mode(
                 "mode": "aks",
                 "total_files": len(file_keys),
             }
+            meta["aks_job_ref"] = aks_job_ref
             if previous_source_version and previous_source_version != latest_dir:
                 meta["previous_source_version"] = previous_source_version
             return meta
@@ -336,9 +449,19 @@ def _try_dispatch_aks_mode(
         max_pods_env = os.environ.get("PREPARE_DB_AKS_MAX_PARALLELISM", "10")
         files_per_pod_env = os.environ.get("PREPARE_DB_AKS_FILES_PER_POD", "50")
         image_env = os.environ.get(
-            "PREPARE_DB_AKS_AZCOPY_IMAGE", "mcr.microsoft.com/azure-cli:latest"
+            "PREPARE_DB_AKS_AZCOPY_IMAGE", "mcr.microsoft.com/azure-cli:2.81.0"
         )
-        timeout_env = os.environ.get("PREPARE_DB_AKS_JOB_TIMEOUT_SECONDS", "1800")
+        timeout_env = os.environ.get("PREPARE_DB_AKS_JOB_TIMEOUT_SECONDS", "2700")
+        # New since Phase 1.5: per-shard azcopy buffer concurrency, K8s
+        # backoffLimit override, and ttlSecondsAfterFinished. Defaults
+        # come from `api.services.k8s.prepare_db_jobs` if the env var
+        # is unset / unparsable, so omitting them keeps the existing
+        # behaviour.
+        azcopy_concurrency_env = os.environ.get(
+            "PREPARE_DB_AKS_AZCOPY_CONCURRENCY", ""
+        )
+        backoff_limit_env = os.environ.get("PREPARE_DB_AKS_BACKOFF_LIMIT", "")
+        ttl_seconds_env = os.environ.get("PREPARE_DB_AKS_TTL_SECONDS", "")
         try:
             max_pods = max(1, int(max_pods_env))
         except ValueError:
@@ -350,12 +473,30 @@ def _try_dispatch_aks_mode(
         try:
             active_deadline = max(60, int(timeout_env))
         except ValueError:
-            active_deadline = 1800
+            active_deadline = 2700
+        try:
+            azcopy_concurrency: int | None = (
+                max(1, min(512, int(azcopy_concurrency_env)))
+                if azcopy_concurrency_env
+                else None
+            )
+        except ValueError:
+            azcopy_concurrency = None
+        try:
+            backoff_limit: int | None = (
+                max(0, int(backoff_limit_env)) if backoff_limit_env else None
+            )
+        except ValueError:
+            backoff_limit = None
+        try:
+            ttl_seconds_after_finished: int | None = (
+                max(60, int(ttl_seconds_env)) if ttl_seconds_env else None
+            )
+        except ValueError:
+            ttl_seconds_after_finished = None
 
         try:
-            result = _safe_send_task(
-                "api.tasks.storage.prepare_db_via_aks",
-                queue="storage",
+            task_kwargs: dict[str, Any] = dict(
                 job_id=f"prepare-db-aks-{db_name}-{int(time.time())}",
                 subscription_id=sub,
                 storage_resource_group=storage_rg,
@@ -366,11 +507,23 @@ def _try_dispatch_aks_mode(
                 file_sizes=file_sizes,
                 aks_resource_group=aks_rg,
                 cluster_name=cluster_name,
+                namespace=aks_namespace,
                 max_pods=max_pods,
                 files_per_pod=files_per_pod,
                 image=image_env,
                 active_deadline_seconds=active_deadline,
                 caller_oid=caller.object_id,
+            )
+            if azcopy_concurrency is not None:
+                task_kwargs["azcopy_concurrency"] = azcopy_concurrency
+            if backoff_limit is not None:
+                task_kwargs["backoff_limit"] = backoff_limit
+            if ttl_seconds_after_finished is not None:
+                task_kwargs["ttl_seconds_after_finished"] = ttl_seconds_after_finished
+            result = _safe_send_task(
+                "api.tasks.storage.prepare_db_via_aks",
+                queue="storage",
+                **task_kwargs,
             )
         except HTTPException:
             raise
@@ -387,6 +540,7 @@ def _try_dispatch_aks_mode(
                         "mode": "aks",
                         "stage": "enqueue",
                     }
+                    meta.pop("aks_job_ref", None)
                     return meta
 
                 _update_metadata(container, db_name, account_name, _rollback)
@@ -1345,6 +1499,41 @@ def prepare_db_cancel(
     if phase == "completed" and not meta.get("update_in_progress"):
         raise HTTPException(409, f"database {db_name} download already completed")
 
+    # AKS-fanout cancel path: if the dispatch recorded `aks_job_ref`, delete
+    # the K8s Job + ConfigMap. The azcopy upload pods write via
+    # PUT-Block (not start_copy_from_url) so the blob `abort_copy` loop
+    # below is a no-op for AKS mode — the Job has to go to actually stop
+    # the data flow.
+    aks_job_deleted: dict[str, Any] | None = None
+    aks_job_ref_raw = meta.get("aks_job_ref")
+    aks_job_ref = aks_job_ref_raw if isinstance(aks_job_ref_raw, dict) else None
+    if aks_job_ref:
+        try:
+            from api.services.k8s.prepare_db_jobs import delete_prepare_db_job
+
+            aks_job_deleted = delete_prepare_db_job(
+                cred,
+                str(aks_job_ref.get("subscription_id") or sub),
+                str(aks_job_ref.get("resource_group") or ""),
+                str(aks_job_ref.get("cluster_name") or ""),
+                namespace=str(aks_job_ref.get("namespace") or "default"),
+                job_name=str(aks_job_ref.get("job_name") or ""),
+                configmap_name=str(
+                    aks_job_ref.get("configmap_name")
+                    or aks_job_ref.get("job_name")
+                    or ""
+                )
+                or None,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "prepare_db_cancel AKS Job delete failed db=%s job=%s: %s",
+                db_name,
+                aks_job_ref.get("job_name"),
+                type(exc).__name__,
+            )
+            aks_job_deleted = {"status": "error", "error": type(exc).__name__}
+
     # Walk container for blobs under {db_name}/ and abort any pending copies.
     aborted = 0
     skipped = 0
@@ -1385,13 +1574,18 @@ def prepare_db_cancel(
             f"({skipped} skipped, {errors} errors)"
         )
         meta_in["update_failed_at"] = datetime.now(UTC).isoformat()
-        meta_in["copy_status"] = {
+        cs: dict[str, Any] = {
             "phase": "cancelled",
             "aborted": aborted,
             "skipped": skipped,
             "errors": errors,
         }
+        if aks_job_ref:
+            cs["mode"] = "aks"
+            cs["aks_job_deleted"] = aks_job_deleted or {"status": "unknown"}
+        meta_in["copy_status"] = cs
         meta_in.pop("updating_to_source_version", None)
+        meta_in.pop("aks_job_ref", None)
         return meta_in
 
     try:
@@ -1430,6 +1624,7 @@ def prepare_db_cancel(
         "aborted": aborted,
         "skipped": skipped,
         "errors": errors,
+        "aks_job_deleted": aks_job_deleted,
     }
 
 

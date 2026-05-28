@@ -582,6 +582,7 @@ def _mark_partial(
             }
         if submit_summary is not None:
             meta["aks_submit_summary"] = submit_summary
+        meta.pop("aks_job_ref", None)
         return meta
 
     try:
@@ -698,6 +699,7 @@ def _promote_success(
             meta["shard_source_version"] = None
             meta["sharding_error"] = "preset shard layout generation failed"
         meta["sharding_in_progress"] = False
+        meta.pop("aks_job_ref", None)
         if isinstance(meta.get("db_order_oracle"), dict):
             oracle = dict(meta["db_order_oracle"])
             if (

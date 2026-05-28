@@ -380,6 +380,60 @@ def test_helper_peers_target_vnet_and_probes_private_ip(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# probe_private_ip — SSRF chokepoint
+# ---------------------------------------------------------------------------
+
+
+def test_probe_private_ip_refuses_non_private_targets(monkeypatch) -> None:
+    """The probe must refuse any address outside RFC1918 even when called
+    directly by trusted code paths (provision_aks, ensure_vnet_peering_*).
+    Verifies the chokepoint without crossing the network."""
+
+    from api.tasks.azure.peering import probe_private_ip
+
+    called = {"n": 0}
+
+    def _spy(*_a: Any, **_kw: Any) -> Any:
+        called["n"] += 1
+        raise AssertionError("httpx.get must not be called for hostile targets")
+
+    monkeypatch.setattr("api.tasks.azure.peering.httpx.get", _spy)
+
+    for hostile in (
+        "169.254.169.254",  # IMDS
+        "127.0.0.1",  # loopback
+        "1.1.1.1",  # public
+        "224.0.0.1",  # multicast
+        "::1",  # IPv6 loopback (IPv6 rejected outright)
+        "fd00::1",  # IPv6 ULA — private but URL builder cannot express it
+        "::ffff:169.254.169.254",  # IPv4-mapped IMDS bypass attempt
+        "not-an-ip",
+    ):
+        out = probe_private_ip(target_ip=hostile, target_path="/openapi.json")
+        assert out["reachable"] is False
+        assert out["url"] == ""
+        assert out["status_code"] is None
+    assert called["n"] == 0
+
+
+def test_probe_private_ip_refuses_control_characters_in_path(monkeypatch) -> None:
+    from api.tasks.azure.peering import probe_private_ip
+
+    def _spy(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError("httpx.get must not be called for unsafe paths")
+
+    monkeypatch.setattr("api.tasks.azure.peering.httpx.get", _spy)
+
+    out = probe_private_ip(target_ip="10.224.0.7", target_path="/x\r\nHost: evil")
+    assert out["reachable"] is False
+    assert "control characters" in out["message"]
+
+    out = probe_private_ip(target_ip="10.224.0.7", target_path="/" + "a" * 300)
+    assert out["reachable"] is False
+    assert "too long" in out["message"]
+
+
+# ---------------------------------------------------------------------------
 # Route — /api/aks/peer-with-platform
 # ---------------------------------------------------------------------------
 

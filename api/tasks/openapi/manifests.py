@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 
-from api.tasks.openapi.constants import K8S_NAMESPACE, K8S_SA_NAME
+from api.tasks.openapi.constants import K8S_NAMESPACE, K8S_SA_NAME, PlsConfig
 
 
 def build_manifests(
@@ -38,6 +38,7 @@ def build_manifests(
     acr_resource_group: str,
     num_nodes: int = 10,
     api_token: str = "",
+    pls: PlsConfig | None = None,
 ) -> str:
     """Return the multi-document JSON payload to feed ``kubectl apply -f -``.
 
@@ -235,15 +236,37 @@ def build_manifests(
         },
     }
 
+    svc_annotations: dict[str, str] = {
+        "service.beta.kubernetes.io/azure-load-balancer-internal": "true",
+    }
+    if pls is not None and pls.enabled:
+        # AKS-managed Private Link Service: enabling these annotations makes
+        # the cloud-provider controller stand up a PLS in front of the ILB
+        # so callers in non-peered VNets (or other subscriptions) can reach
+        # the Service through a Private Endpoint. The annotations are only
+        # honoured on Service create; switching an existing Service from
+        # ILB-only → PLS requires `kubectl delete svc elb-openapi` first
+        # (handled by the deploy task's transition guard).
+        svc_annotations["service.beta.kubernetes.io/azure-pls-create"] = "true"
+        svc_annotations["service.beta.kubernetes.io/azure-pls-name"] = pls.name
+        svc_annotations[
+            "service.beta.kubernetes.io/azure-pls-ip-configuration-subnet"
+        ] = pls.lb_subnet
+        svc_annotations["service.beta.kubernetes.io/azure-pls-visibility"] = (
+            pls.visibility
+        )
+        if pls.auto_approval:
+            svc_annotations[
+                "service.beta.kubernetes.io/azure-pls-auto-approval"
+            ] = pls.auto_approval
+
     svc_manifest = {
         "apiVersion": "v1",
         "kind": "Service",
         "metadata": {
             "name": "elb-openapi",
             "namespace": K8S_NAMESPACE,
-            "annotations": {
-                "service.beta.kubernetes.io/azure-load-balancer-internal": "true",
-            },
+            "annotations": svc_annotations,
         },
         "spec": {
             "type": "LoadBalancer",

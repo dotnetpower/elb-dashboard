@@ -38,6 +38,7 @@ from api.tasks.openapi.rbac import (
 from api.tasks.openapi.rbac import (
     setup_workload_identity as _setup_workload_identity,
 )
+from api.tasks.openapi.reconcile_public_https import reconcile_openapi_public_https
 
 __all__ = (
     "AUTO_DEPLOY_ENV",
@@ -51,5 +52,6 @@ __all__ = (
     "disable_openapi_public_https",
     "enqueue_openapi_deploy_after_aks_event",
     "get_openapi_public_https_status",
+    "reconcile_openapi_public_https",
     "setup_openapi_public_https",
 )

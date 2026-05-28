@@ -278,6 +278,81 @@ const RBAC_HINTS: Record<string, string> = {
   default: "appropriate RBAC role on the target resource",
 };
 
+// One actionable English hint per /v1/ready upstream_code returned by the
+// sibling elastic-blast-azure OpenAPI service. Keep in sync with
+// docker-openapi/app/main.py::v1_ready and api/services/blast/submit_gates.py
+// ::_openapi_action_for_code.
+const OPENAPI_UPSTREAM_HINTS: Record<string, string> = {
+  k8s_unreachable: "Start the AKS cluster and try again.",
+  no_workload_nodes:
+    "Scale up the BLAST workload pool — the cluster has zero Ready nodes.",
+  openapi_pod_not_ready: "Restart the elb-openapi pod and try again.",
+  workload_pool_check_failed: "Check AKS health in the Azure portal.",
+  openapi_pod_check_failed: "Check AKS health in the Azure portal.",
+};
+
+interface OpenApiUpstreamCode {
+  code: string;
+  upstream_code?: string;
+}
+
+function openApiUpstreamCode(body: unknown): OpenApiUpstreamCode | null {
+  if (!body || typeof body !== "object") return null;
+  const detail = (body as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object") return null;
+  const code = (detail as { code?: unknown }).code;
+  if (typeof code !== "string") return null;
+  if (code !== "openapi_not_ready" && code !== "openapi_unreachable") return null;
+  const upstream = (detail as { upstream_code?: unknown }).upstream_code;
+  return {
+    code,
+    upstream_code: typeof upstream === "string" ? upstream : undefined,
+  };
+}
+
+interface PreflightBlockingGate {
+  id?: string;
+  error_code?: string;
+  message?: string;
+  action?: string | null;
+  action_type?: string | null;
+}
+
+/**
+ * Render the SPA copy for a 409 ``blocked_by_preflight`` response.
+ *
+ * Returns ``null`` when the body is not a preflight envelope so the caller
+ * can fall back to the generic 4xx rendering. Each blocking gate already
+ * carries the upstream-derived ``action`` string (computed once by the
+ * backend gate), so the SPA just stitches messages + actions together
+ * instead of re-running ``OPENAPI_UPSTREAM_HINTS`` lookups.
+ */
+function blockedByPreflightMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const detail = (body as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object") return null;
+  const code = (detail as { code?: unknown }).code;
+  if (code !== "blocked_by_preflight") return null;
+  const blocking = (detail as { blocking_gates?: unknown }).blocking_gates;
+  if (!Array.isArray(blocking) || blocking.length === 0) return null;
+  const parts: string[] = [];
+  for (const raw of blocking as PreflightBlockingGate[]) {
+    if (!raw || typeof raw !== "object") continue;
+    const msg = typeof raw.message === "string" && raw.message.trim() ? raw.message.trim() : "";
+    const action = typeof raw.action === "string" && raw.action.trim() ? raw.action.trim() : "";
+    if (!msg && !action) continue;
+    if (msg && action) {
+      parts.push(`${msg} — ${action}.`);
+    } else if (msg) {
+      parts.push(msg);
+    } else {
+      parts.push(`${action}.`);
+    }
+  }
+  if (!parts.length) return null;
+  return `Pre-flight check failed: ${parts.join(" ")}`;
+}
+
 /**
  * Format a caught error into a user-friendly message.
  * For 403 errors, adds guidance about the required RBAC role.
@@ -305,7 +380,15 @@ export function formatApiError(err: unknown, context?: string): string {
   if (apiErr.status === 404) {
     return "Resource not found. It may have been deleted or not yet created.";
   }
-  if (apiErr.status === 400 || apiErr.status === 409 || apiErr.status === 422) {
+  if (apiErr.status === 409) {
+    // Submit pre-flight failure: render the blocking gate messages + the
+    // remediation hint the gate already computed (so we don't double-map
+    // upstream_code in the SPA). See api/services/blast/submit_gates.py.
+    const preflight = blockedByPreflightMessage(apiErr.body);
+    if (preflight) return preflight;
+    return sanitiseAndFormat(structuredMessage ?? base) ?? base;
+  }
+  if (apiErr.status === 400 || apiErr.status === 422) {
     return sanitiseAndFormat(structuredMessage ?? base) ?? base;
   }
   if (apiErr.status === 500) {
@@ -329,8 +412,30 @@ export function formatApiError(err: unknown, context?: string): string {
         "This Lab Tool route has no backend implementation in this build yet."
       );
     }
+    // Map structured /v1/ready upstream codes to actionable English copy.
+    // These detail shapes come from api/services/external_blast.ready() and
+    // are echoed by the openapi_ready submit gate.
+    const openapiCode = openApiUpstreamCode(apiErr.body);
+    const upstream = openapiCode?.upstream_code ?? "";
+    if (openapiCode?.code === "openapi_not_ready") {
+      const action = OPENAPI_UPSTREAM_HINTS[upstream] ?? "Check AKS cluster health and try again.";
+      return `BLAST API is not ready (${upstream || "unknown_cause"}). ${action}`;
+    }
+    if (openapiCode?.code === "openapi_unreachable") {
+      return "Cannot reach the BLAST API service. Make sure the AKS cluster is running and the elb-openapi pod is healthy.";
+    }
     if (structuredMessage) return sanitiseUserFacingMessage(structuredMessage) ?? structuredMessage;
     return "Service temporarily unavailable. The Function App may be starting up — try again in a moment.";
+  }
+  if (apiErr.status === 429) {
+    const body = apiErr.body as { detail?: { code?: string; limit_per_minute?: number } } | undefined;
+    if (body?.detail?.code === "openapi_ready_rate_limited") {
+      const limit = body.detail.limit_per_minute;
+      return limit
+        ? `Readiness probe rate-limit hit (max ${limit}/min). Wait about a minute and try again.`
+        : "Readiness probe rate-limit hit. Wait about a minute and try again.";
+    }
+    return "Rate limit hit. Wait a moment and try again.";
   }
   // Network errors — distinguish abort/timeout from offline so the user sees
   // an actionable hint rather than a generic "Failed to fetch".

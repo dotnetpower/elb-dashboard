@@ -13,14 +13,17 @@ from __future__ import annotations
 
 # ``elb-openapi`` tag uses the dashboard-specific ``4.x`` scheme (dashboard tracks
 # the upstream FastAPI app's ``VERSION`` in commit messages: 4.14 == upstream
-# 3.6.0 cache hardening). Bump in lock-step with the sibling repo's
-# ``docker-openapi/app/main.py`` ``VERSION`` constant and record the mapping in
-# the per-bump change note under ``docs/features_change/``.
+# 3.6.0 cache hardening; 4.15 == upstream 3.7.0 /v1/ready probe; 4.16 ==
+# upstream 3.7.2 /v1/ready hardening — per-IP anonymous bucket, GC of empty
+# rate buckets, optional stricter autoscaler-aware pool name match). Bump in
+# lock-step with the sibling repo's ``docker-openapi/app/main.py`` ``VERSION``
+# constant and record the mapping in the per-bump change note under
+# ``docs/features_change/``.
 IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.14",
+    "elb-openapi": "4.16",
 }
 
 # GitHub source repo for ACR Build Tasks.

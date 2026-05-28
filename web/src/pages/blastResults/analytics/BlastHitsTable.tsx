@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import {
   ExternalLink,
   Download,
@@ -12,13 +13,16 @@ import type { BlastHit } from "@/api/endpoints";
 import { TaxonomyDetailModal } from "@/components/taxonomy/TaxonomyDetailModal";
 import { Tooltip } from "@/components/Tooltip";
 import {
+  extractCanonicalAccession,
   formatDecimal,
   formatEvalue,
   formatInteger,
   formatPercent,
   formatRange,
   identityColor,
+  isNcbiAccessionLike,
   ncbiNuccoreUrl,
+  ncbiSearchUrl,
   numberValue,
   organismFromStitle,
   parseLeadingTaxid,
@@ -293,20 +297,102 @@ export function BlastHitsTable({
                       maxWidth: 150,
                     }}
                   >
-                    <a
-                      href={ncbiNuccoreUrl(hit.sseqid)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        color: "var(--accent)",
-                        display: "inline-flex",
-                        gap: 4,
-                      }}
-                      title="Open in NCBI nuccore"
-                    >
-                      {hit.sseqid}
-                      <ExternalLink size={12} strokeWidth={1.5} />
-                    </a>
+                    {(() => {
+                      const sstart = numberValue(hit.sstart);
+                      const send = numberValue(hit.send);
+                      let highlightStart: number | null = null;
+                      let highlightStop: number | null = null;
+                      if (sstart != null && send != null) {
+                        highlightStart = Math.min(sstart, send);
+                        highlightStop = Math.max(sstart, send);
+                      }
+                      const canonical = extractCanonicalAccession(hit.sseqid);
+                      // Gate the internal SequenceDetail link on the same
+                      // accession pattern the backend uses. Non-accession
+                      // sseqids (e.g. `Query_1`, custom DB IDs) fall back to
+                      // the external NCBI search link instead of producing a
+                      // 422 from /api/ncbi/nuccore.
+                      const looksLikeAccession = isNcbiAccessionLike(hit.sseqid);
+                      const search = new URLSearchParams();
+                      if (highlightStart != null && highlightStop != null) {
+                        search.set("hl_start", String(highlightStart));
+                        search.set("hl_stop", String(highlightStop));
+                      }
+                      const internalHref = `/sequence/${encodeURIComponent(canonical)}${search.toString() ? `?${search.toString()}` : ""}`;
+                      return (
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            gap: 6,
+                            alignItems: "center",
+                            maxWidth: "100%",
+                            minWidth: 0,
+                          }}
+                        >
+                          {looksLikeAccession ? (
+                            <>
+                              <Link
+                                to={internalHref}
+                                style={{
+                                  color: "var(--accent)",
+                                  textDecoration: "none",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                  minWidth: 0,
+                                }}
+                                title={`Open ${hit.sseqid} in dashboard sequence viewer`}
+                              >
+                                {hit.sseqid}
+                              </Link>
+                              <a
+                                href={ncbiNuccoreUrl(hit.sseqid)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  color: "var(--text-muted)",
+                                  lineHeight: 0,
+                                  flexShrink: 0,
+                                }}
+                                title="Open in NCBI nuccore (external)"
+                                aria-label={`Open ${hit.sseqid} in NCBI (external)`}
+                              >
+                                <ExternalLink size={11} strokeWidth={1.5} />
+                              </a>
+                            </>
+                          ) : (
+                            <>
+                              <span
+                                style={{
+                                  color: "var(--text)",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                  minWidth: 0,
+                                }}
+                                title={`${hit.sseqid} — non-accession identifier; in-app viewer is unavailable`}
+                              >
+                                {hit.sseqid}
+                              </span>
+                              <a
+                                href={ncbiSearchUrl(hit.sseqid)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  color: "var(--text-muted)",
+                                  lineHeight: 0,
+                                  flexShrink: 0,
+                                }}
+                                title="Search this identifier on NCBI (external)"
+                                aria-label={`Search ${hit.sseqid} on NCBI (external)`}
+                              >
+                                <ExternalLink size={11} strokeWidth={1.5} />
+                              </a>
+                            </>
+                          )}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td style={{ maxWidth: 280, color: "var(--text-muted)" }}>
                     {hit.stitle || "—"}

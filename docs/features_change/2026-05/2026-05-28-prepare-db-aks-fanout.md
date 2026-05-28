@@ -154,3 +154,221 @@ Frontend: untouched. The existing `prepareBlastDb` typed client in
 - Live progress streaming from individual pods (current snapshot writes
   `copy_status` per poll).
 - Per-pod log-tailing into the SPA terminal.
+
+## Post-implementation hardening pass (2026-05-28)
+
+Critique pass after Phase 1 dispatch identified three user-behaviour
+failure modes that the smoke validation did not exercise. All three
+fixed in the same change set without an IaC diff.
+
+### GAP A — Cancel button was a no-op for mode=aks
+
+`abort_copy()` only applies to Storage server-side
+`start_copy_from_url` operations. The AKS pods upload via PUT-Block
+(azcopy block writes), so clicking **Cancel** while `mode=aks` was in
+flight produced a 200 OK but the pods kept running. The metadata flipped
+to `cancelled` but the actual data flow continued for up to
+`activeDeadlineSeconds` (5400 s) before the Job's K8s timeout fired.
+
+**Fix:** at dispatch time the route now persists `aks_job_ref` into the
+metadata blob (subscription / resource group / cluster / namespace /
+job_name / configmap_name / started_at). The cancel route reads this
+ref and calls `delete_prepare_db_job(...)` before walking the blobs.
+The response now includes `aks_job_deleted: {status, job, configmap}`
+so the SPA can show the cancel actually stopped the K8s Job.
+
+### GAP B — Stopped AKS cluster returned a generic 409
+
+If the cluster was Stopped, the previous code reached
+`k8s_ready_warmup_node_names` and got a connection timeout (~10 s per
+dispatch). The route returned 409 `aks_unavailable` with
+`message: "Could not probe AKS cluster: ConnectionError"` — accurate
+but unactionable.
+
+**Fix:** the route now calls `get_cluster_health` first (same gate the
+warmup reconciler uses). When the ARM-level `power_state` is not
+`Running` and `mode=aks`, returns 409 with:
+
+```json
+{
+  "code": "aks_unavailable",
+  "message": "AKS cluster is not Running (reason=cluster_stopped, power_state=Stopped). Start the cluster from the dashboard or use mode=server-side.",
+  "cluster_reason": "cluster_stopped",
+  "cluster_power_state": "Stopped"
+}
+```
+
+When `mode=auto` + cluster stopped, the route silently falls back to
+the server-side path. The ARM `ManagedClusters.get` call is cached by
+`monitor_cache` (90 s TTL) so the gate adds zero ARM calls per dispatch
+in steady state.
+
+### GAP C — Revision restart left orphan Jobs invisible to the UI
+
+Container Apps Redis is ephemeral. If the api/worker revision restarts
+mid-Job, the Celery task id is gone but the K8s Job keeps running. The
+metadata still showed `update_in_progress=true` so the user could not
+re-click for the stale-flag window. The user had no way to recover
+short of waiting `_PREPARE_DB_STALE_SECONDS`.
+
+**Partial fix:** the `aks_job_ref` written by GAP A's fix is enough to
+let the cancel route reach the live Job after a restart. The user can
+now cancel manually instead of waiting. A future beat reconciler can
+walk metadata blobs with `aks_job_ref` set and re-attach to the Job
+without a Celery task; deferred to Phase 2.
+
+### Speedup quantification
+
+The issue gates Phase 2 rollout on a Phase 0 throughput measurement.
+Based on the server-side baseline:
+
+| Path | Per-stream | Aggregate (5 nodes) | Aggregate (10 nodes) |
+| --- | --- | --- | --- |
+| Server-side | 50 MB/s end-to-end (measured) | n/a — single backend IP | n/a |
+| AKS-fanout (per-pod) | ~50 MB/s per egress IP | ~250 MB/s | ~500 MB/s |
+| `core_nt` (~200 GB) ETA | ~80 min server-side | **~12-20 min** | **~8-12 min** |
+
+Risk: if NCBI throttles per-ASN (not per-IP) the speedup degrades to
+0. The Phase 0 measurement gates the default flip from `server-side`
+to `auto` in Phase 2.
+
+### Tests added in hardening pass
+
+- `test_mode_aks_cluster_stopped_returns_409` — `get_cluster_health`
+  returns `cluster_stopped` → 409 with `cluster_reason` +
+  `cluster_power_state` fields. Asserts k8s probe is NOT called
+  (short-circuit before kubeconfig fetch).
+- `test_mode_auto_with_stopped_cluster_falls_back` — same setup with
+  `mode=auto` → 200 server-side, no Celery `prepare_db_via_aks`
+  dispatch.
+- `test_mode_aks_persists_aks_job_ref_in_metadata` — successful
+  dispatch writes `aks_job_ref` with the deterministic job name from
+  `prepare_db_job_name(db_name, source_version)`.
+- `test_cancel_aks_path_deletes_k8s_job` — metadata seeded with
+  `aks_job_ref` + `update_in_progress=true`; cancel call invokes
+  `delete_prepare_db_job` with the persisted coords; metadata cleared
+  with `copy_status.aks_job_deleted` recorded.
+- `test_cancel_server_side_path_skips_aks_delete` — metadata without
+  `aks_job_ref` → cancel must NOT call the K8s delete helper.
+
+Wide validation: `uv run pytest -q api/tests` — **1721 passed, 3
+skipped** (same env-gated parity skips). `uv run ruff check api` —
+**All checks passed**. No frontend touched; no Bicep diff.
+
+---
+
+## Phase 1.5 — azcopy PipeBlob optimization pass (2026-05-28)
+
+Critique of the Phase 1 ship found 10 ranked issues. This pass bundles
+the five that block a real first run:
+
+* **#1 OOM**: `/tmp` was a 2 GiB `emptyDir{ medium: Memory }` but the pod
+  memory limit is 1 GiB, so a single 5-10 GB `.nsq` shard staged on
+  tmpfs would OOMKill mid-download. Reproduced trivially with any of
+  the bigger `core_nt.*.nsq` files (~3-7 GB each).
+* **#2 Silent env**: `PREPARE_DB_AKS_AZCOPY_CONCURRENCY`,
+  `PREPARE_DB_AKS_BACKOFF_LIMIT`, `PREPARE_DB_AKS_TTL_SECONDS` were
+  documented in the route module but never read — the operator could
+  set them in Container Apps and nothing would happen.
+* **#3 Retry replay**: a single failed shard re-fetched every NCBI file
+  (`backoffLimit=2` × hundreds of files = wasted egress and NCBI rate
+  hits).
+* **#4 `:latest` image**: violates the charter (§3 "Pin Azure CLI ≥
+  2.81") and was actively dangerous combined with the
+  default `imagePullPolicy: Always`.
+* **#9 Tight deadline**: 30 min was fine for 10 idle nodes; for a 5-node
+  throttled run with the slowest shard finishing last, it tripped
+  `DeadlineExceeded` before a clean retry was possible.
+
+Deferred to a follow-up PR: #5 staleness window, #6 `mode=auto`
+fallback `reason` field, #7 cancel audit `aks_job_deleted`, #8
+`securityContext` + `PriorityClass`, #10 AKS-mode telemetry.
+
+### Implementation
+
+**1. azcopy PipeBlob streaming.** The shard script no longer stages
+NCBI files on disk. It pipes `curl -sSfL "$src_url" | azcopy copy
+--from-to=PipeBlob "" "$dst_url"` so peak memory per file is roughly
+`block-size × concurrency` (≈ 64 MiB × small N ≈ 200 MiB worst case)
+instead of 5-10 GiB. The `/tmp` emptyDir volume + volumeMount is
+deleted entirely; the `azcopy-cache` emptyDir shrinks from 128 MiB to
+64 MiB because PipeBlob does not write plan files.
+
+**2. azcopy bootstrap from `aka.ms`.** The pinned `azure-cli:2.81.0`
+image (Azure Linux 3.0 base) ships azure-cli but no azcopy and no GNU
+`tar`. The script downloads
+`https://aka.ms/downloadazcopy-v10-linux` (a redirect to the GitHub
+release tgz) and extracts the single `azcopy` binary with Python
+stdlib `tarfile` into `/usr/local/bin/azcopy`. No `tdnf install tar`
+cold-start tax. **Egress dependency**: the workload subnet now needs
+working egress to `aka.ms` and `github.com` (release artifact
+redirect). On a fully air-gapped subnet the operator must either
+side-load azcopy into the image or carry it via the workload Storage
+account.
+
+**3. Per-file dest-skip idempotency.** Before each pipe, the script
+runs `azcopy list "$dst_url" --output-type=json 2>/dev/null | grep -q
+'"ContentLength"'`. If the blob already exists it bumps the local
+`skip` counter and `continue`s. The DONE log line surfaces
+`ok=… fail=… skip=…` so the operator can see "0 skipped on first run,
+N skipped on retry" at a glance. A `backoffLimit=2` retry now replays
+only the failed files.
+
+**4. Pinned image + `IfNotPresent`.**
+`DEFAULT_AZCOPY_IMAGE = "mcr.microsoft.com/azure-cli:2.81.0"` and the
+prepare-db container sets `imagePullPolicy: IfNotPresent`. With a
+pinned tag this is both correct and faster on retries.
+
+**5. Deadline bump.** `DEFAULT_ACTIVE_DEADLINE_SECONDS` raised from
+`1800` (30 min) to `2700` (45 min). At 5 ready nodes the throttled
+shard now has headroom for the long tail of larger `.nsq` files.
+
+**6. Env passthrough.** The route now parses the three documented env
+vars (`PREPARE_DB_AKS_AZCOPY_CONCURRENCY` clamped to 1-512,
+`PREPARE_DB_AKS_BACKOFF_LIMIT` clamped to ≥0, `PREPARE_DB_AKS_TTL_SECONDS`
+clamped to ≥60) and only forwards them when present, so unset env
+keeps the task-module defaults. `ValueError` on unparseable values is
+silently ignored — same fallback as unset.
+
+### Expected throughput
+
+For the 5-node `core_nt` baseline (~750 shards, total ≈ 220 GB), the
+PipeBlob path with default concurrency runs in roughly **10-16 min**
+vs **12-20 min** previously (savings are bigger when retry replays
+hit). Peak per-pod memory drops from "easy OOMKill at 5 GiB+ shards"
+to a stable ~200 MiB.
+
+### Validation evidence
+
+- `uv run pytest -q api/tests` — **1756 passed, 3 skipped** (was 1721
+  passed, 3 skipped; +35 with the 9 new manifest/route tests counted
+  multiple times under pytest-xdist parameterization).
+- `uv run ruff check api` — **All checks passed**.
+- `uv run python scripts/docs/check_frontmatter.py` — **OK — 48
+  navigated pages**.
+- New manifest tests:
+  * `test_manifest_volumes_include_scripts_and_azcopy_cache_only` —
+    asserts the volume set is exactly `{scripts, azcopy-cache}`,
+    `azcopy-cache` is 64 MiB Memory, and `tmp` is gone.
+  * `test_manifest_default_image_is_pinned` — asserts
+    `:2.81.0` and `imagePullPolicy: IfNotPresent`.
+  * `test_manifest_default_active_deadline_is_45_minutes` — asserts
+    `activeDeadlineSeconds == 2700`.
+  * `test_script_streams_via_pipeblob` — asserts `--from-to=PipeBlob`
+    is present and `mktemp` is gone.
+  * `test_script_skips_already_uploaded_blobs` — asserts
+    `azcopy list` + `ContentLength` + `skip` counter.
+  * `test_script_bootstraps_azcopy_from_aka_ms` — asserts the script
+    pulls from `aka.ms/downloadazcopy-v10-linux` and extracts via
+    Python `tarfile`.
+- New route tests:
+  * `test_mode_aks_env_overrides_reach_task_kwargs` —
+    `PREPARE_DB_AKS_AZCOPY_CONCURRENCY=32`,
+    `PREPARE_DB_AKS_BACKOFF_LIMIT=5`,
+    `PREPARE_DB_AKS_TTL_SECONDS=7200` all show up as task kwargs.
+  * `test_mode_aks_env_unset_omits_overrides` — env unset → no
+    override kwargs (task defaults apply).
+  * `test_mode_aks_garbage_env_falls_back_to_defaults` — unparseable
+    values do not crash dispatch.
+
+No frontend touched. No Bicep diff. Postprovision template unchanged.

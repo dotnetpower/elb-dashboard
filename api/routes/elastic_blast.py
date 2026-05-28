@@ -212,6 +212,12 @@ def submit_external_blast_job(
         request.program,
     )
     del caller
+    # Pre-flight the sibling's submit path. Surfaces precise structured 503s
+    # (e.g. AKS stopped / workload pool empty / openapi pod down) before we
+    # spend the 90 s submit timeout waiting for a request the sibling cannot
+    # service. Older sibling images without /v1/ready fail open inside the
+    # client so the submit still goes through.
+    external_blast.ready()
     upstream = external_blast.submit_job(payload)
     return _normalise_external_job_payload(upstream, request_payload=payload)
 

@@ -21,9 +21,13 @@ Risky contracts: The per-pod script lives in `PREPARE_DB_AKS_SCRIPT` and
     kubelet-attached managed identity, which must already carry
     `Storage Blob Data Contributor` on the workload Storage account (the
     existing warmup RBAC grant covers this). The pod-side download flow
-    (`curl … | azcopy copy`) is what actually achieves the per-pod NAT
-    parallelism — server-side `azcopy copy <url> <url>` would re-use Azure's
-    backend IP and gain no speedup.
+    (`curl … | azcopy copy --from-to=PipeBlob`) is what actually achieves
+    the per-pod NAT parallelism — server-side `azcopy copy <url> <url>`
+    would re-use Azure's backend IP and gain no speedup. The script
+    bootstraps `azcopy` from `aka.ms/downloadazcopy-v10-linux` at pod
+    start because the pinned `mcr.microsoft.com/azure-cli:2.81.0` image
+    does not bundle it; the download depends on egress to `aka.ms` and
+    `github.com` (release redirect) being reachable from the pod NIC.
 Validation: `uv run pytest -q api/tests/test_prepare_db_aks_planner.py
     api/tests/test_prepare_db_aks_manifest.py`.
 """
@@ -43,14 +47,19 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_APP_LABEL = "elb-prepare-db"
 DEFAULT_NAMESPACE = "default"
 DEFAULT_SCRIPTS_CONFIGMAP_PREFIX = "elb-prepare-db"
-DEFAULT_AZCOPY_IMAGE = "mcr.microsoft.com/azure-cli:latest"
+# Pin the base image — charter §3 requires Azure CLI >= 2.81 and forbids
+# `:latest`-style tags for production workloads. The image does not ship
+# azcopy; the entrypoint script downloads it from aka.ms.
+DEFAULT_AZCOPY_IMAGE = "mcr.microsoft.com/azure-cli:2.81.0"
 DEFAULT_AZCOPY_CONCURRENCY = 16
 DEFAULT_BACKOFF_LIMIT = 2
 DEFAULT_TTL_SECONDS_AFTER_FINISHED = 3600
-DEFAULT_ACTIVE_DEADLINE_SECONDS = 1800
+# 45 min: leaves headroom for a 5-node throttled scenario where the slowest
+# shard still has ~10-15 large `.nsq` files to stream after the others
+# finish. 30 min was tight for `core_nt` at AKS scale.
+DEFAULT_ACTIVE_DEADLINE_SECONDS = 2700
 DEFAULT_FILES_PER_POD = 50
 DEFAULT_MAX_PARALLELISM = 10
-DEFAULT_MIN_IDLE_NODES = 3
 SOURCE_VERSION_ANNOTATION = "elb.dashboard/source-version"
 
 _SAFE_DB_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -63,12 +72,17 @@ _SAFE_IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$")
 # Pod-side shell script. Each pod is one completion of an Indexed Job; its
 # shard index comes from `JOB_COMPLETION_INDEX` (kubelet downward-API env).
 # The script reads its assigned NCBI keys from `/scripts/shard-NN.txt`,
-# downloads each via `curl` (which uses the pod's NIC -> AKS node's
-# outbound NAT IP -> per-node distinct source IP from NCBI's perspective),
-# then uploads to Azure Blob via `azcopy copy` authenticated as the
-# kubelet managed identity. This is what actually parallelises the NCBI
-# fetch; server-side `azcopy copy <url> <url>` would reuse Azure's backend
-# IP and yield no speedup.
+# streams each file through `curl | azcopy copy --from-to=PipeBlob` so the
+# pod NIC -> AKS node's outbound NAT IP is what NCBI sees (per-node distinct
+# source IPs = real parallelism), and the bytes never touch the pod's
+# filesystem. Server-side `azcopy copy <url> <url>` would reuse Azure's
+# backend IP and yield no NCBI-side speedup.
+#
+# The base image (`mcr.microsoft.com/azure-cli`) does NOT ship `azcopy`, so
+# the script downloads the official build from aka.ms once per pod and
+# extracts the single `azcopy` binary using Python's `tarfile` (the image
+# does not have GNU `tar` either). Install size is ~30 MiB tgz on the
+# container's writable rootfs; no extra emptyDir is needed.
 PREPARE_DB_AKS_SCRIPT = r"""#!/bin/bash
 set -euo pipefail
 
@@ -89,44 +103,172 @@ fi
 TOTAL=$(grep -cve '^[[:space:]]*$' "$FILE_LIST" || true)
 log "START shard=${SHARD_INDEX} db=${DB_NAME} files=${TOTAL}"
 
+# Bootstrap azcopy. The azure-cli image does not bundle it (and does not
+# ship GNU `tar`), so download the official linux build and pull the single
+# `azcopy` binary out using Python's stdlib tarfile module.
+if ! command -v azcopy >/dev/null 2>&1; then
+    log "Installing azcopy from aka.ms..."
+    curl -fsSL --retry 5 --retry-delay 5 --max-time 120 \
+        https://aka.ms/downloadazcopy-v10-linux -o /tmp/azcopy.tgz
+    python3 - <<'PY'
+import os
+import shutil
+import tarfile
+
+with tarfile.open("/tmp/azcopy.tgz", "r:gz") as t:
+    for member in t.getmembers():
+        if member.name.endswith("/azcopy") and member.isfile():
+            t.extract(member, "/tmp")
+            shutil.move(f"/tmp/{member.name}", "/usr/local/bin/azcopy")
+            os.chmod("/usr/local/bin/azcopy", 0o755)
+            break
+    else:
+        raise SystemExit("azcopy binary not found inside tarball")
+PY
+    rm -f /tmp/azcopy.tgz
+    rm -rf /tmp/azcopy_linux_*
+    log "azcopy installed: $(azcopy --version 2>/dev/null | head -1)"
+fi
+
 if ! azcopy login --identity >/tmp/azcopy-login.log 2>&1; then
     log "ERROR azcopy login --identity failed"
     sed 's/[A-Za-z0-9_-]\{20,\}/<redacted>/g' /tmp/azcopy-login.log | head -n 20
     exit 3
 fi
 export AZCOPY_CONCURRENCY_VALUE="${AZCOPY_CONCURRENCY_VALUE:-16}"
-export AZCOPY_BUFFER_GB="${AZCOPY_BUFFER_GB:-2}"
+
+# Intentionally NOT exporting AZCOPY_BUFFER_GB: the container memory
+# limit is 1Gi (see build_prepare_db_job_manifest) and azcopy auto-tunes
+# the in-memory block buffer to 25% of the cgroup limit (~256 MiB), which
+# stays safely under the limit even with concurrency=16 and 64MiB blocks.
+# A larger explicit value risks OOMKilled mid-shard.
 
 DEST_BASE="https://${STORAGE_ACCOUNT}.${BLOB_SUFFIX}/blast-db/${DB_NAME}"
 
+# Integrity verification cadence. Every Nth uploaded file gets a full
+# round-trip check (NCBI Content-Length captured pre-flight + `azcopy
+# list` post-upload). Each verify costs ~1-2s (RBAC token refresh +
+# ARM call), so 1/10 keeps wall time bounded while still catching
+# NCBI rolling-restart truncations within a single shard. Override
+# with `ELB_VERIFY_EVERY_N=1` to verify every file (debug) or `=0`
+# to disable verify entirely (azcopy's own Content-MD5 check is the
+# only safety net then).
+VERIFY_EVERY_N="${ELB_VERIFY_EVERY_N:-10}"
+
 ok=0
 fail=0
+skip=0
+file_index=0
 while IFS= read -r KEY; do
     [ -z "$KEY" ] && continue
+    file_index=$((file_index + 1))
     file_basename="${KEY##*/}"
     src_url="${NCBI_BASE}/${KEY}"
     dst_url="${DEST_BASE}/${file_basename}"
-    tmp="$(mktemp /tmp/prepare-db-XXXXXX)"
-    if curl -sSfL --retry 3 --retry-delay 5 --max-time 1500 -o "$tmp" "$src_url"; then
-        if azcopy copy "$tmp" "$dst_url" --block-size-mb=64 --log-level=ERROR >/dev/null; then
-            ok=$((ok + 1))
-        else
-            log "ERROR azcopy upload failed for ${KEY}"
-            fail=$((fail + 1))
+    # Per-file idempotency: if a previous attempt of this shard already
+    # uploaded this blob (e.g. a retry after backoffLimit kick-in), do not
+    # re-fetch from NCBI. `azcopy list` against a single blob returns its
+    # ContentLength when present and an empty listing when missing.
+    if azcopy list "$dst_url" --output-type=json 2>/dev/null \
+            | grep -q '"ContentLength"' ; then
+        skip=$((skip + 1))
+        continue
+    fi
+    # Decide upfront whether THIS file is one of the sampled ones. We
+    # only pay the pre-flight HEAD + post-upload verify cost on the
+    # sampled subset; the rest trust the curl|azcopy pipeline exit
+    # code (already gated by `set -euo pipefail`).
+    verify_this=""
+    if [ "$VERIFY_EVERY_N" != "0" ] && [ $((file_index % VERIFY_EVERY_N)) -eq 0 ]; then
+        verify_this="1"
+    fi
+    expected_size=""
+    if [ -n "$verify_this" ]; then
+        # Pre-flight: NCBI Content-Length tells us how many bytes to expect.
+        # Captured here so the post-upload verification step can compare
+        # apples to apples without trusting curl's exit code alone (a HTTP
+        # 200 + truncated body would otherwise upload silently).
+        expected_size=$(curl -sIL --retry 3 --retry-delay 10 --max-time 60 \
+            "$src_url" \
+            | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {gsub(/[^0-9]/,"",$2); print $2; exit}')
+        if [ -z "${expected_size:-}" ] || [ "$expected_size" = "0" ]; then
+            log "WARN no Content-Length for ${KEY}; integrity check will be skipped"
+            expected_size=""
         fi
+    fi
+    # Stream NCBI -> pod NIC -> Azure Blob with no on-disk staging. Peak
+    # memory ≈ block-size-mb × azcopy's internal buffer count (~200 MiB),
+    # well under the 1 GiB container memory limit even for 10+ GiB files.
+    # `set -euo pipefail` makes the pipeline fail if either side errors.
+    if curl -sSfL --retry 5 --retry-delay 30 --retry-all-errors \
+            --max-time 1800 "$src_url" \
+        | azcopy copy --from-to=PipeBlob "" "$dst_url" \
+            --block-size-mb=64 --log-level=ERROR >/dev/null ; then
+        # Post-upload integrity check ONLY on sampled files (see
+        # VERIFY_EVERY_N). Mismatch means NCBI gave us a truncated body
+        # or served an HTML error with status 200 — both have been
+        # observed during NCBI rolling restarts. Delete the bad blob
+        # so the next retry of this shard re-fetches it cleanly rather
+        # than leaving garbage to confuse BLAST.
+        #
+        # The parser emits one of:
+        #   "<int>"      — uploaded ContentLength successfully extracted
+        #   "PARSE_FAIL" — azcopy list returned a shape we don't
+        #                  understand (azcopy version upgrade, schema
+        #                  drift); skip verify and assume the upload is
+        #                  good rather than enter a delete-and-retry
+        #                  loop that would burn through the backoffLimit
+        if [ -n "$expected_size" ]; then
+            uploaded_size=$(azcopy list "$dst_url" --output-type=json 2>/dev/null \
+                | python3 -c 'import json,sys
+got = False
+for line in sys.stdin:
+    line=line.strip()
+    if not line:
+        continue
+    try:
+        obj=json.loads(line)
+    except Exception:
+        continue
+    msg=obj.get("MessageContent") or obj.get("messageContent")
+    if isinstance(msg, str) and msg:
+        try:
+            inner=json.loads(msg)
+        except Exception:
+            inner=None
+        if isinstance(inner, dict):
+            cl=inner.get("ContentLength") or inner.get("contentLength")
+            if cl is not None:
+                print(cl); got=True; break
+    cl=obj.get("ContentLength") or obj.get("contentLength")
+    if cl is not None:
+        print(cl); got=True; break
+if not got:
+    print("PARSE_FAIL")')
+            if [ "$uploaded_size" = "PARSE_FAIL" ] || [ -z "$uploaded_size" ]; then
+                log "WARN verify parse-fail ${KEY}; trusting upload exit code"
+                ok=$((ok + 1))
+                continue
+            fi
+            if [ "$uploaded_size" != "$expected_size" ]; then
+                log "ERROR size mismatch ${KEY} exp=${expected_size} got=${uploaded_size}"
+                azcopy remove "$dst_url" --log-level=ERROR >/dev/null 2>&1 || true
+                fail=$((fail + 1))
+                continue
+            fi
+        fi
+        ok=$((ok + 1))
     else
-        log "ERROR curl download failed for ${KEY}"
+        log "ERROR pipeline failed for ${KEY}"
         fail=$((fail + 1))
     fi
-    rm -f "$tmp"
 done < "$FILE_LIST"
 
-log "DONE shard=${SHARD_INDEX} ok=${ok} fail=${fail}"
+log "DONE shard=${SHARD_INDEX} ok=${ok} fail=${fail} skip=${skip}"
 
-# Azcopy plan files can be MBs each; clean up so the pod's emptyDir does
-# not blow past its inode budget across multiple completions.
-pkill -f azcopy 2>/dev/null || true
-rm -rf /root/.azcopy 2>/dev/null || true
+# backoffLimit launches a fresh pod with a clean emptyDir for retries
+# (restartPolicy=Never + emptyDir{medium: Memory}), so no per-pod
+# cleanup is needed before exit.
 
 if [ "$fail" -gt 0 ]; then
     exit 1
@@ -279,8 +421,6 @@ def build_prepare_db_job_manifest(
     backoff_limit: int = DEFAULT_BACKOFF_LIMIT,
     ttl_seconds_after_finished: int = DEFAULT_TTL_SECONDS_AFTER_FINISHED,
     active_deadline_seconds: int = DEFAULT_ACTIVE_DEADLINE_SECONDS,
-    extra_tolerations: list[dict[str, Any]] | None = None,
-    node_selector: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build the Indexed Job manifest that runs N parallel `prepare-db` pods.
 
@@ -349,6 +489,10 @@ def build_prepare_db_job_manifest(
             {
                 "name": "prepare-db",
                 "image": image,
+                # Pinned tag (see DEFAULT_AZCOPY_IMAGE). `IfNotPresent`
+                # is only safe because the tag is immutable; revert to
+                # `Always` if we ever go back to `:latest`.
+                "imagePullPolicy": "IfNotPresent",
                 "command": ["bash", "-lc"],
                 "args": ["/scripts/prepare-db.sh"],
                 "env": [
@@ -382,7 +526,6 @@ def build_prepare_db_job_manifest(
                 "volumeMounts": [
                     {"name": "scripts", "mountPath": "/scripts"},
                     {"name": "azcopy-cache", "mountPath": "/root/.azcopy"},
-                    {"name": "tmp", "mountPath": "/tmp"},  # noqa: S108 — K8s in-pod tmpfs mount, not host temp.
                 ],
             }
         ],
@@ -394,19 +537,14 @@ def build_prepare_db_job_manifest(
                     "defaultMode": 0o755,
                 },
             },
-            # Azcopy writes plan files to ~/.azcopy; back it by an
-            # emptyDir so we don't pollute the container image layer.
-            {"name": "azcopy-cache", "emptyDir": {"medium": "Memory", "sizeLimit": "128Mi"}},
-            # Staging for the curl-downloaded file before azcopy uploads
-            # it. Backed by tmpfs so an oversize NCBI file (rare) fails
-            # fast instead of filling node disk.
-            {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "2Gi"}},
+            # Azcopy writes plan files to ~/.azcopy. PipeBlob mode does
+            # not create plan files, but the login flow + occasional
+            # diagnostic state still need a few KiB. 64Mi is plenty and
+            # tmpfs-backed so a stale state from a backoff retry never
+            # touches node disk.
+            {"name": "azcopy-cache", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}},
         ],
     }
-    if extra_tolerations:
-        pod_spec["tolerations"].extend(extra_tolerations)
-    if node_selector:
-        pod_spec["nodeSelector"] = dict(node_selector)
 
     pod_template: dict[str, Any] = {
         "metadata": {

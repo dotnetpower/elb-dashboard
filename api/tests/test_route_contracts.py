@@ -44,6 +44,7 @@ def test_aks_package_keeps_public_import_surface() -> None:
     assert callable(aks.aks_provision)
     assert callable(aks.aks_openapi_deploy)
     assert callable(aks.aks_openapi_deployment)
+    assert callable(aks.aks_openapi_pls)
     assert callable(aks.aks_openapi_proxy)
     assert callable(aks.aks_openapi_token)
     assert callable(aks.aks_openapi_token_generate)
@@ -81,6 +82,7 @@ def test_api_routes_registered_before_frontend_catchall() -> None:
         ("GET", "/api/aks/skus"),
         ("POST", "/api/aks/provision"),
         ("GET", "/api/aks/openapi/deployment"),
+        ("GET", "/api/aks/openapi/pls"),
         ("GET", "/api/aks/openapi/spec"),
         ("GET", "/api/aks/openapi/token"),
         ("POST", "/api/aks/openapi/token"),

@@ -214,3 +214,144 @@ def test_kubectl_apply_reuses_existing_az_login(monkeypatch) -> None:
     assert not any(call[:3] == ["az", "login", "--identity"] for call in calls)
     assert calls[0] == ["az", "account", "show", "--only-show-errors"]
     assert calls[1][:5] == ["az", "aks", "get-credentials", "--subscription", "sub-1"]
+
+
+# ---------- PLS (Private Link Service) — PR2 ---------------------------------
+
+
+def _base_build_kwargs() -> dict[str, Any]:
+    return {
+        "image": "elbacr.azurecr.io/elb-openapi:4.15",
+        "mi_client_id": "mi-client-id",
+        "cluster_name": "elb-cluster",
+        "resource_group": "rg-elb",
+        "storage_account": "elbstg",
+        "region": "koreacentral",
+        "tenant_id": "tenant-id",
+        "acr_name": "elbacr",
+        "acr_resource_group": "rg-acr",
+        "num_nodes": 10,
+        "api_token": "dummy-token",
+    }
+
+
+def _service_annotations(manifest_str: str) -> dict[str, str]:
+    docs = [json.loads(chunk) for chunk in manifest_str.split("\n---\n")]
+    svc = next(doc for doc in docs if doc["kind"] == "Service")
+    return svc["metadata"]["annotations"]
+
+
+def test_build_manifests_pls_disabled_omits_annotations() -> None:
+    """Default (PLS disabled) → only ILB annotation present."""
+    from api.tasks.openapi.constants import PlsConfig
+
+    manifest = openapi._build_manifests(
+        **_base_build_kwargs(),
+        pls=PlsConfig(enabled=False, name="", lb_subnet="", visibility="*", auto_approval=""),
+    )
+    annotations = _service_annotations(manifest)
+    assert (
+        annotations.get("service.beta.kubernetes.io/azure-load-balancer-internal")
+        == "true"
+    )
+    assert "service.beta.kubernetes.io/azure-pls-create" not in annotations
+
+
+def test_build_manifests_pls_enabled_injects_annotations() -> None:
+    """PLS enabled → all required PLS annotations injected."""
+    from api.tasks.openapi.constants import PlsConfig
+
+    manifest = openapi._build_manifests(
+        **_base_build_kwargs(),
+        pls=PlsConfig(
+            enabled=True,
+            name="pls-elb-openapi",
+            lb_subnet="snet-elb-lb",
+            visibility="sub-aaaa,sub-bbbb",
+            auto_approval="sub-aaaa",
+        ),
+    )
+    annotations = _service_annotations(manifest)
+    assert annotations["service.beta.kubernetes.io/azure-load-balancer-internal"] == "true"
+    assert annotations["service.beta.kubernetes.io/azure-pls-create"] == "true"
+    assert annotations["service.beta.kubernetes.io/azure-pls-name"] == "pls-elb-openapi"
+    assert (
+        annotations["service.beta.kubernetes.io/azure-pls-ip-configuration-subnet"]
+        == "snet-elb-lb"
+    )
+    assert (
+        annotations["service.beta.kubernetes.io/azure-pls-visibility"]
+        == "sub-aaaa,sub-bbbb"
+    )
+    assert (
+        annotations["service.beta.kubernetes.io/azure-pls-auto-approval"]
+        == "sub-aaaa"
+    )
+
+
+def test_build_manifests_pls_enabled_without_auto_approval_skips_annotation() -> None:
+    """Empty auto_approval → annotation omitted entirely."""
+    from api.tasks.openapi.constants import PlsConfig
+
+    manifest = openapi._build_manifests(
+        **_base_build_kwargs(),
+        pls=PlsConfig(
+            enabled=True,
+            name="pls-elb-openapi",
+            lb_subnet="snet-elb-lb",
+            visibility="*",
+            auto_approval="",
+        ),
+    )
+    annotations = _service_annotations(manifest)
+    assert annotations["service.beta.kubernetes.io/azure-pls-create"] == "true"
+    assert (
+        "service.beta.kubernetes.io/azure-pls-auto-approval" not in annotations
+    )
+
+
+def test_pls_config_from_env_rejects_enabled_without_subnet(monkeypatch) -> None:
+    """OPENAPI_PLS_ENABLED=true without LB_SUBNET → ValueError."""
+    import pytest
+    from api.tasks.openapi.constants import pls_config_from_env
+
+    monkeypatch.setenv("OPENAPI_PLS_ENABLED", "true")
+    monkeypatch.delenv("OPENAPI_PLS_LB_SUBNET", raising=False)
+    with pytest.raises(ValueError, match="OPENAPI_PLS_LB_SUBNET"):
+        pls_config_from_env()
+
+
+def test_pls_config_from_env_disabled_by_default(monkeypatch) -> None:
+    """No env vars → enabled=False, defaults sane."""
+    from api.tasks.openapi.constants import pls_config_from_env
+
+    for var in (
+        "OPENAPI_PLS_ENABLED",
+        "OPENAPI_PLS_NAME",
+        "OPENAPI_PLS_LB_SUBNET",
+        "OPENAPI_PLS_VISIBILITY",
+        "OPENAPI_PLS_AUTO_APPROVAL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    cfg = pls_config_from_env()
+    assert cfg.enabled is False
+    assert cfg.name == "pls-elb-openapi"
+    assert cfg.visibility == "*"
+
+
+def test_pls_config_from_env_reads_all_fields(monkeypatch) -> None:
+    """All env vars set → PlsConfig populated."""
+    from api.tasks.openapi.constants import pls_config_from_env
+
+    monkeypatch.setenv("OPENAPI_PLS_ENABLED", "1")
+    monkeypatch.setenv("OPENAPI_PLS_NAME", "pls-custom")
+    monkeypatch.setenv("OPENAPI_PLS_LB_SUBNET", "snet-lb")
+    monkeypatch.setenv("OPENAPI_PLS_VISIBILITY", "sub-a")
+    monkeypatch.setenv("OPENAPI_PLS_AUTO_APPROVAL", "sub-a")
+    cfg = pls_config_from_env()
+    assert cfg.enabled is True
+    assert cfg.name == "pls-custom"
+    assert cfg.lb_subnet == "snet-lb"
+    assert cfg.visibility == "sub-a"
+    assert cfg.auto_approval == "sub-a"
+
