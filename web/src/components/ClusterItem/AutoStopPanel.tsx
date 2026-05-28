@@ -7,7 +7,9 @@ import type {
   AutoStopPreferenceResponse,
   AutoStopStatusResponse,
 } from "@/api/aks";
+import { PermissionGate } from "@/components/PermissionGate";
 import { useToast } from "@/components/Toast";
+import { usePermissions } from "@/hooks/usePermissions";
 
 // Glassmorphic Idle Auto-Stop control surfaced inside the expanded
 // cluster card. Two visual states:
@@ -74,6 +76,16 @@ export function AutoStopPanel({
 }) {
   const qc = useQueryClient();
   const { toast } = useToast();
+  // Critique #6: gate the toggle + Extend mutations behind the
+  // caller's RBAC at the cluster scope so a user without
+  // ``Contributor`` (or equivalent) sees a disabled control with a
+  // "you need Contributor" tooltip instead of clicking through to a
+  // silent 403.
+  const { permissions } = usePermissions(
+    subscriptionId,
+    resourceGroup,
+    clusterName,
+  );
   const prefKey = useMemo(
     () => ["aks", "autostop", "pref", subscriptionId, resourceGroup, clusterName],
     [subscriptionId, resourceGroup, clusterName],
@@ -306,24 +318,26 @@ export function AutoStopPanel({
               {reasonText(status?.reason ?? "", status?.active_job_count ?? 0)}
             </span>
           </span>
-          <button
-            type="button"
-            className="glass-button"
-            disabled={extendMutation.isPending}
-            onClick={() => extendMutation.mutate(30)}
-            title="Push the auto-stop deadline out by 30 minutes"
-            style={{
-              fontSize: 11,
-              padding: "3px 10px",
-              color: "var(--accent)",
-            }}
-          >
-            {extendMutation.isPending ? (
-              <Loader2 size={11} className="spin" />
-            ) : (
-              "Extend 30 min"
-            )}
-          </button>
+          <PermissionGate need="can_write" permissions={permissions}>
+            <button
+              type="button"
+              className="glass-button"
+              disabled={extendMutation.isPending}
+              onClick={() => extendMutation.mutate(30)}
+              title="Push the auto-stop deadline out by 30 minutes"
+              style={{
+                fontSize: 11,
+                padding: "3px 10px",
+                color: "var(--accent)",
+              }}
+            >
+              {extendMutation.isPending ? (
+                <Loader2 size={11} className="spin" />
+              ) : (
+                "Extend 30 min"
+              )}
+            </button>
+          </PermissionGate>
         </div>
       )}
 
@@ -352,36 +366,40 @@ export function AutoStopPanel({
           ) : (
             <Power size={13} strokeWidth={1.5} style={{ color: "var(--text-faint)" }} />
           )}
-          <input
-            type="checkbox"
-            checked={draftEnabled}
-            disabled={saveMutation.isPending || prefQuery.isLoading || !!pref?.degraded}
-            onChange={(e) => handleToggle(e.target.checked)}
-            style={{ accentColor: "var(--accent)" }}
-          />
+          <PermissionGate need="can_write" permissions={permissions}>
+            <input
+              type="checkbox"
+              checked={draftEnabled}
+              disabled={saveMutation.isPending || prefQuery.isLoading || !!pref?.degraded}
+              onChange={(e) => handleToggle(e.target.checked)}
+              style={{ accentColor: "var(--accent)" }}
+            />
+          </PermissionGate>
           <span>Auto-stop when idle for</span>
         </label>
 
-        <select
-          aria-label="Idle window in minutes"
-          value={draftIdleMinutes}
-          disabled={!draftEnabled || saveMutation.isPending}
-          onChange={(e) => handleIdleChange(Number(e.target.value))}
-          style={{
-            fontSize: 12,
-            padding: "2px 6px",
-            background: "transparent",
-            border: "1px solid var(--border-weak)",
-            borderRadius: 4,
-            color: "var(--text)",
-          }}
-        >
-          {allowed.map((minutes) => (
-            <option key={minutes} value={minutes}>
-              {minutes < 60 ? `${minutes} min` : `${minutes / 60} h`}
-            </option>
-          ))}
-        </select>
+        <PermissionGate need="can_write" permissions={permissions}>
+          <select
+            aria-label="Idle window in minutes"
+            value={draftIdleMinutes}
+            disabled={!draftEnabled || saveMutation.isPending}
+            onChange={(e) => handleIdleChange(Number(e.target.value))}
+            style={{
+              fontSize: 12,
+              padding: "2px 6px",
+              background: "transparent",
+              border: "1px solid var(--border-weak)",
+              borderRadius: 4,
+              color: "var(--text)",
+            }}
+          >
+            {allowed.map((minutes) => (
+              <option key={minutes} value={minutes}>
+                {minutes < 60 ? `${minutes} min` : `${minutes / 60} h`}
+              </option>
+            ))}
+          </select>
+        </PermissionGate>
         <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
           {draftEnabled ? "to save cost" : "(disabled)"}
         </span>

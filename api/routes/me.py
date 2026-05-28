@@ -22,10 +22,11 @@ import threading
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from api.auth import CallerIdentity, require_caller
 from api.services import get_credential
+from api.services.me_permissions import compute_caller_permissions
 from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
@@ -121,4 +122,39 @@ def me(caller: CallerIdentity = Depends(require_caller)) -> dict[str, Any]:
     if error:
         body["subscriptions_error"] = error
     return body
+
+
+@router.get("/me/permissions")
+def me_permissions(
+    subscription_id: str = Query(..., description="Azure subscription id"),
+    resource_group: str | None = Query(
+        None, description="Optional resource group to scope the check"
+    ),
+    cluster_name: str | None = Query(
+        None, description="Optional AKS cluster name to scope the check"
+    ),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return the calling user's effective RBAC capabilities at a scope.
+
+    The SPA uses this to disable Start/Stop/Delete/Submit/Build buttons
+    when the signed-in user lacks the underlying Azure role at the
+    requested scope, and to render a tooltip explaining which role
+    they currently hold vs which role would be needed.
+
+    Important: this is a UX affordance, NOT a security boundary. The
+    real authorization check runs at submit time inside ARM / Storage
+    against the worker's managed identity (which is the canonical
+    enforcement point). Enumeration failures degrade open
+    (``degraded=true`` + all capabilities ``true``) so a transient
+    ARM hiccup never locks the operator out.
+    """
+    perms = compute_caller_permissions(
+        get_credential(),
+        caller_oid=caller.object_id,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    return perms.to_dict()
 

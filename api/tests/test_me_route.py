@@ -116,3 +116,57 @@ def test_me_requires_caller(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("API_CLIENT_ID", "00000000-0000-0000-0000-000000000000")
     res = client.get("/api/me")
     assert res.status_code in (401, 403)
+
+
+def test_me_permissions_returns_capability_shape(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Critique #6: `/api/me/permissions` must return the documented
+    capability shape so the SPA can disable buttons based on it."""
+    from api.services import me_permissions as svc
+
+    svc.reset_permissions_cache_for_tests()
+    monkeypatch.setattr(
+        svc,
+        "_enumerate_role_assignments",
+        lambda credential, sub, oid: (
+            [
+                (
+                    "8e3af657-a8ff-443c-a75c-2fe8c4bcb635",  # Owner
+                    f"/subscriptions/{sub}".lower(),
+                )
+            ],
+            None,
+        ),
+    )
+
+    res = client.get(
+        "/api/me/permissions?subscription_id=SUB&resource_group=rg-elb"
+    )
+    assert res.status_code == 200
+    body = res.json()
+    for key in (
+        "can_read",
+        "can_write",
+        "can_start_stop",
+        "can_delete",
+        "can_submit_blast",
+        "can_build_acr",
+        "can_grant_rbac",
+        "degraded",
+        "matched_roles",
+        "matched_role_names",
+        "reason",
+    ):
+        assert key in body, f"missing key {key}"
+    # Owner at sub scope grants every capability for rg-scoped query.
+    assert body["can_write"] is True
+    assert body["can_delete"] is True
+    assert "Owner" in body["matched_role_names"]
+
+
+def test_me_permissions_requires_subscription_id(
+    client: TestClient,
+) -> None:
+    res = client.get("/api/me/permissions")
+    assert res.status_code == 422  # FastAPI Query(...) required validation
