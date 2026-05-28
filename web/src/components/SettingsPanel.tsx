@@ -15,6 +15,7 @@ import {
   Loader2,
   Monitor,
   Moon,
+  Network,
   FlaskConical,
   RotateCcw,
   Settings as SettingsIcon,
@@ -124,7 +125,7 @@ const SECTIONS: Array<{ id: SectionId; label: string; icon: React.ReactNode }> =
   { id: "telemetry", label: "Telemetry", icon: <Activity size={14} strokeWidth={1.5} /> },
   { id: "aks", label: "AKS Observability", icon: <Monitor size={14} strokeWidth={1.5} /> },
   { id: "public-https", label: "Public HTTPS", icon: <Globe size={14} strokeWidth={1.5} /> },
-  { id: "vnet-peering", label: "VNet peering", icon: <Globe size={14} strokeWidth={1.5} /> },
+  { id: "vnet-peering", label: "VNet peering", icon: <Network size={14} strokeWidth={1.5} /> },
   { id: "sizing", label: "Sizing", icon: <Gauge size={14} strokeWidth={1.5} /> },
   { id: "resources", label: "Resources", icon: <SettingsIcon size={14} strokeWidth={1.5} /> },
 ];

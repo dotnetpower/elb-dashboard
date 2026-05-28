@@ -417,7 +417,7 @@ Goal: Web BLAST compatibility becomes a repeatable evidence process.
 Tasks:
 
 - [ ] Define golden cases: small DB, `core_nt`, taxonomy inclusive/exclusive, no-hit, high-hit-count, multi-query same searchsp, multi-query mixed searchsp, approximate mode, and storage partial.
-- [ ] Add CI-friendly comparator fixtures.
+- [x] Add CI-friendly comparator fixtures. (All three reference genes -- F3L Monkeypox virus, 18S rRNA P. falciparum, and RdRp / ORF1ab SARS-CoV-2 -- now carry checked-in FASTA + NCBI Web BLAST reference XML under `api/tests/fixtures/web_blast_parity/`. `api/tests/test_web_blast_parity_fixtures.py` enforces the form-to-INI request mapping, and `api/tests/test_web_blast_parity_xml.py` enforces the result-side contract: header guard, self-equivalence via `api/services/blast/web_blast_parity.py::compare_summaries`, query-source taxonomic exclusion, canonical-field guard against `api/services/blast/results_parser.py::parse_blast_xml`, and opt-in candidate-vs-reference parity gated by `ELB_PARITY_CANDIDATE_DIR`.)
 - [ ] Add manual/scheduled large-DB evidence workflow.
 - [ ] Store evidence artifacts with hashes.
 - [x] Add registry promotion flow that requires evidence artifacts.
@@ -433,6 +433,9 @@ Done when:
 Validation evidence:
 
 - Evidence registry validation added in `api/services/blast_equivalence_evidence.py`.
+- Web BLAST reference parity fixtures + request-side and result-side contract tests landed for
+	all three reference diagnostic genes; see
+	[Web BLAST Parity Validation](../user-guide/web-blast-parity.md).
 
 Remaining Low items:
 

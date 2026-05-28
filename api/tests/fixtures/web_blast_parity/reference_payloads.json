@@ -1,0 +1,143 @@
+{
+  "$schema_note": "Web BLAST parity reference inputs. Each entry pairs the literal NCBI Web BLAST form payload with the structured dashboard submit request the parity test maps it into, plus the BLAST+ flags that must appear in the [blast].options line of the generated elastic-blast INI. See README.md.",
+  "version": "2",
+  "core_nt_snapshot": {
+    "policy": "When the dashboard's local core_nt snapshot drifts from the NCBI Web BLAST snapshot, byte-level result equality is not guaranteed. The parity comparator records both versions and downgrades to taxonomy-and-rank-set equivalence instead of HSP byte equality when the snapshots differ.",
+    "ncbi_database_name": "core_nt",
+    "reference_database_field": "Database/BlastOutput_db",
+    "documented_in": "docs/user-guide/web-blast-parity.md#database-parity"
+  },
+  "genes": {
+    "f3l": {
+      "description": "Monkeypox virus F3L gene, 462 bp. NCBI Web BLAST RID 1FZVPFJ6014 captured 2026-05-28.",
+      "fasta_path": "f3l_query.fasta",
+      "reference_xml_path": "reference_xml/f3l_1FZVPFJ6014.xml.gz",
+      "query_length": 462,
+      "ncbi_form": {
+        "CMD": "Put",
+        "PROGRAM": "blastn",
+        "DATABASE": "core_nt",
+        "FORMAT_TYPE": "XML",
+        "HITLIST_SIZE": "500",
+        "EXPECT": "0.05",
+        "MEGABLAST": "on",
+        "WORD_SIZE": "28",
+        "FILTER": "L",
+        "TOOL": "elb-dashboard-parity",
+        "EMAIL": "parity@example.com",
+        "ENTREZ_QUERY": "NOT txid3431483[ORGN]"
+      },
+      "ncbi_rid": "1FZVPFJ6014",
+      "exclusion_taxid": 3431483,
+      "exclusion_label": "Orthopoxvirus",
+      "dashboard_request": {
+        "program": "blastn",
+        "database_name": "core_nt",
+        "outfmt": 5,
+        "evalue": 0.05,
+        "word_size": 28,
+        "max_target_seqs": 500,
+        "low_complexity_filter": true,
+        "taxid": 3431483,
+        "is_inclusive": false
+      },
+      "expected_blast_options": [
+        "-evalue 0.05",
+        "-max_target_seqs 500",
+        "-negative_taxids 3431483",
+        "-outfmt 5",
+        "-word_size 28",
+        "-dust yes",
+        "-soft_masking false"
+      ]
+    },
+    "rrna_18s": {
+      "description": "Plasmodium falciparum 18S ribosomal RNA, 2151 bp. NCBI Web BLAST RID 1FZW35EN014 captured 2026-05-28.",
+      "fasta_path": "18s_query.fasta",
+      "reference_xml_path": "reference_xml/rrna_18s_1FZW35EN014.xml.gz",
+      "query_length": 2151,
+      "ncbi_form": {
+        "CMD": "Put",
+        "PROGRAM": "blastn",
+        "DATABASE": "core_nt",
+        "FORMAT_TYPE": "XML",
+        "HITLIST_SIZE": "500",
+        "EXPECT": "0.05",
+        "MEGABLAST": "on",
+        "WORD_SIZE": "28",
+        "FILTER": "L",
+        "TOOL": "elb-dashboard-parity",
+        "EMAIL": "parity@example.com",
+        "ENTREZ_QUERY": "NOT txid5833[ORGN]"
+      },
+      "ncbi_rid": "1FZW35EN014",
+      "exclusion_taxid": 5833,
+      "exclusion_label": "Plasmodium falciparum",
+      "dashboard_request": {
+        "program": "blastn",
+        "database_name": "core_nt",
+        "outfmt": 5,
+        "evalue": 0.05,
+        "word_size": 28,
+        "max_target_seqs": 500,
+        "low_complexity_filter": true,
+        "taxid": 5833,
+        "is_inclusive": false
+      },
+      "expected_blast_options": [
+        "-evalue 0.05",
+        "-max_target_seqs 500",
+        "-negative_taxids 5833",
+        "-outfmt 5",
+        "-word_size 28",
+        "-dust yes",
+        "-soft_masking false"
+      ]
+    },
+    "rdrp_orf1ab": {
+      "description": "SARS-CoV-2 ORF1ab polyprotein (266..21555 of NC_045512.2; includes nsp12 / RdRp), 21290 bp. NCBI Web BLAST RID 1G7Z8G7W016 submitted 2026-05-28 with the parity tool/email tuple (the issue's elb-dashboard-parity / parity@example.com is the documented original requestor; either combination produces the same scientific result for these parameters).",
+      "fasta_path": "orf1ab_query.fasta",
+      "fasta_source": "NCBI Entrez efetch nuccore NC_045512.2:266-21555",
+      "reference_xml_path": "reference_xml/rdrp_orf1ab_1G7Z8G7W016.xml.gz",
+      "query_length": 21290,
+      "ncbi_form": {
+        "CMD": "Put",
+        "PROGRAM": "blastn",
+        "DATABASE": "core_nt",
+        "FORMAT_TYPE": "XML",
+        "HITLIST_SIZE": "500",
+        "EXPECT": "0.05",
+        "MEGABLAST": "on",
+        "WORD_SIZE": "28",
+        "FILTER": "L",
+        "TOOL": "elb-dashboard-parity",
+        "EMAIL": "parity@example.com",
+        "ENTREZ_QUERY": "NOT txid3418604[ORGN]"
+      },
+      "ncbi_rid": "1G7Z8G7W016",
+      "exclusion_taxid": 3418604,
+      "exclusion_label": "Betacoronavirus",
+      "dashboard_request": {
+        "program": "blastn",
+        "database_name": "core_nt",
+        "outfmt": 5,
+        "evalue": 0.05,
+        "word_size": 28,
+        "max_target_seqs": 500,
+        "low_complexity_filter": true,
+        "taxid": 3418604,
+        "is_inclusive": false
+      },
+      "expected_blast_options": [
+        "-evalue 0.05",
+        "-max_target_seqs 500",
+        "-negative_taxids 3418604",
+        "-outfmt 5",
+        "-word_size 28",
+        "-dust yes",
+        "-soft_masking false"
+      ]
+    }
+  },
+  "blockers": {}
+}

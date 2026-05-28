@@ -48,6 +48,7 @@ from api.tasks.storage.helpers import (
 from api.tasks.storage.helpers import (
     wait_for_warmup_jobs as _wait_for_warmup_jobs,
 )
+from api.tasks.storage.prepare_db_via_aks import prepare_db_via_aks
 from api.tasks.storage.reconcile import reconcile_auto_warmup
 from api.tasks.storage.update_check import check_database_updates
 from api.tasks.storage.warmup import warmup_database
@@ -65,6 +66,7 @@ __all__ = (
     "_wait_for_warmup_jobs",
     "check_database_updates",
     "get_credential",
+    "prepare_db_via_aks",
     "reconcile_auto_warmup",
     "warmup_database",
 )

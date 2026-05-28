@@ -127,6 +127,346 @@ def _is_stale_prepare_marker(metadata: dict[str, Any]) -> bool:
     return age >= _PREPARE_DB_STALE_SECONDS
 
 
+def _try_dispatch_aks_mode(
+    *,
+    body: dict[str, Any],
+    caller: CallerIdentity,
+    cred: Any,
+    sub: str,
+    storage_rg: str,
+    account_name: str,
+    db_name: str,
+    mode: str,
+) -> dict[str, Any] | None:
+    """Issue #7 Phase 1: dispatch the AKS-fanout prepare-db Celery task.
+
+    Returns the HTTP response dict on a successful dispatch. Returns
+    ``None`` when ``mode == "auto"`` and AKS is unavailable so the caller
+    transparently falls back to the existing server-side path. Raises
+    ``HTTPException`` for explicit ``mode == "aks"`` failures (no silent
+    fallback per acceptance criterion #3) and for input validation
+    problems.
+    """
+    aks_rg = str(body.get("aks_resource_group") or "").strip()
+    cluster_name = str(body.get("cluster_name") or "").strip()
+    if mode == "aks" and (not aks_rg or not cluster_name):
+        raise HTTPException(
+            400,
+            "aks_resource_group and cluster_name are required when mode=aks",
+        )
+    if not aks_rg or not cluster_name:
+        # mode=auto with no AKS coords → fall through to server-side.
+        return None
+    _check(aks_rg, _RE_RG, "aks_resource_group")
+    _check(cluster_name, _RE_RG, "cluster_name")
+
+    min_idle_env = os.environ.get("PREPARE_DB_AKS_MIN_IDLE_NODES", "3")
+    try:
+        min_idle_nodes = max(1, int(min_idle_env))
+    except ValueError:
+        min_idle_nodes = 3
+
+    # Lazy import — k8s helpers pull in the Azure SDK transitively.
+    from api.services.k8s.nodes import k8s_ready_warmup_node_names
+
+    try:
+        ready_nodes = k8s_ready_warmup_node_names(cred, sub, aks_rg, cluster_name)
+    except Exception as exc:
+        if mode == "aks":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "aks_unavailable",
+                    "message": (
+                        "Could not probe AKS cluster for ready workers: "
+                        f"{type(exc).__name__}"
+                    ),
+                    "ready_nodes": 0,
+                    "required_nodes": min_idle_nodes,
+                },
+            ) from exc
+        LOGGER.info(
+            "prepare_db mode=auto AKS probe failed (%s); falling back to server-side",
+            type(exc).__name__,
+        )
+        return None
+
+    if len(ready_nodes) < min_idle_nodes:
+        if mode == "aks":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "aks_unavailable",
+                    "message": (
+                        f"AKS cluster has {len(ready_nodes)} ready worker nodes; "
+                        f"need at least {min_idle_nodes}. Retry once warmup "
+                        "scales the pool up or use mode=server-side."
+                    ),
+                    "ready_nodes": len(ready_nodes),
+                    "required_nodes": min_idle_nodes,
+                },
+            )
+        return None
+
+    from api.routes._blast_shared import _safe_send_task
+    from api.routes.storage.common import (
+        NcbiAccessDenied,
+        _list_keys_with_sizes,
+    )
+    from api.services.storage.data import _blob_service
+    from api.services.storage.public_access import ensure_local_storage_access
+
+    access = ensure_local_storage_access(cred, sub, storage_rg, account_name)
+    if access.get("action") == "failed":
+        LOGGER.warning(
+            "prepare_db AKS local-debug auto-open failed for %s: %s",
+            account_name,
+            access.get("error"),
+        )
+
+    try:
+        latest_dir = _resolve_latest_dir()
+    except Exception as exc:
+        LOGGER.warning(
+            "NCBI latest-dir lookup failed for AKS prepare-db: %s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            502, f"could not contact NCBI: {sanitise(str(exc))[:200]}"
+        ) from exc
+
+    try:
+        sized_keys = _list_keys_with_sizes(latest_dir, db_name)
+    except NcbiAccessDenied as exc:
+        LOGGER.warning("NCBI 403 listing %s (AKS path)", db_name)
+        raise HTTPException(
+            502,
+            "NCBI bucket refused the request (rate-limited); retry shortly.",
+        ) from exc
+    except Exception as exc:
+        LOGGER.warning(
+            "NCBI key list failed for %s (AKS path): %s",
+            db_name,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            502,
+            f"could not list NCBI database keys: {sanitise(str(exc))[:200]}",
+        ) from exc
+
+    if not sized_keys:
+        raise HTTPException(
+            404,
+            (
+                f"No files found for database '{db_name}' in NCBI S3 (snapshot: "
+                f"{latest_dir})."
+            ),
+        )
+
+    if _INCLUDE_SHARED_TAXONOMY:
+        try:
+            tax_keys = shared_taxonomy_keys(latest_dir)
+        except Exception as exc:
+            LOGGER.warning(
+                "shared taxonomy HEAD probe failed (AKS path) %s: %s — "
+                "proceeding without taxdb staging",
+                latest_dir,
+                type(exc).__name__,
+            )
+            tax_keys = []
+        if tax_keys:
+            # dedupe with existing list (preserve order)
+            existing_keys = {k for k, _ in sized_keys}
+            for tk in tax_keys:
+                if tk not in existing_keys:
+                    sized_keys.append((tk, 0))
+
+    file_keys = [k for k, _ in sized_keys]
+    file_sizes = {k: s for k, s in sized_keys if s > 0}
+
+    # Acquire route-side lock + write start metadata. The Celery worker
+    # process owns the rest of the lifecycle; cross-process serialisation
+    # is the metadata's ``update_in_progress=true`` flag.
+    lock = _prepare_db_lock(account_name, db_name)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, "another prepare-db is in progress for this DB")
+
+    try:
+        blob_svc = _blob_service(cred, account_name)
+        container = blob_svc.get_container_client("blast-db")
+        previous_metadata, _ = _download_blob_with_etag(container, db_name)
+        if previous_metadata.get("update_in_progress") and not _is_stale_prepare_marker(
+            previous_metadata
+        ):
+            raise HTTPException(
+                409,
+                "prepare-db is already running for this DB (check the dashboard)",
+            )
+
+        previous_source_version = str(previous_metadata.get("source_version") or "")
+        started_at = datetime.now(UTC).isoformat()
+
+        def _start_mutator(meta: dict[str, Any]) -> dict[str, Any]:
+            meta["db_name"] = db_name
+            meta["update_in_progress"] = True
+            meta["update_started_at"] = started_at
+            meta["updating_to_source_version"] = latest_dir
+            meta["updating_signature_etag"] = None
+            meta.pop("update_error", None)
+            meta.pop("update_failed_at", None)
+            meta.pop("failed_files", None)
+            meta["copy_status"] = {
+                "phase": "queued",
+                "mode": "aks",
+                "total_files": len(file_keys),
+            }
+            if previous_source_version and previous_source_version != latest_dir:
+                meta["previous_source_version"] = previous_source_version
+            return meta
+
+        try:
+            _update_metadata(container, db_name, account_name, _start_mutator)
+        except Exception as exc:
+            LOGGER.warning(
+                "AKS prepare-db update-start metadata write failed for %s: %s",
+                db_name,
+                sanitise(str(exc))[:200],
+            )
+
+        max_pods_env = os.environ.get("PREPARE_DB_AKS_MAX_PARALLELISM", "10")
+        files_per_pod_env = os.environ.get("PREPARE_DB_AKS_FILES_PER_POD", "50")
+        image_env = os.environ.get(
+            "PREPARE_DB_AKS_AZCOPY_IMAGE", "mcr.microsoft.com/azure-cli:latest"
+        )
+        timeout_env = os.environ.get("PREPARE_DB_AKS_JOB_TIMEOUT_SECONDS", "1800")
+        try:
+            max_pods = max(1, int(max_pods_env))
+        except ValueError:
+            max_pods = 10
+        try:
+            files_per_pod = max(1, int(files_per_pod_env))
+        except ValueError:
+            files_per_pod = 50
+        try:
+            active_deadline = max(60, int(timeout_env))
+        except ValueError:
+            active_deadline = 1800
+
+        try:
+            result = _safe_send_task(
+                "api.tasks.storage.prepare_db_via_aks",
+                queue="storage",
+                job_id=f"prepare-db-aks-{db_name}-{int(time.time())}",
+                subscription_id=sub,
+                storage_resource_group=storage_rg,
+                storage_account=account_name,
+                db_name=db_name,
+                source_version=latest_dir,
+                file_keys=file_keys,
+                file_sizes=file_sizes,
+                aks_resource_group=aks_rg,
+                cluster_name=cluster_name,
+                max_pods=max_pods,
+                files_per_pod=files_per_pod,
+                image=image_env,
+                active_deadline_seconds=active_deadline,
+                caller_oid=caller.object_id,
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            # Roll back the start marker so the SPA does not show a
+            # phantom in-progress with no live worker.
+            try:
+                def _rollback(meta: dict[str, Any]) -> dict[str, Any]:
+                    meta["update_in_progress"] = False
+                    meta["update_error"] = "AKS dispatch failed (enqueue error)"
+                    meta["update_failed_at"] = datetime.now(UTC).isoformat()
+                    meta["copy_status"] = {
+                        "phase": "init_failed",
+                        "mode": "aks",
+                        "stage": "enqueue",
+                    }
+                    return meta
+
+                _update_metadata(container, db_name, account_name, _rollback)
+            except Exception as exc:
+                LOGGER.debug(
+                    "AKS rollback metadata write skipped db=%s: %s",
+                    db_name,
+                    type(exc).__name__,
+                )
+            raise
+    finally:
+        # Release the route-side lock immediately — the worker process has
+        # no visibility into this threading.Lock anyway, and the
+        # metadata.update_in_progress flag is the real cross-process gate.
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+
+    try:
+        from api.services.db.ops_audit import record_db_op
+
+        audit_job_id = record_db_op(
+            op="prepare_db_aks",
+            caller=caller,
+            account_name=account_name,
+            db_name=db_name,
+            extra={
+                "source_version": latest_dir,
+                "files_total": len(file_keys),
+                "subscription_id": sub,
+                "storage_resource_group": storage_rg,
+                "aks_resource_group": aks_rg,
+                "cluster_name": cluster_name,
+                "ready_nodes": len(ready_nodes),
+                "task_id": result.id,
+            },
+        )
+    except Exception as exc:
+        LOGGER.debug(
+            "prepare_db_aks audit record skipped: %s", type(exc).__name__
+        )
+        audit_job_id = ""
+
+    LOGGER.info(
+        "prepare_db mode=aks dispatched oid=%s db=%s task=%s files=%d nodes=%d audit=%s",
+        caller.object_id,
+        db_name,
+        result.id,
+        len(file_keys),
+        len(ready_nodes),
+        audit_job_id or "n/a",
+    )
+
+    response: dict[str, Any] = {
+        "ok": True,
+        "mode": "aks",
+        "db_name": db_name,
+        "task_id": result.id,
+        "instance_id": result.id,
+        "statusQueryGetUri": f"/api/tasks/{result.id}",
+        "files_total": len(file_keys),
+        "source_version": latest_dir,
+        "ready_nodes": len(ready_nodes),
+        "async": True,
+        "output": (
+            f"Dispatched AKS-fanout prepare-db for {db_name} "
+            f"({len(file_keys)} files, {len(ready_nodes)} worker nodes). "
+            "Poll /api/blast/databases for progress."
+        ),
+    }
+    if access.get("action") in ("opened", "ip_added"):
+        response["local_debug_storage_opened"] = {
+            "ip": access.get("ip"),
+            "previous_public": access.get("previous_public"),
+            "off_hint": access.get("off_hint"),
+        }
+    return response
+
+
 def _read_db_metadata(container: Any, db_name: str) -> dict[str, Any]:
     metadata_blob = container.get_blob_client(f"{db_name}-metadata.json")
     try:
@@ -454,7 +794,32 @@ def prepare_db(
     _check(account_name, _RE_STORAGE_ACCOUNT, "account_name")
     _check(db_name, _RE_DB_NAME, "db_name")
 
+    mode_default = os.environ.get("PREPARE_DB_AKS_MODE_DEFAULT", "server-side").strip().lower()
+    raw_mode = str(body.get("mode") or mode_default).strip().lower()
+    if raw_mode not in {"server-side", "aks", "auto"}:
+        raise HTTPException(
+            400,
+            f"invalid mode: {raw_mode!r} (must be server-side, aks, or auto)",
+        )
+
     cred = get_credential()
+
+    if raw_mode in {"aks", "auto"}:
+        outcome = _try_dispatch_aks_mode(
+            body=body,
+            caller=caller,
+            cred=cred,
+            sub=sub,
+            storage_rg=storage_rg,
+            account_name=account_name,
+            db_name=db_name,
+            mode=raw_mode,
+        )
+        if outcome is not None:
+            return outcome
+        # auto + AKS not available → fall through to the existing
+        # server-side path. ``aks`` mode with unavailable AKS raises
+        # HTTP 409 inside the helper, so we never reach here on that branch.
 
     # Local-debug only: when LOCAL_DEBUG_AUTO_OPEN_STORAGE=true is set on a
     # developer laptop (NOT in a Container App), open the workload Storage

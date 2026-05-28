@@ -176,6 +176,83 @@ def _list_keys(latest_dir: str, db_name: str) -> list[str]:
     return keys
 
 
+def _list_keys_with_sizes(latest_dir: str, db_name: str) -> list[tuple[str, int]]:
+    """Same as `_list_keys` but also returns each object's ``Size`` in bytes.
+
+    Used by the AKS-fanout prepare-db path (issue #7) to balance shards via
+    longest-processing-time-first. Cached separately from `_list_keys`
+    (different value type) and respects the same circuit breaker. A 0 size
+    is reported for any object whose ``Size`` element is missing or
+    unparseable — the planner falls back to count-balancing for those.
+    """
+    from urllib.parse import quote
+
+    import httpx
+
+    cache_key = (latest_dir, db_name)
+    now = time.monotonic()
+    with _NCBI_CACHE_LOCK:
+        cached = _LIST_KEYS_SIZES_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            return list(cached[1])
+
+    prefix = f"{latest_dir}/{db_name}"
+    items: list[tuple[str, int]] = []
+    continuation = ""
+    _breaker_check()
+    try:
+        from api.services.httpx_pool import get_pooled_client
+
+        client = get_pooled_client("ncbi-list", timeout=30.0)
+        for _page in range(50):
+            list_url = f"{_NCBI_S3_BASE}?list-type=2&prefix={prefix}&max-keys=1000"
+            if continuation:
+                list_url += f"&continuation-token={quote(continuation, safe='')}"
+            resp = client.get(list_url)
+            if resp.status_code == 403:
+                _breaker_record_failure()
+                raise NcbiAccessDenied(
+                    f"NCBI bucket returned 403 listing {prefix!r}: {resp.text[:200]}"
+                )
+            if resp.status_code >= 500:
+                _breaker_record_failure()
+                raise NcbiUnavailable(
+                    f"NCBI bucket HTTP {resp.status_code} listing {prefix!r}"
+                )
+            resp.raise_for_status()
+            root = ElementTree.fromstring(resp.content)  # noqa: S314 — NCBI public bucket, schema fixed
+            for el in root.findall(".//s3:Contents", _S3_LIST_NS):
+                key_el = el.find("s3:Key", _S3_LIST_NS)
+                size_el = el.find("s3:Size", _S3_LIST_NS)
+                if key_el is None or not key_el.text or key_el.text.endswith("/"):
+                    continue
+                try:
+                    size_val = int(size_el.text) if size_el is not None and size_el.text else 0
+                except ValueError:
+                    size_val = 0
+                items.append((key_el.text, max(size_val, 0)))
+            is_truncated = root.findtext("s3:IsTruncated", "false", _S3_LIST_NS)
+            if is_truncated == "true":
+                tok = root.find("s3:NextContinuationToken", _S3_LIST_NS)
+                continuation = tok.text if tok is not None and tok.text else ""
+            else:
+                break
+    except httpx.HTTPError as exc:
+        _breaker_record_failure()
+        raise NcbiUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    _breaker_record_success()
+    if items:
+        expires_at = time.monotonic() + _LIST_KEYS_CACHE_TTL_SECONDS
+        with _NCBI_CACHE_LOCK:
+            _LIST_KEYS_SIZES_CACHE[cache_key] = (expires_at, list(items))
+            if len(_LIST_KEYS_SIZES_CACHE) > 64:
+                oldest = min(
+                    _LIST_KEYS_SIZES_CACHE.items(), key=lambda kv: kv[1][0]
+                )[0]
+                _LIST_KEYS_SIZES_CACHE.pop(oldest, None)
+    return items
+
+
 _LATEST_DIR_CACHE_TTL_SECONDS = float(
     os.environ.get("NCBI_LATEST_DIR_CACHE_TTL", "3600.0")
 )
@@ -184,6 +261,7 @@ _LIST_KEYS_CACHE_TTL_SECONDS = float(
 )
 _LATEST_DIR_CACHE: dict[str, tuple[float, str]] = {}
 _LIST_KEYS_CACHE: dict[tuple[str, str], tuple[float, list[str]]] = {}
+_LIST_KEYS_SIZES_CACHE: dict[tuple[str, str], tuple[float, list[tuple[str, int]]]] = {}
 _SHARED_TAXONOMY_KEYS_CACHE: dict[str, tuple[float, list[str]]] = {}
 _NCBI_CACHE_LOCK = threading.Lock()
 
@@ -251,6 +329,7 @@ def reset_ncbi_catalogue_cache() -> None:
     with _NCBI_CACHE_LOCK:
         _LATEST_DIR_CACHE.clear()
         _LIST_KEYS_CACHE.clear()
+        _LIST_KEYS_SIZES_CACHE.clear()
         _SHARED_TAXONOMY_KEYS_CACHE.clear()
         _NCBI_BREAKER_STATE["failures"] = 0
         _NCBI_BREAKER_STATE["opened_at"] = 0.0
