@@ -38,6 +38,12 @@ param uamiPrincipalId string
 
 var contributorRoleId = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
 var userAccessAdministratorRoleId = '18d7d88d-d35e-4fb5-a5c3-7773c20a72d9'
+// Narrow built-in roles added in phase-1 of audit P2 #16-20. The sibling
+// controlPlaneRoles.bicep keeps the symmetric set on the dashboard RG; see
+// that file's header for the phase-1/phase-2 split rationale.
+var managedIdentityContributorRoleId = 'e40ec5ca-96e0-45a2-b4ff-59039f2c2b59'
+var networkContributorRoleId = '4d97b98b-1d4f-4787-a291-c67834d212e7'
+var aksContributorRoleId = 'ed7f3fbd-7b88-4dd4-9017-9adb7ce333f8'
 
 resource workloadRgContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(resourceGroup().id, uamiPrincipalId, contributorRoleId)
@@ -45,7 +51,7 @@ resource workloadRgContributor 'Microsoft.Authorization/roleAssignments@2022-04-
     principalId: uamiPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', contributorRoleId)
-    description: 'elb-dashboard shared UAMI — create id-elb-openapi MI + federated cred + read/list AKS in the workload RG.'
+    description: 'elb-dashboard shared UAMI — create id-elb-openapi MI + federated cred + read/list AKS in the workload RG. PHASE-1 LEGACY: kept during the soak window; scheduled for removal in phase-2 of audit P2 #16-20.'
   }
 }
 
@@ -59,5 +65,40 @@ resource workloadRgUserAccessAdministrator 'Microsoft.Authorization/roleAssignme
   }
 }
 
+// --- phase-1 narrow additions --------------------------------------------
+
+resource workloadRgManagedIdentityContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, uamiPrincipalId, managedIdentityContributorRoleId)
+  properties: {
+    principalId: uamiPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', managedIdentityContributorRoleId)
+    description: 'elb-dashboard shared UAMI — phase-1: create/manage id-elb-openapi + federated credentials in the workload RG (replaces Contributor for MI operations).'
+  }
+}
+
+resource workloadRgNetworkContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, uamiPrincipalId, networkContributorRoleId)
+  properties: {
+    principalId: uamiPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', networkContributorRoleId)
+    description: 'elb-dashboard shared UAMI — phase-1: AKS cluster CNI + load-balancer + NSG management in the workload RG (replaces Contributor for networking).'
+  }
+}
+
+resource workloadRgAksContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, uamiPrincipalId, aksContributorRoleId)
+  properties: {
+    principalId: uamiPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', aksContributorRoleId)
+    description: 'elb-dashboard shared UAMI — phase-1: manage the AKS cluster resource in the workload RG (replaces Contributor for AKS lifecycle).'
+  }
+}
+
 output contributorRoleAssignmentId string = workloadRgContributor.id
 output userAccessAdministratorRoleAssignmentId string = workloadRgUserAccessAdministrator.id
+output managedIdentityContributorRoleAssignmentId string = workloadRgManagedIdentityContributor.id
+output networkContributorRoleAssignmentId string = workloadRgNetworkContributor.id
+output aksContributorRoleAssignmentId string = workloadRgAksContributor.id
