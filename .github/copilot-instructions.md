@@ -291,12 +291,53 @@ Hardening discipline (§12a):
 - [ ] Persona Matrix tests pass for owner / contributor / reader / dev_bypass
 - [ ] Reader allowlist unchanged OR split-PR link: #…
 - [ ] Capability Probe passes locally (`scripts/dev/probe_capabilities.py`)
+- [ ] RBAC removal preflight green locally (`scripts/dev/preflight_rbac_removal.sh`) OR `ACCEPT_RBAC_REMOVAL=phase-2-of-pr-<N>` recorded in the PR description
 - [ ] New guard ships default-OFF behind `STRICT_*` / `ENFORCE_*` env var (or N/A)
 - [ ] No `Depends(require_caller)` added to an SSE event stream
 - [ ] Change note under `docs/features_change/YYYY-MM/` summarises persona impact
 ```
 
 Reviewers MUST refuse to merge a hardening PR with this block missing or incomplete.
+
+### Rule 7 — RBAC removal halt at `azd provision`
+Bicep is declarative, so removing a `roleAssignments` resource from a module
+(or removing the module from `infra/main.bicep`) causes the next `azd provision`
+/ `azd up` to **DELETE** the live assignment. That is exactly how Rule 1's
+phase-2 PR is supposed to ship — but the same one-character diff in any unrelated
+hardening PR will silently strip permissions a subscription Owner / Contributor /
+Reader was relying on, and the first symptom is a `403 AuthorizationFailed` in
+production traffic.
+
+The mechanical guard for this is
+[scripts/dev/check_rbac_removal.py](../scripts/dev/check_rbac_removal.py) and its
+azure.yaml preprovision wrapper
+[scripts/dev/preflight_rbac_removal.sh](../scripts/dev/preflight_rbac_removal.sh).
+The wrapper runs `az deployment sub what-if --no-pretty-print --output json`
+against `infra/main.bicep`, pipes the result to the python parser, and the
+parser flags every `Microsoft.Authorization/roleAssignments` entry with
+`changeType` in `Delete` / `DeploymentMode`.
+
+Defaults (per Rule 4):
+
+* `STRICT_RBAC_REMOVAL_HALT` unset / `false` → **warn-only**. Findings print to
+  preprovision stdout; `azd provision` proceeds. This is the soak-window state.
+* `STRICT_RBAC_REMOVAL_HALT=true` → **halt**. The preprovision hook exits
+  non-zero, azd aborts before any ARM call. The only way through is to set
+  `ACCEPT_RBAC_REMOVAL=phase-2-of-pr-<N>` (regex tolerates
+  `phase-2 of 2 (see PR-<N>)` etc.) for the duration of the run.
+
+When to flip the default to ON: after one full release cycle of dogfood with
+the warning visible in preprovision logs AND a green `pytest -q
+api/tests/test_check_rbac_removal.py` run with the gate forced ON. The flip is
+its own PR; it must include the matching env var change in
+[infra/modules/containerAppControl.bicep](../infra/modules/containerAppControl.bicep)
+documentation only — there is no Container App surface to flip; the gate lives
+in azd preprovision.
+
+Phase-2 PRs MUST cite the matching phase-1 PR number in their
+`ACCEPT_RBAC_REMOVAL` value and copy the same string into the Rule 6 checklist
+("RBAC removal preflight green locally … OR `ACCEPT_RBAC_REMOVAL=phase-2-of-pr-<N>`
+recorded"). Reviewers cross-check the value against the phase-1 PR before merge.
 
 ---
 

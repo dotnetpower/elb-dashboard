@@ -49,6 +49,8 @@ hooks:
       else
         bash ./scripts/dev/recover-deleted-keyvault.sh --environment "$AZURE_ENV_NAME"
       fi
+      bash ./scripts/dev/azd-progress.sh note "Running RBAC removal preflight (charter §12a Rule 7)."
+      bash ./scripts/dev/preflight_rbac_removal.sh
       bash ./scripts/dev/azd-progress.sh step 3 "Bicep provision" "azd runs infra/main.bicep next; this is the main Azure resource creation phase."
       if [ -z "${API_CLIENT_ID:-}" ]; then
         bash ./scripts/dev/azd-progress.sh note "API_CLIENT_ID is not set yet. Step 4 will create/reuse the App Registration and persist it."
