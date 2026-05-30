@@ -22,6 +22,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.auth import CallerIdentity, require_caller
+from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ def aks_peer_with_platform(
         "aks/peer-with-platform requested cluster=%s rg=%s caller_oid=%s",
         cluster_name,
         resource_group,
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
 
     from api.services import get_credential

@@ -29,6 +29,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.auth import CallerIdentity, require_caller
+from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger(__name__)
 
@@ -203,7 +204,7 @@ def peer_vnet(
     )
 
     target_ip = str(body.get("target_ip") or "10.224.0.7").strip()
-    _validate_target_ip(target_ip, caller.object_id)
+    _validate_target_ip(target_ip, redact_oid(caller.object_id) or "")
 
     target_path = str(body.get("target_path") or "/openapi.json").strip()
     if not target_path.startswith("/"):
@@ -212,13 +213,13 @@ def peer_vnet(
         LOGGER.warning(
             "settings/vnet-peering rejected oversize target_path len=%s caller_oid=%s",
             len(target_path),
-            caller.object_id,
+            redact_oid(caller.object_id),
         )
         raise HTTPException(400, "target_path too long (max 256 chars)")
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in target_path):
         LOGGER.warning(
             "settings/vnet-peering rejected target_path with control chars caller_oid=%s",
-            caller.object_id,
+            redact_oid(caller.object_id),
         )
         raise HTTPException(400, "target_path contains control characters")
 
@@ -228,7 +229,7 @@ def peer_vnet(
         resource_group,
         target_resource_group,
         target_vnet_name,
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
 
     from api.services import get_credential
@@ -326,7 +327,7 @@ def apply_peering_nsg_rule(
     )
 
     target_ip = str(body.get("target_ip") or "10.224.0.7").strip()
-    _validate_target_ip(target_ip, caller.object_id)
+    _validate_target_ip(target_ip, redact_oid(caller.object_id) or "")
 
     dry_run = bool(body.get("dry_run", False))
 
@@ -353,7 +354,7 @@ def apply_peering_nsg_rule(
         LOGGER.warning(
             "settings/vnet-peering/apply-nsg-rule rejected ports=%s caller_oid=%s",
             sorted(bad),
-            caller.object_id,
+            redact_oid(caller.object_id),
         )
         raise HTTPException(
             400, f"ports must be a subset of {sorted(ALLOWED_PORTS)}"
@@ -379,7 +380,7 @@ def apply_peering_nsg_rule(
         target_ip,
         ports_sorted,
         dry_run,
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
 
     from api.services import get_credential
@@ -399,7 +400,7 @@ def apply_peering_nsg_rule(
         LOGGER.info(
             "settings/vnet-peering/apply-nsg-rule lookup failed: %s caller_oid=%s",
             exc,
-            caller.object_id,
+            redact_oid(caller.object_id),
         )
         # No ARM mutation happened; skip the audit row to avoid phantom
         # "started" entries the Audit screen has to filter out.
@@ -436,7 +437,7 @@ def apply_peering_nsg_rule(
             "settings/vnet-peering/apply-nsg-rule nsg_id parsed to empty fields "
             "nsg_id=%s caller_oid=%s",
             nsg_ctx.nsg_id,
-            caller.object_id,
+            redact_oid(caller.object_id),
         )
         # No mutation attempted; skip audit.
         raise HTTPException(
@@ -483,7 +484,7 @@ def apply_peering_nsg_rule(
         LOGGER.info(
             "settings/vnet-peering/apply-nsg-rule permission denied nsg=%s caller_oid=%s",
             nsg_ctx.nsg_id,
-            caller.object_id,
+            redact_oid(caller.object_id),
         )
         # Permission-denied is a legitimate operator action but does not
         # mutate ARM — record it as a one-shot audit row (start + refused
@@ -535,7 +536,7 @@ def apply_peering_nsg_rule(
         LOGGER.warning(
             "settings/vnet-peering/apply-nsg-rule lock busy nsg=%s caller_oid=%s",
             nsg_ctx.nsg_id,
-            caller.object_id,
+            redact_oid(caller.object_id),
         )
         # Lock-busy paths do not mutate ARM either; skip audit.
         raise HTTPException(
@@ -619,7 +620,7 @@ def apply_peering_nsg_rule(
                     LOGGER.warning(
                         "settings/vnet-peering/apply-nsg-rule helper refused: %s caller_oid=%s",
                         exc,
-                        caller.object_id,
+                        redact_oid(caller.object_id),
                     )
                     set_audit_terminal(
                         "refused",
@@ -689,7 +690,7 @@ def apply_peering_nsg_rule(
         apply_result.applied,
         apply_result.skipped_reason,
         apply_result.rule_name,
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
     # Echo the deterministic rule name so the SPA can render the preview
     # without having to recompute the hash.

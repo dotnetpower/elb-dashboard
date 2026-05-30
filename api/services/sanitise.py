@@ -3,7 +3,7 @@
 Responsibility: Output sanitisation helpers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
-Key entry points: `sanitise`
+Key entry points: `sanitise`, `redact_oid`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests`.
@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 # Patterns we mask in any user-facing string.
@@ -91,3 +92,24 @@ def _redact_guid(match: re.Match[str]) -> str:
     text payloads.
     """
     return match.group(0)[:8] + "…"
+
+
+def redact_oid(value: str | None) -> str | None:
+    """Return a short, non-reversible identifier for a caller GUID.
+
+    Use this whenever ``caller.object_id`` (or any other PII GUID) needs to
+    appear in a log line, audit record, or App Insights custom dimension.
+    The output is a 12-char sha256 prefix — long enough to disambiguate a
+    handful of dashboard users in correlation queries, short enough that it
+    cannot be reversed to a GUID by brute force, and free of any GUID
+    substring that operators could mistake for the real identifier.
+
+    Returns ``None`` for falsy input so callers can pass it straight into
+    structured log fields without an ``if`` guard. The existing terminal
+    WebSocket route uses the same primitive (see
+    `api/routes/terminal/ws.py::_log_identity_hash`) — that helper is now a
+    re-export of this one.
+    """
+    if not value:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]

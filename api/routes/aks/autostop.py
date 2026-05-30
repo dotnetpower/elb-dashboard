@@ -43,6 +43,7 @@ from api.services.auto_stop import (
     save_auto_stop_preference,
 )
 from api.services.auto_stop_evaluator import evaluate_cluster
+from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger(__name__)
 
@@ -353,15 +354,16 @@ def _check_ownership(pref: AutoStopPreference | None, caller: CallerIdentity) ->
     """
     if _caller_owns(pref, caller):
         return
-    # Critique #9.10: never log the full caller object_id (PII /
-    # correlation surface). Last 8 chars are enough to grep a single
-    # operator's trail in App Insights without exposing the GUID itself.
+    # Critique #9.10 + audit P0 #1: never log the full caller object_id (PII /
+    # correlation surface). `redact_oid` returns a stable 12-char sha256 prefix
+    # so operators can still grep a single user's trail in App Insights without
+    # exposing the GUID itself.
     pref_owner = (pref.owner_oid if pref else "") or ""
     LOGGER.warning(
         "autostop ownership refusal cluster=%s pref_owner=%s caller=%s",
         pref.cluster_name if pref else "?",
-        f"...{pref_owner[-8:]}" if pref_owner else "?",
-        f"...{caller.object_id[-8:]}" if caller.object_id else "?",
+        redact_oid(pref_owner) or "?",
+        redact_oid(caller.object_id) or "?",
     )
     raise HTTPException(
         status_code=403,
@@ -475,7 +477,7 @@ def put_autostop(
         saved.cluster_name,
         saved.enabled,
         saved.idle_minutes,
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
     return _pref_response(
         saved,
@@ -511,7 +513,7 @@ def extend_autostop(
         extended.cluster_name,
         body.minutes,
         extended.extend_until,
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
     return _pref_response(
         extended,

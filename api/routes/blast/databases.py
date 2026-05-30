@@ -32,6 +32,7 @@ from api.routes._blast_shared import (
     _stub_log,
 )
 from api.routes.blast.common import LAB_TOOL_PENDING
+from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger(__name__)
 
@@ -269,7 +270,7 @@ def blast_database_shard(
 
     LOGGER.info(
         "blast_database_shard accepted oid=%s db=%s account=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         db_name,
         account_name,
     )
@@ -602,7 +603,7 @@ def blast_database_order_oracle(
 
     LOGGER.info(
         "db-order oracle accepted oid=%s db=%s run_id=%s parts=%d",
-        caller.object_id,
+        redact_oid(caller.object_id),
         db_name,
         run_id,
         len(shard_nodes),

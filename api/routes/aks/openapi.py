@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _OPENAPI_PROXY_ALLOWED_HEADERS, _safe_delay
+from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger(__name__)
 
@@ -689,7 +690,7 @@ def aks_openapi_token_generate(
     LOGGER.info(
         "openapi token update requested cluster=%s caller_oid=%s regenerate=%s",
         body.cluster_name,
-        caller.object_id,
+        redact_oid(caller.object_id),
         body.regenerate,
     )
     try:
@@ -834,7 +835,7 @@ def aks_openapi_public_https_enable(
     LOGGER.info(
         "openapi public-https enable requested cluster=%s caller_oid=%s",
         body.cluster_name,
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
     result = _safe_delay(
         setup_openapi_public_https,
@@ -876,7 +877,7 @@ def aks_openapi_public_https_disable(
     LOGGER.info(
         "openapi public-https disable requested cluster=%s caller_oid=%s",
         cluster_name,
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
     result = _safe_delay(
         disable_openapi_public_https,

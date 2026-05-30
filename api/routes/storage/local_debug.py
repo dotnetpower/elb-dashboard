@@ -21,6 +21,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from api.auth import CallerIdentity, require_caller
 from api.routes.storage.common import _RE_RG, _RE_STORAGE_ACCOUNT, _RE_SUB, _check
 from api.services import get_credential
+from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger(__name__)
 
@@ -108,7 +109,7 @@ def storage_local_debug_open(
     result = ensure_local_storage_access(cred, sub, rg, account_name, force=True)
     LOGGER.info(
         "storage_local_debug_open oid=%s account=%s action=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         account_name,
         result.get("action"),
     )

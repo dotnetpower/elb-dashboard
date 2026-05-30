@@ -42,7 +42,7 @@ from api.routes.storage.common import (
     shared_taxonomy_keys,
 )
 from api.services import get_credential
-from api.services.sanitise import sanitise
+from api.services.sanitise import redact_oid, sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -587,7 +587,7 @@ def _try_dispatch_aks_mode(
 
     LOGGER.info(
         "prepare_db mode=aks dispatched oid=%s db=%s task=%s files=%d nodes=%d audit=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         db_name,
         result.id,
         len(file_keys),
@@ -1420,7 +1420,7 @@ def prepare_db(
 
     LOGGER.info(
         "prepare_db started oid=%s db=%s files=%d source=%s access=%s audit=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         db_name,
         len(all_keys),
         latest_dir,
@@ -1569,8 +1569,9 @@ def prepare_db_cancel(
     def _cancel_mutator(meta_in: dict[str, Any]) -> dict[str, Any]:
         meta_in["db_name"] = db_name
         meta_in["update_in_progress"] = False
+        _cancel_oid = redact_oid(caller.object_id) or "caller"
         meta_in["update_error"] = (
-            f"cancelled by {caller.object_id}: aborted {aborted} pending copies "
+            f"cancelled by {_cancel_oid}: aborted {aborted} pending copies "
             f"({skipped} skipped, {errors} errors)"
         )
         meta_in["update_failed_at"] = datetime.now(UTC).isoformat()
@@ -1612,7 +1613,7 @@ def prepare_db_cancel(
 
     LOGGER.info(
         "prepare_db_cancel oid=%s db=%s aborted=%d skipped=%d errors=%d",
-        caller.object_id,
+        redact_oid(caller.object_id),
         db_name,
         aborted,
         skipped,

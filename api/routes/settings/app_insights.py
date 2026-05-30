@@ -30,7 +30,7 @@ from api.services.app_insights_provisioning import (
     find_application_insights_by_name,
     get_application_insights,
 )
-from api.services.sanitise import sanitise
+from api.services.sanitise import redact_oid, sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ def provision(
     )
     LOGGER.info(
         "app_insights provision enqueued by oid=%s sub=%s rg=%s name=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         subscription_id,
         resource_group,
         component_name,
@@ -208,7 +208,7 @@ def apply_to_deployment(
     )
     LOGGER.info(
         "app_insights deployment apply enqueued by oid=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
     return {
         "task_id": result.id,
@@ -232,7 +232,7 @@ def clear_deployment(
     result = _safe_delay(clear_app_insights_from_deployment)
     LOGGER.info(
         "app_insights deployment clear enqueued by oid=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
     )
     return {
         "task_id": result.id,

@@ -28,7 +28,7 @@ from api.services import get_credential
 from api.services.aks_observability import (
     get_container_insights_status,
 )
-from api.services.sanitise import sanitise
+from api.services.sanitise import redact_oid, sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ def enable(
     )
     LOGGER.info(
         "aks_observability enable enqueued by oid=%s sub=%s cluster=%s workspace=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         subscription_id,
         cluster_name,
         workspace_resource_id.rsplit("/", 1)[-1],
@@ -136,7 +136,7 @@ def disable(
     )
     LOGGER.info(
         "aks_observability disable enqueued by oid=%s sub=%s cluster=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         subscription_id,
         cluster_name,
     )

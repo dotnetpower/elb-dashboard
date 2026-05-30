@@ -13,7 +13,6 @@ Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import secrets
@@ -25,6 +24,7 @@ import websockets
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 
 from api.auth import CallerIdentity, require_caller
+from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger(__name__)
 
@@ -92,9 +92,13 @@ _tickets_lock = asyncio.Lock()
 
 
 def _log_identity_hash(value: str | None) -> str | None:
-    if not value:
-        return None
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    """Backward-compatible thin wrapper around `api.services.sanitise.redact_oid`.
+
+    Existing call sites in this module use this name; keep it so the diff
+    stays small while making the helper itself a single source of truth.
+    See [api/services/sanitise.py](../../services/sanitise.py) `redact_oid`.
+    """
+    return redact_oid(value)
 
 
 @router.post("/ticket")

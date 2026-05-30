@@ -27,6 +27,7 @@ from api.services.blast.submit_payload import (
     canonical_submit_snapshot,
     submit_contracts,
 )
+from api.services.sanitise import redact_oid
 
 router = APIRouter(prefix="/api/v1/elastic-blast", tags=["external-elastic-blast"])
 LOGGER = logging.getLogger(__name__)
@@ -207,7 +208,7 @@ def submit_external_blast_job(
     )
     LOGGER.info(
         "external BLAST submit accepted caller_oid=%s db=%s program=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         request.db,
         request.program,
     )
@@ -234,7 +235,7 @@ def list_external_blast_jobs(
     ConfigMaps and are invisible to that route. This proxy lets the BLAST
     Jobs page join both sources.
     """
-    LOGGER.info("external BLAST list requested caller_oid=%s", caller.object_id)
+    LOGGER.info("external BLAST list requested caller_oid=%s", redact_oid(caller.object_id))
     del caller
     return external_blast.list_jobs()
 
@@ -244,7 +245,11 @@ def get_external_blast_job(
     job_id: str = Path(..., min_length=6, max_length=12, pattern=r"^[a-f0-9]+$"),
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
-    LOGGER.info("external BLAST status requested caller_oid=%s job_id=%s", caller.object_id, job_id)
+    LOGGER.info(
+        "external BLAST status requested caller_oid=%s job_id=%s",
+        redact_oid(caller.object_id),
+        job_id,
+    )
     del caller
     return _normalise_external_job_payload(
         external_blast.get_job(job_id),
@@ -257,7 +262,11 @@ def list_external_blast_job_events(
     job_id: str = Path(..., min_length=6, max_length=12, pattern=r"^[a-f0-9]+$"),
     caller: CallerIdentity = _REQUIRE_CALLER,
 ) -> dict[str, Any]:
-    LOGGER.info("external BLAST events requested caller_oid=%s job_id=%s", caller.object_id, job_id)
+    LOGGER.info(
+        "external BLAST events requested caller_oid=%s job_id=%s",
+        redact_oid(caller.object_id),
+        job_id,
+    )
     del caller
     try:
         from api.services.blast.events import canonical_job_events
@@ -293,7 +302,7 @@ def get_external_blast_job_manifest(
 ) -> dict[str, Any]:
     LOGGER.info(
         "external BLAST manifest requested caller_oid=%s job_id=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         job_id,
     )
     del caller
@@ -313,7 +322,7 @@ def download_external_blast_file(
 ) -> StreamingResponse:
     LOGGER.info(
         "external BLAST file requested caller_oid=%s job_id=%s file_id=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         job_id,
         file_id,
     )

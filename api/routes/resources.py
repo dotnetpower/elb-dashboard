@@ -22,7 +22,7 @@ from api.auth import CallerIdentity, require_caller
 from api.services import get_credential
 from api.services import monitoring as monitoring_svc
 from api.services import network as network_svc
-from api.services.sanitise import sanitise
+from api.services.sanitise import redact_oid, sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def ensure_rg(
 
     LOGGER.info(
         "ensure_rg by oid=%s sub=%s rg=%s region=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         body["subscription_id"],
         body["resource_group"],
         body["region"],
@@ -118,7 +118,7 @@ def ensure_storage(
 
     LOGGER.info(
         "ensure_storage by oid=%s account=%s region=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         body["account_name"],
         body["region"],
     )
@@ -156,7 +156,7 @@ def ensure_acr(
 
     LOGGER.info(
         "ensure_acr by oid=%s registry=%s region=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         body["registry_name"],
         body["region"],
     )

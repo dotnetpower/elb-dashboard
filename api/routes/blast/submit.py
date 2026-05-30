@@ -37,7 +37,7 @@ from api.services.response_contracts import (
     build_target,
     request_id_from_scope,
 )
-from api.services.sanitise import sanitise
+from api.services.sanitise import redact_oid, sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -523,7 +523,7 @@ def blast_job_submit(
     )
     LOGGER.info(
         "canonical external BLAST submit accepted caller_oid=%s db=%s program=%s",
-        caller.object_id,
+        redact_oid(caller.object_id),
         submit_request.db,
         submit_request.program,
     )
