@@ -176,12 +176,36 @@ def create_app() -> FastAPI:
                 f"CORS_ALLOW_ORIGINS entry {origin!r} is not a valid scheme://host origin"
             )
     if cors_origins:
+        # Audit P2 #12: `allow_methods=["*"]` and `allow_headers=["*"]` echo
+        # back any method or header the browser requests, which is fine
+        # behind a same-origin ingress but unnecessarily generous in
+        # cross-origin development. Gated behind `STRICT_CORS` per
+        # charter §12a Rule 4 — default OFF preserves the existing
+        # behaviour. The narrow defaults cover every method and header
+        # the dashboard SPA actually sends today (GET/POST/PUT/DELETE +
+        # Authorization/Content-Type/x-client-request-id); operators
+        # with custom flows can override via `STRICT_CORS_ALLOW_METHODS`
+        # / `STRICT_CORS_ALLOW_HEADERS` (comma-separated).
+        if os.environ.get("STRICT_CORS", "").lower() == "true":
+            methods_raw = os.environ.get(
+                "STRICT_CORS_ALLOW_METHODS",
+                "GET,POST,PUT,DELETE,OPTIONS",
+            )
+            headers_raw = os.environ.get(
+                "STRICT_CORS_ALLOW_HEADERS",
+                "Authorization,Content-Type,x-client-request-id",
+            )
+            allow_methods = [m.strip() for m in methods_raw.split(",") if m.strip()]
+            allow_headers = [h.strip() for h in headers_raw.split(",") if h.strip()]
+        else:
+            allow_methods = ["*"]
+            allow_headers = ["*"]
         app.add_middleware(
             CORSMiddleware,
             allow_origins=cors_origins,
             allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_methods=allow_methods,
+            allow_headers=allow_headers,
         )
 
     # ---- /api/* routers (must be registered BEFORE the catch-all) ----
