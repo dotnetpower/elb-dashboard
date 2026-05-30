@@ -61,6 +61,58 @@ def _clamp_page_size(limit: int) -> int:
     return min(limit, _AZURE_TABLES_MAX_PAGE_SIZE)
 
 
+# Keys whose value is an Entra OID, UPN, or email address. Used by the
+# `STRICT_AUDIT_HASH` gate to hash PII out of `jobhistory.payload_json`
+# at write time. Lower-cased substrings — matched with `.endswith()` or
+# exact equality so e.g. `caller_oid`, `owner_oid`, `actor_oid`, and a
+# bare `oid` key all qualify, but unrelated keys (`void`, `paranoid`,
+# `cosmosdb_resource_id`) don't.
+_PII_KEY_EXACT = frozenset({
+    "oid",
+    "upn",
+    "email",
+    "actor",
+    "principal",
+    "principal_id",
+    "object_id",
+    "preferred_username",
+    "user_id",
+    "userid",
+})
+_PII_KEY_SUFFIXES = ("_oid", "_upn", "_email", "_actor")
+
+
+def _is_pii_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    lowered = key.lower()
+    if lowered in _PII_KEY_EXACT:
+        return True
+    return lowered.endswith(_PII_KEY_SUFFIXES)
+
+
+def _redact_audit_payload(payload: Any) -> Any:
+    """Return a deep copy of `payload` with PII-bearing values hashed.
+
+    Uses `api.services.sanitise.redact_oid` for the actual hashing so
+    the format (sha256[:12]) matches the log redaction policy. Walks
+    nested dicts and lists; leaves other types untouched.
+    """
+    from api.services.sanitise import redact_oid
+
+    if isinstance(payload, dict):
+        return {
+            k: (
+                redact_oid(str(v)) if _is_pii_key(k) and v is not None and v != ""
+                else _redact_audit_payload(v)
+            )
+            for k, v in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_redact_audit_payload(item) for item in payload]
+    return payload
+
+
 class JobStateRepository:
     """Read/write jobstate + jobhistory tables on the platform Storage account."""
 
@@ -531,7 +583,20 @@ class JobStateRepository:
                 "ts": _now_iso(),
             }
             if payload is not None:
-                entity["payload_json"] = json.dumps(payload, default=str)
+                # Audit P2 #13 #14: when STRICT_AUDIT_HASH=true, replace
+                # GUID-shaped values under PII-bearing keys (caller_oid,
+                # owner_oid, upn, …) with `redact_oid()` BEFORE the
+                # payload is JSON-serialised and persisted. Default OFF
+                # preserves the legacy verbose payload per charter §12a
+                # Rule 4. The hash is deterministic so historical rows
+                # remain joinable across events without recovering the
+                # original GUID.
+                effective_payload = (
+                    _redact_audit_payload(payload)
+                    if os.environ.get("STRICT_AUDIT_HASH", "").lower() == "true"
+                    else payload
+                )
+                entity["payload_json"] = json.dumps(effective_payload, default=str)
             self._ensure_table("jobhistory")
             with self._history_client() as t:
                 t.create_entity(entity)
