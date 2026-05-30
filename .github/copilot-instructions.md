@@ -185,6 +185,121 @@ Calm, muted, low-contrast surfaces. **Detail moved to [docs/copilot/glass-ui.md]
 
 ---
 
+## 12a. Security Hardening Discipline (HARD REQUIREMENT)
+
+This section is the safety net for §12. Any change that tightens auth, RBAC, network ACLs,
+JWT validation, ticket lifetimes, CORS, or error sanitisation **must** also satisfy the rules
+below. The goal is to make hardening additive and reversible so a single `quick-deploy.sh all`
+can never silently strip permissions a subscription Owner / Contributor / Reader was relying on.
+
+Scope (mandatory whenever a PR touches any of these surfaces):
+
+* `api/auth.py`, `api/services/upgrade/auth.py`, anything that calls `require_caller`
+* `infra/modules/*Roles*.bicep`, [infra/modules/storage.bicep](../infra/modules/storage.bicep),
+  [infra/modules/acr.bicep](../infra/modules/acr.bicep),
+  [infra/modules/keyvault.bicep](../infra/modules/keyvault.bicep),
+  [infra/modules/workloadRgCreatorRole.bicep](../infra/modules/workloadRgCreatorRole.bicep)
+* WebSocket / SSE ticket issuance and consumption ([api/routes/terminal/ws.py](../api/routes/terminal/ws.py),
+  [api/routes/monitor/sidecars.py](../api/routes/monitor/sidecars.py),
+  [api/routes/monitor/logs.py](../api/routes/monitor/logs.py))
+* CORS / origin allowlists ([api/main.py](../api/main.py),
+  [infra/modules/containerAppControl.bicep](../infra/modules/containerAppControl.bicep))
+* [terminal/exec_server.py](../terminal/exec_server.py) (allowlist, bind host, body/timeout caps)
+
+### Rule 1 — RBAC changes are always 2-phase (ADD then REMOVE)
+Narrowing a role (e.g. `Contributor` → `Storage Blob Data Reader` + `AcrPull`) must not happen
+in a single PR.
+
+* **PR-N (phase-1)**: ADD the new narrower role assignments. Keep the existing broader role.
+  The PR description must contain the literal phrase `phase-1 of 2 (see PR-…)` so reviewers can
+  search for the matching phase-2.
+* **Soak window**: At least one full release cycle (or 7 days of dogfood traffic, whichever is
+  longer) with the new role active and the old role still present. The release notes for the
+  phase-1 release must list the soak target.
+* **PR-N+1 (phase-2)**: REMOVE the broader role. The PR description must reference PR-N's link
+  and include the App Insights query showing zero authorization failures attributable to the
+  narrower role during the soak window.
+
+Single-PR role narrowing is rejected at review even if "obviously safe". The 2-phase rule has
+no shortcuts and no exceptions for hotfixes — a hotfix that genuinely needs the broader role
+must re-add it as phase-1.
+
+### Rule 2 — Persona Matrix regression test is required
+Any PR in scope above must keep [api/tests/test_persona_matrix.py](../api/tests/test_persona_matrix.py)
+green. The matrix exercises four caller personas against a curated whitelist of actions:
+
+| Persona | Expected to keep working |
+|---------|--------------------------|
+| `owner_caller` (subscription Owner) | full CRUD on platform + workload resources |
+| `contributor_caller` (RG Contributor + Blob Data Contributor) | submit BLAST, AKS scale, ACR build, all data-plane writes |
+| `reader_caller` (subscription Reader + Blob Data Reader) | dashboard browse, job list/status, logs, terminal open, AKS observe |
+| `dev_bypass_caller` (`AUTH_DEV_BYPASS=true`, OID `00000…0`) | local-debug only — every action allowed but `is_dev_bypass_caller()` must remain True |
+
+The Reader whitelist lives in `api/tests/persona_reader_allowlist.py`. Adding or removing an
+entry in that file is a separate PR with a maintainer review; a hardening PR that needs the
+Reader to lose an action must split into (a) "remove from whitelist" PR, then (b) the enforcement PR.
+
+### Rule 3 — Postprovision Capability Probe must pass
+[scripts/dev/postprovision.sh](../scripts/dev/postprovision.sh) runs
+`scripts/dev/probe_capabilities.py` as its final step. The probe uses the deployed shared
+user-assigned MI to attempt one real call against each critical Azure surface
+(`BlobServiceClient.list_containers`, `TableServiceClient.list_tables`,
+`ContainerRegistryManagementClient.registries.get`, `ManagedClustersOperations.get` when AKS
+exists, `KeyClient.list_properties_of_keys`, `ContainerAppsAPIClient.container_apps.get`).
+
+A 403 / `AuthorizationFailed` on any required surface aborts `postprovision.sh` with a non-zero
+exit code, prints the missing role name, and links to the Bicep module that grants it.
+`quick-deploy.sh all` invokes `postprovision.sh` and must not skip the probe. A new role
+introduced in phase-1 of Rule 1 must be added to the probe in the same PR.
+
+### Rule 4 — New guards ship default-OFF
+Any new positive validation (e.g. `azp`/`appid` enforcement, JWT cache TTL shortening, CORS
+allowlist narrowing, ticket IP-binding, exec_server bind-host pinning) is gated behind an
+environment variable named `STRICT_<area>` or `ENFORCE_<area>`. Default = unset = **existing
+behaviour preserved**. The PR that introduces the gate must:
+
+1. Default the env var to OFF in [infra/modules/containerAppControl.bicep](../infra/modules/containerAppControl.bicep).
+2. Add a positive and a negative test in `api/tests/` (the gate ON path AND the legacy OFF path).
+3. Document the gate in [docs/operate/](../docs/operate/) with the planned flip date.
+
+Flipping the default to ON is a separate PR that may only land after one full release cycle of
+dogfood plus a green Persona Matrix run with the gate forced ON.
+
+### Rule 5 — EventSource SSE never gets `require_caller`
+The browser `EventSource` API cannot send `Authorization` headers, so the existing ticket-based
+auth on [api/routes/monitor/sidecars.py](../api/routes/monitor/sidecars.py#L119) and
+[api/routes/monitor/logs.py](../api/routes/monitor/logs.py#L79) must remain ticket-based. Adding
+`Depends(require_caller)` to those event streams will break every dashboard log/metric tile and
+is rejected at review.
+
+The sanctioned hardening for SSE is to strengthen the ticket itself:
+
+* Issue endpoint stays `require_caller`-protected (already is).
+* Ticket payload binds to `caller.object_id`, `request.client.host` (or the trusted XFF first hop),
+  and a `User-Agent` hash. Consume rejects if any of the three differ.
+* Ticket is one-shot: first successful `_consume_*_ticket` invalidates it, even if TTL remains.
+* Ticket TTL stays ≤ 30 s and the issue endpoint enforces an origin check identical to the
+  WebSocket handler.
+
+### Rule 6 — Hardening PR template (paste in description)
+Every PR in scope must include the following checklist filled in:
+
+```
+Hardening discipline (§12a):
+- [ ] In scope: <auth | rbac | network | jwt | ticket | cors | sanitise>
+- [ ] RBAC change is single-PR safe (no role narrowed) OR labelled `phase-1 of 2` / `phase-2 of 2 (see #…)`
+- [ ] Persona Matrix tests pass for owner / contributor / reader / dev_bypass
+- [ ] Reader allowlist unchanged OR split-PR link: #…
+- [ ] Capability Probe passes locally (`scripts/dev/probe_capabilities.py`)
+- [ ] New guard ships default-OFF behind `STRICT_*` / `ENFORCE_*` env var (or N/A)
+- [ ] No `Depends(require_caller)` added to an SSE event stream
+- [ ] Change note under `docs/features_change/YYYY-MM/` summarises persona impact
+```
+
+Reviewers MUST refuse to merge a hardening PR with this block missing or incomplete.
+
+---
+
 ## 13. Process Discipline
 
 ### Documentation terminology links

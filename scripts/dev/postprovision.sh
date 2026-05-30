@@ -756,6 +756,40 @@ elif [[ -x "$PEER_SCRIPT" ]]; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# 6. Capability probe — final RBAC sanity check.
+#
+# Per .github/copilot-instructions.md §12a Rule 3, the probe attempts one
+# real call against every critical Azure surface (Blob / Table / ACR /
+# Container Apps + optional AKS / Key Vault) using the shared user-assigned
+# MI. A 403 / AuthorizationFailed on a REQUIRED surface aborts the deploy
+# with a non-zero exit code and prints the missing role + Bicep module to
+# fix it. Optional surfaces (AKS / Key Vault) downgrade to warnings so
+# first-deploys before the SPA wizard creates AKS do not trip the gate.
+#
+# Hard-fail: there is intentionally no skip flag. The probe is read-only
+# and runs in ~3-5 seconds against the SDKs the rest of the deploy already
+# uses; if it fails, every dashboard action that needs that surface would
+# fail next anyway.
+# ---------------------------------------------------------------------------
+PROBE_SCRIPT="$REPO_ROOT/scripts/dev/probe_capabilities.py"
+if [[ -f "$PROBE_SCRIPT" ]]; then
+  ts "==> Verifying shared MI capabilities (probe_capabilities.py)"
+  PROBE_RC=0
+  if command -v uv >/dev/null 2>&1; then
+    uv run --quiet python "$PROBE_SCRIPT" 2>&1 | sed 's/^/    /' || PROBE_RC=${PIPESTATUS[0]}
+  else
+    python3 "$PROBE_SCRIPT" 2>&1 | sed 's/^/    /' || PROBE_RC=${PIPESTATUS[0]}
+  fi
+  if [[ "$PROBE_RC" -ne 0 ]]; then
+    ts "    ✗ capability probe FAILED (rc=$PROBE_RC)"
+    ts "      One or more required RBAC roles are missing on the shared MI."
+    ts "      See the probe output above for the specific role + Bicep module."
+    exit "$PROBE_RC"
+  fi
+  ts "    ✓ capability probe passed"
+fi
+
 # Soft-fail policy: do not break azd up just because health was slow to
-# come up. Hard-fail above stays for image-build / swap-deploy errors.
+# come up. Hard-fail above stays for image-build / swap-deploy errors / probe.
 exit 0
