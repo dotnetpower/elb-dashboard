@@ -230,6 +230,12 @@ def extend_auto_stop_preference(
     preference) is not silently rolled back. We only mutate
     ``extend_until`` + ``updated_at``; every other field is taken from
     the freshly-read row.
+
+    Same residual TOCTOU window as ``mark_auto_stop_event`` applies
+    (critique #9.6) — a sibling PUT that lands between the freshly-read
+    row and ``save_auto_stop_preference`` can still get clobbered. The
+    fully-atomic fix is ETag-based optimistic concurrency across every
+    preference table and was deferred to a follow-up issue.
     """
     grant = max(1, min(int(minutes or EXTEND_GRANT_MINUTES), 24 * 60))
     latest = get_auto_stop_preference(
@@ -267,6 +273,19 @@ def mark_auto_stop_event(
     ``tenant_id``) are taken from the freshly-read row. When the row no
     longer exists (user deleted the pref), we silently no-op and return
     the in-memory snapshot — there is nothing to update.
+
+    RESIDUAL TOCTOU WINDOW (critique #9.6): the read-modify-write
+    sequence above is *not* atomic. Between the freshly-read row and
+    the final ``save_auto_stop_preference`` call a sibling ``PUT`` can
+    still slip in and get clobbered by this write — the window is
+    typically sub-millisecond but real. The fully-atomic fix is Azure
+    Tables ETag + ``If-Match`` conditional upsert across every
+    preference table (``auto_stop`` + ``auto_warmup`` + future
+    additions); that's a charter-level change and was deferred to a
+    follow-up issue. Under the current cost-saver SLA the lost-update
+    only loses bookkeeping fields, not user-owned configuration, so
+    operators see at most a momentarily stale ``last_skip_at`` /
+    ``last_stop_reason`` value.
     """
     latest = get_auto_stop_preference(
         pref.subscription_id, pref.resource_group, pref.cluster_name

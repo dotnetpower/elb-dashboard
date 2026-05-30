@@ -82,3 +82,40 @@ $ cd /home/moonchoi/dev/elastic-blast-azure/docker-openapi
 $ python -m pytest tests/test_ready.py -q
 14 passed, 30 warnings in 1.19s
 ```
+
+## Rollout order (added 2026-05-30 — critique #20.11)
+
+**Cross-repo image bumps must follow this order**, otherwise the dashboard
+ships a Container App template pointing at a tag that does not yet exist
+in ACR and the next `azd up` / sidecar redeploy fails with
+`ImagePullBackOff: manifest unknown`. This change note originally
+described the dashboard pin moving `4.15 → 4.16` together with the
+sibling source moving to `VERSION = 3.7.2`, but it did **not** call out
+that `4.16` had never been built+pushed at the time the dashboard pin
+landed — a follow-up critique (issue #20 P0 #1) flagged the gap and
+the pin had to be rolled back to `4.14` on 2026-05-30 (see
+[2026-05-30-openapi-pin-p0-rollback.md](2026-05-30-openapi-pin-p0-rollback.md)).
+
+The safe order for every future bump:
+
+1. **Commit + push the sibling change.** Update
+   `~/dev/elastic-blast-azure/docker-openapi/app/main.py` `VERSION`,
+   land the actual code/test changes, and push the sibling commit to
+   `master`.
+2. **Build the new image in ACR.** Run
+   `az acr build -r acrelbdashboard3abp67bppe -t elb-openapi:<NEW_TAG> -f ~/dev/elastic-blast-azure/docker-openapi/Dockerfile ~/dev/elastic-blast-azure/docker-openapi`
+   and confirm the tag shows up via
+   `az acr repository show-tags --name acrelbdashboard3abp67bppe --repository elb-openapi`.
+3. **Then bump the dashboard pin.** Update
+   `api/services/image_tags.py::IMAGE_TAGS["elb-openapi"]` to the new
+   tag, refresh the comment block that documents the version mapping,
+   and write a per-bump change note recording the sibling commit SHA
+   and ACR digest.
+4. **Validate end-to-end.** `uv run pytest -q api/tests`, `cd web && npm
+   test -- --run`, then `scripts/dev/quick-deploy.sh openapi` (or
+   `apply_template`) against a dev environment and confirm the new
+   ConfigMap is picked up.
+
+The 2026-05-30 P0 rollback exists because steps 1–2 had not completed
+when the dashboard pin moved in step 3. Future contributors: collapsing
+the three steps into a single PR is a charter violation.

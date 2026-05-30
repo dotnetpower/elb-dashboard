@@ -79,3 +79,55 @@ def test_spa_hints_have_dashboard_codes() -> None:
         f"or add them to OPENAPI_UPSTREAM_ACTIONS in "
         f"api/services/blast/submit_gates.py."
     )
+
+
+# ── Canonical sibling-source contract (critique #20.4) ───────────────────
+#
+# Hand-curated mirror of the upstream ``code = ...`` literals emitted by
+# the sibling ``elastic-blast-azure/docker-openapi/app/main.py`` ``v1_ready``
+# handler. When sibling adds a new code (e.g. ``azure_arm_unauthorized``,
+# ``cache_failed``, ``node_taint_pressure``), the dashboard's
+# ``OPENAPI_UPSTREAM_ACTIONS`` table must learn to remediate it or the SPA
+# silently falls through to generic 4xx copy. The test below is the gate.
+#
+# Source of truth: the ``code = "..."`` assignments inside
+# ``docker-openapi/app/main.py::v1_ready`` (lines ~1785-1850 as of sibling
+# VERSION=3.7.3). The 429 ``rate_limited`` envelope code is intentionally
+# excluded because the dashboard remaps it to the dashboard-only
+# ``openapi_ready_rate_limited`` wrapper before the SPA sees it (see
+# ``api/services/blast/submit_gates.py`` 429 branch).
+#
+# WHEN UPDATING THIS LIST you must also extend
+# ``OPENAPI_UPSTREAM_ACTIONS`` in ``api/services/blast/submit_gates.py``
+# *in the same commit* — otherwise dashboard tests still pass but real
+# submits silently lose remediation hints.
+KNOWN_SIBLING_NESTED_CODES: frozenset[str] = frozenset(
+    {
+        "k8s_unreachable",
+        "no_workload_nodes",
+        "workload_pool_check_failed",
+        "openapi_pod_not_ready",
+        "openapi_pod_check_failed",
+    }
+)
+
+
+def test_dashboard_codes_match_known_sibling_codes() -> None:
+    """The dashboard's ``OPENAPI_NESTED_UPSTREAM_CODES`` must equal the
+    hand-curated mirror of the sibling's emitted codes.
+
+    Fails on either direction: sibling added a code but dashboard didn't
+    learn to remediate it, or dashboard stopped mapping a code the sibling
+    still emits. Tracks critique #20.4.
+    """
+    dashboard_codes = openapi_known_upstream_codes()
+    sibling_only = KNOWN_SIBLING_NESTED_CODES - dashboard_codes
+    dashboard_only = dashboard_codes - KNOWN_SIBLING_NESTED_CODES
+    assert not sibling_only and not dashboard_only, (
+        "Sibling-vs-dashboard upstream-code drift:\n"
+        f"  Sibling emits but dashboard does not map: {sorted(sibling_only)}\n"
+        f"  Dashboard maps but sibling no longer emits: {sorted(dashboard_only)}\n"
+        "Update OPENAPI_UPSTREAM_ACTIONS in api/services/blast/submit_gates.py "
+        "and KNOWN_SIBLING_NESTED_CODES in this file together (critique #20.4)."
+    )
+
