@@ -66,6 +66,12 @@ _FIELD_LABEL_TO_COLUMN: dict[str, str] = {
     "subject sci name": "sscinames",
     "subject sci names": "sscinames",
     "subject taxids": "staxids",
+    # Reading-frame labels used by translated BLAST programs (blastx /
+    # tblastn / tblastx). Web BLAST surfaces these as the "Frame" column;
+    # without this mapping the tabular parser would silently drop them.
+    "query frame": "qframe",
+    "subject frame": "sframe",
+    "frame": "qframe",
 }
 
 # Columns that should be coerced to float, int, or left as string.
@@ -83,6 +89,11 @@ _INT_COLUMNS = frozenset(
         "qlen",
         "slen",
         "score",
+        # Reading frame columns for translated BLAST programs
+        # (blastx, tblastn, tblastx). Values are in {-3,-2,-1,1,2,3}; 0
+        # for nucleotide/protein-only programs and is filtered out below.
+        "qframe",
+        "sframe",
     }
 )
 
@@ -220,6 +231,16 @@ def _build_hit_row(
     }
     if ppos is not None:
         row["ppos"] = ppos
+    # Reading frame for translated programs (blastx / tblastn / tblastx).
+    # XML emits these as ``Hsp_query-frame`` / ``Hsp_hit-frame`` with values
+    # in {-3..3}; nucleotide / protein-only programs emit ``0`` which we drop
+    # so the UI does not show a misleading "Frame: 0" badge on blastn/blastp.
+    qframe = _int_or_none(_text(hsp, "Hsp_query-frame"))
+    if qframe is not None and qframe != 0:
+        row["qframe"] = qframe
+    sframe = _int_or_none(_text(hsp, "Hsp_hit-frame"))
+    if sframe is not None and sframe != 0:
+        row["sframe"] = sframe
     return {key: value for key, value in row.items() if value is not None}
 
 

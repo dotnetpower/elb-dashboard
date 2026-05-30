@@ -6,7 +6,10 @@ Azure calls.
 Key entry points: `test_parse_outfmt6_default_columns`, `test_parse_outfmt7_uses_field_header`,
 `test_parse_outfmt5_xml_to_canonical_hit_rows`, `test_parse_result_content_detects_xml`,
 `test_parse_result_content_detects_bom_prefixed_xml`,
-`test_parse_outfmt5_xml_tolerates_namespaces`
+`test_parse_outfmt5_xml_tolerates_namespaces`,
+`test_parse_outfmt5_xml_extracts_query_and_subject_frame`,
+`test_parse_outfmt5_xml_drops_zero_valued_frame`,
+`test_parse_outfmt7_with_frame_header_extracts_qframe_and_sframe`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py`.
@@ -256,3 +259,100 @@ def test_export_columns_cover_outfmt6() -> None:
     assert "qseqid" in EXPORT_DEFAULT_COLUMNS
     assert "bitscore" in EXPORT_DEFAULT_COLUMNS
     assert len(EXPORT_DEFAULT_COLUMNS) == 12
+
+
+# --------------------------------------------------------------------------- #
+# Reading-frame extraction for translated BLAST programs (blastx / tblastn /
+# tblastx). NCBI Web BLAST surfaces a "Frame" column on the Descriptions /
+# Alignments tabs for translated programs; without parser support that column
+# would be silently empty even when the underlying BLAST output carries it.
+# --------------------------------------------------------------------------- #
+
+_OUTFMT_5_TRANSLATED_XML = """<?xml version="1.0"?>
+<BlastOutput>
+    <BlastOutput_iterations>
+        <Iteration>
+            <Iteration_query-ID>query_translated</Iteration_query-ID>
+            <Iteration_query-len>900</Iteration_query-len>
+            <Iteration_hits>
+                <Hit>
+                    <Hit_id>gi|2|gb|XYZ987.1|</Hit_id>
+                    <Hit_accession>XYZ987</Hit_accession>
+                    <Hit_def>Translated subject sequence</Hit_def>
+                    <Hit_len>300</Hit_len>
+                    <Hit_hsps><Hsp>
+                        <Hsp_identity>290</Hsp_identity><Hsp_positive>295</Hsp_positive>
+                        <Hsp_align-len>300</Hsp_align-len><Hsp_gaps>0</Hsp_gaps>
+                        <Hsp_query-from>1</Hsp_query-from><Hsp_query-to>900</Hsp_query-to>
+                        <Hsp_hit-from>1</Hsp_hit-from><Hsp_hit-to>300</Hsp_hit-to>
+                        <Hsp_evalue>1e-150</Hsp_evalue><Hsp_bit-score>540</Hsp_bit-score>
+                        <Hsp_score>290</Hsp_score>
+                        <Hsp_query-frame>2</Hsp_query-frame>
+                        <Hsp_hit-frame>-1</Hsp_hit-frame>
+                        <Hsp_qseq>MTEXAMPLE</Hsp_qseq>
+                        <Hsp_hseq>MTEXAMPLE</Hsp_hseq><Hsp_midline>|||||||||</Hsp_midline>
+                    </Hsp></Hit_hsps>
+                </Hit>
+            </Iteration_hits>
+        </Iteration>
+    </BlastOutput_iterations>
+</BlastOutput>
+"""
+
+
+def test_parse_outfmt5_xml_extracts_query_and_subject_frame() -> None:
+    """Translated BLAST programs emit Hsp_query-frame / Hsp_hit-frame; the
+    canonical hit row must surface them as qframe / sframe so the UI can
+    render NCBI's "Frame" column.
+    """
+    hits = parse_blast_xml(_OUTFMT_5_TRANSLATED_XML)
+    assert len(hits) == 1
+    hit = hits[0]
+    assert hit["qframe"] == 2
+    assert hit["sframe"] == -1
+
+
+def test_parse_outfmt5_xml_drops_zero_valued_frame() -> None:
+    """Nucleotide / protein-only programs emit ``0`` for the frame fields;
+    surfacing ``Frame: 0`` would mislead researchers, so the parser drops
+    zero values entirely.
+    """
+    zero_frame_xml = _OUTFMT_5_TRANSLATED_XML.replace(
+        "<Hsp_query-frame>2</Hsp_query-frame>",
+        "<Hsp_query-frame>0</Hsp_query-frame>",
+    ).replace(
+        "<Hsp_hit-frame>-1</Hsp_hit-frame>",
+        "<Hsp_hit-frame>0</Hsp_hit-frame>",
+    )
+    hits = parse_blast_xml(zero_frame_xml)
+    assert len(hits) == 1
+    hit = hits[0]
+    assert "qframe" not in hit
+    assert "sframe" not in hit
+
+
+def test_parse_outfmt7_with_frame_header_extracts_qframe_and_sframe() -> None:
+    """The tabular ``# Fields:`` header carries label aliases like
+    ``query frame`` / ``subject frame``; the parser must coerce them to
+    int and into the canonical qframe / sframe column names.
+    """
+    content = "\n".join(
+        [
+            "# BLASTX 2.17.0+",
+            "# Query: q1",
+            "# Database: nr",
+            (
+                "# Fields: query acc.ver, subject acc.ver, % identity, "
+                "alignment length, mismatches, gap opens, q. start, q. end, "
+                "s. start, s. end, evalue, bit score, query frame, "
+                "subject frame"
+            ),
+            "# 1 hits found",
+            "q1\tABC\t99.5\t100\t1\t0\t1\t300\t1\t100\t1e-50\t180\t2\t-1",
+        ]
+    )
+    hits = parse_blast_tabular(content)
+    assert len(hits) == 1
+    hit = hits[0]
+    assert hit["qframe"] == 2
+    assert hit["sframe"] == -1

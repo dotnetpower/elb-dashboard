@@ -137,6 +137,7 @@ Next action:
 | 8. Equivalence evidence matrix | Complete | 2026-05-20 | Evidence registry validation tests added. |
 | 9. Queue/recovery hardening | Complete | 2026-05-20 | Queue depth and position snapshot endpoint added. |
 | 10. Final acceptance | In progress | 2026-05-20 | Final combined validation running for this implementation wave. |
+| 11. NCBI Web BLAST parity wave | In progress | 2026-05-31 | 8/20 catalogued gaps shipped; 12 documented with severity + cost. |
 
 ## Stage 0: Planning Ledger
 
@@ -510,6 +511,88 @@ Remaining Low items:
 - Browser screenshot verification, worker-side standalone provenance upload,
   callback delivery, pagination, and expanded large-DB evidence automation are
   documented Low follow-ups.
+
+## Stage 11: NCBI Web BLAST Parity Wave (2026-05-31)
+
+Goal: close the remaining 20 gaps between this control plane's BLAST experience
+and what a researcher gets at <https://blast.ncbi.nlm.nih.gov/Blast.cgi>. The
+gaps were catalogued in a single audit pass against NCBI Web BLAST's UI, then
+triaged into Critical / High / Medium / Low buckets. This wave ships the items
+where the cost is small and the impact is concrete; the rest are tracked here
+with severity so a future session can pick them up without re-doing the audit.
+
+Eight items ship as code in this wave (~the 8/20 cheapest, highest-impact
+items): the BLAST submit whitelist gains the algorithm/filter flags that the
+NCBI Web BLAST advanced submit form exposes (`matrix`, `threshold`,
+`comp_based_stats`, `culling_limit`, `best_hit_overhang`, `best_hit_score_edge`,
+`qcov_hsp_perc`, `perc_identity`, plus the `gilist` / `seqidlist` filter inputs
+and the `xdrop_*` / `window_size` / `parse_deflines` / `soft_masking` /
+`lcase_masking` / `ungapped` / `num_alignments` / `num_descriptions` advanced
+knobs). The parser surfaces translated-program reading frames as `qframe` and
+`sframe` and drops the misleading `0` value that nucleotide-only programs emit.
+The result UI gains a Frame badge on the Descriptions table, a Copy/Download
+FASTA action on the Alignment viewer, and a no-SAS regression test that locks
+in the Charter §9 contract.
+
+The remaining 12 items remain Planned with severity + cost notes so they can be
+scheduled into later waves.
+
+### Gap matrix
+
+| # | Group | Gap (NCBI Web BLAST baseline → ours) | Severity | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Submit form | `matrix` dropdown is wired in NCBI Advanced; we accepted it only via the OpenAPI `options` sub-dict. Now whitelisted at the top level too — UI dropdown deferred. | Medium | Whitelist shipped; UI deferred |
+| 2 | Submit form | `threshold` (`-threshold`) accepted via whitelist; UI input deferred. | Low | Whitelist shipped; UI deferred |
+| 3 | Submit form | `comp_based_stats` (`-comp_based_stats`) accepted via whitelist; UI dropdown deferred. | Medium | Whitelist shipped; UI deferred |
+| 4 | Submit form | `culling_limit` / `best_hit_overhang` / `best_hit_score_edge` whitelisted; UI controls deferred. | Low | Whitelist shipped; UI deferred |
+| 5 | Submit form | `qcov_hsp_perc` and `perc_identity` whitelisted; UI sliders deferred. | Medium | Whitelist shipped; UI deferred |
+| 6 | Result UX | Alignment viewer had no Copy/Download FASTA action — NCBI exposes Copy + Download. | High | Code shipped |
+| 7 | Result UX | Descriptions table lacked a Frame indicator for translated programs (blastx / tblastn / tblastx). | High | Code shipped (Frame badge + qcovs column already present) |
+| 8 | Result UX | Graphic Summary lacks the bit-score colour legend NCBI uses (Black / Blue / Green / Pink / Red 5-band scheme). | Medium | Planned (UI work, ~½ day) |
+| 9 | Result UX | No Distance Tree tab (NCBI uses fastME / NJ over the top hits). Requires a server-side tree builder or external Foundry call. | Medium | Planned (~2 days, needs tree library) |
+| 10 | Result UX | No MSA Viewer deep-link. NCBI passes hits to the Multiple Sequence Alignment Viewer; we'd need to either ship MSA or deep-link to NCBI's. | Low | Planned (deep-link is cheap; full MSA viewer is not) |
+| 11 | Scientific | `qframe` / `sframe` not surfaced in canonical hit rows — silent data loss for translated programs. | Critical | Code shipped (parser + UI) |
+| 12 | Scientific | Karlin–Altschul parameters (`Lambda`, `K`, `H`, `effective search space`) not surfaced in the result header. NCBI prints them in the "Search Summary" block. | Medium | Planned (~1 day; parser already extracts `<Parameters>` block — needs UI surface) |
+| 13 | Scientific | Multi-query effective search space is reported per-query by NCBI; we currently report a single aggregate. | Low | Planned (~1 day after #12) |
+| 14 | Scientific | Default masking behaviour (DUST for blastn, SEG for blastp) is not documented in the UI; NCBI says so explicitly under Advanced. | Low | Planned (docs-only, ~½ day) |
+| 15 | Scientific | "Reformat results" (re-render with different `-outfmt`) is missing. NCBI lets users toggle pairwise / hit-table / XML without re-running. | Medium | Planned (~1 day; we already store raw outputs, just need a re-render route) |
+| 16 | Operations | The events stream is polling-based; NCBI Web BLAST uses long-poll and the upstream OpenAPI sibling now offers SSE. SSE upgrade for the events endpoint. | Medium | Planned (~1 day; ticket auth already in place per Charter §12a Rule 5) |
+| 17 | Operations | Cancel is binary (`DELETE /jobs/{id}`); NCBI Web BLAST surfaces phase-aware cancel ("Cancel queued" vs "Stop running"). | Low | Planned (~½ day) |
+| 18 | Operations | Result pagination — NCBI limits Descriptions to 100 by default with Next page. Ours streams the full set every time, which is fine today but does not scale to large `-num_descriptions`. | Low | Planned (~½ day after #17) |
+| 19 | §12a hardening | Submit/result log lines could include raw FASTA bytes from user input; tests cover SAS sanitisation but not FASTA scrubbing. | Medium | Planned (~½ day; extend `api.services.sanitise`) |
+| 20 | §12a hardening | No regression test that asserts the BLAST result routes never emit a SAS token in their JSON. | High | Code shipped (`test_blast_results_routes_never_emit_sas_tokens`) |
+
+### Critique Hardening Loop — Pass 1
+
+Stage: 11 NCBI Web BLAST Parity Wave
+Iteration: 1
+Date: 2026-05-31
+Implemented slice: 8/20 catalogued gaps shipped as code (items 1–5 whitelisted,
+6, 7, 11, 20 fully shipped); 12 remain documented with severity + cost.
+
+Findings:
+
+1. [Critical] `qframe` / `sframe` were silently dropped from canonical hit rows — fixed in `api/services/blast/results_parser.py` for both XML (`Hsp_query-frame` / `Hsp_hit-frame`) and tabular (`# Fields: query frame, subject frame`) paths, with `0` filtered out so nucleotide-only programs don't display a misleading "Frame: 0".
+2. [High] Alignment viewer had no Copy/Download FASTA action — fixed in `web/src/pages/blastResults/analytics/AlignmentViewer.tsx` with `AlignmentExportActions` (three buttons + 2 s feedback) and `buildAlignmentFasta` / `buildPairwiseAlignmentText` helpers.
+3. [High] Descriptions table did not show a Frame indicator for translated programs — fixed in `web/src/pages/blastResults/analytics/BlastHitsTable.tsx` with a conditional Frame badge and tooltip.
+4. [High] No regression test asserted BLAST result routes never emit a SAS token — fixed with `test_blast_results_routes_never_emit_sas_tokens` and `test_blast_aggregate_does_not_leak_storage_url_in_review_metadata` in `api/tests/test_blast_results_routes.py`.
+5. [Medium] Submit whitelist lacked NCBI Advanced flags (`matrix`, `threshold`, `comp_based_stats`, `culling_limit`, `best_hit_*`, `qcov_hsp_perc`, `perc_identity`, `gilist`, `negative_gilist`, `seqidlist`, `xdrop_*`, `window_size`, `parse_deflines`, `soft_masking`, `lcase_masking`, `ungapped`, `num_alignments`, `num_descriptions`) — fixed in `_BLAST_SUBMIT_OPTION_KEYS` (~40 → ~60 keys) with both top-level and `options` sub-dict tests.
+6. [Medium] Submit form UI sliders / dropdowns for items 1–5 deferred to a later wave to keep the diff scoped — OpenAPI callers can use them today via the whitelist; UI controls planned.
+7. [Medium] Karlin–Altschul parameters (`Lambda`, `K`, `H`, effective search space) not surfaced — Planned (~1 day) as item 12.
+8. [Medium] "Reformat results" missing — Planned (~1 day) as item 15.
+9. [Medium] Graphic Summary lacks the NCBI 5-band bit-score colour legend — Planned (~½ day) as item 8.
+10. [Medium] Distance Tree tab missing — Planned (~2 days) as item 9; needs a tree library decision (fastME vs scikit-bio NJ vs Foundry).
+
+Remaining non-low findings: 4 Planned Medium items (8, 9, 12, 15) and 1 Planned High item batched into wave 2 (#10 MSA deep-link is reclassified Low because deep-linking to NCBI's MSA viewer is a cheap shim, but full MSA is not in scope here).
+
+Validation evidence:
+
+- `uv run pytest -q api/tests` → 2225 passed, 3 skipped (up from 2218 baseline; +7 new tests).
+- `uv run ruff check api` → clean.
+- `cd web && npm test -- --run` → 433 passed.
+- `cd web && npm run build` → built in 8.07 s with the existing large-chunk warning (unchanged).
+
+Next action: schedule wave 2 (UI controls for items 1–5 + items 8, 9, 12, 15) into a follow-up PR. The remaining Low items (2, 4, 13, 14, 17, 18, 19) and the deferred MSA deep-link (10) are tracked in this matrix; no separate issue needed yet.
 
 ## Critique Log
 

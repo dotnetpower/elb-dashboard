@@ -485,6 +485,27 @@ export function BlastHitsTable({
                   </td>
                   <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                     {formatRange(hit.qstart, hit.qend)}
+                    {(hit.qframe !== undefined || hit.sframe !== undefined) && (
+                      <span
+                        className="muted"
+                        title={
+                          [
+                            hit.qframe !== undefined
+                              ? `Query frame ${hit.qframe}`
+                              : null,
+                            hit.sframe !== undefined
+                              ? `Subject frame ${hit.sframe}`
+                              : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ") ||
+                          "Reading frame for translated BLAST programs"
+                        }
+                        style={{ marginLeft: 6, fontSize: 11 }}
+                      >
+                        ({hit.qframe ?? "·"}/{hit.sframe ?? "·"})
+                      </span>
+                    )}
                   </td>
                 </tr>
               );

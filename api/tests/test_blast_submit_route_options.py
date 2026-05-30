@@ -179,3 +179,81 @@ def test_web_blast_defaults_preserve_low_complexity_opt_out() -> None:
 
     assert options["db_effective_search_space"] == 32156241807668
     assert options["low_complexity_filter"] is False
+
+
+def test_submit_options_forward_ncbi_web_blast_algorithm_flags() -> None:
+    """NCBI Web BLAST parity: matrix / threshold / composition / culling /
+    best-hit / post-search filters must round-trip through the canonical
+    options dict instead of being dropped or forced into the free-text
+    ``additional_options`` escape hatch.
+
+    Researchers expect to set these via the structured submit form (next
+    wave) and via OpenAPI ``options`` today — both call paths funnel through
+    ``_submit_options_from_body``, so a single assertion covers both.
+    """
+    options = _submit_options_from_body(
+        {
+            "matrix": "BLOSUM45",
+            "threshold": 11,
+            "comp_based_stats": 2,
+            "culling_limit": 5,
+            "best_hit_overhang": 0.25,
+            "best_hit_score_edge": 0.1,
+            "qcov_hsp_perc": 80,
+            "perc_identity": 95.0,
+            "window_size": 40,
+            "xdrop_gap": 30,
+            "xdrop_gap_final": 100,
+            "xdrop_ungap": 20.0,
+            "num_alignments": 250,
+            "num_descriptions": 250,
+            "parse_deflines": True,
+            "soft_masking": True,
+            "lcase_masking": True,
+            "ungapped": False,
+            "gilist": "gi-list-blob",
+            "negative_gilist": "neg-gi-blob",
+            "seqidlist": "seqid-blob",
+        }
+    )
+
+    assert options["matrix"] == "BLOSUM45"
+    assert options["threshold"] == 11
+    assert options["comp_based_stats"] == 2
+    assert options["culling_limit"] == 5
+    assert options["best_hit_overhang"] == 0.25
+    assert options["best_hit_score_edge"] == 0.1
+    assert options["qcov_hsp_perc"] == 80
+    assert options["perc_identity"] == 95.0
+    assert options["window_size"] == 40
+    assert options["xdrop_gap"] == 30
+    assert options["xdrop_gap_final"] == 100
+    assert options["xdrop_ungap"] == 20.0
+    assert options["num_alignments"] == 250
+    assert options["num_descriptions"] == 250
+    assert options["parse_deflines"] is True
+    assert options["soft_masking"] is True
+    assert options["lcase_masking"] is True
+    assert options["ungapped"] is False
+    assert options["gilist"] == "gi-list-blob"
+    assert options["negative_gilist"] == "neg-gi-blob"
+    assert options["seqidlist"] == "seqid-blob"
+
+
+def test_submit_options_via_options_dict_for_web_blast_parity_flags() -> None:
+    """Same parity flags, this time wrapped in the OpenAPI ``options``
+    sub-dict. Guards against the historical bug where new whitelisted
+    keys were only accepted at the top-level body."""
+    options = _submit_options_from_body(
+        {
+            "options": {
+                "matrix": "BLOSUM80",
+                "comp_based_stats": 1,
+                "qcov_hsp_perc": 50,
+            }
+        }
+    )
+
+    assert options["matrix"] == "BLOSUM80"
+    assert options["comp_based_stats"] == 1
+    assert options["qcov_hsp_perc"] == 50

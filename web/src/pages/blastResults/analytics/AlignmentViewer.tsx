@@ -12,6 +12,7 @@ import {
   strandLabel,
 } from "./helpers";
 import type { BlastHit } from "@/api/endpoints";
+import { useState } from "react";
 
 // Reused by the pairwise renderer. NCBI's pairwise view colors bases by
 // chemistry; we keep our existing palette so existing screenshots/docs
@@ -166,9 +167,171 @@ export function AlignmentViewer({ hit }: AlignmentViewerProps) {
         <span>Mismatches: {formatInteger(hit.mismatch)}</span>
         <span>Gaps: {formatInteger(hit.gaps ?? hit.gapopen)}</span>
         {hit.ppos !== undefined && <span>Positives: {formatPercent(hit.ppos)}</span>}
+        {hit.qframe !== undefined && <span>Query frame: {hit.qframe}</span>}
+        {hit.sframe !== undefined && <span>Subject frame: {hit.sframe}</span>}
       </div>
+
+      <AlignmentExportActions hit={hit} />
     </div>
   );
+}
+
+/**
+ * NCBI Web BLAST has "Download" + "GenPept/GenBank" + "Graphics" buttons
+ * on each alignment card. Our equivalents are intentionally smaller in
+ * scope: clipboard copy of the pairwise text, and a two-record FASTA
+ * download (query + subject for the aligned region). Both run entirely
+ * client-side from data already on the page — no extra backend round-trip.
+ *
+ * Buttons stay hidden when the alignment payload lacks ``qseq``/``sseq``
+ * (e.g. a tabular-only result file) so we never surface a broken action.
+ */
+function AlignmentExportActions({ hit }: { hit: BlastHit }) {
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const hasSequences = Boolean(hit.qseq && hit.sseq);
+  if (!hasSequences) return null;
+
+  const showFeedback = (message: string) => {
+    setFeedback(message);
+    window.setTimeout(() => setFeedback(null), 2000);
+  };
+
+  const handleCopyAlignment = async () => {
+    try {
+      await navigator.clipboard.writeText(buildPairwiseAlignmentText(hit));
+      showFeedback("Alignment copied");
+    } catch {
+      showFeedback("Copy failed");
+    }
+  };
+
+  const handleCopyFasta = async () => {
+    try {
+      await navigator.clipboard.writeText(buildAlignmentFasta(hit));
+      showFeedback("FASTA copied");
+    } catch {
+      showFeedback("Copy failed");
+    }
+  };
+
+  const handleDownloadFasta = () => {
+    const text = buildAlignmentFasta(hit);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const safeName = `${(hit.qseqid || "query").replace(/[^A-Za-z0-9._-]/g, "_")}__${(hit.sseqid || "subject").replace(/[^A-Za-z0-9._-]/g, "_")}.fasta`;
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = safeName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    showFeedback("FASTA downloaded");
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 8,
+        marginTop: 10,
+        flexWrap: "wrap",
+        alignItems: "center",
+      }}
+    >
+      <button type="button" className="btn-tertiary" onClick={handleCopyAlignment}>
+        Copy alignment
+      </button>
+      <button type="button" className="btn-tertiary" onClick={handleCopyFasta}>
+        Copy FASTA
+      </button>
+      <button type="button" className="btn-tertiary" onClick={handleDownloadFasta}>
+        Download FASTA
+      </button>
+      {feedback && (
+        <span className="muted" style={{ fontSize: 12 }}>
+          {feedback}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Build a plain-text pairwise alignment in the rough shape NCBI ships for
+ * researchers who paste alignments into manuscripts. Format:
+ *
+ *   Query  <qstart>  <60 chars>  <qend>
+ *                    |||| ::: ...
+ *   Sbjct  <sstart>  <60 chars>  <send>
+ *
+ * Position counters advance the same way as the on-screen renderer — by
+ * column index, NOT by sequence length — so gap-padding stays aligned
+ * across the three lines.
+ */
+function buildPairwiseAlignmentText(hit: BlastHit): string {
+  const qseq = String(hit.qseq ?? "");
+  const sseq = String(hit.sseq ?? "");
+  const qstart = numberValue(hit.qstart) ?? 1;
+  const sstart = numberValue(hit.sstart) ?? 1;
+  const blockSize = 60;
+
+  const headerLines = [
+    `Query  ${hit.qseqid ?? "(query)"}  ${formatRange(hit.qstart, hit.qend)} / ${hit.qlen ?? "?"}`,
+    `Sbjct  ${hit.sseqid ?? "(subject)"}  ${formatRange(hit.sstart, hit.send)} / ${hit.slen ?? "?"}`,
+    `Score  ${formatDecimal(hit.bitscore, 1)} bits   E=${formatEvalue(hit.evalue)}   Identity=${formatPercent(hit.pident)}`,
+    "",
+  ];
+
+  const out: string[] = [...headerLines];
+  for (let i = 0; i < qseq.length; i += blockSize) {
+    const qBlock = qseq.slice(i, i + blockSize);
+    const sBlock = sseq.slice(i, i + blockSize);
+    let matchLine = "";
+    for (let j = 0; j < qBlock.length; j++) {
+      if (qBlock[j] === sBlock[j]) matchLine += "|";
+      else if (qBlock[j] !== "-" && sBlock[j] !== "-") matchLine += ":";
+      else matchLine += " ";
+    }
+    const qPos = qstart + i;
+    const sPos = sstart + i;
+    out.push(`Query  ${String(qPos).padStart(6, " ")}  ${qBlock}`);
+    out.push(`                ${matchLine}`);
+    out.push(`Sbjct  ${String(sPos).padStart(6, " ")}  ${sBlock}`);
+    out.push("");
+  }
+  return out.join("\n");
+}
+
+/**
+ * Build a two-record FASTA file (query + subject) using the aligned
+ * region only. We strip gap characters so the records contain the actual
+ * sequence the researcher can re-use in downstream tools.
+ */
+function buildAlignmentFasta(hit: BlastHit): string {
+  const qid = hit.qseqid || "query";
+  const sid = hit.sseqid || "subject";
+  const stitle = hit.stitle ? ` ${hit.stitle}` : "";
+  const qseq = String(hit.qseq ?? "").replace(/-/g, "");
+  const sseq = String(hit.sseq ?? "").replace(/-/g, "");
+  const qRange = `${hit.qstart ?? "?"}-${hit.qend ?? "?"}`;
+  const sRange = `${hit.sstart ?? "?"}-${hit.send ?? "?"}`;
+  return [
+    `>${qid} aligned_region=${qRange}`,
+    wrapFasta(qseq),
+    `>${sid}${stitle} aligned_region=${sRange}`,
+    wrapFasta(sseq),
+    "",
+  ].join("\n");
+}
+
+function wrapFasta(seq: string, width = 70): string {
+  if (!seq) return "";
+  const lines: string[] = [];
+  for (let i = 0; i < seq.length; i += width) {
+    lines.push(seq.slice(i, i + width));
+  }
+  return lines.join("\n");
 }
 
 function CoverageBar({

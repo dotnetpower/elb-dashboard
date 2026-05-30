@@ -507,6 +507,13 @@ export interface BlastHit {
   qcovs?: BlastHitNumeric;
   scovs?: BlastHitNumeric;
   ppos?: BlastHitNumeric;
+  /**
+   * Reading frame for translated BLAST programs (blastx / tblastn /
+   * tblastx). Values are in {-3,-2,-1,1,2,3}. Absent for blastn / blastp
+   * because the parser drops zero-valued frames (see results_parser).
+   */
+  qframe?: BlastHitNumeric;
+  sframe?: BlastHitNumeric;
   stitle?: string;
   sscinames?: string;
   staxids?: string;

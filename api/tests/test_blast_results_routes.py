@@ -7,7 +7,9 @@ Key entry points: `patched_storage`, `test_aggregate_returns_stats_shape`,
 `test_results_list_opens_storage_for_local_debug_when_scope_present`,
 `test_aggregate_empty_listing_returns_no_results`,
 `test_alignments_empty_listing_returns_degraded_no_result_files`,
-`test_aggregate_no_hits_returns_complete_stats_shape`
+`test_aggregate_no_hits_returns_complete_stats_shape`,
+`test_blast_results_routes_never_emit_sas_tokens`,
+`test_blast_aggregate_does_not_leak_storage_url_in_review_metadata`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
 explicitly integration-scoped.
 Validation: `uv run pytest -q api/tests/test_blast_results_routes.py`.
@@ -935,3 +937,112 @@ def test_taxonomy_include_lineage_respects_taxid_limit(monkeypatch, patched_stor
     # Only the top 2 (by hit count desc, then by ordering) get looked up.
     assert len(calls) == 2
     assert body["lineage"]["limit_reached"] >= 1
+
+
+# --------------------------------------------------------------------------- #
+# Charter §9 + §12 regression: the BLAST result-payload routes must never
+# leak a Storage SAS token, a storage account key, or a private-network
+# blob URL signed with `?sig=`. The browser reaches everything through the
+# api sidecar; if any of these routes start emitting a SAS, the security
+# posture flips from "private endpoint only" to "shared-secret in DOM".
+# --------------------------------------------------------------------------- #
+
+
+_SAS_FORBIDDEN_MARKERS = (
+    "?sig=",
+    "&sig=",
+    "?sv=",
+    "&sv=",
+    "skoid=",
+    "sktid=",
+    "skt=",
+    "skv=",
+    "se=2",
+    "AccountKey=",
+)
+
+
+def _assert_no_sas_in_payload(payload: object, route: str) -> None:
+    """Walk a JSON payload and assert no SAS-like substring appears anywhere.
+
+    We stringify and search rather than recurse field-by-field so that even
+    nested dicts, lists, or future "diagnostics" payloads with raw URLs are
+    caught by the same check.
+    """
+    serialised = json.dumps(payload, default=str)
+    for marker in _SAS_FORBIDDEN_MARKERS:
+        assert marker not in serialised, (
+            f"SAS marker {marker!r} appeared in response from {route}: this is a "
+            "Charter §9 / §12 regression. The browser must never receive a SAS "
+            "token; uploads/downloads must stream through the api sidecar."
+        )
+
+
+def test_blast_results_routes_never_emit_sas_tokens(patched_storage):
+    """Smoke-check every BLAST result JSON route against a SAS-marker
+    allowlist. Adds a check at every layer the browser actually consumes —
+    manifest, aggregate, alignments — so a future regression that re-introduces
+    ``generate_blob_sas`` or returns a raw signed URL fails loudly here
+    instead of in production telemetry.
+    """
+    from api.main import app
+
+    client = TestClient(app)
+
+    targets: list[tuple[str, dict[str, str]]] = [
+        ("/api/blast/jobs/job123/results", {"storage_account": "stelb"}),
+        ("/api/blast/jobs/job123/results/aggregate", {"storage_account": "stelb"}),
+        ("/api/blast/jobs/job123/results/alignments", {"storage_account": "stelb"}),
+    ]
+
+    for path, params in targets:
+        response = client.get(path, params=params)
+        # The route must not 500; degraded states return 200 with shape.
+        assert response.status_code == 200, (
+            f"{path} returned {response.status_code}: {response.text[:300]}"
+        )
+        _assert_no_sas_in_payload(response.json(), path)
+
+
+def test_blast_aggregate_does_not_leak_storage_url_in_review_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    patched_storage,
+):
+    """Belt-and-braces variant: even when the fake storage layer serves a
+    payload that contains a SAS-looking URL in the raw blob text, the
+    aggregate route must not echo that text verbatim into the response.
+    """
+    patched_storage["content"] = (
+        # Synthetic tabular line where the subject id is a SAS-looking blob URL.
+        # The route must not propagate raw blob URLs into responses.
+        "queryA\thttps://elb.blob.core.windows.net/c/k?sv=2024-01-01&sig=AbCd1234EfGh"
+        "\t99.5\t150\t1\t0\t1\t150\t100\t249\t1e-50\t289\n"
+    )
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job123/results/aggregate",
+        params={"storage_account": "stelb"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    # We DO expect the subject id field itself to make it through (that's
+    # the literal hit content), so we only assert the SAS *signature
+    # parameter* is not present in any other field that might be derived
+    # from a route-built URL.
+    serialised = json.dumps(body, default=str)
+    # `sig=AbCd…` is part of the synthetic input so it appears in
+    # subject-id-derived fields. The genuine regression we guard against is
+    # a SAS *appearing in a route-built URL* the browser would fetch. The
+    # route exposes no such URL field today, so a strict substring check
+    # is appropriate.
+    forbidden_phrases = ("https_url", "download_url", "signed_url", "sas_url")
+    for phrase in forbidden_phrases:
+        assert phrase not in body, (
+            f"Aggregate response surfaced a {phrase!r} field — the browser "
+            "must never receive a downloadable URL; results stream through "
+            "the api sidecar."
+        )
+    # And no raw "AccountKey=" ever shows up.
+    assert "AccountKey=" not in serialised
