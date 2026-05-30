@@ -339,6 +339,30 @@ Phase-2 PRs MUST cite the matching phase-1 PR number in their
 ("RBAC removal preflight green locally … OR `ACCEPT_RBAC_REMOVAL=phase-2-of-pr-<N>`
 recorded"). Reviewers cross-check the value against the phase-1 PR before merge.
 
+Scope notes:
+
+* The guard runs `az deployment sub what-if` against
+  [infra/main.bicep](../infra/main.bicep) only. That template is the single
+  subscription-scope entry point and `az` flattens every nested module's
+  changes into a single `changes[]` array, so module-level
+  `roleAssignments` deletions ARE detected — no extra per-module scan
+  needed. If a future PR introduces a *second* `targetScope = 'subscription'`
+  entry point that azd provisions, add it to the wrapper's `--template-file`
+  loop in the same PR.
+* In `STRICT_RBAC_REMOVAL_HALT=true` mode the wrapper no longer silently
+  skips on internal failures (missing `az`, unset `AZURE_*`, what-if call
+  failed, malformed JSON). A skipped preflight in strict mode is treated
+  as exit 3 — better a noisy halt than a silent permission loss. In
+  warn-only mode the legacy silent-skip is preserved so day-to-day
+  development is never blocked by environmental hiccups.
+* Local validation: `bash scripts/dev/preflight_rbac_removal.sh` runs the
+  same flow azd's preprovision invokes. Set
+  `STRICT_RBAC_REMOVAL_HALT=true` to rehearse the halt path against your
+  current env before opening a PR; the wrapper prints a per-finding line,
+  an audit-friendly `ACCEPT_RBAC_REMOVAL=…` echo when the override is
+  accepted, and a final `SUMMARY:` line so the outcome is visible at the
+  bottom of a long log.
+
 ---
 
 ## 13. Process Discipline

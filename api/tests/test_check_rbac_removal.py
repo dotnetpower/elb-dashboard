@@ -154,10 +154,13 @@ def test_summarise_change_handles_missing_before() -> None:
         ("1", True),
         ("yes", True),
         ("on", True),
+        ("enabled", True),
+        ("ENABLED", True),
         ("", False),
         ("false", False),
         ("0", False),
         ("no", False),
+        ("disabled", False),
         ("anything-else", False),
     ],
 )
@@ -286,3 +289,280 @@ def test_main_reads_stdin(
 def test_main_compute_requires_subscription_and_location() -> None:
     rc = crr.main(["--compute"], env={})
     assert rc == crr.EXIT_BAD_ENV
+
+
+# ---------------------------------------------------------------------------
+# Robustness additions (charter §12a Rule 7 hardening wave)
+# ---------------------------------------------------------------------------
+def test_find_rbac_removals_unwraps_doubly_wrapped_envelope() -> None:
+    """Some Azure SDK / REST shapes nest properties twice."""
+    change = _change(change_type="Delete", resource_id=_RA_RID)
+    payload = {"properties": {"properties": {"changes": [change]}}}
+    assert crr.find_rbac_removals(payload) == [change]
+
+
+def test_summarise_change_includes_builtin_role_name() -> None:
+    """Storage Blob Data Contributor GUID should be expanded to a name."""
+    change = _change(
+        change_type="Delete",
+        resource_id=_RA_RID,
+        before_props={
+            "principalId": "22222222-2222-2222-2222-222222222222",
+            "principalType": "ServicePrincipal",
+            "roleDefinitionId": (
+                "/subscriptions/00000000-0000-0000-0000-000000000001/providers/"
+                "Microsoft.Authorization/roleDefinitions/"
+                "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
+            ),
+        },
+    )
+    summary = crr.summarise_change(change)
+    assert "Storage Blob Data Contributor" in summary
+    assert "ba92f5b4-2d11-453d-a403-e96b0029c9fe" in summary
+
+
+def test_role_name_for_guid_known_and_unknown() -> None:
+    assert crr.role_name_for_guid("8e3af657-a8ff-443c-a75c-2fe8c4bcb635") == "Owner"
+    # Case-insensitive.
+    assert (
+        crr.role_name_for_guid("B24988AC-6180-42A0-AB88-20F7382DD24C")
+        == "Contributor"
+    )
+    assert crr.role_name_for_guid("00000000-0000-0000-0000-000000000000") is None
+    assert crr.role_name_for_guid("") is None
+
+
+def test_summarise_change_masks_principal_when_flagged() -> None:
+    change = _change(
+        change_type="Delete",
+        resource_id=_RA_RID,
+        before_props={
+            "principalId": "22222222-2222-2222-2222-222222229999",
+            "principalType": "ServicePrincipal",
+        },
+    )
+    plain = crr.summarise_change(change)
+    masked = crr.summarise_change(change, mask_principals=True)
+    assert "22222222-2222-2222-2222-222222229999" in plain
+    assert "22222222-2222-2222-2222-222222229999" not in masked
+    assert "***-9999" in masked
+
+
+def test_summarise_change_index_prefix_renders() -> None:
+    change = _change(change_type="Delete", resource_id=_RA_RID)
+    summary = crr.summarise_change(change, index=2, total=5)
+    assert summary.startswith("  [2/5] ")
+
+
+def test_main_emits_summary_sentinel(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {"changes": [_change(change_type="Delete", resource_id=_RA_RID)]}
+    path = _write_whatif(tmp_path, payload)
+    crr.main(["--from-json", str(path)], env={})
+    out = capsys.readouterr().out
+    assert "SUMMARY:" in out
+    assert "(WARN-ONLY" in out
+
+
+def test_main_summary_for_zero_removals(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {"changes": [_change(change_type="Create", resource_id=_RA_RID)]}
+    path = _write_whatif(tmp_path, payload)
+    crr.main(["--from-json", str(path)], env={})
+    out = capsys.readouterr().out
+    assert "SUMMARY: 0 removals (OK)" in out
+
+
+def test_main_summary_for_halt_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {"changes": [_change(change_type="Delete", resource_id=_RA_RID)]}
+    path = _write_whatif(tmp_path, payload)
+    crr.main(
+        ["--from-json", str(path)],
+        env={"STRICT_RBAC_REMOVAL_HALT": "true"},
+    )
+    out = capsys.readouterr().out
+    assert "SUMMARY:" in out
+    assert "(HALT)" in out
+
+
+def test_main_summary_for_accepted_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {"changes": [_change(change_type="Delete", resource_id=_RA_RID)]}
+    path = _write_whatif(tmp_path, payload)
+    crr.main(
+        ["--from-json", str(path)],
+        env={
+            "STRICT_RBAC_REMOVAL_HALT": "true",
+            "ACCEPT_RBAC_REMOVAL": "phase-2-of-pr-42",
+        },
+    )
+    out = capsys.readouterr().out
+    assert "ACCEPT_RBAC_REMOVAL satisfied" in out
+    assert "(ACCEPTED, allowed)" in out
+
+
+def test_main_missing_from_json_file_returns_bad_env(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = crr.main(["--from-json", "/nonexistent/whatif.json"], env={})
+    out = capsys.readouterr().out
+    assert rc == crr.EXIT_BAD_ENV
+    assert "--from-json file not found" in out
+
+
+def test_main_malformed_json_returns_az_failed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json at all", encoding="utf-8")
+    rc = crr.main(["--from-json", str(bad)], env={})
+    out = capsys.readouterr().out
+    assert rc == crr.EXIT_AZ_FAILED
+    assert "failed to parse what-if JSON" in out
+
+
+def test_main_argparse_unknown_flag_exits_two() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        crr.main(["--no-such-flag"], env={})
+    assert excinfo.value.code == 2
+
+
+def test_main_argparse_missing_source_exits_two() -> None:
+    """`--from-json` and `--compute` are mutually exclusive AND required."""
+    with pytest.raises(SystemExit) as excinfo:
+        crr.main([], env={})
+    assert excinfo.value.code == 2
+
+
+def test_compute_whatif_invokes_az_with_expected_args(
+    tmp_path: Path,
+) -> None:
+    """Mock subprocess so we can validate argv shape without calling az."""
+    calls: list[Any] = []
+
+    template = tmp_path / "main.bicep"
+    template.write_text("// fake", encoding="utf-8")
+
+    payload = {"changes": [_change(change_type="Delete", resource_id=_RA_RID)]}
+
+    class _Proc:
+        returncode = 0
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> _Proc:
+        calls.append((cmd, kwargs))
+        return _Proc()
+
+    out = crr.compute_whatif(
+        subscription="sub-1",
+        location="koreacentral",
+        template_file=str(template),
+        parameters=["envName=dev"],
+        runner=fake_run,
+    )
+    assert out == payload
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd[0:4] == ["az", "deployment", "sub", "what-if"]
+    assert "--subscription" in cmd and "sub-1" in cmd
+    assert "--location" in cmd and "koreacentral" in cmd
+    assert "--template-file" in cmd and str(template) in cmd
+    # Each --parameters appears as a separate flag pair.
+    assert cmd.count("--parameters") == 1
+    assert "envName=dev" in cmd
+    assert kwargs.get("capture_output") is True
+    assert kwargs.get("text") is True
+
+
+def test_compute_whatif_az_failure_raises_az_failed(tmp_path: Path) -> None:
+    template = tmp_path / "main.bicep"
+    template.write_text("// fake", encoding="utf-8")
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "azure-cli: ResourceGroupNotFound"
+
+    def fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> _Proc:
+        return _Proc()
+
+    with pytest.raises(SystemExit) as excinfo:
+        crr.compute_whatif(
+            subscription="sub-1",
+            location="koreacentral",
+            template_file=str(template),
+            parameters=[],
+            runner=fake_run,
+        )
+    assert excinfo.value.code == crr.EXIT_AZ_FAILED
+
+
+def test_compute_whatif_missing_template_raises_bad_env(tmp_path: Path) -> None:
+    missing = tmp_path / "absent.bicep"
+    with pytest.raises(SystemExit) as excinfo:
+        crr.compute_whatif(
+            subscription="sub-1",
+            location="koreacentral",
+            template_file=str(missing),
+            parameters=[],
+            runner=lambda *a, **k: None,  # never called
+        )
+    assert excinfo.value.code == crr.EXIT_BAD_ENV
+
+
+def test_compute_whatif_malformed_stdout_raises_az_failed(tmp_path: Path) -> None:
+    template = tmp_path / "main.bicep"
+    template.write_text("// fake", encoding="utf-8")
+
+    class _Proc:
+        returncode = 0
+        stdout = "not json"
+        stderr = ""
+
+    with pytest.raises(SystemExit) as excinfo:
+        crr.compute_whatif(
+            subscription="sub-1",
+            location="koreacentral",
+            template_file=str(template),
+            parameters=[],
+            runner=lambda *a, **k: _Proc(),
+        )
+    assert excinfo.value.code == crr.EXIT_AZ_FAILED
+
+
+def test_help_epilog_contains_exit_code_table(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        crr.main(["--help"], env={})
+    out = capsys.readouterr().out
+    assert "Exit codes:" in out
+    # Spot-check three of the documented exit codes.
+    assert "0   no removals" in out
+    assert "3   HALT" in out
+    assert "4   az invocation failed" in out
+
+
+def test_main_emits_accept_token_for_audit_grep(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The accepted ACCEPT_RBAC_REMOVAL value lands in the log verbatim so
+    'git log + grep' can answer 'who/when acknowledged removal X?' later."""
+    payload = {"changes": [_change(change_type="Delete", resource_id=_RA_RID)]}
+    path = _write_whatif(tmp_path, payload)
+    crr.main(
+        ["--from-json", str(path)],
+        env={
+            "STRICT_RBAC_REMOVAL_HALT": "true",
+            "ACCEPT_RBAC_REMOVAL": "phase-2-of-pr-123",
+        },
+    )
+    out = capsys.readouterr().out
+    assert "phase-2-of-pr-123" in out
+    assert "ACCEPT_RBAC_REMOVAL satisfied" in out

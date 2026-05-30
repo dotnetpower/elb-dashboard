@@ -11,7 +11,9 @@ Responsibility: Parse the output of `az deployment sub what-if --no-pretty-print
 Edit boundaries: Pure read-only. Does NOT mutate any Azure resource. Does
     NOT decide which roles are "important" — it flags every roleAssignment
     deletion and lets the operator acknowledge via `ACCEPT_RBAC_REMOVAL`.
-Key entry points: `find_rbac_removals`, `summarise_change`, `main`.
+Key entry points: `find_rbac_removals`, `summarise_change`, `main`,
+    `is_strict_enabled`, `is_acceptance_valid`, `compute_whatif`,
+    `load_whatif`, `role_name_for_guid`.
 Risky contracts: The env-var gate `STRICT_RBAC_REMOVAL_HALT` defaults to
     OFF per charter §12a Rule 4. When unset the script logs findings and
     returns 0 (warn-only). When set to a truthy value the script returns
@@ -20,7 +22,16 @@ Risky contracts: The env-var gate `STRICT_RBAC_REMOVAL_HALT` defaults to
     `ACCEPT_RBAC_REMOVAL` must reference a PR (e.g.
     `phase-2-of-pr-42` or `phase-2 of 2 (see PR-42)`) so the override is
     auditable in shell history and git log.
+
+    Exit codes:
+        0  OK / warn-only / acknowledged removal
+        2  bad CLI usage (mutually-exclusive group, missing --subscription,
+           missing --template-file, non-existent --from-json file)
+        3  HALT — STRICT_RBAC_REMOVAL_HALT=true and unaccepted removal(s)
+        4  az invocation failed OR malformed JSON document
 Validation: `uv run pytest -q api/tests/test_check_rbac_removal.py`.
+    Local end-to-end check (no halt — warn-only):
+        bash scripts/dev/preflight_rbac_removal.sh
 """
 
 from __future__ import annotations
@@ -49,11 +60,51 @@ ROLE_ASSIGNMENT_TYPE = "/providers/microsoft.authorization/roleassignments/"
 ROLE_DEFINITION_TYPE = "/providers/microsoft.authorization/roledefinitions/"
 REMOVAL_CHANGE_TYPES = frozenset({"delete", "deploymentmode"})
 
+# Built-in Azure RBAC role GUIDs for which a removal is the most likely to
+# cause a production outage. The list is intentionally focused on roles that
+# `infra/modules/*.bicep` actually grants today plus the 3 broadest built-in
+# roles (Owner / Contributor / Reader) so a removal log line carries an
+# immediately recognisable name without the operator having to look up
+# `az role definition show --name <guid>`.
+# Source: https://learn.microsoft.com/azure/role-based-access-control/built-in-roles
+_BUILTIN_ROLE_GUIDS: dict[str, str] = {
+    "8e3af657-a8ff-443c-a75c-2fe8c4bcb635": "Owner",
+    "b24988ac-6180-42a0-ab88-20f7382dd24c": "Contributor",
+    "acdd72a7-3385-48ef-bd42-f606fba81ae7": "Reader",
+    "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9": "User Access Administrator",
+    "ba92f5b4-2d11-453d-a403-e96b0029c9fe": "Storage Blob Data Contributor",
+    "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1": "Storage Blob Data Reader",
+    "974c5e8b-45b9-4653-ba55-5f855dd0fb88": "Storage Queue Data Contributor",
+    "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3": "Storage Table Data Contributor",
+    "7f951dda-4ed3-4680-a7ca-43fe172d538d": "AcrPull",
+    "8311e382-0749-4cb8-b61a-304f252e45ec": "AcrPush",
+    "b86a8fe4-44ce-4948-aee5-eccb2c155cd7": "Key Vault Secrets Officer",
+    "4633458b-17de-408a-b874-0445c86b69e6": "Key Vault Secrets User",
+    "00482a5a-887f-4fb3-b363-3b7fe8e74483": "Key Vault Administrator",
+    "f25e0fa2-a7c8-4377-a976-54943a77a395": "Key Vault Contributor",
+    "21090545-7ca7-4776-b22c-e363652d74d2": "Key Vault Reader",
+    "73c42c96-874c-492b-b04d-ab87d138a893": "Log Analytics Reader",
+    "92aaf0da-9dab-42b6-94a3-d43ce8d16293": "Log Analytics Contributor",
+    "f5819b54-e033-4d82-ac1d-d5a2c0aedbef": "Azure Container Apps Operator",
+}
+
+# `ACCEPT_RBAC_REMOVAL` tokens — must explicitly reference a phase-2 PR so
+# the override is searchable in shell history and git log. Examples accepted:
+#     phase-2-of-pr-42
+#     phase-2 of pr-42
+#     phase-2 of 2 (see PR-42)
+#     phase-2 of 2 (see #42)
 ACCEPT_PATTERN = re.compile(
     r"phase[-\s]?2(?:[-\s](?:of|to)[-\s]?\d+)?[-\s](?:of[-\s])?(?:pr[-#]?\d+|"
     r"\(?see[-\s]+(?:pr[-#]?\d+|#\d+)\)?|#\d+)",
     re.IGNORECASE,
 )
+
+# Recognised truthy values for `STRICT_RBAC_REMOVAL_HALT`. Includes the
+# values most commonly used by other tooling in the repo + the Azure-style
+# `enabled` so the gate behaves predictably regardless of the operator's
+# convention.
+_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on", "enabled"})
 
 
 # ---------------------------------------------------------------------------
@@ -82,20 +133,43 @@ def _normalise_resource_id(value: Any) -> str:
     return str(value or "").lower()
 
 
+def _unwrap_changes(whatif: dict[str, Any]) -> list[Any]:
+    """Return the `changes` array regardless of envelope nesting depth.
+
+    Azure surfaces three documented shapes for what-if responses:
+
+    1. CLI direct output: `{"changes": [...]}`
+    2. ARM deployment resource: `{"properties": {"changes": [...]}}`
+    3. Doubly-wrapped (some SDK / REST responses):
+       `{"properties": {"properties": {"changes": [...]}}}`
+
+    Walk up to two `properties` levels before giving up so future SDK
+    refactors do not silently break the guard.
+    """
+    node: Any = whatif
+    for _ in range(3):
+        if not isinstance(node, dict):
+            return []
+        changes = node.get("changes")
+        if isinstance(changes, list):
+            return changes
+        node = node.get("properties")
+        if node is None:
+            return []
+    return []
+
+
 def find_rbac_removals(whatif: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the subset of `whatif["changes"]` that delete roleAssignments.
 
-    Accepts both the bare CLI shape (`{"changes": [...]}`) and the wrapped
-    deployment-resource shape (`{"properties": {"changes": [...]}}`).
+    Accepts the bare CLI shape (`{"changes": [...]}`), the wrapped
+    deployment-resource shape (`{"properties": {"changes": [...]}}`),
+    and the doubly-wrapped SDK shape.
     """
     if not isinstance(whatif, dict):
         return []
-    changes = whatif.get("changes")
-    if changes is None:
-        properties = whatif.get("properties") or {}
-        if isinstance(properties, dict):
-            changes = properties.get("changes")
-    if not isinstance(changes, list):
+    changes = _unwrap_changes(whatif)
+    if not changes:
         return []
     out: list[dict[str, Any]] = []
     for ch in changes:
@@ -111,21 +185,61 @@ def find_rbac_removals(whatif: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def summarise_change(change: dict[str, Any]) -> str:
-    """Human-readable one-line description of a role-assignment deletion."""
+def role_name_for_guid(guid: str) -> str | None:
+    """Return the human-readable name of a built-in role GUID, or None."""
+    if not guid:
+        return None
+    return _BUILTIN_ROLE_GUIDS.get(guid.lower())
+
+
+def _mask_principal(principal_id: str, *, mask: bool) -> str:
+    """Optionally mask all but the last 4 chars of a GUID-shaped principal id."""
+    if not mask or not principal_id or len(principal_id) <= 4:
+        return principal_id
+    tail = principal_id[-4:]
+    return f"***-{tail}"
+
+
+def summarise_change(
+    change: dict[str, Any],
+    *,
+    index: int | None = None,
+    total: int | None = None,
+    mask_principals: bool = False,
+) -> str:
+    """Human-readable one-line description of a role-assignment deletion.
+
+    When `index`/`total` are provided the line is prefixed with `[i/N]` so
+    the deletions are easy to scan in a long preprovision log.
+    """
     rid = str(change.get("resourceId") or "<unknown>")
     before = change.get("before") or {}
     props = (
         before.get("properties") if isinstance(before, dict) else None
     ) or {}
-    principal_id = props.get("principalId") or "<unknown-principal>"
+    principal_id_raw = str(props.get("principalId") or "")
+    principal_id = (
+        _mask_principal(principal_id_raw, mask=mask_principals)
+        if principal_id_raw
+        else "<unknown-principal>"
+    )
     principal_type = props.get("principalType") or "<unknown-type>"
     role_def = str(props.get("roleDefinitionId") or "")
-    role_guid = role_def.rsplit("/", 1)[-1] if role_def else "<unknown-role>"
+    role_guid = role_def.rsplit("/", 1)[-1] if role_def else ""
+    role_name = role_name_for_guid(role_guid)
+    if role_name:
+        role_label = f"{role_name} ({role_guid})"
+    elif role_guid:
+        role_label = role_guid
+    else:
+        role_label = "<unknown-role>"
     scope = props.get("scope") or _scope_from_role_assignment_id(rid)
+    prefix = "  - "
+    if index is not None and total is not None:
+        prefix = f"  [{index}/{total}] "
     return (
-        f"  - principal={principal_id} ({principal_type}) "
-        f"role={role_guid} scope={scope} resourceId={rid}"
+        f"{prefix}principal={principal_id} ({principal_type}) "
+        f"role={role_label} scope={scope} resourceId={rid}"
     )
 
 
@@ -146,7 +260,7 @@ def _scope_from_role_assignment_id(rid: str) -> str:
 # ---------------------------------------------------------------------------
 def is_strict_enabled(env: dict[str, str]) -> bool:
     raw = (env.get("STRICT_RBAC_REMOVAL_HALT") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return raw in _TRUTHY_VALUES
 
 
 def acceptance_token(env: dict[str, str]) -> str:
@@ -163,10 +277,31 @@ def is_acceptance_valid(token: str) -> bool:
 # What-if source
 # ---------------------------------------------------------------------------
 def load_whatif(source: str) -> dict[str, Any]:
-    if source == "-":
-        return json.loads(sys.stdin.read())
-    with open(source, encoding="utf-8") as fh:
-        return json.load(fh)
+    """Load a what-if document from a file path or '-' for stdin.
+
+    JSON parse errors surface as `SystemExit(EXIT_AZ_FAILED)` so `main()`
+    can map them to a consistent exit code without re-raising into the
+    caller's traceback.
+    """
+    try:
+        if source == "-":
+            raw = sys.stdin.read()
+        else:
+            with open(source, encoding="utf-8") as fh:
+                raw = fh.read()
+    except FileNotFoundError as exc:
+        err(f"--from-json file not found: {source}")
+        raise SystemExit(EXIT_BAD_ENV) from exc
+    except OSError as exc:
+        err(f"failed to read --from-json source {source!r}: {exc}")
+        raise SystemExit(EXIT_AZ_FAILED) from exc
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        # Truncate the snippet so a multi-MB what-if dump does not flood the log.
+        snippet = raw[:200].replace("\n", " ")
+        err(f"failed to parse what-if JSON from {source}: {exc}; head: {snippet!r}")
+        raise SystemExit(EXIT_AZ_FAILED) from exc
 
 
 def compute_whatif(
@@ -176,8 +311,16 @@ def compute_whatif(
     template_file: str,
     parameters: list[str],
     extra_args: Iterable[str] = (),
+    runner: Any = None,
 ) -> dict[str, Any]:
-    """Invoke `az deployment sub what-if` and return the parsed JSON."""
+    """Invoke `az deployment sub what-if` and return the parsed JSON.
+
+    `runner` is an optional `subprocess.run`-compatible callable so unit
+    tests can stub the az invocation without monkey-patching the module.
+    """
+    if not os.path.isfile(template_file):
+        err(f"--template-file does not exist: {template_file}")
+        raise SystemExit(EXIT_BAD_ENV)
     cmd = [
         "az",
         "deployment",
@@ -197,26 +340,55 @@ def compute_whatif(
         cmd.extend(["--parameters", kv])
     cmd.extend(extra_args)
     info(f"az deployment sub what-if (template={template_file}, location={location})")
-    # S603: cmd is constructed from validated CLI flags only; no shell.
-    proc = subprocess.run(  # noqa: S603
+    runner = runner or subprocess.run
+    # `runner` is either `subprocess.run` or a test stub; argv is built from
+    # validated CLI flags only — no shell, no interpolation.
+    proc = runner(
         cmd, capture_output=True, text=True, check=False
     )
     if proc.returncode != 0:
         err(
             "az deployment sub what-if failed "
-            f"(exit={proc.returncode}); stderr tail: {proc.stderr.strip()[-500:]}"
+            f"(exit={proc.returncode}); stderr tail: "
+            f"{(proc.stderr or '').strip()[-500:]}"
         )
         raise SystemExit(EXIT_AZ_FAILED)
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
-        err(f"failed to parse what-if JSON: {exc}; stdout tail: {proc.stdout[-500:]}")
+        err(
+            f"failed to parse what-if JSON: {exc}; "
+            f"stdout tail: {(proc.stdout or '')[-500:]}"
+        )
         raise SystemExit(EXIT_AZ_FAILED) from exc
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+_HELP_EPILOG = """\
+Exit codes:
+  0   no removals, OR warn-only mode, OR removal acknowledged
+  2   bad CLI usage (mutually exclusive args, missing flag, missing file)
+  3   HALT — STRICT_RBAC_REMOVAL_HALT=true and at least one unaccepted removal
+  4   az invocation failed or what-if JSON could not be parsed
+
+Examples:
+  # Parse a what-if document on disk and report findings (warn-only):
+  python scripts/dev/check_rbac_removal.py --from-json /tmp/whatif.json
+
+  # Pipe what-if from az directly:
+  az deployment sub what-if --subscription $SID --location $LOC \\
+      --template-file infra/main.bicep --no-pretty-print --output json \\
+    | python scripts/dev/check_rbac_removal.py --from-json -
+
+  # Enforce halt mode and acknowledge an intentional phase-2 PR:
+  STRICT_RBAC_REMOVAL_HALT=true \\
+  ACCEPT_RBAC_REMOVAL='phase-2-of-pr-42' \\
+    bash scripts/dev/preflight_rbac_removal.sh
+"""
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -224,7 +396,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Microsoft.Authorization/roleAssignments resource. Enabled by "
             "STRICT_RBAC_REMOVAL_HALT=true; acknowledge intended removals "
             "with ACCEPT_RBAC_REMOVAL=phase-2-of-pr-NN."
-        )
+        ),
+        epilog=_HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument(
@@ -251,6 +425,14 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="KEY=VALUE",
         help="Bicep parameter override; repeat for multiple values.",
     )
+    parser.add_argument(
+        "--mask-principals",
+        action="store_true",
+        help=(
+            "Mask all but the last 4 characters of principal ids. Use when "
+            "the preflight output is uploaded to a CI artifact store."
+        ),
+    )
     return parser
 
 
@@ -272,16 +454,29 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         else:
             whatif = load_whatif(args.from_json)
     except SystemExit as exc:
-        return int(exc.code or 0) or EXIT_AZ_FAILED
+        code = exc.code
+        if isinstance(code, int):
+            return code
+        return EXIT_AZ_FAILED
 
     removals = find_rbac_removals(whatif)
     if not removals:
         info("no roleAssignment deletions detected")
+        info("SUMMARY: 0 removals (OK)")
         return EXIT_OK
 
-    info(f"detected {len(removals)} roleAssignment deletion(s) in what-if:")
-    for change in removals:
-        print(summarise_change(change), flush=True)
+    total = len(removals)
+    info(f"detected {total} roleAssignment deletion(s) in what-if:")
+    for idx, change in enumerate(removals, start=1):
+        print(
+            summarise_change(
+                change,
+                index=idx,
+                total=total,
+                mask_principals=args.mask_principals,
+            ),
+            flush=True,
+        )
 
     strict = is_strict_enabled(env)
     accept = acceptance_token(env)
@@ -292,13 +487,17 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
             "Charter §12a Rule 4 transition will flip this default once "
             "the soak window completes."
         )
+        info(f"SUMMARY: {total} removal(s) detected (WARN-ONLY, allowed)")
         return EXIT_OK
 
     if accept and is_acceptance_valid(accept):
+        # Echo the accepted token so it lands in the preprovision log and
+        # is grep-able later for audit ("who acknowledged what, when").
         info(
             "ACCEPT_RBAC_REMOVAL satisfied "
             f"(token={accept!r}); proceeding with deployment."
         )
+        info(f"SUMMARY: {total} removal(s) detected (ACCEPTED, allowed)")
         return EXIT_OK
 
     if accept:
@@ -317,6 +516,7 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         "See charter .github/copilot-instructions.md §12a Rule 1 + Rule 7 for "
         "the 2-phase ADD-then-REMOVE workflow."
     )
+    info(f"SUMMARY: {total} removal(s) detected (HALT)")
     return EXIT_HALT
 
 

@@ -20,68 +20,136 @@
 
 set -Eeuo pipefail
 
+# Tighten file mode mask for any temp files we create — the parameters
+# document includes principal ids that should not be world-readable.
+umask 077
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+START_EPOCH=$(date +%s)
+
 ts() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+# Final summary line — always runs (success, halt, or error) so the
+# outcome is visible at the bottom of long preprovision logs.
+WORKDIR=""
+FINAL_STATUS="unknown"
+cleanup_and_summarise() {
+  local rc=$?
+  local elapsed=$(( $(date +%s) - START_EPOCH ))
+  if [[ -n "$WORKDIR" && -d "$WORKDIR" ]]; then
+    rm -rf "$WORKDIR" 2>/dev/null || true
+  fi
+  ts "rbac-guard: preflight complete (exit=$rc, status=$FINAL_STATUS, elapsed=${elapsed}s)"
+}
+trap cleanup_and_summarise EXIT INT TERM ERR
+
+# Surface the active mode up front so the operator immediately sees
+# whether a failure would be advisory or fatal.
+STRICT_FLAG="${STRICT_RBAC_REMOVAL_HALT:-}"
+ACCEPT_FLAG="${ACCEPT_RBAC_REMOVAL:-}"
+if [[ -n "$STRICT_FLAG" ]]; then
+  ts "rbac-guard: mode=STRICT (STRICT_RBAC_REMOVAL_HALT=$STRICT_FLAG)"
+else
+  ts "rbac-guard: mode=WARN-ONLY (STRICT_RBAC_REMOVAL_HALT unset; charter §12a Rule 4 default-OFF)"
+fi
+if [[ -n "$ACCEPT_FLAG" ]]; then
+  ts "rbac-guard: ACCEPT_RBAC_REMOVAL is set (token will be validated by check_rbac_removal.py)"
+fi
+
+# Helper: in STRICT mode, an internal failure (env missing, az not on PATH,
+# what-if call failed) is too risky to silent-skip because it could hide
+# the very deletion we are guarding against. WARN-ONLY mode keeps the
+# legacy silent-skip behaviour so it never accidentally blocks normal
+# development.
+strict_or_skip() {
+  local reason="$1"
+  if [[ -n "$STRICT_FLAG" ]]; then
+    ts "rbac-guard: STRICT mode and $reason — refusing to skip preflight."
+    FINAL_STATUS="halt-internal-failure"
+    exit 3
+  fi
+  ts "rbac-guard: $reason — skipping preflight (warn-only mode)."
+  FINAL_STATUS="skipped"
+  exit 0
+}
 
 # Skip silently when the env doesn't look like an azd run (e.g. unit tests).
 if [[ -z "${AZURE_SUBSCRIPTION_ID:-}" || -z "${AZURE_LOCATION:-}" ]]; then
-  ts "rbac-guard: AZURE_SUBSCRIPTION_ID or AZURE_LOCATION unset — skipping preflight."
-  exit 0
+  strict_or_skip "AZURE_SUBSCRIPTION_ID or AZURE_LOCATION unset"
 fi
 
 if ! command -v az >/dev/null 2>&1; then
-  ts "rbac-guard: az CLI not on PATH — skipping preflight."
-  exit 0
+  strict_or_skip "az CLI not on PATH"
 fi
 
 # Find a python interpreter — prefer the project's uv venv if present.
+# `-x` is not enough: a broken symlink (deleted venv after build) reports
+# executable but `exec` fails, so probe with a no-op import.
 PY=""
-if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
-  PY="$REPO_ROOT/.venv/bin/python"
-elif command -v python3 >/dev/null 2>&1; then
+if [[ -e "$REPO_ROOT/.venv/bin/python" ]]; then
+  if "$REPO_ROOT/.venv/bin/python" -c '' 2>/dev/null; then
+    PY="$REPO_ROOT/.venv/bin/python"
+  else
+    ts "rbac-guard: $REPO_ROOT/.venv/bin/python exists but is not executable — falling back."
+  fi
+fi
+if [[ -z "$PY" ]] && command -v python3 >/dev/null 2>&1; then
   PY="python3"
-elif command -v python >/dev/null 2>&1; then
+fi
+if [[ -z "$PY" ]] && command -v python >/dev/null 2>&1; then
   PY="python"
-else
-  ts "rbac-guard: no python interpreter found — skipping preflight."
-  exit 0
+fi
+if [[ -z "$PY" ]]; then
+  strict_or_skip "no python interpreter found"
 fi
 
 PARAM_TEMPLATE="$REPO_ROOT/infra/main.parameters.json"
+TEMPLATE_FILE="$REPO_ROOT/infra/main.bicep"
 if [[ ! -f "$PARAM_TEMPLATE" ]]; then
-  ts "rbac-guard: $PARAM_TEMPLATE missing — skipping preflight."
-  exit 0
+  strict_or_skip "$PARAM_TEMPLATE missing"
+fi
+if [[ ! -f "$TEMPLATE_FILE" ]]; then
+  strict_or_skip "$TEMPLATE_FILE missing"
 fi
 
-# envsubst is part of gettext-base; fall back to plain copy if unavailable
-# (the file may still resolve from azd-side substitution in some setups).
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+
 RESOLVED_PARAMS="$WORKDIR/main.parameters.resolved.json"
 if command -v envsubst >/dev/null 2>&1; then
   envsubst <"$PARAM_TEMPLATE" >"$RESOLVED_PARAMS"
+  # envsubst leaves unresolved ${VAR} tokens in place when VAR is unset.
+  # Warn loudly so the operator knows the what-if call may fail with
+  # an unhelpful "InvalidTemplate" — a hint to set the missing env var.
+  if grep -Eo '\$\{[A-Z_][A-Z0-9_]*\}' "$RESOLVED_PARAMS" >/dev/null 2>&1; then
+    UNRESOLVED=$(grep -Eo '\$\{[A-Z_][A-Z0-9_]*\}' "$RESOLVED_PARAMS" \
+                   | sort -u | head -5 | tr '\n' ' ')
+    ts "rbac-guard: WARN unresolved placeholders in parameters.json: $UNRESOLVED"
+    ts "rbac-guard: WARN set these env vars (azd env set …) before az can validate."
+  fi
 else
-  ts "rbac-guard: envsubst not installed — passing parameters file verbatim."
+  ts "rbac-guard: WARN envsubst not installed — install with 'sudo apt install gettext-base' (or 'brew install gettext')."
+  ts "rbac-guard: WARN passing parameters file verbatim; placeholders will be sent to az unresolved."
   cp "$PARAM_TEMPLATE" "$RESOLVED_PARAMS"
 fi
 
 WHATIF_JSON="$WORKDIR/whatif.json"
+WHATIF_ERR="$WORKDIR/what-if.err"
 ts "rbac-guard: running 'az deployment sub what-if' against infra/main.bicep ($AZURE_LOCATION)"
 if ! az deployment sub what-if \
       --subscription "$AZURE_SUBSCRIPTION_ID" \
       --location "$AZURE_LOCATION" \
-      --template-file "$REPO_ROOT/infra/main.bicep" \
+      --template-file "$TEMPLATE_FILE" \
       --parameters "$RESOLVED_PARAMS" \
       --no-pretty-print \
       --output json \
-      >"$WHATIF_JSON" 2>"$WORKDIR/what-if.err"; then
-  ts "rbac-guard: what-if call failed — skipping preflight (see preprovision logs)."
-  if [[ -s "$WORKDIR/what-if.err" ]]; then
-    sed 's/^/  /' "$WORKDIR/what-if.err" >&2 || true
+      >"$WHATIF_JSON" 2>"$WHATIF_ERR"; then
+  ts "rbac-guard: what-if call failed (see captured stderr below)."
+  if [[ -s "$WHATIF_ERR" ]]; then
+    sed 's/^/  /' "$WHATIF_ERR" >&2 || true
   fi
-  exit 0
+  strict_or_skip "what-if call failed"
 fi
 
 # Delegate parse + gate to the python script. Its exit codes:
@@ -96,16 +164,28 @@ set -e
 
 case "$RC" in
   0)
+    FINAL_STATUS="ok"
     exit 0
     ;;
   3)
     ts "rbac-guard: refusing to continue — see the per-finding lines above."
     ts "rbac-guard: to acknowledge an intentional phase-2 removal, set"
     ts "rbac-guard:   ACCEPT_RBAC_REMOVAL='phase-2-of-pr-<N>' and re-run azd provision."
+    FINAL_STATUS="halt"
     exit "$RC"
     ;;
+  4)
+    ts "rbac-guard: parser returned exit=4 (az/JSON parsing failure)."
+    if [[ -n "$STRICT_FLAG" ]]; then
+      FINAL_STATUS="halt-parser-failure"
+      exit "$RC"
+    fi
+    FINAL_STATUS="parser-failure-skipped"
+    exit 0
+    ;;
   *)
-    ts "rbac-guard: parser returned exit=$RC; treating as non-fatal (no halt)."
+    ts "rbac-guard: parser returned unexpected exit=$RC; treating as non-fatal (no halt)."
+    FINAL_STATUS="unexpected-rc-$RC"
     exit 0
     ;;
 esac
