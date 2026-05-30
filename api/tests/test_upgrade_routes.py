@@ -30,10 +30,15 @@ from fastapi.testclient import TestClient
 def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     # AUTH_DEV_BYPASS synthesises an identity with this oid (see api/auth.py);
-    # admin routes only pass when that oid is in the allowlist.
+    # admin routes only pass when that oid is in the allowlist. Audit P1 #11
+    # additionally requires CONTAINER_APP_NAME to be UNSET so the new
+    # production fail-closed guard does not reject the dev-bypass admin.
+    # Tests that need CONTAINER_APP_NAME set (e.g. escape-hatch) must
+    # override `require_upgrade_admin` via `app.dependency_overrides`.
     monkeypatch.setenv(
         "UPGRADE_ADMIN_OIDS", "00000000-0000-0000-0000-000000000000"
     )
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
     state.set_backend(state.InMemoryBackend())
 
     from api.services.upgrade import acr_inventory, build_logs, history
@@ -426,15 +431,41 @@ def test_rollback_happy_path(
 def test_escape_hatch_returns_commands(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-1")
-    monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-elb")
-    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
-    _seed_rollback_snapshot()
-    resp = client.get("/api/upgrade/escape-hatch")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["container_app"] == "ca-elb-dashboard"
-    assert any("--container-name api" in c for c in body["commands"])
+    # Audit P1 #11: setting CONTAINER_APP_NAME activates the production
+    # fail-closed guard in `is_upgrade_admin`, so the dev-bypass OID can
+    # no longer satisfy the admin gate. Override `require_upgrade_admin`
+    # via FastAPI's dependency injection so the escape-hatch CLI builder
+    # (which legitimately reads CONTAINER_APP_NAME) is exercised under a
+    # synthetic admin identity carrying the UpgradeAdmin role claim.
+    from api.auth import CallerIdentity
+    from api.main import app
+    from api.services.upgrade.auth import (
+        UPGRADE_ADMIN_ROLE,
+        require_upgrade_admin,
+    )
+
+    def _synthetic_admin() -> CallerIdentity:
+        return CallerIdentity(
+            object_id="11111111-1111-1111-1111-111111111111",
+            tenant_id="test",
+            upn="admin@test",
+            raw_token="",
+            claims={"roles": [UPGRADE_ADMIN_ROLE]},
+        )
+
+    app.dependency_overrides[require_upgrade_admin] = _synthetic_admin
+    try:
+        monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-1")
+        monkeypatch.setenv("AZURE_RESOURCE_GROUP", "rg-elb")
+        monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+        _seed_rollback_snapshot()
+        resp = client.get("/api/upgrade/escape-hatch")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["container_app"] == "ca-elb-dashboard"
+        assert any("--container-name api" in c for c in body["commands"])
+    finally:
+        app.dependency_overrides.pop(require_upgrade_admin, None)
 
 
 def test_escape_hatch_404_without_snapshot(client: TestClient) -> None:

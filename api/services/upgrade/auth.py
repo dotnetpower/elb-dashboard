@@ -23,11 +23,10 @@ import os
 
 from fastapi import Depends, HTTPException, status
 
-from api.auth import CallerIdentity, require_caller
+from api.auth import DEV_BYPASS_OID, CallerIdentity, require_caller
 
 UPGRADE_ADMIN_ROLE = "UpgradeAdmin"
 UPGRADE_ADMIN_OIDS_ENV = "UPGRADE_ADMIN_OIDS"
-
 
 def _allowed_oids() -> set[str]:
     raw = os.environ.get(UPGRADE_ADMIN_OIDS_ENV, "").strip()
@@ -43,7 +42,20 @@ def is_upgrade_admin(caller: CallerIdentity) -> bool:
     (`upgradeadmin`, `UPGRADEADMIN`, …) is still recognised. The oid
     allowlist comparison stays case-sensitive because GUIDs are
     canonicalised by AAD.
+
+    Audit P1 #11: in a deployed Container Apps revision (`CONTAINER_APP_NAME`
+    set), the `DEV_BYPASS_OID` synthetic identity is explicitly rejected even
+    if `UPGRADE_ADMIN_OIDS` accidentally contains it. The dev-bypass identity
+    is meant for local debugging only; trusting it for the upgrade gate would
+    let a stale `AUTH_DEV_BYPASS=true` env import escalate into a Container
+    App image swap. Tests that exercise admin routes locally rely on the
+    bypass identity but never set `CONTAINER_APP_NAME`.
     """
+    if (
+        caller.object_id == DEV_BYPASS_OID
+        and os.environ.get("CONTAINER_APP_NAME")
+    ):
+        return False
     roles = caller.claims.get("roles") if isinstance(caller.claims, dict) else None
     if isinstance(roles, list):
         target = UPGRADE_ADMIN_ROLE.casefold()

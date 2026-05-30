@@ -319,3 +319,152 @@ def test_known_admin_route_still_requires_upgrade_admin(
         "the persona matrix) or the upgrade router was renamed. Investigate "
         "before merging."
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. PR-3 fail-closed production guards (audit P0 #4 #5, P1 #11).
+#
+# These tests assert the three closed escape hatches stay closed:
+#   * TERMINAL_WS_ALLOW_ANY_ORIGIN cannot be true inside a deployed
+#     Container App revision (CSWSH defence).
+#   * terminal/exec_server.py refuses to start with a non-loopback
+#     EXEC_HOST inside a Container App.
+#   * is_upgrade_admin() rejects the DEV_BYPASS_OID when CONTAINER_APP_NAME
+#     is set, even if UPGRADE_ADMIN_OIDS accidentally lists it.
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_ws_allow_any_origin_force_disabled_in_container_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`TERMINAL_WS_ALLOW_ANY_ORIGIN=true` must NOT take effect when the
+    process is running inside a Container Apps revision.
+
+    Re-imports `api.routes.terminal.ws` under the deployed-env profile so the
+    module-level toggle resolves with the platform marker set. The same
+    re-import with the marker cleared must restore the local-dev behaviour.
+    """
+    import importlib
+
+    monkeypatch.setenv("TERMINAL_WS_ALLOW_ANY_ORIGIN", "true")
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+    import api.routes.terminal.ws as ws_mod
+
+    ws_mod = importlib.reload(ws_mod)
+    try:
+        assert ws_mod._TERMINAL_WS_ALLOW_ANY_ORIGIN is False, (
+            "Audit P0 #4 regression: TERMINAL_WS_ALLOW_ANY_ORIGIN took effect "
+            "inside a Container Apps revision (CSWSH escape hatch re-opened)."
+        )
+    finally:
+        # Reset to local-dev profile so other tests see the documented behaviour.
+        monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+        importlib.reload(ws_mod)
+
+
+def test_terminal_ws_allow_any_origin_works_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bypass continues to work for local dev (no `CONTAINER_APP_NAME`)."""
+    import importlib
+
+    monkeypatch.setenv("TERMINAL_WS_ALLOW_ANY_ORIGIN", "true")
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+    import api.routes.terminal.ws as ws_mod
+
+    ws_mod = importlib.reload(ws_mod)
+    try:
+        assert ws_mod._TERMINAL_WS_ALLOW_ANY_ORIGIN is True
+    finally:
+        # Reset the env var so other tests do not inherit the override.
+        monkeypatch.delenv("TERMINAL_WS_ALLOW_ANY_ORIGIN", raising=False)
+        importlib.reload(ws_mod)
+
+
+@pytest.mark.parametrize("bad_host", ["0.0.0.0", "192.168.1.5", "10.0.0.1", "::"])
+def test_exec_server_refuses_non_loopback_bind_in_container_app(
+    monkeypatch: pytest.MonkeyPatch, bad_host: str
+) -> None:
+    """exec_server.py must hard-fail at import when `EXEC_HOST` is anything
+    other than loopback inside a Container Apps revision.
+
+    Re-imports the module so the top-level guard runs under the deployed-env
+    profile. Failure mode is a `RuntimeError` raised at import time — that is
+    the contract: a misconfigured deploy is visible immediately rather than
+    after the first malicious request reaches the pod IP.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+    monkeypatch.setenv("EXEC_HOST", bad_host)
+    # Forget any cached copy so the module-level guard runs again.
+    sys.modules.pop("exec_server", None)
+    exec_server_path = (
+        Path(__file__).resolve().parent.parent.parent / "terminal" / "exec_server.py"
+    )
+    spec = importlib.util.spec_from_file_location("exec_server", exec_server_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        with pytest.raises(RuntimeError, match="refuses to start"):
+            spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop("exec_server", None)
+        monkeypatch.delenv("EXEC_HOST", raising=False)
+        monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+
+
+def test_exec_server_allows_loopback_bind_in_container_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legitimate production binding (loopback) still imports cleanly."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+    monkeypatch.setenv("EXEC_HOST", "127.0.0.1")
+    sys.modules.pop("exec_server", None)
+    exec_server_path = (
+        Path(__file__).resolve().parent.parent.parent / "terminal" / "exec_server.py"
+    )
+    spec = importlib.util.spec_from_file_location("exec_server", exec_server_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        assert module.LISTEN_HOST == "127.0.0.1"
+    finally:
+        sys.modules.pop("exec_server", None)
+        monkeypatch.delenv("EXEC_HOST", raising=False)
+        monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+
+
+def test_upgrade_admin_rejects_dev_bypass_in_container_app(
+    monkeypatch: pytest.MonkeyPatch, dev_bypass_caller: CallerIdentity
+) -> None:
+    """Even if the dev-bypass OID accidentally lands in `UPGRADE_ADMIN_OIDS`,
+    the deployed Container App must refuse to recognise it as admin.
+
+    Defence in depth so a stale `AUTH_DEV_BYPASS=true` cloud revision cannot
+    escalate into a Container App image swap.
+    """
+    monkeypatch.setenv("CONTAINER_APP_NAME", "ca-elb-dashboard")
+    monkeypatch.setenv(UPGRADE_ADMIN_OIDS_ENV, DEV_BYPASS_OID)
+    assert is_upgrade_admin(dev_bypass_caller) is False, (
+        "Audit P1 #11 regression: dev-bypass OID was accepted as upgrade admin "
+        "inside a Container Apps revision."
+    )
+
+
+def test_upgrade_admin_still_honours_dev_bypass_locally(
+    monkeypatch: pytest.MonkeyPatch, dev_bypass_caller: CallerIdentity
+) -> None:
+    """Local dev (no `CONTAINER_APP_NAME`) keeps the documented escape hatch
+    so `UPGRADE_ADMIN_OIDS=<dev-bypass-oid>` continues to let tests exercise
+    upgrade routes."""
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+    monkeypatch.setenv(UPGRADE_ADMIN_OIDS_ENV, DEV_BYPASS_OID)
+    assert is_upgrade_admin(dev_bypass_caller) is True

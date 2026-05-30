@@ -35,7 +35,25 @@ from pathlib import PurePosixPath
 ALLOWED_BIN: frozenset[str] = frozenset(
     {"azcopy", "kubectl", "elastic-blast", "elb", "az", "git"}
 )
-LISTEN_HOST = os.environ.get("EXEC_HOST", "127.0.0.1")
+# Audit P0 #5: in a deployed Container Apps revision (`CONTAINER_APP_NAME`
+# always set by the platform) we refuse any `EXEC_HOST` override and pin to
+# loopback. The api sidecar reaches this server over 127.0.0.1; binding to
+# 0.0.0.0 or a routable interface would expose the elastic-blast / kubectl
+# / azcopy / az allowlist to anything that can reach the pod IP, which is
+# the entire Container Apps Environment VNet.
+_CONFIGURED_EXEC_HOST = os.environ.get("EXEC_HOST", "127.0.0.1")
+if os.environ.get("CONTAINER_APP_NAME") and _CONFIGURED_EXEC_HOST not in {
+    "127.0.0.1",
+    "localhost",
+    "::1",
+}:
+    # Hard-fail rather than silently rebind — a misconfigured deploy must be
+    # visible at startup, not after the first malicious request.
+    raise RuntimeError(
+        f"exec_server refuses to start with EXEC_HOST={_CONFIGURED_EXEC_HOST!r} "
+        "inside a Container Apps revision; pin to 127.0.0.1"
+    )
+LISTEN_HOST = _CONFIGURED_EXEC_HOST
 LISTEN_PORT = int(os.environ.get("EXEC_PORT", "7682"))
 EXEC_TOKEN = os.environ.get("EXEC_TOKEN", "")
 MAX_CONCURRENCY = int(os.environ.get("EXEC_MAX_CONCURRENCY", "4"))

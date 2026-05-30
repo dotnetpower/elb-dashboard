@@ -44,8 +44,15 @@ _ALLOWED_ORIGINS: frozenset[str] = frozenset(
 )
 # Permissive bypass — set to "true" only in tests / local dev where the
 # browser may be on a different localhost port than the api.
+#
+# Audit P0 #4: when `CONTAINER_APP_NAME` is set (the platform always exports
+# this in a deployed Container Apps revision), the bypass is force-disabled
+# even if `TERMINAL_WS_ALLOW_ANY_ORIGIN=true` slipped in through a stale env
+# import. This closes the CSWSH escape hatch in production without breaking
+# local debugging.
 _TERMINAL_WS_ALLOW_ANY_ORIGIN = (
     os.environ.get("TERMINAL_WS_ALLOW_ANY_ORIGIN", "").lower() == "true"
+    and not os.environ.get("CONTAINER_APP_NAME")
 )
 
 
