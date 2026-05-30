@@ -11,6 +11,11 @@ import {
   numberValue,
   strandLabel,
 } from "./helpers";
+import {
+  buildAlignmentExportFilename,
+  buildAlignmentFasta,
+  buildPairwiseAlignmentText,
+} from "./alignmentExport";
 import type { BlastHit } from "@/api/endpoints";
 import { useState } from "react";
 
@@ -218,10 +223,9 @@ function AlignmentExportActions({ hit }: { hit: BlastHit }) {
     const text = buildAlignmentFasta(hit);
     const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const safeName = `${(hit.qseqid || "query").replace(/[^A-Za-z0-9._-]/g, "_")}__${(hit.sseqid || "subject").replace(/[^A-Za-z0-9._-]/g, "_")}.fasta`;
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = safeName;
+    anchor.download = buildAlignmentExportFilename(hit);
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
@@ -258,81 +262,10 @@ function AlignmentExportActions({ hit }: { hit: BlastHit }) {
 }
 
 /**
- * Build a plain-text pairwise alignment in the rough shape NCBI ships for
- * researchers who paste alignments into manuscripts. Format:
- *
- *   Query  <qstart>  <60 chars>  <qend>
- *                    |||| ::: ...
- *   Sbjct  <sstart>  <60 chars>  <send>
- *
- * Position counters advance the same way as the on-screen renderer — by
- * column index, NOT by sequence length — so gap-padding stays aligned
- * across the three lines.
+ * Build a plain-text pairwise alignment, two-record FASTA, and the safe
+ * download filename — all in `./alignmentExport`. Keep this file focused
+ * on rendering; export formatters belong with their own tests.
  */
-function buildPairwiseAlignmentText(hit: BlastHit): string {
-  const qseq = String(hit.qseq ?? "");
-  const sseq = String(hit.sseq ?? "");
-  const qstart = numberValue(hit.qstart) ?? 1;
-  const sstart = numberValue(hit.sstart) ?? 1;
-  const blockSize = 60;
-
-  const headerLines = [
-    `Query  ${hit.qseqid ?? "(query)"}  ${formatRange(hit.qstart, hit.qend)} / ${hit.qlen ?? "?"}`,
-    `Sbjct  ${hit.sseqid ?? "(subject)"}  ${formatRange(hit.sstart, hit.send)} / ${hit.slen ?? "?"}`,
-    `Score  ${formatDecimal(hit.bitscore, 1)} bits   E=${formatEvalue(hit.evalue)}   Identity=${formatPercent(hit.pident)}`,
-    "",
-  ];
-
-  const out: string[] = [...headerLines];
-  for (let i = 0; i < qseq.length; i += blockSize) {
-    const qBlock = qseq.slice(i, i + blockSize);
-    const sBlock = sseq.slice(i, i + blockSize);
-    let matchLine = "";
-    for (let j = 0; j < qBlock.length; j++) {
-      if (qBlock[j] === sBlock[j]) matchLine += "|";
-      else if (qBlock[j] !== "-" && sBlock[j] !== "-") matchLine += ":";
-      else matchLine += " ";
-    }
-    const qPos = qstart + i;
-    const sPos = sstart + i;
-    out.push(`Query  ${String(qPos).padStart(6, " ")}  ${qBlock}`);
-    out.push(`                ${matchLine}`);
-    out.push(`Sbjct  ${String(sPos).padStart(6, " ")}  ${sBlock}`);
-    out.push("");
-  }
-  return out.join("\n");
-}
-
-/**
- * Build a two-record FASTA file (query + subject) using the aligned
- * region only. We strip gap characters so the records contain the actual
- * sequence the researcher can re-use in downstream tools.
- */
-function buildAlignmentFasta(hit: BlastHit): string {
-  const qid = hit.qseqid || "query";
-  const sid = hit.sseqid || "subject";
-  const stitle = hit.stitle ? ` ${hit.stitle}` : "";
-  const qseq = String(hit.qseq ?? "").replace(/-/g, "");
-  const sseq = String(hit.sseq ?? "").replace(/-/g, "");
-  const qRange = `${hit.qstart ?? "?"}-${hit.qend ?? "?"}`;
-  const sRange = `${hit.sstart ?? "?"}-${hit.send ?? "?"}`;
-  return [
-    `>${qid} aligned_region=${qRange}`,
-    wrapFasta(qseq),
-    `>${sid}${stitle} aligned_region=${sRange}`,
-    wrapFasta(sseq),
-    "",
-  ].join("\n");
-}
-
-function wrapFasta(seq: string, width = 70): string {
-  if (!seq) return "";
-  const lines: string[] = [];
-  for (let i = 0; i < seq.length; i += width) {
-    lines.push(seq.slice(i, i + width));
-  }
-  return lines.join("\n");
-}
 
 function CoverageBar({
   label,
