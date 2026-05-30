@@ -35,6 +35,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.auth import CallerIdentity, require_caller
+from api.services.sanitise import sanitise
 from api.services.upgrade import (
     acr_inventory,
     build_logs,
@@ -207,8 +208,9 @@ def upgrade_start(
             idempotency_key=body.idempotency_key,
         )
     except UpgradeStartRefused as exc:
+        # Audit P1 #7: sanitise + cap exception text.
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            status_code=status.HTTP_409_CONFLICT, detail=sanitise(str(exc))[:200]
         ) from exc
     return _mask_state(updated.to_public_dict())
 
@@ -295,8 +297,9 @@ def upgrade_rollback(
             started_by_oid=caller.object_id, reason=reason
         )
     except RollbackStartRefused as exc:
+        # Audit P1 #7: sanitise + cap exception text.
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            status_code=status.HTTP_409_CONFLICT, detail=sanitise(str(exc))[:200]
         ) from exc
     return _mask_state(updated.to_public_dict())
 

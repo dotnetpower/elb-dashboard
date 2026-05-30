@@ -32,7 +32,7 @@ from api.routes._blast_shared import (
     _stub_log,
 )
 from api.routes.blast.common import LAB_TOOL_PENDING
-from api.services.sanitise import redact_oid
+from api.services.sanitise import redact_oid, sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -783,7 +783,8 @@ def blast_database_preview(
     try:
         return preview_database(db_name)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)[:200]) from exc
+        # Audit P1 #7: sanitise + cap exception text.
+        raise HTTPException(400, sanitise(str(exc))[:200]) from exc
     except NcbiAccessDenied as exc:
         LOGGER.warning("preview %s: NCBI denied: %s: %s", db_name, type(exc).__name__, exc)
         raise HTTPException(

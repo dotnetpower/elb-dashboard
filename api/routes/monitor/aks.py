@@ -270,9 +270,10 @@ def aks_pod_delete(
             cred, sub, resource_group, cluster_name, namespace, pod_name
         )
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        # Audit P1 #7: sanitise + cap exception text before returning to clients.
+        raise HTTPException(status_code=403, detail=sanitise(str(exc))[:200]) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=sanitise(str(exc))[:200]) from exc
     except Exception as exc:
         LOGGER.warning("aks_pod_delete failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"delete failed: {type(exc).__name__}") from exc

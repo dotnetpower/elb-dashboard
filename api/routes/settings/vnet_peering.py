@@ -29,7 +29,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.auth import CallerIdentity, require_caller
-from api.services.sanitise import redact_oid
+from api.services.sanitise import redact_oid, sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -404,7 +404,8 @@ def apply_peering_nsg_rule(
         )
         # No ARM mutation happened; skip the audit row to avoid phantom
         # "started" entries the Audit screen has to filter out.
-        raise HTTPException(404, str(exc)) from exc
+        # Audit P1 #8: sanitise + cap exception text.
+        raise HTTPException(404, sanitise(str(exc))[:200]) from exc
 
     nsg_ctx = resolve_nsg_context(
         cred,
@@ -571,7 +572,8 @@ def apply_peering_nsg_rule(
                 arm_attempts=preview_arm_attempts,
             )
         except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            # Audit P1 #8: sanitise + cap exception text.
+            raise HTTPException(400, sanitise(str(exc))[:200]) from exc
         except Exception as exc:
             LOGGER.exception("settings/vnet-peering/apply-nsg-rule dry-run helper failed")
             raise HTTPException(
@@ -626,7 +628,8 @@ def apply_peering_nsg_rule(
                         "refused",
                         {"reason": "helper_validation", "error": str(exc)[:200]},
                     )
-                    raise HTTPException(400, str(exc)) from exc
+                    # Audit P1 #8: sanitise + cap exception text.
+                    raise HTTPException(400, sanitise(str(exc))[:200]) from exc
                 except Exception as exc:
                     LOGGER.exception("settings/vnet-peering/apply-nsg-rule helper failed")
                     set_audit_terminal(

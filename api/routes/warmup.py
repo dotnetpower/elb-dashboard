@@ -25,6 +25,7 @@ from api.routes._blast_shared import (
     _WARMUP_RELEASE_CALLER,
     _safe_send_task,
 )
+from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,7 +56,8 @@ def warmup_auto_preference_put(
             {**body, "owner_oid": caller.object_id, "tenant_id": caller.tenant_id}
         )
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        # Audit P1 #7: sanitise + cap exception text.
+        raise HTTPException(400, sanitise(str(exc))[:200]) from exc
     saved = save_auto_warmup_preference(pref)
     return {"status": "saved", "preference": saved.to_dict()}
 
@@ -178,7 +180,8 @@ def warmup_release(
             database_name,
         )
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        # Audit P1 #7: sanitise + cap exception text.
+        raise HTTPException(400, sanitise(str(exc))[:200]) from exc
     except Exception as exc:
         LOGGER.warning("warmup release failed: %s", type(exc).__name__)
         raise HTTPException(

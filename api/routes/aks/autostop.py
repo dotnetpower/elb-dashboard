@@ -43,7 +43,10 @@ from api.services.auto_stop import (
     save_auto_stop_preference,
 )
 from api.services.auto_stop_evaluator import evaluate_cluster
-from api.services.sanitise import redact_oid
+from api.services.sanitise import (
+    redact_oid,
+    sanitise,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -457,7 +460,8 @@ def put_autostop(
     try:
         pref = normalise_preference(payload)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Audit P1 #7: sanitise + cap exception text.
+        raise HTTPException(status_code=400, detail=sanitise(str(exc))[:200]) from exc
     # Preserve cooldown/extend/last-* state across updates — the user is
     # only changing the toggle / bucket choice; clobbering bookkeeping
     # would re-open a cluster that is mid-cooldown.

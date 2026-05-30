@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.auth import CallerIdentity, require_caller
+from api.services.sanitise import sanitise
 
 router = APIRouter()
 
@@ -53,7 +54,10 @@ def request_metrics(
             rpm_buckets=rpm_buckets,
         )
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        # Audit P1 #7: sanitise + cap exception text before returning to clients
+        # so SAS URLs, bearer tokens, or GUIDs leaked into ValueError messages do
+        # not reach the browser / proxy logs as-is.
+        raise HTTPException(400, sanitise(str(exc))[:200]) from exc
 
 
 # ---------------------------------------------------------------------------
