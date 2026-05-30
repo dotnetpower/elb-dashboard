@@ -37,9 +37,55 @@ _JWKS_INFLIGHT_LOCK = threading.Lock()
 # insertion, drop entries whose `expires_at` is in the past.
 _CLAIMS_CACHE: dict[str, tuple[float, CallerIdentity]] = {}
 _CLAIMS_CACHE_LOCK = threading.Lock()
-_CLAIMS_CACHE_MAX_TTL_SECONDS = 300  # never trust the cache longer than 5 min
+_CLAIMS_CACHE_MAX_TTL_SECONDS = 300  # legacy cap (used when STRICT_JWT is off)
+_CLAIMS_CACHE_STRICT_TTL_SECONDS = 60  # audit P1 #9: lower cap when STRICT_JWT=true
 _CLAIMS_CACHE_SOFT_CAP = 1024
 _CLAIMS_SKEW_SECONDS = 30
+
+# Audit P1 #6 + #9: strict JWT enforcement adds two extra checks on every
+# validated token and shortens the claims cache TTL so a revoked SPA cannot
+# linger for more than ~60 s. Gated behind `STRICT_JWT` per charter §12a
+# Rule 4 (default OFF preserves existing behaviour). When operators flip
+# it on, the validator also requires the `azp` (v2) or `appid` (v1) claim
+# to be in `JWT_ALLOWED_APPIDS` (defaults to the configured
+# `API_CLIENT_ID` so single-app deployments need no extra config).
+_STRICT_JWT_ENV = "STRICT_JWT"
+_JWT_ALLOWED_APPIDS_ENV = "JWT_ALLOWED_APPIDS"
+
+
+def _is_strict_jwt() -> bool:
+    """Return True when `STRICT_JWT=true` is set in the environment.
+
+    Read at call time so tests can flip the env via `monkeypatch.setenv`
+    without re-importing the module.
+    """
+    return os.environ.get(_STRICT_JWT_ENV, "").lower() == "true"
+
+
+def _claims_cache_ttl_cap() -> int:
+    """Effective claims-cache TTL ceiling for the current request.
+
+    Strict mode caps the cache at 60 s so a SPA whose admin consent has
+    been revoked stops accepting cached tokens within a minute. Legacy
+    mode keeps the 5-minute cap so the existing low-churn polling
+    profile (status / sidecars cards) is unaffected.
+    """
+    if _is_strict_jwt():
+        return _CLAIMS_CACHE_STRICT_TTL_SECONDS
+    return _CLAIMS_CACHE_MAX_TTL_SECONDS
+
+
+def _jwt_allowed_appids(api_client_id: str) -> frozenset[str]:
+    """Return the set of `azp` / `appid` values accepted in strict mode.
+
+    Defaults to the configured `API_CLIENT_ID` so a single-app deployment
+    needs no extra configuration. Operators with separate SPA + API app
+    registrations override via `JWT_ALLOWED_APPIDS=<spa-id>,<other-id>`.
+    """
+    raw = os.environ.get(_JWT_ALLOWED_APPIDS_ENV, "").strip()
+    if raw:
+        return frozenset(x.strip() for x in raw.split(",") if x.strip())
+    return frozenset({api_client_id})
 
 
 @dataclass(frozen=True)
@@ -147,7 +193,7 @@ def _claims_cache_put(key: str, identity: CallerIdentity, exp_claim: int | float
     if exp_claim is None:
         # No exp -> token is invalid (jwt.decode would have raised), but be defensive.
         return
-    ttl = min(float(exp_claim) - now - _CLAIMS_SKEW_SECONDS, float(_CLAIMS_CACHE_MAX_TTL_SECONDS))
+    ttl = min(float(exp_claim) - now - _CLAIMS_SKEW_SECONDS, float(_claims_cache_ttl_cap()))
     if ttl <= 0:
         return
     expires_at = now + ttl
@@ -224,6 +270,29 @@ def _validate_token(token: str) -> CallerIdentity:
     oid = claims.get("oid")
     if not oid:
         raise AuthError(status.HTTP_401_UNAUTHORIZED, "token missing 'oid' claim")
+
+    # Audit P1 #6: when `STRICT_JWT=true` is set, additionally pin the
+    # token to a known SPA / app-registration via the `azp` (v2) or
+    # `appid` (v1) claim. Without this, any other app that has minted a
+    # token for our API audience inside the same tenant would be
+    # accepted. Default OFF preserves existing single-app behaviour per
+    # charter §12a Rule 4.
+    if _is_strict_jwt():
+        appid_claim = claims.get("azp") or claims.get("appid")
+        if not appid_claim:
+            raise AuthError(
+                status.HTTP_401_UNAUTHORIZED,
+                "token missing 'azp'/'appid' claim",
+            )
+        if appid_claim not in _jwt_allowed_appids(api_client_id):
+            LOGGER.warning(
+                "token issued by unauthorized app: appid=%s",
+                appid_claim,
+            )
+            raise AuthError(
+                status.HTTP_401_UNAUTHORIZED,
+                "token issued by unauthorized app",
+            )
 
     identity = CallerIdentity(
         object_id=oid,
