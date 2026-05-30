@@ -33,7 +33,8 @@ from api.app.inspector import (
     _inspector_should_capture,
     _inspector_should_record,
 )
-from api.app.jwt_utils import _decode_jwt_upn, _extract_client_ip
+from api.app.jwt_utils import _decode_jwt_oid, _decode_jwt_upn, _extract_client_ip
+from api.services.sanitise import redact_oid
 
 LOGGER = logging.getLogger("api.app.middleware")
 
@@ -102,13 +103,23 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
         except Exception as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000
+            # Audit P3 #26: hash the caller's `oid` claim into the
+            # completion line so log shippers / KQL can count per-user
+            # traffic without inspecting raw OIDs. `redact_oid(None)`
+            # returns None — formatted as the literal `None` by the
+            # logger — so anonymous (no-bearer) requests still produce a
+            # parseable token. Best-effort; never raises.
+            caller_hash = redact_oid(
+                _decode_jwt_oid(request.headers.get("authorization"))
+            )
             LOGGER.exception(
-                "req_failed rid=%s method=%s path=%s elapsed=%.0fms err=%s",
+                "req_failed rid=%s method=%s path=%s elapsed=%.0fms err=%s caller_hash=%s",
                 rid,
                 method,
                 path,
                 elapsed_ms,
                 type(exc).__name__,
+                caller_hash,
             )
             try:
                 from api.services.request_metrics import metrics as _metrics
@@ -187,14 +198,22 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                 log_level = logging.ERROR
             elif response.status_code >= 400:
                 log_level = logging.WARNING
+            # Audit P3 #26: same `caller_hash` token as the failure path
+            # so success / failure can join on the same field. `redact_oid`
+            # returns `None` for anonymous requests, which formats as the
+            # literal `None` — operators get a consistent token shape.
+            caller_hash = redact_oid(
+                _decode_jwt_oid(request.headers.get("authorization"))
+            )
             LOGGER.log(
                 log_level,
-                "req rid=%s method=%s path=%s status=%d elapsed=%.0fms",
+                "req rid=%s method=%s path=%s status=%d elapsed=%.0fms caller_hash=%s",
                 rid,
                 method,
                 path,
                 response.status_code,
                 elapsed_ms,
+                caller_hash,
             )
         try:
             if (
