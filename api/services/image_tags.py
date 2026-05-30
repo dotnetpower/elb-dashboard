@@ -19,11 +19,18 @@ from __future__ import annotations
 # lock-step with the sibling repo's ``docker-openapi/app/main.py`` ``VERSION``
 # constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
+#
+# 2026-05-30 P0 ROLLBACK: pinned back to 4.14 because tags 4.15/4.16 were
+# never built in ACR (sibling source had VERSION=3.7.2 committed but no
+# ``az acr build -t elb-openapi:4.16`` was run). The next bump will be 4.17,
+# tracking sibling VERSION=3.7.3 once the critique-fix round is merged AND the
+# image has been built+pushed to ACR. See
+# docs/features_change/2026-05/2026-05-30-openapi-pin-p0-rollback.md.
 IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.16",
+    "elb-openapi": "4.14",
 }
 
 # GitHub source repo for ACR Build Tasks.
