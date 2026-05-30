@@ -22,11 +22,12 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from api.auth import CallerIdentity, require_caller
 from api.routes.monitor.common import _graceful
+from api.services import sse_ticket
 from api.services.sidecar_metrics import collect_snapshot as collect_snapshot
 
 LOGGER = logging.getLogger(__name__)
@@ -42,6 +43,13 @@ _SSE_HEARTBEAT_INTERVAL_SEC = 25  # < Container Apps' 240s idle ws timeout.
 class _SidecarTicket:
     owner_oid: str
     expires_at: float
+    # Audit P0 #2: optional client-binding hashes captured at issue time so
+    # the consume path can refuse a ticket replayed from a foreign IP or
+    # browser when `STRICT_SSE_TICKET_BINDING=true`. Defaults to ``None`` so
+    # legacy callers (and tests that build the dataclass directly) keep
+    # working when the strict-binding flag is off.
+    ip_hash: str | None = None
+    ua_hash: str | None = None
 
 
 _sidecar_tickets: dict[str, _SidecarTicket] = {}
@@ -79,9 +87,18 @@ async def sidecars_snapshot(
 
 @router.post("/sidecars/ticket")
 async def sidecars_ticket(
+    request: Request,
     caller: CallerIdentity = Depends(require_caller),
 ) -> dict[str, object]:
-    """Validate the bearer and issue a short-lived single-use SSE ticket."""
+    """Validate the bearer and issue a short-lived single-use SSE ticket.
+
+    When `STRICT_SSE_TICKET_BINDING=true` (audit P0 #2 #3) the issue path
+    also rejects foreign Origins with 403 and captures hashed client IP +
+    User-Agent on the ticket so the consume path can detect a replay from
+    a different browser or network. Default OFF preserves legacy behaviour
+    per charter §12a Rule 4.
+    """
+    sse_ticket.enforce_issue_origin(request)
     token = secrets.token_urlsafe(24)
     async with _sidecar_tickets_lock:
         now = _time.time()
@@ -91,11 +108,15 @@ async def sidecars_ticket(
         _sidecar_tickets[token] = _SidecarTicket(
             owner_oid=caller.object_id,
             expires_at=now + _SIDECAR_TICKET_TTL_SEC,
+            ip_hash=sse_ticket.client_ip_hash(request),
+            ua_hash=sse_ticket.user_agent_hash(request),
         )
     return {"ticket": token, "ttl_seconds": _SIDECAR_TICKET_TTL_SEC}
 
 
-async def _consume_sidecar_ticket(token: str | None) -> _SidecarTicket | None:
+async def _consume_sidecar_ticket(
+    token: str | None, request: Request | None = None
+) -> _SidecarTicket | None:
     """Pop and validate a sidecar SSE ticket. Returns None if missing/invalid/expired.
 
     The SSE route maps ``None`` to **HTTP 204** so the browser's native
@@ -104,6 +125,14 @@ async def _consume_sidecar_ticket(token: str | None) -> _SidecarTicket | None:
     onerror handler still fires and retries with a fresh ticket. Using
     401 here previously generated phantom App Insights Dependency
     failures on every drop.
+
+    When `STRICT_SSE_TICKET_BINDING=true` (audit P0 #2 #3) the function
+    additionally checks that the consume request's IP and User-Agent
+    hashes match the values captured at issue time; any mismatch is
+    treated identically to an expired ticket so the browser receives 204
+    and the frontend re-issues from a fresh token. `request` is optional
+    only so legacy callers that did not pass it (and tests that pop the
+    ticket manually) keep working; production routes always pass it.
     """
     if not token:
         return None
@@ -113,11 +142,19 @@ async def _consume_sidecar_ticket(token: str | None) -> _SidecarTicket | None:
         return None
     if entry.expires_at <= _time.time():
         return None
+    if request is not None and not sse_ticket.binding_matches(
+        request=request,
+        ticket_ip_hash=entry.ip_hash,
+        ticket_ua_hash=entry.ua_hash,
+    ):
+        return None
     return entry
 
 
 @router.get("/sidecars/events")
-async def sidecars_events(ticket: str | None = Query(default=None)) -> Response:
+async def sidecars_events(
+    request: Request, ticket: str | None = Query(default=None)
+) -> Response:
     """Server-Sent Events stream of sidecar metric snapshots.
 
     Protocol:
@@ -137,7 +174,7 @@ async def sidecars_events(ticket: str | None = Query(default=None)) -> Response:
     tick — no consumer can steal another's events. See
     ``_SidecarBroadcaster``.
     """
-    if (await _consume_sidecar_ticket(ticket)) is None:
+    if (await _consume_sidecar_ticket(ticket, request)) is None:
         return Response(status_code=204)
 
     from api.routes import monitor as monitor_package
