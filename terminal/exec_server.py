@@ -117,6 +117,73 @@ _semaphore = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
 
 # ---------------------------------------------------------------------------
+# Audit P2 #22 #28 — token-bucket rate limiter (default OFF per §12a Rule 4).
+#
+# The existing BoundedSemaphore caps *concurrent* exec calls at four, but
+# a hostile / runaway caller that hands back tokens very quickly (e.g. a
+# Celery task that retries `kubectl get pods` every 10 ms) can sustain
+# thousands of requests per minute without ever blocking on the
+# semaphore. The rate limiter adds a second control plane that counts
+# completed *attempts* per minute, gated behind
+# `STRICT_EXEC_RATE_LIMIT=true` so the default boot posture is unchanged.
+#
+# The bucket is process-local; the sidecar runs once per Container App
+# revision so coordinating across replicas is not a concern. We also
+# track per-binary so a noisy `azcopy` cannot starve an interactive
+# `kubectl exec` from the dashboard.
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_BUCKETS: dict[str, list[float]] = {}
+
+
+def _rate_limit_enabled() -> bool:
+    """Read the gate at request time so tests can flip it via monkeypatch."""
+    return os.environ.get("STRICT_EXEC_RATE_LIMIT", "").lower() == "true"
+
+
+def _rate_limit_window_seconds() -> int:
+    return int(os.environ.get("EXEC_RATE_LIMIT_WINDOW_SECONDS", "60"))
+
+
+def _rate_limit_per_window() -> int:
+    return int(os.environ.get("EXEC_RATE_LIMIT_PER_WINDOW", "120"))
+
+
+def _rate_limit_check(binary: str, *, now: float | None = None) -> tuple[bool, int]:
+    """Return `(allowed, retry_after_seconds)`.
+
+    Token-bucket-ish: keeps a sliding window of accept timestamps per
+    binary. When the count inside the window exceeds the cap, deny and
+    return how many seconds remain until the oldest accept exits the
+    window. Cheap O(n) per call with n bounded by the per-window cap.
+    """
+    if not _rate_limit_enabled():
+        return True, 0
+    now = now if now is not None else time.monotonic()
+    window = _rate_limit_window_seconds()
+    cap = _rate_limit_per_window()
+    cutoff = now - window
+    with _RATE_LIMIT_LOCK:
+        bucket = _RATE_LIMIT_BUCKETS.setdefault(binary, [])
+        # Drop expired entries (sliding window).
+        while bucket and bucket[0] < cutoff:
+            bucket.pop(0)
+        if len(bucket) >= cap:
+            # Oldest entry stays in the bucket for (oldest + window - now)
+            # more seconds; tell the caller to wait that long.
+            retry = max(1, int(bucket[0] + window - now))
+            return False, retry
+        bucket.append(now)
+        return True, 0
+
+
+def _rate_limit_reset_for_tests() -> None:
+    """Test-only helper — clear in-process buckets between scenarios."""
+    with _RATE_LIMIT_LOCK:
+        _RATE_LIMIT_BUCKETS.clear()
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def _audit(event: str, **fields: object) -> None:
@@ -558,6 +625,38 @@ class _Handler(BaseHTTPRequestHandler):
         # so the api caller can choose to retry / queue at its layer.
         if not _semaphore.acquire(blocking=False):
             self._send_json(503, {"error": "exec server busy", "max_concurrency": MAX_CONCURRENCY})
+            return
+
+        # Audit P2 #22 #28: per-binary token-bucket rate limit. Default
+        # OFF — only fires when STRICT_EXEC_RATE_LIMIT=true. Returns 429
+        # with `retry-after` so the api caller backs off cleanly instead
+        # of looping.
+        rl_allowed, rl_retry = _rate_limit_check(req["argv"][0])
+        if not rl_allowed:
+            _semaphore.release()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Retry-After", str(rl_retry))
+            payload = json.dumps(
+                {
+                    "error": "exec server rate-limited",
+                    "binary": req["argv"][0],
+                    "retry_after_seconds": rl_retry,
+                    "window_seconds": _rate_limit_window_seconds(),
+                    "per_window": _rate_limit_per_window(),
+                }
+            ).encode("utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                self.wfile.write(payload)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            _audit(
+                "exec_rate_limited",
+                bin=req["argv"][0],
+                retry_after=rl_retry,
+            )
             return
 
         # Header + body read are done; relax the per-request socket timeout so
