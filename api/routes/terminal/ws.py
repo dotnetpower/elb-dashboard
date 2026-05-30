@@ -108,6 +108,70 @@ def _log_identity_hash(value: str | None) -> str | None:
     return redact_oid(value)
 
 
+# ---------------------------------------------------------------------------
+# Audit P3 #29 — WebSocket close-code observability.
+#
+# The terminal proxy closes the WS with five distinct codes depending on
+# what failed:
+#   * 4401 — bearer/ticket auth failure (no valid ticket presented)
+#   * 4403 — origin rejected (CSWSH guard tripped)
+#   * 1011 — upstream ttyd connect failure or mid-stream upstream error
+#   * 1000 — normal close (both sides finished)
+#   * 1006 — unexpected disconnect (logged when no close frame was sent)
+#
+# Pre-2026-05-30 only the 1011 and 4403 paths had a log line, so the
+# dashboard's terminal-session telemetry could not tell apart "user
+# closed the tab" from "ticket expired" from "upstream sidecar died".
+# `_audit_ws_close` emits one structured log line per close so the
+# downstream `RequestIdMiddleware` log capture can roll them up into App
+# Insights custom metrics keyed by `close_code`. Identity fields are
+# always passed through `_log_identity_hash` (charter §11 audit rule).
+#
+# This is purely additive observability — no behavioural change — so it
+# is *not* gated behind a `STRICT_*` env var per §12a Rule 4 (Rule 4
+# explicitly scopes to "positive validation" changes).
+# ---------------------------------------------------------------------------
+
+
+def _ws_close_severity(code: int) -> int:
+    """Pick a log level for a WS close code.
+
+    1000 = normal close → INFO. Everything else → WARNING so it shows up
+    in the default log filter without being a hard error.
+    """
+    if code == 1000:
+        return logging.INFO
+    return logging.WARNING
+
+
+def _log_ws_close(
+    *,
+    code: int,
+    reason: str,
+    session_id: str | None = None,
+    owner_oid: str | None = None,
+    owner_upn: str | None = None,
+    **extra: object,
+) -> None:
+    """Emit a single structured `terminal_ws_close` audit line.
+
+    Never logs raw OID / UPN — both go through `_log_identity_hash`. Extra
+    kwargs are written as `key=value` so a future log-shipper / App
+    Insights query can pivot on them.
+    """
+    extras_str = " ".join(f"{k}={v!r}" for k, v in extra.items()) if extra else ""
+    LOGGER.log(
+        _ws_close_severity(code),
+        "terminal_ws_close code=%d reason=%r session_id=%s owner_hash=%s upn_hash=%s%s",
+        code,
+        reason,
+        session_id,
+        _log_identity_hash(owner_oid),
+        _log_identity_hash(owner_upn),
+        f" {extras_str}" if extras_str else "",
+    )
+
+
 @router.post("/ticket")
 async def issue_ticket(caller: CallerIdentity = REQUIRE_CALLER) -> dict[str, object]:
     """Validate the bearer token and return a short-lived WebSocket ticket."""
@@ -268,6 +332,11 @@ async def ws_terminal(
         ticket_entry = await _consume_ticket(ticket)
     except HTTPException as exc:
         # Cannot send a 401 over WebSocket; close with policy violation.
+        _log_ws_close(
+            code=4401,
+            reason=str(exc.detail),
+            phase="ticket",
+        )
         await websocket.close(code=4401, reason=exc.detail)
         return
 
@@ -280,6 +349,14 @@ async def ws_terminal(
             "terminal_ws origin rejected origin=%r host=%r",
             websocket.headers.get("origin"),
             websocket.headers.get("host"),
+        )
+        _log_ws_close(
+            code=4403,
+            reason="origin not allowed",
+            session_id=ticket_entry.session_id,
+            owner_oid=ticket_entry.owner_oid,
+            owner_upn=ticket_entry.owner_upn,
+            phase="origin",
         )
         await websocket.close(code=4403, reason="origin not allowed")
         return
@@ -317,6 +394,15 @@ async def ws_terminal(
 
     if upstream is None:
         LOGGER.warning("terminal proxy upstream connect failed after retries: %s", last_exc)
+        _log_ws_close(
+            code=1011,
+            reason="upstream unavailable",
+            session_id=ticket_entry.session_id,
+            owner_oid=ticket_entry.owner_oid,
+            owner_upn=ticket_entry.owner_upn,
+            phase="upstream_connect",
+            error_class=type(last_exc).__name__ if last_exc else None,
+        )
         try:
             await websocket.close(code=1011, reason="upstream unavailable")
         except Exception as close_exc:
@@ -387,6 +473,15 @@ async def ws_terminal(
                 raise task_exception
     except Exception as exc:
         LOGGER.warning("terminal proxy upstream error: %s", exc)
+        _log_ws_close(
+            code=1011,
+            reason="upstream error",
+            session_id=ticket_entry.session_id,
+            owner_oid=ticket_entry.owner_oid,
+            owner_upn=ticket_entry.owner_upn,
+            phase="proxy",
+            error_class=type(exc).__name__,
+        )
         if not browser_closed:
             try:
                 await websocket.close(code=1011, reason="upstream error")
@@ -400,6 +495,16 @@ async def ws_terminal(
             except Exception as close_exc:
                 LOGGER.debug("terminal proxy upstream final close failed: %s", close_exc)
 
+    _log_ws_close(
+        code=1000,
+        reason="normal close",
+        session_id=ticket_entry.session_id,
+        owner_oid=ticket_entry.owner_oid,
+        owner_upn=ticket_entry.owner_upn,
+        phase="complete",
+        browser_initiated=browser_closed,
+        upstream_initiated=upstream_closed,
+    )
     if not browser_closed:
         try:
             await websocket.close()
