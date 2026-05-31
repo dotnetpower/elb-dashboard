@@ -357,6 +357,7 @@ def aks_openapi_deploy(
         storage_resource_group=body.get("storage_resource_group", "") or "",
         tenant_id=caller.tenant_id or "",
         caller_oid=caller.object_id or "",
+        confirm_recreate=bool(body.get("confirm_recreate", False)),
     )
     return {
         "id": result.id,

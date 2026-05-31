@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -559,6 +560,107 @@ def list_active_reservations(cluster_name: str) -> list[Reservation]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# In-process gate counters (Stage 5 telemetry)
+# ---------------------------------------------------------------------------
+#
+# Per-cluster, per-event counters maintained inside the worker / api
+# processes. Cheap (a dict update under a lock), zero external infra, and
+# scoped to the lifetime of a Container Apps revision — which is exactly
+# the operator-visible window. Surfaced through ``gate_counters_snapshot``
+# so the /api/blast/capacity route can include them; the worker hook
+# functions (``bump_admit``, ``bump_deny``, ``bump_release``,
+# ``bump_reserve_lost``) are called from ``api.tasks.blast.submit_task``.
+#
+# Counters are intentionally NOT persisted: on revision restart the
+# absolute numbers reset to 0 and operators read deltas from the
+# dashboard's polling. Persistence would tie the gate to a backing
+# store we already chose not to introduce.
+_COUNTERS_LOCK = threading.Lock()
+_COUNTERS: dict[str, dict[str, Any]] = {}
+
+
+def _bucket(cluster: str) -> dict[str, Any]:
+    bucket = _COUNTERS.get(cluster)
+    if bucket is None:
+        bucket = {
+            "admit_total": 0,
+            "deny_total": 0,
+            "release_total": 0,
+            "reserve_lost_total": 0,
+            "deny_by_reason": {},
+            "last_event_at": None,
+        }
+        _COUNTERS[cluster] = bucket
+    return bucket
+
+
+def bump_admit(cluster_name: str) -> None:
+    with _COUNTERS_LOCK:
+        bucket = _bucket(cluster_name or "_unknown")
+        bucket["admit_total"] = int(bucket["admit_total"]) + 1
+        bucket["last_event_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def bump_deny(cluster_name: str, reason: str | None) -> None:
+    label = (reason or "unknown").strip().lower() or "unknown"
+    with _COUNTERS_LOCK:
+        bucket = _bucket(cluster_name or "_unknown")
+        bucket["deny_total"] = int(bucket["deny_total"]) + 1
+        reasons = bucket["deny_by_reason"]
+        reasons[label] = int(reasons.get(label, 0)) + 1
+        bucket["last_event_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def bump_release(cluster_name: str) -> None:
+    with _COUNTERS_LOCK:
+        bucket = _bucket(cluster_name or "_unknown")
+        bucket["release_total"] = int(bucket["release_total"]) + 1
+        bucket["last_event_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def bump_reserve_lost(cluster_name: str) -> None:
+    with _COUNTERS_LOCK:
+        bucket = _bucket(cluster_name or "_unknown")
+        bucket["reserve_lost_total"] = int(bucket["reserve_lost_total"]) + 1
+        bucket["last_event_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def gate_counters_snapshot(cluster_name: str) -> dict[str, Any]:
+    """Read-only snapshot of the counters for one cluster.
+
+    Returns the zero-filled defaults when nothing has happened yet so the
+    SPA can render the cell without a degraded branch.
+    """
+    with _COUNTERS_LOCK:
+        bucket = _COUNTERS.get(cluster_name)
+        if bucket is None:
+            return {
+                "admit_total": 0,
+                "deny_total": 0,
+                "release_total": 0,
+                "reserve_lost_total": 0,
+                "deny_by_reason": {},
+                "last_event_at": None,
+            }
+        # Defensive copy — the SPA receives JSON, the inner dict must not
+        # leak the live mutable reference.
+        return {
+            "admit_total": int(bucket["admit_total"]),
+            "deny_total": int(bucket["deny_total"]),
+            "release_total": int(bucket["release_total"]),
+            "reserve_lost_total": int(bucket["reserve_lost_total"]),
+            "deny_by_reason": dict(bucket["deny_by_reason"]),
+            "last_event_at": bucket["last_event_at"],
+        }
+
+
+def _reset_counters_for_tests() -> None:
+    """Test helper — not exported."""
+    with _COUNTERS_LOCK:
+        _COUNTERS.clear()
+
+
 __all__ = (
     "GATE_DEFAULT_CPU_WATERMARK_PCT",
     "GATE_DEFAULT_DEMAND_CPU_M",
@@ -571,10 +673,15 @@ __all__ = (
     "GateDecision",
     "Reservation",
     "ResourceDemand",
+    "bump_admit",
+    "bump_deny",
+    "bump_release",
+    "bump_reserve_lost",
     "cpu_watermark_pct",
     "default_demand_cpu_m",
     "default_demand_mem_mib",
     "evaluate_capacity_gate",
+    "gate_counters_snapshot",
     "list_active_reservations",
     "max_slots_per_cluster",
     "mem_watermark_pct",

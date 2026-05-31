@@ -24,6 +24,7 @@ Validation: ``uv run pytest -q api/tests/test_blast_tasks.py``.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from celery import shared_task
@@ -48,6 +49,17 @@ from api.tasks.blast.submit_lock import (
     submit_lock_key,
 )
 from api.tasks.blast.submit_logs import persist_submit_log_events
+
+
+def _capacity_gate_enabled() -> bool:
+    """Stage 3 feature flag — default OFF preserves the existing submit lock path.
+
+    Per Charter §12a Rule 4, a new admission control must ship behaviour-
+    equivalent to today (existing per-cluster Redis lock + ``max_slots=1``).
+    Flipping ``BLAST_GATE_ENABLED=true`` swaps to the capacity-gate path.
+    """
+    raw = os.environ.get("BLAST_GATE_ENABLED", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 LOGGER = logging.getLogger(__name__)
 
@@ -376,59 +388,216 @@ def submit(
         _blast._update_state(job_id, "submitting")
 
     try:
-        lock_key = submit_lock_key(cluster_name, "default")
-        submit_lock = acquire_submit_lock(job_id, lock_key=lock_key)
-        if submit_lock is None:
-            # Lock contention is expected when two submits target the same
-            # (cluster, namespace). Treat it as a wait, not an error — do
-            # NOT consume the task's max_retries budget. The current task
-            # finishes "successfully" with a queued state row, and a
-            # fresh submit task is enqueued for the same job after the
-            # cooldown so the dashboard keeps the row visible the whole
-            # time the contender is waiting in line.
-            _blast._update_state(
-                job_id,
-                "waiting_for_submit_slot",
-                status="running",
-                event="submit_lock_busy",
-                error_code="blast_submit_lock_busy",
-                retry_after_seconds=30,
-            )
+        gate_enabled = _capacity_gate_enabled()
+        submit_lock: tuple[Any, str] | None = None
+        capacity_reservation = None
+        if gate_enabled:
+            from api.services import get_credential
+            from api.services.blast import capacity_gate, capacity_signals
+
+            credential = get_credential()
             try:
-                submit.apply_async(
-                    kwargs={
+                snap = capacity_signals.resolve_capacity_signals(
+                    credential, subscription_id, resource_group, cluster_name
+                )
+            except Exception as exc:  # pragma: no cover - safety net
+                LOGGER.warning(
+                    "capacity gate signal resolve failed job_id=%s: %s",
+                    job_id,
+                    type(exc).__name__,
+                )
+                snap = capacity_signals.CapacitySignals(
+                    pressure=None, top_nodes=None, pending_pods=0
+                )
+            active = capacity_gate.list_active_reservations(cluster_name)
+            demand = capacity_gate.predict_demand(program=program, database=database)
+            decision = capacity_gate.evaluate_capacity_gate(
+                pressure=snap.pressure,
+                top_nodes=snap.top_nodes,
+                pending_pods_count=snap.pending_pods,
+                predicted_demand=demand,
+                active_reservations=active,
+            )
+            if not decision.admit:
+                phase_name = (
+                    "waiting_for_capacity"
+                    if decision.retryable
+                    else "rejected_capacity"
+                )
+                status_name = "running" if decision.retryable else "failed"
+                error_code = f"capacity_gate_{decision.reason or 'denied'}"
+                retry_after = 30 if decision.retryable else 600
+                LOGGER.info(
+                    "blast_gate_deny cluster=%s job_id=%s reason=%s "
+                    "retryable=%s slots=%s measured_pct=%s",
+                    cluster_name,
+                    job_id,
+                    decision.reason,
+                    decision.retryable,
+                    decision.slots_in_use,
+                    decision.measured_pct,
+                )
+                capacity_gate.bump_deny(cluster_name, decision.reason)
+                _blast._update_state(
+                    job_id,
+                    phase_name,
+                    status=status_name,
+                    event="capacity_gate_deny",
+                    error_code=error_code,
+                    retry_after_seconds=retry_after,
+                )
+                if not decision.retryable:
+                    return {
                         "job_id": job_id,
-                        "subscription_id": subscription_id,
-                        "resource_group": resource_group,
-                        "cluster_name": cluster_name,
-                        "storage_account": storage_account,
-                        "program": program,
-                        "database": database,
-                        "query_file": query_file,
-                        "options": options,
-                        "caller_oid": caller_oid,
-                        "caller_tenant_id": caller_tenant_id,
-                    },
-                    countdown=30,
-                    queue="blast",
+                        "status": "failed",
+                        "phase": phase_name,
+                        "error_code": error_code,
+                    }
+                try:
+                    submit.apply_async(
+                        kwargs={
+                            "job_id": job_id,
+                            "subscription_id": subscription_id,
+                            "resource_group": resource_group,
+                            "cluster_name": cluster_name,
+                            "storage_account": storage_account,
+                            "program": program,
+                            "database": database,
+                            "query_file": query_file,
+                            "options": options,
+                            "caller_oid": caller_oid,
+                            "caller_tenant_id": caller_tenant_id,
+                        },
+                        countdown=retry_after,
+                        queue="blast",
+                    )
+                except Exception as enq_exc:
+                    return _blast._retry_or_fail(
+                        self,
+                        job_id=job_id,
+                        phase=phase_name,
+                        exc=enq_exc,
+                        error_code="blast_submit_requeue_failed",
+                    )
+                return {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": phase_name,
+                    "requeued": True,
+                }
+            capacity_reservation = capacity_gate.reserve_slot(
+                cluster_name, job_id, demand
+            )
+            if capacity_reservation is None:
+                # Lost the atomic reserve race after admit (another worker
+                # took the last slot). Treat the same as a retryable deny.
+                LOGGER.info(
+                    "blast_gate_reserve_lost cluster=%s job_id=%s",
+                    cluster_name,
+                    job_id,
                 )
-            except Exception as enq_exc:
-                # If re-enqueue itself fails (broker gone), fall back to
-                # the retry path so we surface the broker error properly.
-                return _blast._retry_or_fail(
-                    self,
-                    job_id=job_id,
-                    phase="waiting_for_submit_slot",
-                    exc=enq_exc,
-                    error_code="blast_submit_requeue_failed",
+                capacity_gate.bump_reserve_lost(cluster_name)
+                _blast._update_state(
+                    job_id,
+                    "waiting_for_capacity",
+                    status="running",
+                    event="capacity_reserve_lost",
+                    error_code="capacity_reserve_lost",
+                    retry_after_seconds=30,
                 )
-            return {
-                "job_id": job_id,
-                "status": "running",
-                "phase": "waiting_for_submit_slot",
-                "requeued": True,
-            }
-        lock_client, lock_token = submit_lock
+                try:
+                    submit.apply_async(
+                        kwargs={
+                            "job_id": job_id,
+                            "subscription_id": subscription_id,
+                            "resource_group": resource_group,
+                            "cluster_name": cluster_name,
+                            "storage_account": storage_account,
+                            "program": program,
+                            "database": database,
+                            "query_file": query_file,
+                            "options": options,
+                            "caller_oid": caller_oid,
+                            "caller_tenant_id": caller_tenant_id,
+                        },
+                        countdown=30,
+                        queue="blast",
+                    )
+                except Exception as enq_exc:
+                    return _blast._retry_or_fail(
+                        self,
+                        job_id=job_id,
+                        phase="waiting_for_capacity",
+                        exc=enq_exc,
+                        error_code="blast_submit_requeue_failed",
+                    )
+                return {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": "waiting_for_capacity",
+                    "requeued": True,
+                }
+            LOGGER.info(
+                "blast_gate_admit cluster=%s job_id=%s cpu_m=%s mem_mib=%s",
+                cluster_name,
+                job_id,
+                capacity_reservation.cpu_m,
+                capacity_reservation.mem_mib,
+            )
+            capacity_gate.bump_admit(cluster_name)
+        else:
+            lock_key = submit_lock_key(cluster_name, "default")
+            submit_lock = acquire_submit_lock(job_id, lock_key=lock_key)
+            if submit_lock is None:
+                # Lock contention is expected when two submits target the same
+                # (cluster, namespace). Treat it as a wait, not an error — do
+                # NOT consume the task's max_retries budget. The current task
+                # finishes "successfully" with a queued state row, and a
+                # fresh submit task is enqueued for the same job after the
+                # cooldown so the dashboard keeps the row visible the whole
+                # time the contender is waiting in line.
+                _blast._update_state(
+                    job_id,
+                    "waiting_for_submit_slot",
+                    status="running",
+                    event="submit_lock_busy",
+                    error_code="blast_submit_lock_busy",
+                    retry_after_seconds=30,
+                )
+                try:
+                    submit.apply_async(
+                        kwargs={
+                            "job_id": job_id,
+                            "subscription_id": subscription_id,
+                            "resource_group": resource_group,
+                            "cluster_name": cluster_name,
+                            "storage_account": storage_account,
+                            "program": program,
+                            "database": database,
+                            "query_file": query_file,
+                            "options": options,
+                            "caller_oid": caller_oid,
+                            "caller_tenant_id": caller_tenant_id,
+                        },
+                        countdown=30,
+                        queue="blast",
+                    )
+                except Exception as enq_exc:
+                    # If re-enqueue itself fails (broker gone), fall back to
+                    # the retry path so we surface the broker error properly.
+                    return _blast._retry_or_fail(
+                        self,
+                        job_id=job_id,
+                        phase="waiting_for_submit_slot",
+                        exc=enq_exc,
+                        error_code="blast_submit_requeue_failed",
+                    )
+                return {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": "waiting_for_submit_slot",
+                    "requeued": True,
+                }
         try:
             # Azure CLI login was warmed up alongside the warmup poll; retry
             # here only if the cached identity expired between then and now.
@@ -449,7 +618,19 @@ def submit(
                 progress_phase="submitting",
             )
         finally:
-            release_submit_lock(lock_client, lock_token, lock_key=lock_key)
+            if submit_lock is not None:
+                lock_client, lock_token = submit_lock
+                release_submit_lock(lock_client, lock_token, lock_key=lock_key)
+            if capacity_reservation is not None:
+                from api.services.blast import capacity_gate
+
+                capacity_gate.release_slot(cluster_name, job_id)
+                capacity_gate.bump_release(cluster_name)
+                LOGGER.info(
+                    "blast_gate_release cluster=%s job_id=%s",
+                    cluster_name,
+                    job_id,
+                )
     except TerminalExecError as exc:
         return _blast._retry_or_fail(
             self,

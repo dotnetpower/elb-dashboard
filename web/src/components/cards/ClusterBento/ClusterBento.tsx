@@ -60,6 +60,7 @@ import {
 import type { ClusterHealth } from "./atoms";
 import { isActiveJobState, jobClusterName, toJobRowView } from "./jobMapping";
 import { groupEvents } from "./eventMapping";
+import { CapacityGateCell } from "./CapacityGateCell";
 
 const ACTIVE_JOBS_PREVIEW = 4;
 const REQUEST_METRICS_WINDOW_SEC = 900; // 15 min
@@ -685,6 +686,14 @@ export function ClusterBento({
           </div>
         )}
       </BentoCell>
+
+      {/* CAPACITY GATE — slot count, watermarks, decision preview */}
+      <CapacityGateCell
+        subscriptionId={subscriptionId}
+        resourceGroup={resourceGroup}
+        clusterName={cluster.name}
+        isRunning={isRunning}
+      />
     </div>
   );
 }

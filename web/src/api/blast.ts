@@ -1137,7 +1137,81 @@ export const blastApi = {
       `/blast/jobs/${encodeURIComponent(jobId)}/results/taxonomy?${params.toString()}`,
     );
   },
+
+  getCapacityGate: (context: {
+    subscriptionId: string;
+    resourceGroup: string;
+    clusterName: string;
+    program?: string;
+    database?: string;
+  }) => {
+    const params = new URLSearchParams({
+      subscription_id: context.subscriptionId,
+      resource_group: context.resourceGroup,
+      cluster_name: context.clusterName,
+    });
+    if (context.program) params.set("program", context.program);
+    if (context.database) params.set("database", context.database);
+    return api.get<{
+      data: CapacityGateSnapshot;
+      meta?: ApiResponseMeta;
+    }>(`/blast/capacity?${params.toString()}`);
+  },
 };
+
+export interface CapacityGateSnapshot {
+  enabled: boolean;
+  pool: string;
+  slots: { in_use: number; max: number };
+  cpu_request_pct: number;
+  memory_request_pct: number;
+  watermark_cpu_pct: number;
+  watermark_memory_pct: number;
+  pending_pods: number;
+  decision_preview: "admit" | "deny";
+  decision_reason: string | null;
+  decision_retryable: boolean;
+  predicted_demand: { cpu_m: number; mem_mib: number };
+  active_reservations: Array<{
+    job_id: string;
+    reserved_at: string;
+    cpu_m: number;
+    mem_mib: number;
+  }>;
+  signals_degraded: boolean;
+  signals_error: string | null;
+  counters?: CapacityGateCounters;
+}
+
+export interface CapacityGateCounters {
+  admit_total: number;
+  deny_total: number;
+  release_total: number;
+  reserve_lost_total: number;
+  deny_by_reason: Record<string, number>;
+  last_event_at: string | null;
+}
+
+export function capacityGateBandClass(
+  snapshot: Pick<
+    CapacityGateSnapshot,
+    | "enabled"
+    | "cpu_request_pct"
+    | "memory_request_pct"
+    | "watermark_cpu_pct"
+    | "watermark_memory_pct"
+    | "decision_preview"
+    | "signals_degraded"
+  >,
+): "is-disabled" | "is-degraded" | "is-warning" | "is-danger" | "is-ok" {
+  if (!snapshot.enabled) return "is-disabled";
+  if (snapshot.signals_degraded) return "is-degraded";
+  if (snapshot.decision_preview === "deny") return "is-danger";
+  const cpuOver = snapshot.cpu_request_pct >= snapshot.watermark_cpu_pct;
+  const memOver = snapshot.memory_request_pct >= snapshot.watermark_memory_pct;
+  if (cpuOver || memOver) return "is-warning";
+  return "is-ok";
+}
 
 export interface BlastSubjectAggregate {
   sseqid: string;

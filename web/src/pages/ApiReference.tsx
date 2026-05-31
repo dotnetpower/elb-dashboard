@@ -323,6 +323,10 @@ export function ApiReference() {
           subscriptionId={sub}
           resourceGroup={clusterRg}
           clusterName={clusterName}
+          acrName={acrName}
+          acrResourceGroup={acrRg}
+          storageAccount={savedConfig?.storageAccountName ?? ""}
+          storageResourceGroup={anchorRg}
         />
       )}
 

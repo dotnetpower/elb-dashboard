@@ -17,20 +17,33 @@ Validation: `uv run pytest -q api/tests/test_auto_stop.py`.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
 import re
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
-from azure.core.exceptions import ResourceExistsError
+from azure.core import MatchConditions
+from azure.core.exceptions import (
+    ResourceExistsError,
+    ResourceModifiedError,
+    ResourceNotFoundError,
+)
 from azure.data.tables import TableClient, TableServiceClient, UpdateMode
 
 from api.services import get_credential
+from api.services.preference_concurrency import (
+    PreferenceUpdateConflict,
+    cas_retry,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 _TABLE_ENDPOINT_ENV = "AZURE_TABLE_ENDPOINT"
 _TABLE_NAME = "autostop"
@@ -109,6 +122,12 @@ class AutoStopPreference:
     created_at: str = ""
     owner_oid: str = ""
     tenant_id: str = ""
+    # Optimistic-concurrency token populated by ``_get_*`` reads. NEVER
+    # persisted in ``payload_json`` (excluded from ``to_dict``) — the Azure
+    # Tables backend carries it in entity metadata, and the file backend
+    # synthesises it from a content hash. Excluded from equality so
+    # round-trip dataclass comparisons stay payload-only.
+    etag: str = field(default="", compare=False, repr=False)
 
     @property
     def key(self) -> str:
@@ -189,10 +208,23 @@ def _use_table_backend() -> bool:
 
 
 def save_auto_stop_preference(pref: AutoStopPreference) -> AutoStopPreference:
+    """Persist the preference. Mode depends on ``pref.etag``:
+
+    * Empty ``pref.etag`` — unconditional upsert (legacy first-write
+      semantics; the route handler that accepts a user PUT does this so
+      the user always wins over a missing-row state).
+    * Non-empty ``pref.etag`` — conditional update (Azure Tables
+      ``If-Match``; raises :class:`PreferenceUpdateConflict` when the
+      stored ETag has moved on). Background bookkeeping writers
+      (``mark_auto_stop_event`` / ``extend_auto_stop_preference``) set
+      this from a fresh read so a sibling write cannot be silently
+      clobbered.
+    """
     if _use_table_backend():
-        _save_table(pref)
+        new_etag = _save_table(pref)
     else:
-        _save_file(pref)
+        new_etag = _save_file(pref)
+    pref.etag = new_etag
     return pref
 
 
@@ -224,30 +256,36 @@ def extend_auto_stop_preference(
     `idle_minutes`. The next evaluator tick treats the cluster as active
     until `extend_until` passes.
 
-    Lost-update guard mirrors ``mark_auto_stop_event``: re-fetch the
-    latest persisted row so a concurrent beat tick's
-    ``mark_auto_stop_event`` write (or a sibling SPA tab toggling the
-    preference) is not silently rolled back. We only mutate
-    ``extend_until`` + ``updated_at``; every other field is taken from
-    the freshly-read row.
-
-    Same residual TOCTOU window as ``mark_auto_stop_event`` applies
-    (critique #9.6) — a sibling PUT that lands between the freshly-read
-    row and ``save_auto_stop_preference`` can still get clobbered. The
-    fully-atomic fix is ETag-based optimistic concurrency across every
-    preference table and was deferred to a follow-up issue.
+    Atomicity: re-reads the latest row (with its ETag) and writes back
+    with an Azure Tables ``If-Match`` conditional update. If a sibling
+    PUT slips in between the read and the write the CAS save raises
+    :class:`PreferenceUpdateConflict`; ``cas_retry`` then refreshes the
+    snapshot and retries (bounded by
+    :data:`api.services.preference_concurrency.DEFAULT_CAS_MAX_ATTEMPTS`).
+    On exhaustion the conflict surfaces — the caller is the SPA route,
+    which translates it into a 409 Conflict and the user re-sends the
+    Extend press.
     """
     grant = max(1, min(int(minutes or EXTEND_GRANT_MINUTES), 24 * 60))
-    latest = get_auto_stop_preference(
-        pref.subscription_id, pref.resource_group, pref.cluster_name
-    )
-    base = latest if latest is not None else pref
-    next_pref = AutoStopPreference.from_dict(base.to_dict())
-    next_pref.extend_until = (
-        datetime.now(UTC) + timedelta(minutes=grant)
-    ).isoformat(timespec="seconds")
-    next_pref.updated_at = _now_iso()
-    return save_auto_stop_preference(next_pref)
+
+    def _attempt() -> AutoStopPreference:
+        latest = get_auto_stop_preference(
+            pref.subscription_id, pref.resource_group, pref.cluster_name
+        )
+        base = latest if latest is not None else pref
+        next_pref = AutoStopPreference.from_dict(base.to_dict())
+        # Carry the ETag through so the save is conditional on the
+        # exact row we just read. ``latest`` is None on a first-write
+        # path; in that case the empty etag falls through to an
+        # unconditional upsert (legacy behaviour).
+        next_pref.etag = base.etag
+        next_pref.extend_until = (
+            datetime.now(UTC) + timedelta(minutes=grant)
+        ).isoformat(timespec="seconds")
+        next_pref.updated_at = _now_iso()
+        return save_auto_stop_preference(next_pref)
+
+    return cas_retry(_attempt, operation="auto_stop.extend")
 
 
 def mark_auto_stop_event(
@@ -262,48 +300,63 @@ def mark_auto_stop_event(
     (idle but blocked by guard). The fields feed the SPA's "last
     evaluation" line and the cooldown gate.
 
-    LOST-UPDATE GUARD: this helper re-fetches the latest persisted row
-    BEFORE writing so a concurrent ``PUT /api/aks/autostop`` (e.g. the
-    user toggled ``enabled=False`` between beat-decide and beat-write)
-    does not get its toggle silently reverted by the in-memory ``pref``
+    Atomicity: this helper re-fetches the latest persisted row (with
+    its ETag) before writing and uses Azure Tables ``If-Match``
+    conditional update so a concurrent ``PUT /api/aks/autostop`` (e.g.
+    the user toggled ``enabled=False`` between beat-decide and
+    beat-write) cannot be silently reverted by the in-memory ``pref``
     snapshot the beat task is holding. Only the bookkeeping fields
     (``last_stop_*`` / ``last_skip_*`` / ``updated_at``) are written
     from this path — user-owned fields (``enabled``, ``idle_minutes``,
     ``cooldown_minutes``, ``extend_until``, ``owner_oid``,
-    ``tenant_id``) are taken from the freshly-read row. When the row no
-    longer exists (user deleted the pref), we silently no-op and return
-    the in-memory snapshot — there is nothing to update.
-
-    RESIDUAL TOCTOU WINDOW (critique #9.6): the read-modify-write
-    sequence above is *not* atomic. Between the freshly-read row and
-    the final ``save_auto_stop_preference`` call a sibling ``PUT`` can
-    still slip in and get clobbered by this write — the window is
-    typically sub-millisecond but real. The fully-atomic fix is Azure
-    Tables ETag + ``If-Match`` conditional upsert across every
-    preference table (``auto_stop`` + ``auto_warmup`` + future
-    additions); that's a charter-level change and was deferred to a
-    follow-up issue. Under the current cost-saver SLA the lost-update
-    only loses bookkeeping fields, not user-owned configuration, so
-    operators see at most a momentarily stale ``last_skip_at`` /
-    ``last_stop_reason`` value.
+    ``tenant_id``) are always taken from the freshly-read row. On an
+    ETag conflict ``cas_retry`` refreshes the snapshot and retries
+    (bounded by
+    :data:`api.services.preference_concurrency.DEFAULT_CAS_MAX_ATTEMPTS`).
+    If retries are exhausted the helper logs a warning and returns the
+    in-memory next-state without persisting it — a bookkeeping miss
+    is preferred over clobbering whatever the sibling writer just
+    persisted. When the row no longer exists (user deleted the pref),
+    we silently no-op and return the in-memory snapshot — there is
+    nothing to update.
     """
-    latest = get_auto_stop_preference(
-        pref.subscription_id, pref.resource_group, pref.cluster_name
-    )
-    base = latest if latest is not None else pref
-    next_pref = AutoStopPreference.from_dict(base.to_dict())
-    now = _now_iso()
-    if stopped:
-        next_pref.last_stop_at = now
-        next_pref.last_stop_reason = reason[:200]
-    else:
-        next_pref.last_skip_at = now
-        next_pref.last_skip_reason = reason[:200]
-    next_pref.updated_at = now
-    if latest is None:
-        # Row vanished mid-tick; do not resurrect a stale preference.
-        return next_pref
-    return save_auto_stop_preference(next_pref)
+    fallback: AutoStopPreference | None = None
+
+    def _attempt() -> AutoStopPreference:
+        nonlocal fallback
+        latest = get_auto_stop_preference(
+            pref.subscription_id, pref.resource_group, pref.cluster_name
+        )
+        base = latest if latest is not None else pref
+        next_pref = AutoStopPreference.from_dict(base.to_dict())
+        next_pref.etag = base.etag
+        now = _now_iso()
+        if stopped:
+            next_pref.last_stop_at = now
+            next_pref.last_stop_reason = reason[:200]
+        else:
+            next_pref.last_skip_at = now
+            next_pref.last_skip_reason = reason[:200]
+        next_pref.updated_at = now
+        fallback = next_pref
+        if latest is None:
+            # Row vanished mid-tick; do not resurrect a stale preference.
+            return next_pref
+        return save_auto_stop_preference(next_pref)
+
+    try:
+        return cas_retry(_attempt, operation="auto_stop.mark_event")
+    except PreferenceUpdateConflict:
+        # Bookkeeping write: log and return the in-memory snapshot
+        # rather than re-raising. The sibling writer that won the CAS
+        # already persisted user-owned fields; a momentarily stale
+        # ``last_skip_at`` is the lesser evil compared to a 500 from a
+        # background beat tick.
+        LOGGER.warning(
+            "auto_stop.mark_auto_stop_event giving up after CAS exhaustion; "
+            "in-memory snapshot returned without persisting",
+        )
+        return fallback if fallback is not None else pref
 
 
 def is_extended(pref: AutoStopPreference, *, now: datetime | None = None) -> bool:
@@ -399,22 +452,67 @@ def _ensure_table() -> None:
         _ENSURED_TABLES.add(endpoint)
 
 
-def _save_table(pref: AutoStopPreference) -> None:
+def _save_table(pref: AutoStopPreference) -> str:
+    """Persist ``pref`` and return the new ETag.
+
+    When ``pref.etag`` is empty the write is an unconditional upsert
+    (legacy first-write path used by SPA PUT). When ``pref.etag`` is
+    non-empty we issue ``update_entity`` with ``If-Match=pref.etag``;
+    a stored row that has moved on raises
+    :class:`PreferenceUpdateConflict` so the caller can retry on the
+    fresh state.
+    """
     _ensure_table()
+    entity = _entity_from_pref(pref)
     with _table_client() as table:
-        table.upsert_entity(_entity_from_pref(pref), mode=UpdateMode.REPLACE)
+        if pref.etag:
+            try:
+                response = table.update_entity(
+                    entity,
+                    mode=UpdateMode.REPLACE,
+                    etag=pref.etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+            except ResourceModifiedError as exc:
+                raise PreferenceUpdateConflict(
+                    f"auto_stop row {pref.key!r} changed since last read"
+                ) from exc
+            except ResourceNotFoundError:
+                # Row vanished between our read and our write. Fall back
+                # to an unconditional upsert — either we recreate it (a
+                # first-time write semantically) or a sibling will, and
+                # the caller's retry loop will reconverge.
+                response = table.upsert_entity(entity, mode=UpdateMode.REPLACE)
+        else:
+            response = table.upsert_entity(entity, mode=UpdateMode.REPLACE)
+    return _extract_etag(response)
+
+
+def _extract_etag(response: Any) -> str:
+    if response is None:
+        return ""
+    if isinstance(response, dict):
+        return str(response.get("etag") or response.get("odata.etag") or "")
+    etag = getattr(response, "etag", None)
+    if etag:
+        return str(etag)
+    return ""
 
 
 def _get_table(key: str) -> AutoStopPreference | None:
-    from azure.core.exceptions import ResourceNotFoundError
-
     _ensure_table()
     with _table_client() as table:
         try:
-            entity = dict(table.get_entity(partition_key=key, row_key="current"))
+            entity = table.get_entity(partition_key=key, row_key="current")
         except ResourceNotFoundError:
             return None
-    return _pref_from_entity(entity)
+        metadata = getattr(entity, "metadata", None) or {}
+        entity_dict = dict(entity)
+    etag = str(metadata.get("etag") or entity_dict.get("odata.etag") or "")
+    pref = _pref_from_entity(entity_dict)
+    if pref is not None and etag:
+        pref.etag = etag
+    return pref
 
 
 def _list_table(limit: int) -> list[AutoStopPreference]:
@@ -440,7 +538,7 @@ def _state_file() -> Path:
 # Per-state-file ``threading.Lock`` registry. Replaces the previous
 # sibling ``.lock`` file pattern (critique #14) which leaked an empty
 # sentinel file every time the file backend ran. The file backend is
-# intentionally single-process (local dev only \u2014 deployed Container
+# intentionally single-process (local dev only — deployed Container
 # Apps always uses the Table backend), so a plain in-process lock is
 # enough to serialise read-modify-write on the JSON state file.
 _FILE_BACKEND_LOCKS: dict[str, threading.Lock] = {}
@@ -475,12 +573,12 @@ def _write_file_state(data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def _save_file(pref: AutoStopPreference) -> None:
+def _save_file(pref: AutoStopPreference) -> str:
     # Critique #14: the previous implementation opened a sibling
     # ``<state>.lock`` file with ``open("a")`` and ``fcntl.flock`` for
     # cross-process exclusion. That leaves an orphan ``auto_stop.json.lock``
     # file forever (no cleanup) AND the file backend is intentionally
-    # single-process (dev/local-run only \u2014 the Container App always
+    # single-process (dev/local-run only — the Container App always
     # uses the Table backend), so the cross-process flock was never
     # exercised in production. A plain ``threading.Lock`` keyed by the
     # state file path is enough: serialises concurrent writes from the
@@ -490,15 +588,39 @@ def _save_file(pref: AutoStopPreference) -> None:
     lock = _file_backend_lock(path)
     with lock:
         data = _read_file_state()
-        data[pref.key] = pref.to_dict()
+        if pref.etag:
+            existing = data.get(pref.key)
+            current_etag = _file_etag(existing) if isinstance(existing, dict) else ""
+            if current_etag != pref.etag:
+                raise PreferenceUpdateConflict(
+                    f"auto_stop row {pref.key!r} changed since last read"
+                )
+        row = pref.to_dict()
+        data[pref.key] = row
         _write_file_state(data)
+    return _file_etag(row)
+
+
+def _file_etag(row: dict[str, Any] | None) -> str:
+    """Synthesise a deterministic ETag from a stored row payload.
+
+    The file backend is single-process, so optimistic concurrency is
+    technically unnecessary — but mirroring the Table backend's CAS
+    contract means tests can exercise the conflict path identically.
+    """
+    if not isinstance(row, dict):
+        return ""
+    blob = json.dumps(row, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _get_file(key: str) -> AutoStopPreference | None:
     value = _read_file_state().get(key)
     if not isinstance(value, dict):
         return None
-    return AutoStopPreference.from_dict(value)
+    pref = AutoStopPreference.from_dict(value)
+    pref.etag = _file_etag(value)
+    return pref
 
 
 def _list_file(limit: int) -> list[AutoStopPreference]:

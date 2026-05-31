@@ -94,6 +94,70 @@ def test_openapi_deploy_route_forwards_acr_resource_group(
     assert captured["acr_resource_group"] == "rg-shared-acr"
 
 
+def test_openapi_deploy_route_forwards_confirm_recreate(monkeypatch) -> None:
+    """Issue #22: the PLS transition banner posts ``confirm_recreate: true`` so
+    the deploy task can recreate the ``elb-openapi`` Service (the only way to
+    attach the ``azure-pls-create`` annotation after the fact). The route
+    must forward the flag to the task kwarg."""
+    captured: dict[str, Any] = {}
+
+    def fake_safe_delay(_task: object, **kwargs: Any) -> AsyncResultStub:
+        captured.update(kwargs)
+        return AsyncResultStub("task-openapi-recreate")
+
+    monkeypatch.setattr(openapi_route, "_safe_delay", fake_safe_delay)
+
+    openapi_route.aks_openapi_deploy(
+        {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+            "acr_name": "elbacr",
+            "confirm_recreate": True,
+        },
+        CallerIdentity(
+            object_id="caller-oid",
+            tenant_id="tenant-id",
+            upn="researcher@example.test",
+            raw_token="token",
+            claims={},
+        ),
+    )
+
+    assert captured["confirm_recreate"] is True
+
+
+def test_openapi_deploy_route_defaults_confirm_recreate_to_false(monkeypatch) -> None:
+    """Bodies without ``confirm_recreate`` must not enable Service recreation
+    — only the explicit banner click should opt in."""
+    captured: dict[str, Any] = {}
+
+    def fake_safe_delay(_task: object, **kwargs: Any) -> AsyncResultStub:
+        captured.update(kwargs)
+        return AsyncResultStub("task-openapi-default")
+
+    monkeypatch.setattr(openapi_route, "_safe_delay", fake_safe_delay)
+
+    openapi_route.aks_openapi_deploy(
+        {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-01",
+            "acr_name": "elbacr",
+        },
+        CallerIdentity(
+            object_id="caller-oid",
+            tenant_id="tenant-id",
+            upn="researcher@example.test",
+            raw_token="token",
+            claims={},
+        ),
+    )
+
+    assert captured["confirm_recreate"] is False
+
+
+
 def test_setup_workload_identity_uses_storage_resource_group_for_storage_role(
     monkeypatch,
 ) -> None:

@@ -203,6 +203,15 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // flip back to `false` (or remove this entry) once the Service
             // is moved behind an internal LB or TLS-terminated ingress.
             { name: 'OPENAPI_ALLOW_PUBLIC_LB', value: 'true' }
+            // BLAST capacity gate (issue #23). Default OFF preserves the
+            // existing per-cluster Redis submit lock + max_slots=1 behaviour
+            // (Charter §12a Rule 4). Flip to 'true' to enable cluster-aware
+            // admission. Optional knobs (env_int defaults apply when unset):
+            //   BLAST_GATE_MAX_SLOTS_PER_CLUSTER (default 1)
+            //   BLAST_GATE_CPU_WATERMARK_PCT     (default 75)
+            //   BLAST_GATE_MEM_WATERMARK_PCT     (default 75)
+            //   BLAST_GATE_SIGNAL_CACHE_S        (default 30)
+            { name: 'BLAST_GATE_ENABLED', value: 'false' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
           probes: [
@@ -283,6 +292,9 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // shared secret as the api sidecar.
             { name: 'TERMINAL_EXEC_UPSTREAM', value: 'http://127.0.0.1:7682' }
             { name: 'EXEC_TOKEN', secretRef: 'exec-token' }
+            // BLAST capacity gate (issue #23) — must match the api sidecar.
+            // Default OFF preserves the existing submit-lock path.
+            { name: 'BLAST_GATE_ENABLED', value: 'false' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }
@@ -315,6 +327,9 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
             { name: 'CELERY_RESULT_BACKEND', value: 'redis://127.0.0.1:6379/1' }
+            // BLAST capacity gate (issue #23) — must match the api sidecar.
+            // Default OFF preserves the existing submit-lock path.
+            { name: 'BLAST_GATE_ENABLED', value: 'false' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
         }

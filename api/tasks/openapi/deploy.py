@@ -237,12 +237,24 @@ def deploy_openapi_service(
     storage_resource_group: str = "",
     tenant_id: str = "",
     caller_oid: str = "",
+    confirm_recreate: bool = False,
 ) -> dict[str, Any]:
     """Re-deploy ``elb-openapi`` to an existing AKS cluster.
 
     Returns the orchestrator-style payload the SPA's ``OpenApiDeployPanel``
     consumes: ``{status, cluster_name, resource_group, workload_identity,
     openapi_deploy: {image, external_ip, ...}}``.
+
+    ``confirm_recreate`` is the per-invocation opt-in for the PLS
+    first-time-activation path: when the deploy environment enables PLS
+    but the live ``elb-openapi`` Service does not yet carry the
+    ``azure-pls-create`` annotation, the only way to attach the PLS is
+    to delete + recreate the Service (~1-2 min ingress outage). The
+    SPA's PLS transition banner sets this when the operator clicks
+    "Deploy with PLS recreate". The legacy
+    ``OPENAPI_PLS_CONFIRM_RECREATE`` env var on the api sidecar still
+    works (operators that pre-date the SPA button can keep using it);
+    kwargs and env are OR-ed so either one unblocks the recreate path.
     """
 
     started = time.time()
@@ -389,7 +401,7 @@ def deploy_openapi_service(
             )
             != "true"
         ):
-            confirm = (
+            confirm = bool(confirm_recreate) or (
                 os.environ.get("OPENAPI_PLS_CONFIRM_RECREATE") or ""
             ).strip().lower() in {"1", "true", "yes", "on"}
             if not confirm:

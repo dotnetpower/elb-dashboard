@@ -351,6 +351,7 @@ export const aksApi = {
     storageAccount?: string,
     storageResourceGroup?: string,
     acrResourceGroup?: string,
+    confirmRecreate?: boolean,
   ) =>
     api.post<{ id: string; statusQueryGetUri?: string }>("/aks/openapi/deploy", {
       subscription_id: subscriptionId,
@@ -360,6 +361,7 @@ export const aksApi = {
       acr_resource_group: acrResourceGroup,
       storage_account: storageAccount,
       storage_resource_group: storageResourceGroup,
+      ...(confirmRecreate ? { confirm_recreate: true } : {}),
     }),
 
   openApiDeployStatus: (instanceId: string) =>

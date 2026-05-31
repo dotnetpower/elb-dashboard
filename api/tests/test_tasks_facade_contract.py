@@ -44,6 +44,10 @@ _FACADE_CONTRACT: tuple[str, ...] = (
     "api.tasks.azure.start_aks",  # .delay
     "api.tasks.azure.stop_aks.run",
     "api.tasks.blast.submit",  # .delay
+    "api.tasks.blast.submit_task.persist_submit_log_events",
+    "api.tasks.blast.submit_task.poll_running_status",
+    "api.tasks.blast.submit_task.upload_db_order_oracle_pointer_if_available",
+    "api.tasks.blast.submit_task.upload_tie_order_oracle_if_present",
     "api.tasks.storage._autowarmup_inflight_acquire",
     "api.tasks.storage._record_task_progress",
     "api.tasks.storage._update_state",

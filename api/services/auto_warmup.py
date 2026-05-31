@@ -12,7 +12,9 @@ Validation: `uv run pytest -q api/tests`.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -22,10 +24,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from azure.core.exceptions import ResourceExistsError
+from azure.core import MatchConditions
+from azure.core.exceptions import (
+    ResourceExistsError,
+    ResourceModifiedError,
+    ResourceNotFoundError,
+)
 from azure.data.tables import TableClient, TableServiceClient, UpdateMode
 
 from api.services import get_credential
+from api.services.preference_concurrency import (
+    PreferenceUpdateConflict,
+    cas_retry,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 _TABLE_ENDPOINT_ENV = "AZURE_TABLE_ENDPOINT"
 _TABLE_NAME = "autowarmup"
@@ -89,6 +102,12 @@ class AutoWarmupPreference:
     updated_at: str = ""
     owner_oid: str = ""
     tenant_id: str = ""
+    # Optimistic-concurrency token populated by ``_get_*`` reads. See the
+    # matching note in ``api.services.auto_stop`` — NEVER persisted in
+    # ``payload_json`` (excluded from ``to_dict``), carried in entity
+    # metadata on the Table backend and synthesised from a content hash
+    # on the file backend.
+    etag: str = field(default="", compare=False, repr=False)
 
     @property
     def key(self) -> str:
@@ -188,10 +207,22 @@ def _use_table_backend() -> bool:
 
 
 def save_auto_warmup_preference(pref: AutoWarmupPreference) -> AutoWarmupPreference:
+    """Persist the preference. Mode depends on ``pref.etag``:
+
+    * Empty ``pref.etag`` — unconditional upsert (legacy first-write
+      semantics; the route handler that accepts a user PUT does this
+      so the user always wins over a missing-row state).
+    * Non-empty ``pref.etag`` — conditional update (Azure Tables
+      ``If-Match``; raises :class:`PreferenceUpdateConflict` when the
+      stored ETag has moved on). Background bookkeeping writers
+      (``mark_auto_warmup_ready_state``) set this from a fresh read so
+      a sibling write cannot be silently clobbered.
+    """
     if _use_table_backend():
-        _save_table(pref)
+        new_etag = _save_table(pref)
     else:
-        _save_file(pref)
+        new_etag = _save_file(pref)
+    pref.etag = new_etag
     return pref
 
 
@@ -218,12 +249,55 @@ def mark_auto_warmup_ready_state(
     ready: bool,
     triggered: bool = False,
 ) -> AutoWarmupPreference:
-    next_pref = AutoWarmupPreference.from_dict(pref.to_dict())
-    next_pref.last_ready = ready
-    if triggered:
-        next_pref.last_triggered_at = _now_iso()
-    next_pref.updated_at = _now_iso()
-    return save_auto_warmup_preference(next_pref)
+    """Update the warm-readiness bookkeeping with optimistic concurrency.
+
+    Re-reads the latest persisted row (with its ETag) before writing
+    and uses an Azure Tables ``If-Match`` conditional update so a
+    concurrent ``PUT /api/aks/autowarmup`` (e.g. the user toggled
+    ``enabled=False`` or changed the database list between the
+    reconciler's decide and write) cannot be silently reverted by the
+    in-memory ``pref`` snapshot the reconciler is holding. Only the
+    bookkeeping fields (``last_ready`` / ``last_triggered_at`` /
+    ``updated_at``) are written from this path — every user-owned
+    field is taken from the freshly-read row. When the row no longer
+    exists (user deleted the pref), we silently no-op and return the
+    in-memory snapshot — there is nothing to update.
+
+    On an ETag conflict ``cas_retry`` refreshes the snapshot and
+    retries (bounded by
+    :data:`api.services.preference_concurrency.DEFAULT_CAS_MAX_ATTEMPTS`).
+    On exhaustion we log a warning and return the in-memory
+    next-state without persisting it — a bookkeeping miss is preferred
+    over clobbering whatever the sibling writer just persisted.
+    """
+    fallback: AutoWarmupPreference | None = None
+
+    def _attempt() -> AutoWarmupPreference:
+        nonlocal fallback
+        latest = get_auto_warmup_preference(
+            pref.subscription_id, pref.resource_group, pref.cluster_name
+        )
+        base = latest if latest is not None else pref
+        next_pref = AutoWarmupPreference.from_dict(base.to_dict())
+        next_pref.etag = base.etag
+        next_pref.last_ready = ready
+        if triggered:
+            next_pref.last_triggered_at = _now_iso()
+        next_pref.updated_at = _now_iso()
+        fallback = next_pref
+        if latest is None:
+            # Row vanished mid-tick; do not resurrect a stale preference.
+            return next_pref
+        return save_auto_warmup_preference(next_pref)
+
+    try:
+        return cas_retry(_attempt, operation="auto_warmup.mark_ready")
+    except PreferenceUpdateConflict:
+        LOGGER.warning(
+            "auto_warmup.mark_auto_warmup_ready_state giving up after CAS "
+            "exhaustion; in-memory snapshot returned without persisting",
+        )
+        return fallback if fallback is not None else pref
 
 
 def _entity_from_pref(pref: AutoWarmupPreference) -> dict[str, Any]:
@@ -301,22 +375,60 @@ def _ensure_table() -> None:
         _ENSURED_TABLES.add(endpoint)
 
 
-def _save_table(pref: AutoWarmupPreference) -> None:
+def _save_table(pref: AutoWarmupPreference) -> str:
+    """Persist ``pref`` and return the new ETag.
+
+    See ``api.services.auto_stop._save_table`` for the conditional
+    update contract — this helper is identical other than the table
+    name.
+    """
     _ensure_table()
+    entity = _entity_from_pref(pref)
     with _table_client() as table:
-        table.upsert_entity(_entity_from_pref(pref), mode=UpdateMode.REPLACE)
+        if pref.etag:
+            try:
+                response = table.update_entity(
+                    entity,
+                    mode=UpdateMode.REPLACE,
+                    etag=pref.etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+            except ResourceModifiedError as exc:
+                raise PreferenceUpdateConflict(
+                    f"auto_warmup row {pref.key!r} changed since last read"
+                ) from exc
+            except ResourceNotFoundError:
+                response = table.upsert_entity(entity, mode=UpdateMode.REPLACE)
+        else:
+            response = table.upsert_entity(entity, mode=UpdateMode.REPLACE)
+    return _extract_etag(response)
+
+
+def _extract_etag(response: Any) -> str:
+    if response is None:
+        return ""
+    if isinstance(response, dict):
+        return str(response.get("etag") or response.get("odata.etag") or "")
+    etag = getattr(response, "etag", None)
+    if etag:
+        return str(etag)
+    return ""
 
 
 def _get_table(key: str) -> AutoWarmupPreference | None:
-    from azure.core.exceptions import ResourceNotFoundError
-
     _ensure_table()
     with _table_client() as table:
         try:
-            entity = dict(table.get_entity(partition_key=key, row_key="current"))
+            entity = table.get_entity(partition_key=key, row_key="current")
         except ResourceNotFoundError:
             return None
-    return _pref_from_entity(entity)
+        metadata = getattr(entity, "metadata", None) or {}
+        entity_dict = dict(entity)
+    etag = str(metadata.get("etag") or entity_dict.get("odata.etag") or "")
+    pref = _pref_from_entity(entity_dict)
+    if pref is not None and etag:
+        pref.etag = etag
+    return pref
 
 
 def _list_table(limit: int) -> list[AutoWarmupPreference]:
@@ -376,21 +488,42 @@ def _write_file_state(data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def _save_file(pref: AutoWarmupPreference) -> None:
+def _save_file(pref: AutoWarmupPreference) -> str:
     path = _state_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = _file_backend_lock(path)
     with lock:
         data = _read_file_state()
-        data[pref.key] = pref.to_dict()
+        if pref.etag:
+            existing = data.get(pref.key)
+            current_etag = _file_etag(existing) if isinstance(existing, dict) else ""
+            if current_etag != pref.etag:
+                raise PreferenceUpdateConflict(
+                    f"auto_warmup row {pref.key!r} changed since last read"
+                )
+        row = pref.to_dict()
+        data[pref.key] = row
         _write_file_state(data)
+    return _file_etag(row)
+
+
+def _file_etag(row: dict[str, Any] | None) -> str:
+    """Mirror ``api.services.auto_stop._file_etag`` — deterministic
+    content hash so the file backend's CAS contract matches the Table
+    backend in tests."""
+    if not isinstance(row, dict):
+        return ""
+    blob = json.dumps(row, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _get_file(key: str) -> AutoWarmupPreference | None:
     value = _read_file_state().get(key)
     if not isinstance(value, dict):
         return None
-    return AutoWarmupPreference.from_dict(value)
+    pref = AutoWarmupPreference.from_dict(value)
+    pref.etag = _file_etag(value)
+    return pref
 
 
 def _list_file(limit: int) -> list[AutoWarmupPreference]:

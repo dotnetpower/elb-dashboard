@@ -176,3 +176,17 @@ def test_delete_openapi_service_raises_on_unexpected_status(monkeypatch) -> None
             cluster_name="elb-cluster",
         )
     assert session.closed is True
+
+
+def test_deploy_openapi_service_accepts_confirm_recreate_kwarg() -> None:
+    """Issue #22: ``deploy_openapi_service`` must accept the per-invocation
+    ``confirm_recreate`` kwarg so the PLS transition banner can opt in
+    without setting an env var on the api sidecar. The legacy env-var
+    path must keep working (``confirm = kwarg OR env``)."""
+    import inspect
+
+    sig = inspect.signature(openapi_deploy.deploy_openapi_service)
+    assert "confirm_recreate" in sig.parameters
+    param = sig.parameters["confirm_recreate"]
+    assert param.default is False
+    assert param.kind == inspect.Parameter.KEYWORD_ONLY

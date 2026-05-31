@@ -23,6 +23,7 @@ from api.routes._blast_shared import (
 from api.routes._blast_shared import (
     _safe_delay as _safe_delay,
 )
+from api.routes.blast import capacity as _capacity_routes
 from api.routes.blast import databases as _databases_routes
 from api.routes.blast import jobs as _jobs_routes
 from api.routes.blast import logs as _logs_routes
@@ -155,3 +156,4 @@ blast_router.include_router(_taxonomy_routes.router)
 blast_router.include_router(_schedules_routes.router)
 blast_router.include_router(_result_analytics_routes.router)
 blast_router.include_router(_results_routes.router)
+blast_router.include_router(_capacity_routes.router)
