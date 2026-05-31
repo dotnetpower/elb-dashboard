@@ -18,7 +18,12 @@ from fastapi import APIRouter, Body, Depends, Request
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _apply_web_blast_searchsp_default
-from api.services.response_contracts import build_admission, build_meta, request_id_from_scope
+from api.services.response_contracts import (
+    AdmissionDecision,
+    build_admission,
+    build_meta,
+    request_id_from_scope,
+)
 from api.services.sanitise import sanitise
 
 router = APIRouter()
@@ -377,7 +382,7 @@ def blast_pre_flight(
 
     ready = critical == 0
     warnings = [check for check in checks if check.get("status") == "warn"]
-    decision = "would_accept" if ready else "would_reject"
+    decision: AdmissionDecision = "would_accept" if ready else "would_reject"
     return {
         "status": "ok",
         "ready": ready,

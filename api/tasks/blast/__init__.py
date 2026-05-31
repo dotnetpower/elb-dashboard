@@ -80,9 +80,11 @@ __all__ = (
     "SUBMIT_SUBSTEP_PATTERNS",
     "SUBMIT_SUBSTEP_TOTAL",
     "acquire_submit_lock",
+    "cancel",
     "detect_submit_substep",
     "persist_submit_log_events",
     "release_submit_lock",
+    "submit",
     "submit_lock_key",
 )
 
@@ -121,7 +123,7 @@ def _storage_account_from_row(row: Any) -> str:
 # ``include=["api.tasks.blast"]`` discovery still picks them up and external
 # callers (``from api.tasks.blast import cancel``) continue to work.
 from api.tasks.blast.backfill_task import backfill_completed_runtime_metrics  # noqa: E402,F401
-from api.tasks.blast.cancel_task import cancel  # noqa: E402,F401
+from api.tasks.blast.cancel_task import cancel  # noqa: E402
 from api.tasks.blast.cli_parsing import (  # noqa: E402,F401
     ELASTIC_BLAST_CFG_FILE,
     ELASTIC_BLAST_JOB_ID_RE,
@@ -210,6 +212,6 @@ from api.tasks.blast.submit_runtime import (  # noqa: E402,F401
     _refresh_submit_terminal_status,
     _stream_submit_command,
 )
-from api.tasks.blast.submit_task import submit  # noqa: E402,F401
+from api.tasks.blast.submit_task import submit  # noqa: E402
 
 

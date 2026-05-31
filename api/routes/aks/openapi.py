@@ -1044,6 +1044,11 @@ async def aks_openapi_proxy(
 
     from api.services import get_credential
     from api.services.k8s.monitoring import k8s_get_service_ip
+    from api.services.openapi.exec_gate import evaluate_openapi_exec_gate
+    from api.services.openapi.proxy_audit import (
+        is_state_changing_method,
+        record_openapi_proxy_exec,
+    )
     from api.services.openapi.runtime import get_public_tls_base_url
 
     if not target_path.startswith("/") or target_path.startswith("//"):
@@ -1064,6 +1069,32 @@ async def aks_openapi_proxy(
 
     sub = subscription_id or os.getenv("AZURE_SUBSCRIPTION_ID", "")
     cred = get_credential()
+
+    # Opt-in RBAC enforcement (charter §12a Rule 4, default-OFF behind
+    # ENFORCE_OPENAPI_EXEC_RBAC). When enabled, a state-changing call is
+    # only forwarded if the caller actually holds a write role
+    # (Contributor / Owner / AKS write) on the target resource group;
+    # otherwise we deny BEFORE resolving the upstream or injecting the
+    # admin token. Read-only GETs and the dev-bypass identity are never
+    # gated, and with the env unset the legacy "any tenant member" path is
+    # preserved exactly. The RBAC lookup is synchronous ARM IO, so run it
+    # off the event loop.
+    import asyncio
+
+    exec_decision = await asyncio.to_thread(
+        evaluate_openapi_exec_gate,
+        cred,
+        caller=caller,
+        method=request.method,
+        subscription_id=sub,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
+    if not exec_decision.allowed:
+        raise HTTPException(
+            status_code=exec_decision.status_code,
+            detail=exec_decision.detail,
+        )
 
     # Pick the upstream base URL. The TLS-terminated public endpoint, when
     # configured, is always safe for admin-token injection because the
@@ -1160,6 +1191,27 @@ async def aks_openapi_proxy(
             LOGGER.debug("openapi/proxy: API token lookup skipped: %s", type(exc).__name__)
     if api_token:
         headers["X-ELB-API-Token"] = api_token
+
+    # Forensic audit trail: the proxy injects the admin token. When the
+    # opt-in RBAC gate above is OFF (the default), any authenticated tenant
+    # member — even a subscription Reader — can drive state-changing calls
+    # through the admin token, so record WHO drove each mutating call
+    # (POST/PUT/PATCH/DELETE) for traceability. When the gate is ON the call
+    # has already passed the write-role check, and the row still captures
+    # who executed. Read-only GETs are intentionally not audited (polling
+    # noise). Best-effort and run off the event loop; never blocks the proxy.
+    if is_state_changing_method(request.method):
+        await asyncio.to_thread(
+            record_openapi_proxy_exec,
+            method=request.method,
+            target_path=target_path,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            caller_oid=caller.object_id or "",
+            tenant_id=caller.tenant_id or "",
+        )
+
     body = await request.body()
     # Streaming proxy: open the AsyncClient OUTSIDE the request scope so
     # we can attach its lifecycle to the streaming response generator.

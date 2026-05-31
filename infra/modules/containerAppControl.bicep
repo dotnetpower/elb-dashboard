@@ -203,6 +203,17 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             // flip back to `false` (or remove this entry) once the Service
             // is moved behind an internal LB or TLS-terminated ingress.
             { name: 'OPENAPI_ALLOW_PUBLIC_LB', value: 'true' }
+            // OpenAPI proxy execution RBAC gate (security audit, 2026-05-31).
+            // Default OFF preserves the legacy behaviour where any
+            // authenticated tenant member can drive state-changing OpenAPI
+            // "Try it" / curl calls through the admin token (Charter §12a
+            // Rule 4). Flip to 'true' to require the caller to hold a write
+            // role (Contributor / Owner / AKS write) on the target resource
+            // group before forwarding POST/PUT/PATCH/DELETE. When enabled
+            // the api managed identity needs
+            // Microsoft.Authorization/roleAssignments/read at the
+            // subscription scope (the Reader built-in grants this).
+            { name: 'ENFORCE_OPENAPI_EXEC_RBAC', value: 'false' }
             // BLAST capacity gate (issue #23). Default OFF preserves the
             // existing per-cluster Redis submit lock + max_slots=1 behaviour
             // (Charter §12a Rule 4). Flip to 'true' to enable cluster-aware

@@ -351,7 +351,7 @@ def celery_diag(
                 out["queues"][q] = f"err:{type(exc).__name__}"
         out["broker_url"] = CELERY_BROKER_URL
         out["redis_keys_db0"] = sorted(
-            k.decode() for k in r.keys("*") if not k.startswith(b"_kombu")  # type: ignore[union-attr]
+            k.decode() for k in r.keys("*") if not k.startswith(b"_kombu")
         )
     except Exception as exc:
         out["errors"].append(f"redis: {type(exc).__name__}: {exc}")

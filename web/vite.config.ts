@@ -98,6 +98,18 @@ export default defineConfig({
           if (id.includes("node_modules/@xterm/")) {
             return "vendor-xterm";
           }
+          // Large, rarely-changing auth/telemetry/icon vendors get their own
+          // chunks so they stay out of the main index bundle and keep a long
+          // browser-cache lifetime across app-code deploys.
+          if (id.includes("node_modules/@azure/msal")) {
+            return "vendor-msal";
+          }
+          if (id.includes("node_modules/@microsoft/applicationinsights")) {
+            return "vendor-appinsights";
+          }
+          if (id.includes("node_modules/lucide-react")) {
+            return "vendor-icons";
+          }
           if (id.includes("/src/pages/blastResults/") || id.includes("/src/pages/BlastJobs/")) {
             return "blast-results";
           }
