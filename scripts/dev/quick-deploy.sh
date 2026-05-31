@@ -143,13 +143,19 @@ load_simple_env_file "$REPO_ROOT/.env.local"
 load_simple_env_file "$REPO_ROOT/web/.env.production"
 # web/.env.local exists for local-dev (vite dev server + local-run.sh web)
 # and pins VITE_API_BASE_URL=http://localhost:8085 plus local-debug toggles
-# (VITE_AUTH_DEV_BYPASS, AUTH_DEV_BYPASS). Those values must NEVER end up
-# in a cloud frontend's runtime-config.js or container env — see the guard
-# below and docs/features_change/2026-05/2026-05-25-frontend-env-leak-hardening.md.
+# (VITE_AUTH_DEV_BYPASS, AUTH_DEV_BYPASS). It may also carry a developer's
+# personal MSAL tenant/client for local SPA debugging. Those values must
+# NEVER end up in a cloud frontend's runtime-config.js or container env —
+# see the guard below and
+# docs/features_change/2026-05/2026-05-25-frontend-env-leak-hardening.md.
 load_simple_env_file "$REPO_ROOT/web/.env.local" \
   VITE_API_BASE_URL \
   VITE_AUTH_DEV_BYPASS \
-  AUTH_DEV_BYPASS
+  AUTH_DEV_BYPASS \
+  VITE_AZURE_TENANT_ID \
+  VITE_AZURE_CLIENT_ID \
+  VITE_AZURE_REDIRECT_URI \
+  API_CLIENT_ID
 if [[ -z "${AZURE_RESOURCE_GROUP:-}" || -z "${ACR_NAME:-}" || -z "${ACR_LOGIN_SERVER:-}" || -z "${CONTAINER_APP_NAME:-}" ]]; then
   load_azd_env
 fi
