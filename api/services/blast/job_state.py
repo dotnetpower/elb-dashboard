@@ -4,7 +4,7 @@ Responsibility: BLAST job projection, file preview, and refresh helpers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `_payload_value`, `_queries_blob_path`, `_job_query_blob_path`,
-`_refresh_running_blast_state`
+`_refresh_running_blast_state`, `_blocked_refresh_reasons`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
@@ -333,6 +333,8 @@ def _local_to_blast_job(
     split_children: dict[str, Any] | None = None,
     *,
     include_database_metadata: bool = False,
+    refresh_blocked_reason: str | None = None,
+    cluster_power_state: str | None = None,
 ) -> dict[str, Any]:
     payload = state.payload if isinstance(state.payload, dict) else {}
     progress = payload.get("_progress") if isinstance(payload.get("_progress"), dict) else None
@@ -425,6 +427,19 @@ def _local_to_blast_job(
             out["splits_done"] = done
             out["splits_failed"] = failed
             out["splits_total"] = total
+    # Cluster-stopped / cluster-missing rows can't be refreshed against the
+    # K8s API, so an active row would otherwise show a frozen "running" state
+    # forever. Tag it as stale + surface the ARM power_state so the SPA can
+    # render a "status frozen — cluster stopped" badge instead of a false
+    # in-progress signal. Only meaningful for rows still in an active state.
+    if refresh_blocked_reason and str(getattr(state, "status", "") or "").strip().casefold() in (
+        "running",
+        "submitted",
+    ):
+        out["stale"] = True
+        out["refresh_blocked_reason"] = refresh_blocked_reason
+        if cluster_power_state:
+            out["cluster_power_state"] = cluster_power_state
     return out
 
 
@@ -600,6 +615,90 @@ def _refresh_running_blast_state(repo: Any, state: Any) -> Any:
     except Exception as exc:
         LOGGER.debug("blast k8s refresh update skipped job_id=%s: %s", state.job_id, exc)
         return state
+
+
+def _row_refresh_scope(state: Any) -> tuple[str, str, str]:
+    """Extract (subscription_id, resource_group, cluster_name) for a job row.
+
+    Prefers the indexed top-level columns so it works for list rows fetched
+    with ``include_payload=False``, falling back to the payload when present.
+    """
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    subscription_id = str(
+        getattr(state, "subscription_id", None) or _payload_value(payload, "subscription_id") or ""
+    )
+    resource_group = str(
+        getattr(state, "resource_group", None) or _payload_value(payload, "resource_group") or ""
+    )
+    cluster_name = str(
+        getattr(state, "cluster_name", None)
+        or _payload_value(payload, "cluster_name", "aks_cluster_name")
+        or ""
+    )
+    return subscription_id, resource_group, cluster_name
+
+
+def _blocked_refresh_reasons(rows: list[Any]) -> dict[str, dict[str, Any]]:
+    """Map ``job_id -> ClusterHealth`` for active rows whose AKS cluster is down.
+
+    The list endpoint consults this so it can (a) SKIP the K8s refresh for a
+    stopped/missing cluster — which would otherwise burn a ~10 s K8s API
+    timeout per job — and (b) tag the affected active rows as ``stale`` so the
+    SPA renders a "status frozen — cluster stopped" badge instead of a false
+    "running" signal that never advances.
+
+    Cost: one cached ARM ``ManagedClusters.get`` per distinct
+    (sub, rg, cluster) via ``get_cluster_health`` (90 s TTL), so a fleet of
+    stopped jobs costs one ARM call, not one per job. Returns ``{}`` when there
+    are no active rows, no usable scope, or credentials are unavailable —
+    the gate is best-effort and never blocks the list response.
+    """
+    active = [
+        row
+        for row in rows
+        if str(getattr(row, "status", "") or "").strip().casefold() in ("running", "submitted")
+        and str(getattr(row, "phase", "") or "").strip().casefold() in _K8S_REFRESH_PHASES
+    ]
+    if not active:
+        return {}
+    scopes: dict[tuple[str, str, str], list[str]] = {}
+    for row in active:
+        subscription_id, resource_group, cluster_name = _row_refresh_scope(row)
+        if not (subscription_id and resource_group and cluster_name):
+            continue
+        scopes.setdefault((subscription_id, resource_group, cluster_name), []).append(
+            str(row.job_id)
+        )
+    if not scopes:
+        return {}
+    try:
+        from api.services import get_credential
+        from api.services.cluster_health import get_cluster_health
+
+        credential = get_credential()
+    except Exception as exc:
+        LOGGER.debug("blocked-refresh health gate skipped (no credential): %s", type(exc).__name__)
+        return {}
+    blocked: dict[str, dict[str, Any]] = {}
+    for (subscription_id, resource_group, cluster_name), job_ids in scopes.items():
+        try:
+            health = get_cluster_health(
+                credential, subscription_id, resource_group, cluster_name
+            )
+        except Exception as exc:
+            LOGGER.debug(
+                "blocked-refresh health probe skipped cluster=%s: %s",
+                cluster_name,
+                type(exc).__name__,
+            )
+            continue
+        # `get_cluster_health` degrades open (healthy=True) when ARM is
+        # unreachable, so we only block on a proven stopped/missing cluster.
+        if health.get("healthy", True):
+            continue
+        for job_id in job_ids:
+            blocked[job_id] = dict(health)
+    return blocked
 
 
 def _payload_with_refresh_progress(

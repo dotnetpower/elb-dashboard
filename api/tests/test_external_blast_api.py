@@ -1814,3 +1814,77 @@ def test_external_blast_submit_proceeds_when_ready_ok(monkeypatch) -> None:
     assert response.status_code == 202
     assert call_order == ["ready", "submit"]
     assert response.json()["job_id"] == "abcdef123456"
+
+
+def test_canonical_jobs_list_marks_running_row_stale_when_cluster_stopped(monkeypatch):
+    """End-to-end: a ``running`` local row whose AKS cluster is stopped must
+    come back with ``stale=True`` + ``refresh_blocked_reason`` so the SPA can
+    render a "status frozen — cluster stopped" badge instead of a misleading
+    live progress bar. The expensive K8s refresh is skipped for that row."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.routes.blast import jobs as jobs_route
+    from api.services import cluster_health, external_blast, state_repo
+
+    jobs_route._reset_blast_jobs_list_cache()
+
+    class RunningRepo:
+        def list_for_owner(self, *_args, **_kwargs):
+            return [
+                SimpleNamespace(
+                    job_id="running-job",
+                    task_id=None,
+                    type="blast",
+                    status="running",
+                    phase="running",
+                    created_at="2026-06-01T10:00:00Z",
+                    updated_at="2026-06-01T10:01:00Z",
+                    error_code=None,
+                    parent_job_id=None,
+                    payload={
+                        "subscription_id": "sub-1",
+                        "resource_group": "rg-elb-01",
+                        "cluster_name": "elb-cluster",
+                        "program": "blastn",
+                        "db": "core_nt",
+                    },
+                ),
+            ]
+
+        def list_children_for_owner(self, *_args, **_kwargs):
+            return {}
+
+    refresh_calls: list[str] = []
+
+    def _should_not_refresh(_repo, row):
+        refresh_calls.append(str(row.job_id))
+        return row
+
+    monkeypatch.setattr(state_repo, "JobStateRepository", RunningRepo)
+    monkeypatch.setattr(external_blast, "list_jobs", lambda **_kwargs: {"jobs": []})
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        cluster_health,
+        "get_cluster_health",
+        lambda *_args, **_kwargs: {
+            "healthy": False,
+            "exists": True,
+            "power_state": "Stopped",
+            "reason": "cluster_stopped",
+        },
+    )
+    monkeypatch.setattr(jobs_route, "_refresh_running_blast_state", _should_not_refresh)
+    client = TestClient(app)
+
+    response = client.get("/api/blast/jobs")
+
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job["job_id"] == "running-job"
+    assert job["stale"] is True
+    assert job["refresh_blocked_reason"] == "cluster_stopped"
+    assert job["cluster_power_state"] == "Stopped"
+    # The K8s refresh is skipped for the blocked row (no ~10 s timeout).
+    assert refresh_calls == []

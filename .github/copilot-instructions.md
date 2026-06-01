@@ -390,6 +390,26 @@ When work is tied to a registered GitHub issue, do not leave the issue silent. B
 * Infra changes: `az deployment sub what-if` (or `azd provision --preview`) output attached to the change note. For the bundled Container App, also confirm `postprovision.sh` still applies the six-sidecar template diff cleanly.
 * **Do not** rely on `func start` for new work — the Azure Functions tree has been removed from the repository.
 
+### CI parity — mirror the GitHub Actions gates before every push (NON-NEGOTIABLE)
+A push must never turn the Actions dashboard red. Two workflows gate `main` and PRs, and you must reproduce both **locally** before pushing:
+
+| Workflow | File | What it runs | Local equivalent |
+| --- | --- | --- | --- |
+| Tests | [.github/workflows/test.yml](.github/workflows/test.yml) | `uv run ruff check api` + `uv run pytest -q api/tests` | same two commands |
+| Publish Docs | [.github/workflows/docs.yml](.github/workflows/docs.yml) | `check_frontmatter.py` + `mkdocs build --strict` | `uv run python scripts/docs/check_frontmatter.py` then `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` |
+
+The repo ships version-controlled git hooks that run exactly these checks automatically — **install them once per clone**:
+
+```bash
+scripts/dev/install-git-hooks.sh   # sets core.hooksPath=scripts/dev/git-hooks
+```
+
+* **pre-commit** (fast, staged files only): `ruff check api` when `api/**` is staged; the docs frontmatter guard when `docs/**` / `mkdocs.yml` is staged.
+* **pre-push** (full CI mirror): `pytest -q api/tests` and/or `mkdocs build --strict`, scoped to the file paths the push actually touches (so a docs-only push skips pytest and vice-versa).
+
+The hooks are the safety net, not a substitute for thinking: when you change `mkdocs.yml`-relevant docs, confirm every new page under `docs/**` is wired into the `nav:` (an orphan page fails `--strict`). Bypass only for genuine emergencies with `git commit/push --no-verify` (or `ELB_SKIP_HOOKS=1`), and never push a red build knowingly.
+
+
 ### Post-implementation self-review (NON-NEGOTIABLE for code changes)
 After every code change and **before** calling `task_complete`, run a self-review pass without waiting for the user to ask. The goal is to catch broken contracts, missed consumers, and stale fixtures that the focused test you already ran would not surface.
 

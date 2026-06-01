@@ -166,6 +166,27 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
         >
           {phase}
         </span>
+        {job.stale && (
+          <div
+            style={{
+              fontSize: 9,
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+              marginTop: 3,
+              color: "var(--text-faint)",
+              whiteSpace: "nowrap",
+            }}
+            title={
+              job.refresh_blocked_reason === "cluster_not_found"
+                ? "Cluster not found — last-known status, no longer refreshing."
+                : `Cluster ${job.cluster_power_state || "stopped"} — status frozen until it restarts.`
+            }
+          >
+            {job.refresh_blocked_reason === "cluster_not_found"
+              ? "✕ no cluster"
+              : "❄ frozen"}
+          </div>
+        )}
       </td>
       <td
         style={{

@@ -205,10 +205,14 @@ def test_rate_limit_http_returns_429_with_retry_after(
             time.sleep(0.02)
 
     try:
-        # An argv that the allowlist accepts but that exits immediately so
-        # the request unwinds fast enough to exhaust the bucket inside the
-        # test budget. `kubectl version --client=true` is one of the
-        # cheapest allowlisted invocations.
+        # An argv that the allowlist accepts. We do NOT rely on the binary
+        # actually running here: the first two slots in the bucket are
+        # pre-filled directly via `_rate_limit_check`, so the single HTTP
+        # request below trips the cap *before* `do_POST` ever spawns a
+        # subprocess. This keeps the test deterministic and independent of
+        # whether `kubectl` is installed (or fast) on the CI runner —
+        # subprocess token consumption is already covered by the unit-level
+        # tests above.
         body = json.dumps(
             {
                 "argv": ["kubectl", "version", "--client=true", "--output=json"],
@@ -236,15 +240,14 @@ def test_rate_limit_http_returns_429_with_retry_after(
             finally:
                 conn.close()
 
-        # Two requests within the cap — kubectl may not be installed in CI,
-        # so we accept either 200 (success) OR 500 (subprocess failure).
-        # Both consume a token from the bucket, which is what we are
-        # actually testing.
+        # Exhaust the per-window cap (2) for `kubectl` directly so no real
+        # subprocess is spawned. The HTTP handler shares this module-level
+        # bucket via `_rate_limit_check`.
         for _ in range(2):
-            status, _, _ = _post()
-            assert status in (200, 500), f"unexpected status {status} for permitted call"
+            allowed, _ = module._rate_limit_check("kubectl")
+            assert allowed is True
 
-        # Third request — bucket exhausted — must be 429 with Retry-After.
+        # Next request — bucket exhausted — must be 429 with Retry-After.
         status, hdrs, payload = _post()
         assert status == 429
         retry_after_header = hdrs.get("Retry-After") or hdrs.get("retry-after")

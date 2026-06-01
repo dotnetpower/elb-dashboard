@@ -26,6 +26,7 @@ from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import (
     _EXTERNAL_DETAIL_ENRICH_LIMIT,
     _EXTERNAL_NOT_ENABLED_REASONS,
+    _blocked_refresh_reasons,
     _exception_reason,
     _external_job_detail_or_row,
     _external_list_jobs_cached,
@@ -232,7 +233,15 @@ def blast_jobs_list(
         # job to "completed". The refresh helper already early-returns for
         # non-active rows and shares a per-job throttle (5 s for hot phases,
         # 20 s for `submitted`) with the detail endpoint.
+        #
+        # First gate the active rows against ARM cluster health: a stopped or
+        # deleted cluster can't be refreshed via the K8s API, so we skip that
+        # refresh (avoids a ~10 s timeout per job) and tag the row as stale
+        # below so the SPA shows "status frozen — cluster stopped".
+        blocked_refresh = _blocked_refresh_reasons(rows)
         for idx, row in enumerate(rows):
+            if str(row.job_id) in blocked_refresh:
+                continue
             if str(getattr(row, "phase", "") or "").strip().casefold() not in _K8S_REFRESH_PHASES:
                 continue
             try:
@@ -253,10 +262,17 @@ def blast_jobs_list(
             parent_ids,
         )
         for row in rows:
+            health = blocked_refresh.get(str(row.job_id))
             jobs.append(
                 _local_to_blast_job(
                     row,
                     split_children=split_summaries.get(row.job_id),
+                    refresh_blocked_reason=str(health.get("reason")) if health else None,
+                    cluster_power_state=(
+                        str(health.get("power_state"))
+                        if health and health.get("power_state")
+                        else None
+                    ),
                 )
             )
     except Exception as exc:

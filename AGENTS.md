@@ -198,6 +198,8 @@ where the failure was found, but knowing them up front saves a lot of time.
 | Worker | `uv run celery -A api.celery_app worker -l info` (needs local Redis) |
 | Frontend build | `cd web && npm run build` |
 | Docs frontmatter guard | `uv run python scripts/docs/check_frontmatter.py` (same check Publish Docs CI runs) |
+| Docs strict build | `DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict` (catches orphan/non-nav pages — same as Publish Docs CI) |
+| Install CI-mirror git hooks | `scripts/dev/install-git-hooks.sh` (pre-commit ruff + frontmatter; pre-push pytest + mkdocs strict — run once per clone) |
 | Infra preview | `azd provision --preview` |
 | Local 2-sidecar Compose | `docker compose -f scripts/dev/docker-compose.local.yml up --build` |
 | Local debug as real az identity | `scripts/dev/local-run.sh auth-on` (RBAC + storage open + bypass=false + restart) → debug → `scripts/dev/local-run.sh auth-off` |

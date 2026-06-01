@@ -189,6 +189,17 @@ export interface BlastJobSummary {
   owner_upn?: string;
   error_code?: string;
   error?: string;
+  /**
+   * True when the server could not refresh this active row's live state
+   * because its AKS cluster is stopped/missing. The status/phase shown is the
+   * last-known value and is frozen until the cluster restarts. See
+   * `refresh_blocked_reason` for why.
+   */
+  stale?: boolean;
+  /** Why the live refresh was skipped — e.g. `cluster_stopped`, `cluster_not_found`. */
+  refresh_blocked_reason?: string;
+  /** ARM power_state of the job's cluster when the refresh was blocked (e.g. `Stopped`). */
+  cluster_power_state?: string;
 }
 
 export interface BlastExecutionStepsSnapshot {

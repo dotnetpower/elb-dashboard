@@ -118,6 +118,7 @@ nav:
       - Deployment Reference: deployment-reference.md
       - CLI Rolling Update: operate/cli-upgrade.md
       - OpenAPI Execution RBAC Gate: operate/openapi-exec-rbac-gate.md
+      - OpenAPI Direct Access: operate/openapi-direct-access.md
       - Architecture:
           - architecture/index.md
           - High Level Architecture: architecture/high-level.md

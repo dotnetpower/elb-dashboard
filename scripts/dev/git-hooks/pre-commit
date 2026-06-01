@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# pre-commit hook — fast CI mirror on staged files only.
+#
+# Runs the CHEAP half of the GitHub Actions gates so an obviously-broken commit
+# never reaches the remote: `ruff check api` (when api/ is staged) and the docs
+# frontmatter canon guard (when docs/ is staged). Both finish in ~2s combined.
+# The slow half (pytest, mkdocs --strict) runs in the pre-push hook instead, so
+# day-to-day commits stay snappy.
+#
+# Install: scripts/dev/install-git-hooks.sh (sets core.hooksPath).
+# Escape hatch: `git commit --no-verify` or `ELB_SKIP_HOOKS=1 git commit`.
+# Mirrors: .github/workflows/test.yml (ruff), .github/workflows/docs.yml (frontmatter).
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/dev/git-hooks/_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+if [[ "${ELB_SKIP_HOOKS:-}" == "1" ]]; then
+  hook_warn "ELB_SKIP_HOOKS=1 — skipping pre-commit checks"
+  exit 0
+fi
+
+# Staged, added/copied/modified files (ignore deletions).
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+if [[ -z "$staged" ]]; then
+  exit 0
+fi
+
+rc=0
+
+if paths_touch_api "$staged"; then
+  hook_run "ruff check api" uv run ruff check api || rc=$?
+fi
+
+if paths_touch_docs "$staged"; then
+  hook_run "docs frontmatter canon guard" \
+    uv run python scripts/docs/check_frontmatter.py || rc=$?
+fi
+
+if [[ "$rc" -ne 0 ]]; then
+  hook_err "pre-commit blocked. Fix the above, or bypass with: git commit --no-verify"
+  exit "$rc"
+fi
+
+exit 0

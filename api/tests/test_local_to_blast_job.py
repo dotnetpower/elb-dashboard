@@ -534,3 +534,128 @@ def test_refresh_running_blast_state_reads_top_level_columns(monkeypatch):
     assert "started_at" in progress["steps"]["running"]
     assert refreshed.status == "completed"
 
+
+def test_local_to_blast_job_marks_stale_when_refresh_blocked():
+    """A running row whose cluster is stopped is tagged stale, not silently
+    left looking like it is still in progress."""
+    out = _local_to_blast_job(
+        _state(status="running", phase="running"),
+        refresh_blocked_reason="cluster_stopped",
+        cluster_power_state="Stopped",
+    )
+    assert out["stale"] is True
+    assert out["refresh_blocked_reason"] == "cluster_stopped"
+    assert out["cluster_power_state"] == "Stopped"
+
+
+def test_local_to_blast_job_no_stale_for_terminal_rows():
+    """Completed/failed rows are never marked stale even if the cluster is
+    down — their last-known status is final, not frozen."""
+    out = _local_to_blast_job(
+        _state(status="completed", phase="completed"),
+        refresh_blocked_reason="cluster_stopped",
+        cluster_power_state="Stopped",
+    )
+    assert "stale" not in out
+    assert "refresh_blocked_reason" not in out
+
+
+def test_local_to_blast_job_stale_omits_power_state_when_unknown():
+    out = _local_to_blast_job(
+        _state(status="running", phase="submitted"),
+        refresh_blocked_reason="cluster_not_found",
+        cluster_power_state=None,
+    )
+    assert out["stale"] is True
+    assert out["refresh_blocked_reason"] == "cluster_not_found"
+    assert "cluster_power_state" not in out
+
+
+def test_blocked_refresh_reasons_flags_stopped_cluster(monkeypatch):
+    """`_blocked_refresh_reasons` returns the active rows whose cluster is not
+    Running, costing one cached ARM probe per distinct scope."""
+    rows = [
+        _state(
+            job_id="job-a",
+            status="running",
+            phase="running",
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+        ),
+        _state(
+            job_id="job-b",
+            status="running",
+            phase="submitted",
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+        ),
+        # Terminal row — never gated.
+        _state(
+            job_id="job-done",
+            status="completed",
+            phase="completed",
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+        ),
+    ]
+    probe_calls: list[tuple[str, str, str]] = []
+
+    def fake_health(_cred, sub, rg, cluster):
+        probe_calls.append((sub, rg, cluster))
+        return {
+            "healthy": False,
+            "exists": True,
+            "power_state": "Stopped",
+            "reason": "cluster_stopped",
+        }
+
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr("api.services.cluster_health.get_cluster_health", fake_health)
+
+    blocked = blast_job_state._blocked_refresh_reasons(rows)
+
+    assert set(blocked) == {"job-a", "job-b"}
+    assert blocked["job-a"]["reason"] == "cluster_stopped"
+    assert blocked["job-a"]["power_state"] == "Stopped"
+    # One ARM probe for the single shared (sub, rg, cluster) scope.
+    assert probe_calls == [("sub-1", "rg-elb", "elb-cluster")]
+
+
+def test_blocked_refresh_reasons_empty_when_cluster_running(monkeypatch):
+    rows = [
+        _state(
+            job_id="job-a",
+            status="running",
+            phase="running",
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+        ),
+    ]
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_a, **_kw: {
+            "healthy": True,
+            "exists": True,
+            "power_state": "Running",
+            "reason": None,
+        },
+    )
+
+    assert blast_job_state._blocked_refresh_reasons(rows) == {}
+
+
+def test_blocked_refresh_reasons_skips_when_no_active_rows(monkeypatch):
+    """No active rows → no credential fetch, no ARM probe."""
+
+    def boom():
+        raise AssertionError("get_credential must not be called without active rows")
+
+    monkeypatch.setattr("api.services.get_credential", boom)
+    rows = [_state(job_id="job-done", status="completed", phase="completed")]
+    assert blast_job_state._blocked_refresh_reasons(rows) == {}
+

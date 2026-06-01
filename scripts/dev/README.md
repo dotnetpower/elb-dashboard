@@ -10,6 +10,8 @@
 | [`postprovision.sh`](./postprovision.sh) | Full first-time / structural deploy — sidecar layout, env vars, secrets, probes, scale rules. Run via `azd up` or directly after sourcing `/tmp/azd-env.sh`. |
 | [`smoke_api.py`](./smoke_api.py) | HTTP smoke test against a running api sidecar. |
 | [`preflight-check.sh`](./preflight-check.sh) | Pre-`azd up` sanity. |
+| [`install-git-hooks.sh`](./install-git-hooks.sh) | **Install the CI-mirror git hooks** (sets `core.hooksPath=scripts/dev/git-hooks`). Run once per fresh clone. pre-commit = `ruff` + docs frontmatter guard on staged files; pre-push = `pytest` + `mkdocs build --strict` scoped to the pushed paths. Mirrors [`.github/workflows/test.yml`](../../.github/workflows/test.yml) and [`docs.yml`](../../.github/workflows/docs.yml). Bypass with `--no-verify` or `ELB_SKIP_HOOKS=1`. |
+| [`git-hooks/`](./git-hooks/) | The hook scripts themselves (`pre-commit`, `pre-push`, shared `_lib.sh`). Edit these when the CI workflows' checks or `paths:` filters change so the local mirror stays accurate. |
 | [`setup-app-registration.sh`](./setup-app-registration.sh) | One-shot Entra ID app registration creation. |
 | [`grant-local-rbac.sh`](./grant-local-rbac.sh) | One-shot: grant your `az login` user the minimum RBAC (Storage Blob Data Contributor, Storage Account Contributor, RG Reader, AcrPull) needed to drive a deployed environment from a local api sidecar. Idempotent; run once per fresh clone. |
 | [`storage-public-access.sh`](./storage-public-access.sh) | Manually flip a workload Storage account's `publicNetworkAccess` on (IP-allowlisted) / off for local debugging. The api also auto-opens it when `LOCAL_DEBUG_AUTO_OPEN_STORAGE=true` — see `api/services/storage/public_access.py`. |

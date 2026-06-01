@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# pre-push hook — full CI mirror on the commits being pushed.
+#
+# Runs the EXPENSIVE half of the GitHub Actions gates so a push that would turn
+# the Actions dashboard red is blocked locally first:
+#   - `uv run pytest -q api/tests`   (mirrors .github/workflows/test.yml)
+#   - `uv run mkdocs build --strict` (mirrors .github/workflows/docs.yml)
+# Each runs only when the pushed range actually touches the files that CI gates
+# on, so a docs-only push never pays the pytest cost and vice-versa.
+#
+# git invokes this hook with refs on stdin:
+#   <local-ref> <local-sha> <remote-ref> <remote-sha>
+# We diff remote-sha..local-sha to learn what is actually being pushed.
+#
+# Install: scripts/dev/install-git-hooks.sh (sets core.hooksPath).
+# Escape hatch: `git push --no-verify` or `ELB_SKIP_HOOKS=1 git push`.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/dev/git-hooks/_lib.sh
+source "$SCRIPT_DIR/_lib.sh"
+
+if [[ "${ELB_SKIP_HOOKS:-}" == "1" ]]; then
+  hook_warn "ELB_SKIP_HOOKS=1 — skipping pre-push checks"
+  exit 0
+fi
+
+ZERO="0000000000000000000000000000000000000000"
+
+# Collect the set of files across every ref being pushed.
+changed=""
+refs_seen=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ -z "${local_sha:-}" ]] && continue
+  refs_seen=$((refs_seen + 1))
+  if [[ "$local_sha" == "$ZERO" ]]; then
+    # Branch deletion — nothing to validate.
+    continue
+  fi
+  if [[ "$remote_sha" == "$ZERO" ]]; then
+    # New branch on the remote: diff against main if we can, else inspect the
+    # whole commit. Fall back to HEAD~1..HEAD when main is unavailable.
+    if base="$(git merge-base "$local_sha" origin/main 2>/dev/null)"; then
+      range="$base..$local_sha"
+    else
+      range="$local_sha"
+    fi
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  if [[ "$range" == *..* ]]; then
+    files="$(git diff --name-only "$range" 2>/dev/null || true)"
+  else
+    files="$(git show --name-only --format= "$range" 2>/dev/null || true)"
+  fi
+  changed+="$files"$'\n'
+done
+
+# If git fed us at least one ref line we trust that result verbatim — a
+# deletion-only push legitimately yields an empty `changed` and must stay a
+# no-op. Only when stdin was completely empty (manual invocation for testing)
+# do we fall back to validating the last commit.
+if [[ "$refs_seen" -eq 0 ]]; then
+  changed="$(git diff --name-only HEAD~1..HEAD 2>/dev/null || true)"
+fi
+
+if [[ -z "${changed//[$'\n\t ']/}" ]]; then
+  exit 0
+fi
+
+rc=0
+
+if paths_touch_api "$changed"; then
+  hook_run "ruff check api" uv run ruff check api || rc=$?
+  CI=true hook_run "pytest -q api/tests" uv run pytest -q api/tests || rc=$?
+fi
+
+if paths_touch_docs "$changed"; then
+  hook_run "docs frontmatter canon guard" \
+    uv run python scripts/docs/check_frontmatter.py || rc=$?
+  DISABLE_MKDOCS_2_WARNING=true \
+    hook_run "mkdocs build --strict" uv run mkdocs build --strict || rc=$?
+fi
+
+if [[ "$rc" -ne 0 ]]; then
+  hook_err "pre-push blocked — these are the exact checks GitHub Actions runs."
+  hook_err "Fix the failures above, or bypass with: git push --no-verify"
+  exit "$rc"
+fi
+
+exit 0
