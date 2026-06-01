@@ -27,6 +27,7 @@ from api.services.blast.result_analytics import (
     annotate_result_hit,
     enrich_taxonomy_with_lineage,
     list_parseable_result_blobs,
+    read_result_blob_texts_parallel,
     result_hit_matches_filters,
     result_hit_rank_aggregates,
     result_hit_sort_key,
@@ -258,20 +259,21 @@ def _read_hits(
 
 
 def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[str, Any]:
-    cred = get_credential()
     result_blobs = list_parseable_result_blobs(storage_account, job_id)
     aggregate = _StreamingAggregate()
     parsed_files = 0
     read_failures = 0
-    for blob_info in result_blobs[:RESULTS_MAX_FILES]:
+    reads = read_result_blob_texts_parallel(
+        storage_account,
+        result_blobs[:RESULTS_MAX_FILES],
+        max_bytes=RESULTS_AGGREGATE_MAX_BYTES,
+    )
+    for blob_path, content, read_exc in reads:
+        if not blob_path:
+            continue
         try:
-            content = storage_data.read_result_blob_text(
-                cred,
-                storage_account,
-                "results",
-                str(blob_info["name"]),
-                max_bytes=RESULTS_AGGREGATE_MAX_BYTES,
-            )
+            if read_exc is not None:
+                raise read_exc
             for hit in parse_blast_result_content(content):
                 aggregate.add(hit)
             parsed_files += 1
@@ -279,7 +281,7 @@ def build_result_aggregate_payload(job_id: str, storage_account: str) -> dict[st
             read_failures += 1
             LOGGER.warning(
                 "aggregate artifact builder failed to parse %s for %s: %s",
-                blob_info.get("name"),
+                blob_path,
                 job_id,
                 type(exc).__name__,
             )

@@ -477,9 +477,9 @@ def has_nsg_write_permission(
     scope. Wildcards (``*``, ``Microsoft.Network/*``, ...) and the
     ``not_actions`` deny list are honoured.
     """
-    from azure.mgmt.authorization import AuthorizationManagementClient
+    from api.services.azure_clients import authorization_client
 
-    auth = AuthorizationManagementClient(cred, subscription_id)
+    auth = authorization_client(cred, subscription_id)
     try:
         perms = _retry_arm(
             lambda: list(

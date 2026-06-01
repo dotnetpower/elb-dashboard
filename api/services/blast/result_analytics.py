@@ -17,12 +17,21 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from api.services import get_credential
 from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
+
+# Upper bound on concurrent Storage reads when fanning out result-blob parsing.
+# Result sets are capped at ``RESULTS_MAX_FILES`` (20); reading them one HTTP
+# roundtrip at a time serialises export/aggregate latency, while an unbounded
+# fan-out would open one connection per blob. Eight keeps the wall-clock win
+# without exhausting the thread-local blob-client pool.
+_RESULT_READ_MAX_WORKERS = 8
 
 # Tokens after which the remainder of a BLAST subject title (`stitle`) is no
 # longer the scientific name. NCBI titles look like
@@ -171,6 +180,55 @@ def list_parseable_result_blobs(storage_account: str, job_id: str) -> list[dict[
         if _is_merged_result_blob_name(str(blob.get("name") or ""))
     ]
     return merged or candidates
+
+
+def read_result_blob_texts_parallel(
+    storage_account: str,
+    blob_infos: Sequence[dict[str, Any]],
+    *,
+    max_bytes: int,
+    max_workers: int = _RESULT_READ_MAX_WORKERS,
+) -> list[tuple[str, str | None, BaseException | None]]:
+    """Read result blobs concurrently, preserving the input order.
+
+    Returns one ``(blob_path, content, error)`` tuple per input blob, in the
+    same order as ``blob_infos``. For a successful read ``content`` is the text
+    and ``error`` is ``None``; for a failed read ``content`` is ``None`` and
+    ``error`` carries the exception so callers keep their existing
+    per-blob failure accounting. A blob whose name is empty yields
+    ``(``"``, None, None)`` so callers can skip it exactly as the previous
+    serial loops did.
+
+    Blob-service clients are thread-local and pooled, so concurrent reads are
+    safe; concurrency is bounded by ``max_workers`` so a 20-file job never opens
+    more than that many simultaneous Storage connections.
+    """
+    cred = get_credential()
+    paths = [str(info.get("name") or "") for info in blob_infos]
+
+    def _read(path: str) -> tuple[str, str | None, BaseException | None]:
+        if not path:
+            return ("", None, None)
+        try:
+            content = storage_data.read_result_blob_text(
+                cred,
+                storage_account,
+                "results",
+                path,
+                max_bytes=max_bytes,
+            )
+            return (path, content, None)
+        except Exception as exc:  # per-blob failure captured, not fatal
+            return (path, None, exc)
+
+    if len(paths) <= 1:
+        return [_read(path) for path in paths]
+
+    workers = min(max_workers, len(paths))
+    with ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="blast-result-read"
+    ) as executor:
+        return list(executor.map(_read, paths))
 
 
 def _is_parseable_result_blob_name(blob_name: str) -> bool:

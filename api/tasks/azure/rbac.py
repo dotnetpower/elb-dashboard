@@ -193,8 +193,9 @@ def attach_acr(
     round trip. When omitted, falls back to the legacy lookup so external
     callers / tests keep working.
     """
-    from azure.mgmt.authorization import AuthorizationManagementClient
     from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
+
+    from api.services.azure_clients import authorization_client
 
     if kubelet_oid is None:
         kubelet_oid = _resolve_kubelet_oid(
@@ -212,7 +213,7 @@ def attach_acr(
     # AcrPull role definition ID (well-known)
     acr_pull_role = "7f951dda-4ed3-4680-a7ca-43fe172d538d"
 
-    auth_cl = AuthorizationManagementClient(cred, subscription_id)
+    auth_cl = authorization_client(cred, subscription_id)
     role_definition_id = (
         f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/"
         f"roleDefinitions/{acr_pull_role}"
@@ -249,8 +250,9 @@ def grant_storage_blob_contributor_to_aks(
     Accepts an optional pre-resolved `kubelet_oid`; falls back to the
     cluster lookup when not provided.
     """
-    from azure.mgmt.authorization import AuthorizationManagementClient
     from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
+
+    from api.services.azure_clients import authorization_client
 
     if kubelet_oid is None:
         kubelet_oid = _resolve_kubelet_oid(
@@ -268,7 +270,7 @@ def grant_storage_blob_contributor_to_aks(
     storage_scope = storage.id
     blob_contributor_role = "ba92f5b4-2d11-453d-a403-e96b0029c9fe"
 
-    auth_cl = AuthorizationManagementClient(cred, subscription_id)
+    auth_cl = authorization_client(cred, subscription_id)
     role_definition_id = (
         f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/"
         f"roleDefinitions/{blob_contributor_role}"
@@ -322,8 +324,9 @@ def grant_network_contributor_on_subnet(
     Idempotent (stable assignment UUID) and tolerant of Entra propagation
     via `_create_role_assignment_with_retry`. No-ops on empty inputs.
     """
-    from azure.mgmt.authorization import AuthorizationManagementClient
     from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
+
+    from api.services.azure_clients import authorization_client
 
     if not principal_id or not subnet_id:
         LOGGER.info(
@@ -331,7 +334,7 @@ def grant_network_contributor_on_subnet(
         )
         return
 
-    auth_cl = AuthorizationManagementClient(cred, subscription_id)
+    auth_cl = authorization_client(cred, subscription_id)
     role_definition_id = (
         f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/"
         f"roleDefinitions/{_NETWORK_CONTRIBUTOR_ROLE}"
@@ -459,13 +462,14 @@ def ensure_dashboard_mi_cluster_rg_roles(
             "roles_failed": {},
         }
 
-    from azure.mgmt.authorization import AuthorizationManagementClient
     from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
+
+    from api.services.azure_clients import authorization_client
 
     scope = (
         f"/subscriptions/{subscription_id}/resourceGroups/{cluster_resource_group}"
     )
-    auth_cl = AuthorizationManagementClient(cred, subscription_id)
+    auth_cl = authorization_client(cred, subscription_id)
 
     targets: list[tuple[str, str]] = [
         ("Contributor", _ROLE_CONTRIBUTOR_GUID),

@@ -4,7 +4,8 @@ Responsibility: Azure SDK client factories for service wrappers
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
 Key entry points: `_get_mi_credential`, `credential_for_caller`, `resource_client`,
-`network_client`, `compute_client`, `storage_client`
+`network_client`, `compute_client`, `storage_client`, `subscription_client`,
+`authorization_client`, `msi_client`
 Risky contracts: Use managed identity/DefaultAzureCredential only; do not add client secrets or
 OBO flows.
 Validation: `uv run pytest -q api/tests`.
@@ -13,6 +14,7 @@ Validation: `uv run pytest -q api/tests`.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from azure.core.credentials import TokenCredential
 from azure.keyvault.secrets import SecretClient
@@ -80,3 +82,37 @@ def kv_secret_client(credential: TokenCredential, vault_uri: str) -> SecretClien
 
 def kv_mgmt_client(credential: TokenCredential, subscription_id: str) -> KeyVaultManagementClient:
     return KeyVaultManagementClient(credential, subscription_id)
+
+
+# ---------------------------------------------------------------------------
+# Lazy-import factories.
+#
+# These SDK clients are imported inside the function (not at module top) on
+# purpose: several tests monkeypatch the class on its azure.mgmt.* module
+# (e.g. ``monkeypatch.setattr("azure.mgmt.resource.SubscriptionClient", Fake)``)
+# and rely on the construction resolving the patched class at call time. A
+# top-level import would bind the real class once at import and defeat those
+# patches. Keep the import inside the function.
+# ---------------------------------------------------------------------------
+
+
+def subscription_client(credential: TokenCredential) -> Any:
+    """Return a SubscriptionClient (tenant-wide subscription listing)."""
+    from azure.mgmt.resource import SubscriptionClient
+
+    return SubscriptionClient(credential)
+
+
+def authorization_client(credential: TokenCredential, subscription_id: str) -> Any:
+    """Return an AuthorizationManagementClient (RBAC role assignments)."""
+    from azure.mgmt.authorization import AuthorizationManagementClient
+
+    return AuthorizationManagementClient(credential, subscription_id)
+
+
+def msi_client(credential: TokenCredential, subscription_id: str) -> Any:
+    """Return a ManagedServiceIdentityClient (user-assigned MI + federated creds)."""
+    from azure.mgmt.msi import ManagedServiceIdentityClient
+
+    return ManagedServiceIdentityClient(credential, subscription_id)
+

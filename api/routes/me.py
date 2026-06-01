@@ -61,13 +61,13 @@ def _list_visible_subscriptions() -> tuple[list[dict[str, Any]], str | None]:
             return [dict(item) for item in subs], error
 
     try:
-        from azure.mgmt.resource import SubscriptionClient
+        from api.services.azure_clients import subscription_client
     except Exception as exc:  # pragma: no cover - import guard
         return [], f"subscription_client_unavailable: {type(exc).__name__}"
 
     try:
         cred = get_credential()
-        client = SubscriptionClient(cred)
+        client = subscription_client(cred)
         subs: list[dict[str, Any]] = []
         for s in client.subscriptions.list():
             state = s.state

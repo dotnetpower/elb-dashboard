@@ -41,6 +41,7 @@ from api.services.blast.result_analytics import (
     RESULTS_MAX_FILES,
     annotate_result_hit,
     list_parseable_result_blobs,
+    read_result_blob_texts_parallel,
 )
 from api.services.sanitise import sanitise
 
@@ -420,7 +421,6 @@ def blast_job_results_export(
         EXPORT_EXTRA_COLUMNS,
         parse_blast_result_content,
     )
-    from api.services.storage.data import read_result_blob_text
 
     cred = get_credential()
     _maybe_open_local_storage_access(
@@ -452,17 +452,19 @@ def blast_job_results_export(
 
     all_hits: list[dict[str, Any]] = []
     read_failures = 0
-    for blob_info in result_blobs[:RESULTS_MAX_FILES]:
+    reads = read_result_blob_texts_parallel(
+        storage_account,
+        result_blobs[:RESULTS_MAX_FILES],
+        max_bytes=RESULTS_EXPORT_MAX_BYTES,
+    )
+    for blob_path, content, read_exc in reads:
+        if not blob_path:
+            continue
         try:
-            content = read_result_blob_text(
-                cred,
-                storage_account,
-                "results",
-                blob_info["name"],
-                max_bytes=RESULTS_EXPORT_MAX_BYTES,
-            )
+            if read_exc is not None:
+                raise read_exc
             all_hits.extend(
-                annotate_result_hit(hit, str(blob_info["name"]))
+                annotate_result_hit(hit, blob_path)
                 for hit in parse_blast_result_content(content)
             )
         except Exception:
@@ -632,30 +634,25 @@ def _export_raw_result_text(
     cred: Any,
     storage_account: str,
 ) -> StreamingResponse:
-    from api.services.storage.data import read_result_blob_text
-
     contents: list[tuple[str, str]] = []
     read_failures = 0
-    for blob_info in result_blobs[:RESULTS_MAX_FILES]:
-        blob_name = str(blob_info.get("name") or "")
+    reads = read_result_blob_texts_parallel(
+        storage_account,
+        result_blobs[:RESULTS_MAX_FILES],
+        max_bytes=RESULTS_EXPORT_MAX_BYTES,
+    )
+    for blob_name, content, read_exc in reads:
         if not blob_name:
             continue
-        try:
-            content = read_result_blob_text(
-                cred,
-                storage_account,
-                "results",
-                blob_name,
-                max_bytes=RESULTS_EXPORT_MAX_BYTES,
-            )
-            if export_format == "xml" and not _looks_like_blast_xml(content):
-                continue
-            if export_format == "text" and _looks_like_blast_xml(content):
-                continue
-            contents.append((blob_name, content))
-        except Exception:
+        if read_exc is not None:
             read_failures += 1
             LOGGER.debug("results raw export: failed to read blob", exc_info=True)
+            continue
+        if export_format == "xml" and not _looks_like_blast_xml(content):
+            continue
+        if export_format == "text" and _looks_like_blast_xml(content):
+            continue
+        contents.append((blob_name, content))
 
     if not contents:
         if read_failures:

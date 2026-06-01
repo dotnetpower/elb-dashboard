@@ -446,10 +446,8 @@ def azure_discovery_probe(
     then resource_groups.list on the first sub) so do not poll this
     from a dashboard — use it as a one-shot post-deploy sanity check.
     """
-    from azure.mgmt.resource import SubscriptionClient
-
     from api.services import get_credential
-    from api.services.azure_clients import resource_client
+    from api.services.azure_clients import resource_client, subscription_client
     from api.services.sanitise import sanitise
 
     _ = caller  # accepted for auth-gate side effect; not echoed back
@@ -480,7 +478,7 @@ def azure_discovery_probe(
     # 2. Subscriptions list (forces a real ARM token via IMDS / MI).
     sub_id: str | None = None
     try:
-        client = SubscriptionClient(cred)
+        client = subscription_client(cred)
         # Hard cap so a misconfigured tenant with thousands of subs does
         # not turn this probe into an outage.
         samples: list[dict[str, str]] = []

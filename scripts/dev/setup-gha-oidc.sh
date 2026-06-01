@@ -44,14 +44,11 @@ APP_NAME="${APP_NAME:-gha-elb-dashboard}"
 
 # ---------------------------------------------------------------------------
 # Discover Azure resource names from azd env (preferred) or env vars.
+# load_azd_env only fills keys that are currently UNSET (set-vs-unset guard),
+# so an explicit empty-string export is preserved — see lib-env.sh.
 # ---------------------------------------------------------------------------
-if command -v azd >/dev/null 2>&1; then
-  while IFS='=' read -r key value; do
-    [[ -n "${key:-}" ]] || continue
-    value="${value%\"}"; value="${value#\"}"
-    [[ -z "${!key:-}" ]] && export "$key=$value"
-  done < <(azd env get-values 2>/dev/null || true)
-fi
+. "$REPO_ROOT/scripts/dev/lib-env.sh"
+load_azd_env
 
 : "${AZURE_SUBSCRIPTION_ID:?AZURE_SUBSCRIPTION_ID not set (run 'azd env refresh' or export it)}"
 : "${AZURE_TENANT_ID:?AZURE_TENANT_ID not set}"

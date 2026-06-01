@@ -108,11 +108,11 @@ def list_subscriptions(
     caller: CallerIdentity = Depends(require_caller),
 ) -> list[dict[str, Any]]:
     """List subscriptions visible to the api sidecar's managed identity."""
-    from azure.mgmt.resource import SubscriptionClient
+    from api.services.azure_clients import subscription_client
 
     cred = get_credential()
     try:
-        client = SubscriptionClient(cred)
+        client = subscription_client(cred)
         subs: list[dict[str, Any]] = []
         for s in client.subscriptions.list():
             state = s.state
@@ -175,11 +175,11 @@ def list_locations(
     Returns an empty array on failure so the SPA can fall back to its
     bundled `AZURE_REGIONS` list.
     """
-    from azure.mgmt.resource import SubscriptionClient
+    from api.services.azure_clients import subscription_client
 
     cred = get_credential()
     try:
-        client = SubscriptionClient(cred)
+        client = subscription_client(cred)
         locations: list[dict[str, Any]] = []
         for loc in client.subscriptions.list_locations(subscription_id):
             # Skip non-physical regions (`category != "Recommended"` includes

@@ -98,8 +98,7 @@ def setup_workload_identity(
     return shape (``mi_client_id`` etc.) is unchanged.
     """
 
-    from azure.mgmt.authorization import AuthorizationManagementClient
-    from azure.mgmt.msi import ManagedServiceIdentityClient
+    from api.services.azure_clients import authorization_client, msi_client
 
     # 1. OIDC issuer URL from the cluster (must already be enabled).
     aks = aks_client(cred, subscription_id)
@@ -114,7 +113,7 @@ def setup_workload_identity(
         )
 
     # 2. User-Assigned Managed Identity (idempotent create_or_update).
-    msi = ManagedServiceIdentityClient(cred, subscription_id)
+    msi = msi_client(cred, subscription_id)
     mi = msi.user_assigned_identities.create_or_update(
         resource_group,
         MI_NAME,
@@ -143,7 +142,7 @@ def setup_workload_identity(
     # other failure is fatal. The pod cannot perform its job without these
     # roles, and surfacing "succeeded" while the pod 403s on first call is
     # the failure mode this branch exists to prevent.
-    auth = AuthorizationManagementClient(cred, subscription_id)
+    auth = authorization_client(cred, subscription_id)
     roles_assigned: list[str] = []
     roles_failed: list[tuple[str, str]] = []
 

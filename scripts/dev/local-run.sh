@@ -79,7 +79,9 @@ load_local_azure_env() {
     key="${key#export }"
     case "$key" in
       AZURE_SUBSCRIPTION_ID|AZURE_TENANT_ID|ELB_LOCAL_STORAGE_ACCOUNT|ELB_LOCAL_STORAGE_RG|API_CLIENT_ID|AUTH_DEV_BYPASS|VITE_AUTH_DEV_BYPASS)
-        if [[ -z "${!key:-}" ]]; then
+        # Set-vs-unset guard (${!key+x}) preserves an explicit empty export,
+        # e.g. AUTH_DEV_BYPASS= passed on the command line — see lib-env.sh.
+        if [[ -z "${!key+x}" ]]; then
           if [[ "$value" == \"*\" && "$value" == *\" ]]; then
             value="${value:1:${#value}-2}"
           elif [[ "$value" == \'*\' && "$value" == *\' ]]; then

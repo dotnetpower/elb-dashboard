@@ -64,49 +64,10 @@ release_build_number() {
   fi
 }
 
-strip_quotes() {
-  local value="${1:-}"
-  value="${value%\"}"
-  value="${value#\"}"
-  printf '%s' "$value"
-}
-
-load_simple_env_file() {
-  local file="${1:-}"
-  [[ -f "$file" ]] || return 0
-  shift || true
-  local -A SKIP=()
-  local k
-  for k in "$@"; do SKIP["$k"]=1; done
-  while IFS='=' read -r key value; do
-    [[ -n "${key:-}" ]] || continue
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    [[ -z "${SKIP[$key]:-}" ]] || continue
-    value="$(strip_quotes "${value:-}")"
-    # Treat empty-string export (VAR='') as an explicit value, not unset.
-    # Without this guard a caller's deliberate empty value (e.g. unsetting
-    # VITE_API_BASE_URL before a cloud frontend deploy) silently gets
-    # overwritten by web/.env.local — see 2026-05-25 validation note.
-    if [[ -z "${!key+x}" ]]; then
-      export "$key=$value"
-    fi
-  done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" || true)
-}
-
-load_azd_env() {
-  command -v azd >/dev/null 2>&1 || return 0
-  command -v timeout >/dev/null 2>&1 || return 0
-  local values
-  values="$(timeout 8s azd env get-values 2>/dev/null || true)"
-  while IFS='=' read -r key value; do
-    [[ -n "${key:-}" ]] || continue
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    value="$(strip_quotes "${value:-}")"
-    if [[ -z "${!key:-}" ]]; then
-      export "$key=$value"
-    fi
-  done <<< "$values"
-}
+# Env-loading helpers (strip_quotes / load_simple_env_file / load_azd_env)
+# live in lib-env.sh so the set-vs-unset guard cannot drift back to the
+# buggy `${!key:-}` form — see lib-env.sh "Risky contracts".
+. "$REPO_ROOT/scripts/dev/lib-env.sh"
 
 provider_registration_marker() {
   printf '%s/.logs/provider-registration.%s.ok' "$REPO_ROOT" "${AZURE_SUBSCRIPTION_ID:-default}"

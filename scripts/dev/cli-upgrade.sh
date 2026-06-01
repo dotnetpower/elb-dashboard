@@ -206,28 +206,11 @@ done
 case "$SCOPE" in worker|beat) SCOPE="api" ;; esac
 
 # ---------------------------------------------------------------------------
-# Env loading (mirrors quick-deploy.sh load_simple_env_file + load_azd_env).
+# Env loading — shared helpers (strip_quotes / load_simple_env_file /
+# load_azd_env) live in lib-env.sh so the set-vs-unset guard cannot drift
+# back to the buggy `${!key:-}` form. See lib-env.sh "Risky contracts".
 # ---------------------------------------------------------------------------
-strip_quotes() { local v="${1:-}"; v="${v%\"}"; v="${v#\"}"; printf '%s' "$v"; }
-load_simple_env_file() {
-  local file="${1:-}"; [[ -f "$file" ]] || return 0
-  while IFS='=' read -r key value; do
-    [[ -n "${key:-}" ]] || continue
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    value="$(strip_quotes "${value:-}")"
-    if [[ -z "${!key:-}" ]]; then export "$key=$value"; fi
-  done < <(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$file" || true)
-}
-load_azd_env() {
-  command -v azd >/dev/null 2>&1 || return 0
-  local values; values="$(azd env get-values 2>/dev/null || true)"
-  while IFS='=' read -r key value; do
-    [[ -n "${key:-}" ]] || continue
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-    value="$(strip_quotes "${value:-}")"
-    if [[ -z "${!key:-}" ]]; then export "$key=$value"; fi
-  done <<< "$values"
-}
+. "$REPO_ROOT/scripts/dev/lib-env.sh"
 
 load_simple_env_file "$REPO_ROOT/.env"
 load_simple_env_file "$REPO_ROOT/.env.local"
