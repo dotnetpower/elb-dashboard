@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Link, useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ExternalLink, ArrowLeft, Play, AlertTriangle, Maximize2 } from "lucide-react";
@@ -108,7 +108,6 @@ export function SequenceDetail() {
   const summary = summaryQuery.data;
   const genbank = genbankQuery.data;
   const fasta = fastaQuery.data;
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const highlightRange = hasHighlight
     ? { start: highlightStart, stop: highlightStop }
     : null;
@@ -374,46 +373,29 @@ export function SequenceDetail() {
             <Maximize2 size={13} strokeWidth={1.5} style={{ verticalAlign: "-2px", marginRight: 4 }} />
             Advanced view (NCBI Sequence Viewer)
           </h2>
-          <button
-            type="button"
+          {/* NCBI serves every page with ``X-Frame-Options: SAMEORIGIN``, so
+              the Sequence Viewer cannot be embedded cross-origin in an
+              iframe — the browser refuses to render it ("connection
+              refused"). Open it in a new tab on the NCBI origin instead. The
+              dashboard sends no data; the link only carries the accession
+              {hasHighlight ? " and hit range" : ""}. */}
+          <a
             className="glass-button"
-            onClick={() => setShowAdvanced((v) => !v)}
-            aria-expanded={showAdvanced}
+            href={sviewerEmbedUrl(accession, highlightRange)}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
           >
-            {showAdvanced ? "Hide" : "Show"} sviewer
-          </button>
+            <ExternalLink size={13} strokeWidth={1.5} />
+            Open Sequence Viewer
+          </a>
         </div>
-        {!showAdvanced && (
-          <p className="muted" style={{ margin: 0, fontSize: 12 }}>
-            Loads the NCBI Sequence Viewer iframe (external) for full pan/zoom and track inspection.
-            The dashboard does not send any data; the embed only carries the accession{hasHighlight ? " and hit range" : ""}.
-          </p>
-        )}
-        {showAdvanced && (
-          // NCBI sviewer requires both ``allow-scripts`` and
-          // ``allow-same-origin`` to render — Sequence Viewer ships as a
-          // client-side JS app that reads from ncbi.nlm.nih.gov directly.
-          // Dropping ``allow-same-origin`` produces a blank track viewer.
-          // The combination is normally a sandbox escape, but the embed is
-          // pinned to the public NCBI origin which we already trust for the
-          // FASTA/GenBank fetches above, and ``referrerPolicy="no-referrer"``
-          // prevents the embed from learning the dashboard URL. If the
-          // embed is ever swapped to a different origin, drop
-          // ``allow-same-origin`` and revalidate.
-          <iframe
-            title={`NCBI Sequence Viewer · ${accession}`}
-            src={sviewerEmbedUrl(accession, highlightRange)}
-            style={{
-              width: "100%",
-              height: 520,
-              border: "1px solid var(--glass-border, rgba(255,255,255,0.06))",
-              borderRadius: 8,
-              background: "#fff",
-            }}
-            sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-            referrerPolicy="no-referrer"
-          />
-        )}
+        <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+          NCBI blocks embedding the Sequence Viewer in other sites, so it opens
+          in a new tab for full pan/zoom and track inspection. The dashboard
+          does not send any data; the link only carries the accession
+          {hasHighlight ? " and hit range" : ""}.
+        </p>
       </div>
     </div>
   );

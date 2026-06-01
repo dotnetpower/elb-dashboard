@@ -133,7 +133,7 @@ The example below uses the same `core_nt` monkeypox query shown in the result XM
   },
   "priority": 50,
   "idempotency_key": "core-nt-monkeypox-smoke-001",
-  "resource_profile": "core_nt_safe"
+  "resource_profile": "standard"
 }
 ```
 
@@ -142,6 +142,19 @@ That request maps to this BLAST command shape after the service resolves Storage
 ```bash
 blastn -db core_nt -evalue 0.05 -max_target_seqs 100 -outfmt 5 -query query.fasta -out results.out
 ```
+
+!!! warning "Large databases need a large-memory node or sharding"
+
+    `resource_profile` is free-form metadata only — it is echoed back on the job
+    status but does **not** select a machine type or enable sharding. A
+    full-database BLAST against a large database such as `core_nt` (~250 GB)
+    needs a cluster node with enough memory (for example `Standard_E32s_v5`,
+    256 GB). On a smaller node the submit fails its memory pre-flight with
+    `BLAST database ... memory requirements exceed memory available on selected machine type`.
+    To run `core_nt` on a smaller node, submit from the Dashboard with the
+    **Sharded throughput** execution profile (it partitions the database so each
+    shard fits node memory), recreate the cluster with a larger machine type, or
+    choose a smaller database.
 
 A successful submission returns `202` with a short OpenAPI `job_id`. Copy that value for polling; do not use the Dashboard UUID from a `/blast/jobs/<uuid>` page URL.
 
@@ -178,7 +191,7 @@ curl -X POST "https://api.example.internal/v1/jobs" \
   },
   "priority": "normal",
   "idempotency_key": "core-nt-monkeypox-smoke-001",
-  "resource_profile": "core_nt_safe"
+  "resource_profile": "standard"
 }
 JSON
 ```
@@ -204,7 +217,7 @@ The response shows the current job lifecycle state. Early responses commonly mov
   "last_progress_at": "2026-05-21T06:18:14.402000+00:00",
   "program": "blastn",
   "db": "https://stexample.blob.core.windows.net/blast-db/core_nt/core_nt",
-  "resource_profile": "core_nt_safe",
+  "resource_profile": "standard",
   "error": "",
   "kubernetes": {
     "summary": {
@@ -367,7 +380,7 @@ curl -X POST "https://api.example.internal/api/v1/elastic-blast/submit" \
   },
   "priority": "normal",
   "idempotency_key": "external-core-nt-monkeypox-001",
-  "resource_profile": "core_nt_safe",
+  "resource_profile": "standard",
   "external_correlation_id": "notebook-core-nt-run-42"
 }
 JSON

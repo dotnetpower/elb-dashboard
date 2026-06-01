@@ -246,6 +246,31 @@ preflight_permission_check() {
   ts "preflight: ARM read access OK on rg/acr/containerApp"
 }
 
+# ---------------------------------------------------------------------------
+# resolve_image_digest -- pin a mutable tag to its immutable digest.
+#
+# Azure Container Apps only rolls a NEW revision when the template's image
+# string changes. Patching a mutable tag (latest-main, latest, ...) that the
+# active revision already references is a byte-for-byte no-op, so a freshly
+# rebuilt image pushed under the SAME tag is silently ignored -- the deploy
+# "succeeds" but the old image keeps running and the version stamp never
+# changes. Resolving the tag to registry/image@sha256:... makes every
+# distinct build a distinct template -> a new revision always rolls. Falls
+# back to the tag ref (with a warning) when the manifest lookup fails, so a
+# transient ACR read error degrades to the old behaviour rather than
+# aborting the deploy.
+# ---------------------------------------------------------------------------
+resolve_image_digest() {
+  local ref="$1" digest
+  digest="$(az acr manifest show-metadata "$ref" --query digest -o tsv 2>/dev/null | tr -d '[:space:]')" || true
+  if [[ "$digest" == sha256:* ]]; then
+    printf '%s@%s' "${ref%:*}" "$digest"
+  else
+    printf 'WARN: could not resolve digest for %s; patching with the mutable tag (a re-pushed tag may not roll a new revision)\n' "$ref" >&2
+    printf '%s' "$ref"
+  fi
+}
+
 if [[ "$SIDECAR" == "all" ]]; then
   # ---------------------------------------------------------------------------
   # Parallel-build path: api / frontend / terminal images build concurrently
@@ -352,6 +377,9 @@ if ! $NO_BUILD; then
       --registry "$ACR_NAME" \
       --image "elb-api:${TAG}" \
       --file "api/Dockerfile" \
+      --build-arg "APP_VERSION=$APP_VERSION_VAL" \
+      --build-arg "APP_GIT_COMMIT=$GIT_COMMIT_VAL" \
+      --build-arg "APP_BUILD_TIME=$BUILD_TIME_VAL" \
       "." \
       -o none
     rc=$?
@@ -462,6 +490,18 @@ if $BUILD_ONLY; then
   ts "==> Done. Tag was: $TAG"
   exit 0
 fi
+
+  # Pin mutable tags to their immutable digests so the PATCH actually changes
+  # the Container App template and rolls a new revision. Without this,
+  # `deploy all latest-main` is a silent no-op whenever the active revision
+  # already references :latest-main (see resolve_image_digest).
+  ts "==> Resolving image tags to digests for a deterministic revision roll"
+  NEW_API="$(resolve_image_digest "$NEW_API")"
+  NEW_FRONTEND="$(resolve_image_digest "$NEW_FRONTEND")"
+  NEW_TERMINAL="$(resolve_image_digest "$NEW_TERMINAL")"
+  ts "      api/worker/beat -> $NEW_API"
+  ts "      frontend        -> $NEW_FRONTEND"
+  ts "      terminal        -> $NEW_TERMINAL"
 
   # Sequential PATCHes -- see the long comment at the top of this block.
   # api / worker / beat share the elb-api image and are patched one at a
@@ -608,6 +648,18 @@ if ! $NO_BUILD; then
     BUILD_ARGS=(
       --build-arg "TERMINAL_BASE_IMAGE=$(terminal_base_image)"
     )
+  elif [[ "$SIDECAR" == "api" || "$SIDECAR" == "worker" || "$SIDECAR" == "beat" ]]; then
+    # Bake the release version into the api image so /api/health reports it
+    # (api/__init__.py reads APP_VERSION). ACR builds run without .git in
+    # context, so resolve the values on the host.
+    APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"
+    GIT_COMMIT_VAL="${GIT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)}"
+    BUILD_TIME_VAL="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    BUILD_ARGS=(
+      --build-arg "APP_VERSION=$APP_VERSION_VAL"
+      --build-arg "APP_GIT_COMMIT=$GIT_COMMIT_VAL"
+      --build-arg "APP_BUILD_TIME=$BUILD_TIME_VAL"
+    )
   fi
 
   ts "==> Building $IMAGE_NAME:$TAG via ACR (no local Docker)"
@@ -653,6 +705,11 @@ case "$SIDECAR" in
   frontend)         TARGETS=(frontend) ;;
   terminal)         TARGETS=(terminal) ;;
 esac
+
+# Pin the mutable tag to its digest so the PATCH rolls a new revision even
+# when the active revision already references the same tag (see
+# resolve_image_digest in the helpers block).
+NEW_IMAGE="$(resolve_image_digest "$NEW_IMAGE")"
 
 for tgt in "${TARGETS[@]}"; do
   ts "==> Patching container '$tgt' on $CONTAINER_APP_NAME → $NEW_IMAGE"

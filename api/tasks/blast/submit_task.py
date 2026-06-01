@@ -813,6 +813,13 @@ def submit(
             retry_after_seconds=_blast._retry_after(payload, default=30),
         )
 
+    # Enrich known non-retryable failures with an actionable remediation hint.
+    # ElasticBLAST's full-DB memory rejection is accurate but opaque to a
+    # dashboard user who cannot edit the generated INI — point them at the
+    # "Sharded throughput" profile or a larger-SKU cluster instead.
+    guidance = _blast._submit_failure_guidance(error)
+    if guidance:
+        error = f"{error}\n\n{guidance}"
     _blast._update_state(job_id, "submit_failed", status="failed", error_code=error)
     return {"job_id": job_id, "status": "failed", "phase": "submit_failed", "error": error}
 

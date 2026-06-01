@@ -127,6 +127,8 @@ from api.tasks.blast.cancel_task import cancel  # noqa: E402
 from api.tasks.blast.cli_parsing import (  # noqa: E402,F401
     ELASTIC_BLAST_CFG_FILE,
     ELASTIC_BLAST_JOB_ID_RE,
+    INSUFFICIENT_MEMORY_GUIDANCE,
+    MEMORY_LIMIT_GUIDANCE,
     RETRYABLE_ERROR_CATEGORIES,
     RETRYABLE_EXIT_CODES,
     _elastic_blast_argv,
@@ -135,6 +137,7 @@ from api.tasks.blast.cli_parsing import (  # noqa: E402,F401
     _last_json,
     _result_error,
     _retry_after,
+    _submit_failure_guidance,
     _submit_success_status,
 )
 from api.tasks.blast.config_shims import (  # noqa: E402,F401

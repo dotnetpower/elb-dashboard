@@ -203,10 +203,25 @@ def test_build_config_content_rejects_relative_path_traversal() -> None:
 def test_elastic_blast_argv_uses_cfg_file() -> None:
     argv = blast._elastic_blast_argv("submit", "abc-123")
 
-    assert argv == ["elastic-blast", "submit", "--cfg", "elastic-blast.ini"]
+    assert argv[:4] == ["elastic-blast", "submit", "--cfg", "elastic-blast.ini"]
+    # Full progress log is routed to stderr so the dashboard live stream captures
+    # it; without this the submit step only emits a handful of print() markers.
+    assert argv[argv.index("--logfile") + 1] == "stderr"
+    assert argv[argv.index("--loglevel") + 1] == "INFO"
     assert "--json" not in argv
     assert "--idempotency-key" not in argv
     assert "bash" not in argv
+
+
+def test_elastic_blast_loglevel_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELASTIC_BLAST_LOGLEVEL", "debug")
+    argv = blast._elastic_blast_argv("submit", "abc-123")
+    assert argv[argv.index("--loglevel") + 1] == "DEBUG"
+
+    monkeypatch.setenv("ELASTIC_BLAST_LOGLEVEL", "bogus")
+    argv = blast._elastic_blast_argv("submit", "abc-123")
+    assert argv[argv.index("--loglevel") + 1] == "INFO"
+
 
 
 def test_submit_task_helpers_are_reexported_on_blast_package() -> None:
@@ -234,6 +249,7 @@ def test_submit_task_helpers_are_reexported_on_blast_package() -> None:
         "_result_error",
         "_is_retryable_result",
         "_retry_after",
+        "_submit_failure_guidance",
         "_requires_split_parent_submission",
         "_run_storage_query_split_parent_submission",
         "_submit_requires_node_warmup",
@@ -262,6 +278,41 @@ def test_retryable_result_uses_structured_category_and_exit_code() -> None:
     assert not blast._is_retryable_result(
         {"exit_code": 1}, {"kind": "error", "category": "invalid"}
     )
+
+
+def test_submit_failure_guidance_detects_insufficient_node_memory() -> None:
+    error = (
+        "ERROR: BLAST database https://acct.blob.core.windows.net/blast-db/core_nt/core_nt "
+        "memory requirements exceed memory available on selected machine type "
+        '"Standard_E16s_v5". Please select machine type with at least 251.7GB available memory.'
+    )
+
+    guidance = blast._submit_failure_guidance(error)
+
+    assert guidance == blast.INSUFFICIENT_MEMORY_GUIDANCE
+    assert "Sharded throughput" in guidance
+
+
+def test_submit_failure_guidance_detects_memory_limit_exceeds() -> None:
+    error = (
+        'ERROR: Memory limit "200G" exceeds memory available on the selected '
+        "machine type Standard_E16s_v5: 124GB. Please, select machine type "
+        "with more memory or lower memory limit"
+    )
+
+    guidance = blast._submit_failure_guidance(error)
+
+    assert guidance == blast.MEMORY_LIMIT_GUIDANCE
+    assert "memory limit" in guidance.lower()
+    # The full-DB sharding hint must NOT leak into the mem-limit case (sharding
+    # does not lower a per-search memory limit).
+    assert "Sharded throughput" not in guidance
+
+
+def test_submit_failure_guidance_is_none_for_unrelated_errors() -> None:
+    assert blast._submit_failure_guidance("") is None
+    assert blast._submit_failure_guidance(None) is None
+    assert blast._submit_failure_guidance("ERROR: query file not found") is None
 
 
 def test_update_state_uses_repository_contract(monkeypatch) -> None:
