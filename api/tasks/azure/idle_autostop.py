@@ -182,6 +182,14 @@ def auto_stop_aks(
         pref,
         repo=get_state_repo(),
         power_state=_power_state(pref),
+        # The beat driver preflight-stamps ``last_stop_at`` before
+        # enqueueing this task (its double-enqueue guard). Without
+        # ``ignore_cooldown`` the re-evaluation would always see that
+        # fresh stamp, return ``keep / cooldown``, and late-skip the
+        # stop forever. Cooldown is a beat-decide / SPA concern; the act
+        # task re-confirms only the decide-vs-act race gates (enabled,
+        # active jobs, extend, power_state).
+        ignore_cooldown=True,
     )
     if decision.verdict != "stop":
         LOGGER.info(

@@ -162,7 +162,14 @@ export function BlastSubmit() {
     setForm,
   });
 
-  const { warmupQuery, warmDbs, selectedDbShortName, isDbAlreadyWarm, warmDbInfo } =
+  const {
+    warmupQuery,
+    warmDbs,
+    selectedDbShortName,
+    isDbAlreadyWarm,
+    isWarmupStatusResolved,
+    warmDbInfo,
+  } =
     useWarmupStatus({
       subId,
       // The k8s warmup-status endpoint resolves the cluster via
@@ -210,9 +217,10 @@ export function BlastSubmit() {
         cluster: selectedCluster,
         database: selectedDbInfo,
         isDbAlreadyWarm,
+        isWarmupStatusResolved,
         outfmt: form.outfmt,
       }),
-    [selectedCluster, selectedDbInfo, isDbAlreadyWarm, form.outfmt],
+    [selectedCluster, selectedDbInfo, isDbAlreadyWarm, isWarmupStatusResolved, form.outfmt],
   );
   const shardingBlockedReason = !shardingAvailability.options[form.sharding_mode].enabled
     ? shardingAvailability.options[form.sharding_mode].reason
@@ -577,6 +585,8 @@ export function BlastSubmit() {
           preFlightPending={preFlightMutation.isPending}
           effectiveSearchSpace={selectedDbInfo?.web_blast_searchsp}
           lastSavedAt={lastSavedAt}
+          effectiveShardingMode={effectiveShardingMode}
+          isDbAlreadyWarm={isDbAlreadyWarm}
           permissionTooltip={submitPermissionTooltip}
           set={set}
           onPreFlight={() => preFlightMutation.mutate()}

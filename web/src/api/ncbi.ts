@@ -71,13 +71,13 @@ export interface NuccoreGenBank {
 
 export function getNuccoreSummary(accession: string) {
   return api.get<NuccoreSummary>(
-    `/api/ncbi/nuccore/${encodeURIComponent(accession)}`,
+    `/ncbi/nuccore/${encodeURIComponent(accession)}`,
   );
 }
 
 export function getNuccoreGenBank(accession: string) {
   return api.get<NuccoreGenBank>(
-    `/api/ncbi/nuccore/${encodeURIComponent(accession)}/genbank`,
+    `/ncbi/nuccore/${encodeURIComponent(accession)}/genbank`,
   );
 }
 
@@ -94,7 +94,7 @@ export function getNuccoreFastaPath(
   if (seqStart != null) params.set("seq_start", String(seqStart));
   if (seqStop != null) params.set("seq_stop", String(seqStop));
   const qs = params.toString();
-  return `/api/ncbi/nuccore/${encodeURIComponent(accession)}/fasta${qs ? `?${qs}` : ""}`;
+  return `/ncbi/nuccore/${encodeURIComponent(accession)}/fasta${qs ? `?${qs}` : ""}`;
 }
 
 export async function getNuccoreFasta(

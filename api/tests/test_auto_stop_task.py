@@ -85,7 +85,7 @@ def test_auto_stop_aks_re_evaluates_and_skips_when_active(
     monkeypatch.setattr(
         idle_autostop,
         "evaluate_cluster",
-        lambda pref, *, repo, power_state: IdleDecision(
+        lambda pref, *, repo, power_state, ignore_cooldown=False: IdleDecision(
             verdict="keep", reason="active_jobs:1", active_job_count=1
         ),
     )
@@ -116,7 +116,7 @@ def test_auto_stop_aks_calls_stop_when_evaluator_returns_stop(
     monkeypatch.setattr(
         idle_autostop,
         "evaluate_cluster",
-        lambda pref, *, repo, power_state: IdleDecision(
+        lambda pref, *, repo, power_state, ignore_cooldown=False: IdleDecision(
             verdict="stop", reason="idle:60m"
         ),
     )
@@ -137,6 +137,58 @@ def test_auto_stop_aks_calls_stop_when_evaluator_returns_stop(
     assert result["reason"] == "idle:60m"
     assert len(stop_calls) == 1
     assert stop_calls[0]["cluster_name"] == "elb-cluster"
+
+
+def test_auto_stop_aks_stops_despite_preflight_cooldown_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the beat driver stamps ``last_stop_at`` BEFORE enqueueing
+    the act task (its double-enqueue guard). The act task uses the REAL
+    ``evaluate_cluster`` and MUST still stop the idle cluster — otherwise
+    that fresh stamp trips ``is_in_cooldown`` and the act task late-skips
+    its own enqueued stop forever (the observed prod livelock where
+    ``auto_stop_aks late-skip reason=cooldown`` repeated every cooldown
+    window and the cluster never stopped).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from api.services.auto_stop import get_auto_stop_preference
+    from api.tasks.azure import idle_autostop
+
+    now = datetime.now(UTC)
+    save_auto_stop_preference(
+        _pref(
+            cluster_name="elb-cluster",
+            enabled=True,
+            cooldown_minutes=30,
+            # Preflight stamp the beat just wrote — well inside cooldown.
+            last_stop_at=(now - timedelta(minutes=1)).isoformat(timespec="seconds"),
+            # Anchored long ago so the idle window has elapsed.
+            created_at=(now - timedelta(hours=4)).isoformat(timespec="seconds"),
+        )
+    )
+    monkeypatch.setattr(idle_autostop, "_power_state", lambda _pref: "Running")
+    # Real evaluate_cluster with an idle (no active jobs) repo.
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: type("_R", (), {"list_for_scope": lambda self, **_kw: []})(),
+    )
+    stop_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.tasks.azure.stop_aks.run",
+        lambda **kwargs: stop_calls.append(kwargs) or {"status": "completed"},
+    )
+
+    result = idle_autostop.auto_stop_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+    )
+    assert result["action"] == "stop", result
+    assert len(stop_calls) == 1
+    persisted = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
+    assert persisted is not None
+    assert persisted.last_stop_reason.startswith("idle:")
 
 
 def test_evaluate_idle_clusters_enqueues_per_cluster(

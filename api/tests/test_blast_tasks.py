@@ -3560,6 +3560,116 @@ def test_reconcile_marks_old_quiet_row_worker_lost(monkeypatch: pytest.MonkeyPat
     assert repo.updates[0][1]["phase"] == "worker_lost"
 
 
+def test_reconcile_worker_lost_refines_stopped_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quiet row whose own cluster is Stopped surfaces ``cluster_stopped``.
+
+    The job targeted a multi-cluster sibling that was stopped mid-flight, so
+    the opaque ``worker_lost`` is replaced with an actionable reason + message
+    instead of leaving the dashboard with no error detail.
+    """
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j-stopped",
+                task_id="task-stopped",
+                updated_at="2025-01-01T00:00:00+00:00",
+                created_at="2025-01-01T00:00:00+00:00",
+                subscription_id="sub-1",
+                resource_group="rg-elb-cluster",
+                cluster_name="elb-cluster-01",
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    # K8s probe is unreachable (the cluster is stopped) so reconcile falls
+    # through to the quiet-row branch.
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("stopped")),
+    )
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_args, **_kwargs: {
+            "healthy": False,
+            "exists": True,
+            "power_state": "Stopped",
+            "reason": "cluster_stopped",
+        },
+    )
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=60)
+
+    assert summary["worker_lost"] == 1
+    update = repo.updates[0][1]
+    assert update["error_code"] == "cluster_stopped"
+    assert update["phase"] == "worker_lost"
+    assert update["status"] == "failed"
+    worker_lost_history = [
+        payload for _job, event, payload in repo.history if event == "reconcile_worker_lost"
+    ]
+    assert worker_lost_history, "expected a reconcile_worker_lost history entry"
+    detail = worker_lost_history[-1] or {}
+    assert detail.get("cluster_name") == "elb-cluster-01"
+    assert "elb-cluster-01" in str(detail.get("error"))
+    assert detail.get("power_state") == "Stopped"
+
+
+def test_reconcile_worker_lost_keeps_plain_code_when_cluster_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quiet row whose cluster looks healthy keeps the bare ``worker_lost``."""
+    repo = _FakeReconcileRepo(
+        [
+            _StaleRow(
+                job_id="j-healthy",
+                task_id="task-healthy",
+                updated_at="2025-01-01T00:00:00+00:00",
+                created_at="2025-01-01T00:00:00+00:00",
+                subscription_id="sub-1",
+                resource_group="rg-elb-cluster",
+                cluster_name="elb-cluster-02",
+            )
+        ]
+    )
+    _install_repo(monkeypatch, repo)
+
+    class FakeAsync:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.status = "PENDING"
+            self.result = None
+
+    monkeypatch.setattr("celery.result.AsyncResult", FakeAsync)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "api.services.monitoring.k8s_check_blast_status",
+        lambda *_args, **_kwargs: {"status": "unknown"},
+    )
+    monkeypatch.setattr(
+        "api.services.cluster_health.get_cluster_health",
+        lambda *_args, **_kwargs: {
+            "healthy": True,
+            "exists": True,
+            "power_state": "Running",
+            "reason": None,
+        },
+    )
+
+    summary = blast.reconcile_stale_jobs.run(stale_threshold_seconds=60)
+
+    assert summary["worker_lost"] == 1
+    assert repo.updates[0][1]["error_code"] == "worker_lost"
+
+
 def test_reconcile_logs_external_refresh_http_detail(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

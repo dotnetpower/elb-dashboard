@@ -248,6 +248,26 @@ export function ClusterCard({
     ? "A cluster is currently being provisioned. Wait for it to finish before adding another."
     : undefined;
 
+  // Dedupe the live provision: while the ProvisioningBanner is actively
+  // tracking a create, the same cluster also shows up as a `Creating` row in
+  // the list with every metric blank (`—`). Hide that row so the banner is the
+  // single source of truth for the in-flight cluster. The KPI line still
+  // counts it under "N provisioning". Match on name (+ RG when known) and only
+  // while the row is still provisioning, so a freshly-Ready cluster reappears.
+  const visibleClusters = useMemo(() => {
+    if (prov.provStatus !== "creating" || !prov.clusterName) return clusters;
+    const trackedName = prov.clusterName;
+    const trackedRg = prov.provisionResourceGroup;
+    return clusters.filter(
+      (c) =>
+        !(
+          c.name === trackedName &&
+          (!trackedRg || c.resource_group === trackedRg) &&
+          isAksProvisioning(c)
+        ),
+    );
+  }, [clusters, prov.provStatus, prov.clusterName, prov.provisionResourceGroup]);
+
   const openProvision = () => {
     if (addClusterDisabled) return;
     const suggested = nextElbClusterName(clusters, existingResourceGroupNames);
@@ -283,7 +303,9 @@ export function ClusterCard({
       title="Azure Kubernetes Service Cluster"
       subtitle={
         enabled
-          ? `Subscription-wide${resourceGroup ? ` · anchor: ${resourceGroup}` : ""}`
+          ? resourceGroup
+            ? `Workspace RG: ${resourceGroup} \u00b7 clusters listed subscription-wide`
+            : "Clusters listed subscription-wide"
           : "Configure subscription / RG"
       }
       status={prov.provStatus === "creating" ? "loading" : status}
@@ -469,7 +491,7 @@ export function ClusterCard({
             title="Dashboard backend /api/blast latency p95 and 5xx count over the last 15 minutes. Not a per-cluster signal."
             style={{ marginLeft: "auto", cursor: "help" }}
           >
-            Dashboard p95{" "}
+            Control-plane API p95{" "}
             <strong style={{ color: "var(--text-secondary)" }}>
               {dashboardMetricsDegraded || dashboardP95 == null
                 ? "\u2014"
@@ -499,7 +521,7 @@ export function ClusterCard({
           gap: "var(--space-2)",
         }}
       >
-        {clusters.map((c) => (
+        {visibleClusters.map((c) => (
           <ClusterItem
             key={`${c.resource_group}/${c.name}`}
             cluster={c}

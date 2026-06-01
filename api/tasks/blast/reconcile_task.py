@@ -37,6 +37,7 @@ LOGGER = logging.getLogger(__name__)
 __all__ = (
     "_celery_success_row_status",
     "_reconcile_row_k8s_status",
+    "_worker_lost_reason",
     "reconcile_stale_jobs",
 )
 
@@ -104,6 +105,67 @@ def _reconcile_row_k8s_status(
     return outcome
 
 
+def _worker_lost_reason(
+    *,
+    job_id: str,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> tuple[str, dict[str, Any]]:
+    """Refine an opaque ``worker_lost`` outcome with the target cluster state.
+
+    A submit row most often degrades to ``worker_lost`` because its AKS
+    cluster was stopped (auto-stop or manual) while ``elastic-blast submit``
+    was mid-flight: the worker then hangs against an unreachable API server
+    until this reconcile pass demotes the quiet row. Probing the *job's own*
+    cluster (multi-cluster aware — never the workspace anchor RG) lets the
+    dashboard show an actionable reason instead of a bare ``worker_lost``.
+
+    Returns ``(error_code, details)``. ``error_code`` falls back to
+    ``"worker_lost"`` (and ``details`` to ``{}``) when the cluster looks
+    healthy, the coordinates are incomplete, or ARM is unreachable — so the
+    legacy behaviour is preserved whenever the power state cannot be proven.
+    """
+    if not (subscription_id and resource_group and cluster_name):
+        return "worker_lost", {}
+    try:
+        from api.services import get_credential
+        from api.services.cluster_health import get_cluster_health
+
+        health = get_cluster_health(
+            get_credential(), subscription_id, resource_group, cluster_name
+        )
+    except Exception as exc:
+        LOGGER.info(
+            "reconcile_stale_jobs: cluster health probe skipped job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+        return "worker_lost", {}
+
+    reason = health.get("reason")
+    power_state = health.get("power_state")
+    if reason == "cluster_stopped":
+        return "cluster_stopped", {
+            "power_state": power_state,
+            "cluster_name": cluster_name,
+            "error": (
+                f"Target AKS cluster '{cluster_name}' is "
+                f"{power_state or 'not running'}. The in-flight job became "
+                "unreachable before it finished. Start the cluster and resubmit."
+            ),
+        }
+    if reason == "cluster_not_found":
+        return "cluster_not_found", {
+            "cluster_name": cluster_name,
+            "error": (
+                f"Target AKS cluster '{cluster_name}' no longer exists in "
+                f"'{resource_group}'. The job could not be completed."
+            ),
+        }
+    return "worker_lost", {}
+
+
 def _celery_success_row_status(row: Any, result: Any) -> tuple[str, str]:
     if not isinstance(result, Mapping):
         return "completed", "completed"
@@ -141,9 +203,12 @@ def reconcile_stale_jobs(
          artifacts exist.
      3. Falling back to the external OpenAPI plane when Celery has no
          record (worker died, broker lost the message, etc.).
-     4. Marking rows ``failed`` with ``error_code=worker_lost`` when no
-       upstream still knows about the job and the row has been quiet for
-       longer than ``stale_threshold_seconds``.
+     4. Marking rows ``failed`` when no upstream still knows about the job
+       and the row has been quiet for longer than
+       ``stale_threshold_seconds``. The ``error_code`` is refined from the
+       bare ``worker_lost`` to ``cluster_stopped`` / ``cluster_not_found``
+       (with a human-readable ``error``) when the job's own AKS cluster is
+       provably stopped or gone, so the dashboard can explain the failure.
 
     Runs every minute via the beat schedule registered in
     ``api/celery_app.py``. Idempotent — calling it twice in a row is a
@@ -334,13 +399,23 @@ def reconcile_stale_jobs(
             if quiet_seconds >= stale_threshold_seconds:
                 # Mirror the FAILURE/REVOKED branch above: route through
                 # `_update_state` so orphan running step entries get demoted
-                # to `failed` and the UI stops spinning.
+                # to `failed` and the UI stops spinning. Refine the opaque
+                # `worker_lost` code with the job's own cluster power state so
+                # the dashboard can explain a stopped/unreachable cluster
+                # instead of just "worker-lost".
+                error_code, extra = _worker_lost_reason(
+                    job_id=row.job_id,
+                    subscription_id=str(sub),
+                    resource_group=str(rg),
+                    cluster_name=str(cluster),
+                )
                 _blast._update_state(
                     row.job_id,
                     "worker_lost",
                     status="failed",
                     event="reconcile_worker_lost",
-                    error_code="worker_lost",
+                    error_code=error_code,
+                    **extra,
                 )
                 summary["worker_lost"] += 1
             else:

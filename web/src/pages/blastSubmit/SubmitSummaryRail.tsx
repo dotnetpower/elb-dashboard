@@ -4,6 +4,10 @@ import { Link } from "react-router-dom";
 
 import { BLASTN_OPTIMIZE, type FormState } from "@/pages/blastSubmitModel";
 import { BlastCommandPreview } from "@/pages/blastSubmit/ui";
+import {
+  runtimeShardingDisplay,
+  runtimeWarmupDisplay,
+} from "@/pages/blastSubmit/runtimeSummaryDisplay";
 import type { PreFlightResult } from "@/pages/blastSubmit/usePreFlight";
 import { PreFlightResultPanel } from "@/pages/blastSubmit/PreFlightResultPanel";
 import type { ProgramMeta, ToastFn } from "@/pages/blastSubmit/types";
@@ -39,6 +43,21 @@ export interface SubmitSummaryRailProps {
   preFlightPending: boolean;
   effectiveSearchSpace?: number;
   lastSavedAt?: Date | null;
+  /**
+   * The sharding mode that will actually be submitted. The submit payload
+   * derives this from cluster + warm + capacity state, independently of the
+   * reconcile effect that mutates ``form.sharding_mode``. Displaying it (rather
+   * than the raw ``form.sharding_mode``) keeps the Runtime summary truthful even
+   * before the reconcile effect has run, e.g. while warmup-status is still
+   * resolving. Defaults to ``form.sharding_mode`` when omitted.
+   */
+  effectiveShardingMode?: FormState["sharding_mode"];
+  /**
+   * Whether the selected database is already warm on the selected cluster.
+   * When true, warmup is effectively satisfied even if ``form.enable_warmup``
+   * has not yet been flipped on by the reconcile effect.
+   */
+  isDbAlreadyWarm?: boolean;
   /** When set, overrides the submit-button title with the
    *  "you do not have permission to submit BLAST jobs" tooltip
    *  computed by ``permissionDeniedTooltip``. Critique #6. */
@@ -68,6 +87,8 @@ export function SubmitSummaryRail({
   preFlightPending,
   effectiveSearchSpace,
   lastSavedAt,
+  effectiveShardingMode,
+  isDbAlreadyWarm,
   permissionTooltip,
   set,
   onPreFlight,
@@ -117,6 +138,20 @@ export function SubmitSummaryRail({
       ? (BLASTN_OPTIMIZE.find((o) => o.value === form.optimize)?.value ?? "—")
       : "—";
 
+  // Show the values that will actually run, not the raw form state. The submit
+  // payload uses ``effectiveShardingMode`` (and treats an already-warm DB as
+  // satisfied), so the Runtime summary must mirror that — otherwise it reports
+  // "off" while a sharded, warm run is queued. See the reconcile effect in
+  // BlastSubmit for why ``form`` can lag the effective values.
+  const shardingDisplay = runtimeShardingDisplay({
+    effectiveShardingMode,
+    formShardingMode: form.sharding_mode,
+  });
+  const warmupDisplay = runtimeWarmupDisplay({
+    isDbAlreadyWarm: isDbAlreadyWarm ?? false,
+    enableWarmup: form.enable_warmup,
+  });
+
   return (
     <aside className="bsl-rail" aria-label="Search summary">
       {/* ── Input summary block ─────────────────────────────────── */}
@@ -165,11 +200,11 @@ export function SubmitSummaryRail({
         </div>
         <div className="bsl-rail__kv">
           <span className="bsl-rail__k">Warmup</span>
-          <span className="bsl-rail__v">{form.enable_warmup ? "enabled" : "off"}</span>
+          <span className="bsl-rail__v">{warmupDisplay}</span>
         </div>
         <div className="bsl-rail__kv">
           <span className="bsl-rail__k">Sharding</span>
-          <span className="bsl-rail__v">{form.sharding_mode}</span>
+          <span className="bsl-rail__v">{shardingDisplay}</span>
         </div>
         <div className="bsl-rail__kv">
           <span className="bsl-rail__k">E-value</span>

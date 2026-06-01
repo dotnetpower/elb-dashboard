@@ -93,6 +93,35 @@ def test_cooldown_keeps_cluster() -> None:
     assert decision.reason == "cooldown"
 
 
+def test_ignore_cooldown_bypasses_cooldown_gate() -> None:
+    """The act task passes ``ignore_cooldown=True`` so the beat driver's
+    own preflight ``last_stop_at`` stamp cannot make the act task skip
+    the very stop it was enqueued to perform (the self-livelock fix).
+
+    With a fresh ``last_stop_at`` (inside the cooldown window) and an idle
+    cluster, the default path keeps (cooldown) while ``ignore_cooldown``
+    proceeds to ``stop``.
+    """
+    pref = _pref(
+        last_stop_at=(_NOW - timedelta(minutes=1)).isoformat(timespec="seconds"),
+        created_at=(_NOW - timedelta(hours=4)).isoformat(timespec="seconds"),
+    )
+    # Default: cooldown wins.
+    blocked = evaluate_cluster(pref, repo=_FakeRepo([]), now=_NOW, power_state="Running")
+    assert blocked.verdict == "keep"
+    assert blocked.reason == "cooldown"
+    # Act task: cooldown bypassed, idle cluster stops.
+    proceed = evaluate_cluster(
+        pref,
+        repo=_FakeRepo([]),
+        now=_NOW,
+        power_state="Running",
+        ignore_cooldown=True,
+    )
+    assert proceed.verdict == "stop"
+    assert proceed.reason.startswith("idle:")
+
+
 def test_extend_overrides_idle() -> None:
     pref = _pref(
         extend_until=(_NOW + timedelta(minutes=10)).isoformat(timespec="seconds"),

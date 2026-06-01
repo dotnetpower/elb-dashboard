@@ -7,6 +7,7 @@ import { loadSavedConfig } from "@/components/SetupWizard";
 import { useToast } from "@/components/Toast";
 import { useBlastResultActions } from "@/hooks/useBlastResultActions";
 import { useClusterReadiness, useTerminalSidecarHealth } from "@/hooks/usePrerequisites";
+import { resolveBlastJobScope } from "@/pages/blastResults/blastJobScope";
 import {
   resolveBlastJobPhase,
   resolveBlastResultState,
@@ -136,30 +137,20 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
   const databaseMetadata =
     databaseMetadataQuery.data?.database_metadata ?? job?.database_metadata ?? null;
   const payload = job?.payload;
-  const payloadSubscriptionId = stringFromPayload(payload, "subscription_id");
-  const payloadStorageAccount = stringFromPayload(payload, "storage_account");
-  const payloadResourceGroup = stringFromPayload(payload, "resource_group");
-  const payloadClusterName =
-    stringFromPayload(payload, "cluster_name") ||
-    stringFromPayload(payload, "aks_cluster_name");
 
-  const subscriptionId =
-    searchParams.get("subscription_id") ||
-    payloadSubscriptionId ||
-    config?.subscriptionId ||
-    "";
-  const storageAccount =
-    searchParams.get("storage_account") ||
-    payloadStorageAccount ||
-    config?.storageAccountName ||
-    "";
-  const resourceGroup =
-    searchParams.get("resource_group") ||
-    payloadResourceGroup ||
-    config?.workloadResourceGroup ||
-    "";
-  const clusterName =
-    searchParams.get("cluster_name") || payloadClusterName || "elb-cluster";
+  // The backend records the cluster this job actually ran on in
+  // `job.infrastructure`. The cluster picker is subscription-wide, so a job's
+  // cluster may live OUTSIDE the workspace anchor RG. When the submit payload
+  // is missing a field (legacy jobs, or fields the backend never echoes back),
+  // we must fall back to the job's own infrastructure block — NOT the workspace
+  // anchor RG/cluster — otherwise results listing, downloads, exports, and
+  // cancel all target the wrong resource group/cluster for cross-RG fleets.
+  const { subscriptionId, storageAccount, resourceGroup, clusterName } = resolveBlastJobScope({
+    searchParams,
+    payload,
+    infrastructure: job?.infrastructure,
+    config,
+  });
 
   const phaseInfo = resolveBlastJobPhase(job);
 
@@ -305,8 +296,3 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
 }
 
 export type BlastResultsState = ReturnType<typeof useBlastResultsState>;
-
-function stringFromPayload(payload: Record<string, unknown> | undefined, key: string) {
-  const value = payload?.[key];
-  return typeof value === "string" ? value : "";
-}

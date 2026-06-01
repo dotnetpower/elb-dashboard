@@ -89,6 +89,26 @@ describe("deriveShardingAvailability", () => {
     expect(availability.options.precise.reason).toContain("Warm this database");
   });
 
+  it("shows a neutral checking message while warm status is unresolved", () => {
+    const availability = deriveShardingAvailability({
+      cluster,
+      database,
+      isDbAlreadyWarm: false,
+      isWarmupStatusResolved: false,
+      outfmt: 5,
+    });
+
+    expect(availability.options.precise.enabled).toBe(false);
+    expect(availability.options.approximate.enabled).toBe(false);
+    // Must NOT tell the user to warm a possibly-already-warm DB.
+    expect(availability.options.approximate.reason).toContain(
+      "Checking warm status",
+    );
+    expect(availability.options.approximate.reason).not.toContain(
+      "Warm this database",
+    );
+  });
+
   it("keeps baseline mode available for warm DBs without prepared shard layouts", () => {
     const availability = deriveShardingAvailability({
       cluster,

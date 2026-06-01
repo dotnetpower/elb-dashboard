@@ -173,6 +173,7 @@ def evaluate_cluster(
     repo: StateRepoProtocol,
     now: datetime | None = None,
     power_state: str = "",
+    ignore_cooldown: bool = False,
 ) -> IdleDecision:
     """Decide whether an AKS cluster should be auto-stopped.
 
@@ -186,6 +187,15 @@ def evaluate_cluster(
         power_state: Latest ARM ``power_state`` (``Running`` / ``Stopped``
             / ``Starting`` / …). The evaluator does not fetch it itself;
             the driver supplies it from `cluster_health.get_cluster_health`.
+        ignore_cooldown: When True, skip the cooldown gate. The act task
+            (`auto_stop_aks`) MUST set this: the beat driver stamps
+            ``last_stop_at`` as a preflight double-enqueue guard *before*
+            enqueueing the act task, so the act task's re-evaluation would
+            otherwise always trip its own freshly-written cooldown and
+            late-skip the very stop it was enqueued to perform (a
+            permanent livelock — the cluster never stops). The beat
+            ``decide`` pass and the SPA countdown keep cooldown enforced
+            (default False) so a real recent stop still blocks a re-stop.
 
     Returns:
         `IdleDecision` describing the outcome.
@@ -212,7 +222,7 @@ def evaluate_cluster(
             cluster_power_state=power_state,
         )
 
-    if is_in_cooldown(pref, now=current):
+    if not ignore_cooldown and is_in_cooldown(pref, now=current):
         return IdleDecision(
             verdict="keep",
             reason="cooldown",

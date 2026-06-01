@@ -26,6 +26,15 @@ export interface DeriveShardingAvailabilityArgs {
   cluster?: AksClusterSummary;
   database?: BlastDatabase;
   isDbAlreadyWarm: boolean;
+  /**
+   * Whether the warmup-status query has produced a trustworthy answer for the
+   * selected cluster yet. While it is still disabled (cluster not workload-
+   * ready) or loading, `isDbAlreadyWarm` is `false` even for a DB that is
+   * actually warm, so the gate must show a neutral "checking" message instead
+   * of telling the user to warm an already-warm database. Defaults to `true`
+   * to preserve the legacy behaviour for callers that do not pass it.
+   */
+  isWarmupStatusResolved?: boolean;
   outfmt: number;
 }
 
@@ -52,6 +61,7 @@ function unavailableReason({
   cluster,
   database,
   isDbAlreadyWarm,
+  isWarmupStatusResolved = true,
   outfmt,
   capacityPlan,
 }: DeriveShardingAvailabilityArgs & {
@@ -59,8 +69,14 @@ function unavailableReason({
 }): string | null {
   if (!database) return "Select a database first.";
   if (!cluster) return "Select a cluster first.";
-  if (!isDbAlreadyWarm)
+  if (!isDbAlreadyWarm) {
+    // Distinguish "we have not heard back yet" from "confirmed cold". Telling a
+    // user to warm a database that is already warm (but whose status query is
+    // still loading/disabled) is the warmup-status conflation bug.
+    if (!isWarmupStatusResolved)
+      return "Checking warm status on the selected cluster\u2026";
     return "Warm this database on the selected cluster before using sharded performance modes.";
+  }
   if (database.sharding_in_progress)
     return "Shard preparation is still running for this database.";
   if (database.sharding_error)
@@ -86,6 +102,7 @@ export function deriveShardingAvailability({
   cluster,
   database,
   isDbAlreadyWarm,
+  isWarmupStatusResolved = true,
   outfmt,
 }: DeriveShardingAvailabilityArgs): ShardingAvailability {
   const nodeCount = cluster ? getWorkloadNodeCount(cluster) : null;
@@ -103,6 +120,7 @@ export function deriveShardingAvailability({
     cluster,
     database,
     isDbAlreadyWarm,
+    isWarmupStatusResolved,
     outfmt,
     capacityPlan,
   });
