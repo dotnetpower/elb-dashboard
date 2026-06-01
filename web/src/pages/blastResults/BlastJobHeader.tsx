@@ -96,6 +96,7 @@ export function BlastJobHeader({
   const [copiedId, setCopiedId] = useState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const [loadingQuery, setLoadingQuery] = useState(false);
+  const [copyingCitation, setCopyingCitation] = useState(false);
 
   const hydratableFields = jobPayload ? partialFormFromJobPayload(jobPayload) : null;
   const canReuseConfig = Boolean(hydratableFields);
@@ -128,6 +129,20 @@ export function BlastJobHeader({
       setTimeout(() => setCopiedId(false), 1500);
     } catch {
       toast("Failed to copy search ID", "error");
+    }
+  };
+
+  const handleCopyCitation = async () => {
+    if (copyingCitation) return;
+    setCopyingCitation(true);
+    try {
+      const citation = await blastApi.getCitation(jobId, "text");
+      await navigator.clipboard.writeText(citation.citation);
+      toast("Methods citation copied to clipboard", "success");
+    } catch {
+      toast("Citation is not available for this search yet", "error");
+    } finally {
+      setCopyingCitation(false);
     }
   };
 
@@ -330,6 +345,25 @@ export function BlastJobHeader({
           }}
         >
           <Download size={14} strokeWidth={1.5} /> Save settings
+        </button>
+        <button
+          className="glass-button"
+          onClick={handleCopyCitation}
+          disabled={copyingCitation}
+          title="Copy a reproducible Methods citation (program, version, database snapshot) to the clipboard."
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            fontSize: 12,
+          }}
+        >
+          {copyingCitation ? (
+            <Loader2 size={14} strokeWidth={1.5} className="spin" />
+          ) : (
+            <Copy size={14} strokeWidth={1.5} />
+          )}{" "}
+          {copyingCitation ? "Copying…" : "Copy citation"}
         </button>
       </div>
 
@@ -709,6 +743,27 @@ function buildDownloadAllOptions(
       detail: "Comma-separated",
       format: "hit-table-csv",
       title: "Download parsed hits as a CSV table",
+    },
+    {
+      key: "ncbi-hit-table-text",
+      label: "NCBI Descriptions (text)",
+      detail: "Per-subject, NCBI columns",
+      format: "ncbi-hit-table-text",
+      title: "Download an NCBI Web BLAST-style Descriptions table (tab-separated)",
+    },
+    {
+      key: "ncbi-hit-table-csv",
+      label: "NCBI Descriptions (CSV)",
+      detail: "Per-subject, NCBI columns",
+      format: "ncbi-hit-table-csv",
+      title: "Download an NCBI Web BLAST-style Descriptions table (CSV)",
+    },
+    {
+      key: "ncbi-report-text",
+      label: "NCBI Report (text)",
+      detail: "With provenance header",
+      format: "ncbi-report-text",
+      title: "Download an NCBI-style report with an ELB provenance header",
     },
     {
       key: "multi-xml2",

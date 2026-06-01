@@ -1,0 +1,60 @@
+/*
+ * Surface styling for the AKS cluster bento cells.
+ *
+ * The visual surface (gradient, border, radius, hover) lives here so the
+ * `:hover` state can lift the cell — inline styles cannot express hover.
+ * Structural layout (grid span, padding, flex) stays inline in `BentoCell`
+ * so callers keep full control over placement.
+ *
+ * Motion respects the calm glass design language: a single ≤200ms ease-out
+ * border/lift transition, no shadow above the panel token, and a full
+ * opt-out under prefers-reduced-motion.
+ */
+
+.bento-cell {
+  background: linear-gradient(
+    160deg,
+    rgba(255, 255, 255, 0.025) 0%,
+    rgba(255, 255, 255, 0.005) 100%
+  );
+  border: 1px solid var(--border-weak);
+  border-radius: 12px;
+  transition:
+    border-color var(--motion-base),
+    background-color var(--motion-base),
+    transform var(--motion-base);
+}
+
+.bento-cell:hover {
+  border-color: var(--border-medium);
+  background-color: rgba(255, 255, 255, 0.012);
+  transform: translateY(-1px);
+}
+
+/* Thin accent rule along the top edge of emphasised cells. */
+.bento-cell__accent {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Hairline divider between adjacent KPIs in the Pulse strip. */
+.bento-pulse-divider {
+  align-self: stretch;
+  width: 1px;
+  background: var(--border-weak);
+  flex: 0 0 auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bento-cell {
+    transition: none;
+  }
+  .bento-cell:hover {
+    transform: none;
+  }
+}

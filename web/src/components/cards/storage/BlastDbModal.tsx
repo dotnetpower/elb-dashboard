@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Database, Loader2, Lock, RefreshCw, ShieldCheck, X } from "lucide-react";
 
 import { useToast } from "@/components/Toast";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StorageDownloadResultBanner } from "@/components/cards/StorageDownloadResultBanner";
 import {
   DB_CATALOG,
@@ -52,6 +53,7 @@ export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalPr
   );
   const [confirmLargeDb, setConfirmLargeDb] = useState<string | null>(null);
   const [confirmUpdateDb, setConfirmUpdateDb] = useState<string | null>(null);
+  const [confirmCancelDb, setConfirmCancelDb] = useState<string | null>(null);
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
     readAutoWarmupDbs(),
   );
@@ -65,6 +67,7 @@ export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalPr
         setConfirmClusterDb(null);
         setConfirmLargeDb(null);
         setConfirmUpdateDb(null);
+        setConfirmCancelDb(null);
       }
     };
     window.addEventListener("keydown", handleEsc);
@@ -431,24 +434,6 @@ export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalPr
                     const isDownloaded = !isCopying && isDbReady(meta);
                     const isDownloading = downloading === db.value;
                     const preview = previewByName.get(db.value);
-                    const expectedFromPreview =
-                      preview?.file_count ?? inProgressInfo?.expectedFiles ?? 0;
-                    const copyProgress = inProgressInfo
-                      ? Math.min(
-                          100,
-                          Math.round(
-                            ((meta?.copy_status?.success ?? meta?.file_count ?? 0) /
-                              Math.max(
-                                meta?.copy_status?.total_files ??
-                                  inProgressInfo.expectedFiles ??
-                                  expectedFromPreview ??
-                                  1,
-                                1,
-                              )) *
-                              100,
-                          ),
-                        )
-                      : 0;
                     // Per-DB update detection prefers the server-side ETag
                     // map; fall back to the legacy snapshot comparison only
                     // when the server omitted the per-DB list.
@@ -471,7 +456,6 @@ export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalPr
                         isDownloading={isDownloading}
                         isCopying={isCopying}
                         inProgressInfo={inProgressInfo}
-                        copyProgress={copyProgress}
                         hasUpdate={hasUpdate}
                         latestVersion={latestVersion}
                         elapsed={elapsed}
@@ -486,7 +470,7 @@ export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalPr
                         onUpdate={() => setConfirmUpdateDb(db.value)}
                         onBuildOracle={() => void handleBuildOracle(db.value)}
                         onConfirmLarge={() => requestDownload(db.value, true)}
-                        onCancel={() => void handleCancel(db.value)}
+                        onCancel={() => setConfirmCancelDb(db.value)}
                         onToggleAutoWarmup={(checked) =>
                           toggleAutoWarmup(db.value, checked)
                         }
@@ -530,6 +514,26 @@ export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalPr
               latestVersion={latestVersion}
               onConfirm={() => startUpdate(confirmUpdateDb)}
               onCancel={() => setConfirmUpdateDb(null)}
+            />
+          )}
+
+          {confirmCancelDb && (
+            <ConfirmDialog
+              title={`Cancel download of ${confirmCancelDb}?`}
+              message={
+                "Files already copied to the blast-db container stay in place; " +
+                "only the remaining (pending) copies are aborted. You can " +
+                "restart the download later to finish the rest."
+              }
+              confirmLabel="Cancel download"
+              confirmAriaLabel={`Cancel the in-flight download of ${confirmCancelDb}`}
+              tone="danger"
+              onConfirm={() => {
+                const dbValue = confirmCancelDb;
+                setConfirmCancelDb(null);
+                void handleCancel(dbValue);
+              }}
+              onCancel={() => setConfirmCancelDb(null)}
             />
           )}
 

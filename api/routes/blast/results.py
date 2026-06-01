@@ -392,7 +392,10 @@ def blast_job_results_export(
     storage_account: str = Query(...),
     format: str = Query(
         default="csv",
-        pattern=r"^(csv|tsv|json|hit-table-text|hit-table-csv|json-seqalign|xml|text)$",
+        pattern=(
+            r"^(csv|tsv|json|hit-table-text|hit-table-csv|json-seqalign|xml|text"
+            r"|ncbi-hit-table-text|ncbi-hit-table-csv|ncbi-report-text)$"
+        ),
     ),
     caller: CallerIdentity = Depends(require_caller),
 ) -> StreamingResponse:
@@ -400,7 +403,10 @@ def blast_job_results_export(
 
     Hit-table exports are generated from parsed BLAST XML / tabular output.
     Raw `xml` / `text` exports stream the report format captured at submit
-    time; the route does not try to synthesize pairwise text from XML.
+    time; the route does not try to synthesize pairwise text from XML. The
+    `ncbi-*` formats synthesize an NCBI Web BLAST-style "Descriptions" table
+    (per-subject aggregation) from the same parsed hits — see
+    `api.services.blast.ncbi_report`.
     """
     _ensure_job_read_allowed(job_id, caller)
     storage_account = _resolve_job_storage_account(job_id, storage_account)
@@ -474,6 +480,13 @@ def blast_job_results_export(
             },
         )
 
+    if export_format in {"ncbi-hit-table-text", "ncbi-hit-table-csv", "ncbi-report-text"}:
+        return _export_ncbi_report(
+            job_id=job_id,
+            export_format=export_format,
+            all_hits=all_hits,
+        )
+
     if export_format in {"json", "json-seqalign"}:
         key = "seq_alignments" if export_format == "json-seqalign" else "hits"
         body = json.dumps(
@@ -513,6 +526,102 @@ def _normalise_results_export_format(format_value: str) -> str:
         "hit-table-csv": "csv",
     }
     return aliases.get(format_value, format_value)
+
+
+def _ncbi_report_header_fields(job_id: str) -> dict[str, Any]:
+    """Best-effort job metadata for the NCBI report header.
+
+    Reads the persisted job state / provenance bundle. Never raises — a missing
+    state row degrades to neutral header values rather than failing the export.
+    """
+    fields: dict[str, Any] = {
+        "program": "blast",
+        "database": "",
+        "job_title": None,
+        "blast_version": None,
+        "database_snapshot": None,
+        "compatibility_note": None,
+    }
+    try:
+        from api.services.blast.provenance import build_blast_provenance
+        from api.services.state_repo import get_state_repo
+
+        state = get_state_repo().get(job_id)
+        if state is None:
+            return fields
+        raw_payload = getattr(state, "payload", None)
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        provenance = payload.get("provenance")
+        if not isinstance(provenance, dict):
+            provenance = build_blast_provenance(job_id=job_id, payload=payload)
+        blast = provenance.get("blast") if isinstance(provenance.get("blast"), dict) else {}
+        database = (
+            provenance.get("database") if isinstance(provenance.get("database"), dict) else {}
+        )
+        precision = (
+            provenance.get("precision") if isinstance(provenance.get("precision"), dict) else {}
+        )
+        fields["program"] = str(
+            blast.get("program") or getattr(state, "program", None) or "blast"
+        )
+        fields["blast_version"] = blast.get("version")
+        fields["database"] = str(
+            database.get("name") or getattr(state, "db", None) or payload.get("db") or ""
+        )
+        fields["database_snapshot"] = database.get("snapshot")
+        title = getattr(state, "job_title", None) or payload.get("job_title")
+        fields["job_title"] = title if isinstance(title, str) else None
+        note = precision.get("status") if isinstance(precision, dict) else None
+        fields["compatibility_note"] = str(note) if note else None
+    except Exception:
+        LOGGER.debug("ncbi report header lookup failed", exc_info=True)
+    return fields
+
+
+def _export_ncbi_report(
+    *,
+    job_id: str,
+    export_format: str,
+    all_hits: list[dict[str, Any]],
+) -> StreamingResponse:
+    """Render the NCBI Web BLAST-style description table / report for a job."""
+    from api.services.blast.ncbi_report import (
+        aggregate_ncbi_rows,
+        format_ncbi_hit_table,
+        format_ncbi_report_text,
+    )
+
+    rows = aggregate_ncbi_rows(all_hits)
+
+    if export_format == "ncbi-report-text":
+        header = _ncbi_report_header_fields(job_id)
+        body = format_ncbi_report_text(
+            rows,
+            rid=f"ELB-{job_id}",
+            program=str(header["program"]),
+            database=str(header["database"]),
+            job_title=header["job_title"],
+            blast_version=header["blast_version"],
+            database_snapshot=header["database_snapshot"],
+            compatibility_note=header["compatibility_note"],
+        )
+        filename = f"{job_id}_ncbi_report.txt"
+        return StreamingResponse(
+            iter([body.encode("utf-8")]),
+            media_type="text/plain",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    delimiter = "\t" if export_format == "ncbi-hit-table-text" else ","
+    body = format_ncbi_hit_table(rows, delimiter=delimiter)
+    ext = "tsv" if export_format == "ncbi-hit-table-text" else "csv"
+    mime = "text/tab-separated-values" if ext == "tsv" else "text/csv"
+    filename = f"{job_id}_ncbi_hit_table.{ext}"
+    return StreamingResponse(
+        iter([body.encode("utf-8")]),
+        media_type=mime,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _export_raw_result_text(

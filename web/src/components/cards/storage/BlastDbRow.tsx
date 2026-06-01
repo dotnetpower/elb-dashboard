@@ -8,7 +8,9 @@ import {
   Loader2,
   RefreshCw,
 } from "lucide-react";
+import { useRef } from "react";
 
+import { formatEta } from "@/components/cards/storage/blastDbProgress";
 import {
   type BlastDbCatalogItem,
   formatBytes,
@@ -33,7 +35,6 @@ interface BlastDbRowProps {
   isDownloading: boolean;
   isCopying: boolean;
   inProgressInfo: { expectedFiles: number; startTime: number } | undefined;
-  copyProgress: number;
   hasUpdate: boolean;
   latestVersion: string | null;
   elapsed: number;
@@ -70,7 +71,6 @@ export function BlastDbRow({
   isDownloading,
   isCopying,
   inProgressInfo,
-  copyProgress,
   hasUpdate,
   latestVersion,
   elapsed,
@@ -93,9 +93,82 @@ export function BlastDbRow({
       onDownload();
     }
   };
+  // Live copy progress. The number is clamped to be monotonic non-decreasing
+  // within a single copy session so it never flickers between
+  // `copy_status.success` and the live blob-listing `file_count` (which
+  // fluctuates while azcopy/server-side copies are mid-flight). We only trust
+  // `copy_status.success` here and never fall back to `file_count` during an
+  // active copy.
+  //
+  // A copy can be live for two reasons: (1) this browser session started it,
+  // so `isCopying`/`inProgressInfo` are populated by useBlastDb; or (2) the
+  // server reports an in-flight copy via the metadata — `copy_status.phase` of
+  // `copying`/`queued`, or an `update_in_progress` generation swap. Case (2)
+  // happens after a page reload, or when the copy/update was launched from
+  // another tab/session: the local `inProgress` map is empty but the metadata
+  // still carries honest progress. Previously the progress text + bar were
+  // gated on `inProgressInfo` alone, so a reloaded update showed only the
+  // "Updating" badge with no numbers.
   const isUpdating = Boolean(meta?.update_in_progress);
   const copyPhase = meta?.copy_status?.phase;
   const isPartial = copyPhase === "partial" || copyPhase === "init_failed";
+  const serverCopyActive =
+    copyPhase === "copying" || copyPhase === "queued" || isUpdating;
+  const copyActive = (isCopying && Boolean(inProgressInfo)) || serverCopyActive;
+
+  const cs = meta?.copy_status;
+  // The server-side copy path reports a per-file `success`; the AKS-fanout
+  // path reports pod-level counts (`succeeded_pods`/`shard_count`) instead.
+  // Prefer per-file progress and fall back to shard progress so an AKS update
+  // still surfaces a moving bar instead of a bare "Updating" badge.
+  const hasPerFile = typeof cs?.success === "number";
+  const hasShard =
+    typeof cs?.succeeded_pods === "number" && typeof cs?.shard_count === "number";
+  const maxCopiedRef = useRef(0);
+  if (!copyActive) {
+    maxCopiedRef.current = 0;
+  }
+  const rawCopied = copyActive ? (cs?.success ?? 0) : 0;
+  if (rawCopied > maxCopiedRef.current) {
+    maxCopiedRef.current = rawCopied;
+  }
+  const copiedFiles = maxCopiedRef.current;
+  const perFileTotal = cs?.total_files ?? inProgressInfo?.expectedFiles ?? 0;
+  // Unit-agnostic progress: per-file (server-side) or shard (AKS).
+  const progressDone = hasPerFile
+    ? copiedFiles
+    : hasShard
+      ? (cs?.succeeded_pods ?? 0)
+      : 0;
+  const progressTotal = hasPerFile
+    ? perFileTotal
+    : hasShard
+      ? (cs?.shard_count ?? 0)
+      : perFileTotal;
+  const progressUnit = hasPerFile || !hasShard ? "files" : "shards";
+  const copyPct =
+    progressTotal > 0
+      ? Math.min(100, Math.round((progressDone / progressTotal) * 100))
+      : 0;
+  // Elapsed seconds: prefer the local session start (most accurate), then the
+  // server-recorded update start so the ETA survives a page reload.
+  const copyStartMs = inProgressInfo
+    ? inProgressInfo.startTime
+    : meta?.update_started_at
+      ? Date.parse(meta.update_started_at)
+      : NaN;
+  const copyElapsedSeconds = Number.isFinite(copyStartMs)
+    ? Math.max(0, Math.floor((Date.now() - copyStartMs) / 1000))
+    : 0;
+  // Dynamic estimate from observed throughput, replacing the static catalog
+  // `estMinutes`. Recomputed every render (the parent re-renders ~1 Hz via the
+  // `elapsed` tick) so it tightens as the copy progresses. Only meaningful for
+  // per-file progress with a known elapsed; the AKS pod-level path has no
+  // reliable per-file rate.
+  const etaLabel =
+    hasPerFile && copyElapsedSeconds > 0
+      ? formatEta(copyElapsedSeconds, copiedFiles, perFileTotal)
+      : null;
   const unsupported = db.unsupported;
   const isUnsupported = Boolean(unsupported);
   // Suppress the generic "Not in current NCBI snapshot" warning for DBs we
@@ -136,7 +209,7 @@ export function BlastDbRow({
         transition: "background 0.15s, border-color 0.15s",
       }}
     >
-      {(isDownloading || isCopying) && (
+      {(isDownloading || copyActive) && (
         <div
           aria-hidden
           style={{
@@ -165,7 +238,7 @@ export function BlastDbRow({
       <div style={{ paddingTop: 2 }}>
         {isDownloaded ? (
           <CheckCircle2 size={14} style={{ color: "var(--success)" }} />
-        ) : isDownloading || isCopying ? (
+        ) : isDownloading || copyActive ? (
           <Loader2 size={14} className="spin" style={{ color: "var(--accent)" }} />
         ) : (
           <Circle
@@ -241,7 +314,7 @@ export function BlastDbRow({
           >
             {db.value}
           </code>
-          {!isDownloaded && !isDownloading && !isCopying && (
+          {!isDownloaded && !isDownloading && !copyActive && (
             <>
               {unsupported ? (
                 <a
@@ -303,25 +376,21 @@ export function BlastDbRow({
               <span style={{ fontFamily: "var(--font-mono)" }}>{elapsed}s</span>
             </span>
           )}
-          {isCopying && inProgressInfo && (
+          {copyActive && progressTotal > 0 && (
             <span style={{ color: "var(--accent)" }}>
-              Copying{" "}
-              {meta?.copy_status?.success ?? meta?.file_count ?? 0} /{" "}
-              {meta?.copy_status?.total_files ?? inProgressInfo.expectedFiles}{" "}
-              files{" "}
-              <span
-                style={{
-                  fontFamily: "var(--font-mono)",
-                  color: "var(--text-faint)",
-                }}
-              >
-                · {Math.floor((Date.now() - inProgressInfo.startTime) / 1000)}s
-              </span>
-              {db.estMinutes && (
-                <span style={{ color: "var(--text-faint)" }}>
-                  {" "}
-                  · est. {db.estMinutes}
+              Copying {progressDone} / {progressTotal} {progressUnit}{" "}
+              {copyElapsedSeconds > 0 && (
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--text-faint)",
+                  }}
+                >
+                  · {copyElapsedSeconds}s
                 </span>
+              )}
+              {etaLabel && (
+                <span style={{ color: "var(--text-faint)" }}> · {etaLabel}</span>
               )}
             </span>
           )}
@@ -516,7 +585,7 @@ export function BlastDbRow({
             Auto warm
           </label>
         </div>
-        {isCopying && inProgressInfo && (
+        {copyActive && progressTotal > 0 && (
           <div
             style={{
               marginTop: 5,
@@ -528,7 +597,7 @@ export function BlastDbRow({
           >
             <div
               style={{
-                width: `${copyProgress}%`,
+                width: `${copyPct}%`,
                 height: "100%",
                 background: "var(--accent)",
                 transition: "width 0.5s ease",
@@ -552,6 +621,7 @@ export function BlastDbRow({
             style={{ fontSize: 10, display: "inline-flex", alignItems: "center", gap: 4 }}
           >
             <Loader2 size={10} className="spin" /> Updating
+            {progressTotal > 0 ? ` · ${copyPct}%` : ""}
           </span>
         ) : hasUpdate ? (
           <button
@@ -609,10 +679,10 @@ export function BlastDbRow({
           >
             {elapsed}s
           </span>
-        ) : isCopying ? (
+        ) : copyActive ? (
           <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
             <span className="gt gt-b" style={{ fontSize: 10 }}>
-              {copyProgress}%
+              {copyPct}%
             </span>
             {onCancel && (
               <button

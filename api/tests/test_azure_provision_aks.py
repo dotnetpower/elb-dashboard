@@ -79,6 +79,164 @@ def test_build_cluster_params_keeps_expected_pools_and_taints() -> None:
     assert pools["blastpool"].node_taints == ["workload=blast:NoSchedule"]
 
 
+def test_build_cluster_params_managed_vnet_when_no_subnet() -> None:
+    """Without a subnet id the cluster stays in managed-VNet mode.
+
+    Backward-compat guard: local/legacy callers that do not inject a subnet
+    id must keep producing a model with no per-pool vnet_subnet_id and no
+    explicit network profile (Azure picks the node subnet).
+    """
+    cluster = _build_cluster_params(
+        region="koreacentral",
+        cluster_name="elb-smoke-aks",
+        sys_sku="Standard_D2s_v3",
+        sys_count=1,
+        blast_sku="Standard_D8s_v3",
+        blast_count=1,
+        caller_oid="caller-1",
+    )
+
+    assert cluster.network_profile is None
+    for pool in cluster.agent_pool_profiles:
+        assert pool.vnet_subnet_id is None
+
+
+def test_build_cluster_params_byo_subnet_pins_overlay() -> None:
+    """A supplied subnet id puts both pools in BYO-subnet mode + overlay.
+
+    This is the storage-connectivity fix: nodes land in the hub snet-aks
+    subnet so the workload Storage private endpoints resolve and route
+    intra-VNet, and Azure CNI Overlay keeps pods off the subnet IP space.
+    """
+    subnet_id = (
+        "/subscriptions/sub/resourceGroups/rg-elb-dashboard/providers/"
+        "Microsoft.Network/virtualNetworks/vnet-elb-dashboard/subnets/snet-aks"
+    )
+    cluster = _build_cluster_params(
+        region="koreacentral",
+        cluster_name="elb-smoke-aks",
+        sys_sku="Standard_D2s_v3",
+        sys_count=1,
+        blast_sku="Standard_D8s_v3",
+        blast_count=1,
+        caller_oid="caller-1",
+        vnet_subnet_id=subnet_id,
+    )
+
+    for pool in cluster.agent_pool_profiles:
+        assert pool.vnet_subnet_id == subnet_id
+    assert cluster.network_profile is not None
+    assert cluster.network_profile.network_plugin == "azure"
+    assert cluster.network_profile.network_plugin_mode == "overlay"
+    assert cluster.network_profile.pod_cidr == "10.244.0.0/16"
+
+
+def test_resolve_aks_vnet_subnet_id_prefers_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.azure.provision import _resolve_aks_vnet_subnet_id
+
+    monkeypatch.setenv("PLATFORM_AKS_SUBNET_ID", "/explicit/snet-aks")
+    monkeypatch.setenv(
+        "PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID",
+        "/vnet/subnets/snet-private-endpoints",
+    )
+    assert _resolve_aks_vnet_subnet_id() == "/explicit/snet-aks"
+
+
+def test_resolve_aks_vnet_subnet_id_derives_from_pe_subnet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.azure.provision import _resolve_aks_vnet_subnet_id
+
+    monkeypatch.delenv("PLATFORM_AKS_SUBNET_ID", raising=False)
+    monkeypatch.setenv(
+        "PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID",
+        "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/"
+        "virtualNetworks/vnet-elb-dashboard/subnets/snet-private-endpoints",
+    )
+    assert _resolve_aks_vnet_subnet_id() == (
+        "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/"
+        "virtualNetworks/vnet-elb-dashboard/subnets/snet-aks"
+    )
+
+
+def test_resolve_aks_vnet_subnet_id_empty_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api.tasks.azure.provision import _resolve_aks_vnet_subnet_id
+
+    monkeypatch.delenv("PLATFORM_AKS_SUBNET_ID", raising=False)
+    monkeypatch.delenv("PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID", raising=False)
+    assert _resolve_aks_vnet_subnet_id() == ""
+
+
+def test_grant_network_contributor_on_subnet_creates_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.tasks.azure.rbac as rbac
+
+    created: list[dict[str, object]] = []
+
+    class _FakeRoleAssignments:
+        def create(
+            self, scope: str, role_assignment_name: str, parameters: object
+        ) -> object:
+            created.append(
+                {
+                    "scope": scope,
+                    "name": role_assignment_name,
+                    "role_definition_id": parameters.role_definition_id,
+                    "principal_id": parameters.principal_id,
+                }
+            )
+            return object()
+
+    class _FakeAuthClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.role_assignments = _FakeRoleAssignments()
+
+    monkeypatch.setattr(
+        "azure.mgmt.authorization.AuthorizationManagementClient",
+        _FakeAuthClient,
+    )
+
+    rbac.grant_network_contributor_on_subnet(
+        object(),
+        "sub-1",
+        principal_id="cluster-principal",
+        subnet_id="/subs/sub-1/.../subnets/snet-aks",
+    )
+
+    assert len(created) == 1
+    assert created[0]["scope"] == "/subs/sub-1/.../subnets/snet-aks"
+    assert created[0]["principal_id"] == "cluster-principal"
+    assert created[0]["role_definition_id"].endswith(
+        "4d97b98b-1d4f-4787-a291-c67834d212e7"
+    )
+
+
+def test_grant_network_contributor_on_subnet_noop_on_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.tasks.azure.rbac as rbac
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("AuthorizationManagementClient must not be constructed")
+
+    monkeypatch.setattr(
+        "azure.mgmt.authorization.AuthorizationManagementClient", _boom
+    )
+
+    rbac.grant_network_contributor_on_subnet(
+        object(), "sub-1", principal_id="", subnet_id="/x"
+    )
+    rbac.grant_network_contributor_on_subnet(
+        object(), "sub-1", principal_id="p", subnet_id=""
+    )
+
+
+
 def test_provision_aks_ensures_resource_group_before_create(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

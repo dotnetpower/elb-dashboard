@@ -550,8 +550,25 @@ export type BlastExportFormat =
   | "hit-table-text"
   | "hit-table-csv"
   | "json-seqalign"
+  | "ncbi-hit-table-text"
+  | "ncbi-hit-table-csv"
+  | "ncbi-report-text"
   | "xml"
   | "text";
+
+export type BlastCitationFormat = "text" | "markdown" | "bibtex";
+
+export interface BlastCitation {
+  job_id: string;
+  format: BlastCitationFormat;
+  citation: string;
+  rid: string;
+  program: string;
+  blast_version: string;
+  database: string;
+  database_snapshot?: string | null;
+  search_space?: string | null;
+}
 
 function filenameFromDisposition(value: string | null): string | null {
   if (!value) return null;
@@ -827,6 +844,11 @@ export const blastApi = {
   ) =>
     api.getText(
       `/blast/jobs/${encodeURIComponent(jobId)}/results/export?subscription_id=${encodeURIComponent(subscriptionId)}&storage_account=${encodeURIComponent(storageAccount)}&format=${format}${resourceGroup ? `&resource_group=${encodeURIComponent(resourceGroup)}` : ""}`,
+    ),
+
+  getCitation: (jobId: string, format: BlastCitationFormat = "text") =>
+    api.get<BlastCitation>(
+      `/blast/jobs/${encodeURIComponent(jobId)}/citation?format=${encodeURIComponent(format)}`,
     ),
 
   listDatabases: (

@@ -66,6 +66,17 @@ export interface DownloadedDbMeta {
     aborted?: number;
     pending?: number;
     timed_out?: boolean;
+    /**
+     * AKS-fanout progress. The server-side copy path reports a per-file
+     * `success`; the AKS-fanout path reports pod-level counts instead, so the
+     * SPA falls back to shard progress (`succeeded_pods`/`shard_count`) when
+     * `success` is absent.
+     */
+    mode?: string;
+    active_pods?: number;
+    succeeded_pods?: number;
+    failed_pods?: number;
+    shard_count?: number;
   };
   failed_files?: Array<{ blob: string; status: string; reason?: string }>;
   db_order_oracle?: {
@@ -263,13 +274,28 @@ export function useBlastDb({
   // not on the whole `dbQuery` object — otherwise the interval would be torn
   // down and recreated on every parent render.
   const refetchDbList = dbQuery.refetch;
+  // The server reports an in-flight copy/update through the metadata even when
+  // THIS browser session did not start it (page reload, or a copy launched
+  // from another tab). The local `inProgress` map is empty in that case, so
+  // the poll must also key off the server-reported state — otherwise the
+  // "Copying X / Y" numbers never advance after a reload.
+  const serverCopyActive = useMemo(
+    () =>
+      [...downloadedDbs.values()].some(
+        (m) =>
+          m.update_in_progress === true ||
+          m.copy_status?.phase === "copying" ||
+          m.copy_status?.phase === "queued",
+      ),
+    [downloadedDbs],
+  );
   useEffect(() => {
-    if (inProgress.size === 0) return;
+    if (inProgress.size === 0 && !serverCopyActive) return;
     const t = setInterval(() => {
       void refetchDbList();
     }, 10_000);
     return () => clearInterval(t);
-  }, [inProgress.size, refetchDbList]);
+  }, [inProgress.size, serverCopyActive, refetchDbList]);
 
   // Detect copy completion honestly — the hardened prepare-db pipeline writes
   // ``copy_status.phase`` into ``{db}-metadata.json``. Only ``completed`` is

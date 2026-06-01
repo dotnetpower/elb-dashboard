@@ -294,6 +294,71 @@ def grant_storage_blob_contributor_to_aks(
     )
 
 
+# Network Contributor (well-known). Grants subnets/join + read/write so an
+# AKS cluster created in a BYO subnet can attach nodes and provision internal
+# LoadBalancer frontend IPs in that subnet.
+_NETWORK_CONTRIBUTOR_ROLE = "4d97b98b-1d4f-4787-a291-c67834d212e7"
+
+
+def grant_network_contributor_on_subnet(
+    cred: Any,
+    subscription_id: str,
+    *,
+    principal_id: str,
+    subnet_id: str,
+    label: str = "AKS cluster identity",
+) -> None:
+    """Grant Network Contributor on a single subnet to a principal.
+
+    Used for BYO-subnet AKS: the cluster's control-plane managed identity
+    needs Network Contributor on the hub `snet-aks` subnet so the Azure
+    cloud-provider can create the `elb-openapi` internal LoadBalancer's
+    frontend IP in that subnet. Node attachment itself is authorised at
+    create time by the requesting identity (the dashboard MI, which holds
+    Network Contributor on the platform RG), but the *runtime* LB
+    reconcile runs as the cluster identity — without this grant the
+    internal LB Service stays `<pending>` with AuthorizationFailed.
+
+    Idempotent (stable assignment UUID) and tolerant of Entra propagation
+    via `_create_role_assignment_with_retry`. No-ops on empty inputs.
+    """
+    from azure.mgmt.authorization import AuthorizationManagementClient
+    from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
+
+    if not principal_id or not subnet_id:
+        LOGGER.info(
+            "grant_network_contributor_on_subnet: missing principal_id/subnet_id, skipping"
+        )
+        return
+
+    auth_cl = AuthorizationManagementClient(cred, subscription_id)
+    role_definition_id = (
+        f"/subscriptions/{subscription_id}/providers/Microsoft.Authorization/"
+        f"roleDefinitions/{_NETWORK_CONTRIBUTOR_ROLE}"
+    )
+    role_assignment_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{subnet_id}|{principal_id}|{_NETWORK_CONTRIBUTOR_ROLE}",
+        )
+    )
+    _create_role_assignment_with_retry(
+        auth_cl,
+        subnet_id,
+        role_assignment_id,
+        RoleAssignmentCreateParameters(  # type: ignore[call-arg]
+            role_definition_id=role_definition_id,
+            principal_id=principal_id,
+            principal_type="ServicePrincipal",
+        ),
+        label=f"Network Contributor ({label})",
+    )
+    LOGGER.info(
+        "Network Contributor assigned to %s on subnet %s", principal_id, subnet_id
+    )
+
+
+
 def _call_with_optional_kubelet_oid(
     fn: Any,
     *positional: Any,

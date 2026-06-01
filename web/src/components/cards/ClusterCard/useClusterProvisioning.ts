@@ -447,12 +447,23 @@ export function useClusterProvisioning(args: {
   }, [provStatus, query]);
 
   // Two-stage state transition while creating:
-  //   1) As soon as ARM accepts the create (`cluster_state` set to
-  //      Creating/Updating/Succeeded), close the modal so the user can
-  //      watch the in-card progress banner. We do NOT mark provStatus
-  //      "done" yet — the "is ready" banner is reserved for real
-  //      readiness, otherwise we lie to the user about a cluster that
-  //      is still 5–10 minutes from being usable.
+  //   1) As soon as the provision task is *accepted* (`taskId` present,
+  //      i.e. the enqueue POST returned), close the modal so the user
+  //      watches the in-card progress banner — which is already showing
+  //      the same Step N/5 / phase / elapsed. We close at enqueue rather
+  //      than waiting for ARM to publish `cluster_state` because the
+  //      in-card banner duplicates the modal's live panel from that point
+  //      on, and the safety net that originally justified keeping the
+  //      modal open now lives on the card:
+  //        - form inputs persist (this hook stays mounted regardless of
+  //          the modal), so an ARM rejection's Retry reopens prefilled;
+  //        - the ProvisionErrorCard renders in the card whenever
+  //          `provError && !showProvision`, so a task FAILURE / ARM
+  //          rejection after the modal closed is still surfaced inline
+  //          with Dismiss + Edit-&-retry.
+  //      We do NOT mark provStatus "done" here — the "is ready" banner is
+  //      reserved for real readiness, otherwise we lie to the user about a
+  //      cluster that is still 5–10 minutes from being usable.
   //   2) Only flip to "done" when either (a) the list query returns the
   //      named cluster with `provisioning_state === "Succeeded"`, or
   //      (b) the task itself reports `cluster_state === "Succeeded"`.
@@ -461,11 +472,10 @@ export function useClusterProvisioning(args: {
   //      rendering.
   useEffect(() => {
     if (provStatus !== "creating") return;
-    const armState = String(taskProgress?.cluster_state ?? "");
-    const armAccepted = ["Creating", "Updating", "Succeeded"].includes(armState);
-    if (armAccepted) {
+    if (taskId) {
       closeModal();
     }
+    const armState = String(taskProgress?.cluster_state ?? "");
     const found = query.data?.clusters?.find((c) => c.name === clusterName);
     const foundSucceeded =
       !!found &&
@@ -475,7 +485,7 @@ export function useClusterProvisioning(args: {
       setProvStatus("done");
       closeModal();
     }
-  }, [provStatus, query.data, clusterName, taskProgress, closeModal]);
+  }, [provStatus, taskId, query.data, clusterName, taskProgress, closeModal]);
 
   const handleProvision = async () => {
     if (!provisionRegion) return;
@@ -555,16 +565,16 @@ export function useClusterProvisioning(args: {
     setTaskId(null);
     setTaskPhase(null);
     setTaskProgress(null);
-    // **Do not** close the modal here — the previous behaviour closed
-    // as soon as the Celery task accepted the enqueue, which left the
-    // user staring at a tiny "Provisioning…" banner outside while ARM
-    // spent ~70 s validating. If ARM then rejected with quota or SKU
-    // errors the user had lost every input value. The modal stays open
-    // until either (a) the task publishes `cluster_state` for the
-    // first time (= ARM accepted) or (b) the cluster appears in the
-    // list — both signalled by the useEffect above. On task FAILURE the
-    // modal stays open so the user can see the error inline and edit
-    // the form to retry.
+    // The modal does not close synchronously here — it closes from the
+    // two-stage effect above the moment the enqueue POST returns a
+    // `taskId`. Until then the modal shows its "Creating…" button so the
+    // user gets immediate feedback while the POST is in flight (a few
+    // hundred ms). Closing on `taskId` (rather than waiting for ARM to
+    // publish `cluster_state`, ~70 s later) means the user is not left
+    // staring at a modal that merely duplicates the in-card progress
+    // banner. If the enqueue POST itself fails, the catch below flips to
+    // "error" and the card's ProvisionErrorCard surfaces it with the form
+    // inputs preserved (they live in this hook, not the modal).
     try {
       const response = await aksApi.provision({
         subscription_id: subscriptionId,
@@ -593,8 +603,11 @@ export function useClusterProvisioning(args: {
     } catch (e) {
       setProvError(formatApiError(e, "aks"));
       setProvStatus("error");
-      // Modal intentionally stays open so the user can see the error in
-      // the structured error card and either fix the form or click Cancel.
+      // The enqueue POST failed before a taskId was issued, so the modal
+      // never auto-closed. It stays open here so the user sees the error
+      // in the structured error card and can fix the form or click Cancel
+      // without losing inputs. (Once a taskId exists the modal has already
+      // closed and any later FAILURE surfaces via the card's error card.)
     }
   };
 

@@ -127,6 +127,12 @@ function blastExportFormatLabel(format: BlastExportFormat): string {
       return "Hit Table (text)";
     case "hit-table-csv":
       return "Hit Table (CSV)";
+    case "ncbi-hit-table-text":
+      return "NCBI Descriptions (text)";
+    case "ncbi-hit-table-csv":
+      return "NCBI Descriptions (CSV)";
+    case "ncbi-report-text":
+      return "NCBI Report (text)";
     case "json-seqalign":
       return "JSON Seq-align";
     case "xml":

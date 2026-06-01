@@ -66,6 +66,9 @@ from api.tasks.azure.rbac import (
     ensure_dashboard_mi_cluster_rg_roles as _ensure_dashboard_mi_cluster_rg_roles,
 )
 from api.tasks.azure.rbac import (
+    grant_network_contributor_on_subnet as _grant_network_contributor_on_subnet,
+)
+from api.tasks.azure.rbac import (
     grant_storage_blob_contributor_to_aks as _grant_storage_blob_contributor_to_aks,
 )
 
@@ -75,6 +78,7 @@ __all__ = (
     "_ensure_aks_runtime_rbac",
     "_ensure_dashboard_mi_cluster_rg_roles",
     "_ensure_vnet_peering_with_cluster",
+    "_grant_network_contributor_on_subnet",
     "_grant_storage_blob_contributor_to_aks",
     "_now_iso",
     "_update_state",

@@ -514,6 +514,66 @@ def blast_job_get(
         raise HTTPException(404, "job not found") from exc
 
 
+@router.get("/jobs/{job_id}/citation")
+def blast_job_citation(
+    job_id: str = Path(...),
+    format: str = Query(default="text", pattern="^(text|markdown|bibtex)$"),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return a copy-ready Methods paragraph / Markdown / BibTeX for the run.
+
+    The citation is synthesised from the persisted provenance bundle alone, so
+    this route performs no extra Azure data-plane calls. Storage URLs and SAS
+    tokens are never emitted.
+    """
+    try:
+        from api.services.blast.citation import build_citation
+        from api.services.blast.provenance import build_blast_provenance
+        from api.services.state_repo import get_state_repo
+
+        repo = get_state_repo()
+        state = repo.get(job_id)
+        if state is None:
+            raise HTTPException(404, "job not found")
+        if state.owner_oid and state.owner_oid != caller.object_id:
+            raise HTTPException(403, "not owner")
+
+        raw_payload = getattr(state, "payload", None)
+        payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+        provenance = payload.get("provenance")
+        if not isinstance(provenance, dict):
+            provenance = build_blast_provenance(job_id=job_id, payload=payload)
+        job_title = getattr(state, "job_title", None) or payload.get("job_title")
+
+        bundle = build_citation(
+            job_id=job_id,
+            provenance=provenance,
+            job_title=job_title if isinstance(job_title, str) else None,
+        )
+        return {
+            "job_id": job_id,
+            "format": format,
+            "citation": bundle.render(format),
+            "rid": bundle.rid,
+            "program": bundle.program,
+            "blast_version": bundle.blast_version,
+            "database": bundle.database,
+            "database_snapshot": bundle.database_snapshot,
+            "search_space": bundle.search_space,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning("blast_job_citation failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            {
+                "code": "citation_unavailable",
+                "message": f"Could not build citation: {type(exc).__name__}",
+            },
+        ) from exc
+
+
 @router.get("/jobs/{job_id}/events")
 def blast_job_events(
     job_id: str = Path(...),

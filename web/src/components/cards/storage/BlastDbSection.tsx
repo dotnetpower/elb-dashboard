@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Database, Loader2, Lock, Maximize2, ShieldCheck, Unlock } from "lucide-react";
 
 import { useToast } from "@/components/Toast";
@@ -6,6 +6,20 @@ import { DB_CATALOG } from "@/components/cards/storageDbCatalog";
 import type { BlastDbClusterTopology } from "@/components/cards/storage/BlastDbClusterConfirm";
 import { BlastDbModal } from "@/components/cards/storage/BlastDbModal";
 import { useBlastDb } from "@/components/cards/storage/useBlastDb";
+import {
+  blastDbReadinessLabel,
+  blastDbReadinessTone,
+  getBlastDbReadiness,
+} from "@/utils/blastDbReady";
+
+/** Maps a readiness tone to the matching pill className. */
+const TONE_PILL_CLASS: Record<string, string> = {
+  ok: "dv3-pill-success",
+  loading: "dv3-pill-warning",
+  blocked: "dv3-pill-danger",
+  neutral: "dv3-pill-faint",
+  accent: "dv3-pill-accent",
+};
 
 interface BlastDbSectionProps {
   subscriptionId: string;
@@ -69,6 +83,21 @@ export function BlastDbSection({
   const showLocalDebugBanner = publicAccessDisabled && canEnableLocalAccess;
   const showLocalRbacBanner = canGrantLocalRbac;
 
+  // Split the catalogue map by honest readiness so the header pills never
+  // count a mid-copy DB (e.g. core_nt at copy_status.phase==="copying") as
+  // "downloaded". `downloadedDbs` includes every DB storage reports, ready or
+  // not, so the raw size is misleading for the green pill.
+  const { readyCount, downloadingCount } = useMemo(() => {
+    let ready = 0;
+    let downloading = 0;
+    for (const meta of downloadedDbs.values()) {
+      const tone = blastDbReadinessTone(getBlastDbReadiness(meta));
+      if (tone === "ok") ready += 1;
+      else if (tone === "loading") downloading += 1;
+    }
+    return { readyCount: ready, downloadingCount: downloading };
+  }, [downloadedDbs]);
+
   return (
     <div className="dv3-db-section">
       <div className="dv3-db-section-head">
@@ -88,9 +117,16 @@ export function BlastDbSection({
               access blocked
             </span>
           )}
-          {!publicAccessDisabled && downloadedDbs.size > 0 && (
-            <span className="dv3-pill dv3-pill-success">
-              {downloadedDbs.size} downloaded
+          {!publicAccessDisabled && readyCount > 0 && (
+            <span className="dv3-pill dv3-pill-success">{readyCount} downloaded</span>
+          )}
+          {!publicAccessDisabled && downloadingCount > 0 && (
+            <span
+              className="dv3-pill dv3-pill-warning"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            >
+              <Loader2 size={10} className="spin" strokeWidth={2} />
+              {downloadingCount} downloading
             </span>
           )}
           {updatesAvailable > 0 && (
@@ -220,11 +256,28 @@ export function BlastDbSection({
         <div
           style={{ display: "flex", gap: 4, flexWrap: "wrap", padding: "2px 4px 4px" }}
         >
-          {[...downloadedDbs.keys()].map((name) => (
-            <span key={name} className="dv3-pill dv3-pill-success">
-              {name}
-            </span>
-          ))}
+          {[...downloadedDbs.entries()].map(([name, meta]) => {
+            const readiness = getBlastDbReadiness(meta);
+            const tone = blastDbReadinessTone(readiness);
+              const pillClass = TONE_PILL_CLASS[tone] ?? "dv3-pill-faint";
+            const inFlight = tone === "loading";
+            return (
+              <span
+                key={name}
+                className={`dv3-pill ${pillClass}`}
+                title={readiness.ready ? name : `${name} — ${blastDbReadinessLabel(readiness)}`}
+                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+              >
+                {inFlight && <Loader2 size={10} className="spin" strokeWidth={2} />}
+                {name}
+                {!readiness.ready && readiness.progress && (
+                  <span style={{ opacity: 0.75, fontVariantNumeric: "tabular-nums" }}>
+                    {readiness.progress.success}/{readiness.progress.total}
+                  </span>
+                )}
+              </span>
+            );
+          })}
         </div>
       )}
 

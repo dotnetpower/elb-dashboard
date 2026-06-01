@@ -47,6 +47,26 @@ _AKS_OPERATION_CONFLICT_RETRY_SECONDS = 60
 _STALE_QUEUED_SECONDS = int(os.environ.get("AKS_PROVISION_STALE_QUEUED_SECONDS", "900"))
 _STALE_RUNNING_SECONDS = int(os.environ.get("AKS_PROVISION_STALE_RUNNING_SECONDS", "2700"))
 
+
+def _resolve_aks_vnet_subnet_id() -> str:
+    """Resolve the hub `snet-aks` subnet id for BYO-subnet AKS creation.
+
+    Prefers the explicit `PLATFORM_AKS_SUBNET_ID` env var. Falls back to
+    deriving it from `PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID` (same hub VNet,
+    swap the trailing `/subnets/snet-private-endpoints` segment for
+    `/subnets/snet-aks`) so the fix works on already-deployed revisions that
+    only carry the private-endpoint subnet env var. Returns "" when neither
+    is resolvable, in which case the cluster falls back to managed-VNet mode.
+    """
+    explicit = os.environ.get("PLATFORM_AKS_SUBNET_ID", "").strip()
+    if explicit:
+        return explicit
+    pe_subnet = os.environ.get("PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID", "").strip()
+    if pe_subnet and "/subnets/" in pe_subnet:
+        vnet_id = pe_subnet.rsplit("/subnets/", 1)[0]
+        return f"{vnet_id}/subnets/snet-aks"
+    return ""
+
 # Ordered list of (machine_phase, human_label, step_number). `total_steps`
 # is `len(_PROVISION_STEPS)` and is shipped with every progress tick so
 # the FE banner can render "Step 3 of 5". Keep the keys in sync with
@@ -400,6 +420,22 @@ def provision_aks(
     SYSTEM_POOL_NAME = "systempool"
     BLAST_POOL_NAME = "blastpool"
 
+    aks_vnet_subnet_id = _resolve_aks_vnet_subnet_id()
+    if aks_vnet_subnet_id:
+        LOGGER.info(
+            "AKS %s will be created in BYO-subnet mode (nodes in hub snet-aks) "
+            "so workload Storage private endpoints resolve and route intra-VNet.",
+            cluster_name,
+        )
+    else:
+        LOGGER.warning(
+            "AKS %s will be created in managed-VNet mode: neither "
+            "PLATFORM_AKS_SUBNET_ID nor PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID is set. "
+            "Workload Storage (publicNetworkAccess=Disabled) will be unreachable "
+            "from cluster pods (warmup azcopy will 403).",
+            cluster_name,
+        )
+
     cluster_params = build_cluster_params(
         region=region,
         cluster_name=cluster_name,
@@ -409,6 +445,7 @@ def provision_aks(
         blast_count=blast_count,
         caller_oid=caller_oid,
         tier=tier,
+        vnet_subnet_id=aks_vnet_subnet_id,
     )
 
     portal_url = None
@@ -581,6 +618,44 @@ def provision_aks(
             failed_items,
             recovery,
         )
+
+    # BYO-subnet clusters: grant the cluster control-plane identity Network
+    # Contributor on the hub snet-aks subnet so the Azure cloud-provider can
+    # provision the `elb-openapi` internal LoadBalancer frontend IP in that
+    # subnet at runtime. Node attachment was already authorised at create
+    # time by the dashboard MI (Network Contributor on the platform RG);
+    # this grant covers the *runtime* LB reconcile, which runs as the
+    # cluster identity. Best-effort: warmup azcopy (node outbound to the
+    # Storage private endpoint) does not need it, so a failure here must not
+    # fail the provision — it only degrades OpenAPI Try-It until an admin
+    # re-grants. Skipped entirely in managed-VNet mode.
+    if aks_vnet_subnet_id:
+        cluster_principal = getattr(
+            getattr(result, "identity", None), "principal_id", ""
+        )
+        if cluster_principal:
+            try:
+                _facade._grant_network_contributor_on_subnet(
+                    cred,
+                    subscription_id,
+                    principal_id=cluster_principal,
+                    subnet_id=aks_vnet_subnet_id,
+                    label=f"{cluster_name} cluster identity",
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "AKS %s ready, but Network Contributor grant on snet-aks for the "
+                    "cluster identity failed: %s. OpenAPI internal LoadBalancer may "
+                    "stay <pending>; warmup/BLAST are unaffected.",
+                    cluster_name,
+                    exc,
+                )
+        else:
+            LOGGER.warning(
+                "AKS %s BYO-subnet: cluster identity principal_id missing from create "
+                "result; skipping subnet Network Contributor grant.",
+                cluster_name,
+            )
 
     # Peer the dashboard platform VNet with the AKS-auto-created VNet so
     # the api sidecar can reach the `elb-openapi` Service's internal LB

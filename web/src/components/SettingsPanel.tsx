@@ -827,6 +827,7 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
         )}
       </Group>
 
+      {!ai.active && (
       <Group title="Provision a resource">
         <Row
           label="Create Application Insights"
@@ -895,6 +896,7 @@ function TelemetrySection({ config }: { config: ResourceConfig | null }) {
           </div>
         )}
       </Group>
+      )}
     </Section>
     <ConfirmDialog
       open={provisionConfirmOpen}

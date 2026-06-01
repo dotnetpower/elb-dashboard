@@ -112,6 +112,31 @@ def blast_databases(
     return {"databases": databases}
 
 
+@router.get("/databases/recommend")
+def blast_databases_recommend(
+    molecule: str = Query(default=""),
+    program: str = Query(default=""),
+    goal: str = Query(default="identify"),
+    taxon: str = Query(default=""),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Recommend one NCBI database plus an alternative for a described search.
+
+    Pure decision logic over a versioned rule table (no Azure data-plane calls).
+    Inputs describe the query (``molecule`` or ``program``), the search ``goal``,
+    and an optional taxonomic ``taxon`` hint.
+    """
+    from api.services.blast.db_recommendation import recommend_database
+
+    recommendation = recommend_database(
+        molecule=molecule or None,
+        program=program or None,
+        goal=goal or None,
+        taxon=taxon or None,
+    )
+    return recommendation.as_dict()
+
+
 @router.post("/databases/{db_name}/shard")
 def blast_database_shard(
     db_name: str,

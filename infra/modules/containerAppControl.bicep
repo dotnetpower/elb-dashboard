@@ -68,6 +68,9 @@ param platformStorageAccountName string = ''
 @description('Resource id of the platform subnet where workload Storage private endpoints are created for api/worker/terminal access.')
 param platformPrivateEndpointSubnetId string = ''
 
+@description('Resource id of the hub VNet snet-aks subnet. New AKS clusters are created in this subnet (BYO-subnet) so their nodes resolve and route to the workload Storage private endpoints intra-VNet. Empty falls back to managed-VNet mode (no Storage connectivity).')
+param platformAksSubnetId string = ''
+
 @description('Subscription id (passed into the api/worker env vars so monitor routes can default subscription_id when not provided in the query string).')
 param subscriptionId string = subscription().subscriptionId
 
@@ -177,6 +180,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_TABLE_ENDPOINT', value: tableEndpoint }
             { name: 'AZURE_BLOB_ENDPOINT', value: blobEndpoint }
             { name: 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', value: platformPrivateEndpointSubnetId }
+            { name: 'PLATFORM_AKS_SUBNET_ID', value: platformAksSubnetId }
             { name: 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }
@@ -295,6 +299,7 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'AZURE_TABLE_ENDPOINT', value: tableEndpoint }
             { name: 'AZURE_BLOB_ENDPOINT', value: blobEndpoint }
             { name: 'PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID', value: platformPrivateEndpointSubnetId }
+            { name: 'PLATFORM_AKS_SUBNET_ID', value: platformAksSubnetId }
             { name: 'PLATFORM_PRIVATE_DNS_ZONE_RESOURCE_GROUP', value: platformResourceGroupName }
             { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: applicationInsightsConnectionString }
             { name: 'CELERY_BROKER_URL', value: 'redis://127.0.0.1:6379/0' }

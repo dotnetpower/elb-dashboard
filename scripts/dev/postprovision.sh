@@ -555,6 +555,18 @@ ENV_RID="/subscriptions/$SUB_ID/resourceGroups/$AZURE_RESOURCE_GROUP/providers/M
 PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL="$(resolve_platform_private_endpoint_subnet_id)"
 ts "    Private endpoint subnet: $PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL"
 
+# New AKS clusters are created in the hub VNet's snet-aks subnet (BYO-subnet)
+# so their nodes resolve and route to the workload Storage private endpoints
+# intra-VNet. Derive it from the private-endpoint subnet id (same VNet) by
+# swapping the trailing subnet name. The api/worker sidecars also derive this
+# at runtime, but injecting it explicitly avoids relying on the fallback.
+if [ -n "$PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL" ]; then
+  PLATFORM_AKS_SUBNET_ID_VAL="${PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL%/subnets/*}/subnets/snet-aks"
+else
+  PLATFORM_AKS_SUBNET_ID_VAL=""
+fi
+ts "    AKS BYO subnet: ${PLATFORM_AKS_SUBNET_ID_VAL:-<unset>}"
+
 # Resolve the Live Wall LA workspace from the Container Apps Environment
 # itself when the operator's shell did not export LOG_ANALYTICS_WORKSPACE_ID.
 # Container Apps strips env entries with empty values, so deploying with an
@@ -619,6 +631,7 @@ az deployment group create \
       logAnalyticsWorkspaceId="$LOG_ANALYTICS_WORKSPACE_ID_VAL" \
       platformStorageAccountName="${STORAGE_ACCOUNT_NAME:-}" \
       platformPrivateEndpointSubnetId="$PLATFORM_PRIVATE_ENDPOINT_SUBNET_ID_VAL" \
+      platformAksSubnetId="$PLATFORM_AKS_SUBNET_ID_VAL" \
       subscriptionId="$(az account show --query id -o tsv)" \
       allowedOrigins="$ALLOWED_ORIGINS_JSON" \
   --output none \

@@ -482,6 +482,7 @@ export function ClusterBento({
                 : `SLA ${P95_DEGRADED_MS} ms`
             }
           />
+          <span className="bento-pulse-divider" aria-hidden="true" />
           <KpiInline
             icon={<Shield size={11} />}
             label="Errors 15m"
@@ -498,6 +499,7 @@ export function ClusterBento({
                 : undefined
             }
           />
+          <span className="bento-pulse-divider" aria-hidden="true" />
           <KpiInline
             icon={<Cpu size={11} />}
             label="CPU peak"
@@ -515,6 +517,7 @@ export function ClusterBento({
                 : undefined
             }
           />
+          <span className="bento-pulse-divider" aria-hidden="true" />
           <KpiInline
             icon={<HardDrive size={11} />}
             label="Mem peak"

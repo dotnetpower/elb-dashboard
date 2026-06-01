@@ -12,7 +12,12 @@ Risky contracts: The pool names (`systempool`, `blastpool`), the
     by other parts of the system reference these strings. The base tag set
     (`app=elastic-blast`, `managedBy=elb-dashboard`) is the ground-truth filter used
     by the subscription-wide cluster list — drop or rename either tag and the
-    dashboard will stop recognising clusters it provisioned.
+    dashboard will stop recognising clusters it provisioned. When `vnet_subnet_id`
+    is supplied the cluster is created in BYO-subnet mode (nodes land in the hub
+    `snet-aks` subnet) and the network profile is pinned to Azure CNI Overlay so
+    pods stay on the overlay pod CIDR and do not consume subnet IPs — the
+    overlay CIDRs (`10.244.0.0/16` pod, `10.0.0.0/16` service, `10.0.0.10` DNS)
+    must not collide with the hub VNet address space (`10.20.0.0/20`).
 Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py`.
 """
 
@@ -31,6 +36,7 @@ def build_cluster_params(
     blast_count: int,
     caller_oid: str,
     tier: str | None = None,
+    vnet_subnet_id: str | None = None,
 ) -> Any:
     """Build the AKS managed cluster model used by the provision task.
 
@@ -38,8 +44,22 @@ def build_cluster_params(
     written to the `elb-tier` ARM tag so the dashboard can group multi-cluster
     deployments. Empty / whitespace tier values are dropped so we never store
     `elb-tier=""` on the cluster.
+
+    `vnet_subnet_id` selects the cluster networking mode:
+
+      * Truthy → BYO-subnet mode. Both agent pools set `vnet_subnet_id` so the
+        nodes land in the supplied subnet (the hub VNet's `snet-aks`), and the
+        network profile is pinned to Azure CNI Overlay. This is what lets the
+        nodes resolve the workload Storage private-endpoint FQDN (the hub VNet
+        is linked to the `privatelink.*` zones) and route to it intra-VNet —
+        without it the cluster gets a fresh managed VNet that the dashboard MI
+        cannot peer/link, so warmup azcopy 403s against the locked-down
+        Storage account.
+      * Falsy / None → managed-VNet mode (Azure picks the node subnet). Kept
+        for local/legacy callers and tests that do not inject a subnet id.
     """
     from azure.mgmt.containerservice.models import (
+        ContainerServiceNetworkProfile,
         ManagedCluster,
         ManagedClusterAgentPoolProfile,
         ManagedClusterIdentity,
@@ -70,6 +90,24 @@ def build_cluster_params(
     if tier_clean:
         tags["elb-tier"] = tier_clean
 
+    subnet_id = (vnet_subnet_id or "").strip()
+    pool_subnet_id = subnet_id or None
+    # Pin Azure CNI Overlay when running in BYO-subnet mode so only nodes (not
+    # every pod) draw IPs from `snet-aks`. The CIDRs mirror the AKS defaults the
+    # managed-VNet clusters already use; they must stay outside the hub VNet
+    # space (10.20.0.0/20) to avoid overlap.
+    network_profile = (
+        ContainerServiceNetworkProfile(
+            network_plugin="azure",
+            network_plugin_mode="overlay",
+            pod_cidr="10.244.0.0/16",
+            service_cidr="10.0.0.0/16",
+            dns_service_ip="10.0.0.10",
+        )
+        if pool_subnet_id
+        else None
+    )
+
     return ManagedCluster(
         location=region,
         identity=ManagedClusterIdentity(type="SystemAssigned"),
@@ -98,6 +136,7 @@ def build_cluster_params(
         storage_profile=ManagedClusterStorageProfile(
             blob_csi_driver=ManagedClusterStorageProfileBlobCSIDriver(enabled=True)
         ),
+        network_profile=network_profile,
         agent_pool_profiles=[
             ManagedClusterAgentPoolProfile(
                 name=SYSTEM_POOL_NAME,
@@ -108,6 +147,7 @@ def build_cluster_params(
                 type="VirtualMachineScaleSets",
                 enable_auto_scaling=False,
                 node_taints=[SYSTEM_TAINT],
+                vnet_subnet_id=pool_subnet_id,
             ),
             ManagedClusterAgentPoolProfile(
                 name=BLAST_POOL_NAME,
@@ -119,6 +159,7 @@ def build_cluster_params(
                 enable_auto_scaling=False,
                 node_labels={BLAST_LABEL_KEY: BLAST_LABEL_VALUE},
                 node_taints=[BLAST_TAINT],
+                vnet_subnet_id=pool_subnet_id,
             ),
         ],
         tags=tags,

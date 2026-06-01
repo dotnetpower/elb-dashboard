@@ -17,9 +17,11 @@ import {
   TrendingUp,
   XCircle,
 } from "lucide-react";
+import { useId } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import type { DisplayJobState, JobRowView } from "./jobTypes";
+import "./ClusterBento.css";
 
 /* -------------------------------------------------------------------------- */
 /* Health pill                                                                */
@@ -136,6 +138,10 @@ export function Spark({
   smooth?: boolean;
   ariaLabel?: string;
 }) {
+  // `useId()` must run before any early return to satisfy the Rules of
+  // Hooks. It yields a stable, collision-free gradient id per Spark
+  // instance (replacing the old Math.random id that churned every paint).
+  const reactId = useId();
   if (!data || data.length === 0) return null;
   // Strip non-finite samples — a single NaN/Infinity poisons every
   // computed coordinate (NaN propagates through min/max/range), and
@@ -171,10 +177,9 @@ export function Spark({
   }
   // SVG <linearGradient> ids must be unique per render to avoid the
   // browser sharing one gradient definition between sparklines and
-  // tinting them all the same colour. Math.random in render is fine
-  // here because the value is purely visual; React's reconciliation
-  // doesn't care.
-  const id = `spark-grad-${Math.random().toString(36).slice(2, 10)}`;
+  // tinting them all the same colour. `useId()` (computed above) gives a
+  // stable, collision-free id that does not churn on every render.
+  const id = `spark-grad-${reactId.replace(/:/g, "")}`;
   return (
     <svg
       width={width}
@@ -657,14 +662,11 @@ export function BentoCell({
 }) {
   return (
     <div
+      className="bento-cell"
       style={{
         gridColumn: span ? `span ${span[0]}` : undefined,
         gridRow: span ? `span ${span[1]}` : undefined,
         padding: "14px 16px",
-        background:
-          "linear-gradient(160deg, rgba(255,255,255,0.025) 0%, rgba(255,255,255,0.005) 100%)",
-        border: "1px solid var(--border-weak)",
-        borderRadius: 12,
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
@@ -675,14 +677,9 @@ export function BentoCell({
     >
       {accent && (
         <div
+          className="bento-cell__accent"
           style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            height: 1,
             background: `linear-gradient(90deg, transparent 0%, ${accent} 30%, ${accent} 70%, transparent 100%)`,
-            opacity: 0.5,
           }}
         />
       )}

@@ -16,6 +16,13 @@ export function NoJobsEmpty({ cluster, degradedNotice }: NoJobsEmptyProps) {
       style={{ textAlign: "center", padding: "var(--space-7)" }}
     >
       <p className="muted">No BLAST searches yet.</p>
+      <p
+        className="muted"
+        style={{ maxWidth: 520, margin: "var(--space-2) auto 0", fontSize: 13 }}
+      >
+        Your searches run on your own AKS cluster and storage — never on a
+        shared NCBI queue, so there is no public rate limit or wait line.
+      </p>
       {degradedNotice && (
         <div
           style={{
