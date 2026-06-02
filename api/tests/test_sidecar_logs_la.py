@@ -15,6 +15,7 @@ Validation: `uv run pytest -q api/tests/test_sidecar_logs_la.py`.
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -165,3 +166,41 @@ def test_end_offset_la_falls_back_to_now_when_empty(monkeypatch: pytest.MonkeyPa
     after = sidecar_logs_la._now_ms()
 
     assert before <= cursor <= after
+
+
+def test_first_fetch_does_not_deadlock_on_lazy_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: the first real fetch must not self-deadlock.
+
+    `_fetch_snapshot` calls `_get_client` while it already holds `_lock`.
+    When `_client` is `None`, `_get_client` lazily constructs the client; it
+    must use a *separate* lock, otherwise re-acquiring the non-reentrant
+    `_lock` deadlocks the very first Live Wall log fetch (the SSE stream stays
+    open at HTTP 200 but never emits a line, with no exception logged).
+
+    Unlike the other tests we do NOT monkeypatch `_get_client` here — that is
+    exactly the code path that deadlocked in production, so it must run for
+    real with only the credential + SDK client construction stubbed out.
+    """
+    fake_client = MagicMock()
+    fake_client.query_workspace.return_value = _fake_response(
+        [(datetime.now(UTC), "api", "after lazy client")]
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        "azure.monitor.query.LogsQueryClient", lambda _credential: fake_client
+    )
+    # Ensure the lazy path runs (no pre-built client).
+    sidecar_logs_la._client = None
+
+    result: list[list] = []
+
+    def _run() -> None:
+        result.append(sidecar_logs_la.read_recent_lines_la("api", tail=5))
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout=5.0)
+
+    assert not worker.is_alive(), "first LA fetch deadlocked while building the client"
+    assert result and [line["text"] for line in result[0]] == ["after lazy client"]
+

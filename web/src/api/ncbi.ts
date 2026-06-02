@@ -31,20 +31,37 @@ export interface NuccoreFeatureInterval {
   accession: string | null;
 }
 
+/**
+ * A single GenBank feature qualifier. The backend returns qualifiers as an
+ * ordered list of `{name, value}` pairs (NOT a map) so duplicate keys such as
+ * repeated `db_xref` entries on the `source` feature are preserved.
+ */
+export interface NuccoreQualifier {
+  name: string;
+  value: string;
+}
+
 export interface NuccoreFeature {
   key: string | null;
   location: string | null;
   intervals: NuccoreFeatureInterval[];
-  qualifiers: Record<string, string>;
+  qualifiers: NuccoreQualifier[];
 }
 
 export interface NuccoreReference {
-  reference: string | null;
-  position: string | null;
-  authors: string | null;
   title: string | null;
   journal: string | null;
+  authors: string[];
   pubmed: string | null;
+}
+
+/**
+ * A record-level DBLINK cross-reference (e.g. BioProject / BioSample /
+ * Assembly / SRA), parsed from `GBSeq_xrefs`.
+ */
+export interface NuccoreGenBankXref {
+  dbname: string;
+  id: string;
 }
 
 export interface NuccoreGenBank {
@@ -60,13 +77,15 @@ export interface NuccoreGenBank {
   create_date: string | null;
   update_date: string | null;
   organism: string | null;
-  taxonomy_lineage: string[];
+  /** Semicolon-delimited lineage string from `GBSeq_taxonomy` (root → genus). */
+  taxonomy_lineage: string;
   source: string | null;
   comment: string | null;
   features: NuccoreFeature[];
   references: NuccoreReference[];
+  xrefs: NuccoreGenBankXref[];
   cached: boolean;
-  data_source: "efetch_gbset" | string;
+  data_source: "ncbi_eutils" | string;
 }
 
 export function getNuccoreSummary(accession: string) {

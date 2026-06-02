@@ -354,29 +354,30 @@ def build_manifests(
         },
     }
 
-    role_manifest = {
-        "apiVersion": "rbac.authorization.k8s.io/v1",
-        "kind": "ClusterRole",
-        "metadata": {"name": "elb-openapi-role"},
-        "rules": [
-            {
-                "apiGroups": [""],
-                "resources": ["nodes", "pods", "configmaps", "services"],
-                "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
-            },
-            {
-                "apiGroups": ["batch"],
-                "resources": ["jobs"],
-                "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
-            },
-            {
-                "apiGroups": ["apps"],
-                "resources": ["deployments"],
-                "verbs": ["get", "list", "watch"],
-            },
-        ],
-    }
-
+    # The elb-openapi pod runs `elastic-blast submit`, which applies a
+    # broad set of cluster-scoped objects on every submit: a janitor
+    # ClusterRoleBinding that binds the default ServiceAccount to
+    # `cluster-admin` (`elb-janitor-rbac.yaml`), a `create-workspace`
+    # DaemonSet in `kube-system`, PersistentVolumes, a StorageClass, and
+    # the per-batch BLAST Jobs. A previously-shipped narrow custom
+    # ClusterRole (`elb-openapi-role`, granting only nodes/pods/configmaps/
+    # services + batch/jobs + apps/deployments) made every openapi-driven
+    # core_nt submit fail mid-flight — the job marched through one 403 after
+    # another (`clusterrolebindings` forbidden -> `serviceaccounts` ->
+    # `daemonsets`) and ultimately died as "submit produced no BLAST jobs
+    # before stuck timeout". Only terminal/CLI submissions (which carry the
+    # cluster-admin kubeconfig) ever succeeded.
+    #
+    # Scoping below cluster-admin is also security theater here: to apply
+    # the janitor binding the SA must hold `bind`/`escalate` on the
+    # `cluster-admin` ClusterRole, which already lets it grant itself
+    # cluster-admin at will. Binding `elb-openapi-sa` directly to the
+    # built-in `cluster-admin` ClusterRole is therefore both the honest
+    # representation of its privilege level and the only configuration that
+    # keeps pace with elastic-blast's evolving manifest set without
+    # whack-a-mole RBAC patches. The pod is internal-only (private
+    # LoadBalancer, no public ingress) and is the trusted BLAST control
+    # plane, so this is consistent with elastic-blast's own design.
     binding_manifest = {
         "apiVersion": "rbac.authorization.k8s.io/v1",
         "kind": "ClusterRoleBinding",
@@ -390,14 +391,13 @@ def build_manifests(
         ],
         "roleRef": {
             "kind": "ClusterRole",
-            "name": "elb-openapi-role",
+            "name": "cluster-admin",
             "apiGroup": "rbac.authorization.k8s.io",
         },
     }
 
     docs = [
         sa_manifest,
-        role_manifest,
         binding_manifest,
         kubeconfig_manifest,
         deploy_manifest,

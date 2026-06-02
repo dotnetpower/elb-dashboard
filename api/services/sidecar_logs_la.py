@@ -67,7 +67,16 @@ _LOOKBACK = timedelta(
 )
 
 
+# Guards the shared snapshot refresh. NON-reentrant — never acquire it
+# transitively (e.g. via `_get_client`) while it is already held, or the
+# refreshing thread self-deadlocks.
 _lock = threading.Lock()
+# Separate, dedicated lock for lazy client construction. Kept distinct from
+# `_lock` precisely because `_fetch_snapshot` calls `_get_client` while it
+# already holds `_lock`; a shared non-reentrant lock would deadlock the very
+# first Live Wall log fetch (HTTP 200 stream stays open but never emits a
+# line, with no exception logged).
+_client_lock = threading.Lock()
 _client: LogsQueryClient | None = None
 _snapshot: dict[SidecarContainer, list[tuple[int, LogLine]]] = {}
 _snapshot_fetched_at_monotonic: float = 0.0
@@ -267,7 +276,9 @@ def _get_client() -> LogsQueryClient:
     global _client
     if _client is not None:
         return _client
-    with _lock:
+    # Dedicated `_client_lock` (not `_lock`): `_fetch_snapshot` already holds
+    # `_lock` when it calls this, and `_lock` is non-reentrant.
+    with _client_lock:
         if _client is not None:
             return _client
         from azure.monitor.query import LogsQueryClient

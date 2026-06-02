@@ -140,6 +140,28 @@ def test_reference_xml_self_equivalence(gene_id: str) -> None:
     assert report.hsp_drift == []
 
 
+@pytest.mark.parametrize("gene_id", _captured_genes())
+def test_snapshot_drift_detail_is_populated(gene_id: str) -> None:
+    """The comparator attaches a structured snapshot-drift verdict.
+
+    When the candidate summary carries a database name, the report must expose
+    a `snapshot_drift_detail` dict whose `status` is one of the known verdicts.
+    This is the machine-readable counterpart to the `snapshot_drift` boolean.
+    """
+    payload = _load_payloads()["genes"][gene_id]
+    xml_path = FIXTURES_DIR / payload["reference_xml_path"]
+    summary = parse_summary(xml_path)
+    report = compare_summaries(summary, summary)
+    if not summary.database:
+        assert report.snapshot_drift_detail is None
+        return
+    detail = report.snapshot_drift_detail
+    assert isinstance(detail, dict)
+    assert detail["status"] in {"match", "drift", "uncalibrated", "unknown"}
+    assert "database" in detail
+    assert "message" in detail
+
+
 # ---------------------------------------------------------------------------
 # Taxonomic exclusion verification (always runs)
 # ---------------------------------------------------------------------------

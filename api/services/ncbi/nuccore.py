@@ -289,6 +289,7 @@ def _parse_genbank_xml(body: bytes, normalised: str) -> dict[str, Any]:
 
     references = _parse_references(seq.find("GBSeq_references"))
     features = _parse_features(seq.find("GBSeq_feature-table"))
+    xrefs = _parse_xrefs(seq.find("GBSeq_xrefs"))
 
     return {
         "accession": accession_version.split(".")[0],
@@ -308,8 +309,35 @@ def _parse_genbank_xml(body: bytes, normalised: str) -> dict[str, Any]:
         "comment": comment,
         "features": features,
         "references": references,
+        "xrefs": xrefs,
         "data_source": "ncbi_eutils",
     }
+
+
+def _parse_xrefs(node: Any) -> list[dict[str, str]]:
+    """Parse the record-level DBLINK block (``GBSeq_xrefs``).
+
+    NCBI surfaces BioProject / BioSample / Assembly / SRA accessions here
+    rather than as ``source`` feature qualifiers, so the Sequence Detail page
+    needs this list to reproduce the DBLINK section of the nuccore record.
+    """
+    if node is None:
+        return []
+    out: list[dict[str, str]] = []
+    for xref in node.findall("GBXref"):
+        dbname = _xml_text(xref.find("GBXref_dbname"))
+        xid = _xml_text(xref.find("GBXref_id"))
+        if not dbname or not xid:
+            continue
+        out.append(
+            {
+                "dbname": _truncate(dbname, limit=120),
+                "id": _truncate(xid, limit=200),
+            }
+        )
+        if len(out) >= 32:
+            break
+    return out
 
 
 def _parse_features(node: Any) -> list[dict[str, Any]]:

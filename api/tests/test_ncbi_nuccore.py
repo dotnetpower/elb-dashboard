@@ -35,6 +35,10 @@ _GENBANK_XML = b"""<?xml version="1.0" ?>
   <GBSeq_organism>Homo sapiens</GBSeq_organism>
   <GBSeq_taxonomy>Eukaryota; Metazoa; Chordata; Mammalia; Primates; Hominidae; Homo</GBSeq_taxonomy>
   <GBSeq_comment>REVIEWED REFSEQ: This record has been curated by NCBI staff.</GBSeq_comment>
+  <GBSeq_xrefs>
+    <GBXref><GBXref_dbname>BioProject</GBXref_dbname><GBXref_id>PRJNA12345</GBXref_id></GBXref>
+    <GBXref><GBXref_dbname>BioSample</GBXref_dbname><GBXref_id>SAMN00000001</GBXref_id></GBXref>
+  </GBSeq_xrefs>
   <GBSeq_references>
     <GBReference>
       <GBReference_title>p53: At the crossroads of cell-cycle regulation</GBReference_title>
@@ -279,6 +283,10 @@ def test_fetch_nuccore_genbank_parses_record(monkeypatch: pytest.MonkeyPatch) ->
     qual_names = [q["name"] for q in cds["qualifiers"]]
     assert "gene" in qual_names
     assert record["references"][0]["pubmed"] == "12154352"
+    assert record["xrefs"] == [
+        {"dbname": "BioProject", "id": "PRJNA12345"},
+        {"dbname": "BioSample", "id": "SAMN00000001"},
+    ]
     assert record["cached"] is False
 
 

@@ -30,6 +30,8 @@ from pathlib import Path
 
 from defusedxml import ElementTree as ET
 
+from api.services.blast.snapshot_drift import assess_snapshot_drift
+
 _ACC_RE = re.compile(r"^([A-Z]+_?\d+(?:\.\d+)?)$", re.IGNORECASE)
 
 
@@ -96,6 +98,12 @@ class ParityReport:
     rank_set_only_in_reference: list[str] = field(default_factory=list)
     rank_set_only_in_candidate: list[str] = field(default_factory=list)
     hsp_drift: list[dict] = field(default_factory=list)
+    # Structured, quantified drift of the candidate run's observed database
+    # statistics against the verified NCBI Web BLAST calibration (see
+    # `api/services/blast/snapshot_drift.assess_snapshot_drift`). `None` when
+    # the candidate did not report a database name to look up. The boolean
+    # `snapshot_drift` above remains the reference-vs-candidate comparison.
+    snapshot_drift_detail: dict | None = None
 
 
 def _open_xml(path: Path) -> str:
@@ -343,6 +351,15 @@ def compare_summaries(
         )
 
     equivalent = not findings
+    snapshot_drift_detail = (
+        assess_snapshot_drift(
+            candidate.database,
+            candidate.db_num,
+            candidate.db_len,
+        )
+        if candidate.database
+        else None
+    )
     return ParityReport(
         equivalent=equivalent,
         snapshot_drift=snapshot_drift,
@@ -354,6 +371,7 @@ def compare_summaries(
         rank_set_only_in_reference=only_ref,
         rank_set_only_in_candidate=only_cand,
         hsp_drift=hsp_drift,
+        snapshot_drift_detail=snapshot_drift_detail,
     )
 
 

@@ -8,6 +8,7 @@ import {
   getNuccoreGenBank,
   getNuccoreFasta,
   type NuccoreFeature,
+  type NuccoreGenBank,
 } from "@/api/ncbi";
 
 const NCBI_NUCCORE_BASE = "https://www.ncbi.nlm.nih.gov/nuccore";
@@ -48,11 +49,22 @@ function featureLabel(feature: NuccoreFeature): string {
   return feature.key || "feature";
 }
 
+/** First value of a named qualifier on a feature, or null. */
+function qualifier(feature: NuccoreFeature, name: string): string | null {
+  for (const qual of feature.qualifiers) {
+    if (qual.name === name && qual.value) return qual.value;
+  }
+  return null;
+}
+
 function featureSummary(feature: NuccoreFeature): string {
   const parts: string[] = [];
-  if (feature.qualifiers.gene) parts.push(feature.qualifiers.gene);
-  if (feature.qualifiers.product) parts.push(feature.qualifiers.product);
-  if (feature.qualifiers.note && parts.length === 0) parts.push(feature.qualifiers.note);
+  const gene = qualifier(feature, "gene");
+  const product = qualifier(feature, "product");
+  const note = qualifier(feature, "note");
+  if (gene) parts.push(gene);
+  if (product) parts.push(product);
+  if (note && parts.length === 0) parts.push(note);
   return parts.join(" — ");
 }
 
@@ -62,6 +74,49 @@ function featureRange(feature: NuccoreFeature): { start: number; stop: number } 
       return { start: interval.start, stop: interval.stop };
     }
   }
+  return null;
+}
+
+// NCBI renders sample provenance from the ``source`` feature qualifiers. We
+// surface the same fields the public nuccore record shows so the dashboard
+// detail page reads like the NCBI page. ``country`` is the legacy name for
+// what NCBI now labels ``geo_loc_name``; accept either.
+const SOURCE_QUALIFIER_FIELDS: ReadonlyArray<{ label: string; names: string[] }> = [
+  { label: "Mol type", names: ["mol_type"] },
+  { label: "Isolate", names: ["isolate"] },
+  { label: "Strain", names: ["strain"] },
+  { label: "Host", names: ["host"] },
+  { label: "Geo location", names: ["geo_loc_name", "country"] },
+  { label: "Collection date", names: ["collection_date"] },
+  { label: "Collected by", names: ["collected_by"] },
+  { label: "Isolation source", names: ["isolation_source"] },
+];
+
+function sourceFeature(genbank: NuccoreGenBank | undefined): NuccoreFeature | null {
+  if (!genbank) return null;
+  return genbank.features.find((feature) => feature.key === "source") ?? null;
+}
+
+function firstQualifier(
+  feature: NuccoreFeature | null,
+  names: string[],
+): string | null {
+  if (!feature) return null;
+  for (const name of names) {
+    const value = qualifier(feature, name);
+    if (value) return value;
+  }
+  return null;
+}
+
+const NCBI_BIOPROJECT_BASE = "https://www.ncbi.nlm.nih.gov/bioproject";
+const NCBI_BIOSAMPLE_BASE = "https://www.ncbi.nlm.nih.gov/biosample";
+const NCBI_PUBMED_BASE = "https://pubmed.ncbi.nlm.nih.gov";
+
+function xrefUrl(dbname: string, id: string): string | null {
+  const key = dbname.toLowerCase();
+  if (key === "bioproject") return `${NCBI_BIOPROJECT_BASE}/${encodeURIComponent(id)}`;
+  if (key === "biosample") return `${NCBI_BIOSAMPLE_BASE}/${encodeURIComponent(id)}`;
   return null;
 }
 
@@ -117,6 +172,23 @@ export function SequenceDetail() {
     if (fasta.length <= SEQUENCE_PREVIEW_BYTES) return fasta;
     return `${fasta.slice(0, SEQUENCE_PREVIEW_BYTES)}\n…(truncated, ${(fasta.length - SEQUENCE_PREVIEW_BYTES).toLocaleString()} bytes hidden)`;
   }, [fasta]);
+
+  const source = sourceFeature(genbank);
+  const sourceRows = useMemo(
+    () =>
+      SOURCE_QUALIFIER_FIELDS.map((field) => ({
+        label: field.label,
+        value: firstQualifier(source, field.names),
+      })).filter((row) => row.value != null),
+    [source],
+  );
+  const lineage = useMemo(() => {
+    const raw = genbank?.taxonomy_lineage || "";
+    return raw
+      .split(";")
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+  }, [genbank?.taxonomy_lineage]);
 
   if (!accession) {
     return (
@@ -275,6 +347,83 @@ export function SequenceDetail() {
         </dl>
       </div>
 
+      {(sourceRows.length > 0 || (genbank?.xrefs.length ?? 0) > 0) && (
+        <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 14 }}>Sample &amp; source</h2>
+          {sourceRows.length > 0 && (
+            <dl
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                gap: 12,
+                margin: 0,
+                fontSize: 13,
+              }}
+            >
+              {sourceRows.map((row) => (
+                <MetaCell key={row.label} label={row.label} value={row.value} />
+              ))}
+            </dl>
+          )}
+          {genbank && genbank.xrefs.length > 0 && (
+            <div style={{ display: "grid", gap: 6 }}>
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>DBLINK</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {genbank.xrefs.map((xref) => {
+                  const href = xrefUrl(xref.dbname, xref.id);
+                  const label = `${xref.dbname}: ${xref.id}`;
+                  return href ? (
+                    <a
+                      key={`${xref.dbname}-${xref.id}`}
+                      className="glass-button glass-button--ghost"
+                      href={href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        fontSize: 12,
+                        padding: "2px 8px",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
+                      <ExternalLink size={11} strokeWidth={1.5} />
+                      {label}
+                    </a>
+                  ) : (
+                    <span
+                      key={`${xref.dbname}-${xref.id}`}
+                      style={{
+                        fontSize: 12,
+                        padding: "2px 8px",
+                        fontFamily: "var(--font-mono, monospace)",
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      {label}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {lineage.length > 0 && (
+        <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 8 }}>
+          <h2 style={{ margin: 0, fontSize: 14 }}>Taxonomy</h2>
+          <div style={{ fontSize: 12, lineHeight: 1.7, color: "var(--text)" }}>
+            {lineage.map((rank, idx) => (
+              <span key={`${rank}-${idx}`}>
+                {idx > 0 && <span style={{ color: "var(--text-muted)" }}> › </span>}
+                {rank}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 10 }}>
         <h2 style={{ margin: 0, fontSize: 14 }}>Features</h2>
         {genbankQuery.isLoading && <p className="muted" style={{ margin: 0 }}>Loading features…</p>}
@@ -336,6 +485,34 @@ export function SequenceDetail() {
           </div>
         )}
       </div>
+
+      {genbank && genbank.references.length > 0 && (
+        <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 10 }}>
+          <h2 style={{ margin: 0, fontSize: 14 }}>References</h2>
+          <ol style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 10 }}>
+            {genbank.references.slice(0, 24).map((ref, idx) => (
+              <li key={`ref-${idx}`} style={{ fontSize: 12, lineHeight: 1.5 }}>
+                {ref.title && <div style={{ color: "var(--text)" }}>{ref.title}</div>}
+                {ref.authors.length > 0 && (
+                  <div className="muted">{ref.authors.join(", ")}</div>
+                )}
+                {ref.journal && <div className="muted">{ref.journal}</div>}
+                {ref.pubmed && (
+                  <a
+                    href={`${NCBI_PUBMED_BASE}/${encodeURIComponent(ref.pubmed)}/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 2 }}
+                  >
+                    <ExternalLink size={11} strokeWidth={1.5} />
+                    PubMed {ref.pubmed}
+                  </a>
+                )}
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
 
       <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 8 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>

@@ -78,6 +78,51 @@ def test_build_manifests_rejects_empty_token() -> None:
         openapi._build_manifests(**base_kwargs)
 
 
+def test_build_manifests_grants_janitor_rbac_permissions() -> None:
+    """elb-openapi ServiceAccount must hold cluster-admin so
+    `elastic-blast submit` can apply its full manifest set.
+
+    `elastic-blast submit` applies a janitor ClusterRoleBinding that binds
+    the default ServiceAccount to `cluster-admin`, a `create-workspace`
+    DaemonSet in `kube-system`, PersistentVolumes, a StorageClass, and the
+    BLAST Jobs. A narrow custom ClusterRole made every openapi-driven
+    core_nt submit fail mid-flight with a cascade of 403s. The pod's
+    ServiceAccount is therefore bound directly to the built-in
+    `cluster-admin` ClusterRole, and the redundant custom
+    `elb-openapi-role` ClusterRole is no longer emitted.
+    """
+    manifest = openapi._build_manifests(
+        image="elbacr.azurecr.io/elb-openapi:4.9",
+        mi_client_id="mi-client-id",
+        cluster_name="elb-cluster",
+        resource_group="rg-elb",
+        storage_account="elbstg",
+        region="koreacentral",
+        tenant_id="tenant-id",
+        acr_name="elbacr",
+        acr_resource_group="rg-acr",
+        num_nodes=10,
+        api_token="dummy-token-for-rbac-test",
+    )
+    docs = [json.loads(chunk) for chunk in manifest.split("\n---\n")]
+
+    # The ClusterRoleBinding must target the built-in cluster-admin role
+    # and bind the elb-openapi ServiceAccount.
+    binding = next(doc for doc in docs if doc["kind"] == "ClusterRoleBinding")
+    assert binding["roleRef"]["name"] == "cluster-admin"
+    assert binding["roleRef"]["kind"] == "ClusterRole"
+    subject = binding["subjects"][0]
+    assert subject["kind"] == "ServiceAccount"
+    assert subject["name"] == "elb-openapi-sa"
+
+    # The narrow custom ClusterRole must no longer be emitted — it was the
+    # root cause of the cascading-403 submit failures.
+    assert not any(
+        doc["kind"] == "ClusterRole" and doc.get("metadata", {}).get("name") == "elb-openapi-role"
+        for doc in docs
+    )
+
+
 def test_build_manifests_preserves_openapi_api_token() -> None:
     manifest = openapi._build_manifests(
         image="elbacr.azurecr.io/elb-openapi:4.9",
