@@ -28,6 +28,7 @@ from api.services.auto_stop import (
     is_in_cooldown,
     list_auto_stop_preferences,
     mark_auto_stop_event,
+    mark_auto_stop_started,
     normalise_preference,
     preference_key,
     save_auto_stop_preference,
@@ -138,6 +139,39 @@ def test_mark_auto_stop_event_records_stop_and_skip(monkeypatch, tmp_path) -> No
     assert after_skip.last_skip_reason == "active_jobs:2"
     # Stop fields are preserved across a subsequent skip.
     assert after_skip.last_stop_at == after_stop.last_stop_at
+
+
+def test_mark_auto_stop_started_stamps_last_started_at(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    pref = save_auto_stop_preference(_make())
+    assert pref.last_started_at == ""
+
+    updated = mark_auto_stop_started(
+        pref.subscription_id, pref.resource_group, pref.cluster_name
+    )
+    assert updated is not None
+    assert updated.last_started_at != ""
+    # Persisted, not just returned.
+    reloaded = get_auto_stop_preference(
+        pref.subscription_id, pref.resource_group, pref.cluster_name
+    )
+    assert reloaded is not None
+    assert reloaded.last_started_at == updated.last_started_at
+
+
+def test_mark_auto_stop_started_noop_when_no_pref(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    result = mark_auto_stop_started("sub-x", "rg-x", "cluster-x")
+    assert result is None
+
+
+def test_last_started_at_round_trips_through_dict() -> None:
+    pref = _make(last_started_at="2026-06-02T07:22:14+00:00")
+    restored = AutoStopPreference.from_dict(pref.to_dict())
+    assert restored.last_started_at == "2026-06-02T07:22:14+00:00"
+    assert restored == pref
 
 
 def test_extend_auto_stop_preference_sets_future_deadline(monkeypatch, tmp_path) -> None:

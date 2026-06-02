@@ -5,6 +5,7 @@ import { BlastHitsTable } from "./BlastHitsTable";
 import { DegradedBanner } from "./DegradedBanner";
 import { ResultFilterBar } from "./ResultFilterBar";
 import { ResultsPendingPanel } from "./ResultsPendingPanel";
+import { TaxonRollupPanel } from "./TaxonRollupPanel";
 import { isPartialResult, isResultFilesUnavailable, ncbiNuccoreUrl } from "./helpers";
 import type { BlastAnalyticsState } from "./useBlastAnalyticsState";
 import type { BlastHit } from "@/api/endpoints";
@@ -113,6 +114,10 @@ export function DescriptionsTabBody({ analytics, resultsPending = false }: Descr
             </p>
           </div>
         )}
+
+      {alignments.length > 0 && (
+        <TaxonRollupPanel analytics={analytics} onHitActivate={handleSubjectDrilldown} />
+      )}
 
       {alignments.length > 0 && (
         <BlastHitsTable

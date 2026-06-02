@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, HashRouter } from "react-router-dom";
 
 import { msalInstance } from "@/auth/msal";
+import { clearAuthSessionIssue } from "@/auth/sessionEvents";
 import { installClientErrorHandlers, reportUnknownClientError } from "@/api/clientLog";
 import { App } from "@/App";
 import { ToastProvider } from "@/components/Toast";
@@ -75,6 +76,9 @@ async function bootstrap() {
         if (payload.account) {
           msalInstance.setActiveAccount(payload.account);
         }
+        // A fresh token means the session is healthy again — re-open the
+        // dashboard if the session-expiry gate had routed the user to sign-in.
+        clearAuthSessionIssue();
       }
     });
 

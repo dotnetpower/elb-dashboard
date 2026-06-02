@@ -12,6 +12,8 @@ import {
 } from "./helpers";
 import { OverviewPanel } from "./OverviewPanel";
 import { ResultsPendingPanel } from "./ResultsPendingPanel";
+import { SubjectMapPanel } from "./SubjectMapPanel";
+import { TriageScatterPanel } from "./TriageScatterPanel";
 import type { BlastAnalyticsState } from "./useBlastAnalyticsState";
 
 const SCORE_BIN_ORDER: NcbiScoreBin[] = [
@@ -69,6 +71,10 @@ export function GraphicSummaryPanel({ analytics, resultsPending = false }: Graph
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <OverviewPanel analytics={analytics} />
+
+      <TriageScatterPanel analytics={analytics} onHitActivate={handleBarActivate} />
+
+      <SubjectMapPanel analytics={analytics} onHitActivate={handleBarActivate} />
 
       <div className="glass-card" style={{ padding: 16 }}>
         <div

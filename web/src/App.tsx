@@ -5,6 +5,7 @@ import { AuthenticatedTemplate, UnauthenticatedTemplate } from "@azure/msal-reac
 import { Layout } from "@/components/Layout";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { SignIn } from "@/pages/SignIn";
+import { useAuthSessionIssue } from "@/auth/sessionEvents";
 import { Dashboard } from "@/pages/Dashboard";
 import { BlastSubmit } from "@/pages/BlastSubmit";
 import { BlastJobs } from "@/pages/BlastJobs";
@@ -197,8 +198,22 @@ export function App() {
         <SignIn />
       </UnauthenticatedTemplate>
       <AuthenticatedTemplate>
-        <AppRoutes />
+        <AuthenticatedApp />
       </AuthenticatedTemplate>
     </>
   );
+}
+
+// Gate the authenticated app behind the session-issue store. MSAL's
+// AuthenticatedTemplate only checks that an account is still cached, not that
+// its tokens are still valid — so a silently-expired session would otherwise
+// keep the dashboard mounted behind a stale banner. When a session issue is
+// raised (no active account, interaction required, refresh failed, or a 401
+// from the API/ARM) we route the user to the in-app sign-in page instead.
+function AuthenticatedApp() {
+  const sessionIssue = useAuthSessionIssue();
+  if (sessionIssue) {
+    return <SignIn expired expiredMessage={sessionIssue.message} />;
+  }
+  return <AppRoutes />;
 }

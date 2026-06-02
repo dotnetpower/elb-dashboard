@@ -32,8 +32,8 @@ cause is one of:
    "not_found", ...}`.
 2. **Wrong Azure tenant.** Your `az login` session belongs to a different
    tenant than the subscription the SPA is calling (very common on machines
-   with multiple subscription profiles, e.g. via `az-jungha` /
-   `~/.azure-jungha`). ARM returns
+   with multiple subscription profiles, e.g. a separate `AZURE_CONFIG_DIR`
+   profile). ARM returns
    `InvalidAuthenticationTokenTenant`, the monitor router classifies it as
    `auth_wrong_tenant`, and the backend returns an empty payload.
 3. **Missing role assignment.** Your identity is signed in but lacks

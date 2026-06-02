@@ -463,6 +463,38 @@ def blast_database_order_oracle(
         account_name,
         context="blast_database_order_oracle",
     )
+
+    # ARM-level powerState gate first — a stopped cluster yields a clean 409
+    # instead of letting the K8s warmup/job calls below time out (~10 s).
+    # Mirrors the precheck in /api/storage/prepare-db (mode=aks).
+    from api.services.cluster_health import get_cluster_health
+
+    try:
+        health = get_cluster_health(cred, sub, storage_rg, cluster_name)
+    except Exception as exc:
+        LOGGER.debug(
+            "cluster_health probe raised for order-oracle build: %s",
+            type(exc).__name__,
+        )
+        health = None
+    if health is not None and not health.get("healthy", True):
+        reason = health.get("reason")
+        power_state = health.get("power_state")
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "aks_unavailable",
+                "message": (
+                    "AKS cluster is not Running "
+                    f"(reason={reason}, power_state={power_state}). "
+                    "Start the cluster from the dashboard before building the "
+                    "order oracle."
+                ),
+                "cluster_reason": reason,
+                "cluster_power_state": power_state,
+            },
+        )
+
     db_meta = next(
         (
             item

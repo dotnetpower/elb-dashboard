@@ -82,10 +82,11 @@ def test_auto_stop_aks_re_evaluates_and_skips_when_active(
     monkeypatch.setattr(
         idle_autostop, "_power_state", lambda _pref: "Running"
     )
+    monkeypatch.setattr(idle_autostop, "_provisioning_state", lambda _pref: "Succeeded")
     monkeypatch.setattr(
         idle_autostop,
         "evaluate_cluster",
-        lambda pref, *, repo, power_state, ignore_cooldown=False: IdleDecision(
+        lambda pref, *, repo, power_state, ignore_cooldown=False, **_extra: IdleDecision(
             verdict="keep", reason="active_jobs:1", active_job_count=1
         ),
     )
@@ -113,10 +114,11 @@ def test_auto_stop_aks_calls_stop_when_evaluator_returns_stop(
 
     save_auto_stop_preference(_pref())
     monkeypatch.setattr(idle_autostop, "_power_state", lambda _pref: "Running")
+    monkeypatch.setattr(idle_autostop, "_provisioning_state", lambda _pref: "Succeeded")
     monkeypatch.setattr(
         idle_autostop,
         "evaluate_cluster",
-        lambda pref, *, repo, power_state, ignore_cooldown=False: IdleDecision(
+        lambda pref, *, repo, power_state, ignore_cooldown=False, **_extra: IdleDecision(
             verdict="stop", reason="idle:60m"
         ),
     )
@@ -168,6 +170,7 @@ def test_auto_stop_aks_stops_despite_preflight_cooldown_stamp(
         )
     )
     monkeypatch.setattr(idle_autostop, "_power_state", lambda _pref: "Running")
+    monkeypatch.setattr(idle_autostop, "_provisioning_state", lambda _pref: "Succeeded")
     # Real evaluate_cluster with an idle (no active jobs) repo.
     monkeypatch.setattr(
         "api.services.state_repo.get_state_repo",

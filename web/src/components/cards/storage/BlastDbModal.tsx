@@ -74,6 +74,13 @@ interface BlastDbModalProps {
    */
   writeDisabled?: boolean;
   writeDisabledReason?: string;
+  /**
+   * False when the target AKS workload cluster is not Running. The Build
+   * Oracle Jobs execute on the warmed cluster nodes, so a stopped cluster
+   * makes the build fail — the button is disabled with an explanatory
+   * tooltip. Defaults to true (degrade-open while AKS status is unknown).
+   */
+  clusterReady?: boolean;
   onClose: () => void;
 }
 
@@ -95,6 +102,7 @@ export function BlastDbModal({
   clusterTopology,
   writeDisabled = false,
   writeDisabledReason,
+  clusterReady = true,
   onClose,
 }: BlastDbModalProps) {
   const [confirmClusterDb, setConfirmClusterDb] = useState<PendingDownloadConfirm | null>(
@@ -510,7 +518,14 @@ export function BlastDbModal({
                         elapsed={elapsed}
                         downloadDisabled={downloading !== null}
                         oracleBuilding={oracleBuilding === db.value}
-                        oracleDisabled={!isDownloaded || oracleBuilding !== null}
+                        oracleDisabled={
+                          !isDownloaded || oracleBuilding !== null || !clusterReady
+                        }
+                        oracleDisabledReason={
+                          !clusterReady
+                            ? "AKS cluster is not running — start it before building the order oracle"
+                            : undefined
+                        }
                         autoWarmupChecked={autoWarmupDbs.has(db.value)}
                         autoWarmupDisabled={
                           !isDownloaded || hasUpdate || !!meta?.update_in_progress

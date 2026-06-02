@@ -12,6 +12,7 @@ import { StorageMetaGrid } from "@/components/cards/storage/StorageMetaGrid";
 import { StorageWarnings } from "@/components/cards/storage/StorageWarnings";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 import { getWorkloadNodeCount } from "@/pages/blastSubmit/computeEnvironment";
+import { isAksWorkloadReady } from "@/utils/aksStatus";
 import { pickPreferredCluster } from "@/utils/clusterSelection";
 import { getDegradedInfo } from "@/utils/monitorDegraded";
 
@@ -96,6 +97,20 @@ export function StorageCard({
   // keep the card's "fetching" shimmer on while a copy is running.
   const [dbDownloading, setDbDownloading] = useState<string | null>(null);
 
+  // Power-state gate for the Build Oracle action. The oracle Jobs run on the
+  // warmed nodes of the cluster the build targets (`clusterName` below), so a
+  // stopped/half-provisioned cluster makes the build fail. Evaluate readiness
+  // against the exact cluster the oracle build will use and degrade open
+  // (ready=true) while the AKS list is unknown or the cluster is not found.
+  const oracleClusterName = clusterName ?? "elb-cluster";
+  const clusterReady = useMemo(() => {
+    const clusters = clusterQuery.data?.clusters;
+    if (!clusters) return true;
+    const match = clusters.find((c) => c.name === oracleClusterName);
+    if (!match) return true;
+    return isAksWorkloadReady(match);
+  }, [clusterQuery.data, oracleClusterName]);
+
   const status = !enabled
     ? "idle"
     : query.isLoading
@@ -158,6 +173,7 @@ export function StorageCard({
             clusterName={clusterName ?? "elb-cluster"}
             acrName={acrName}
             clusterTopology={clusterTopology}
+            clusterReady={clusterReady}
             onDownloadingChange={setDbDownloading}
           />
         </>

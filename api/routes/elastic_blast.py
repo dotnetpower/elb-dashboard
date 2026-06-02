@@ -39,7 +39,14 @@ class ExternalBlastOptions(BaseModel):
     outfmt: Literal[5] = Field(5, description="Fixed to BLAST XML format 5")
     word_size: int = Field(28, ge=1)
     dust: bool = Field(True)
-    evalue: float = Field(10.0, gt=0)
+    evalue: float = Field(
+        0.05,
+        gt=0,
+        description=(
+            "Expect-value threshold. Defaults to 0.05 to match the NCBI Web "
+            "BLAST megablast default and the dashboard submit form."
+        ),
+    )
     max_target_seqs: int = Field(500, ge=1)
 
 

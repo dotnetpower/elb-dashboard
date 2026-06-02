@@ -59,7 +59,11 @@ def test_get_cluster_health_running_returns_healthy(monkeypatch: pytest.MonkeyPa
     )
 
     assert health == cluster_health.ClusterHealth(
-        healthy=True, exists=True, power_state="Running", reason=None
+        healthy=True,
+        exists=True,
+        power_state="Running",
+        provisioning_state="Succeeded",
+        reason=None,
     )
     assert fake.calls == 1
 

@@ -52,11 +52,18 @@ class ClusterHealth(TypedDict):
     ARM itself was unreachable (the gate is best-effort — it never blocks
     callers when ARM is down, instead degrading to `reason=None` so the
     caller proceeds with the K8s call as if the gate were absent).
+
+    `provisioning_state` is the ARM control-plane state (`Succeeded` /
+    `Starting` / `Stopping` / `Updating` / …). It is None when the cluster
+    does not exist or ARM was unreachable. The auto-stop evaluator uses it
+    to avoid stopping a cluster whose start LRO is still in progress
+    (AKS reports `power_state == "Running"` before provisioning settles).
     """
 
     healthy: bool
     exists: bool
     power_state: str | None
+    provisioning_state: str | None
     reason: str | None
 
 
@@ -130,25 +137,42 @@ def get_cluster_health(
             key,
             type(exc).__name__,
         )
-        return ClusterHealth(healthy=True, exists=True, power_state=None, reason=None)
+        return ClusterHealth(
+            healthy=True,
+            exists=True,
+            power_state=None,
+            provisioning_state=None,
+            reason=None,
+        )
 
     exists = bool(snapshot.get("exists", True))
     power_state = snapshot.get("power_state")
+    provisioning_state = snapshot.get("provisioning_state")
     if not exists:
         return ClusterHealth(
-            healthy=False, exists=False, power_state=None, reason="cluster_not_found"
+            healthy=False,
+            exists=False,
+            power_state=None,
+            provisioning_state=None,
+            reason="cluster_not_found",
         )
     if isinstance(power_state, str) and power_state and power_state != "Running":
         return ClusterHealth(
             healthy=False,
             exists=True,
             power_state=power_state,
+            provisioning_state=(
+                provisioning_state if isinstance(provisioning_state, str) else None
+            ),
             reason="cluster_stopped",
         )
     return ClusterHealth(
         healthy=True,
         exists=True,
         power_state=power_state if isinstance(power_state, str) else None,
+        provisioning_state=(
+            provisioning_state if isinstance(provisioning_state, str) else None
+        ),
         reason=None,
     )
 

@@ -231,6 +231,24 @@ export interface K8sNodeMetrics {
   conditions?: Record<string, string>;
 }
 
+/** One lifecycle phase estimate from `/monitor/aks/start-stats`. */
+export interface ClusterTimingPhase {
+  phase: string;
+  /** Median of recent observed durations (seconds), or the built-in default. */
+  seconds: number;
+  /** Number of recorded samples backing `seconds` (0 ⇒ using the default). */
+  samples: number;
+  last_observed_at: string | null;
+  /** "measured" when samples > 0, otherwise "default". */
+  source: "measured" | "default";
+}
+
+export interface ClusterStartStats {
+  phases: Partial<Record<string, ClusterTimingPhase>>;
+  /** aks_start + openapi_deploy medians, convenience sum (seconds). */
+  api_ready_seconds: number;
+}
+
 export const monitoringApi = {
   /**
    * List AKS clusters. When `rg` is omitted (or empty), the backend returns
@@ -250,6 +268,13 @@ export const monitoringApi = {
       degraded_reason?: string;
     }>(`/monitor/aks?${params.toString()}`);
   },
+
+  /**
+   * Measured cluster-lifecycle timing estimates (AKS start/stop, OpenAPI
+   * deploy). Powers `StartEstimatePanel`. Read-only; the backend degrades to
+   * built-in defaults (`source: "default"`) rather than failing.
+   */
+  aksStartStats: () => api.get<ClusterStartStats>("/monitor/aks/start-stats"),
 
   storage: (subscriptionId: string, rg: string, accountName: string) =>
     api.get<StorageSummary>(

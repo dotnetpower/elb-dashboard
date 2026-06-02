@@ -16,6 +16,12 @@ import {
   buildAlignmentFasta,
   buildPairwiseAlignmentText,
 } from "./alignmentExport";
+import {
+  CONFIDENCE_COLOR,
+  bitscoreNote,
+  evalueConfidence,
+  hitQueryCoverage,
+} from "./derived";
 import type { BlastHit } from "@/api/endpoints";
 import { useState } from "react";
 
@@ -176,7 +182,85 @@ export function AlignmentViewer({ hit }: AlignmentViewerProps) {
         {hit.sframe !== undefined && <span>Subject frame: {hit.sframe}</span>}
       </div>
 
+      <HitEvidence hit={hit} />
+
       <AlignmentExportActions hit={hit} />
+    </div>
+  );
+}
+
+/**
+ * Inline, plain-language read of *why* this hit scored the way it did.
+ * NCBI's Alignments card shows the raw Score / Expect numbers but never
+ * interprets them; a researcher new to BLAST has to know that "E = 2e-40 is
+ * good". This collapsible panel turns the E-value into a confidence verdict,
+ * notes the database-independent bit score, and pins query coverage — all
+ * from data already on the card, no extra round-trip.
+ */
+function HitEvidence({ hit }: { hit: BlastHit }) {
+  const [open, setOpen] = useState(false);
+  const verdict = evalueConfidence(hit.evalue);
+  const coverage = hitQueryCoverage(hit);
+  const color = CONFIDENCE_COLOR[verdict.level];
+
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        borderTop: "1px solid var(--glass-border)",
+        paddingTop: 10,
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          background: "none",
+          border: "none",
+          padding: 0,
+          cursor: "pointer",
+          color: "var(--text-primary)",
+          fontSize: 12,
+        }}
+      >
+        <span
+          style={{
+            display: "inline-block",
+            width: 8,
+            height: 8,
+            borderRadius: 999,
+            background: color,
+          }}
+        />
+        <span style={{ fontWeight: 600 }}>{verdict.headline}</span>
+        <span className="muted">— what does this score mean?</span>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            marginTop: 8,
+            fontSize: 12,
+            color: "var(--text-muted)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}
+        >
+          <p style={{ margin: 0 }}>{verdict.detail}</p>
+          <p style={{ margin: 0 }}>{bitscoreNote(hit.bitscore)}</p>
+          {coverage !== null && (
+            <p style={{ margin: 0 }}>
+              Query coverage {coverage.toFixed(0)}% — the fraction of your query this
+              alignment spans. Low coverage with high identity often means a shared
+              domain or repeat, not a full-length match.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

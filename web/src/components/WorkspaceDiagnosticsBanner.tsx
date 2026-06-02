@@ -165,9 +165,9 @@ export function WorkspaceDiagnosticsBanner({
       return {
         degraded: true,
         reason: "subscriptions_unavailable",
-        label: "Sign in to Azure",
+        label: "Subscriptions unavailable",
         description:
-          "The dashboard could not list any Azure subscriptions for your current credential. Run `az login` in the terminal and reload.",
+          "The dashboard could not list any Azure subscriptions. In the deployed app, grant its managed identity the Reader role at the subscription scope (or wait for a fresh assignment to propagate); locally, run `az login` against the correct tenant. Then click Reset workspace.",
         isAuthIssue: true,
       };
     }
@@ -180,7 +180,7 @@ export function WorkspaceDiagnosticsBanner({
         reason: "subscriptions_unavailable",
         label: "No subscriptions",
         description:
-          "Your current Azure credential has no subscriptions assigned. Run `az login` against the correct tenant or ask an owner to grant Reader.",
+          "The credential the dashboard uses has no subscriptions assigned. In the deployed app, ask an owner to grant its managed identity the Reader role at the subscription scope; locally, run `az login` against the correct tenant.",
         isAuthIssue: true,
       };
     }

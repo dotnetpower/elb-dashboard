@@ -1,5 +1,5 @@
 import { msalInstance, apiLoginRequest } from "@/auth/msal";
-import { notifyAuthSessionIssue } from "@/auth/sessionEvents";
+import { clearAuthSessionIssue, notifyAuthSessionIssue } from "@/auth/sessionEvents";
 import { fetchWithRetry, makeRequestId } from "@/api/resilience";
 import { apiBaseUrl, isDevBypassEnabled } from "@/config/runtime";
 import type { AccountInfo } from "@azure/msal-browser";
@@ -63,6 +63,8 @@ async function acquireFreshApiToken(account: AccountInfo): Promise<string> {
       if (expiresAtMs - ACCESS_TOKEN_REFRESH_SKEW_MS > Date.now()) {
         cachedApiToken = entry;
       }
+      // The silent refresh succeeded — the session is healthy again.
+      clearAuthSessionIssue();
       return entry;
     })
     .finally(() => {

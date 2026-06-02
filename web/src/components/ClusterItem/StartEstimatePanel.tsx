@@ -1,6 +1,11 @@
 import { Clock3, DatabaseZap, Lightbulb, Network } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 
+import { monitoringApi } from "@/api/endpoints";
+
+// Fallback estimates used until the backend has recorded at least one real
+// observation for a phase (mirrors api/services/cluster_timings.DEFAULT_SECONDS).
 const OBSERVED_AKS_START_SECONDS = 235;
 const OBSERVED_OPENAPI_DEPLOY_SECONDS = 31;
 const WARMUP_FIRST_DB_LOW_SECONDS = 10 * 60;
@@ -51,7 +56,22 @@ export function StartEstimatePanel({
   const elapsedSeconds = startedAt
     ? Math.max(0, Math.floor((now - startedAt) / 1_000))
     : 0;
-  const apiReadySeconds = OBSERVED_AKS_START_SECONDS + OBSERVED_OPENAPI_DEPLOY_SECONDS;
+
+  const statsQuery = useQuery({
+    queryKey: ["aks-start-stats"],
+    queryFn: () => monitoringApi.aksStartStats(),
+    staleTime: 5 * 60_000,
+    retry: 0,
+  });
+  const stats = statsQuery.data;
+  const aksStartPhase = stats?.phases?.aks_start;
+  const openapiPhase = stats?.phases?.openapi_deploy;
+  const aksStartSeconds = aksStartPhase?.seconds ?? OBSERVED_AKS_START_SECONDS;
+  const openapiSeconds = openapiPhase?.seconds ?? OBSERVED_OPENAPI_DEPLOY_SECONDS;
+  const aksStartSamples = aksStartPhase?.samples ?? 0;
+  const isMeasured = (aksStartPhase?.source ?? "default") === "measured";
+
+  const apiReadySeconds = Math.round(aksStartSeconds + openapiSeconds);
   const [warmupLow, warmupHigh] = warmupRangeSeconds(autoWarmupDbCount);
   const totalLow = apiReadySeconds + warmupLow;
   const totalHigh = apiReadySeconds + warmupHigh;
@@ -63,10 +83,14 @@ export function StartEstimatePanel({
       {
         icon: Clock3,
         title: "Startup estimate",
-        body: `Last observed AKS start took ${formatDuration(
-          OBSERVED_AKS_START_SECONDS,
-        )}. OpenAPI usually adds about ${formatDuration(
-          OBSERVED_OPENAPI_DEPLOY_SECONDS,
+        body: `${
+          isMeasured
+            ? `Median of the last ${aksStartSamples} observed AKS start${
+                aksStartSamples === 1 ? "" : "s"
+              } is ${formatDuration(aksStartSeconds)}`
+            : `Typical AKS start is about ${formatDuration(aksStartSeconds)}`
+        }. OpenAPI usually adds about ${formatDuration(
+          openapiSeconds,
         )}, so API readiness is roughly ${formatDuration(apiReadySeconds)}.`,
       },
       {
@@ -95,7 +119,17 @@ export function StartEstimatePanel({
             : "Enable Auto warm on downloaded databases if you want the next start to prepare node-local cache automatically.",
       },
     ],
-    [apiReadySeconds, autoWarmupDbCount, clusterName, totalHigh, totalLow],
+    [
+      aksStartSamples,
+      aksStartSeconds,
+      apiReadySeconds,
+      autoWarmupDbCount,
+      clusterName,
+      isMeasured,
+      openapiSeconds,
+      totalHigh,
+      totalLow,
+    ],
   );
 
   const activeTip = tips[tipIndex];

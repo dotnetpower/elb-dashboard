@@ -581,6 +581,18 @@ def deploy_openapi_service(
         external_ip or "<pending>",
         elapsed,
     )
+    try:
+        from api.services.cluster_timings import record_timing
+
+        record_timing(
+            "openapi_deploy",
+            float(elapsed),
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+    except Exception as exc:  # metrics must not fail the deploy
+        LOGGER.warning("cluster timing record failed (openapi_deploy): %s", exc)
     return {
         "status": "succeeded",
         "cluster_name": cluster_name,

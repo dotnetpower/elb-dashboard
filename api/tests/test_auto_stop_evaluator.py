@@ -306,6 +306,99 @@ def test_truncated_scan_refuses_to_stop() -> None:
     assert decision.reason == "history_scan_truncated"
 
 
+def test_recent_start_resets_idle_clock() -> None:
+    """A cluster start within the idle window keeps the cluster running
+    even when the last observed job predates the window.
+
+    This is the core fix for "started the cluster but it stopped again
+    within one beat tick": ``last_started_at`` is folded into the idle
+    anchor so every start grants a full ``idle_minutes`` grace.
+    """
+    jobs = [
+        _FakeJob(
+            type="blast",
+            status="completed",
+            # Last job ran 2 h ago — well past a 15-min idle window.
+            updated_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+        ),
+    ]
+    pref = _pref(
+        idle_minutes=15,
+        # User started the cluster 2 min ago.
+        last_started_at=(_NOW - timedelta(minutes=2)).isoformat(timespec="seconds"),
+    )
+    decision = evaluate_cluster(pref, repo=_FakeRepo(jobs), now=_NOW, power_state="Running")
+    # Anchor = start (2 min ago) + 15 min window = 13 min left → keep.
+    assert decision.verdict == "keep"
+    assert decision.reason == "active"
+    assert decision.seconds_until_stop > 0
+
+
+def test_stale_start_does_not_prevent_stop() -> None:
+    """``last_started_at`` only pushes the deadline forward — a start that
+    is itself older than the idle window must not block a stop."""
+    pref = _pref(
+        idle_minutes=15,
+        # Started 2 h ago, no jobs since → idle clock long expired.
+        last_started_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+    )
+    decision = evaluate_cluster(pref, repo=_FakeRepo([]), now=_NOW, power_state="Running")
+    assert decision.verdict == "stop"
+    assert decision.reason.startswith("idle:")
+
+
+def test_recent_start_anchors_when_no_jobs_observed() -> None:
+    """A start with no job history at all still grants a full grace,
+    overriding the ``created_at`` fallback anchor."""
+    pref = _pref(
+        idle_minutes=15,
+        created_at=(_NOW - timedelta(hours=4)).isoformat(timespec="seconds"),
+        last_started_at=(_NOW - timedelta(minutes=1)).isoformat(timespec="seconds"),
+    )
+    decision = evaluate_cluster(pref, repo=_FakeRepo([]), now=_NOW, power_state="Running")
+    assert decision.verdict == "keep"
+    assert decision.seconds_until_stop > 0
+
+
+def test_transitional_provisioning_state_keeps_cluster() -> None:
+    """AKS reports ``power_state == "Running"`` the instant a start LRO
+    begins while ``provisioning_state`` stays ``Starting``. The evaluator
+    must refuse to stop a transitional cluster (stopping mid-start is
+    rejected by ARM with ``OperationNotAllowed``)."""
+    pref = _pref(
+        idle_minutes=15,
+        updated_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+    )
+    decision = evaluate_cluster(
+        pref,
+        repo=_FakeRepo([]),
+        now=_NOW,
+        power_state="Running",
+        provisioning_state="Starting",
+        ignore_cooldown=True,
+    )
+    assert decision.verdict == "keep"
+    assert decision.reason == "provisioning:Starting"
+
+
+def test_succeeded_provisioning_state_allows_stop() -> None:
+    """A steady ``Succeeded`` provisioning state does not block a stop."""
+    pref = _pref(
+        idle_minutes=15,
+        updated_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+    )
+    decision = evaluate_cluster(
+        pref,
+        repo=_FakeRepo([]),
+        now=_NOW,
+        power_state="Running",
+        provisioning_state="Succeeded",
+        ignore_cooldown=True,
+    )
+    assert decision.verdict == "stop"
+    assert decision.reason.startswith("idle:")
+
+
 def test_idle_decision_to_dict_shape() -> None:
     payload = IdleDecision(
         verdict="warn",

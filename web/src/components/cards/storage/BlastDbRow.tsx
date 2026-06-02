@@ -41,6 +41,12 @@ interface BlastDbRowProps {
   downloadDisabled: boolean;
   oracleBuilding: boolean;
   oracleDisabled: boolean;
+  /**
+   * Tooltip explaining why the Build Oracle button is disabled when the
+   * reason is not RBAC (e.g. the AKS cluster is stopped). Falls back to the
+   * generic build hint when undefined.
+   */
+  oracleDisabledReason?: string;
   autoWarmupChecked: boolean;
   autoWarmupDisabled: boolean;
   /**
@@ -85,6 +91,7 @@ export function BlastDbRow({
   downloadDisabled,
   oracleBuilding,
   oracleDisabled,
+  oracleDisabledReason,
   autoWarmupChecked,
   autoWarmupDisabled,
   writeDisabled = false,
@@ -680,7 +687,8 @@ export function BlastDbRow({
               title={
                 writeDisabled
                   ? writeDisabledReason
-                  : "Build DB order oracle from warmed AKS shards"
+                  : (oracleDisabledReason ??
+                    "Build DB order oracle from warmed AKS shards")
               }
             >
               {oracleBuilding ? (

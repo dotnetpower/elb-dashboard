@@ -167,12 +167,27 @@ def _format_iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="seconds")
 
 
+def _parse_iso(value: str | None) -> datetime | None:
+    """Best-effort ISO 8601 → aware UTC datetime, or None when unparseable."""
+    if not value:
+        return None
+    try:
+        text = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
+    except (TypeError, ValueError):
+        return None
+
+
 def evaluate_cluster(
     pref: AutoStopPreference,
     *,
     repo: StateRepoProtocol,
     now: datetime | None = None,
     power_state: str = "",
+    provisioning_state: str = "",
     ignore_cooldown: bool = False,
 ) -> IdleDecision:
     """Decide whether an AKS cluster should be auto-stopped.
@@ -187,6 +202,13 @@ def evaluate_cluster(
         power_state: Latest ARM ``power_state`` (``Running`` / ``Stopped``
             / ``Starting`` / …). The evaluator does not fetch it itself;
             the driver supplies it from `cluster_health.get_cluster_health`.
+        provisioning_state: Latest ARM ``provisioning_state`` (``Succeeded``
+            / ``Starting`` / ``Stopping`` / ``Updating`` / …). AKS flips
+            ``power_state`` to ``Running`` the moment a start LRO begins
+            while ``provisioning_state`` stays transitional, so the
+            evaluator refuses to stop unless this is ``Succeeded`` (or
+            unknown/empty when ARM is unreachable). The driver supplies
+            it from `cluster_health.get_cluster_health`.
         ignore_cooldown: When True, skip the cooldown gate. The act task
             (`auto_stop_aks`) MUST set this: the beat driver stamps
             ``last_stop_at`` as a preflight double-enqueue guard *before*
@@ -219,6 +241,21 @@ def evaluate_cluster(
         return IdleDecision(
             verdict="keep",
             reason=f"power_state:{power_state}",
+            cluster_power_state=power_state,
+        )
+
+    # AKS reports ``power_state.code == "Running"`` the instant a start LRO
+    # begins, while ``provisioning_state`` stays ``Starting`` until the
+    # control plane settles (~5 min). Stopping a cluster mid-transition is
+    # rejected by ARM with ``OperationNotAllowed`` ("in progress start
+    # managed cluster"), surfacing as a Celery task ERROR. Treat any
+    # non-steady provisioning state as keep so we never attempt a stop
+    # against a transitional cluster. Empty string = unknown (ARM
+    # unreachable) → degrade open and let the remaining gates decide.
+    if provisioning_state and provisioning_state.strip().lower() != "succeeded":
+        return IdleDecision(
+            verdict="keep",
+            reason=f"provisioning:{provisioning_state}",
             cluster_power_state=power_state,
         )
 
@@ -264,6 +301,17 @@ def evaluate_cluster(
         )
 
     idle_window = timedelta(minutes=max(1, int(pref.idle_minutes)))
+
+    # A cluster START resets the idle clock: fold ``last_started_at`` into
+    # the activity anchor so the user gets a full ``idle_minutes`` grace
+    # after every start, even when the last observed job predates that
+    # window. ``last_started_at`` only advances on real starts (never on
+    # warn ticks), so — like ``created_at`` — it is a drift-free anchor
+    # that cannot push the deadline indefinitely. This is the core fix for
+    # "started the cluster but it stopped again within one beat tick".
+    started = _parse_iso(pref.last_started_at)
+    if started is not None and (latest is None or started > latest):
+        latest = started
 
     if latest is None:
         # No jobs ever observed on this cluster. Anchor the idle clock to

@@ -503,7 +503,11 @@ def test_mode_aks_cluster_stopped_returns_409(
     monkeypatch.setattr(
         "api.services.cluster_health.get_cluster_health",
         lambda *_a, **_kw: ClusterHealth(
-            healthy=False, exists=True, power_state="Stopped", reason="cluster_stopped"
+            healthy=False,
+            exists=True,
+            power_state="Stopped",
+            provisioning_state="Succeeded",
+            reason="cluster_stopped",
         ),
         raising=True,
     )
@@ -551,7 +555,11 @@ def test_mode_auto_with_stopped_cluster_falls_back(
     monkeypatch.setattr(
         "api.services.cluster_health.get_cluster_health",
         lambda *_a, **_kw: ClusterHealth(
-            healthy=False, exists=True, power_state="Stopped", reason="cluster_stopped"
+            healthy=False,
+            exists=True,
+            power_state="Stopped",
+            provisioning_state="Succeeded",
+            reason="cluster_stopped",
         ),
         raising=True,
     )

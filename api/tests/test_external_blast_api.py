@@ -85,7 +85,41 @@ def test_external_blast_submit_forwards_contract(monkeypatch):
     assert "caller_oid" not in captured
 
 
-def test_canonical_jobs_external_submit_uses_trusted_metadata(monkeypatch):
+def test_external_blast_options_default_evalue_matches_ncbi(monkeypatch):
+    """Omitting `options` must default evalue to 0.05 (NCBI megablast default)."""
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    from api.main import app
+    from api.services import external_blast
+
+    captured: dict = {}
+
+    def fake_submit(payload):
+        captured.update(payload)
+        return {
+            "job_id": "bbbbbbbbbbbb",
+            "status": "queued",
+            "created_at": "2026-05-12T10:00:00Z",
+            "blast_version": "2.17.0+",
+            "db_name": "core_nt",
+            "db_version": "2026-05-02",
+        }
+
+    monkeypatch.setattr(external_blast, "submit_job", fake_submit)
+    monkeypatch.setattr(external_blast, "ready", lambda **_kw: {"ready": True})
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/elastic-blast/submit",
+        json={
+            "query_fasta": ">q1\nATGCATGCATGC",
+            "db": "core_nt",
+            "program": "blastn",
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured["options"]["evalue"] == 0.05
+
     monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
     from api.main import app
     from api.services import external_blast

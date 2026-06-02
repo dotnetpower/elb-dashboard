@@ -9,7 +9,8 @@ Edit boundaries: Storage + serialisation only. The "should we stop?"
     `api/tasks/azure/idle_autostop.py`. Do NOT call the AKS SDK here.
 Key entry points: `AutoStopPreference`, `get_auto_stop_preference`,
     `save_auto_stop_preference`, `list_auto_stop_preferences`,
-    `extend_auto_stop_preference`, `mark_auto_stop_event`.
+    `extend_auto_stop_preference`, `mark_auto_stop_event`,
+    `mark_auto_stop_started`.
 Risky contracts: `preference_key` shape is shared with the Table
     PartitionKey — changing it orphans existing rows.
 Validation: `uv run pytest -q api/tests/test_auto_stop.py`.
@@ -110,6 +111,15 @@ class AutoStopPreference:
     last_skip_at: str = ""
     last_skip_reason: str = ""
     extend_until: str = ""
+    # Critique (2026-06): a cluster START is a strong "the user wants this
+    # running" signal that the evaluator must honour, otherwise a cluster
+    # whose last BLAST job ran longer ago than ``idle_minutes`` is stopped
+    # again within one beat tick of being started. ``last_started_at`` is
+    # stamped by ``start_aks`` (and the ``mark_auto_stop_started`` helper)
+    # and folded into the evaluator's idle anchor so every start grants a
+    # full ``idle_minutes`` grace. It only advances on real starts, never
+    # on warn ticks, so it is a drift-free anchor like ``created_at``.
+    last_started_at: str = ""
     updated_at: str = ""
     # Critique #9.2: ``updated_at`` and ``last_skip_at`` BOTH drift forward
     # on every warn tick because ``mark_auto_stop_event`` writes them.
@@ -146,6 +156,7 @@ class AutoStopPreference:
             "last_skip_at": self.last_skip_at,
             "last_skip_reason": self.last_skip_reason,
             "extend_until": self.extend_until,
+            "last_started_at": self.last_started_at,
             "updated_at": self.updated_at,
             "created_at": self.created_at,
             "owner_oid": self.owner_oid,
@@ -166,6 +177,7 @@ class AutoStopPreference:
             last_skip_at=str(value.get("last_skip_at") or ""),
             last_skip_reason=str(value.get("last_skip_reason") or ""),
             extend_until=str(value.get("extend_until") or ""),
+            last_started_at=str(value.get("last_started_at") or ""),
             updated_at=str(value.get("updated_at") or ""),
             created_at=str(value.get("created_at") or ""),
             owner_oid=str(value.get("owner_oid") or ""),
@@ -357,6 +369,56 @@ def mark_auto_stop_event(
             "in-memory snapshot returned without persisting",
         )
         return fallback if fallback is not None else pref
+
+
+def mark_auto_stop_started(
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> AutoStopPreference | None:
+    """Stamp ``last_started_at`` so a cluster start resets the idle clock.
+
+    Called by the ``start_aks`` Celery task at the very beginning of the
+    start so that any evaluator tick racing the ~5-min start LRO sees a
+    fresh anchor and keeps the cluster running for a full ``idle_minutes``
+    grace. No-op (returns ``None``) when no preference row exists — a
+    cluster the user never opted into auto-stop has nothing to reset.
+
+    Atomicity: mirrors ``mark_auto_stop_event`` — re-reads the latest row
+    with its ETag and writes back with an ``If-Match`` conditional update,
+    touching only ``last_started_at`` + ``updated_at`` so a concurrent
+    user PUT cannot be clobbered. On CAS exhaustion it logs a warning and
+    returns the in-memory snapshot without persisting; the next start (or
+    the existing idle anchor) keeps the cluster safe.
+    """
+    pref = get_auto_stop_preference(subscription_id, resource_group, cluster_name)
+    if pref is None:
+        return None
+
+    fallback: AutoStopPreference | None = None
+
+    def _attempt() -> AutoStopPreference:
+        nonlocal fallback
+        latest = get_auto_stop_preference(subscription_id, resource_group, cluster_name)
+        if latest is None:
+            return None  # type: ignore[return-value]
+        next_pref = AutoStopPreference.from_dict(latest.to_dict())
+        next_pref.etag = latest.etag
+        now = _now_iso()
+        next_pref.last_started_at = now
+        next_pref.updated_at = now
+        fallback = next_pref
+        return save_auto_stop_preference(next_pref)
+
+    try:
+        return cas_retry(_attempt, operation="auto_stop.mark_started")
+    except PreferenceUpdateConflict:
+        LOGGER.warning(
+            "auto_stop.mark_auto_stop_started giving up after CAS exhaustion; "
+            "in-memory snapshot returned without persisting cluster=%s",
+            cluster_name,
+        )
+        return fallback
 
 
 def is_extended(pref: AutoStopPreference, *, now: datetime | None = None) -> bool:

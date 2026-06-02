@@ -215,7 +215,7 @@ preflight_permission_check() {
   who="$(az account show --query 'user.name' -o tsv 2>/dev/null || true)"
   user_type="$(az account show --query 'user.type' -o tsv 2>/dev/null || true)"
   if [[ -z "$who" ]]; then
-    die "Not signed in to Azure CLI. Run 'az login' (or 'az-jungha' for the demo profile) and retry."
+    die "Not signed in to Azure CLI. Run 'az login' and retry."
   fi
   # Critique-round-1 M2: differentiate user-vs-SP in the diagnostic so
   # a service-principal session in CI does not see a misleading

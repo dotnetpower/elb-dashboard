@@ -334,7 +334,7 @@ function bannerBody(
 ): string {
   if (primary === "subscriptions_unavailable") {
     return (
-      "The dashboard could not list any Azure subscriptions for your current credential. Run `az login --tenant <your-tenant>` in a terminal (or pick a different az profile such as `az-jungha`), then click Reset workspace to retry. Until this is fixed every monitor card will be empty."
+      "The dashboard could not list any Azure subscriptions. In the deployed app this means its managed identity is missing the Reader role at the subscription scope, or a freshly granted assignment has not finished propagating yet — wait a minute, then click Reset workspace to retry. When running the control plane locally it instead means your `az login` session is missing or signed in to the wrong tenant. Until this is fixed every monitor card will be empty."
     );
   }
   if (primary === "invisible_subscription") {

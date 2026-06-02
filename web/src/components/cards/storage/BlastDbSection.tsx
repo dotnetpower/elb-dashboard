@@ -30,6 +30,12 @@ interface BlastDbSectionProps {
   clusterName: string;
   acrName?: string;
   clusterTopology?: BlastDbClusterTopology;
+  /**
+   * False when the target AKS workload cluster is not Running. Threaded to
+   * the modal so the Build Oracle button is disabled while the cluster is
+   * stopped. Defaults to true (degrade-open while AKS status is unknown).
+   */
+  clusterReady?: boolean;
   /** Bubbles "anything in flight?" up to the parent card so it can shimmer. */
   onDownloadingChange?: (db: string | null) => void;
 }
@@ -48,6 +54,7 @@ export function BlastDbSection({
   clusterName,
   acrName,
   clusterTopology,
+  clusterReady = true,
   onDownloadingChange,
 }: BlastDbSectionProps) {
   const enabled = Boolean(subscriptionId && resourceGroup && accountName);
@@ -302,6 +309,7 @@ export function BlastDbSection({
           clusterTopology={clusterTopology}
           writeDisabled={writeDisabled}
           writeDisabledReason={writeDisabledReason}
+          clusterReady={clusterReady}
           onClose={() => setShowPopup(false)}
         />
       )}

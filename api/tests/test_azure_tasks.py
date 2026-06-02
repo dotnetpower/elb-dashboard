@@ -637,6 +637,56 @@ def test_start_aks_skips_openapi_when_opt_out_env_set(monkeypatch) -> None:
     assert sent_tasks == [], "deploy_openapi_service must not be enqueued when opted out"
 
 
+def test_start_aks_stamps_last_started_at(monkeypatch, tmp_path) -> None:
+    """Starting a cluster resets the idle auto-stop clock by stamping
+    ``last_started_at`` on the preference (the recurrence fix)."""
+    from api.services.auto_stop import (
+        AutoStopPreference,
+        get_auto_stop_preference,
+        save_auto_stop_preference,
+    )
+
+    monkeypatch.delenv("AZURE_TABLE_ENDPOINT", raising=False)
+    monkeypatch.delenv("CONTAINER_APP_NAME", raising=False)
+    monkeypatch.setenv("ELB_LOCAL_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("ELB_AUTO_OPENAPI_DEPLOY", raising=False)
+    monkeypatch.setenv("ELB_AUTO_OPENAPI_DEPLOY", "false")
+
+    save_auto_stop_preference(
+        AutoStopPreference(
+            subscription_id="sub-1",
+            resource_group="rg-elb",
+            cluster_name="elb-cluster",
+            enabled=True,
+            idle_minutes=15,
+        )
+    )
+
+    class FakePoller:
+        def result(self) -> None:
+            return None
+
+    class FakeManagedClusters:
+        def begin_start(self, *_args: Any) -> FakePoller:
+            return FakePoller()
+
+    class FakeAksClient:
+        managed_clusters = FakeManagedClusters()
+
+    monkeypatch.setattr(azure, "get_credential", lambda: object())
+    monkeypatch.setattr(azure, "aks_client", lambda _cred, _sub: FakeAksClient())
+
+    azure.start_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+    )
+
+    reloaded = get_auto_stop_preference("sub-1", "rg-elb", "elb-cluster")
+    assert reloaded is not None
+    assert reloaded.last_started_at != ""
+
+
 class _FakePoller:
     def result(self) -> None:
         return None

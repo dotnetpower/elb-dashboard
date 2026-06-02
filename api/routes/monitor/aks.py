@@ -3,9 +3,10 @@
 Responsibility: AKS monitor routes
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `list_aks`, `aks_nodes`, `aks_pods`, `aks_top_nodes`, `aks_pod_logs`,
-`aks_pod_describe`, `aks_pod_delete`, `aks_service_ip`
+Key entry points: `list_aks`, `aks_start_stats`, `aks_nodes`, `aks_pods`, `aks_top_nodes`,
+`aks_pod_logs`, `aks_pod_describe`, `aks_pod_delete`, `aks_service_ip`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
+auth gate. Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_route_contracts.py
 api/tests/test_monitor_cache.py`.
@@ -72,6 +73,39 @@ def list_aks(
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_list", exc, empty={"clusters": []}))
+
+
+@router.get("/aks/start-stats")
+def aks_start_stats(
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Return measured cluster-lifecycle timing estimates for the SPA.
+
+    Powers `StartEstimatePanel`'s "Last observed AKS start took …" line. Each
+    phase reports the median of recent observed durations; when no samples have
+    been recorded yet the phase falls back to a built-in default
+    (`source="default"`). Read-only and degrades to all-defaults rather than
+    raising, so the start panel always has an estimate to render.
+    """
+    try:
+        from api.services.cluster_timings import KNOWN_PHASES, get_timing_stats
+
+        stats = get_timing_stats()
+        phases = {name: stats[name].to_dict() for name in KNOWN_PHASES if name in stats}
+        api_ready_seconds = (
+            stats["aks_start"].seconds + stats["openapi_deploy"].seconds
+            if "aks_start" in stats and "openapi_deploy" in stats
+            else 0.0
+        )
+        return {
+            "phases": phases,
+            "api_ready_seconds": round(api_ready_seconds, 1),
+        }
+    except Exception as exc:
+        return cast(
+            dict[str, Any],
+            _graceful("aks_start_stats", exc, empty={"phases": {}, "api_ready_seconds": 0.0}),
+        )
 
 
 @router.get("/aks/nodes")

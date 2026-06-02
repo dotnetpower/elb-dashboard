@@ -63,6 +63,35 @@ def _power_state(pref: AutoStopPreference) -> str:
         return ""
 
 
+def _provisioning_state(pref: AutoStopPreference) -> str:
+    """Best-effort ARM ``provisioning_state`` lookup for a single cluster.
+
+    Used by ``auto_stop_aks`` so the evaluator can refuse to stop a
+    cluster whose start LRO is still in progress (AKS reports
+    ``power_state == "Running"`` the instant a start begins while
+    ``provisioning_state`` stays ``Starting``). Failure is non-fatal —
+    ``""`` lets the evaluator degrade open. Shares the 90s
+    ``cluster_health`` cache with ``_power_state`` so this adds no extra
+    ARM round-trip in the common path.
+    """
+    try:
+        from api.services import get_credential
+        from api.services.cluster_health import get_cluster_health
+
+        health = get_cluster_health(
+            get_credential(),
+            pref.subscription_id,
+            pref.resource_group,
+            pref.cluster_name,
+        )
+        return health.get("provisioning_state") or ""
+    except Exception as exc:
+        LOGGER.debug(
+            "auto_stop provisioning_state lookup failed for %s: %s", pref.cluster_name, exc
+        )
+        return ""
+
+
 def _batch_power_states(
     prefs: list[AutoStopPreference],
 ) -> tuple[dict[tuple[str, str, str], str], dict[str, Any]]:
@@ -182,6 +211,12 @@ def auto_stop_aks(
         pref,
         repo=get_state_repo(),
         power_state=_power_state(pref),
+        # Refuse to stop a cluster whose start LRO is still in progress —
+        # AKS flips ``power_state`` to ``Running`` before
+        # ``provisioning_state`` settles, and stopping mid-start is
+        # rejected by ARM with ``OperationNotAllowed`` ("in progress start
+        # managed cluster"), which would surface as a Celery task ERROR.
+        provisioning_state=_provisioning_state(pref),
         # The beat driver preflight-stamps ``last_stop_at`` before
         # enqueueing this task (its double-enqueue guard). Without
         # ``ignore_cooldown`` the re-evaluation would always see that

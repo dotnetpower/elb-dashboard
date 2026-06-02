@@ -18,6 +18,7 @@ Validation: `uv run pytest -q api/tests/test_azure_tasks.py
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from celery import shared_task
@@ -25,6 +26,33 @@ from celery import shared_task
 import api.tasks.azure as _facade
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _record_lifecycle_timing(
+    phase: str,
+    duration_seconds: float,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+) -> None:
+    """Persist an observed lifecycle duration. Best-effort; never raises.
+
+    Feeds the `/api/monitor/aks/start-stats` estimate so the SPA start panel
+    can show a measured "Last observed …" value instead of a constant.
+    """
+    try:
+        from api.services.cluster_timings import record_timing
+
+        record_timing(
+            phase,
+            duration_seconds,
+            subscription_id=subscription_id,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+        )
+    except Exception as exc:  # metrics must not fail the task
+        LOGGER.warning("cluster timing record failed (%s): %s", phase, exc)
 
 
 @shared_task(
@@ -55,9 +83,33 @@ def start_aks(
     """
     cred = _facade.get_credential()
     aks = _facade.aks_client(cred, subscription_id)
+    _started_at = time.monotonic()
+    # Reset the idle auto-stop clock as soon as the start begins so an
+    # evaluator tick racing the ~5-min start LRO sees a fresh anchor and
+    # grants a full ``idle_minutes`` grace instead of stopping the cluster
+    # the user just asked to start. Non-fatal: a bookkeeping miss must
+    # never block the start itself. No-op when the cluster has no
+    # auto-stop preference row.
+    try:
+        from api.services.auto_stop import mark_auto_stop_started
+
+        mark_auto_stop_started(subscription_id, resource_group, cluster_name)
+    except Exception as exc:
+        LOGGER.warning(
+            "auto_stop last_started_at stamp failed before AKS start for %s: %s",
+            cluster_name,
+            exc,
+        )
     poller = aks.managed_clusters.begin_start(resource_group, cluster_name)
     poller.result()
     LOGGER.info("AKS cluster %s started", cluster_name)
+    _record_lifecycle_timing(
+        "aks_start",
+        time.monotonic() - _started_at,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
     auto_warmup_task_id = ""
     if auto_warmup:
         try:
@@ -125,9 +177,17 @@ def stop_aks(
     """Stop a running AKS cluster."""
     cred = _facade.get_credential()
     aks = _facade.aks_client(cred, subscription_id)
+    _started_at = time.monotonic()
     poller = aks.managed_clusters.begin_stop(resource_group, cluster_name)
     poller.result()
     LOGGER.info("AKS cluster %s stopped", cluster_name)
+    _record_lifecycle_timing(
+        "aks_stop",
+        time.monotonic() - _started_at,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        cluster_name=cluster_name,
+    )
     return {"cluster_name": cluster_name, "action": "stop", "status": "completed"}
 
 

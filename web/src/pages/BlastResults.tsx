@@ -14,6 +14,7 @@ import { ResultsCard } from "@/pages/blastResults/ResultsCard";
 import { AlignmentsTabBody } from "@/pages/blastResults/analytics/AlignmentsTabBody";
 import { DescriptionsTabBody } from "@/pages/blastResults/analytics/DescriptionsTabBody";
 import { GraphicSummaryPanel } from "@/pages/blastResults/analytics/GraphicSummaryPanel";
+import { ResultPassportCard } from "@/pages/blastResults/analytics/ResultPassportCard";
 import { ResultsPendingPanel } from "@/pages/blastResults/analytics/ResultsPendingPanel";
 import { TaxonomyPanel } from "@/pages/blastResults/analytics/TaxonomyPanel";
 import { useBlastAnalyticsState } from "@/pages/blastResults/analytics/useBlastAnalyticsState";
@@ -125,6 +126,10 @@ export function BlastResults() {
       />
 
       <BlastResultsTabs active={tab} resultsPending={isRunning} />
+
+      {isResultAnalyticsTab && !resultTabWaitingForJob && job && (
+        <ResultPassportCard job={job} />
+      )}
 
       {resultTabWaitingForJob && (
         <ResultsPendingPanel
