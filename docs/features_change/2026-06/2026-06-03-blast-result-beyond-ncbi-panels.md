@@ -34,7 +34,9 @@ state (so they respect the active result filters):
 3. **Subject coordinate map** (Graphic Summary tab) — plots each subject's
    HSPs on the subject axis (1..length) rather than the query axis, surfacing
    multi-HSP tiling, strand flips, and coordinate inversions
-   (rearrangements / duplications). Flagged subjects sort to the top.
+   (rearrangements / duplications). Flagged subjects sort to the top. The
+   panel only renders when at least one subject carries multiple HSPs, so the
+   common single-HSP case is not duplicated from the query-centric ruler.
 4. **Inline hit evidence** (Alignments tab) — each pairwise card gains a
    collapsible plain-language read of *why* the hit scored as it did:
    E-value confidence verdict, database-independent bit-score note, and a

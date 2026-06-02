@@ -44,7 +44,11 @@ export function SubjectMapPanel({ analytics, onHitActivate }: SubjectMapPanelPro
     [tracks],
   );
 
-  if (ranked.length === 0) return null;
+  // The subject map earns its place only when at least one subject carries
+  // multiple HSPs — that is where strand flips / inversions live. With every
+  // subject at a single HSP the view would just duplicate the query-centric
+  // Graphic Summary with single bars, so stay out of the way entirely.
+  if (ranked.length === 0 || multiHspCount === 0) return null;
 
   const visible = showAll ? ranked : ranked.slice(0, MAX_TRACKS);
 

@@ -127,7 +127,7 @@ export function BlastResults() {
 
       <BlastResultsTabs active={tab} resultsPending={isRunning} />
 
-      {isResultAnalyticsTab && !resultTabWaitingForJob && job && (
+      {isResultAnalyticsTab && !isRunning && job && (
         <ResultPassportCard job={job} />
       )}
 

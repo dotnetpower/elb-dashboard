@@ -270,6 +270,76 @@ def test_warmup_status_merges_setup_and_warmup_sources() -> None:
     assert sorted(dbs["core_nt"].get("sources", [])) == ["setup", "warmup"]
 
 
+def test_warmup_status_warmup_jobs_are_authoritative_denominator() -> None:
+    """The node-local warmup-Job count (one per Ready node) must win over the
+    ElasticBLAST `init-ssd-*` setup-Job count.
+
+    ElasticBLAST splits core_nt into more shards than there are nodes (e.g. 20
+    `init-ssd-*` setup Jobs for a 10-node cluster). A `max` merge with those
+    setup Jobs used to inflate the dashboard denominator to "10/20" and hold
+    BLAST submit at `warmup_not_ready`. With 10 node-local warmup Jobs all
+    succeeded the merged entry must report 10/10 Ready, not 10/20 Loading.
+    """
+
+    setup_jobs = [
+        {
+            "metadata": {"name": f"init-ssd-deadbeef-{idx}"},
+            # 10 setup Jobs done, 10 still active -> 20 total / 10 ready.
+            "status": {"succeeded": 1} if idx < 10 else {"active": 1},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {"env": [{"name": "ELB_DB", "value": f"core_nt_shard_{idx:02d}"}]}
+                        ]
+                    }
+                }
+            },
+        }
+        for idx in range(20)
+    ]
+    warmup_jobs = [
+        {
+            "metadata": {"labels": {"db": "core_nt", "shard": f"{idx:02d}"}},
+            "status": {"succeeded": 1},
+        }
+        for idx in range(10)
+    ]
+
+    def handler(url: str, params=None, timeout=10):  # type: ignore[no-untyped-def]
+        if url.endswith("/daemonsets/create-workspace"):
+            return _FakeResponse({"status": {"numberReady": 0, "desiredNumberScheduled": 0}})
+        if url.endswith("/daemonsets/vmtouch-db-cache"):
+            return _FakeResponse({"status": {"numberReady": 0}})
+        if "/batch/v1/namespaces/default/jobs" in url:
+            label = (params or {}).get("labelSelector", "")
+            if "setup" in label:
+                return _FakeResponse({"items": setup_jobs})
+            if "db-warmup" in label:
+                return _FakeResponse({"items": warmup_jobs})
+            return _FakeResponse({"items": []})
+        if "/apps/v1/namespaces/default/daemonsets" in url:
+            return _FakeResponse({"items": []})
+        if url.endswith("/api/v1/namespaces"):
+            return _FakeResponse({"items": []})
+        if "/api/v1/namespaces/default/pods" in url and "/log" not in url:
+            return _FakeResponse({"items": []})
+        if url.endswith("/api/v1/nodes"):
+            return _FakeResponse({"items": []})
+        return _FakeResponse({}, status_code=404)
+
+    session = _fake_session(handler)
+    with patch.object(km, "_get_k8s_session", return_value=(session, "https://k8s")):
+        result = km.k8s_warmup_status(MagicMock(), "sub", "rg", "aks")
+
+    core = {db["name"]: db for db in result["databases"]}["core_nt"]
+    assert core["total_jobs"] == 10, core
+    assert core["nodes_ready"] == 10, core
+    assert core["nodes_active"] == 0, core
+    assert core["status"] == "Ready", core
+    assert sorted(core.get("sources", [])) == ["setup", "warmup"]
+
+
 def test_warmup_status_daemonset_tags_warmup_source() -> None:
     """`app=db-warmup` DaemonSets must also tag their entries `warmup`."""
 

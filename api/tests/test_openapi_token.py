@@ -462,3 +462,118 @@ def test_self_heal_audit_inherits_caller_identity(monkeypatch) -> None:
     assert captured["caller_oid"] == "caller-oid-abc123"
     assert captured["tenant_id"] == "tenant-xyz"
     assert captured["event"] == "openapi_token_self_healed"
+
+
+def test_resync_from_cluster_reads_pod_token_and_syncs(monkeypatch) -> None:
+    """The reactive 401 self-heal re-reads the live ELB_OPENAPI_API_TOKEN
+    from the elb-openapi deployment env and syncs it into the runtime cache
+    using the cluster context cached alongside the OpenAPI base URL. It must
+    NEVER mint a token — a 401 means the pod already holds one."""
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment("pod-live-token"))
+    synced: list[tuple[str, dict[str, Any]]] = []
+    mint_count = {"n": 0}
+
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_runtime_metadata",
+        lambda: {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+    monkeypatch.setattr(
+        "api.services.get_credential",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+
+    def _generate_must_not_run() -> str:
+        mint_count["n"] += 1
+        return "unexpected-mint"
+
+    monkeypatch.setattr(openapi_token, "_generate_token", _generate_must_not_run)
+    monkeypatch.setattr(
+        openapi_token,
+        "_sync_runtime_token",
+        lambda token, metadata: synced.append((token, metadata)),
+    )
+
+    result = openapi_token.resync_openapi_api_token_from_cluster()
+
+    assert result == "pod-live-token"
+    assert mint_count["n"] == 0, "resync must never mint a token"
+    assert len(synced) == 1
+    token, metadata = synced[0]
+    assert token == "pod-live-token"
+    assert metadata["source"] == "token_resync_on_401"
+    assert metadata["subscription_id"] == "sub-1"
+    assert metadata["cluster_name"] == "aks-elb"
+    assert session.closed is True
+
+
+def test_resync_from_cluster_skips_without_context(monkeypatch) -> None:
+    """No cached cluster context → return "" without touching K8s or the
+    cache. Best-effort by contract."""
+    from api.services.openapi import token as openapi_token
+
+    called = {"k8s": False, "sync": False}
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_runtime_metadata",
+        lambda: {},
+    )
+
+    def _must_not_call(*_args, **_kwargs):
+        called["k8s"] = True
+        raise AssertionError("k8s session must not be created without context")
+
+    monkeypatch.setattr(openapi_token, "_get_k8s_session", _must_not_call)
+    monkeypatch.setattr(
+        openapi_token,
+        "_sync_runtime_token",
+        lambda *_args, **_kwargs: called.__setitem__("sync", True),
+    )
+
+    result = openapi_token.resync_openapi_api_token_from_cluster()
+
+    assert result == ""
+    assert called == {"k8s": False, "sync": False}
+
+
+def test_resync_from_cluster_returns_empty_when_pod_has_no_token_env(monkeypatch) -> None:
+    """If the elb-openapi deployment env has no ELB_OPENAPI_API_TOKEN entry
+    there is nothing to resync — return "" and never mint."""
+    from api.services.openapi import token as openapi_token
+
+    session = FakeSession(_deployment())  # no token env entry
+    synced: list[Any] = []
+    monkeypatch.setattr(
+        "api.services.openapi.runtime.get_openapi_runtime_metadata",
+        lambda: {
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+        },
+    )
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+    monkeypatch.setattr(
+        openapi_token,
+        "_get_k8s_session",
+        lambda *_args, **_kwargs: (session, "https://k8s"),
+    )
+    monkeypatch.setattr(
+        openapi_token,
+        "_sync_runtime_token",
+        lambda *_args, **_kwargs: synced.append(True),
+    )
+
+    result = openapi_token.resync_openapi_api_token_from_cluster()
+
+    assert result == ""
+    assert synced == []
+    assert session.closed is True

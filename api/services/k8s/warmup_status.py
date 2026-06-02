@@ -461,9 +461,25 @@ def _merge_database_statuses(result: dict[str, Any], incoming: list[dict[str, An
             continue
         if name in existing:
             current = existing[name]
+            incoming_is_warmup = "warmup" in (database.get("sources") or [])
+            current_has_warmup = "warmup" in (current.get("sources") or [])
+            # Node-local warmup Jobs (one per Ready node) are the authoritative
+            # denominator for the dashboard's AKS cache state. ElasticBLAST
+            # submit-side `init-ssd-*` setup Jobs use their own internal shard
+            # count (often greater than the node count, e.g. ~20 for core_nt on
+            # 10 nodes), so a plain `max` merge would inflate the denominator
+            # (10 nodes shown as "10/20") and wrongly hold BLAST submit at
+            # `warmup_not_ready`. When the incoming warmup-Job entry overrides a
+            # setup-only entry, take its counts and status verbatim.
+            warmup_authoritative = incoming_is_warmup and not current_has_warmup
             for key in ("nodes_ready", "nodes_failed", "nodes_active", "total_jobs"):
-                current[key] = max(int(current.get(key) or 0), int(database.get(key) or 0))
-            if database.get("status") == "Ready" or current.get("status") != "Ready":
+                if warmup_authoritative:
+                    current[key] = int(database.get(key) or 0)
+                else:
+                    current[key] = max(int(current.get(key) or 0), int(database.get(key) or 0))
+            if warmup_authoritative:
+                current["status"] = database.get("status", current.get("status", "Unknown"))
+            elif database.get("status") == "Ready" or current.get("status") != "Ready":
                 current["status"] = database.get("status", current.get("status", "Unknown"))
             if database.get("shards"):
                 current["shards"] = sorted(

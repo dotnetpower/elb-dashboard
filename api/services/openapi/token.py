@@ -3,7 +3,8 @@
 Responsibility: Generate, read, and apply the sibling OpenAPI API token
 Edit boundaries: Keep Kubernetes token storage and runtime cache synchronization here; routes
 should only validate HTTP input and shape responses.
-Key entry points: `get_openapi_api_token_status`, `ensure_openapi_api_token`
+Key entry points: `get_openapi_api_token_status`, `ensure_openapi_api_token`,
+`resync_openapi_api_token_from_cluster`
 Risky contracts: Never log token values; keep tokens in server-side env/runtime cache and only
 return them to authenticated dashboard callers.
 Validation: `uv run pytest -q api/tests/test_openapi_token.py`.
@@ -349,6 +350,113 @@ def _sync_runtime_token(token: str, metadata: dict[str, Any]) -> None:
     except Exception as exc:
         # Cache reset is best-effort — never block token rotation.
         LOGGER.debug("openapi token cache reset skipped: %s", exc)
+
+
+def resync_openapi_api_token_from_cluster(*, namespace: str = K8S_NAMESPACE) -> str:
+    """Re-read the live ``ELB_OPENAPI_API_TOKEN`` from the elb-openapi
+    deployment and sync it into the runtime token cache. Returns the synced
+    token, or ``""`` when recovery is not possible.
+
+    Reactive counterpart to ``get_openapi_api_token_status``'s self-heal.
+    It fires when a sibling call returns **401** because the dashboard's
+    runtime token cache was wiped — the in-revision Redis sidecar is
+    ephemeral, so a control-plane redeploy (``quick-deploy.sh all`` /
+    revision restart) drops the cached token while the elb-openapi pod
+    keeps the token minted at its own deploy. The dashboard then sends an
+    empty / stale ``X-ELB-API-Token`` and the sibling 401s.
+
+    Unlike the status path this NEVER mints a token: a 401 means the pod
+    already has one the dashboard simply lost, so re-reading the pod's env
+    and re-syncing is the correct, side-effect-free recovery. The AKS
+    cluster context (subscription / resource group / cluster name) comes
+    from the metadata stored alongside the cached OpenAPI base URL.
+
+    Best-effort by contract — every failure mode (no cached cluster
+    context, credential error, K8s session error, deployment missing, no
+    token env entry) returns ``""`` without raising so the caller can fall
+    through to surfacing the original 401.
+    """
+    from api.services.openapi.runtime import get_openapi_runtime_metadata
+
+    metadata = get_openapi_runtime_metadata()
+    subscription_id = str(metadata.get("subscription_id") or "").strip()
+    resource_group = str(metadata.get("resource_group") or "").strip()
+    cluster_name = str(metadata.get("cluster_name") or "").strip()
+    if not (subscription_id and resource_group and cluster_name):
+        LOGGER.info(
+            "openapi token resync skipped: no cached cluster context for the "
+            "OpenAPI base URL"
+        )
+        return ""
+
+    try:
+        from api.services import get_credential
+
+        credential = get_credential()
+    except Exception as exc:
+        LOGGER.warning(
+            "openapi token resync skipped: credential error %s", type(exc).__name__
+        )
+        return ""
+
+    try:
+        session, server = _get_k8s_session(
+            credential,
+            subscription_id,
+            resource_group,
+            cluster_name,
+            admin=True,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "openapi token resync skipped: k8s session error %s", type(exc).__name__
+        )
+        return ""
+
+    try:
+        deployment = _read_deployment(
+            session, server, namespace, OPENAPI_DEPLOYMENT_NAME
+        )
+        token = _container_env_value(
+            deployment, OPENAPI_CONTAINER_NAME, OPENAPI_TOKEN_ENV
+        )
+    except OpenApiTokenError as exc:
+        LOGGER.warning("openapi token resync failed: %s", exc.code)
+        return ""
+    except Exception as exc:
+        LOGGER.warning(
+            "openapi token resync failed: unexpected %s", type(exc).__name__
+        )
+        return ""
+    finally:
+        session.close()
+
+    if not token:
+        LOGGER.info(
+            "openapi token resync: elb-openapi deployment has no "
+            "ELB_OPENAPI_API_TOKEN env entry — nothing to resync"
+        )
+        return ""
+
+    _sync_runtime_token(
+        token,
+        {
+            "subscription_id": subscription_id,
+            "resource_group": resource_group,
+            "cluster_name": cluster_name,
+            "deployment_name": OPENAPI_DEPLOYMENT_NAME,
+            "namespace": namespace,
+            "source": "token_resync_on_401",
+        },
+    )
+    # WARNING so App Insights / operator alerts can fire on the self-heal —
+    # a recurring resync points at an ephemeral-Redis churn worth noticing.
+    LOGGER.warning(
+        "openapi token resynced from cluster after 401 cluster=%s rg=%s",
+        cluster_name,
+        resource_group,
+    )
+    return token
 
 
 def get_openapi_api_token_status(

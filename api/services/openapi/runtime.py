@@ -139,6 +139,37 @@ def get_openapi_base_url(*, client: Any | None = None) -> str:
     return _normalise_base_url(str(payload.get("base_url") or ""))
 
 
+def get_openapi_runtime_metadata(*, client: Any | None = None) -> dict[str, Any]:
+    """Return the metadata dict stored alongside the cached OpenAPI base URL.
+
+    The base-url payload written by ``save_openapi_base_url`` (at deploy
+    time) carries ``subscription_id`` / ``resource_group`` /
+    ``cluster_name`` in its ``metadata``. The reactive token-resync path
+    (``token.resync_openapi_api_token_from_cluster``) reads this to learn
+    which AKS cluster to re-read the live ``ELB_OPENAPI_API_TOKEN`` env
+    from after a 401. Returns an empty dict when no endpoint is cached or
+    the payload carries no metadata.
+    """
+    redis_client = client or get_ops_redis_client(socket_timeout=1.5)
+    try:
+        raw = redis_client.get(_RUNTIME_KEY)
+    except Exception as exc:
+        LOGGER.debug("openapi runtime metadata read failed: %s", exc)
+        return {}
+    if raw is None:
+        return {}
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    metadata = payload.get("metadata")
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def save_openapi_api_token(
     token: str,
     *,

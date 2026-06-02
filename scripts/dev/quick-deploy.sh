@@ -99,9 +99,19 @@ ensure_provider_registration_once() {
   : > "$marker"
 }
 
-load_simple_env_file "$REPO_ROOT/.env"
-load_simple_env_file "$REPO_ROOT/.env.local"
-load_simple_env_file "$REPO_ROOT/web/.env.production"
+# The auth-bypass toggles (VITE_AUTH_DEV_BYPASS / AUTH_DEV_BYPASS) are
+# local-debug-only — set by scripts/dev/local-debug-auth.sh and frequently
+# left behind in .env / .env.local after a local session. They must NEVER be
+# imported from a file into a cloud deploy (doing so bakes an MSAL-skipping
+# SPA / bearer-skipping api into the Container App — see the guard below and
+# docs/features_change/2026-05/2026-05-25-frontend-env-leak-hardening.md).
+# A developer who genuinely wants the bypass in cloud exports it explicitly
+# on the command line (an existing shell export wins over the file import) and
+# also sets ELB_ALLOW_AUTH_BYPASS_IN_CLOUD=1.
+_ELB_AUTH_BYPASS_SKIP=(VITE_AUTH_DEV_BYPASS AUTH_DEV_BYPASS)
+load_simple_env_file "$REPO_ROOT/.env" "${_ELB_AUTH_BYPASS_SKIP[@]}"
+load_simple_env_file "$REPO_ROOT/.env.local" "${_ELB_AUTH_BYPASS_SKIP[@]}"
+load_simple_env_file "$REPO_ROOT/web/.env.production" "${_ELB_AUTH_BYPASS_SKIP[@]}"
 # web/.env.local exists for local-dev (vite dev server + local-run.sh web)
 # and pins VITE_API_BASE_URL=http://localhost:8085 plus local-debug toggles
 # (VITE_AUTH_DEV_BYPASS, AUTH_DEV_BYPASS). It may also carry a developer's
@@ -171,7 +181,9 @@ $NO_BUILD && $BUILD_ONLY && die "--no-build and --build-only are mutually exclus
 # Default-Enter = proceed, anything else = abort. The default is "proceed"
 # because the alternative (default-abort) would force every operator to
 # type a key on every deploy, even when the discovered target is exactly
-# what `az account show` already told them on the previous line.
+# what `az account show` already told them on the previous line. No input
+# within 10 s also proceeds, so an unattended run is never left blocking on
+# the prompt.
 # ---------------------------------------------------------------------------
 confirm_deploy_target() {
   $SKIP_CONFIRM && return 0
@@ -187,10 +199,17 @@ confirm_deploy_target() {
   printf '      sidecar(s)   : %s\n' "$SIDECAR" >&2
   printf '      tag          : %s\n\n' "$TAG" >&2
   local reply=""
-  read -r -p "Proceed? [Enter=yes, anything else=abort] " reply || true
-  if [[ -n "$reply" ]]; then
-    ts "aborted by user (input: '$reply')"
-    exit 1
+  # 10 s auto-proceed: no input within the window is treated the same as
+  # pressing Enter (proceed). `read -t` returns non-zero on timeout while
+  # leaving $reply empty, so the existing "empty == proceed" branch covers it.
+  if read -r -t 10 -p "Proceed? [Enter=yes, anything else=abort, auto-yes in 10s] " reply; then
+    if [[ -n "$reply" ]]; then
+      ts "aborted by user (input: '$reply')"
+      exit 1
+    fi
+  else
+    printf '\n' >&2
+    ts "no input within 10s — proceeding automatically"
   fi
 }
 

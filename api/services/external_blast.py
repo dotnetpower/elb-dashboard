@@ -561,11 +561,20 @@ def _ready_probe_upstream(
     resolved_base: str,
     *,
     api_token: str | None,
+    allow_token_resync: bool = True,
 ) -> dict[str, Any]:
     """Single upstream HTTP probe + cache store. Always called by the leader.
 
     Split out of :func:`ready` so the in-flight serialisation in ``ready``
     stays declarative.
+
+    ``allow_token_resync`` guards a one-shot reactive recovery: when the
+    sibling answers **401** the dashboard's runtime token cache is almost
+    always stale (the ephemeral Redis sidecar was wiped by a control-plane
+    redeploy while the elb-openapi pod kept its minted token). We re-read
+    the live token from the deployment env, sync it back into the cache,
+    and retry once. The retry sets ``allow_token_resync=False`` so a pod
+    that genuinely rejects the freshly-read token cannot loop.
     """
     with httpx.Client(
         base_url=resolved_base,
@@ -587,6 +596,36 @@ def _ready_probe_upstream(
             # recovers fast; we still rate-limit retry storms.
             _ready_cache_store(cache_key, err, ttl=_READY_CACHE_TTL_SECONDS / 2)
             raise err from exc
+        if resp.status_code == 401 and allow_token_resync:
+            # Stale / missing X-ELB-API-Token. Re-read the live token from
+            # the elb-openapi deployment env, sync it to the runtime cache,
+            # and retry once with the recovered token. The 401 itself is
+            # never cached, so a failed recovery simply surfaces the
+            # original error and the next probe will try again.
+            healed = ""
+            try:
+                from api.services.openapi.token import (
+                    resync_openapi_api_token_from_cluster,
+                )
+
+                healed = resync_openapi_api_token_from_cluster()
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.warning(
+                    "openapi /v1/ready 401 token resync raised %s",
+                    type(exc).__name__,
+                )
+            if healed:
+                LOGGER.warning(
+                    "openapi /v1/ready returned 401 — token resynced from "
+                    "cluster; retrying probe once",
+                    extra={"event": "ready_probe_token_resync"},
+                )
+                return _ready_probe_upstream(
+                    cache_key,
+                    resolved_base,
+                    api_token=healed,
+                    allow_token_resync=False,
+                )
         if resp.status_code == 404:
             LOGGER.warning(
                 "openapi /v1/ready returned 404 — sibling image is pre-4.15 "

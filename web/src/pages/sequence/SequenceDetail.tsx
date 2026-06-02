@@ -12,7 +12,9 @@ import {
 } from "@/api/ncbi";
 
 const NCBI_NUCCORE_BASE = "https://www.ncbi.nlm.nih.gov/nuccore";
-const NCBI_SVIEWER_BASE = "https://www.ncbi.nlm.nih.gov/projects/sviewer/sviewer.cgi";
+// Standalone Sequence Viewer lives at the bare ``/projects/sviewer/`` path.
+// The legacy ``sviewer.cgi`` endpoint now 404s, so never append it.
+const NCBI_SVIEWER_BASE = "https://www.ncbi.nlm.nih.gov/projects/sviewer/";
 
 const SEQUENCE_PREVIEW_BYTES = 8_000;
 // Whole-sequence accession BLAST is rejected by the submit pipeline when the

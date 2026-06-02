@@ -1587,6 +1587,105 @@ def test_external_blast_ready_transport_error_is_openapi_unreachable(monkeypatch
     assert raised.value.detail["probe"] == "ready"
 
 
+class _SequencedReadyClient:
+    """httpx.Client double that returns a different status on each call.
+
+    Used to exercise the reactive 401 → token-resync → retry path: the first
+    probe answers 401, the retried probe (after resync) answers 200.
+    """
+
+    def __init__(self, statuses: list[int], payloads: list[dict[str, object]]) -> None:
+        self._statuses = statuses
+        self._payloads = payloads
+        self.calls = 0
+        self.tokens_seen: list[object] = []
+
+    def __call__(self, **kwargs: object) -> _SequencedReadyClient:
+        headers = kwargs.get("headers") or {}
+        if isinstance(headers, dict):
+            self.tokens_seen.append(headers.get("X-ELB-API-Token"))
+        return self
+
+    def __enter__(self) -> _SequencedReadyClient:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def get(self, path: str) -> httpx.Response:
+        idx = min(self.calls, len(self._statuses) - 1)
+        status = self._statuses[idx]
+        payload = self._payloads[idx]
+        self.calls += 1
+        return httpx.Response(
+            status_code=status,
+            json=payload,
+            request=httpx.Request("GET", f"http://openapi{path}"),
+        )
+
+
+def test_external_blast_ready_401_resyncs_token_and_retries(monkeypatch) -> None:
+    """A 401 from /v1/ready means the dashboard's cached token went stale
+    (ephemeral Redis wiped by a redeploy). The gate must re-read the live
+    token from the cluster, sync it, and retry once — turning the 401 into
+    a normal ready payload without operator action."""
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _SequencedReadyClient(
+        statuses=[401, 200],
+        payloads=[
+            {"detail": "Unauthorized"},
+            {"ready": True, "version": "3.7.2"},
+        ],
+    )
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+
+    resync_calls = {"n": 0}
+
+    def _fake_resync() -> str:
+        resync_calls["n"] += 1
+        return "healed-token-xyz"
+
+    monkeypatch.setattr(
+        "api.services.openapi.token.resync_openapi_api_token_from_cluster",
+        _fake_resync,
+    )
+
+    result = external_blast.ready(base_url="http://openapi", api_token="stale-token")
+
+    assert result["ready"] is True
+    assert result["version"] == "3.7.2"
+    assert resync_calls["n"] == 1
+    # The retry probe carried the freshly-resynced token, not the stale one.
+    assert fake.tokens_seen[-1] == "healed-token-xyz"
+    assert fake.calls == 2
+
+
+def test_external_blast_ready_401_without_recovery_surfaces_error(monkeypatch) -> None:
+    """If the resync cannot recover a token (no cluster context, RBAC, etc.)
+    the original 401 must surface — and must NOT retry endlessly."""
+    from api.services import external_blast
+
+    external_blast.reset_ready_cache()
+    fake = _SequencedReadyClient(
+        statuses=[401, 401],
+        payloads=[{"detail": "Unauthorized"}, {"detail": "Unauthorized"}],
+    )
+    monkeypatch.setattr(external_blast.httpx, "Client", fake)
+    monkeypatch.setattr(
+        "api.services.openapi.token.resync_openapi_api_token_from_cluster",
+        lambda: "",
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.ready(base_url="http://openapi", api_token="stale-token")
+
+    assert raised.value.status_code == 401
+    # Resync returned "" → no retry probe fired (single upstream call).
+    assert fake.calls == 1
+
+
 def test_external_blast_ready_404_fails_open(monkeypatch, caplog) -> None:
     """Older sibling images lack /v1/ready — the gate must not block submit."""
     from api.services import external_blast
