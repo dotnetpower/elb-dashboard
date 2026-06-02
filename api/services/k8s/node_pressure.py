@@ -106,12 +106,24 @@ def k8s_node_request_pressure(
             "reason": f"k8s_session_failed: {type(exc).__name__}",
         }
     try:
-        nodes_resp = session.get(f"{server}/api/v1/nodes", timeout=10)
+        # The nodes and pods reads are independent; fetch them concurrently so
+        # the endpoint latency is max(nodes, pods) instead of their sum. The
+        # requests.Session returned by `_get_k8s_session` is safe for
+        # concurrent GETs from two threads (separate connections from the
+        # pool), and `_get_k8s_session` is monkeypatched in tests with a stub
+        # whose `.get` is keyed by URL substring, so ordering does not matter.
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="node-pressure") as pool:
+            nodes_future = pool.submit(session.get, f"{server}/api/v1/nodes", timeout=10)
+            pods_future = pool.submit(
+                session.get,
+                f"{server}/api/v1/pods?fieldSelector=status.phase!=Succeeded,status.phase!=Failed",
+                timeout=15,
+            )
+            nodes_resp = nodes_future.result()
+            pods_resp = pods_future.result()
         nodes_resp.raise_for_status()
-        pods_resp = session.get(
-            f"{server}/api/v1/pods?fieldSelector=status.phase!=Succeeded,status.phase!=Failed",
-            timeout=15,
-        )
         pods_resp.raise_for_status()
     except Exception as exc:
         return {

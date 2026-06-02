@@ -283,9 +283,19 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             'python3'
             '/app/api/run_celery_workers.py'
           ]
+          // The worker sidecar runs run_celery_workers.py, which spawns TWO
+          // celery parents (worker-main @ concurrency 4 + worker-artifacts @
+          // concurrency 2) = 2 parents + 6 prefork children = 8 Python
+          // processes. At 0.5 vCPU / 1.0Gi that pool is heavily
+          // over-subscribed; bump to 1.0 vCPU / 2.0Gi so the prefork children
+          // are not starved when several azure / blast / storage tasks run at
+          // once. New per-replica total = 2.75 vCPU / 5.5Gi (api 0.5/1.0,
+          // frontend 0.25/0.5, worker 1.0/2.0, beat 0.25/0.5, redis 0.25/0.5,
+          // terminal 0.5/1.0), still under the Consumption 4 vCPU / 8Gi cap
+          // and keeping the 1 vCPU : 2 GiB ratio.
           resources: {
-            cpu: json('0.5')
-            memory: '1.0Gi'
+            cpu: json('1.0')
+            memory: '2.0Gi'
           }
           env: [
             { name: 'SIDECAR_NAME', value: 'worker' }

@@ -5,7 +5,7 @@ metadata Redis subscriber, and on shutdown close the sidecar SSE broadcaster,
 the frontend reverse-proxy client, and the shared httpx pool.
 Edit boundaries: Keep this module focused on app-level start/stop work. Per-
 sidecar background loops (cgroup reporter etc.) belong in `create_app()`.
-Key entry points: `_lifespan`.
+Key entry points: `_lifespan`, `_configure_threadpool_capacity`.
 Risky contracts: Every shutdown step is wrapped in try/except so a single
 failure cannot block the rest. Subscriber stop is conditional on the start
 having succeeded.
@@ -22,6 +22,50 @@ from fastapi import FastAPI
 
 LOGGER = logging.getLogger("api.app.lifespan")
 
+# AnyIO's documented default worker-thread limit. Used as the fallback so an
+# unset / invalid API_THREADPOOL_TOKENS leaves behaviour identical to today.
+_DEFAULT_THREADPOOL_TOKENS = 40
+
+
+def _configure_threadpool_capacity() -> None:
+    """Set the AnyIO default thread-limiter capacity from the environment.
+
+    Reads ``API_THREADPOOL_TOKENS`` (a positive int). Unset, non-numeric, or
+    non-positive values leave the limiter at AnyIO's default so the historical
+    behaviour is preserved. Failures are swallowed — a missing/renamed AnyIO
+    internal must never block startup.
+    """
+    import os
+
+    raw = os.environ.get("API_THREADPOOL_TOKENS", "").strip()
+    if not raw:
+        return
+    try:
+        tokens = int(raw)
+    except ValueError:
+        LOGGER.warning("API_THREADPOOL_TOKENS=%r is not an integer; ignoring", raw)
+        return
+    if tokens <= 0:
+        LOGGER.warning("API_THREADPOOL_TOKENS=%d must be positive; ignoring", tokens)
+        return
+    try:
+        import anyio.to_thread
+
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        previous = limiter.total_tokens
+        limiter.total_tokens = tokens
+        LOGGER.info(
+            "AnyIO thread-pool capacity set to %d (was %s)",
+            tokens,
+            previous,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning(
+            "failed to set AnyIO thread-pool capacity to %d: %s",
+            tokens,
+            type(exc).__name__,
+        )
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -29,6 +73,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     broadcaster cleanly on shutdown so subscribers see an EOF instead of
     a half-closed socket. See `api.routes.monitor._SidecarBroadcaster`.
     """
+    # Size the AnyIO worker-thread pool that backs every sync route, every
+    # `run_in_threadpool` / `asyncio.to_thread` call, and the Azure SDK
+    # blocking calls those wrap. FastAPI/Starlette leave AnyIO at its default
+    # of 40 tokens; under a burst of monitor/data-plane requests (each of
+    # which offloads several blocking Azure SDK calls) that ceiling can become
+    # the throughput bottleneck before CPU does. Allow operators to raise it
+    # via API_THREADPOOL_TOKENS without touching code; the default preserves
+    # the historical 40-token behaviour exactly.
+    _configure_threadpool_capacity()
+
     # Warm the managed-identity credential at startup so the first
     # bearer-authed call (auth + Storage/Tables/AKS) does not block on a
     # cold IMDS / `az login` token fetch. The fetch happens off-loop so

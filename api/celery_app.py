@@ -104,56 +104,65 @@ celery_app.conf.update(
         "api.tasks.storage.*": {"queue": "storage"},
         "api.tasks.openapi.*": {"queue": "azure"},
     },
+    # The interactive task_routes above are deliberately left pointing at the
+    # latency-critical queues (azure / blast / storage / default) so an
+    # operator-triggered `.delay()` keeps its current routing. The periodic
+    # beat-scheduled maintenance/reconcile tasks below are instead pinned to a
+    # dedicated `reconcile` queue so a slow reconcile pass cannot queue behind
+    # — or starve — an interactive BLAST submit. worker-main subscribes to
+    # `reconcile` (see CELERY_MAIN_QUEUES in run_celery_workers.py), so the
+    # isolation is logical today and lets a future deployment peel `reconcile`
+    # onto a dedicated low-priority worker without code changes.
     beat_schedule={
         "auto-warmup-reconcile": {
             "task": "api.tasks.storage.reconcile_auto_warmup",
             "schedule": float(os.environ.get("CELERY_BEAT_AUTO_WARMUP_SECONDS", "120")),
-            "options": {"queue": "storage"},
+            "options": {"queue": "reconcile"},
         },
         "blast-reconcile-stale-jobs": {
             "task": "api.tasks.blast.reconcile_stale_jobs",
             "schedule": float(os.environ.get("CELERY_BEAT_BLAST_RECONCILE_SECONDS", "90")),
-            "options": {"queue": "blast"},
+            "options": {"queue": "reconcile"},
         },
         "blast-backfill-completed-runtime-metrics": {
             "task": "api.tasks.blast.backfill_completed_runtime_metrics",
             "schedule": 300.0,
-            "options": {"queue": "blast"},
+            "options": {"queue": "reconcile"},
         },
         "upgrade-check-latest": {
             "task": "api.tasks.upgrade.check_latest",
             "schedule": 1800.0,
-            "options": {"queue": "default"},
+            "options": {"queue": "reconcile"},
         },
         "upgrade-reconcile-rolling-out": {
             "task": "api.tasks.upgrade.reconcile_rolling_out",
             "schedule": float(os.environ.get("CELERY_BEAT_UPGRADE_RECONCILE_SECONDS", "180")),
-            "options": {"queue": "default"},
+            "options": {"queue": "reconcile"},
         },
         "upgrade-purge-orphan-tags": {
             "task": "api.tasks.upgrade.purge_orphan_acr_tags",
             "schedule": 24 * 60 * 60.0,
-            "options": {"queue": "default"},
+            "options": {"queue": "reconcile"},
         },
         "upgrade-compact-history": {
             "task": "api.tasks.upgrade.compact_history",
             "schedule": 7 * 24 * 60 * 60.0,
-            "options": {"queue": "default"},
+            "options": {"queue": "reconcile"},
         },
         "aks-reconcile-stale-provisions": {
             "task": "api.tasks.azure.reconcile_stale_aks_provisions",
             "schedule": float(os.environ.get("CELERY_BEAT_AKS_PROVISION_RECONCILE_SECONDS", "300")),
-            "options": {"queue": "azure"},
+            "options": {"queue": "reconcile"},
         },
         "aks-idle-autostop-evaluate": {
             "task": "api.tasks.azure.evaluate_idle_clusters",
             "schedule": float(os.environ.get("CELERY_BEAT_AKS_IDLE_AUTOSTOP_SECONDS", "300")),
-            "options": {"queue": "azure"},
+            "options": {"queue": "reconcile"},
         },
         "openapi-public-https-reconcile": {
             "task": "api.tasks.openapi.reconcile_public_https",
             "schedule": float(os.environ.get("CELERY_BEAT_OPENAPI_PUBLIC_HTTPS_SECONDS", "120")),
-            "options": {"queue": "azure"},
+            "options": {"queue": "reconcile"},
         },
     },
     timezone="UTC",

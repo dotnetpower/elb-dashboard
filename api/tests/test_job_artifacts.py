@@ -190,6 +190,54 @@ def test_worker_command_rejects_untrusted_queue_values() -> None:
         run_celery_workers._worker_command("worker-main", "default", "0")
 
 
+def test_worker_command_default_pool_is_prefork() -> None:
+    """prefork is the safety default — ARM pollers rely on its signal-based
+    hard time limit. The command must request it explicitly and must NOT add
+    a --max-memory-per-child flag unless one is configured."""
+    from api import run_celery_workers
+
+    cmd = run_celery_workers._worker_command(
+        "worker-main", "default,reconcile", "4", max_memory_per_child_kb=""
+    )
+    assert "--pool" in cmd
+    assert cmd[cmd.index("--pool") + 1] == "prefork"
+    assert "--max-memory-per-child" not in cmd
+
+
+def test_worker_command_honours_pool_and_memory_backstop() -> None:
+    from api import run_celery_workers
+
+    cmd = run_celery_workers._worker_command(
+        "worker-main", "default", "2", pool="prefork", max_memory_per_child_kb="500000"
+    )
+    assert cmd[cmd.index("--max-memory-per-child") + 1] == "500000"
+
+    # "0" disables the backstop rather than being passed through.
+    cmd_zero = run_celery_workers._worker_command(
+        "worker-main", "default", "2", pool="prefork", max_memory_per_child_kb="0"
+    )
+    assert "--max-memory-per-child" not in cmd_zero
+
+    # Non-prefork pools never get the prefork-only flag.
+    cmd_threads = run_celery_workers._worker_command(
+        "worker-main", "default", "2", pool="threads", max_memory_per_child_kb="500000"
+    )
+    assert cmd_threads[cmd_threads.index("--pool") + 1] == "threads"
+    assert "--max-memory-per-child" not in cmd_threads
+
+
+def test_worker_command_rejects_untrusted_pool_and_memory() -> None:
+    from api import run_celery_workers
+
+    with pytest.raises(ValueError, match="invalid pool"):
+        run_celery_workers._worker_command("worker-main", "default", "1", pool="prefork; rm -rf")
+
+    with pytest.raises(ValueError, match="invalid max-memory-per-child"):
+        run_celery_workers._worker_command(
+            "worker-main", "default", "1", max_memory_per_child_kb="9; touch x"
+        )
+
+
 def test_read_result_analytics_artifact_treats_missing_schema_as_stale(monkeypatch) -> None:
     """A baked payload without `artifact_schema_version` (i.e. from a
     pre-v2 code version) must be returned as None, AND the state row

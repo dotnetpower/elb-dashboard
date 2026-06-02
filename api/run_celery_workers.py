@@ -17,15 +17,36 @@ import subprocess
 import sys
 import time
 
+# The `reconcile` queue carries the beat-scheduled maintenance tasks
+# (auto-warmup reconcile, stale-job sweep, upgrade reconcile, AKS autostop,
+# …). Routing them off the latency-critical interactive queues keeps a slow
+# reconcile pass from queueing behind an operator-triggered BLAST submit. The
+# same worker-main process still consumes it, so the isolation is logical
+# today and lets a future deployment peel it onto a dedicated low-priority
+# worker without code changes.
 MAIN_QUEUES = os.environ.get(
     "CELERY_MAIN_QUEUES",
-    "default,acr,azure,blast,storage",
+    "default,acr,azure,blast,storage,reconcile",
 )
 ARTIFACT_QUEUES = os.environ.get("CELERY_ARTIFACT_QUEUES", "blast-artifacts")
 MAIN_CONCURRENCY = os.environ.get("CELERY_MAIN_CONCURRENCY", "4")
 ARTIFACT_CONCURRENCY = os.environ.get("CELERY_ARTIFACT_CONCURRENCY", "2")
+# Pool implementation. Default `prefork` is intentional: the ARM long-running
+# pollers in api/tasks/azure/* call `poller.result()` without a per-call
+# timeout and rely on Celery's prefork signal-based hard time limit
+# (CELERY_TASK_TIME_LIMIT) as the only backstop. A `threads`/`gevent` pool
+# would silently disable that safety net, so switching is an explicit opt-in.
+WORKER_POOL = os.environ.get("CELERY_POOL", "prefork")
+# Recycle a prefork child once its resident memory exceeds this many KiB. This
+# is a hard backstop against slow leaks OOM-killing the whole worker sidecar
+# (the container memory limit is shared by every prefork child). Unset/`0`
+# keeps Celery's default (no memory-based recycling). prefork-only — billiard
+# ignores it on threads/gevent pools.
+WORKER_MAX_MEMORY_PER_CHILD_KB = os.environ.get("CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB", "")
 _QUEUE_RE = re.compile(r"^[A-Za-z0-9_,.-]+$")
 _CONCURRENCY_RE = re.compile(r"^[1-9][0-9]{0,2}$")
+_POOL_RE = re.compile(r"^[a-z]+$")
+_MAX_MEMORY_RE = re.compile(r"^[1-9][0-9]{0,8}$")
 
 
 def _validated(value: str, pattern: re.Pattern[str], label: str) -> str:
@@ -34,9 +55,17 @@ def _validated(value: str, pattern: re.Pattern[str], label: str) -> str:
     return value
 
 
-def _worker_command(name: str, queues: str, concurrency: str) -> list[str]:
+def _worker_command(
+    name: str,
+    queues: str,
+    concurrency: str,
+    *,
+    pool: str = WORKER_POOL,
+    max_memory_per_child_kb: str = WORKER_MAX_MEMORY_PER_CHILD_KB,
+) -> list[str]:
     queues = _validated(queues, _QUEUE_RE, "queues")
     concurrency = _validated(concurrency, _CONCURRENCY_RE, "concurrency")
+    pool = _validated(pool, _POOL_RE, "pool")
     command = [
         sys.executable,
         "-m",
@@ -49,9 +78,15 @@ def _worker_command(name: str, queues: str, concurrency: str) -> list[str]:
         f"{name}@%h",
         "-Q",
         queues,
+        "--pool",
+        pool,
         "--concurrency",
         concurrency,
     ]
+    # billiard only honours --max-memory-per-child on the prefork pool.
+    if pool == "prefork" and max_memory_per_child_kb and max_memory_per_child_kb != "0":
+        kb = _validated(max_memory_per_child_kb, _MAX_MEMORY_RE, "max-memory-per-child")
+        command.extend(["--max-memory-per-child", kb])
     if os.environ.get("CELERY_WORKER_GOSSIP", "false").strip().lower() not in {
         "1",
         "true",

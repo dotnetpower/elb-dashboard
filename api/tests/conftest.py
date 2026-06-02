@@ -94,6 +94,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     from api.routes.storage.common import reset_ncbi_catalogue_cache
     from api.services.auto_stop import _reset_autostop_table_pool
     from api.services.auto_warmup import _reset_autowarmup_table_pool
+    from api.services.azure_clients import reset_mgmt_client_pool
     from api.services.blast.db_metadata import _reset_blast_db_metadata_cache
     from api.services.httpx_pool import close_all_clients as _reset_httpx_pool
     from api.services.job_artifacts import _reset_artifact_table_pool
@@ -120,6 +121,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     _reset_blast_status_cache()
     reset_state_repo_cache()
     reset_blob_service_pool()
+    reset_mgmt_client_pool()
     reset_ncbi_catalogue_cache()
     reset_k8s_credential_cache()
     reset_k8s_session_pool()
@@ -137,6 +139,7 @@ def _reset_external_jobs_cache() -> Generator[None, None, None]:
     _reset_blast_status_cache()
     reset_state_repo_cache()
     reset_blob_service_pool()
+    reset_mgmt_client_pool()
     reset_ncbi_catalogue_cache()
     reset_k8s_session_pool()
     reset_k8s_credential_cache()
