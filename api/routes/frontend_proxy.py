@@ -18,9 +18,9 @@ from collections.abc import AsyncIterator
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from starlette.routing import Match
 
 LOGGER = logging.getLogger(__name__)
-
 FRONTEND_UPSTREAM = os.environ.get("FRONTEND_UPSTREAM", "http://127.0.0.1:8081")
 
 # Headers the proxy must NOT pass through verbatim because httpx / FastAPI
@@ -100,6 +100,30 @@ async def close_client() -> None:
             LOGGER.debug("frontend_proxy client close skipped: %s", type(exc).__name__)
 
 
+def _allowed_methods_for_known_path(request: Request) -> set[str]:
+    """Return the HTTP methods registered for the request path, if any.
+
+    Scans the app's route table for a route whose path regex matches the
+    request but whose method set does not (`Match.PARTIAL`). A non-empty
+    result means the path exists under a different method → the caller should
+    get a 405 with an `Allow` header, not a 404. The catch-all reverse proxy
+    itself accepts every method, so it is skipped to avoid masking real 405s.
+    """
+    allowed: set[str] = set()
+    for route in request.app.router.routes:
+        if getattr(route, "endpoint", None) is reverse_proxy:
+            continue
+        matcher = getattr(route, "matches", None)
+        if matcher is None:
+            continue
+        match, _ = matcher(request.scope)
+        if match == Match.PARTIAL:
+            methods = getattr(route, "methods", None)
+            if methods:
+                allowed.update(methods)
+    return allowed
+
+
 @router.api_route(
     "/{full_path:path}",
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -107,8 +131,9 @@ async def close_client() -> None:
 async def reverse_proxy(full_path: str, request: Request) -> Response:
     """Forward the request to the frontend sidecar and stream the response.
 
-    `/api/*` requests are matched by the api routers (mounted before this one)
-    and never reach this handler under normal routing. As a defensive guard,
+    `/api/*` requests are matched by the api routers (mounted before this
+    one) and never reach this handler under normal routing. As a defensive
+    guard,
     if a request whose path starts with `api/` does reach here it means the
     api never registered that route — we MUST NOT forward it to the frontend
     (which would return the SPA's `index.html` with status 200 and confuse
@@ -116,8 +141,36 @@ async def reverse_proxy(full_path: str, request: Request) -> Response:
     well-formed 404 JSON so the SPA's error boundary renders correctly.
     """
     if full_path.startswith("api/") or full_path == "api":
+        rid = getattr(request.state, "request_id", None)
+        rid_field = f',"request_id":"{rid}"' if rid else ""
+        # Audit #7: distinguish "path exists under a different method" (405)
+        # from "path is genuinely unknown" (404). Starlette's per-route
+        # `matches()` returns `Match.PARTIAL` when the path regex matches but
+        # the HTTP method does not — exactly the 405 case. The catch-all
+        # itself accepts every method, so it never produces a PARTIAL here.
+        allowed = _allowed_methods_for_known_path(request)
+        if allowed:
+            allow_header = ", ".join(sorted(allowed))
+            return Response(
+                content=(
+                    '{"detail":"method not allowed","path":"/'
+                    + full_path
+                    + '"'
+                    + rid_field
+                    + "}"
+                ),
+                status_code=405,
+                media_type="application/json",
+                headers={"Allow": allow_header},
+            )
         return Response(
-            content='{"detail":"unknown api route","path":"/' + full_path + '"}',
+            content=(
+                '{"detail":"unknown api route","path":"/'
+                + full_path
+                + '"'
+                + rid_field
+                + "}"
+            ),
             status_code=404,
             media_type="application/json",
         )

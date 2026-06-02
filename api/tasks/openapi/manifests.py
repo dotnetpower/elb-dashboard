@@ -1,8 +1,8 @@
 """Kubernetes manifest builder for the ``elb-openapi`` deploy.
 
 Responsibility: Produce the multi-document JSON payload (ServiceAccount + RBAC +
-    Deployment + PodDisruptionBudget + Service) consumed by ``kubectl apply -f -`` in
-    the kubectl module.
+    in-cluster kubeconfig ConfigMap + Deployment + PodDisruptionBudget + Service)
+    consumed by ``kubectl apply -f -`` in the kubectl module.
 Edit boundaries: Pure manifest construction — no Azure or Kubernetes I/O. If you need a
     new env var, label, or tolerations rule, edit it here and rely on the deploy task to
     pipe it through.
@@ -14,7 +14,13 @@ Risky contracts: The blast-pool toleration and `nodeSelector workload=blast` are
     `replicas: 2` + readiness/liveness probes on `/healthz` + a PodDisruptionBudget
     (`minAvailable: 1`) so node drains, rollouts, and crashing pods cannot all take
     the BLAST submit path down at once. Single-node blast pools still work because
-    `topologySpreadConstraints.whenUnsatisfiable` is `ScheduleAnyway`.
+    `topologySpreadConstraints.whenUnsatisfiable` is `ScheduleAnyway`. The pod's
+    own kubectl (used by the service's `/v1/ready` -> `kubectl get --raw /readyz`
+    probe) does NOT auto-load in-cluster config, so an `elb-openapi-kubeconfig`
+    ConfigMap is mounted read-only at `/etc/elb/kube` and `KUBECONFIG` points at
+    it; it authenticates via the ServiceAccount `tokenFile` (auto-rotated) against
+    `https://kubernetes.default.svc`. Without it kubectl falls back to
+    localhost:8080 and `/v1/ready` returns 503 `k8s_unreachable`.
 Validation: `uv run pytest -q api/tests/test_smoke.py api/tests/test_openapi_task.py`.
 """
 
@@ -99,7 +105,57 @@ def build_manifests(
         # visible" SPA bug; keeping the entry unconditional makes the
         # contract obvious to future readers.
         {"name": "ELB_OPENAPI_API_TOKEN", "value": api_token},
+        # The elb-openapi service shells out to
+        # `kubectl get --raw /readyz` for its `/v1/ready` probe. The
+        # kubectl CLI does NOT auto-load in-cluster config the way the
+        # client-go libraries do, so without an explicit kubeconfig it
+        # falls back to localhost:8080 and every cluster call fails with
+        # "connection refused" — surfacing as the recurring `/v1/ready`
+        # 503 `k8s_unreachable` bug even when the cluster is healthy.
+        # Point KUBECONFIG at the in-cluster kubeconfig ConfigMap mounted
+        # read-only below; it authenticates via the ServiceAccount token
+        # (`tokenFile`, auto-rotated) against the standard in-cluster API
+        # endpoint `https://kubernetes.default.svc`.
+        {"name": "KUBECONFIG", "value": "/etc/elb/kube/config"},
     ]
+
+    # In-cluster kubeconfig consumed by the pod's own kubectl. The CLI
+    # needs an explicit kubeconfig (unlike client-go's InClusterConfig).
+    # `tokenFile` re-reads the projected ServiceAccount token on every
+    # call so token rotation is handled transparently, and
+    # `https://kubernetes.default.svc` is the standard in-cluster API
+    # endpoint (always present in the API server certificate SAN).
+    incluster_kubeconfig = (
+        "apiVersion: v1\n"
+        "kind: Config\n"
+        "clusters:\n"
+        "- name: incluster\n"
+        "  cluster:\n"
+        "    certificate-authority: "
+        "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt\n"
+        "    server: https://kubernetes.default.svc\n"
+        "contexts:\n"
+        "- name: incluster\n"
+        "  context:\n"
+        "    cluster: incluster\n"
+        "    user: incluster\n"
+        f"    namespace: {K8S_NAMESPACE}\n"
+        "current-context: incluster\n"
+        "users:\n"
+        "- name: incluster\n"
+        "  user:\n"
+        "    tokenFile: "
+        "/var/run/secrets/kubernetes.io/serviceaccount/token\n"
+    )
+    kubeconfig_manifest = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "elb-openapi-kubeconfig",
+            "namespace": K8S_NAMESPACE,
+        },
+        "data": {"config": incluster_kubeconfig},
+    }
 
     deploy_manifest = {
         "apiVersion": "apps/v1",
@@ -180,6 +236,17 @@ def build_manifests(
                                     "exec": {"command": ["sleep", "10"]},
                                 },
                             },
+                            # Mount the in-cluster kubeconfig (read-only)
+                            # so the pod's kubectl can reach the API
+                            # server. KUBECONFIG (in openapi_env above)
+                            # points at /etc/elb/kube/config.
+                            "volumeMounts": [
+                                {
+                                    "name": "incluster-kubeconfig",
+                                    "mountPath": "/etc/elb/kube",
+                                    "readOnly": True,
+                                },
+                            ],
                         }
                     ],
                     # Sibling repo `constants.py` (commit a2d2f0a) splits
@@ -218,6 +285,18 @@ def build_manifests(
                         },
                     ],
                     "terminationGracePeriodSeconds": 30,
+                    # ConfigMap-backed in-cluster kubeconfig consumed by
+                    # the container's kubectl via the KUBECONFIG env +
+                    # volumeMount above. The ServiceAccount token it
+                    # references is the default projected token mount
+                    # (automountServiceAccountToken is left at the
+                    # default `true`).
+                    "volumes": [
+                        {
+                            "name": "incluster-kubeconfig",
+                            "configMap": {"name": "elb-openapi-kubeconfig"},
+                        },
+                    ],
                 },
             },
         },
@@ -320,6 +399,7 @@ def build_manifests(
         sa_manifest,
         role_manifest,
         binding_manifest,
+        kubeconfig_manifest,
         deploy_manifest,
         pdb_manifest,
         svc_manifest,

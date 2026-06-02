@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -39,6 +40,7 @@ from api.app.global_exception_logging import install_global_exception_hooks
 from api.app.inspector import _inspector_should_capture  # noqa: F401  - back-compat re-export
 from api.app.lifespan import _lifespan
 from api.app.middleware import RequestIdMiddleware
+from api.app.security_headers import SecurityHeadersMiddleware
 from api.routes import (
     acr,
     aks,
@@ -87,15 +89,134 @@ for _name in (
     logging.getLogger(_name).setLevel(_azure_log_level)
 
 
+def _document_common_error_responses(schema: dict[str, Any]) -> None:
+    """Augment every operation with the common error responses it can return.
+
+    Audit #10: generated operations documented only their `200`/`422`
+    responses, so a reader could not tell that any authenticated route may
+    answer `401`/`403`, that path lookups may `404`, or that Azure-backed
+    operations may surface a `5xx`. This registers a shared `ErrorResponse`
+    schema and adds `401`/`403`/`404`/`500` entries to each operation that
+    does not already declare them. It is documentation only — runtime
+    behaviour is unchanged — so any explicitly-authored response wins via
+    `setdefault`.
+    """
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas.setdefault(
+        "ErrorResponse",
+        {
+            "type": "object",
+            "title": "ErrorResponse",
+            "properties": {
+                "detail": {
+                    "type": "string",
+                    "description": "Human-readable, sanitised error summary.",
+                },
+                "request_id": {
+                    "type": "string",
+                    "description": (
+                        "Correlation id echoed from the `X-Request-ID` "
+                        "response header for support and log lookup."
+                    ),
+                },
+            },
+            "required": ["detail"],
+        },
+    )
+    error_ref = {
+        "application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}
+    }
+    common = {
+        "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": error_ref,
+        },
+        "403": {
+            "description": "Authenticated caller lacks the required role.",
+            "content": error_ref,
+        },
+        "404": {
+            "description": "Resource or route not found.",
+            "content": error_ref,
+        },
+        "500": {
+            "description": "Unexpected server or upstream Azure error.",
+            "content": error_ref,
+        },
+    }
+    paths = schema.get("paths", {})
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method.lower() not in {"get", "put", "post", "delete", "patch"}:
+                continue
+            if not isinstance(operation, dict):
+                continue
+            responses = operation.setdefault("responses", {})
+            for status_code, body in common.items():
+                responses.setdefault(status_code, body)
+
+
+def _install_openapi_security_scheme(app: FastAPI) -> None:
+    """Declare a bearer-JWT security scheme and apply it globally in the spec.
+
+    Every domain route enforces an MSAL bearer token at runtime, but the
+    generated OpenAPI document carried no `securitySchemes`, so tooling and
+    readers could not tell the API was authenticated. This injects the
+    `BearerAuth` scheme and a global `security` requirement. OpenAPI `security`
+    is documentation only — it never changes runtime enforcement — so the
+    genuinely-anonymous probes (`/api/health*`) keep working unchanged.
+    """
+    from fastapi.openapi.utils import get_openapi
+
+    def custom_openapi() -> dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        components = schema.setdefault("components", {})
+        security_schemes = components.setdefault("securitySchemes", {})
+        security_schemes["BearerAuth"] = {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": (
+                "Microsoft Entra ID (MSAL) access token. Send as "
+                "`Authorization: Bearer <token>`."
+            ),
+        }
+        schema["security"] = [{"BearerAuth": []}]
+        _document_common_error_responses(schema)
+        app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
+
+
 def create_app() -> FastAPI:
     install_global_exception_hooks()
+    # `/api/docs` (Swagger UI) and `/openapi.json` (the machine-readable spec)
+    # travel together: in production `ENABLE_DOCS` is unset, so both are
+    # disabled and the api never serves its internal route inventory to an
+    # anonymous caller. Enabling docs locally re-exposes both. Runtime auth is
+    # enforced regardless of the spec's visibility, so hiding it strips no
+    # caller's access (no persona regression).
+    _docs_enabled = os.environ.get("ENABLE_DOCS", "false").lower() == "true"
     app = FastAPI(
         title="ElasticBLAST Control Plane API",
         version=__version__,
-        docs_url="/api/docs" if os.environ.get("ENABLE_DOCS", "false").lower() == "true" else None,
+        docs_url="/api/docs" if _docs_enabled else None,
+        openapi_url="/openapi.json" if _docs_enabled else None,
         redoc_url=None,
         lifespan=_lifespan,
     )
+    _install_openapi_security_scheme(app)
 
     # Best-effort Azure Monitor OpenTelemetry init. No-op when
     # APPLICATIONINSIGHTS_CONNECTION_STRING is unset; safe to call before
@@ -208,6 +329,13 @@ def create_app() -> FastAPI:
             allow_headers=allow_headers,
         )
 
+    # Baseline security response headers (HSTS, nosniff, frame-deny, referrer,
+    # permissions) + `Server` banner masking. Added last so it is the
+    # outermost middleware and stamps every response — API JSON, the
+    # body-size-guard 413 short-circuit, and the catch-all reverse-proxied
+    # SPA assets alike. CSP stays behind the default-OFF `STRICT_CSP` gate.
+    app.add_middleware(SecurityHeadersMiddleware)
+
     # ---- /api/* routers (must be registered BEFORE the catch-all) ----
     app.include_router(health.router, prefix="/api")
     app.include_router(me.router, prefix="/api")
@@ -241,6 +369,14 @@ def create_app() -> FastAPI:
             payload = {"detail": detail}
         else:
             payload = detail if isinstance(detail, dict) else {"detail": str(detail)}
+        # Audit #15: stamp the per-request correlation id into the body so a
+        # client that only logs the JSON (not headers) can still report it.
+        # `setdefault` so a route that already carries its own `request_id`
+        # in a dict detail is never clobbered. The same id is on the
+        # `x-request-id` response header via RequestIdMiddleware.
+        rid = getattr(_request.state, "request_id", None)
+        if rid and isinstance(payload, dict):
+            payload.setdefault("request_id", rid)
         # Preserve route-supplied headers (e.g. Retry-After on 429) — Starlette
         # carries them on the exception but the default JSONResponse otherwise
         # drops them.
@@ -248,7 +384,7 @@ def create_app() -> FastAPI:
         return JSONResponse(payload, status_code=exc.status_code, headers=headers)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
         errors: list[dict[str, object]] = []
         for error in exc.errors():
             item = dict(error)
@@ -256,7 +392,11 @@ def create_app() -> FastAPI:
             if isinstance(ctx, dict):
                 item["ctx"] = {str(key): str(value) for key, value in ctx.items()}
             errors.append(item)
-        return JSONResponse({"detail": errors}, status_code=422)
+        rid = getattr(request.state, "request_id", None)
+        body: dict[str, object] = {"detail": errors}
+        if rid:
+            body["request_id"] = rid
+        return JSONResponse(body, status_code=422)
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

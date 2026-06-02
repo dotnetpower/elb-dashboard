@@ -4,20 +4,22 @@ Responsibility: Browser client error log ingestion route
 Edit boundaries: Keep HTTP validation and log shaping here; do not persist user data or call
 Azure SDKs.
 Key entry points: `ClientLogPayload`, `client_log`
-Risky contracts: Keep the route auth-gated, sanitise client-controlled text before logging, and
-cap payload sizes.
+Risky contracts: Auth-gated by default; the `ALLOW_ANONYMOUS_CLIENT_LOG`
+default-OFF guard opts into accepting unauthenticated pre-login error reports.
+Always sanitise client-controlled text before logging and cap payload sizes.
 Validation: `uv run pytest -q api/tests/test_client_log.py`.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, Field
 
-from api.auth import CallerIdentity, require_caller
+from api.auth import AuthError, CallerIdentity, require_caller
 from api.services.sanitise import sanitise
 
 LOGGER = logging.getLogger(__name__)
@@ -43,11 +45,34 @@ def _one_line(value: str | None, *, limit: int) -> str:
     return " ".join(cleaned.split())
 
 
+async def _client_log_caller(
+    authorization: str | None = Header(default=None),
+) -> CallerIdentity | None:
+    """Resolve the caller, optionally tolerating anonymous reports.
+
+    Audit #14: pre-login browser failures (MSAL redirect/login errors) carry
+    no bearer token, so an auth-required route silences exactly the telemetry
+    an operator most wants. Behind the default-OFF `ALLOW_ANONYMOUS_CLIENT_LOG`
+    guard (charter §12a Rule 4 — default OFF preserves the auth-required
+    contract) the route accepts a missing/invalid token and logs the report as
+    `caller=anonymous`. A valid token, when present, is still honoured so
+    authenticated reports keep their caller label.
+    """
+    if os.environ.get("ALLOW_ANONYMOUS_CLIENT_LOG", "").lower() != "true":
+        return await require_caller(authorization)
+    if not authorization:
+        return None
+    try:
+        return await require_caller(authorization)
+    except AuthError:
+        return None
+
+
 @router.post("", status_code=status.HTTP_204_NO_CONTENT)
 def client_log(
     payload: ClientLogPayload,
     response: Response,
-    caller: CallerIdentity = Depends(require_caller),
+    caller: CallerIdentity | None = Depends(_client_log_caller),
 ) -> Response:
     """Write a browser-side app error into the api sidecar log stream."""
 
@@ -56,7 +81,7 @@ def client_log(
         "warning": logging.WARNING,
         "info": logging.INFO,
     }[payload.level]
-    caller_label = caller.upn or caller.object_id
+    caller_label = (caller.upn or caller.object_id) if caller else "anonymous"
     LOGGER.log(
         log_level,
         "client_app_%s source=%s caller=%s url=%s client_request_id=%s "

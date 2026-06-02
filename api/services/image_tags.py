@@ -16,10 +16,20 @@ from __future__ import annotations
 # 3.6.0 cache hardening; 4.15 == upstream 3.7.0 /v1/ready probe; 4.16 ==
 # upstream 3.7.2 /v1/ready hardening; 4.17 == upstream 3.7.3 /v1/ready
 # critique-fix round — X-Forwarded-For-aware anonymous bucket, LRU-bounded
-# rate-bucket dict, exact-match autoscaler pool name parser). Bump in
-# lock-step with the sibling repo's ``docker-openapi/app/main.py`` ``VERSION``
-# constant and record the mapping in the per-bump change note under
+# rate-bucket dict, exact-match autoscaler pool name parser; 4.18 == 4.17 app
+# code REBUILT FROM THE PATCHED LOCAL CONTEXT to restore the core_nt sharding
+# translation that 4.17 silently dropped — see
+# docs/features_change/2026-06/2026-06-02-openapi-resharding-regression-fix.md).
+# Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
+# ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
+#
+# IMPORTANT: the ``elb-openapi`` image MUST be built from the dashboard-patched
+# local sibling context (run ``scripts/dev/patch-openapi-build-context.py
+# ~/dev/elastic-blast-azure/docker-openapi`` THEN ``az acr build … docker-openapi``).
+# A raw GitHub-master build omits the core_nt sharding translation and the
+# patched ElasticBLAST runtime — that omission is exactly the 4.17 regression
+# the 2026-06-02 note documents.
 #
 # Rollout order (charter): build+push the sibling image to ACR FIRST, then
 # move the pin here. See docs/features_change/2026-05/2026-05-29-openapi-critique-fixes.md
@@ -29,7 +39,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.17",
+    "elb-openapi": "4.18",
 }
 
 # GitHub source repo for ACR Build Tasks.

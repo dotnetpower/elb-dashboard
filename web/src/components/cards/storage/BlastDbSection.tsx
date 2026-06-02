@@ -6,6 +6,8 @@ import { DB_CATALOG } from "@/components/cards/storageDbCatalog";
 import type { BlastDbClusterTopology } from "@/components/cards/storage/BlastDbClusterConfirm";
 import { BlastDbModal } from "@/components/cards/storage/BlastDbModal";
 import { useBlastDb } from "@/components/cards/storage/useBlastDb";
+import { permissionDeniedTooltip } from "@/components/PermissionGate";
+import { usePermissions } from "@/hooks/usePermissions";
 import {
   blastDbReadinessLabel,
   blastDbReadinessTone,
@@ -59,6 +61,19 @@ export function BlastDbSection({
   });
   const [showPopup, setShowPopup] = useState(false);
   const { toast } = useToast();
+
+  // Gate every DB write action (Get / Update / Build Oracle / Cancel /
+  // Auto warm / Custom DB) behind the caller's Azure RBAC at the storage
+  // resource group. A subscription Reader sees the buttons disabled with a
+  // "you need Contributor" tooltip instead of clicking through to a silent
+  // 403. Falls back to OPEN_PERMISSIONS while loading / on ARM hiccup, so
+  // there is no flash-of-disabled state and a transient enumeration failure
+  // never locks a legitimate operator out.
+  const { permissions } = usePermissions(subscriptionId, resourceGroup);
+  const writeDisabled = !permissions.can_write && !permissions.degraded;
+  const writeDisabledReason = writeDisabled
+    ? permissionDeniedTooltip("can_write", permissions)
+    : undefined;
 
   // Surface in-flight downloads to the parent (StorageCard uses this for shimmer)
   useEffect(() => {
@@ -285,6 +300,8 @@ export function BlastDbSection({
         <BlastDbModal
           state={state}
           clusterTopology={clusterTopology}
+          writeDisabled={writeDisabled}
+          writeDisabledReason={writeDisabledReason}
           onClose={() => setShowPopup(false)}
         />
       )}

@@ -298,6 +298,25 @@ def readiness() -> Any:
     status_code = 200 if overall_ok else 503
     from fastapi.responses import JSONResponse
 
+    # Audit #3: the per-component map leaks internal topology (which
+    # dependencies exist, credential class name, and truncated error strings
+    # that can echo endpoints) to an anonymous caller. Behind the default-OFF
+    # `STRICT_READINESS_DETAIL` guard (charter §12a Rule 4) the body collapses
+    # to the overall status only — enough for a load balancer / CI gate that
+    # cares about the 200-vs-503 signal, nothing for a recon probe. Default
+    # OFF preserves the existing full-detail body (and the cli-upgrade Tier-1
+    # gate that reads `components.azure_storage`).
+    if os.environ.get("STRICT_READINESS_DETAIL", "").lower() == "true":
+        return JSONResponse(
+            content={
+                "status": "ready" if overall_ok else "not_ready",
+                "version": __version__,
+                "retryable": not overall_ok,
+                "retry_after_seconds": 30 if not overall_ok else None,
+            },
+            status_code=status_code,
+        )
+
     return JSONResponse(
         content={
             "status": "ready" if overall_ok else "not_ready",

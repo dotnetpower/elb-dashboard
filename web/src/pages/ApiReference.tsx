@@ -166,7 +166,21 @@ export function ApiReference() {
 
   const spec = useMemo(() => {
     if (!specQuery.data || !baseUrl) return null;
-    return parseSpec(specQuery.data, baseUrl);
+    const parsed = parseSpec(specQuery.data, baseUrl);
+    // Drop endpoints whose tags are not declared in the spec's top-level
+    // `tags` list. These surface as the "Other / Ungrouped" group and are
+    // the upstream's external direct-caller contract (prefix
+    // `/api/v1/elastic-blast`, tag "External ElasticBLAST"). They are not
+    // reachable through the dashboard's internal proxy — the proxy allowlist
+    // intentionally only permits `/v1/`, `/healthz`, `/openapi.json`,
+    // `/docs/` — so exercising them here always fails with
+    // `openapi_path_not_allowlisted`. Hide them rather than widen the
+    // security allowlist; external callers use the published spec directly.
+    const declaredTags = new Set(parsed.tags.map((tag) => tag.name));
+    const endpoints = parsed.endpoints.filter((endpoint) =>
+      endpoint.tags.some((tag) => declaredTags.has(tag)),
+    );
+    return { ...parsed, endpoints };
   }, [specQuery.data, baseUrl]);
 
   const contractLoading =
@@ -179,22 +193,15 @@ export function ApiReference() {
 
   const grouped = useMemo(() => {
     if (!spec) return [];
-    const byTag = spec.tags
+    // `spec.endpoints` is already filtered to declared-tag endpoints (the
+    // untagged "Other" group is dropped in the `spec` memo above), so every
+    // endpoint here belongs to exactly one rendered tag section.
+    return spec.tags
       .map((tag) => ({
         tag,
         endpoints: spec.endpoints.filter((endpoint) => endpoint.tags.includes(tag.name)),
       }))
       .filter((group) => group.endpoints.length > 0);
-
-    const tagged = new Set(byTag.flatMap((group) => group.endpoints));
-    const untagged = spec.endpoints.filter((endpoint) => !tagged.has(endpoint));
-    if (untagged.length > 0) {
-      byTag.push({
-        tag: { name: "Other", description: "Ungrouped endpoints" },
-        endpoints: untagged,
-      });
-    }
-    return byTag;
   }, [spec]);
 
   return (

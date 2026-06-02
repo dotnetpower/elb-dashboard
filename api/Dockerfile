@@ -66,6 +66,7 @@ CMD ["uvicorn", "api.main:app", \
      "--port", "8080", \
      "--workers", "2", \
      "--proxy-headers", \
+     "--no-server-header", \
      "--forwarded-allow-ips", "*"]
 
 

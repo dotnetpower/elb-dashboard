@@ -244,7 +244,12 @@ def _validate_token(token: str) -> CallerIdentity:
         )
     except jwt.PyJWTError as exc:
         LOGGER.warning("token validation failed: %s", exc)
-        raise AuthError(status.HTTP_401_UNAUTHORIZED, f"invalid token: {exc}") from exc
+        # Surface a generic message to the client. The PyJWT exception text
+        # (e.g. "Not enough segments", "Signature verification failed")
+        # describes *why* validation failed and is useful recon for an
+        # attacker probing token shapes — keep it server-side in the log
+        # above only.
+        raise AuthError(status.HTTP_401_UNAUTHORIZED, "invalid token") from exc
 
     # Defence-in-depth: explicitly verify the ``tid`` (tenant id) claim
     # in addition to the issuer URL check above. The issuer list already

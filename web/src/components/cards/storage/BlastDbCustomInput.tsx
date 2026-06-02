@@ -3,6 +3,8 @@ import { Download } from "lucide-react";
 
 interface BlastDbCustomInputProps {
   disabled: boolean;
+  /** Tooltip explaining a Reader-only RBAC block, when applicable. */
+  writeDisabledReason?: string;
   onDownload: (name: string) => void;
 }
 
@@ -15,7 +17,7 @@ const CUSTOM_DB_NAME_RE = /^[A-Za-z0-9_.-]{1,64}$/;
  * Compact "Custom database" input — collapsed by default, expands inline to
  * accept an arbitrary BLAST DB name (e.g. `refseq_rna`).
  */
-export function BlastDbCustomInput({ disabled, onDownload }: BlastDbCustomInputProps) {
+export function BlastDbCustomInput({ disabled, writeDisabledReason, onDownload }: BlastDbCustomInputProps) {
   const [showCustom, setShowCustom] = useState(false);
   const [customDb, setCustomDb] = useState("");
   const trimmed = customDb.trim();
@@ -61,11 +63,13 @@ export function BlastDbCustomInput({ disabled, onDownload }: BlastDbCustomInputP
           }}
           disabled={!isValid || disabled}
           title={
-            !hasInput
-              ? "Type a NCBI BLAST database name"
-              : !isValid
-                ? "Allowed: letters, digits, _ . - (1-64 chars)"
-                : `Download ${trimmed}`
+            writeDisabledReason
+              ? writeDisabledReason
+              : !hasInput
+                ? "Type a NCBI BLAST database name"
+                : !isValid
+                  ? "Allowed: letters, digits, _ . - (1-64 chars)"
+                  : `Download ${trimmed}`
           }
         >
           <Download size={10} /> Get

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Database, Loader2, Lock, RefreshCw, ShieldCheck, X } from "lucide-react";
 
@@ -28,9 +28,52 @@ import { useDbPreviews } from "@/components/cards/storage/useDbPreviews";
 
 const CATEGORIES = ["Small / Test", "Medium", "Large"] as const;
 
+/**
+ * Centered overlay wrapper rendered into `document.body`. The download / update
+ * confirm panels are otherwise appended to the bottom of the long scrollable
+ * catalog list, so clicking "Update" on a row near the top would render the
+ * confirmation off-screen and look like nothing happened. Wrapping them in a
+ * backdrop overlay keeps the confirmation in view regardless of scroll position.
+ */
+function ConfirmOverlay({
+  onDismiss,
+  children,
+}: {
+  onDismiss: () => void;
+  children: ReactNode;
+}) {
+  return createPortal(
+    <div
+      className="glass-dialog-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onDismiss();
+      }}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="glass-card glass-card--strong glass-dialog"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: 640, width: "calc(100vw - 48px)" }}
+      >
+        {children}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 interface BlastDbModalProps {
   state: UseBlastDbReturn;
   clusterTopology?: BlastDbClusterTopology;
+  /**
+   * When true the signed-in user only holds a read role (e.g. subscription
+   * Reader) at the storage scope, so every write action (Get / Update /
+   * Build Oracle / Cancel / Auto warm / Custom DB) is rendered disabled with
+   * ``writeDisabledReason`` as the tooltip. Defaults to false (degrade-open).
+   */
+  writeDisabled?: boolean;
+  writeDisabledReason?: string;
   onClose: () => void;
 }
 
@@ -47,7 +90,13 @@ interface PendingDownloadConfirm {
  * All lifecycle state (download/in-progress/completed) is owned by the parent
  * via `useBlastDb`; this component is the rendering layer for the modal only.
  */
-export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalProps) {
+export function BlastDbModal({
+  state,
+  clusterTopology,
+  writeDisabled = false,
+  writeDisabledReason,
+  onClose,
+}: BlastDbModalProps) {
   const [confirmClusterDb, setConfirmClusterDb] = useState<PendingDownloadConfirm | null>(
     null,
   );
@@ -466,6 +515,8 @@ export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalPr
                         autoWarmupDisabled={
                           !isDownloaded || hasUpdate || !!meta?.update_in_progress
                         }
+                        writeDisabled={writeDisabled}
+                        writeDisabledReason={writeDisabledReason}
                         onDownload={() => requestDownload(db.value, false)}
                         onUpdate={() => setConfirmUpdateDb(db.value)}
                         onBuildOracle={() => void handleBuildOracle(db.value)}
@@ -484,37 +535,44 @@ export function BlastDbModal({ state, clusterTopology, onClose }: BlastDbModalPr
 
           <div style={{ marginTop: "var(--space-2)" }}>
             <BlastDbCustomInput
-              disabled={downloading !== null}
+              disabled={downloading !== null || writeDisabled}
+              writeDisabledReason={writeDisabled ? writeDisabledReason : undefined}
               onDownload={(name) => requestDownload(name, false)}
             />
           </div>
 
           {confirmClusterDb && (
-            <BlastDbClusterConfirm
-              dbValue={confirmClusterDb.dbValue}
-              isLarge={confirmClusterDb.isLarge}
-              topology={clusterTopology}
-              onConfirm={() => startDownload(confirmClusterDb.dbValue)}
-              onCancel={() => setConfirmClusterDb(null)}
-            />
+            <ConfirmOverlay onDismiss={() => setConfirmClusterDb(null)}>
+              <BlastDbClusterConfirm
+                dbValue={confirmClusterDb.dbValue}
+                isLarge={confirmClusterDb.isLarge}
+                topology={clusterTopology}
+                onConfirm={() => startDownload(confirmClusterDb.dbValue)}
+                onCancel={() => setConfirmClusterDb(null)}
+              />
+            </ConfirmOverlay>
           )}
 
           {confirmLargeDb && (
-            <BlastDbLargeConfirm
-              dbValue={confirmLargeDb}
-              onConfirm={() => startDownload(confirmLargeDb)}
-              onCancel={() => setConfirmLargeDb(null)}
-            />
+            <ConfirmOverlay onDismiss={() => setConfirmLargeDb(null)}>
+              <BlastDbLargeConfirm
+                dbValue={confirmLargeDb}
+                onConfirm={() => startDownload(confirmLargeDb)}
+                onCancel={() => setConfirmLargeDb(null)}
+              />
+            </ConfirmOverlay>
           )}
 
           {confirmUpdateDb && (
-            <BlastDbUpdateConfirm
-              dbValue={confirmUpdateDb}
-              meta={downloadedDbs.get(confirmUpdateDb)}
-              latestVersion={latestVersion}
-              onConfirm={() => startUpdate(confirmUpdateDb)}
-              onCancel={() => setConfirmUpdateDb(null)}
-            />
+            <ConfirmOverlay onDismiss={() => setConfirmUpdateDb(null)}>
+              <BlastDbUpdateConfirm
+                dbValue={confirmUpdateDb}
+                meta={downloadedDbs.get(confirmUpdateDb)}
+                latestVersion={latestVersion}
+                onConfirm={() => startUpdate(confirmUpdateDb)}
+                onCancel={() => setConfirmUpdateDb(null)}
+              />
+            </ConfirmOverlay>
           )}
 
           {confirmCancelDb && (

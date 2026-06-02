@@ -43,6 +43,14 @@ interface BlastDbRowProps {
   oracleDisabled: boolean;
   autoWarmupChecked: boolean;
   autoWarmupDisabled: boolean;
+  /**
+   * When true the caller lacks the Azure RBAC role needed to mutate this
+   * database (Reader-only at the requested scope). Every write action
+   * (Get / Retry / Update / Build Oracle / Cancel / Auto warm) is rendered
+   * disabled with ``writeDisabledReason`` as the tooltip. Defaults to false.
+   */
+  writeDisabled?: boolean;
+  writeDisabledReason?: string;
   onDownload: () => void;
   onUpdate: () => void;
   onBuildOracle: () => void;
@@ -79,6 +87,8 @@ export function BlastDbRow({
   oracleDisabled,
   autoWarmupChecked,
   autoWarmupDisabled,
+  writeDisabled = false,
+  writeDisabledReason,
   onDownload,
   onUpdate,
   onBuildOracle,
@@ -179,6 +189,7 @@ export function BlastDbRow({
   const ncbiFtpUrl = ncbiBlastDbFtpUrl(db.value, db.type);
   const downloadBlocked =
     isUnsupported ||
+    writeDisabled ||
     (downloadDisabled && !isPartial) ||
     (previewUnavailable && !isDownloaded);
   const unsupportedReasonLabel: Record<
@@ -560,11 +571,13 @@ export function BlastDbRow({
               alignItems: "center",
               gap: 5,
               color: autoWarmupChecked ? "var(--success)" : "var(--text-muted)",
-              cursor: autoWarmupDisabled ? "not-allowed" : "pointer",
-              opacity: autoWarmupDisabled ? 0.55 : 1,
+              cursor: autoWarmupDisabled || writeDisabled ? "not-allowed" : "pointer",
+              opacity: autoWarmupDisabled || writeDisabled ? 0.55 : 1,
             }}
             title={
-              autoWarmupDisabled
+              writeDisabled
+                ? writeDisabledReason
+                : autoWarmupDisabled
                 ? !isDownloaded
                   ? "Download this database before enabling automatic warmup"
                   : isUpdating
@@ -578,7 +591,7 @@ export function BlastDbRow({
             <input
               type="checkbox"
               checked={autoWarmupChecked}
-              disabled={autoWarmupDisabled}
+              disabled={autoWarmupDisabled || writeDisabled}
               onChange={(event) => onToggleAutoWarmup(event.target.checked)}
               style={{ accentColor: "var(--success)", margin: 0 }}
             />
@@ -639,8 +652,12 @@ export function BlastDbRow({
               e.stopPropagation();
               onUpdate();
             }}
-            disabled={downloadDisabled}
-            title={`Update from ${formatNcbiVersion(meta!.source_version!)} to ${formatNcbiVersion(latestVersion!)}`}
+            disabled={downloadDisabled || writeDisabled}
+            title={
+              writeDisabled
+                ? writeDisabledReason
+                : `Update from ${formatNcbiVersion(meta!.source_version!)} to ${formatNcbiVersion(latestVersion!)}`
+            }
           >
             <RefreshCw size={11} /> Update
           </button>
@@ -659,8 +676,12 @@ export function BlastDbRow({
                 e.stopPropagation();
                 onBuildOracle();
               }}
-              disabled={oracleDisabled}
-              title="Build DB order oracle from warmed AKS shards"
+              disabled={oracleDisabled || writeDisabled}
+              title={
+                writeDisabled
+                  ? writeDisabledReason
+                  : "Build DB order oracle from warmed AKS shards"
+              }
             >
               {oracleBuilding ? (
                 <Loader2 size={11} className="spin" />
@@ -697,7 +718,8 @@ export function BlastDbRow({
                   e.stopPropagation();
                   onCancel();
                 }}
-                title="Cancel in-flight download"
+                disabled={writeDisabled}
+                title={writeDisabled ? writeDisabledReason : "Cancel in-flight download"}
               >
                 Cancel
               </button>
@@ -719,7 +741,9 @@ export function BlastDbRow({
             }}
             disabled={downloadBlocked}
             title={
-              isUnsupported && unsupported
+              writeDisabled
+                ? writeDisabledReason
+                : isUnsupported && unsupported
                 ? unsupported.hint
                 : previewUnavailable
                   ? (preview?.message ??

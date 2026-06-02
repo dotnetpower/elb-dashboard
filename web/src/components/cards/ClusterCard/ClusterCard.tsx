@@ -8,8 +8,10 @@ import { formatApiError } from "@/api/client";
 import { ClusterItem } from "@/components/ClusterItem";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { MonitorCard } from "@/components/MonitorCard";
+import { permissionDeniedTooltip } from "@/components/PermissionGate";
 import { degradedStatusOverride } from "@/components/cards/cardStatusOverride";
 import { useAksAvailableSkus, useAksSkus } from "@/hooks/useAksSkus";
+import { usePermissions } from "@/hooks/usePermissions";
 import { useAutoRefreshInterval } from "@/hooks/useAutoRefresh";
 import {
   isAksProvisioning,
@@ -239,14 +241,30 @@ export function ClusterCard({
     terminalVmName,
   });
 
-  // Block opening a second provision while either (a) a cluster in the
-  // list is still creating (ARM `provisioning_state` says so) or (b) the
-  // current submit's task is still in flight in this browser.
+  // Gate "Add Cluster" behind the caller's write capability at the
+  // subscription scope: provisioning creates a new resource group + AKS
+  // cluster, so a Reader must see the button disabled with a role tooltip
+  // instead of clicking through to a silent 403 (mirrors the Start / Stop /
+  // Delete gating in PulseActions). usePermissions falls back to
+  // OPEN_PERMISSIONS while loading and stays open when `degraded` so a
+  // transient ARM hiccup never locks a privileged operator out.
+  const { permissions: addClusterPermissions } = usePermissions(subscriptionId);
+  const addClusterWriteDenied =
+    !addClusterPermissions.can_write && !addClusterPermissions.degraded;
+
+  // Block opening a second provision while either (a) the caller lacks
+  // write permission, (b) a cluster in the list is still creating (ARM
+  // `provisioning_state` says so) or (c) the current submit's task is
+  // still in flight in this browser.
   const addClusterDisabled =
-    hasProvisioningCluster || prov.provStatus === "creating";
-  const addClusterDisabledReason = addClusterDisabled
-    ? "A cluster is currently being provisioned. Wait for it to finish before adding another."
-    : undefined;
+    addClusterWriteDenied ||
+    hasProvisioningCluster ||
+    prov.provStatus === "creating";
+  const addClusterDisabledReason = addClusterWriteDenied
+    ? permissionDeniedTooltip("can_write", addClusterPermissions)
+    : addClusterDisabled
+      ? "A cluster is currently being provisioned. Wait for it to finish before adding another."
+      : undefined;
 
   // Dedupe the live provision: while the ProvisioningBanner is actively
   // tracking a create, the same cluster also shows up as a `Creating` row in
