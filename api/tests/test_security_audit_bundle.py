@@ -133,11 +133,16 @@ class _RecordingAsyncClient:
 def _patch_frontend_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force the frontend proxy to use our recording client.
 
-    The proxy caches its client at module scope so we have to reset it.
+    The proxy caches its client at module scope, so the override MUST go
+    through ``monkeypatch.setattr`` (not a bare assignment) — otherwise the
+    recording client leaks past this file and a later test that falls through
+    to the catch-all proxy (e.g. ``test_openapi_hidden_by_default`` proxying
+    ``/openapi.json``) would receive this stub's hard-coded 200 instead of the
+    real "sidecar absent" failure.
     """
     from api.routes import frontend_proxy
 
-    frontend_proxy._client = _RecordingAsyncClient()
+    monkeypatch.setattr(frontend_proxy, "_client", _RecordingAsyncClient())
     _RecordingAsyncClient.last_headers = None
 
 
