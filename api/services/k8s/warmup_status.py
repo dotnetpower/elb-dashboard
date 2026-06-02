@@ -501,6 +501,18 @@ def _merge_database_statuses(result: dict[str, Any], incoming: list[dict[str, An
                 "pod_statuses",
                 "shard_nodes",
                 "shard_host_paths",
+                # `source_version`/`source_versions` are the DB-generation
+                # marker the BLAST submit gate (`ensure_node_warmup_ready_for
+                # _submit`) compares against the storage blob's
+                # `source_version`. Only warmup Jobs carry it (setup
+                # `init-ssd-*` Jobs do not), so when a setup-derived entry is
+                # created first and the warmup entry is merged in afterwards it
+                # MUST carry the marker across — otherwise the merged entry is
+                # `status="Ready"` but marker-less, and submit fails with
+                # "node warmup for <db> has no DB generation marker" even
+                # though the dashboard card shows the DB as warm.
+                "source_version",
+                "source_versions",
             ):
                 if key in database:
                     current[key] = database[key]

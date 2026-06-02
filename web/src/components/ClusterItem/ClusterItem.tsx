@@ -12,6 +12,7 @@ import { isAksWorkloadReady } from "@/utils/aksStatus";
 
 import { DatabaseChipStrip } from "./DatabaseChipStrip";
 import { StartEstimatePanel } from "./StartEstimatePanel";
+import { startingStatusLine, useStartProgress } from "./startEstimate";
 import { AutoStopPanel } from "./AutoStopPanel";
 import { useClusterDbChips } from "./useClusterDbChips";
 import { useClusterShardMutation } from "./useClusterShardMutation";
@@ -78,6 +79,17 @@ export function ClusterItem({
     }
     setTransitionStartedAt(null);
   }, [trans]);
+
+  // Live timing model for the "Starting…" state — shared by the always-visible
+  // status line and the expanded StartEstimatePanel so they never disagree.
+  const startProgress = useStartProgress({
+    startedAt: trans === "starting" ? transitionStartedAt : null,
+    autoWarmupDbCount: autoWarmupDbs.size,
+  });
+  const startingLine =
+    trans === "starting"
+      ? startingStatusLine(startProgress, autoWarmupDbs.size)
+      : undefined;
 
   useEffect(() => {
     const refresh = () => setAutoWarmupDbs(readAutoWarmupDbs());
@@ -176,6 +188,7 @@ export function ClusterItem({
             clusterName={c.name}
             autoWarmupDbCount={autoWarmupDbs.size}
             startedAt={transitionStartedAt}
+            progress={startProgress}
           />
         )}
         {showOperationalDetails && (dbChips.length > 0 || dbListDegraded) && (
@@ -208,6 +221,7 @@ export function ClusterItem({
         subscriptionId={subscriptionId}
         resourceGroup={resourceGroup}
         trans={trans}
+        startingStatusLine={startingLine}
         actionLoading={actionLoading}
         onStartStop={onStartStop}
         onDelete={onDelete}

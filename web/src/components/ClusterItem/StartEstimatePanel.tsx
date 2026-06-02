@@ -1,81 +1,39 @@
 import { Clock3, DatabaseZap, Lightbulb, Network } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 
-import { monitoringApi } from "@/api/endpoints";
-
-// Fallback estimates used until the backend has recorded at least one real
-// observation for a phase (mirrors api/services/cluster_timings.DEFAULT_SECONDS).
-const OBSERVED_AKS_START_SECONDS = 235;
-const OBSERVED_OPENAPI_DEPLOY_SECONDS = 31;
-const WARMUP_FIRST_DB_LOW_SECONDS = 10 * 60;
-const WARMUP_FIRST_DB_HIGH_SECONDS = 25 * 60;
-const WARMUP_EXTRA_DB_LOW_SECONDS = 6 * 60;
-const WARMUP_EXTRA_DB_HIGH_SECONDS = 15 * 60;
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${Math.max(1, Math.round(seconds))} sec`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  return rest ? `${hours} hr ${rest} min` : `${hours} hr`;
-}
-
-function warmupRangeSeconds(dbCount: number): [number, number] {
-  if (dbCount <= 0) return [0, 0];
-  return [
-    WARMUP_FIRST_DB_LOW_SECONDS + (dbCount - 1) * WARMUP_EXTRA_DB_LOW_SECONDS,
-    WARMUP_FIRST_DB_HIGH_SECONDS + (dbCount - 1) * WARMUP_EXTRA_DB_HIGH_SECONDS,
-  ];
-}
+import { formatDuration, useStartProgress, type StartProgress } from "./startEstimate";
 
 export function StartEstimatePanel({
   clusterName,
   autoWarmupDbCount,
   startedAt,
+  progress: progressProp,
 }: {
   clusterName: string;
   autoWarmupDbCount: number;
   startedAt: number | null;
+  /** Pre-computed timings from the parent's `useStartProgress`. When omitted
+   *  the panel derives its own (kept for standalone use / tests). */
+  progress?: StartProgress;
 }) {
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    const tick = () => {
-      if (!document.hidden) setNow(Date.now());
-    };
-    const timer = window.setInterval(tick, 1_000);
-    document.addEventListener("visibilitychange", tick);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
-    };
-  }, []);
-
-  const elapsedSeconds = startedAt
-    ? Math.max(0, Math.floor((now - startedAt) / 1_000))
-    : 0;
-
-  const statsQuery = useQuery({
-    queryKey: ["aks-start-stats"],
-    queryFn: () => monitoringApi.aksStartStats(),
-    staleTime: 5 * 60_000,
-    retry: 0,
+  const ownProgress = useStartProgress({
+    startedAt: progressProp ? null : startedAt,
+    autoWarmupDbCount,
   });
-  const stats = statsQuery.data;
-  const aksStartPhase = stats?.phases?.aks_start;
-  const openapiPhase = stats?.phases?.openapi_deploy;
-  const aksStartSeconds = aksStartPhase?.seconds ?? OBSERVED_AKS_START_SECONDS;
-  const openapiSeconds = openapiPhase?.seconds ?? OBSERVED_OPENAPI_DEPLOY_SECONDS;
-  const aksStartSamples = aksStartPhase?.samples ?? 0;
-  const isMeasured = (aksStartPhase?.source ?? "default") === "measured";
+  const progress = progressProp ?? ownProgress;
 
-  const apiReadySeconds = Math.round(aksStartSeconds + openapiSeconds);
-  const [warmupLow, warmupHigh] = warmupRangeSeconds(autoWarmupDbCount);
-  const totalLow = apiReadySeconds + warmupLow;
-  const totalHigh = apiReadySeconds + warmupHigh;
-  const apiRemaining = Math.max(0, apiReadySeconds - elapsedSeconds);
+  const {
+    elapsedSeconds,
+    aksStartSeconds,
+    openapiSeconds,
+    apiReadySeconds,
+    apiRemainingSeconds: apiRemaining,
+    totalLowSeconds: totalLow,
+    totalHighSeconds: totalHigh,
+    isMeasured,
+    aksStartSamples,
+  } = progress;
+
   const tipIndex = Math.floor(elapsedSeconds / 12) % 4;
 
   const tips = useMemo(
@@ -175,9 +133,30 @@ export function StartEstimatePanel({
           }}
         >
           <strong style={{ fontSize: 12 }}>{activeTip.title}</strong>
-          <span className="muted" style={{ fontSize: 11 }}>
-            elapsed {formatDuration(elapsedSeconds)} · estimated API readiness{" "}
-            {formatDuration(apiRemaining)}
+          <span
+            className="muted"
+            style={{ fontSize: 11, display: "inline-flex", alignItems: "baseline", gap: 6 }}
+          >
+            <span>
+              elapsed {formatDuration(elapsedSeconds)} · estimated API readiness{" "}
+              {formatDuration(apiRemaining)}
+            </span>
+            {!isMeasured && (
+              <span
+                title="No start has been observed yet — based on built-in defaults. The estimate sharpens after the first measured start."
+                style={{
+                  fontSize: 10,
+                  lineHeight: 1.6,
+                  padding: "0 6px",
+                  borderRadius: 999,
+                  border: "1px solid var(--border-weak)",
+                  color: "var(--muted)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                estimate
+              </span>
+            )}
           </span>
         </div>
         <span className="muted" style={{ fontSize: 12, lineHeight: 1.45 }}>

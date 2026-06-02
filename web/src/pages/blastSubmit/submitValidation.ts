@@ -87,6 +87,12 @@ export function deriveSubmitValidation({
   const dbNotReady =
     Boolean(form.db) && !dbMissingFromStorage && readiness != null && !readiness.ready;
   const dbNotReadyReason = readiness && !readiness.ready ? blastDbBlockedReason(readiness) : null;
+  // A query can be supplied either as inline FASTA (`query_data`) or as an
+  // NCBI accession (`query_accession`) that the backend resolves to FASTA at
+  // submit time. Either source satisfies the "Sequence" readiness step.
+  const hasInlineQuery = form.query_data.trim().length > 0;
+  const hasAccession = form.query_accession.trim().length > 0;
+  const hasQuery = hasInlineQuery || hasAccession;
   const hasTaxid = form.taxid.trim().length > 0;
   const taxidValid = !hasTaxid || parsePositiveTaxid(form.taxid) !== null;
   const taxidOptionConflict =
@@ -98,7 +104,7 @@ export function deriveSubmitValidation({
     workloadRg &&
     form.program &&
     form.db &&
-    form.query_data &&
+    hasQuery &&
     storageAccount &&
     selectedCluster &&
     isAksWorkloadReady(selectedCluster) &&
@@ -114,8 +120,8 @@ export function deriveSubmitValidation({
   const missing: MissingItem[] = [];
   if (!subId || !workloadRg)
     missing.push({ text: "Azure resources not configured", link: "/" });
-  if (!form.query_data) missing.push({ text: "Query sequence" });
-  else if (!form.query_data.trim().startsWith(">"))
+  if (!hasQuery) missing.push({ text: "Query sequence or NCBI accession" });
+  else if (hasInlineQuery && !form.query_data.trim().startsWith(">"))
     missing.push({ text: "Query must be in FASTA format (start with '>')" });
   if (!form.db) missing.push({ text: "Database" });
   else if (dbMissingFromStorage)
@@ -165,7 +171,7 @@ export function deriveSubmitValidation({
 
   const readySteps = [
     { ok: Boolean(subId && workloadRg), label: "Config" },
-    { ok: Boolean(form.query_data && seqStats.isFasta), label: "Sequence" },
+    { ok: hasAccession || Boolean(form.query_data && seqStats.isFasta), label: "Sequence" },
     { ok: Boolean(form.db) && !dbMissingFromStorage && !dbNotReady, label: "Database" },
     { ok: taxonomyReady, label: "Taxonomy" },
     {

@@ -36,6 +36,10 @@ interface Props {
   subscriptionId: string;
   resourceGroup: string;
   trans?: ClusterTransitionKind;
+  /** Live "Starting · 1m 20s elapsed · API ~2m" line shown in the
+   *  always-visible header while the cluster is starting. Falls back to the
+   *  derived health status line when omitted. */
+  startingStatusLine?: string;
   actionLoading: string | null;
   onStartStop: (name: string, action: "start" | "stop") => void;
   onDelete: (name: string) => void;
@@ -54,6 +58,7 @@ export function ClusterPulse({
   subscriptionId,
   resourceGroup,
   trans,
+  startingStatusLine,
   actionLoading,
   onStartStop,
   onDelete,
@@ -115,6 +120,13 @@ export function ClusterPulse({
     nodeTotal: signals.nodeSummary.total,
   });
 
+  // While starting, prefer the live elapsed/remaining line over the static
+  // "Starting cluster…" verdict so progress is visible even when collapsed.
+  const statusLine =
+    trans === "starting" && startingStatusLine
+      ? startingStatusLine
+      : health.statusLine;
+
   return (
     <div
       className="glass-card cluster-pulse-card"
@@ -126,7 +138,7 @@ export function ClusterPulse({
         resourceGroup={c.resource_group}
         tone={health.tone}
         statusTone={health.statusTone}
-        statusLine={health.statusLine}
+        statusLine={statusLine}
         open={open}
         onToggle={toggleOpen}
         panelId={panelId}

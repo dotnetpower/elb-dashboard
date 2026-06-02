@@ -113,3 +113,47 @@ describe("blast submit taxonomy readiness", () => {
     ).toBe(true);
   });
 });
+
+describe("blast submit query source readiness", () => {
+  it("treats an NCBI accession as a valid query source when inline FASTA is empty", () => {
+    const result = validate(
+      makeForm({ query_data: "", query_accession: "OZ254605.1" }),
+    );
+
+    expect(result.readySteps.find((step) => step.label === "Sequence")?.ok).toBe(true);
+    expect(result.canSubmit).toBe(true);
+    expect(result.missing.map((item) => item.text)).not.toContain(
+      "Query sequence or NCBI accession",
+    );
+  });
+
+  it("blocks submit when neither inline FASTA nor accession is provided", () => {
+    const result = validate(makeForm({ query_data: "", query_accession: "" }));
+
+    expect(result.readySteps.find((step) => step.label === "Sequence")?.ok).toBe(false);
+    expect(result.canSubmit).toBe(false);
+    expect(result.missing.map((item) => item.text)).toContain(
+      "Query sequence or NCBI accession",
+    );
+  });
+
+  it("still enforces FASTA format for inline queries", () => {
+    const result = validate(makeForm({ query_data: "ATGC", query_accession: "" }));
+
+    expect(result.readySteps.find((step) => step.label === "Sequence")?.ok).toBe(false);
+    expect(result.missing.map((item) => item.text)).toContain(
+      "Query must be in FASTA format (start with '>')",
+    );
+  });
+
+  it("does not enforce FASTA format when only an accession is supplied", () => {
+    const result = validate(
+      makeForm({ query_data: "", query_accession: "NM_000546.6" }),
+    );
+
+    expect(result.missing.map((item) => item.text)).not.toContain(
+      "Query must be in FASTA format (start with '>')",
+    );
+    expect(result.canSubmit).toBe(true);
+  });
+});

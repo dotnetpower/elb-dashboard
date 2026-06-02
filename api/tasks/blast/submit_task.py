@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 from celery import shared_task
@@ -64,6 +65,24 @@ def _capacity_gate_enabled() -> bool:
 LOGGER = logging.getLogger(__name__)
 
 
+def _warmup_max_wait_seconds() -> int:
+    """Upper bound on how long a submit may wait for node-local warmup.
+
+    The ``waiting_for_warmup`` re-enqueue loop is otherwise unbounded — a
+    permanently-stuck warmup (e.g. a node that never leaves ``Loading`` or a
+    DB generation marker that never lands) would keep re-enqueuing forever and
+    never surface as ``Failed``. This deadline lets the job fail after a
+    generous wait so the dashboard shows a real terminal state. Override with
+    ``BLAST_WARMUP_MAX_WAIT_SECONDS``; default 45 minutes.
+    """
+    raw = os.environ.get("BLAST_WARMUP_MAX_WAIT_SECONDS", "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 2700
+    return value if value > 0 else 2700
+
+
 @shared_task(
     name="api.tasks.blast.submit",
     bind=True,
@@ -86,12 +105,19 @@ def submit(
     options: dict[str, Any] | None = None,
     caller_oid: str = "",
     caller_tenant_id: str = "",
+    warmup_wait_deadline_ts: float | None = None,
 ) -> dict[str, Any]:
     """Submit a BLAST search via the terminal sidecar.
 
     Side effects: writes ``elastic-blast.ini`` in the terminal sidecar workdir,
     executes ``elastic-blast submit --cfg elastic-blast.ini``, and updates
     Table-backed job state.
+
+    ``warmup_wait_deadline_ts`` is an internal re-enqueue knob: the first
+    ``waiting_for_warmup`` re-enqueue stamps ``now + _warmup_max_wait_seconds()``
+    and every subsequent re-enqueue forwards it unchanged, so the warmup wait
+    loop fails once the deadline passes instead of looping forever. External
+    callers never pass it.
     """
 
     _blast._progress(self, "preparing")
@@ -177,12 +203,105 @@ def submit(
         try:
             warmup_ready = warmup_future.result()
         except WarmupNotReadyError as exc:
+            # A retryable warmup state (Loading/Pending/Starting, no DB
+            # generation marker yet, or the warmup status read failed) is
+            # transient: the node-local warmup is still settling. Re-enqueue
+            # the submit instead of failing it — the SAME pattern the
+            # capacity-gate / submit-lock waits below use. Re-enqueueing (not
+            # ``task.retry``) means the wait does not consume the task's
+            # ``max_retries`` budget and has no ~6-minute ceiling, so a search
+            # against a still-warming sharded DB keeps its place in line until
+            # the shards report warm. The waiting row keeps ``status="running"``
+            # on the ``waiting_for_warmup`` phase — exactly like the capacity
+            # gate's ``waiting_for_capacity`` row — because the reconciler's
+            # ``_celery_success_row_status`` only treats ``"running"`` as still
+            # active; the original task returns SUCCESS once it re-enqueues, so a
+            # ``"queued"`` result would be reconciled to ``completed`` and the
+            # artifact finalizer would fire on a job that has not run yet. A
+            # non-retryable error (e.g. a missing database name) fails
+            # immediately. The re-enqueue loop is bounded by a generous
+            # ``warmup_wait_deadline_ts`` carried in the message so a
+            # permanently-stuck warmup eventually fails instead of looping
+            # forever (see ``_warmup_max_wait_seconds``).
+            if getattr(exc, "retryable", False):
+                now = time.time()
+                deadline = warmup_wait_deadline_ts or (now + _warmup_max_wait_seconds())
+                if now >= deadline:
+                    error = _blast._snippet(exc)
+                    LOGGER.warning(
+                        "blast_warmup_wait_deadline_exceeded job_id=%s cluster=%s "
+                        "database=%s",
+                        job_id,
+                        cluster_name,
+                        database,
+                    )
+                    _blast._update_state(
+                        job_id,
+                        "warmup_not_ready",
+                        status="failed",
+                        event="warmup_wait_deadline_exceeded",
+                        error_code="node_warmup_wait_deadline_exceeded",
+                        output=error,
+                        last_output=error,
+                    )
+                    return {
+                        "job_id": job_id,
+                        "status": "failed",
+                        "phase": "warmup_not_ready",
+                        "error": error,
+                        "error_code": "node_warmup_wait_deadline_exceeded",
+                    }
+                _blast._update_state(
+                    job_id,
+                    "waiting_for_warmup",
+                    status="running",
+                    event="warmup_not_ready",
+                    error_code="node_warmup_not_ready",
+                    retry_after_seconds=30,
+                    last_output=_blast._snippet(exc),
+                )
+                try:
+                    submit.apply_async(
+                        kwargs={
+                            "job_id": job_id,
+                            "subscription_id": subscription_id,
+                            "resource_group": resource_group,
+                            "cluster_name": cluster_name,
+                            "storage_account": storage_account,
+                            "program": program,
+                            "database": database,
+                            "query_file": query_file,
+                            "options": options,
+                            "caller_oid": caller_oid,
+                            "caller_tenant_id": caller_tenant_id,
+                            "warmup_wait_deadline_ts": deadline,
+                        },
+                        countdown=30,
+                        queue="blast",
+                    )
+                except Exception as enq_exc:
+                    # If re-enqueue itself fails (broker gone), fall back to
+                    # the bounded retry path so the broker error surfaces.
+                    return _blast._retry_or_fail(
+                        self,
+                        job_id=job_id,
+                        phase="waiting_for_warmup",
+                        exc=enq_exc,
+                        error_code="blast_submit_requeue_failed",
+                    )
+                return {
+                    "job_id": job_id,
+                    "status": "running",
+                    "phase": "waiting_for_warmup",
+                    "requeued": True,
+                }
             error = _blast._snippet(exc)
             _blast._update_state(
                 job_id,
                 "warmup_not_ready",
                 status="failed",
                 error_code="node_warmup_not_ready",
+                output=error,
                 last_output=error,
             )
             return {
@@ -190,6 +309,7 @@ def submit(
                 "status": "failed",
                 "phase": "warmup_not_ready",
                 "error": error,
+                "error_code": "node_warmup_not_ready",
             }
 
         if warmup_ready is not None:

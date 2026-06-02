@@ -138,6 +138,11 @@ export function WarmupSection({
     selectedPlan.status !== "no_db_size";
 
   const capacity = useMemo(() => summariseWarmupCapacity(nodeMetrics), [nodeMetrics]);
+  // The cluster can report ARM power state "Running" while the blast pool is
+  // still scaling up, so no node memory metrics are visible yet. In that window
+  // the feasibility planner cannot size a warmup, so Warm actions are gated
+  // until capacity is reported (capacity.memoryPct becomes non-null).
+  const capacityUnknown = capacity.memoryPct == null;
   const warmupRows = useMemo(
     () =>
       buildWarmupRows({
@@ -353,6 +358,7 @@ export function WarmupSection({
               key={row.name}
               row={row}
               actionsDisabled={Boolean(warmupInstanceId) || !storageAccount}
+              capacityUnknown={capacityUnknown}
               starting={starting && selectedDb === row.name}
               releasing={
                 releaseMutation.isPending && releaseMutation.variables === row.name
@@ -514,6 +520,10 @@ function WarmupCapacityBanner({
   nodeCount?: number | null;
 }) {
   const pressure = capacity.memoryPressure;
+  // When node memory is not yet reported the blast pool is still scaling up;
+  // surface that as a calm info tone so the disabled Warm buttons read as
+  // "not ready yet" rather than "broken".
+  const scaling = capacity.memoryPct == null;
   return (
     <div
       style={{
@@ -521,8 +531,18 @@ function WarmupCapacityBanner({
         padding: "8px 10px",
         borderRadius: 8,
         fontSize: 11,
-        background: pressure ? "rgba(240,198,116,0.10)" : "rgba(106,214,163,0.08)",
-        border: `1px solid ${pressure ? "rgba(240,198,116,0.30)" : "rgba(106,214,163,0.22)"}`,
+        background: scaling
+          ? "rgba(122,167,255,0.08)"
+          : pressure
+            ? "rgba(240,198,116,0.10)"
+            : "rgba(106,214,163,0.08)",
+        border: `1px solid ${
+          scaling
+            ? "rgba(122,167,255,0.24)"
+            : pressure
+              ? "rgba(240,198,116,0.30)"
+              : "rgba(106,214,163,0.22)"
+        }`,
         color: "var(--text-muted)",
         display: "flex",
         alignItems: "center",
@@ -535,9 +555,17 @@ function WarmupCapacityBanner({
         Warm cache capacity · {nodeCount ?? capacity.nodes} node
         {(nodeCount ?? capacity.nodes) === 1 ? "" : "s"}
         {nodeSku ? ` · ${nodeSku}` : ""}
+        {scaling ? " · node pool is still scaling up — Warm unlocks once capacity is reported" : ""}
       </span>
       <span
-        style={{ color: pressure ? "var(--warning)" : "var(--success)", fontWeight: 600 }}
+        style={{
+          color: scaling
+            ? "var(--accent)"
+            : pressure
+              ? "var(--warning)"
+              : "var(--success)",
+          fontWeight: 600,
+        }}
       >
         {capacity.memoryPct == null
           ? "memory unknown"
@@ -556,6 +584,7 @@ function WarmupCapacityBanner({
 function WarmupDbRow({
   row,
   actionsDisabled,
+  capacityUnknown,
   starting,
   releasing,
   onWarm,
@@ -563,6 +592,7 @@ function WarmupDbRow({
 }: {
   row: WarmupRow;
   actionsDisabled: boolean;
+  capacityUnknown: boolean;
   starting: boolean;
   releasing: boolean;
   onWarm: () => void;
@@ -580,7 +610,11 @@ function WarmupDbRow({
             ? "var(--warning)"
             : "var(--text-muted)";
   const showWarm = row.primaryAction === "warm" || row.primaryAction === "rewarm";
-  const warmDisabled = actionsDisabled || !row.canWarm || starting || releasing;
+  const warmDisabled =
+    actionsDisabled || !row.canWarm || starting || releasing || capacityUnknown;
+  const warmTitle = capacityUnknown
+    ? "Cluster is still bringing up the blast pool — node capacity is not reported yet. Warm unlocks once memory is visible."
+    : row.blockedReason;
   const releaseDisabled = actionsDisabled || !row.canRelease || starting || releasing;
   return (
     <div
@@ -644,7 +678,7 @@ function WarmupDbRow({
             className="btn btn--primary btn--sm"
             disabled={warmDisabled}
             onClick={onWarm}
-            title={row.blockedReason}
+            title={warmTitle}
             style={{ fontSize: 11, whiteSpace: "nowrap" }}
           >
             {starting ? <Loader2 size={11} className="spin" /> : <Flame size={11} />}

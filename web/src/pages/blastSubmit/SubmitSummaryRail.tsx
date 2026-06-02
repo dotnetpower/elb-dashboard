@@ -170,7 +170,17 @@ export function SubmitSummaryRail({
         </div>
         <div className="bsl-rail__kv">
           <span className="bsl-rail__k">Sequences</span>
-          <span className="bsl-rail__v">{form.query_data ? "entered" : "0"}</span>
+          <span className="bsl-rail__v">
+            {form.query_data
+              ? "entered"
+              : form.query_accession.trim()
+                ? `${form.query_accession.trim()}${
+                    form.query_from.trim() && form.query_to.trim()
+                      ? ` (${form.query_from.trim()}–${form.query_to.trim()})`
+                      : ""
+                  } · fetch at submit`
+                : "0"}
+          </span>
         </div>
         <div className="bsl-rail__kv">
           <span className="bsl-rail__k">Taxon filter</span>

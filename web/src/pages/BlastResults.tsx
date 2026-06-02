@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { BlastJobHeader } from "@/pages/blastResults/BlastJobHeader";
@@ -124,6 +125,47 @@ export function BlastResults() {
         hasExportTargets={state.showCompletedMetrics}
         resultFiles={state.resultFiles}
       />
+
+      {state.liveUpdatesStalled && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
+            padding: "10px 14px",
+            background: "rgba(242,180,111,0.08)",
+            border: "1px solid rgba(242,180,111,0.24)",
+            borderRadius: 8,
+            fontSize: 12,
+            color: "var(--warning)",
+          }}
+        >
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 600 }}>Live status updates paused</div>
+            <div style={{ color: "var(--text-muted)", marginTop: 2 }}>
+              {state.liveUpdatesStalledAuthExpired
+                ? "Your browser sign-in session may have expired, so the status below could be out of date — this job may have already finished. Sign in again or refresh to load the latest result."
+                : "The dashboard could not refresh this job's status, so the status below could be out of date. Refresh to load the latest result."}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => void state.jobQuery.refetch()}
+            disabled={state.jobQuery.isFetching}
+            style={{ flexShrink: 0 }}
+          >
+            <RefreshCw
+              size={13}
+              className={state.jobQuery.isFetching ? "spin" : undefined}
+            />
+            Refresh now
+          </button>
+        </div>
+      )}
 
       <BlastResultsTabs active={tab} resultsPending={isRunning} />
 

@@ -166,7 +166,14 @@ where the failure was found, but knowing them up front saves a lot of time.
     parity checklist from [.github/copilot-instructions.md §13](./.github/copilot-instructions.md)
     "Post-implementation self-review", then summarise the outcome in the
     final user-facing message. If any check is unresolved, fix it or
-    escalate — do not mark the task done.
+    escalate — do not mark the task done. **For non-trivial backend/infra
+    changes, ALSO apply the design-level rubric in the
+    [self-critique-review skill](./.github/skills/self-critique-review/SKILL.md)**
+    (contract/state-machine consistency, unbounded retry/wait loops,
+    idempotency, concurrency races, partial-failure, observability) — the
+    mechanical §13 checklist cannot see those, and they are where the recurring
+    Critical/High critique findings come from. Apply it during planning too so
+    the defect is designed out, not patched in.
 14. **Every docs page's `tags:` frontmatter must use only canonical tags.**
     The Publish Docs CI job runs [scripts/docs/check_frontmatter.py](./scripts/docs/check_frontmatter.py)
     which fails the build if any navigated `docs/**/*.md` file is missing

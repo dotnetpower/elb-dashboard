@@ -49,6 +49,49 @@ def _collect_building_acr_images(
         build_details.append({"image": full, "status": status, "run_id": run_id})
 
 
+def _augment_actual_tags_from_manifests(
+    actual_tags: dict[str, list[str]],
+    login_server: str,
+) -> None:
+    """Fill ``actual_tags`` from the registry's live manifests for expected images.
+
+    The ACR Task run history is a bounded window (``_ACR_RUNS_LIST_LIMIT``)
+    dominated by frequent platform image rebuilds (``elb-api`` /
+    ``elb-frontend`` / ``elb-terminal``). BLAST images that were built once
+    at provisioning time get pushed out of that window, so relying solely on
+    ``Run.output_images`` reports them as "not built" even though their tags
+    still resolve in the registry. This probes each expected ``image:tag``
+    manifest directly so the card's "built" count reflects ground truth.
+
+    Best-effort: any failure (missing data-plane role, transient outage,
+    SDK import error) leaves ``actual_tags`` untouched so the run-history
+    path remains the fallback. Never raises.
+    """
+    if not login_server:
+        return
+    refs = [f"{login_server}/{repo}:{tag}" for repo, tag in IMAGE_TAGS.items()]
+    try:
+        from api.services.upgrade import acr_inventory
+
+        results = acr_inventory.lookup_images(refs)
+    except Exception as exc:
+        LOGGER.debug(
+            "acr manifest probe skipped (%s)", type(exc).__name__
+        )
+        return
+    for info in results:
+        if not info.exists:
+            continue
+        try:
+            _, rest = info.image_ref.split("/", 1)
+            repo, tag = rest.rsplit(":", 1)
+        except ValueError:
+            continue
+        actual_tags.setdefault(repo, [])
+        if tag not in actual_tags[repo]:
+            actual_tags[repo].append(tag)
+
+
 # ---------------------------------------------------------------------------
 # Remote Terminal VM (legacy status surface)
 # ---------------------------------------------------------------------------
@@ -141,6 +184,12 @@ def list_acr_repositories(
                 LOGGER.debug(
                     "acr_build_state prune skipped (%s)", type(exc).__name__
                 )
+
+    # Ground-truth pass: the run-history loop above only sees a bounded
+    # window of recent ACR Task runs, so images built once at provisioning
+    # time can fall out of view. Probe the expected image manifests
+    # directly so the card's built/total count stays accurate.
+    _augment_actual_tags_from_manifests(actual_tags, login_server)
 
     return {
         "name": registry.name,

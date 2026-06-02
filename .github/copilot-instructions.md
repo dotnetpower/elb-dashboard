@@ -18,6 +18,8 @@
 
 > Fast coding that breaks things costs more than thoughtful coding that works the first time. When in doubt, investigate more before typing.
 
+> **Design-critique the plan (step 3) and the result (before done) for non-trivial backend/infra work** using the [self-critique-review skill](../.github/skills/self-critique-review/SKILL.md) rubric — contract/state-machine consistency, unbounded retry/wait loops, idempotency, concurrency races, partial-failure, observability. The mechanical self-review in §13 (consumer grep + tests + diff) cannot see these design-level defects, which are where most Critical/High critique findings come from. Designing them out up front is cheaper than patching them after a critique.
+
 ---
 
 ## 1. Mission

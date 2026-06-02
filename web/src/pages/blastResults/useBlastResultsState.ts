@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
+import type { ApiError } from "@/api/client";
 import { blastApi } from "@/api/endpoints";
 import { FAILURE_PHASES } from "@/components/BlastStepTimeline";
 import { loadSavedConfig } from "@/components/SetupWizard";
@@ -265,6 +266,20 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     !resultState.effectiveIsFailed &&
     split.files.length > 0;
 
+  // When the job-status poll starts failing while the displayed phase is still
+  // non-terminal, TanStack Query keeps the last successful snapshot mounted, so
+  // the page can sit on a stale "running" badge for a job that has actually
+  // finished. The most common cause is an expired MSAL session: the poll 401s,
+  // the global gate routes to sign-in, but a backgrounded tab may never follow
+  // the redirect and is left staring at the stale snapshot. Expose explicit
+  // flags so the page can render a "live updates paused" banner with a manual
+  // refresh action instead of silently misleading the user.
+  const jobQueryErrorStatus = (jobQuery.error as ApiError | null)?.status;
+  const liveUpdatesStalled =
+    jobQuery.isError && Boolean(job) && !TERMINAL_PHASES.has(phaseInfo.phase);
+  const liveUpdatesStalledAuthExpired =
+    liveUpdatesStalled && jobQueryErrorStatus === 401;
+
   return {
     // identity
     subscriptionId,
@@ -292,6 +307,8 @@ export function useBlastResultsState({ jobId, searchParams }: UseBlastResultsSta
     // computed flags
     hasExportTargets,
     showCompletedMetrics,
+    liveUpdatesStalled,
+    liveUpdatesStalledAuthExpired,
   } as const;
 }
 

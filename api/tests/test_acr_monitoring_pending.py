@@ -105,6 +105,24 @@ def patched_acr(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(acr_build_state, "load_pending_builds", _fake_load)
     monkeypatch.setattr(acr_build_state, "prune_terminal_builds", _fake_prune)
 
+    # Keep the manifest ground-truth probe offline + deterministic. Tests
+    # opt into specific results via state["manifest_exists"] (set of
+    # "<repo>:<tag>" strings); default is none exist so the run-history
+    # path is exercised in isolation.
+    from api.services.upgrade import acr_inventory
+
+    def _fake_lookup(refs: list[str]) -> list[acr_inventory.ImageInfo]:
+        present: set[str] = state.get("manifest_exists", set())
+        out: list[acr_inventory.ImageInfo] = []
+        for ref in refs:
+            _, rest = ref.split("/", 1)
+            out.append(
+                acr_inventory.ImageInfo(image_ref=ref, exists=rest in present)
+            )
+        return out
+
+    monkeypatch.setattr(acr_inventory, "lookup_images", _fake_lookup)
+
     return state
 
 
@@ -166,3 +184,31 @@ def test_succeeded_run_prunes_pending_entry(patched_acr: dict[str, Any]) -> None
 
     assert patched_acr["pruned"], "expected prune_terminal_builds to be invoked"
     assert "ca7" in patched_acr["pruned"][0]
+
+
+def test_manifest_probe_marks_images_built_outside_run_window(
+    patched_acr: dict[str, Any],
+) -> None:
+    """Images whose ACR Task runs fell out of the bounded run-history
+    window must still report as built when their tag manifests resolve
+    in the registry (direct manifest ground-truth probe).
+    """
+    # No runs reference the BLAST images (the window is full of platform
+    # image rebuilds), but the manifests still exist in the registry.
+    patched_acr["runs"] = []
+    patched_acr["manifest_exists"] = {
+        "ncbi/elb:1.4.0",
+        "ncbi/elasticblast-job-submit:4.1.0",
+    }
+
+    data = monitoring_svc.list_acr_repositories(
+        credential=object(),  # type: ignore[arg-type]
+        subscription_id="sub",
+        resource_group="rg",
+        registry_name="acr1",
+    )
+
+    assert "1.4.0" in data["actual_tags"].get("ncbi/elb", [])
+    assert "4.1.0" in data["actual_tags"].get("ncbi/elasticblast-job-submit", [])
+    # An image whose manifest does not exist stays absent.
+    assert "ncbi/elasticblast-query-split" not in data["actual_tags"]

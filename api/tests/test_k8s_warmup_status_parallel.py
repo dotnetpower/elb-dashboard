@@ -340,6 +340,78 @@ def test_warmup_status_warmup_jobs_are_authoritative_denominator() -> None:
     assert sorted(core.get("sources", [])) == ["setup", "warmup"]
 
 
+def test_warmup_status_merge_carries_source_version_over_setup_entry() -> None:
+    """The warmup DB-generation marker must survive a merge onto a
+    pre-existing setup entry.
+
+    `result["databases"]` is seeded from `init-ssd-*` setup Jobs first (these
+    carry NO `elb.dashboard/source-version` annotation), then the node-local
+    warmup Jobs (which DO carry it) are merged in. If the merge drops the
+    marker, the final entry is `status="Ready"` but marker-less, and the BLAST
+    submit gate (`ensure_node_warmup_ready_for_submit`) fails with
+    "node warmup for core_nt has no DB generation marker" even though the
+    dashboard card shows the DB as warm. This is a regression guard for that.
+    """
+
+    setup_jobs = [
+        {
+            "metadata": {"name": f"init-ssd-cafe-{idx}"},
+            "status": {"succeeded": 1},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {"env": [{"name": "ELB_DB", "value": f"core_nt_shard_{idx:02d}"}]}
+                        ]
+                    }
+                }
+            },
+        }
+        for idx in range(10)
+    ]
+    warmup_jobs = [
+        {
+            "metadata": {
+                "labels": {"db": "core_nt", "shard": f"{idx:02d}"},
+                "annotations": {"elb.dashboard/source-version": "2026-05-26-01-05-01"},
+            },
+            "status": {"succeeded": 1},
+        }
+        for idx in range(10)
+    ]
+
+    def handler(url: str, params=None, timeout=10):  # type: ignore[no-untyped-def]
+        if url.endswith("/daemonsets/create-workspace"):
+            return _FakeResponse({"status": {"numberReady": 0, "desiredNumberScheduled": 0}})
+        if url.endswith("/daemonsets/vmtouch-db-cache"):
+            return _FakeResponse({"status": {"numberReady": 0}})
+        if "/batch/v1/namespaces/default/jobs" in url:
+            label = (params or {}).get("labelSelector", "")
+            if "setup" in label:
+                return _FakeResponse({"items": setup_jobs})
+            if "db-warmup" in label:
+                return _FakeResponse({"items": warmup_jobs})
+            return _FakeResponse({"items": []})
+        if "/apps/v1/namespaces/default/daemonsets" in url:
+            return _FakeResponse({"items": []})
+        if url.endswith("/api/v1/namespaces"):
+            return _FakeResponse({"items": []})
+        if "/api/v1/namespaces/default/pods" in url and "/log" not in url:
+            return _FakeResponse({"items": []})
+        if url.endswith("/api/v1/nodes"):
+            return _FakeResponse({"items": []})
+        return _FakeResponse({}, status_code=404)
+
+    session = _fake_session(handler)
+    with patch.object(km, "_get_k8s_session", return_value=(session, "https://k8s")):
+        result = km.k8s_warmup_status(MagicMock(), "sub", "rg", "aks")
+
+    core = {db["name"]: db for db in result["databases"]}["core_nt"]
+    assert core["status"] == "Ready", core
+    assert core.get("source_version") == "2026-05-26-01-05-01", core
+    assert core.get("source_versions") == ["2026-05-26-01-05-01"], core
+
+
 def test_warmup_status_daemonset_tags_warmup_source() -> None:
     """`app=db-warmup` DaemonSets must also tag their entries `warmup`."""
 

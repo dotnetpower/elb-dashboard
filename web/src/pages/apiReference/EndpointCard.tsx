@@ -33,13 +33,14 @@ export function EndpointCard({
   const [selectedExample, setSelectedExample] = useState("");
   const [copiedAnchor, setCopiedAnchor] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const { execute, response, loading, copyResponse, copyCurl } = useOpenApiExecutor({
-    endpoint: ep,
-    baseUrl,
-    proxyInfo,
-    paramValues,
-    bodyText,
-  });
+  const { execute, response, loading, copyResponse, downloadResponse, copyCurl } =
+    useOpenApiExecutor({
+      endpoint: ep,
+      baseUrl,
+      proxyInfo,
+      paramValues,
+      bodyText,
+    });
 
   const methodMeta = METHOD_META[ep.method] || METHOD_META.get;
   const examples = useMemo(
@@ -922,7 +923,13 @@ export function EndpointCard({
               </div>
             )}
 
-            {response && <ResponseViewer response={response} onCopy={copyResponse} />}
+            {response && (
+              <ResponseViewer
+                response={response}
+                onCopy={copyResponse}
+                onDownload={downloadResponse}
+              />
+            )}
 
             {response &&
               (response.status === 502 || response.status === 503) &&

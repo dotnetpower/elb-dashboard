@@ -994,6 +994,33 @@ body,
   scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
 }
 
+/* OpenAPI "Try it" response body — keep the scroll affordance clearly visible
+   so a long XML / JSON payload reads as scrollable rather than cut off. */
+.openapi-response__body {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+}
+.openapi-response__body::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.openapi-response__body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.28);
+  border-radius: 5px;
+}
+.openapi-response__body::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.4);
+}
+[data-theme="light"] .openapi-response__body {
+  scrollbar-color: rgba(69, 65, 66, 0.3) transparent;
+}
+[data-theme="light"] .openapi-response__body::-webkit-scrollbar-thumb {
+  background: rgba(69, 65, 66, 0.3);
+}
+[data-theme="light"] .openapi-response__body::-webkit-scrollbar-thumb:hover {
+  background: rgba(69, 65, 66, 0.45);
+}
+
 a {
   color: var(--accent);
   text-decoration: none;

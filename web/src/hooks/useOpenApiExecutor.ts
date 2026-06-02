@@ -21,6 +21,11 @@ export interface OpenApiExecutionResponse {
   status: number;
   body: string;
   time: number;
+  /** Content-type the response was served with (used by the manual download
+   *  button to pick a sensible blob type / file extension). */
+  contentType?: string;
+  /** Suggested filename for the manual "Download" button. */
+  filename?: string;
   download?: {
     filename: string;
     bytes: number;
@@ -47,6 +52,10 @@ export function useOpenApiExecutor({
   const mountedRef = useRef(true);
   const requestSeqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+  // Holds the raw bytes of the last response so the manual "Download" button
+  // saves the server's original payload, not the viewer's pretty-printed copy.
+  // Binary responses store a Blob; text responses store the untouched string.
+  const lastPayloadRef = useRef<Blob | string | null>(null);
 
   useEffect(() => {
     // React 18 StrictMode runs mount → cleanup → re-mount in dev. We must
@@ -68,6 +77,7 @@ export function useOpenApiExecutor({
     requestSeqRef.current = requestSeq;
     setLoading(true);
     setResponse(null);
+    lastPayloadRef.current = null;
     const targetPath = buildTargetPath(endpoint.path, endpoint.parameters, paramValues);
     const start = Date.now();
     const isCurrent = () => mountedRef.current && requestSeqRef.current === requestSeq;
@@ -82,11 +92,14 @@ export function useOpenApiExecutor({
           )
         : await executeDirect(endpoint, baseUrl, targetPath, bodyText, controller.signal);
       const rendered = await readResponseForViewer(resp, targetPath);
+      lastPayloadRef.current = rendered.blob ?? rendered.rawText ?? null;
       if (isCurrent()) {
         setResponse({
           status: resp.status,
           body: rendered.body,
           time: Date.now() - start,
+          contentType: rendered.contentType,
+          filename: rendered.filename,
           ...(rendered.download ? { download: rendered.download } : {}),
         });
       }
@@ -105,6 +118,23 @@ export function useOpenApiExecutor({
   const copyResponse = useCallback(() => {
     if (response) copyText(response.body, "openapi-response");
   }, [copyText, response]);
+
+  const downloadResponse = useCallback(() => {
+    if (!response) return;
+    // Save the server's original bytes: a Blob for binary responses, the
+    // untouched response text for everything else. Only fall back to the
+    // pretty-printed body when no raw payload was captured (e.g. a synthetic
+    // network-error response with status 0).
+    const payload = lastPayloadRef.current;
+    const blob =
+      payload instanceof Blob
+        ? payload
+        : new Blob([payload ?? response.body], {
+            type: response.contentType || "text/plain;charset=utf-8",
+          });
+    const filename = response.filename || "response.txt";
+    triggerBrowserDownload(blob, filename);
+  }, [response]);
 
   const copyCurl = useCallback(async () => {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
@@ -131,7 +161,7 @@ export function useOpenApiExecutor({
     copyText(curl, "openapi-curl");
   }, [baseUrl, bodyText, copyText, endpoint, paramValues, proxyInfo]);
 
-  return { execute, response, loading, copyResponse, copyCurl };
+  return { execute, response, loading, copyResponse, downloadResponse, copyCurl };
 }
 
 /**
@@ -273,28 +303,40 @@ async function readResponseForViewer(
   targetPath: string,
 ): Promise<{
   body: string;
+  contentType: string;
+  filename: string;
+  /** Untouched response text for text payloads — saved verbatim by the
+   *  Download button so the file matches the server's original bytes. */
+  rawText?: string;
+  blob?: Blob;
   download?: { filename: string; bytes: number; contentType: string };
 }> {
   const contentType = resp.headers.get("content-type") ?? "";
+  const disposition = resp.headers.get("content-disposition");
   if (resp.ok && isBinaryContentType(contentType)) {
     const blob = await resp.blob();
-    const filename = pickDownloadFilename(
-      resp.headers.get("content-disposition"),
-      contentType,
-      targetPath,
-    );
+    const filename = pickDownloadFilename(disposition, contentType, targetPath);
     triggerBrowserDownload(blob, filename);
+    const resolvedType = contentType || blob.type || "application/octet-stream";
     return {
-      body: formatBinarySummary(filename, blob.size, contentType || blob.type),
+      body: formatBinarySummary(filename, blob.size, resolvedType),
+      contentType: resolvedType,
+      filename,
+      blob,
       download: {
         filename,
         bytes: blob.size,
-        contentType: contentType || blob.type || "application/octet-stream",
+        contentType: resolvedType,
       },
     };
   }
   const text = await resp.text();
-  return { body: formatResponseBody(text) };
+  return {
+    body: formatResponseBody(text),
+    contentType: contentType || "text/plain;charset=utf-8",
+    filename: pickDownloadFilename(disposition, contentType, targetPath),
+    rawText: text,
+  };
 }
 
 export function isBinaryContentType(contentType: string): boolean {
@@ -353,6 +395,13 @@ function guessExtensionFromContentType(contentType: string): string {
   if (ct === "application/x-tar") return "tar";
   if (ct === "application/pdf") return "pdf";
   if (ct === "application/x-fasta" || ct === "application/fasta") return "fa";
+  if (ct === "application/xml" || ct === "text/xml" || ct.endsWith("+xml")) return "xml";
+  if (ct === "application/json" || ct === "application/problem+json" || ct.endsWith("+json"))
+    return "json";
+  if (ct === "text/html") return "html";
+  if (ct === "text/csv") return "csv";
+  if (ct === "text/tab-separated-values") return "tsv";
+  if (ct === "text/plain") return "txt";
   return "";
 }
 

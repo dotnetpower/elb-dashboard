@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, CircleDot, Clock, Copy } from "lucide-react";
+import { Check, CircleDot, Clock, Copy, Download } from "lucide-react";
 
 import { JsonHighlight } from "@/pages/apiReference/JsonHighlight";
 import { statusColor } from "@/pages/apiReference/spec";
@@ -7,9 +7,11 @@ import { statusColor } from "@/pages/apiReference/spec";
 export function ResponseViewer({
   response,
   onCopy,
+  onDownload,
 }: {
-  response: { status: number; body: string; time: number };
+  response: { status: number; body: string; time: number; filename?: string };
   onCopy: () => void;
+  onDownload?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const isOk = response.status >= 200 && response.status < 300;
@@ -64,32 +66,51 @@ export function ResponseViewer({
             <Clock size={10} /> {response.time}ms
           </span>
         </div>
-        <button
-          type="button"
-          className="glass-button"
-          onClick={doCopy}
-          style={{ padding: "3px 8px", fontSize: 10 }}
-        >
-          {copied ? (
-            <>
-              <Check size={10} /> Copied
-            </>
-          ) : (
-            <>
-              <Copy size={10} /> Copy
-            </>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button
+            type="button"
+            className="glass-button"
+            onClick={doCopy}
+            style={{ padding: "3px 8px", fontSize: 10 }}
+          >
+            {copied ? (
+              <>
+                <Check size={10} /> Copied
+              </>
+            ) : (
+              <>
+                <Copy size={10} /> Copy
+              </>
+            )}
+          </button>
+          {onDownload && (
+            <button
+              type="button"
+              className="glass-button glass-button--primary"
+              onClick={onDownload}
+              title={
+                response.filename
+                  ? `Download response as ${response.filename}`
+                  : "Download response as a file"
+              }
+              style={{ padding: "3px 8px", fontSize: 10 }}
+            >
+              <Download size={10} /> Download
+            </button>
           )}
-        </button>
+        </div>
       </div>
       <pre
+        className="openapi-response__body"
         style={{
           margin: 0,
           padding: "12px 14px",
           fontSize: 11,
           lineHeight: 1.6,
-          maxHeight: 400,
+          maxHeight: 360,
           overflow: "auto",
           whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
           color: "var(--text-primary)",
           fontFamily: "var(--font-mono)",
           background: "transparent",

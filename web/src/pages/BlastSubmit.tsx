@@ -123,7 +123,16 @@ export function BlastSubmit() {
 
     setForm((current) => ({
       ...current,
-      ...(applyAccession ? { query_accession: accession, query_data: "" } : null),
+      ...(applyAccession
+        ? {
+            query_accession: accession,
+            query_data: "",
+            // Give the handed-off accession a descriptive default title so the
+            // summary rail does not read as an empty job. The researcher can
+            // still override it; an empty title falls back to the auto title.
+            ...(current.job_title.trim() ? null : { job_title: `BLAST ${accession}` }),
+          }
+        : null),
       ...(applyRange && from ? { query_from: from } : null),
       ...(applyRange && to ? { query_to: to } : null),
     }));

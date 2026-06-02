@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock, Loader2, Power, PowerOff } from "lucide-react";
 
@@ -10,6 +11,7 @@ import type {
 import { PermissionGate } from "@/components/PermissionGate";
 import { useToast } from "@/components/Toast";
 import { usePermissions } from "@/hooks/usePermissions";
+import { computeRemainingSeconds, formatCoarseRemaining, formatCountdown } from "./autoStopCountdown";
 
 // Glassmorphic Idle Auto-Stop control surfaced inside the expanded
 // cluster card. Two visual states:
@@ -30,23 +32,6 @@ const REASON_LABELS: Record<string, string> = {
   no_preference: "Auto-stop has not been enabled for this cluster.",
 };
 
-function formatSeconds(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return "0s";
-  }
-  if (seconds < 60) {
-    return `${Math.round(seconds)}s`;
-  }
-  const totalMin = Math.floor(seconds / 60);
-  if (totalMin < 60) {
-    const remSec = Math.round(seconds % 60);
-    return remSec ? `${totalMin}m ${remSec}s` : `${totalMin}m`;
-  }
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  return m ? `${h}h ${m}m` : `${h}h`;
-}
-
 function reasonText(reason: string, activeJobs: number): string {
   if (reason.startsWith("active_jobs:")) {
     return `${activeJobs || reason.split(":")[1]} active job${
@@ -61,6 +46,79 @@ function reasonText(reason: string, activeJobs: number): string {
     return `Idle for ${reason.slice("idle:".length)}.`;
   }
   return REASON_LABELS[reason] || reason || "—";
+}
+
+// Visually-hidden style for screen-reader-only summary text. The repo has
+// no global `.sr-only` utility class, so this inline style provides the
+// standard clip-rect off-screen pattern (kept in the layout/a11y tree but
+// not painted).
+const SR_ONLY_STYLE: CSSProperties = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap",
+  border: 0,
+};
+
+// Real-time countdown text that ticks once per second. Anchored on the
+// backend's RELATIVE `seconds_until_stop` snapshot plus the client
+// timestamp at which that snapshot arrived (`anchorMs`, from the query's
+// `dataUpdatedAt`); because both `anchorMs` and `Date.now()` are read from
+// the same client clock, the elapsed difference is immune to client/server
+// clock skew (critique #1 — anchoring on the absolute `next_stop_at` would
+// drift by the skew). Each poll hands a fresh snapshot + anchor, so local
+// drift never accumulates beyond ~1s.
+//
+// Isolated into its own component so only this leaf re-renders each second
+// rather than the whole panel (critique #3), and it fires `onReachZero`
+// exactly once when the countdown crosses zero so the parent can refetch
+// even while polling is paused (critique #5).
+function LiveCountdown({
+  baselineSeconds,
+  anchorMs,
+  style,
+  ariaHidden,
+  onReachZero,
+}: {
+  baselineSeconds: number;
+  anchorMs: number;
+  style?: CSSProperties;
+  ariaHidden?: boolean;
+  onReachZero?: () => void;
+}) {
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [baselineSeconds, anchorMs]);
+  const remaining = computeRemainingSeconds(baselineSeconds, anchorMs, nowMs);
+  // Depend on the zero-crossing boolean, not `remaining`, so this effect
+  // only re-runs when the countdown actually reaches/leaves zero rather
+  // than on every one-second tick (critique #5).
+  const reachedZero = remaining <= 0;
+  const firedRef = useRef(false);
+  useEffect(() => {
+    if (!reachedZero) {
+      firedRef.current = false;
+      return;
+    }
+    if (!firedRef.current) {
+      firedRef.current = true;
+      onReachZero?.();
+    }
+  }, [reachedZero, onReachZero]);
+  return (
+    <strong
+      aria-hidden={ariaHidden}
+      style={{ fontVariantNumeric: "tabular-nums", ...style }}
+    >
+      {formatCountdown(remaining)}
+    </strong>
+  );
 }
 
 export function AutoStopPanel({
@@ -250,6 +308,41 @@ export function AutoStopPanel({
       })
     : "";
 
+  // Auto-stop is armed with a known deadline (cluster running, opt-in
+  // enabled, owned by this caller, and the evaluator projected a stop
+  // time). True for `keep`, `warn`, and `stop` verdicts alike — the
+  // difference is only how close the deadline is.
+  const armedWithDeadline =
+    clusterIsRunning &&
+    Boolean(status?.enabled) &&
+    status?.editable !== false &&
+    Boolean(status?.next_stop_at) &&
+    (status?.verdict === "keep" ||
+      status?.verdict === "warn" ||
+      status?.verdict === "stop");
+  // Anchor the live countdown on the relative `seconds_until_stop`
+  // snapshot plus the client time it arrived (`dataUpdatedAt`) rather than
+  // the absolute `next_stop_at`, so the tick is immune to client/server
+  // clock skew (critique #1). `dataUpdatedAt` is 0 until the first fetch.
+  const countdownBaseline = status?.seconds_until_stop;
+  const countdownAnchorMs = statusQuery.dataUpdatedAt;
+  const canLiveCountdown =
+    armedWithDeadline &&
+    typeof countdownBaseline === "number" &&
+    Number.isFinite(countdownBaseline) &&
+    countdownAnchorMs > 0;
+  // When the local countdown crosses zero the cached snapshot is stale —
+  // the cluster is being stopped now. A single `invalidateQueries` forces
+  // one refetch even when `refetchInterval` has been turned off (critique
+  // #5), so the panel converges to the real verdict without waiting up to
+  // a full `STATUS_POLL_MS` tick. Also refresh the preference so the
+  // "Last auto-stop …" footer (sourced from `pref`, on a 5-min poll)
+  // updates promptly rather than lagging behind the stop.
+  const handleCountdownZero = useCallback(() => {
+    qc.invalidateQueries({ queryKey: statusKey });
+    qc.invalidateQueries({ queryKey: prefKey });
+  }, [qc, statusKey, prefKey]);
+
   // Read-only path: the row exists but is owned by another user (e.g.
   // the cluster was previously enrolled by a teammate). Render a small
   // muted note instead of the full toggle / banner so the SPA does not
@@ -311,9 +404,30 @@ export function AutoStopPanel({
         >
           <Clock size={14} strokeWidth={1.5} style={{ color: "var(--warning)" }} />
           <span style={{ flex: 1, minWidth: 0 }}>
-            Auto-stop in{" "}
-            <strong>{formatSeconds(status?.seconds_until_stop ?? 0)}</strong>
-            {formattedNextStop ? ` (≈ ${formattedNextStop})` : ""} ·{" "}
+            <span aria-hidden="true">
+              Auto-stop in{" "}
+              {canLiveCountdown ? (
+                <LiveCountdown
+                  baselineSeconds={countdownBaseline as number}
+                  anchorMs={countdownAnchorMs}
+                  ariaHidden
+                  onReachZero={handleCountdownZero}
+                />
+              ) : (
+                <strong style={{ fontVariantNumeric: "tabular-nums" }}>
+                  {formatCountdown(status?.seconds_until_stop ?? 0)}
+                </strong>
+              )}
+              {formattedNextStop ? ` (≈ ${formattedNextStop})` : ""}
+            </span>
+            {/* Screen-reader summary: coarse, minute-granularity text that
+                only changes when the backend snapshot refreshes, so the
+                surrounding `aria-live="polite"` region announces it at most
+                once per poll instead of on every one-second visual tick. */}
+            <span style={SR_ONLY_STYLE}>
+              Auto-stop in {formatCoarseRemaining(status?.seconds_until_stop ?? 0)}.
+            </span>{" "}
+            <span aria-hidden="true">· </span>
             <span style={{ color: "var(--text-muted)" }}>
               {reasonText(status?.reason ?? "", status?.active_job_count ?? 0)}
             </span>
@@ -403,6 +517,38 @@ export function AutoStopPanel({
         <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
           {draftEnabled ? "to save cost" : "(disabled)"}
         </span>
+
+        {/* Always-on live countdown while armed but still outside the
+            pre-stop warn window (verdict === "keep"). The amber banner
+            above already carries the live countdown for warn/stop, so
+            this only renders for the calmer keep state to avoid showing
+            the remaining time twice. */}
+        {canLiveCountdown && status?.verdict === "keep" && (
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              marginLeft: "auto",
+              fontSize: 11,
+              color: "var(--text-muted)",
+            }}
+            title={
+              formattedNextStop
+                ? `Projected auto-stop at ≈ ${formattedNextStop}`
+                : "Projected auto-stop time"
+            }
+          >
+            <Clock size={11} strokeWidth={1.5} style={{ color: "var(--text-faint)" }} />
+            Stops in{" "}
+            <LiveCountdown
+              baselineSeconds={countdownBaseline as number}
+              anchorMs={countdownAnchorMs}
+              style={{ color: "var(--text)" }}
+              onReachZero={handleCountdownZero}
+            />
+          </span>
+        )}
 
         {saveMutation.isPending && (
           <Loader2 size={12} className="spin" style={{ color: "var(--text-faint)" }} />

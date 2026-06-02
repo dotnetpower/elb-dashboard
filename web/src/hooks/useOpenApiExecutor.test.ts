@@ -80,6 +80,18 @@ describe("OpenAPI executor binary handling", () => {
     ).toBe("results.bin");
   });
 
+  it("derives a textual extension for inline XML / JSON results", () => {
+    expect(pickDownloadFilename(null, "application/xml", "/v1/jobs/abc/results")).toBe(
+      "results.xml",
+    );
+    expect(
+      pickDownloadFilename(null, "application/json; charset=utf-8", "/v1/jobs/abc/results"),
+    ).toBe("results.json");
+    expect(pickDownloadFilename(null, "text/plain", "/v1/jobs/abc/results")).toBe(
+      "results.txt",
+    );
+  });
+
   it("formats a readable summary for binary downloads", () => {
     const text = formatBinarySummary("merged_results.zip", 2048, "application/zip");
     expect(text).toContain("merged_results.zip");
