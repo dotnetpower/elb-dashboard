@@ -269,10 +269,21 @@ def deploy_openapi_service(
     image_tag = IMAGE_TAGS["elb-openapi"]
     # ``acr_resource_group`` is passed through from the SPA's saved config
     # (web/src/pages/ApiReference.tsx -> OpenApiDeployPanel -> /aks/openapi/deploy).
-    # The hardcoded ``rg-elbacr-01`` fallback only fires for legacy callers that
-    # predate the SPA wiring; new deploys always carry the real ACR RG so the pod's
-    # ELB_ACR_RESOURCE_GROUP env matches the user's actual ACR.
-    effective_acr_resource_group = acr_resource_group or "rg-elbacr-01"
+    # ACR commonly lives in a different RG than the AKS cluster, so a hardcoded
+    # fallback (historically ``rg-elbacr-01``) silently sets the pod's
+    # ELB_ACR_RESOURCE_GROUP to the wrong RG and the image pull / cache routing
+    # misroutes. Fail fast instead — same rationale as the storage warmup path
+    # (`api/tasks/storage/warmup.py`), which already requires the ACR RG when an
+    # ACR name is present. ``auto_deploy`` resolves it from
+    # ``PLATFORM_ACR_RESOURCE_GROUP`` before calling, so a real config always
+    # carries it.
+    if acr_name and not acr_resource_group:
+        raise RuntimeError(
+            "acr_resource_group is required when acr_name is set; the caller "
+            "must pass the ACR's resource group (do not rely on a hardcoded "
+            "fallback or the AKS cluster RG)"
+        )
+    effective_acr_resource_group = acr_resource_group
     image = (
         f"{acr_name}.azurecr.io/elb-openapi:{image_tag}" if acr_name else f"elb-openapi:{image_tag}"
     )

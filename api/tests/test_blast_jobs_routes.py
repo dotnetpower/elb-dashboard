@@ -11,6 +11,7 @@ Validation: `uv run pytest -q api/tests/test_blast_jobs_routes.py`.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import ClassVar
 
 from fastapi.testclient import TestClient
 
@@ -208,4 +209,183 @@ def test_blast_job_query_rejects_path_traversal(monkeypatch) -> None:
 
     assert response.status_code == 422
     assert response.json()["code"] == "invalid_query_path"
+
+
+_DEV_BYPASS_OID = "00000000-0000-0000-0000-000000000000"
+
+
+def _cancel_repo(state: SimpleNamespace):
+    """Fake repo whose ``get`` returns ``state`` and records ``update`` calls."""
+
+    class Repo:
+        updates: ClassVar[list[dict]] = []
+
+        def get(self, job_id: str):
+            assert job_id == state.job_id
+            return state
+
+        def update(self, job_id: str, **kwargs):
+            Repo.updates.append({"job_id": job_id, **kwargs})
+
+    return Repo
+
+
+def test_blast_job_cancel_external_routes_to_sibling_delete(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    state = SimpleNamespace(
+        job_id="abc123",
+        task_id="task-x",
+        type="blast",
+        owner_oid="",
+        owner_upn="api",
+        status="running",
+        phase="running",
+        created_at="2026-06-01T00:00:00Z",
+        updated_at="2026-06-01T00:01:00Z",
+        error_code=None,
+        parent_job_id=None,
+        payload={"external": {"job_id": "abc123"}},
+        subscription_id="",
+        resource_group="",
+        cluster_name="",
+        storage_account="",
+    )
+    repo_cls = _cancel_repo(state)
+    repo_cls.updates = []
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", repo_cls)
+
+    deleted: dict[str, str] = {}
+
+    def fake_delete_job(job_id: str, **kwargs):
+        deleted["job_id"] = job_id
+        deleted.update({k: str(v) for k, v in kwargs.items()})
+        return {"job_id": job_id, "status": "deleted"}
+
+    monkeypatch.setattr("api.services.external_blast.delete_job", fake_delete_job)
+    monkeypatch.setattr(
+        "api.routes.blast._openapi_client_kwargs_from_cluster",
+        lambda *_a, **_k: {},
+    )
+
+    def fail_safe_delay(*_a, **_k):
+        raise AssertionError("external cancel must not enqueue the k8s cancel task")
+
+    monkeypatch.setattr("api.routes.blast._safe_delay", fail_safe_delay)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/blast/jobs/abc123/cancel",
+        json={"cluster_name": "elb-cluster", "resource_group": "rg-elb-dashboard"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "cancelled"
+    assert body["openapi_job_id"] == "abc123"
+    assert deleted["job_id"] == "abc123"
+    assert repo_cls.updates == [
+        {"job_id": "abc123", "status": "cancelled", "phase": "cancelled"}
+    ]
+
+
+def test_blast_job_cancel_dashboard_uses_k8s_task(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    state = SimpleNamespace(
+        job_id="dash-1",
+        task_id="task-y",
+        type="blast",
+        owner_oid=_DEV_BYPASS_OID,
+        owner_upn="user@example.com",
+        status="running",
+        phase="running",
+        created_at="2026-06-01T00:00:00Z",
+        updated_at="2026-06-01T00:01:00Z",
+        error_code=None,
+        parent_job_id=None,
+        payload={
+            "subscription_id": "sub-1",
+            "resource_group": "rg-elb-cluster",
+            "cluster_name": "elb-cluster-02",
+            "storage_account": "stelb01",
+        },
+    )
+    repo_cls = _cancel_repo(state)
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", repo_cls)
+
+    captured: dict[str, object] = {}
+
+    class AsyncResultStub:
+        id = "task-cancel-1"
+
+    def fake_safe_delay(_task, **kwargs):
+        captured.update(kwargs)
+        return AsyncResultStub()
+
+    monkeypatch.setattr("api.routes.blast._safe_delay", fake_safe_delay)
+
+    def fail_delete_job(*_a, **_k):
+        raise AssertionError("dashboard cancel must not call the sibling DELETE")
+
+    monkeypatch.setattr("api.services.external_blast.delete_job", fail_delete_job)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.post("/api/blast/jobs/dash-1/cancel", json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "cancelling"
+    assert body["task_id"] == "task-cancel-1"
+    # The route back-fills the scope from the stored payload.
+    assert captured["cluster_name"] == "elb-cluster-02"
+    assert captured["resource_group"] == "rg-elb-cluster"
+
+
+def test_blast_job_cancel_external_sibling_unreachable_returns_503(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+
+    state = SimpleNamespace(
+        job_id="abc123",
+        task_id="task-x",
+        type="blast",
+        owner_oid="",
+        owner_upn="api",
+        status="running",
+        phase="running",
+        created_at="2026-06-01T00:00:00Z",
+        updated_at="2026-06-01T00:01:00Z",
+        error_code=None,
+        parent_job_id=None,
+        payload={"external": {"job_id": "abc123"}},
+    )
+    repo_cls = _cancel_repo(state)
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", repo_cls)
+
+    from fastapi import HTTPException
+
+    def unreachable(*_a, **_k):
+        raise HTTPException(
+            503, detail={"code": "openapi_unreachable", "message": "down"}
+        )
+
+    monkeypatch.setattr("api.services.external_blast.delete_job", unreachable)
+    monkeypatch.setattr(
+        "api.routes.blast._openapi_client_kwargs_from_cluster",
+        lambda *_a, **_k: {},
+    )
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.post("/api/blast/jobs/abc123/cancel", json={})
+
+    # The sibling's HTTPException is surfaced verbatim, not masked as a wrong
+    # "cancel_unavailable" k8s failure.
+    assert response.status_code == 503
+    assert response.json()["code"] == "openapi_unreachable"
 

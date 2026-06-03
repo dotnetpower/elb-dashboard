@@ -323,6 +323,42 @@ def get_job(
         return cast(dict[str, Any], resp.json())
 
 
+def delete_job(
+    job_id: str,
+    *,
+    base_url: str | None = None,
+    api_token: str | None = None,
+) -> dict[str, Any]:
+    """Cancel + delete a job via the sibling OpenAPI ``DELETE /v1/jobs/{id}``.
+
+    The sibling service owns the AKS cluster the job actually runs on and
+    holds the in-cluster kubeconfig, so it sets the cancel event and tears
+    down the K8s resources itself. The dashboard never needs the cluster
+    coordinates for this path — it only has to reach the sibling's API,
+    which falls back to the cached runtime endpoint when ``base_url`` is
+    not supplied (same resolution the jobs-list sync uses).
+    """
+    with httpx.Client(
+        base_url=_base_url(base_url),
+        timeout=_DEFAULT_TIMEOUT_SECONDS,
+        headers=_headers(api_token=api_token),
+    ) as client:
+        try:
+            resp = client.delete(f"/v1/jobs/{_path_segment(job_id)}")
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            _raise_upstream_error(exc)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "openapi_unreachable",
+                    "message": sanitise(str(exc)[:_TRANSPORT_DETAIL_MAX_CHARS]),
+                },
+            ) from exc
+        return cast(dict[str, Any], resp.json())
+
+
 def list_jobs(*, base_url: str | None = None, api_token: str | None = None) -> dict[str, Any]:
     """List all jobs tracked by the external ElasticBLAST OpenAPI service.
 

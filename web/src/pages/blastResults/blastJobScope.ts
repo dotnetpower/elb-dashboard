@@ -63,6 +63,13 @@ function stringFromPayload(payload: Record<string, unknown> | undefined, key: st
  * Step 3 is the multi-cluster fix: when the payload omits a field, we must use
  * the job's own infrastructure RG/cluster, NOT the workspace anchor RG, so
  * cross-RG clusters keep working.
+ *
+ * `clusterName` intentionally has NO last-resort default: an unknown cluster
+ * must stay empty rather than silently resolve to the workspace anchor
+ * cluster. A wrong cluster guess made cancel target a non-existent AKS
+ * resource (the old `"elb-cluster"` fallback) and fail with
+ * `cancel_unavailable`; OpenAPI-sibling jobs are now cancelled via the
+ * sibling, which owns its own cluster, so the dashboard never needs to guess.
  */
 export function resolveBlastJobScope({
   searchParams,
@@ -96,7 +103,7 @@ export function resolveBlastJobScope({
     searchParams.get("cluster_name") ||
     payloadClusterName ||
     infrastructure?.cluster_name ||
-    "elb-cluster";
+    "";
 
   return { subscriptionId, storageAccount, resourceGroup, clusterName };
 }

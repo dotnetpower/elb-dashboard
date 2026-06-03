@@ -31,6 +31,13 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
     monkeypatch.setattr(
         "api.services.state_repo.get_state_repo", lambda: object()
     )
+    # The status route probes live K8s ``app=blast`` activity for Running
+    # clusters. Stub it to "unavailable" so the route tests stay hermetic
+    # (no Azure/K8s call) and deterministic across CI hosts.
+    monkeypatch.setattr(
+        "api.services.auto_stop_live.probe_live_blast_activity",
+        lambda _pref: None,
+    )
     from api.main import app
 
     return TestClient(app)
@@ -155,7 +162,9 @@ def test_status_returns_verdict_from_evaluator(
 
     captured: dict[str, object] = {}
 
-    def fake_evaluate(pref: AutoStopPreference, *, repo, power_state: str = "") -> IdleDecision:
+    def fake_evaluate(
+        pref: AutoStopPreference, *, repo, power_state: str = "", **_extra
+    ) -> IdleDecision:
         captured["pref_enabled"] = pref.enabled
         captured["power_state"] = power_state
         return IdleDecision(
@@ -202,7 +211,7 @@ def test_status_disabled_overrides_verdict_when_pref_disabled(
     )
     monkeypatch.setattr(
         "api.routes.aks.autostop.evaluate_cluster",
-        lambda pref, *, repo, power_state="": IdleDecision(
+        lambda pref, *, repo, power_state="", **_extra: IdleDecision(
             verdict="warn", reason="idle_pending"
         ),
     )
@@ -273,7 +282,7 @@ def test_status_is_cached_between_polls(
     )
     call_count = {"n": 0}
 
-    def fake_evaluate(pref, *, repo, power_state="") -> IdleDecision:
+    def fake_evaluate(pref, *, repo, power_state="", **_extra) -> IdleDecision:
         call_count["n"] += 1
         return IdleDecision(
             verdict="keep", reason="active", cluster_power_state=power_state
@@ -308,7 +317,7 @@ def test_put_invalidates_status_cache(
     call_count = {"n": 0}
     monkeypatch.setattr(
         "api.routes.aks.autostop.evaluate_cluster",
-        lambda pref, *, repo, power_state="": (
+        lambda pref, *, repo, power_state="", **_extra: (
             call_count.__setitem__("n", call_count["n"] + 1)  # type: ignore[func-returns-value]
             or IdleDecision(verdict="keep", reason="active")
         ),
@@ -459,7 +468,7 @@ def test_status_does_not_cache_degraded_results(
     )
     call_count = {"n": 0}
 
-    def fake_eval(pref, *, repo, power_state=""):
+    def fake_eval(pref, *, repo, power_state="", **_extra):
         call_count["n"] += 1
         return IdleDecision(verdict="keep", reason="state_repo_unreachable")
 
@@ -499,7 +508,7 @@ def test_status_singleflight_collapses_concurrent_polls(
     )
     call_count = {"n": 0}
 
-    def slow_eval(pref, *, repo, power_state=""):
+    def slow_eval(pref, *, repo, power_state="", **_extra):
         call_count["n"] += 1
         _time.sleep(0.2)  # Make the leader actually take time
         return IdleDecision(
@@ -576,7 +585,7 @@ def test_status_writes_to_l2_redis_for_cross_worker_sharing(
 
     monkeypatch.setattr(
         "api.routes.aks.autostop.evaluate_cluster",
-        lambda pref, *, repo, power_state="": IdleDecision(
+        lambda pref, *, repo, power_state="", **_extra: IdleDecision(
             verdict="keep", reason="active", cluster_power_state=power_state
         ),
     )
@@ -645,7 +654,7 @@ def test_status_serves_l2_redis_hit_without_running_evaluator(
 
     eval_calls = {"n": 0}
 
-    def boom_eval(pref, *, repo, power_state=""):
+    def boom_eval(pref, *, repo, power_state="", **_extra):
         eval_calls["n"] += 1
         return IdleDecision(verdict="keep", reason="active")
 
@@ -685,7 +694,7 @@ def test_put_drops_l2_redis_entry(
 
     monkeypatch.setattr(
         "api.routes.aks.autostop.evaluate_cluster",
-        lambda pref, *, repo, power_state="": IdleDecision(
+        lambda pref, *, repo, power_state="", **_extra: IdleDecision(
             verdict="keep", reason="active", cluster_power_state=power_state
         ),
     )

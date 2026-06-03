@@ -43,15 +43,20 @@ _STATIC_HEADERS: dict[str, str] = {
 
 # Conservative CSP for a same-origin React SPA. `'unsafe-inline'` is required
 # for Vite-injected styles and the MSAL redirect bootstrap; `connect-src`
-# allows the Microsoft identity platform endpoints the SPA talks to. Only
-# applied when `STRICT_CSP=true` so a misconfigured policy can never silently
-# break the dashboard in production (charter §12a Rule 4 — default OFF).
+# allows the Microsoft identity platform endpoints the SPA talks to. The
+# `www.ncbi.nlm.nih.gov` origin is allowed in script/style/connect/img/frame so
+# the opt-in NCBI Sequence Viewer embed on SequenceDetail can load — kept in
+# sync with `web/nginx.conf`. Only applied when `STRICT_CSP=true` so a
+# misconfigured policy can never silently break the dashboard in production
+# (charter §12a Rule 4 — default OFF).
 _DEFAULT_CSP = (
     "default-src 'self'; "
-    "img-src 'self' data:; "
-    "style-src 'self' 'unsafe-inline'; "
-    "script-src 'self'; "
-    "connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com; "
+    "img-src 'self' data: https://www.ncbi.nlm.nih.gov; "
+    "style-src 'self' 'unsafe-inline' https://www.ncbi.nlm.nih.gov; "
+    "script-src 'self' https://www.ncbi.nlm.nih.gov; "
+    "connect-src 'self' https://login.microsoftonline.com "
+    "https://graph.microsoft.com https://www.ncbi.nlm.nih.gov; "
+    "frame-src https://www.ncbi.nlm.nih.gov; "
     "frame-ancestors 'none'; "
     "base-uri 'self'"
 )

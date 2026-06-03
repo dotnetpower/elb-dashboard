@@ -32,6 +32,10 @@ from typing import Any
 from celery import shared_task
 
 from api.services import get_credential
+from api.services.aks.node_subnet_nsg import (
+    ensure_ingress_lb_inbound_rule,
+    first_node_subnet_id,
+)
 from api.services.azure_clients import aks_client
 from api.services.k8s.ingress import (
     CERT_MANAGER_INSTALL_URL,
@@ -874,6 +878,34 @@ def setup_openapi_public_https(
             kubeconfig_path=kubeconfig_path,
             timeout_seconds=240,
         )
+
+        # Step 3b: open the BYO node-subnet NSG to the LB VIP. AKS's
+        # cloud-controller-manager writes the Internet->80/443 allow rule
+        # ONLY to the NIC NSG in the MC_ node resource group, never to a
+        # BYO subnet NSG. When the cluster runs in the dashboard's BYO
+        # subnet (`vnet-elb-dashboard/snet-aks`), that subnet NSG's default
+        # DenyAllInBound silently drops inbound 80/443, so the Let's Encrypt
+        # HTTP-01 challenge times out (confirmed on elb-cluster-02,
+        # 2026-06-02). This reconcile is best-effort and idempotent: it is a
+        # no-op for managed-VNet clusters and for BYO subnets without an NSG,
+        # so it can never regress an already-working cluster, and on failure
+        # we log + continue (the cert wait still surfaces a timeout with
+        # diagnostics rather than the pipeline aborting here).
+        record_progress(self, "ensure_node_subnet_nsg", lb_ip=ingress_lb_ip)
+        try:
+            nsg_result = ensure_ingress_lb_inbound_rule(
+                credential=cred,
+                subscription_id=subscription_id,
+                node_subnet_id=first_node_subnet_id(cluster),
+                lb_ip=ingress_lb_ip,
+            )
+            LOGGER.info("public-https: node-subnet NSG reconcile %s", nsg_result)
+        except Exception as nsg_exc:
+            LOGGER.error(
+                "public-https: node-subnet NSG reconcile failed (continuing; "
+                "ACME challenge may time out if inbound 80/443 is blocked): %s",
+                nsg_exc,
+            )
 
         # Step 4: install cert-manager with the same systempool patch.
         # cert-manager ships Deployments only (no install-time Jobs),

@@ -804,6 +804,78 @@ def blast_job_queue(
         ) from exc
 
 
+def _state_is_external(state: Any) -> bool:
+    """Return True when the job state row originated from the OpenAPI sibling.
+
+    External jobs are synced into the Table by ``_sync_external_jobs_to_table``
+    with ``owner_upn="api"`` and a ``payload={"external": ...}`` envelope. Both
+    markers are checked so the detection survives a partially-populated row.
+    """
+    if state is None:
+        return False
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    if isinstance(payload.get("external"), dict):
+        return True
+    return str(getattr(state, "owner_upn", "") or "") == "api"
+
+
+def _cancel_external_job(
+    job_id: str,
+    state: Any,
+    request_body: dict[str, Any],
+) -> dict[str, Any]:
+    """Cancel an OpenAPI-sibling job via its own ``DELETE /v1/jobs/{id}``.
+
+    External jobs run on the sibling's AKS cluster; the dashboard does not
+    know (and must not guess) those coordinates. Routing the cancel to the
+    sibling lets it stop the run with its in-cluster kubeconfig. The local
+    Table row is then flipped to ``cancelled`` so the SPA reflects the change
+    immediately and the next list sync keeps the row tombstoned.
+    """
+    from api.routes import blast as blast_package
+    from api.services import external_blast
+
+    payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
+    external = payload.get("external") if isinstance(payload.get("external"), dict) else {}
+    openapi_job_id = str(external.get("job_id") or job_id)
+
+    external_kwargs = blast_package._openapi_client_kwargs_from_cluster(
+        str(request_body.get("subscription_id") or ""),
+        str(request_body.get("resource_group") or ""),
+        str(request_body.get("cluster_name") or ""),
+    )
+    try:
+        external_blast.delete_job(openapi_job_id, **external_kwargs)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOGGER.warning(
+            "external blast cancel failed job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            502,
+            detail={
+                "code": "external_cancel_failed",
+                "message": f"Could not cancel job on the OpenAPI service: {type(exc).__name__}",
+            },
+        ) from exc
+
+    try:
+        from api.services.state_repo import get_state_repo
+
+        get_state_repo().update(job_id, status="cancelled", phase="cancelled")
+    except Exception as exc:
+        LOGGER.info(
+            "external blast cancel local state update skipped job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+    _reset_external_jobs_cache()
+    return {"job_id": job_id, "status": "cancelled", "openapi_job_id": openapi_job_id}
+
+
 @router.post("/jobs/{job_id}/cancel")
 def blast_job_cancel(
     job_id: str = Path(...),
@@ -813,6 +885,7 @@ def blast_job_cancel(
     from api.tasks.blast import cancel
 
     request_body = dict(body or {})
+    state: Any = None
     try:
         from api.services.state_repo import get_state_repo
 
@@ -839,6 +912,14 @@ def blast_job_cancel(
             job_id,
             type(exc).__name__,
         )
+
+    # External (OpenAPI sibling) jobs run on the sibling's own AKS cluster.
+    # The dashboard cannot reach that cluster's K8s API with the coordinates
+    # it has (they default to the workspace anchor cluster, which is the wrong
+    # one), so the direct k8s cancel task fails with `cancel_unavailable`.
+    # Route these to the sibling's DELETE endpoint instead — it owns the run.
+    if _state_is_external(state):
+        return _cancel_external_job(job_id, state, request_body)
 
     from api.routes import blast as blast_package
 

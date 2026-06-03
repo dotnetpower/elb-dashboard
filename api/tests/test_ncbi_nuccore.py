@@ -30,10 +30,22 @@ _GENBANK_XML = b"""<?xml version="1.0" ?>
   <GBSeq_update-date>15-OCT-2024</GBSeq_update-date>
   <GBSeq_create-date>27-FEB-1995</GBSeq_create-date>
   <GBSeq_definition>Homo sapiens tumor protein p53 (TP53), mRNA</GBSeq_definition>
+  <GBSeq_primary-accession>NM_000546</GBSeq_primary-accession>
   <GBSeq_accession-version>NM_000546.6</GBSeq_accession-version>
+  <GBSeq_other-seqids>
+    <GBSeqid>ref|NM_000546.6|</GBSeqid>
+    <GBSeqid>gi|568815587</GBSeqid>
+  </GBSeq_other-seqids>
+  <GBSeq_secondary-accessions>
+    <GBSecondary-accn>X02469</GBSecondary-accn>
+  </GBSeq_secondary-accessions>
   <GBSeq_source>Homo sapiens (human)</GBSeq_source>
   <GBSeq_organism>Homo sapiens</GBSeq_organism>
   <GBSeq_taxonomy>Eukaryota; Metazoa; Chordata; Mammalia; Primates; Hominidae; Homo</GBSeq_taxonomy>
+  <GBSeq_keywords>
+    <GBKeyword>RefSeq</GBKeyword>
+    <GBKeyword>MANE Select</GBKeyword>
+  </GBSeq_keywords>
   <GBSeq_comment>REVIEWED REFSEQ: This record has been curated by NCBI staff.</GBSeq_comment>
   <GBSeq_xrefs>
     <GBXref><GBXref_dbname>BioProject</GBXref_dbname><GBXref_id>PRJNA12345</GBXref_id></GBXref>
@@ -41,6 +53,7 @@ _GENBANK_XML = b"""<?xml version="1.0" ?>
   </GBSeq_xrefs>
   <GBSeq_references>
     <GBReference>
+      <GBReference_reference>1</GBReference_reference>
       <GBReference_title>p53: At the crossroads of cell-cycle regulation</GBReference_title>
       <GBReference_journal>Nature Reviews 2 (8), 594-604 (2002)</GBReference_journal>
       <GBReference_authors>
@@ -48,7 +61,12 @@ _GENBANK_XML = b"""<?xml version="1.0" ?>
         <GBAuthor>Lane,D.</GBAuthor>
         <GBAuthor>Levine,A.J.</GBAuthor>
       </GBReference_authors>
+      <GBReference_consortium>TP53 Consortium</GBReference_consortium>
+      <GBReference_xref>
+        <GBXref><GBXref_dbname>doi</GBXref_dbname><GBXref_id>10.1038/nrc864</GBXref_id></GBXref>
+      </GBReference_xref>
       <GBReference_pubmed>12154352</GBReference_pubmed>
+      <GBReference_remark>Review article</GBReference_remark>
     </GBReference>
   </GBSeq_references>
   <GBSeq_feature-table>
@@ -108,6 +126,8 @@ _ESUMMARY_JSON: dict[str, Any] = {
             "updatedate": "2024/10/15",
             "taxid": 9606,
             "organism": "Homo sapiens",
+            "status": "live",
+            "replacedby": "",
         },
     },
 }
@@ -192,6 +212,8 @@ def test_fetch_nuccore_summary_parses_record(monkeypatch: pytest.MonkeyPatch) ->
     assert result["organism"] == "Homo sapiens"
     assert result["taxid"] == 9606
     assert result["moltype"] == "rna"
+    assert result["status"] == "live"
+    assert result["replaced_by"] is None
     assert result["cached"] is False
     assert result["source"] == "ncbi_eutils"
 
@@ -283,11 +305,91 @@ def test_fetch_nuccore_genbank_parses_record(monkeypatch: pytest.MonkeyPatch) ->
     qual_names = [q["name"] for q in cds["qualifiers"]]
     assert "gene" in qual_names
     assert record["references"][0]["pubmed"] == "12154352"
+    ref0 = record["references"][0]
+    assert ref0["reference"] == "1"
+    assert ref0["consortium"] == "TP53 Consortium"
+    assert ref0["doi"] == "10.1038/nrc864"
+    assert ref0["remark"] == "Review article"
     assert record["xrefs"] == [
         {"dbname": "BioProject", "id": "PRJNA12345"},
         {"dbname": "BioSample", "id": "SAMN00000001"},
     ]
+    assert record["keywords"] == ["RefSeq", "MANE Select"]
+    assert record["gi"] == "568815587"
+    assert record["primary_accession"] == "NM_000546"
+    assert record["secondary_accessions"] == ["X02469"]
+    assert "ref|NM_000546.6|" in record["other_seqids"]
     assert record["cached"] is False
+    # Untruncated fixture: no field is clipped and every qualifier reports it.
+    assert record["truncated_fields"] == []
+    assert all(
+        q.get("truncated") is False
+        for feature in record["features"]
+        for q in feature["qualifiers"]
+    )
+
+
+def test_fetch_nuccore_genbank_returns_full_untruncated_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_caches()
+    from api.services.ncbi import nuccore
+
+    long_comment = "X" * 5000
+    long_translation = "M" * 600
+    xml = (
+        b'<?xml version="1.0" ?>\n<GBSet><GBSeq>'
+        b"<GBSeq_locus>NM_000546</GBSeq_locus>"
+        b"<GBSeq_accession-version>NM_000546.6</GBSeq_accession-version>"
+        b"<GBSeq_definition>Short definition</GBSeq_definition>"
+        b"<GBSeq_comment>" + long_comment.encode() + b"</GBSeq_comment>"
+        b"<GBSeq_feature-table><GBFeature>"
+        b"<GBFeature_key>CDS</GBFeature_key>"
+        b"<GBFeature_location>1..1800</GBFeature_location>"
+        b"<GBFeature_quals><GBQualifier>"
+        b"<GBQualifier_name>translation</GBQualifier_name>"
+        b"<GBQualifier_value>" + long_translation.encode() + b"</GBQualifier_value>"
+        b"</GBQualifier></GBFeature_quals>"
+        b"</GBFeature></GBSeq_feature-table>"
+        b"</GBSeq></GBSet>"
+    )
+    monkeypatch.setattr(nuccore, "request_bytes", lambda *_a, **_kw: xml)
+
+    record = nuccore.fetch_nuccore_genbank("NM_000546.6")
+    # Truncation was removed: long fields are returned in full and never flagged.
+    assert record["truncated_fields"] == []
+    assert record["comment"] == long_comment
+    translation_qual = record["features"][0]["qualifiers"][0]
+    assert translation_qual["name"] == "translation"
+    assert translation_qual["truncated"] is False
+    assert translation_qual["value"] == long_translation
+    assert not translation_qual["value"].endswith("\u2026")
+
+
+def test_fetch_nuccore_summary_flags_replaced_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_caches()
+    from api.services.ncbi import nuccore
+
+    payload = {
+        "result": {
+            "uids": ["NM_000546.5"],
+            "NM_000546.5": {
+                "accessionversion": "NM_000546.5",
+                "title": "Homo sapiens tumor protein p53 (TP53), mRNA",
+                "status": "replaced",
+                "replacedby": "NM_000546.6",
+                "taxid": 9606,
+                "organism": "Homo sapiens",
+            },
+        },
+    }
+    monkeypatch.setattr(nuccore, "request_json", lambda *_a, **_kw: payload)
+
+    result = nuccore.fetch_nuccore_summary("NM_000546.5")
+    assert result["status"] == "replaced"
+    assert result["replaced_by"] == "NM_000546.6"
 
 
 def test_fetch_nuccore_genbank_rejects_xxe(monkeypatch: pytest.MonkeyPatch) -> None:

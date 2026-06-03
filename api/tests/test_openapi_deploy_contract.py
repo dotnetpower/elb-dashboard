@@ -158,10 +158,34 @@ def test_openapi_deploy_route_defaults_confirm_recreate_to_false(monkeypatch) ->
 
 
 
+def test_mi_name_for_cluster_is_stable_and_per_cluster() -> None:
+    from api.tasks.openapi.constants import MI_NAME, mi_name_for_cluster
+
+    name_a = mi_name_for_cluster("sub-1", "elb-cluster-01")
+    name_a_again = mi_name_for_cluster("sub-1", "elb-cluster-01")
+    name_b = mi_name_for_cluster("sub-1", "elb-cluster-02")
+    name_c = mi_name_for_cluster("sub-2", "elb-cluster-01")
+
+    # Deterministic for idempotent re-runs of the same cluster.
+    assert name_a == name_a_again
+    # Two clusters in the same subscription (and, in practice, the same
+    # resource group) must not collide — this is the bug this rename fixes.
+    assert name_a != name_b
+    # Different subscription with the same cluster name is also distinct.
+    assert name_a != name_c
+    # Shape + ARM length budget (3-128 chars).
+    assert name_a.startswith(f"{MI_NAME}-")
+    assert 3 <= len(name_a) <= 128
+
+
 def test_setup_workload_identity_uses_storage_resource_group_for_storage_role(
     monkeypatch,
 ) -> None:
+    from api.tasks.openapi.constants import mi_name_for_cluster
+
     role_scopes: list[tuple[str, str]] = []
+    identity_names: list[str] = []
+    fed_cred_calls: list[tuple[str, str]] = []
 
     class FakeManagedClusters:
         def get(self, resource_group: str, cluster_name: str) -> SimpleNamespace:
@@ -182,6 +206,7 @@ def test_setup_workload_identity_uses_storage_resource_group_for_storage_role(
         ) -> SimpleNamespace:
             assert resource_group == "rg-elb-cluster"
             assert parameters["location"] == "koreacentral"
+            identity_names.append(name)
             return SimpleNamespace(client_id="mi-client-id", principal_id="mi-principal-id")
 
     class FakeFederatedIdentityCredentials:
@@ -194,6 +219,7 @@ def test_setup_workload_identity_uses_storage_resource_group_for_storage_role(
         ) -> None:
             assert resource_group == "rg-elb-cluster"
             assert parameters["subject"].startswith("system:serviceaccount:")
+            fed_cred_calls.append((identity_name, credential_name))
 
     class FakeMsiClient:
         def __init__(self, _credential: object, _subscription_id: str) -> None:
@@ -239,6 +265,13 @@ def test_setup_workload_identity_uses_storage_resource_group_for_storage_role(
     )
 
     assert result["mi_client_id"] == "mi-client-id"
+    # The identity + its federated credential are created under the
+    # per-cluster name so a sibling cluster in the same RG cannot overwrite
+    # this cluster's OIDC issuer binding.
+    expected_mi = mi_name_for_cluster("sub-1", "elb-cluster-01")
+    assert identity_names == [expected_mi]
+    assert result["mi_name"] == expected_mi
+    assert fed_cred_calls == [(expected_mi, "fc-elb-openapi")]
     storage_scope = dict(role_scopes)["StorageBlobDataContributor"]
     assert "/resourceGroups/rg-elb-dashboard/" in storage_scope
     assert "/resourceGroups/rg-elb-cluster/providers/Microsoft.Storage/" not in storage_scope

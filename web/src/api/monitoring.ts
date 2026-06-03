@@ -206,6 +206,38 @@ export interface K8sPod {
   restarts: number;
   age: string;
   node: string;
+  /** Pod IP assigned by the CNI (status.podIP). Empty until scheduled. */
+  pod_ip?: string;
+  /** IP of the node the pod runs on (status.hostIP). Empty until scheduled. */
+  node_ip?: string;
+}
+
+export interface K8sDeployment {
+  namespace: string;
+  name: string;
+  /** readyReplicas/desired, e.g. "1/1". */
+  ready: string;
+  /** updatedReplicas. */
+  up_to_date: number;
+  /** availableReplicas. */
+  available: number;
+  age: string;
+}
+
+export interface K8sJob {
+  namespace: string;
+  name: string;
+  /** succeeded/desired, e.g. "1/1". */
+  completions: string;
+  /** Derived: Complete | Failed | Running | Pending. */
+  status: string;
+  succeeded: number;
+  failed: number;
+  age: string;
+  /** status.startTime (ISO 8601), empty until the Job starts. */
+  start_time?: string;
+  /** status.completionTime (ISO 8601), empty until the Job completes. */
+  completion_time?: string;
 }
 
 export interface K8sNodeMetrics {
@@ -317,6 +349,16 @@ export const monitoringApi = {
   k8sPods: (subscriptionId: string, rg: string, clusterName: string) =>
     api.get<{ pods: K8sPod[] }>(
       `/monitor/aks/pods?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+
+  k8sDeployments: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<{ deployments: K8sDeployment[] }>(
+      `/monitor/aks/deployments?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
+    ),
+
+  k8sJobs: (subscriptionId: string, rg: string, clusterName: string) =>
+    api.get<{ jobs: K8sJob[] }>(
+      `/monitor/aks/jobs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}`,
     ),
 
   k8sTopNodes: (subscriptionId: string, rg: string, clusterName: string) =>

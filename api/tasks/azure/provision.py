@@ -439,9 +439,21 @@ def provision_aks(
     # Resolve the per-cluster warm-cache persistence mode. A missing
     # preference row reads back as `ephemeral`, which keeps the historical
     # cluster payload byte-identical (no disk overrides).
-    from api.services.performance_pref import resolve_warm_cache_mode
+    from api.services.performance_pref import (
+        DEFAULT_WARM_CACHE_MODE,
+        resolve_warm_cache_mode,
+    )
 
     warm_cache_mode = resolve_warm_cache_mode(subscription_id, resource_group, cluster_name)
+    if warm_cache_mode != DEFAULT_WARM_CACHE_MODE:
+        # Surface the non-default choice in App Insights so an operator can
+        # confirm a cluster was provisioned with a persistent warm-cache disk.
+        # The default `ephemeral` path stays silent (no behaviour change).
+        LOGGER.info(
+            "AKS %s provisioning with warm_cache_mode=%s (per-cluster Performance preference).",
+            cluster_name,
+            warm_cache_mode,
+        )
 
     cluster_params = build_cluster_params(
         region=region,

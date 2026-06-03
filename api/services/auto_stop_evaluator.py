@@ -189,6 +189,8 @@ def evaluate_cluster(
     power_state: str = "",
     provisioning_state: str = "",
     ignore_cooldown: bool = False,
+    live_active_jobs: int | None = None,
+    live_latest_activity: datetime | None = None,
 ) -> IdleDecision:
     """Decide whether an AKS cluster should be auto-stopped.
 
@@ -218,6 +220,23 @@ def evaluate_cluster(
             permanent livelock — the cluster never stops). The beat
             ``decide`` pass and the SPA countdown keep cooldown enforced
             (default False) so a real recent stop still blocks a re-stop.
+        live_active_jobs: Live ElasticBLAST ``app=blast`` job count observed
+            directly on the Kubernetes cluster (via
+            `auto_stop_live.probe_live_blast_activity`), or ``None`` when the
+            K8s probe could not run. This is the key fix for
+            OpenAPI-submitted runs that never write a dashboard jobstate
+            row: it is ADDED to the Table-derived active count, so a live
+            run keeps the cluster alive even though the state repo is empty.
+            ``None`` (the default) means "not probed / unavailable" and is
+            ignored — the probe only ever ADDS protection, it can never
+            force a stop, so an unreachable K8s API can never strand a
+            cluster running forever.
+        live_latest_activity: Most recent live ``app=blast`` start/finish
+            timestamp, or ``None``. Folded into the idle-clock anchor exactly
+            like ``last_started_at`` so a just-finished live burst still gets
+            the full ``idle_minutes`` grace before a stop. Never advances the
+            deadline beyond a real observed activity time, so it cannot push
+            the stop indefinitely.
 
     Returns:
         `IdleDecision` describing the outcome.
@@ -281,11 +300,17 @@ def evaluate_cluster(
             reason="state_repo_unreachable",
             cluster_power_state=power_state,
         )
-    if active_count > 0:
+    # Fold the live K8s ``app=blast`` count into the Table-derived count.
+    # ``live_active_jobs`` is ``None`` when the probe could not run (K8s
+    # unreachable) — in that case we silently degrade to the state_repo
+    # signal alone. A negative value is treated as 0 defensively.
+    extra_active = live_active_jobs if (live_active_jobs and live_active_jobs > 0) else 0
+    total_active = active_count + extra_active
+    if total_active > 0:
         return IdleDecision(
             verdict="keep",
-            reason=f"active_jobs:{active_count}",
-            active_job_count=active_count,
+            reason=f"active_jobs:{total_active}",
+            active_job_count=total_active,
             cluster_power_state=power_state,
         )
     if truncated:
@@ -312,6 +337,15 @@ def evaluate_cluster(
     started = _parse_iso(pref.last_started_at)
     if started is not None and (latest is None or started > latest):
         latest = started
+
+    # A recent live ``app=blast`` start/finish resets the idle clock too, so
+    # a cluster that just finished an OpenAPI-submitted burst (active now 0,
+    # no dashboard jobstate row) still gets the full idle grace instead of
+    # being stopped on the next tick. Like ``last_started_at`` this only ever
+    # moves the anchor to a real observed activity time, never into the
+    # future, so it cannot defer the stop indefinitely.
+    if live_latest_activity is not None and (latest is None or live_latest_activity > latest):
+        latest = live_latest_activity
 
     if latest is None:
         # No jobs ever observed on this cluster. Anchor the idle clock to

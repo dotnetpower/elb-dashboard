@@ -207,6 +207,13 @@ def _parse_esummary(data: dict[str, Any], normalised: str) -> dict[str, Any]:
     topology = _str(record.get("topology")).lower() or None
     createdate = _str(record.get("createdate")) or None
     updatedate = _str(record.get("updatedate")) or None
+    # Record-status trust signals. NCBI esummary surfaces ``status``
+    # ("live" / "replaced" / "suppressed" / "withdrawn" / "dead") and, when a
+    # newer accession supersedes this one, ``replacedby``. A molecular-
+    # diagnostics user checks these before trusting a sequence, so we expose
+    # them verbatim (lowercased status, bare replacement accession).
+    status = _str(record.get("status")).lower() or None
+    replaced_by = _str(record.get("replacedby")) or None
 
     return {
         "accession": accession_version.split(".")[0],
@@ -223,6 +230,8 @@ def _parse_esummary(data: dict[str, Any], normalised: str) -> dict[str, Any]:
         "topology": topology,
         "create_date": createdate,
         "update_date": updatedate,
+        "status": status,
+        "replaced_by": replaced_by,
         "source": "ncbi_eutils",
     }
 
@@ -284,18 +293,43 @@ def _parse_genbank_xml(body: bytes, normalised: str) -> dict[str, Any]:
     organism = _xml_text(seq.find("GBSeq_organism")) or None
     taxonomy_lineage = _xml_text(seq.find("GBSeq_taxonomy")) or ""
     definition = _xml_text(seq.find("GBSeq_definition")) or ""
-    comment = _truncate(_xml_text(seq.find("GBSeq_comment")) or "", limit=4000)
+    comment = _xml_text(seq.find("GBSeq_comment")) or ""
     source = _xml_text(seq.find("GBSeq_source")) or None
+
+    # Clip the potentially large free-text fields, tracking which ones were
+    # actually truncated so the UI can flag "view full record on NCBI".
+    definition_clipped, definition_truncated = _truncate_flagged(definition)
+    comment_clipped, comment_truncated = _truncate_flagged(comment, limit=4000)
+    lineage_clipped, lineage_truncated = _truncate_flagged(
+        taxonomy_lineage, limit=4000
+    )
+    truncated_fields: list[str] = []
+    if definition_truncated:
+        truncated_fields.append("definition")
+    if comment_truncated:
+        truncated_fields.append("comment")
+    if lineage_truncated:
+        truncated_fields.append("taxonomy_lineage")
 
     references = _parse_references(seq.find("GBSeq_references"))
     features = _parse_features(seq.find("GBSeq_feature-table"))
     xrefs = _parse_xrefs(seq.find("GBSeq_xrefs"))
+    keywords = _parse_keywords(seq.find("GBSeq_keywords"))
+    primary_accession = _xml_text(seq.find("GBSeq_primary-accession")) or None
+    gi, other_seqids = _parse_other_seqids(seq.find("GBSeq_other-seqids"))
+    secondary_accessions = _parse_secondary_accessions(
+        seq.find("GBSeq_secondary-accessions")
+    )
 
     return {
         "accession": accession_version.split(".")[0],
         "accession_version": accession_version,
+        "primary_accession": primary_accession,
+        "gi": gi,
+        "other_seqids": other_seqids,
+        "secondary_accessions": secondary_accessions,
         "locus": locus,
-        "definition": _truncate(definition),
+        "definition": definition_clipped,
         "length": length,
         "moltype": moltype,
         "topology": topology,
@@ -304,14 +338,77 @@ def _parse_genbank_xml(body: bytes, normalised: str) -> dict[str, Any]:
         "create_date": create_date,
         "update_date": update_date,
         "organism": organism,
-        "taxonomy_lineage": _truncate(taxonomy_lineage, limit=4000),
+        "taxonomy_lineage": lineage_clipped,
+        "keywords": keywords,
         "source": source,
-        "comment": comment,
+        "comment": comment_clipped,
+        "truncated_fields": truncated_fields,
         "features": features,
         "references": references,
         "xrefs": xrefs,
         "data_source": "ncbi_eutils",
     }
+
+
+def _parse_other_seqids(node: Any) -> tuple[str | None, list[str]]:
+    """Parse ``GBSeq_other-seqids`` into a GI number + the raw seqid list.
+
+    NCBI renders these in the record header (e.g. ``gi|568815587``,
+    ``ref|NM_000546.6|``). The Sequence Detail page surfaces the GI number as a
+    labelled field and keeps the remaining identifiers for completeness.
+    """
+    if node is None:
+        return (None, [])
+    gi: str | None = None
+    out: list[str] = []
+    for seqid in node.findall("GBSeqid"):
+        value = _xml_text(seqid)
+        if not value:
+            continue
+        if gi is None and value.lower().startswith("gi|"):
+            tail = value.split("|", 1)[1].strip()
+            if tail:
+                gi = _truncate(tail, limit=40)
+        out.append(_truncate(value, limit=120))
+        if len(out) >= 16:
+            break
+    return (gi, out)
+
+
+def _parse_secondary_accessions(node: Any) -> list[str]:
+    """Parse ``GBSeq_secondary-accessions`` (the ``ACCESSION`` continuation)."""
+    if node is None:
+        return []
+    out: list[str] = []
+    for accn in node.findall("GBSecondary-accn"):
+        value = _xml_text(accn)
+        if not value:
+            continue
+        out.append(_truncate(value, limit=40))
+        if len(out) >= 32:
+            break
+    return out
+
+
+def _parse_keywords(node: Any) -> list[str]:
+    """Parse the record-level ``GBSeq_keywords`` block into a string list.
+
+    NCBI renders these as the ``KEYWORDS`` line of the GenBank flat file (and
+    shows ``KEYWORDS  .`` when the list is empty). The Sequence Detail page
+    reproduces that line, so it needs the parsed values rather than the raw
+    XML node.
+    """
+    if node is None:
+        return []
+    out: list[str] = []
+    for keyword in node.findall("GBKeyword"):
+        value = _xml_text(keyword)
+        if not value:
+            continue
+        out.append(_truncate(value, limit=120))
+        if len(out) >= 32:
+            break
+    return out
 
 
 def _parse_xrefs(node: Any) -> list[dict[str, str]]:
@@ -375,7 +472,7 @@ def _parse_features(node: Any) -> list[dict[str, Any]]:
                 "from": from_pos,
                 "to": to_pos,
                 "strand": strand_marker,
-                "intervals": intervals[:64],
+                "intervals": intervals,
                 "qualifiers": qualifiers,
             }
         )
@@ -410,9 +507,8 @@ def _parse_qualifiers(node: Any) -> list[dict[str, Any]]:
         value = _xml_text(qual.find("GBQualifier_value"))
         if not name:
             continue
-        out.append({"name": name, "value": _truncate(value, limit=400)})
-        if len(out) >= 32:
-            break
+        clipped, truncated = _truncate_flagged(value, limit=400)
+        out.append({"name": name, "value": clipped, "truncated": truncated})
     return out
 
 
@@ -430,22 +526,39 @@ def _parse_references(node: Any) -> list[dict[str, Any]]:
                 txt = _xml_text(author)
                 if txt:
                     authors.append(_truncate(txt, limit=200))
-                if len(authors) >= 20:
-                    break
         pubmed = _xml_text(ref.find("GBReference_pubmed")) or None
+        reference = _xml_text(ref.find("GBReference_reference")) or None
+        consortium = _xml_text(ref.find("GBReference_consortium")) or None
+        remark = _truncate(_xml_text(ref.find("GBReference_remark")), limit=1200) or None
+        doi = _parse_reference_doi(ref.find("GBReference_xref"))
         if not (title or journal or authors):
             continue
         out.append(
             {
+                "reference": _truncate(reference, limit=120) if reference else None,
                 "title": _truncate(title, limit=400),
                 "journal": _truncate(journal, limit=400),
                 "authors": authors,
+                "consortium": _truncate(consortium, limit=300) if consortium else None,
                 "pubmed": pubmed,
+                "doi": doi,
+                "remark": remark,
             }
         )
-        if len(out) >= 24:
-            break
     return out
+
+
+def _parse_reference_doi(node: Any) -> str | None:
+    """Extract the DOI from a ``GBReference_xref`` block, if present."""
+    if node is None:
+        return None
+    for xref in node.findall("GBXref"):
+        dbname = _xml_text(xref.find("GBXref_dbname")).lower()
+        if dbname == "doi":
+            doi = _xml_text(xref.find("GBXref_id"))
+            if doi:
+                return _truncate(doi, limit=200)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -538,9 +651,27 @@ def _safe_int(value: Any) -> int | None:
 
 
 def _truncate(value: str | None, *, limit: int = MAX_DESCRIPTION_CHARS) -> str:
+    # ``limit`` is retained for call-site compatibility but no longer clips:
+    # the Sequence Detail page shows full field values. Whitespace is still
+    # normalised for clean single-line display. Oversized records are bounded
+    # upstream by the MAX_*_BYTES fetch caps, not here.
     if value is None:
         return ""
-    cleaned = " ".join(value.split())
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[: limit - 1] + "\u2026"
+    return " ".join(value.split())
+
+
+def _truncate_flagged(
+    value: str | None, *, limit: int = MAX_DESCRIPTION_CHARS
+) -> tuple[str, bool]:
+    """Normalise whitespace and always report no truncation.
+
+    Field truncation was removed: the Sequence Detail page renders full
+    values. The ``bool`` flag (and the ``truncated_fields`` / qualifier
+    ``truncated`` payload entries derived from it) are kept for response
+    contract backward compatibility, so they always report ``False`` and the
+    frontend's "view full on NCBI" affordances simply never trigger.
+    Oversized records are bounded upstream by the MAX_*_BYTES fetch caps.
+    """
+    if value is None:
+        return ("", False)
+    return (" ".join(value.split()), False)

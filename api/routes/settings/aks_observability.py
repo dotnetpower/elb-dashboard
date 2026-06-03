@@ -37,9 +37,16 @@ router = APIRouter()
 _RE_SUB = re.compile(r"^[0-9a-fA-F-]{36}$")
 _RE_RG = re.compile(r"^[-\w._()]{1,90}$")
 _RE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._\-]{1,254}$")
+# ARM resource IDs are case-insensitive on their literal path segments, and
+# Azure returns the App Insights component's `WorkspaceResourceId` lowercased
+# (e.g. `/subscriptions/.../resourcegroups/.../providers/
+# microsoft.operationalinsights/workspaces/defaultworkspace-...-se`). Match
+# case-insensitively so the lowercased id from the App Insights lookup is
+# accepted; the name char classes already cover both cases.
 _RE_WORKSPACE_ID = re.compile(
     r"^/subscriptions/[0-9a-fA-F-]{36}/resourceGroups/[-\w._()]{1,90}"
-    r"/providers/Microsoft\.OperationalInsights/workspaces/[a-zA-Z0-9][a-zA-Z0-9._\-]{1,254}$"
+    r"/providers/Microsoft\.OperationalInsights/workspaces/[a-zA-Z0-9][a-zA-Z0-9._\-]{1,254}$",
+    re.IGNORECASE,
 )
 
 

@@ -32,8 +32,30 @@ from api.services.auto_stop import (
     mark_auto_stop_event,
 )
 from api.services.auto_stop_evaluator import evaluate_cluster
+from api.services.auto_stop_live import probe_live_blast_activity
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _live_blast_signal(
+    pref: AutoStopPreference, power_state: str
+) -> tuple[int | None, Any]:
+    """Best-effort live K8s ``app=blast`` activity for the evaluator.
+
+    Returns ``(live_active_jobs, live_latest_activity)`` ready to splat into
+    `evaluate_cluster`. Only probes when ARM reports ``power_state ==
+    "Running"`` (a stopped cluster has no API server to query) and always
+    degrades to ``(None, None)`` on any failure so an unreachable K8s API
+    can never strand a cluster running forever — the live signal is additive
+    protection only.
+    """
+    if power_state != "Running":
+        return None, None
+    probe = probe_live_blast_activity(pref)
+    if probe is None:
+        return None, None
+    return probe
+
 
 
 def _power_state(pref: AutoStopPreference) -> str:
@@ -207,10 +229,12 @@ def auto_stop_aks(
             "reason": "preference_missing_or_disabled",
         }
 
+    power_state = _power_state(pref)
+    live_active_jobs, live_latest_activity = _live_blast_signal(pref, power_state)
     decision = evaluate_cluster(
         pref,
         repo=get_state_repo(),
-        power_state=_power_state(pref),
+        power_state=power_state,
         # Refuse to stop a cluster whose start LRO is still in progress —
         # AKS flips ``power_state`` to ``Running`` before
         # ``provisioning_state`` settles, and stopping mid-start is
@@ -225,6 +249,12 @@ def auto_stop_aks(
         # task re-confirms only the decide-vs-act race gates (enabled,
         # active jobs, extend, power_state).
         ignore_cooldown=True,
+        # Re-probe live K8s ``app=blast`` activity here so an OpenAPI run
+        # that started during the beat-decide → act queueing window blocks
+        # the stop. This closes the decide-vs-act race for OpenAPI jobs the
+        # same way the state_repo re-read does for dashboard jobs.
+        live_active_jobs=live_active_jobs,
+        live_latest_activity=live_latest_activity,
     )
     if decision.verdict != "stop":
         LOGGER.info(
@@ -317,13 +347,24 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     for pref in enabled_prefs:
         summary["evaluated"] += 1
         try:
+            cluster_power_state = power_state_map.get(
+                (pref.subscription_id, pref.resource_group, pref.cluster_name),
+                "",
+            )
+            # Probe live K8s ``app=blast`` activity only for Running
+            # candidates (a stopped cluster has no API server). This catches
+            # OpenAPI-submitted BLAST runs that never write a dashboard
+            # jobstate row; the probe degrades to (None, None) on any K8s
+            # failure so it can only ever ADD protection, never force a stop.
+            live_active_jobs, live_latest_activity = _live_blast_signal(
+                pref, cluster_power_state
+            )
             decision = evaluate_cluster(
                 pref,
                 repo=repo,
-                power_state=power_state_map.get(
-                    (pref.subscription_id, pref.resource_group, pref.cluster_name),
-                    "",
-                ),
+                power_state=cluster_power_state,
+                live_active_jobs=live_active_jobs,
+                live_latest_activity=live_latest_activity,
             )
         except Exception as exc:
             LOGGER.warning(
@@ -425,4 +466,4 @@ def evaluate_idle_clusters(self: Any) -> dict[str, Any]:
     return summary
 
 
-__all__ = ["auto_stop_aks", "evaluate_idle_clusters"]
+__all__ = ["_live_blast_signal", "auto_stop_aks", "evaluate_idle_clusters"]

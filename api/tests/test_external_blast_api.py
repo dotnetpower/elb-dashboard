@@ -525,6 +525,57 @@ def test_external_blast_list_uses_short_timeout(monkeypatch) -> None:
     assert raised.value.detail["code"] == "openapi_unreachable"
 
 
+def test_external_blast_delete_job_calls_v1_endpoint(monkeypatch) -> None:
+    from api.services import external_blast
+
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"job_id": "abc123", "status": "deleted"})
+
+    transport = httpx.MockTransport(handler)
+    original_client_cls = httpx.Client
+
+    class _StubClient(original_client_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(external_blast.httpx, "Client", _StubClient)
+
+    result = external_blast.delete_job("abc123", base_url="http://openapi")
+
+    assert seen == {"method": "DELETE", "path": "/v1/jobs/abc123"}
+    assert result == {"job_id": "abc123", "status": "deleted"}
+
+
+def test_external_blast_delete_job_transport_error_is_503(monkeypatch) -> None:
+    from api.services import external_blast
+
+    class FakeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def delete(self, _path: str) -> object:
+            raise httpx.ConnectError("sibling unreachable")
+
+    monkeypatch.setattr(external_blast.httpx, "Client", FakeClient)
+
+    with pytest.raises(HTTPException) as raised:
+        external_blast.delete_job("abc123", base_url="http://openapi")
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail["code"] == "openapi_unreachable"
+
+
 def test_openapi_runtime_round_trip() -> None:
     from api.services.openapi import runtime as openapi_runtime
 

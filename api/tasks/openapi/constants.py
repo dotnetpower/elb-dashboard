@@ -1,31 +1,59 @@
 """Constants and well-known identifiers for the ``elb-openapi`` AKS deploy.
 
 Responsibility: Hold the static names that must stay aligned with the sibling
-    ``elastic-blast-azure`` repo and the on-cluster manifests (MI name, K8s SA/namespace,
-    federated credential name, role definition IDs).
-Edit boundaries: Constants only. Any change here must also be applied to the matching
-    legacy values in the sibling repo so existing clusters keep a single MI/SA pair.
-Key entry points: `MI_NAME`, `K8S_SA_NAME`, `K8S_NAMESPACE`, `FED_CRED_NAME`,
-    `ROLE_CONTRIBUTOR`, `ROLE_STORAGE_BLOB_DATA_CONTRIBUTOR`, `ROLE_AKS_CLUSTER_USER`,
-    `pls_config_from_env`.
-Risky contracts: Renaming any constant changes the workload identity contract on
-    deployed clusters — existing federated credentials and role assignments would
-    appear duplicated, not migrated.
+    ``elastic-blast-azure`` repo and the on-cluster manifests (MI name prefix, K8s
+    SA/namespace, federated credential name, role definition IDs) and derive the
+    per-cluster managed-identity name.
+Edit boundaries: Constants + the ``mi_name_for_cluster`` / ``pls_config_from_env``
+    derivers only. The K8s SA/namespace must match the sibling repo's manifests.
+Key entry points: `MI_NAME`, `mi_name_for_cluster`, `K8S_SA_NAME`, `K8S_NAMESPACE`,
+    `FED_CRED_NAME`, `ROLE_CONTRIBUTOR`, `ROLE_STORAGE_BLOB_DATA_CONTRIBUTOR`,
+    `ROLE_AKS_CLUSTER_USER`, `pls_config_from_env`.
+Risky contracts: ``MI_NAME`` is a prefix, not the literal identity name — the live
+    identity is ``mi_name_for_cluster`` (per-cluster). Changing the digest scheme or
+    the prefix renames every cluster's identity and orphans the old MI + federated
+    credential + role assignments (they appear duplicated, not migrated).
 Validation: `uv run pytest -q api/tests/test_openapi_deploy.py` (if present) or the
     package smoke `uv run pytest -q api/tests/test_smoke.py`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 
-# Workload-identity / K8s naming — must match the legacy values so existing
-# clusters do not see a duplicate MI / SA pair.
+# Workload-identity / K8s naming.
+#
+# ``MI_NAME`` is the *prefix* for the per-cluster managed identity, NOT the
+# literal identity name — see ``mi_name_for_cluster``. A user-assigned MI is
+# keyed in ARM by ``(resource_group, name)``, and federated credentials are
+# nested under that MI. When two AKS clusters live in the same resource group
+# (the ``elb-cluster-01`` / ``elb-cluster-02`` layout), a single shared
+# ``id-elb-openapi`` identity would make the second cluster's deploy overwrite
+# the first cluster's federated credential ``issuer`` (each cluster has a
+# distinct OIDC issuer URL), silently breaking the first cluster's pods with
+# 401/403 on every ARM/Storage call. Deriving the identity name per cluster
+# keeps each cluster's workload identity isolated while staying deterministic
+# across idempotent re-runs.
 MI_NAME = "id-elb-openapi"
 K8S_SA_NAME = "elb-openapi-sa"
 K8S_NAMESPACE = "default"
 FED_CRED_NAME = "fc-elb-openapi"
+
+
+def mi_name_for_cluster(subscription_id: str, cluster_name: str) -> str:
+    """Return the per-cluster user-assigned managed identity name.
+
+    Deterministic so re-running the deploy for the same cluster reuses the
+    same identity (idempotent) while two clusters — even in the same resource
+    group — never collide. The ``subscription_id`` + ``cluster_name`` digest
+    mirrors ``dns_label_for_cluster`` so both names move together per cluster.
+    The result (``id-elb-openapi-<10 hex>`` = 25 chars) stays within the
+    3-128 char ARM limit for managed-identity names.
+    """
+    digest = hashlib.sha256(f"{subscription_id}/{cluster_name}".encode()).hexdigest()[:10]
+    return f"{MI_NAME}-{digest}"
 
 # Built-in role definition IDs (well-known).
 ROLE_CONTRIBUTOR = "b24988ac-6180-42a0-ab88-20f7382dd24c"
@@ -100,5 +128,6 @@ __all__ = (
     "ROLE_CONTRIBUTOR",
     "ROLE_STORAGE_BLOB_DATA_CONTRIBUTOR",
     "PlsConfig",
+    "mi_name_for_cluster",
     "pls_config_from_env",
 )

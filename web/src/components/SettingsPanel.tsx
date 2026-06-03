@@ -1567,6 +1567,7 @@ const PUBLIC_HTTPS_PHASES: PublicHttpsPhaseMeta[] = [
   { id: "install_ingress_nginx", label: "Installing ingress-nginx", hint: "Applying the upstream manifest patched for the blastpool." },
   { id: "patch_dns_label", label: "Patching Azure DNS label", hint: "Annotating the LoadBalancer Service with a stable FQDN." },
   { id: "wait_external_ip", label: "Waiting for public IP", hint: "Azure assigns the LB's EXTERNAL-IP. Usually 30-90s." },
+  { id: "ensure_node_subnet_nsg", label: "Opening node-subnet firewall", hint: "Allowing Internet 80/443 to the LB on the BYO node-subnet NSG so the ACME challenge can reach ingress." },
   { id: "install_cert_manager", label: "Installing cert-manager", hint: "Applying CRDs + controller + webhook." },
   { id: "wait_cert_manager_webhook", label: "Waiting for cert-manager webhook", hint: "Webhook Pod must become Available before any Issuer applies." },
   { id: "apply_cluster_issuer", label: "Applying ClusterIssuer", hint: "Registering the Let's Encrypt prod ACME account." },

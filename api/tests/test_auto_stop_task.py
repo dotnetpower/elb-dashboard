@@ -32,6 +32,13 @@ def _file_backend(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(
         "api.services.state_repo.get_state_repo", lambda: object()
     )
+    # The driver probes live K8s ``app=blast`` activity for Running
+    # clusters; stub it to "unavailable" by default so the task tests stay
+    # hermetic (no Azure/K8s call). Wiring tests below override this.
+    monkeypatch.setattr(
+        "api.tasks.azure.idle_autostop._live_blast_signal",
+        lambda _pref, _power_state: (None, None),
+    )
 
 
 def _pref(**overrides: object) -> AutoStopPreference:
@@ -210,7 +217,9 @@ def test_evaluate_idle_clusters_enqueues_per_cluster(
         _pref(cluster_name="cluster-disabled", enabled=False)
     )
 
-    def fake_eval(pref: AutoStopPreference, *, repo, power_state: str) -> IdleDecision:
+    def fake_eval(
+        pref: AutoStopPreference, *, repo, power_state: str, **_extra
+    ) -> IdleDecision:
         if pref.cluster_name == "cluster-stop":
             return IdleDecision(verdict="stop", reason="idle:60m")
         return IdleDecision(verdict="keep", reason="active")
@@ -244,7 +253,7 @@ def test_evaluate_idle_clusters_warn_marks_skip(
     monkeypatch.setattr(
         idle_autostop,
         "evaluate_cluster",
-        lambda pref, *, repo, power_state: IdleDecision(
+        lambda pref, *, repo, power_state, **_extra: IdleDecision(
             verdict="warn", reason="idle_pending"
         ),
     )
@@ -275,7 +284,7 @@ def test_evaluate_idle_clusters_stamps_last_stop_at_before_enqueue(
     monkeypatch.setattr(
         idle_autostop,
         "evaluate_cluster",
-        lambda pref, *, repo, power_state: IdleDecision(
+        lambda pref, *, repo, power_state, **_extra: IdleDecision(
             verdict="stop", reason="idle:60m"
         ),
     )
@@ -300,7 +309,7 @@ def test_evaluate_idle_clusters_warn_writes_only_on_transition(
     monkeypatch.setattr(
         idle_autostop,
         "evaluate_cluster",
-        lambda pref, *, repo, power_state: IdleDecision(
+        lambda pref, *, repo, power_state, **_extra: IdleDecision(
             verdict="warn", reason="idle_pending"
         ),
     )
@@ -371,7 +380,9 @@ def test_evaluate_idle_clusters_batches_power_state(
     monkeypatch.setattr(
         idle_autostop,
         "evaluate_cluster",
-        lambda pref, *, repo, power_state: IdleDecision(verdict="keep", reason="active"),
+        lambda pref, *, repo, power_state, **_extra: IdleDecision(
+            verdict="keep", reason="active"
+        ),
     )
 
     summary = idle_autostop.evaluate_idle_clusters.run()
@@ -451,3 +462,78 @@ def test_batch_power_states_groups_by_rg(monkeypatch: pytest.MonkeyPatch) -> Non
     assert summary["rg_groups"] == 2
     assert summary["rg_failed"] == 0
     assert summary["failed_rgs"] == []
+
+
+def test_live_blast_signal_skips_probe_when_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped cluster has no API server — the live probe must be skipped
+    entirely (the autouse stub is irrelevant here; we assert the early
+    return BEFORE any probe call)."""
+    from api.tasks.azure import idle_autostop
+
+    # Remove the autouse stub so we exercise the real ``_live_blast_signal``
+    # body and prove it never reaches the probe for a stopped cluster.
+    monkeypatch.undo()
+    probe_calls: list[Any] = []
+    monkeypatch.setattr(
+        idle_autostop,
+        "probe_live_blast_activity",
+        lambda pref: probe_calls.append(pref) or (5, None),
+    )
+
+    assert idle_autostop._live_blast_signal(_pref(), "Stopped") == (None, None)
+    assert idle_autostop._live_blast_signal(_pref(), "") == (None, None)
+    assert probe_calls == []
+    # Running → probe is consulted.
+    assert idle_autostop._live_blast_signal(_pref(), "Running") == (5, None)
+    assert len(probe_calls) == 1
+
+
+def test_auto_stop_aks_live_activity_blocks_idle_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An OpenAPI-submitted BLAST run that the dashboard jobstate Table
+    never saw still keeps an otherwise-idle cluster alive: the live K8s
+    ``app=blast`` signal flows through the REAL evaluator and turns the
+    stop into a keep with ``active_jobs:N``."""
+    from datetime import UTC, datetime, timedelta
+
+    from api.tasks.azure import idle_autostop
+
+    now = datetime.now(UTC)
+    save_auto_stop_preference(
+        _pref(
+            cluster_name="elb-cluster",
+            enabled=True,
+            cooldown_minutes=30,
+            # Anchored long ago → idle window elapsed → would stop but for
+            # the live signal.
+            created_at=(now - timedelta(hours=4)).isoformat(timespec="seconds"),
+        )
+    )
+    monkeypatch.setattr(idle_autostop, "_power_state", lambda _pref: "Running")
+    monkeypatch.setattr(idle_autostop, "_provisioning_state", lambda _pref: "Succeeded")
+    # Empty dashboard jobstate Table — the run is invisible to ``_scan_cluster_jobs``.
+    monkeypatch.setattr(
+        "api.services.state_repo.get_state_repo",
+        lambda: type("_R", (), {"list_for_scope": lambda self, **_kw: []})(),
+    )
+    # Live K8s probe reports two active ``app=blast`` jobs.
+    monkeypatch.setattr(
+        idle_autostop, "_live_blast_signal", lambda _pref, _ps: (2, None)
+    )
+    stop_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "api.tasks.azure.stop_aks.run",
+        lambda **kwargs: stop_calls.append(kwargs) or {"status": "completed"},
+    )
+
+    result = idle_autostop.auto_stop_aks.run(
+        subscription_id="sub-1",
+        resource_group="rg-elb",
+        cluster_name="elb-cluster",
+    )
+    assert result["action"] == "skip", result
+    assert result["reason"] == "active_jobs:2"
+    assert stop_calls == []

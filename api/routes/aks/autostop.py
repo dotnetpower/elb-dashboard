@@ -741,10 +741,32 @@ def _compute_status(
     try:
         from api.services.state_repo import get_state_repo
 
+        # Probe live K8s ``app=blast`` activity for Running clusters so the
+        # SPA countdown reflects OpenAPI-submitted runs (which never write a
+        # dashboard jobstate row) and agrees with the auto-stop beat driver.
+        # Degrades to (None, None) on any failure — additive protection only.
+        live_active_jobs: int | None = None
+        live_latest_activity = None
+        if power_state == "Running":
+            try:
+                from api.services.auto_stop_live import probe_live_blast_activity
+
+                probe = probe_live_blast_activity(pref)
+                if probe is not None:
+                    live_active_jobs, live_latest_activity = probe
+            except Exception as exc:
+                LOGGER.debug(
+                    "autostop_status live blast probe failed cluster=%s: %s",
+                    cluster_name,
+                    exc,
+                )
+
         decision = evaluate_cluster(
             pref,
             repo=get_state_repo(),
             power_state=power_state,
+            live_active_jobs=live_active_jobs,
+            live_latest_activity=live_latest_activity,
         )
     except Exception as exc:
         LOGGER.warning("autostop_status evaluator failed cluster=%s: %s", cluster_name, exc)

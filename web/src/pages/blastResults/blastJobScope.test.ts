@@ -104,7 +104,9 @@ describe("resolveBlastJobScope", () => {
     expect(scope.subscriptionId).toBe("anchor-sub");
     expect(scope.storageAccount).toBe("anchorstorage");
     expect(scope.resourceGroup).toBe("rg-elb-dashboard");
-    // No cluster signal anywhere: legacy single-cluster default of last resort.
-    expect(scope.clusterName).toBe("elb-cluster");
+    // No cluster signal anywhere: stays empty on purpose. A wrong guess made
+    // cancel target a non-existent cluster (`cancel_unavailable`); external
+    // jobs are cancelled via the sibling, which owns its own cluster.
+    expect(scope.clusterName).toBe("");
   });
 });

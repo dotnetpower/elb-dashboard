@@ -388,8 +388,11 @@ export function useClusterActions(args: {
             setActionError(`${transitionVerb(action)} failed: ${task.error || status}`);
             void query.refetch();
           } else if (status === "SUCCESS") {
-            clearTransition(name);
             if (action === "deleting") {
+              // Deletion is terminal: the cluster is gone, so clearing the
+              // chip immediately is correct (the power_state effect's
+              // missing-cluster branch would clear it anyway).
+              clearTransition(name);
               const result = task.result as
                 | {
                     resource_group_status?: string;
@@ -406,8 +409,21 @@ export function useClusterActions(args: {
                   `Cluster ${name} deleted. Resource group ${result.resource_group} kept (other resources still present).`,
                 );
               }
+              void query.refetch();
+            } else {
+              // start / stop: the Celery task finished, but AKS
+              // ``power_state`` can still lag the real transition (ARM
+              // eventual consistency + the 90s monitor health cache).
+              // Clearing the optimistic "Starting…/Stopping…" chip here would
+              // let the header fall back to the stale ``power_state``
+              // ("Stopped") and flap (the reported "starting → suddenly
+              // stopped → starting on refresh" bug). Keep the chip until the
+              // power_state-reached effect observes the real target
+              // (Running / Stopped), or the deadline evicts a genuinely stuck
+              // entry. Just nudge a refetch so that observation happens
+              // sooner.
+              void query.refetch();
             }
-            void query.refetch();
           }
         } catch {
           // A transient status read failure should not create its own false

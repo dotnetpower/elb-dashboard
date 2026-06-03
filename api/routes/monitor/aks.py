@@ -3,8 +3,9 @@
 Responsibility: AKS monitor routes
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `list_aks`, `aks_start_stats`, `aks_nodes`, `aks_pods`, `aks_top_nodes`,
-`aks_pod_logs`, `aks_pod_describe`, `aks_pod_delete`, `aks_service_ip`
+Key entry points: `list_aks`, `aks_start_stats`, `aks_nodes`, `aks_pods`, `aks_deployments`,
+`aks_jobs`, `aks_top_nodes`, `aks_pod_logs`, `aks_pod_describe`, `aks_pod_delete`,
+`aks_service_ip`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate. Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
@@ -158,6 +159,68 @@ def aks_pods(
         )
     except Exception as exc:
         return cast(dict[str, Any], _graceful("aks_pods", exc, empty={"pods": []}))
+
+
+@router.get("/aks/deployments")
+def aks_deployments(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """List every Deployment in the cluster (Azure-portal Workloads parity)."""
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+
+    cred = monitor_package.get_credential()
+    try:
+        return cached_snapshot_with_cluster_gate(
+            _cache_key("monitor", "aks", "deployments", sub, resource_group, cluster_name),
+            lambda: {
+                "deployments": monitoring_svc.k8s_get_deployments(
+                    cred, sub, resource_group, cluster_name
+                )
+            },
+            credential=cred,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            empty={"deployments": []},
+        )
+    except Exception as exc:
+        return cast(
+            dict[str, Any], _graceful("aks_deployments", exc, empty={"deployments": []})
+        )
+
+
+@router.get("/aks/jobs")
+def aks_jobs(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """List every Job in the cluster (Azure-portal Workloads parity).
+
+    This is where finished and in-flight ElasticBLAST search Jobs surface."""
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+
+    cred = monitor_package.get_credential()
+    try:
+        return cached_snapshot_with_cluster_gate(
+            _cache_key("monitor", "aks", "jobs", sub, resource_group, cluster_name),
+            lambda: {
+                "jobs": monitoring_svc.k8s_get_jobs(cred, sub, resource_group, cluster_name)
+            },
+            credential=cred,
+            subscription_id=sub,
+            resource_group=resource_group,
+            cluster_name=cluster_name,
+            empty={"jobs": []},
+        )
+    except Exception as exc:
+        return cast(dict[str, Any], _graceful("aks_jobs", exc, empty={"jobs": []}))
 
 
 @router.get("/aks/top-nodes")

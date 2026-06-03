@@ -26,10 +26,10 @@ from api.tasks.openapi.constants import (
     FED_CRED_NAME,
     K8S_NAMESPACE,
     K8S_SA_NAME,
-    MI_NAME,
     ROLE_AKS_CLUSTER_USER,
     ROLE_CONTRIBUTOR,
     ROLE_STORAGE_BLOB_DATA_CONTRIBUTOR,
+    mi_name_for_cluster,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -113,15 +113,20 @@ def setup_workload_identity(
         )
 
     # 2. User-Assigned Managed Identity (idempotent create_or_update).
+    # Per-cluster name so two clusters in the same resource group keep
+    # isolated identities + federated credentials instead of overwriting
+    # one another (see constants.mi_name_for_cluster).
+    mi_name = mi_name_for_cluster(subscription_id, cluster_name)
     msi = msi_client(cred, subscription_id)
     mi = msi.user_assigned_identities.create_or_update(
         resource_group,
-        MI_NAME,
+        mi_name,
         {
             "location": region,
             "tags": {
                 "purpose": "elb-openapi-workload-identity",
                 "managedBy": "elb-dashboard",
+                "cluster": cluster_name,
             },
         },
     )
@@ -129,7 +134,7 @@ def setup_workload_identity(
     # 3. Federated Identity Credential — AKS OIDC ↔ K8s ServiceAccount.
     msi.federated_identity_credentials.create_or_update(
         resource_group,
-        MI_NAME,
+        mi_name,
         FED_CRED_NAME,
         {
             "issuer": oidc_url,
@@ -202,7 +207,7 @@ def setup_workload_identity(
         )
 
     return {
-        "mi_name": MI_NAME,
+        "mi_name": mi_name,
         "mi_client_id": mi.client_id,
         "mi_principal_id": mi.principal_id,
         "oidc_issuer": oidc_url,

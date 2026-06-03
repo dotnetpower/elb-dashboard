@@ -416,3 +416,130 @@ def test_idle_decision_to_dict_shape() -> None:
         "active_job_count",
         "cluster_power_state",
     }
+
+
+# ---------------------------------------------------------------------------
+# Live K8s ``app=blast`` activity injection (OpenAPI-submitted runs that
+# never write a dashboard jobstate row).
+# ---------------------------------------------------------------------------
+
+
+def test_live_active_jobs_block_stop_with_empty_state_repo() -> None:
+    """An OpenAPI BLAST run leaves the dashboard jobstate Table empty, so
+    the state-repo scan sees 0 active jobs and the deadline has passed.
+    The injected live count must keep the cluster alive."""
+    jobs = [
+        _FakeJob(
+            type="blast",
+            status="completed",
+            updated_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+        ),
+    ]
+    decision = evaluate_cluster(
+        _pref(idle_minutes=60),
+        repo=_FakeRepo(jobs),
+        now=_NOW,
+        power_state="Running",
+        live_active_jobs=2,
+    )
+    assert decision.verdict == "keep"
+    assert decision.reason == "active_jobs:2"
+    assert decision.active_job_count == 2
+
+
+def test_live_active_jobs_add_to_state_repo_count() -> None:
+    """Live count is ADDED to the Table-derived count, not max-ed."""
+    jobs = [_FakeJob(type="blast", status="running")]
+    decision = evaluate_cluster(
+        _pref(),
+        repo=_FakeRepo(jobs),
+        now=_NOW,
+        power_state="Running",
+        live_active_jobs=3,
+    )
+    assert decision.verdict == "keep"
+    assert decision.reason == "active_jobs:4"
+    assert decision.active_job_count == 4
+
+
+def test_live_active_none_falls_back_to_state_repo() -> None:
+    """``live_active_jobs=None`` (probe unavailable) must not change the
+    state-repo-only decision — an unreachable K8s API can never strand a
+    cluster running forever."""
+    jobs = [
+        _FakeJob(
+            type="blast",
+            status="completed",
+            updated_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+        ),
+    ]
+    decision = evaluate_cluster(
+        _pref(idle_minutes=60),
+        repo=_FakeRepo(jobs),
+        now=_NOW,
+        power_state="Running",
+        live_active_jobs=None,
+    )
+    assert decision.verdict == "stop"
+    assert decision.reason.startswith("idle:")
+
+
+def test_live_active_zero_does_not_block_stop() -> None:
+    """A live probe that reports 0 active jobs (no in-flight run) must not
+    keep an otherwise-idle cluster alive."""
+    jobs = [
+        _FakeJob(
+            type="blast",
+            status="completed",
+            updated_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+        ),
+    ]
+    decision = evaluate_cluster(
+        _pref(idle_minutes=60),
+        repo=_FakeRepo(jobs),
+        now=_NOW,
+        power_state="Running",
+        live_active_jobs=0,
+    )
+    assert decision.verdict == "stop"
+    assert decision.reason.startswith("idle:")
+
+
+def test_live_latest_activity_resets_idle_clock() -> None:
+    """A just-finished live burst (active now 0) seeds the idle anchor so
+    the cluster gets the full idle grace instead of stopping immediately."""
+    jobs = [
+        _FakeJob(
+            type="blast",
+            status="completed",
+            updated_at=(_NOW - timedelta(minutes=120)).isoformat(timespec="seconds"),
+        ),
+    ]
+    decision = evaluate_cluster(
+        _pref(idle_minutes=60),
+        repo=_FakeRepo(jobs),
+        now=_NOW,
+        power_state="Running",
+        live_active_jobs=0,
+        live_latest_activity=_NOW - timedelta(minutes=5),
+    )
+    # Anchor = live activity (5 min ago) + 60 min window → ~55 min left.
+    assert decision.verdict == "keep"
+    assert decision.reason == "active"
+    assert decision.seconds_until_stop > 0
+
+
+def test_stale_live_latest_activity_does_not_block_stop() -> None:
+    """``live_latest_activity`` only moves the anchor to a real observed
+    time — an old live timestamp must not defer a due stop."""
+    decision = evaluate_cluster(
+        _pref(idle_minutes=15),
+        repo=_FakeRepo([]),
+        now=_NOW,
+        power_state="Running",
+        live_active_jobs=0,
+        live_latest_activity=_NOW - timedelta(hours=3),
+    )
+    assert decision.verdict == "stop"
+    assert decision.reason.startswith("idle:")
+

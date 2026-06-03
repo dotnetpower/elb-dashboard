@@ -425,6 +425,10 @@ previous phase.
 * **Predicting demand from FASTA / DB size.** Out of scope for this
   proposal. Tier 1 (history) + Tier 2 (per-program defaults) is enough
   to start; FASTA-based modelling is a probe-script improvement.
+  **Update (§9, 2026-06-03):** the live run shows DB *memory requirement*
+  is not optional after all — it is the dominant hard failure — so a
+  DB→memory lookup feeding a `db_memory_infeasible` reject is promoted to
+  the next gate increment. FASTA-length modelling remains deferred.
 * **Charging per-submit cost.** The gate makes parallel submits
   observable but does not introduce billing. Cost telemetry is a
   separate epic on `api/services/cost/`.
@@ -456,7 +460,200 @@ previous phase.
 
 ---
 
-## 9. References
+## 9. Empirical validation (live cluster, 2026-06-03)
+
+The design above was written from first principles on 2026-05-31. On
+2026-06-03 we ran the real `/v1/jobs` path against a live
+[AKS](https://learn.microsoft.com/azure/aks/) cluster to measure what the
+cluster actually does under a burst, and the numbers materially change two
+of the design assumptions (§7 "predicting demand from DB size" and §2.2's
+race inventory). The reusable harness is
+[scripts/e2e/concurrency/](../../scripts/e2e/concurrency/) (`run.sh` +
+`harness.py` + `watch_pods.sh` + `extract_queries.py`).
+
+### 9.1 Test bed
+
+| Item | Value |
+|---|---|
+| Cluster | `elb-cluster-02` / `rg-elb-cluster` (subscription `b052302c…`) |
+| `blastpool` | 10 × `Standard_E16s_v5` (16 vCPU / 128 GB), **autoscale off** → 160 vCPU hard ceiling |
+| Service under test | `elb-openapi:4.18`, 2 replicas, Mode B inline-FASTA submit |
+| Queries | 16S templates from `web/src/pages/blastSubmit/queryExamples.ts` (≈1.5 kb each) |
+| Pod shape (per shard) | container `blast` requests `cpu=6, mem=4Gi`, limits `cpu=8, mem=126Gi`; image `ncbi/elb:1.4.0`; DB on node-local **`hostPath` volume `blast-dbs` at `/blast/blastdb`** |
+
+### 9.2 What we measured
+
+1. **`core_nt` is not runnable on this pool at all.** `elastic-blast submit`
+   rejects it before any pod is created:
+   `"core_nt memory requirements exceed memory available on Standard_E16s_v5.
+   Please select machine type with at least 251.7GB."` The submit returns
+   HTTP `202` (`status="dispatching"`) and only *then* flips to
+   `status="failed", phase="submit_failed"`. So **`202` is an accept of the
+   request, not an admission of the job** — concurrent capacity for `core_nt`
+   on a 128 GB pool is **zero**.
+2. **Single small-DB job succeeds reliably.** One 16S submit:
+   dispatch ≈ 45 s → running ≈ 15 s → `succeeded`, ≈ 78 s wall.
+3. **Peak concurrent RUNNING jobs under a 10-job burst = 2–3.** Submitting 10
+   16S jobs at once: all 10 returned `202` but the submit call itself took
+   ≈ 39–46 s (elb-openapi serialises admission). The authoritative 3 s pod
+   watcher peaked at **3** `app=blast` pods (= 3 distinct `elb-job-id`s)
+   Running; the slower 12 s status poll never saw more than 2. elb-openapi
+   dispatches in small batches (~70 s cycle) and holds the rest in its own
+   priority queue (the last 1–3 jobs stayed `dispatching` for most of the
+   run). The 160-vCPU node ceiling was never the binding constraint —
+   **elb-openapi's internal dispatch concurrency (~2–3) was.**
+4. **Concurrent same-DB submits fail on a DB-staging race.** Almost every
+   burst 16S job failed with
+   `"BLAST Database error: No alias or index file found for nucleotide
+   database [16S_ribosomal_RNA] in search path
+   [/blast/blastdb:/blast/blastdb:/blast/blastdb_custom:]"`, crash-looping
+   to `BackoffLimitExceeded`. Final burst tally: ≈ 7–8 `failed`, ≈ 1–2
+   `succeeded`, 2 never dispatched. The same 16S query succeeds every time
+   in isolation, so this is not a query problem — it is a **race on the
+   node-local `hostPath` DB cache**: when several jobs land on a node whose
+   `/blast/blastdb` has not finished staging `16S_ribosomal_RNA`, `blastn`
+   reads an incomplete DB directory and aborts. (`core_nt` avoided this only
+   because it had been pre-staged across all nodes by an earlier run.)
+
+### 9.3 How this changes the design
+
+* **DB memory requirement becomes a first-class gate input, not a non-goal.**
+  §7 deferred "predicting demand from DB size" as out of scope, but the
+  dominant *hard* failure on this cluster is exactly DB-memory-vs-node:
+  `core_nt` needs 251.7 GB on a 128 GB node. The gate's Stage-2
+  `predict_demand` MUST be able to surface a job's memory requirement and the
+  decision tree needs a new **non-retryable** reason
+  `db_memory_infeasible` (predicted job memory > max node allocatable in the
+  pool) so an impossible job is rejected with a clear message instead of
+  burning a dispatch→`submit_failed` cycle. This is the single highest-value
+  smartness the gate can add.
+* **The slot key must be per-(cluster, DB), not just per-cluster.** §2.2
+  listed two races (shared terminal working dir, K8s name collisions); the
+  live run surfaces a **third**: concurrent jobs against the *same* DB race
+  on the node-local `hostPath` cache. Until DBs are pre-staged on every node
+  (or moved to a `ReadWriteMany` volume), the safe rule is **serialise
+  submits that share a DB** — i.e. fold the DB id into `slot_hash_key`
+  (`elb:blast:slots:<cluster>:<db>`) so two different DBs can run in parallel
+  but two same-DB jobs cannot collide on staging.
+* **`max_slots=1` is empirically the right conservative default.** The
+  optimistic §1 table (slots=4 → ~80 % CPU, fast) is *not* reachable for a
+  same-DB burst on this topology today — raising the slot cap just multiplies
+  staging-race failures. Keep `BLAST_GATE_MAX_SLOTS_PER_CLUSTER=1` until the
+  DB-staging race is fixed; only then does a higher cap (bounded by
+  elb-openapi's own ~2–3 dispatch concurrency) become safe. This validates the
+  Charter §12a Rule 4 default-OFF posture rather than contradicting it.
+
+> Net: the next gate increment should (1) add the `db_memory_infeasible`
+> hard-reject using a DB→memory lookup, and (2) make the slot key
+> DB-scoped — **before** any change that raises `max_slots`.
+
+### 9.4 Result integrity is orthogonal to the capacity gate
+
+The 2026-06-03 burst (§9.2) was measured through the raw elb-openapi
+`/v1/jobs` path, which is fine for **timing** but does **not** exercise the
+dashboard's NCBI-parity machinery. Two corrections follow, and neither
+weakens the gate design above — they bound what the harness numbers mean.
+
+* **"`core_nt` is not runnable on this pool" (§9.2 #1) is specific to the
+  non-sharded submit.** That HTTP `202` → `submit_failed` was the standard
+  `elastic-blast submit` memory pre-check (`core_nt` needs 251.7 GB on a
+  128 GB node). In **local-SSD partition mode** the same DB is split into 10
+  disjoint shards (one per node) by
+  [`azure_traits.py`](https://github.com/dotnetpower/elastic-blast-azure)
+  `usable_ram_gb` logic — each shard fits, and a pre-staged `core_nt` run
+  completed in ≈ 106 s. So the gate's `db_memory_infeasible` reason must key
+  on **per-shard** memory in partition mode, not the whole-DB figure, or it
+  will wrongly hard-reject a job that the sharded path runs fine.
+* **Sharding does not change e-values when the precise path is used.**
+  Splitting a DB into N shards normally inflates each shard's e-value ≈ N×
+  (the per-shard search space is 1/N of the whole). The dashboard removes
+  this entirely: [api/services/blast/config.py](../../api/services/blast/config.py)
+  injects `-searchsp <db_effective_search_space>` (single-query) or falls
+  back to `-dbsize <db_total_letters>` into **every** shard's `blastn`, so
+  each shard computes full-DB statistics and the merge is a pure
+  concat-and-resort. This is **shard-count-independent**: `num_nodes` can
+  stay at 10 (full parallelism) with **byte-identical NCBI web BLAST**
+  e-values. The calibrated `core_nt` value
+  (`32,156,241,807,668`, 2026-05-09 snapshot) lives in
+  [api/services/web_blast_searchsp.py](../../api/services/web_blast_searchsp.py);
+  the precise-mode contract is enforced by
+  [api/services/sharding_precision.py](../../api/services/sharding_precision.py).
+* **The deployed elb-openapi `4.18` injects the calibrated `-searchsp`
+  server-side for `core_nt`, so even raw `/v1/jobs` harness runs are
+  e-value-correct (live-verified 2026-06-03).** An earlier draft of this note
+  claimed the raw path leaves scores per-shard (≈ N× too significant); that is
+  true only for the older local checkout (`3.7.3`) of
+  [elastic-blast-azure](https://github.com/dotnetpower/elastic-blast-azure).
+  The **deployed** `acrelbdashboard3abp67bppe.azurecr.io/elb-openapi:4.18`
+  builds the job `config.ini` with `options = -outfmt 5 -searchsp
+  32156241807668` and `db-partitions = 10` for `core_nt` regardless of the
+  request body — confirmed by inspecting the live `elb-openapi-job` configmap
+  for a harness submission that sent only `blast_options={'outfmt': '5'}`. All
+  10 shard pods therefore carry the identical full-DB search space, the merge
+  is concat-and-resort, and the burst-run scores are NCBI-parity, not
+  per-shard.
+* **Caveat — calibration drift is the real correctness risk, not sharding.**
+  The injected value `32,156,241,807,668` was calibrated against the
+  **2026-05-09** `core_nt` snapshot (`1,041,443,571,674` letters). The live
+  cluster DB is the **2026-05-26** snapshot
+  (`number_of_letters = 1,058,342,797,689`, `number_of_sequences =
+  125,940,211`) — a ≈ 1.6 % search-space drift. Because E scales linearly with
+  search space, the **hit list, bit scores, and ranking stay identical to
+  NCBI**, but the absolute E-value column drifts ≈ 1.6 % until the searchsp is
+  recalibrated to the current snapshot. The recalibration trigger is already
+  documented in
+  [api/services/web_blast_searchsp.py](../../api/services/web_blast_searchsp.py)
+  (`revalidate_when` = "DB snapshot changes"). For byte-identical NCBI E-values
+  the searchsp must track the snapshot NCBI is currently serving.
+
+> Net for capacity work: keep `num_nodes` fixed and raise throughput only
+> with search-space-neutral levers (`MAX_ACTIVE_SUBMISSIONS`, `batch_len`,
+> submit-phase pipelining). Lowering `num_nodes` to reduce shard count is
+> **not** a free concurrency lever — it is integrity-neutral *only* on the
+> precise path, and the precise path already makes shard count irrelevant to
+> correctness, so there is no integrity reason to touch it.
+
+### 9.5 Concurrency ceiling with `num_nodes = 10` (live, 2026-06-03)
+
+The performance question — "max throughput while preserving NCBI parity" — is
+purely a **scheduling** question, because parity is already guaranteed by the
+auto-injected full-DB `-searchsp` (§9.4). The binding constraint is the
+per-shard **CPU request** against node allocatable, measured live on the
+`blastpool` (`10 × Standard_E16s_v5`):
+
+| Quantity | Value (live) |
+| --- | --- |
+| Per-shard `blast` container request | `cpu = 6`, `memory = 4G` |
+| Per-shard `blast` container limit | `cpu = 8`, `memory = 126Gi` |
+| Node allocatable | `cpu = 15740m`, `memory ≈ 120.7Gi` |
+| Idle-node resident memory (shard DB page cache) | ≈ 27.8 GB (22 %) |
+| Single `core_nt` wall time (pre-staged) | ≈ 107 s |
+
+Each `core_nt` job places **one shard on every node** (10 shards / 10 nodes),
+so the per-node packing is what bounds concurrency:
+
+* **CPU request is binding:** `floor(15740m / 6000m) = 2` shard pods per node.
+  → **exactly 2 concurrent `core_nt` jobs fit** (`2 × 6 = 12 CPU ≤ 15.74`); a
+  3rd job's shards request `18 CPU/node > 15.74` and stay `Pending`.
+* **Memory is not binding:** request `4G` is nominal; the real footprint is
+  the mmap'd shard (~28 GB resident, reclaimable page cache). `2 × 28 ≈ 56 GB
+  < 120.7Gi`, so two co-scheduled shards per node fit comfortably.
+
+To exceed 2 concurrent `core_nt` jobs without touching `num_nodes` you must
+either lower the per-shard CPU request (slower per job) or add nodes — **not**
+reduce shard count. Raising `MAX_ACTIVE_SUBMISSIONS` above 2 for `core_nt`
+buys nothing on this 10-node pool; the 3rd job simply waits in `Pending`.
+`MAX_ACTIVE_SUBMISSIONS = 2` is the throughput-optimal value for `core_nt`
+here, and it is integrity-neutral (every job still gets the full-DB searchsp).
+
+> Live env note: the deployed `elb-openapi` has only `ELB_NUM_NODES=10` /
+> `ELB_CORE_NT_SHARDS=10` set — `MAX_ACTIVE_SUBMISSIONS` is unset (default 1),
+> so today the cluster serialises `core_nt` admission to one job at a time even
+> though two would schedule. Bumping it to 2 is the single safe throughput win.
+
+---
+
+## 10. References
 
 * [api/tasks/blast/submit_lock.py](../../api/tasks/blast/submit_lock.py) — current per-(cluster, namespace) Redis lock + Lua release.
 * [api/tasks/blast/submit_task.py](../../api/tasks/blast/submit_task.py) — submit pipeline, lock-busy requeue path.
@@ -468,12 +665,13 @@ previous phase.
 * [.github/copilot-instructions.md §12a](../../.github/copilot-instructions.md) — phased rollout discipline + default-OFF guard rule.
 * [docs/features_change/2026-05/2026-05-22-submit-parallelism-and-fast-poll.md](../features_change/2026-05/2026-05-22-submit-parallelism-and-fast-poll.md) — the historical PR that lifted the lock from single-key to per-(cluster, namespace).
 * [docs/features_change/2026-05/2026-05-22-submit-lock-requeue.md](../features_change/2026-05/2026-05-22-submit-lock-requeue.md) — the lock-busy requeue / retry-budget contract that the new gate inherits.
+* [scripts/e2e/concurrency/](../../scripts/e2e/concurrency/) — the live burst/sequential harness that produced §9's measurements.
 * [Kubernetes Resource Management documentation](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/) — requests vs limits semantics behind the pressure helper.
 * [Azure Kubernetes Service Cluster Autoscaler documentation](https://learn.microsoft.com/en-us/azure/aks/cluster-autoscaler) — the layer the gate hands off to when it detects `slot_cap_reached`.
 
 ---
 
-## 10. Status board
+## 11. Status board
 
 | Stage | Description | Status |
 |---|---|---|

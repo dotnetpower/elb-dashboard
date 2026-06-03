@@ -75,3 +75,29 @@ export function formatAge(iso: string | undefined | null): string {
   const remHr = hr % 24;
   return remHr ? `${day}d${remHr}h` : `${day}d`;
 }
+
+/**
+ * Format a Job duration from its start/completion timestamps as a compact
+ * string (`30s`, `5m`, `2h`). When `end` is empty the Job is still running,
+ * so the duration is measured against now. Returns `"—"` when no start time
+ * is available yet (the Job has not been scheduled).
+ */
+export function formatDuration(
+  start: string | undefined | null,
+  end: string | undefined | null,
+): string {
+  if (!start) return "—";
+  const s = Date.parse(start);
+  if (Number.isNaN(s)) return "—";
+  const e = end ? Date.parse(end) : Date.now();
+  const sec = Math.max(0, Math.floor(((Number.isNaN(e) ? Date.now() : e) - s) / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) {
+    const remSec = sec % 60;
+    return remSec ? `${min}m${remSec}s` : `${min}m`;
+  }
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return remMin ? `${hr}h${remMin}m` : `${hr}h`;
+}

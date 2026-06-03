@@ -68,55 +68,55 @@
    Merged from the former Aurora + MS brand dual-palette system.
    Aurora removed 2026-05-20; MS brand is now the only light palette. */
 [data-theme="light"] {
-  /* Neutrals — paper-white canvas with cool-gray scaffolding */
-  --bg-canvas: #f4f3f5;
+  /* VS Code Light Modern 2026 — flat, crisp, hairline borders.
+     #ffffff panels on a #f8f8f8 canvas, #e5e5e5 hairlines, #005fb8
+     accent, no blur and no panel shadow. Adopted 2026-06-03. */
+  --bg-canvas: #f8f8f8;
   --bg-primary: #ffffff;
   --bg-secondary: #ffffff;
-  --bg-tertiary: #d9d6d6;
-  --bg-hover: #d7d2cb;
-  --border-weak: rgba(69, 65, 66, 0.2);
-  --border-medium: rgba(69, 65, 66, 0.36);
-  --border-focus: rgba(0, 120, 212, 0.55);
+  --bg-tertiary: #f3f3f3;
+  --bg-hover: #f0f0f0;
+  --border-weak: #e5e5e5;
+  --border-medium: #d4d4d4;
+  --border-focus: rgba(0, 95, 184, 0.5);
 
-  /* Text — Dark Gray ramp, AA against white */
-  --text-primary: #1b1b1b;
-  --text-muted: #454142;
-  --text-faint: #69655f;
+  /* Text — neutral gray ramp, AA against white */
+  --text-primary: #1f1f1f;
+  --text-muted: #525252;
+  --text-faint: #8a8a8a;
 
-  /* Accents — Microsoft brand */
-  --accent: #0078d4;
-  --success: #07641d;
-  --warning: #73391d;
-  --danger: #73262f;
+  /* Accents — VS Code Light Modern */
+  --accent: #005fb8;
+  --success: #1a7f37;
+  --warning: #9a6700;
+  --danger: #b5251f;
   --purple: #8661c5;
-  --teal: #225b62;
+  --teal: #1d6b73;
 
   /* Card accents — keep colour identity per card type */
-  --card-accent-cluster: #0078d4;
-  --card-accent-storage: #07641d;
+  --card-accent-cluster: #005fb8;
+  --card-accent-storage: #1a7f37;
   --card-accent-acr: #8661c5;
-  --card-accent-terminal: #225b62;
-  --card-accent-jobs: #73391d;
+  --card-accent-terminal: #1d6b73;
+  --card-accent-jobs: #9a6700;
 
-  /* Glass — solid white, minimal blur, neutral shadows */
-  --glass-bg: rgba(255, 255, 255, 0.94);
-  --glass-bg-strong: rgba(255, 255, 255, 1);
-  --glass-border: rgba(69, 65, 66, 0.2);
-  --glass-blur: 8px;
+  /* Glass tokens are flattened: solid white panels, zero blur,
+     hairline borders. The names are kept so existing call sites
+     compile, but there is no frosted glass in Light Modern. */
+  --glass-bg: #ffffff;
+  --glass-bg-strong: #ffffff;
+  --glass-border: #e5e5e5;
+  --glass-blur: 0px;
 
-  --shadow-panel:
-    0 1px 0 rgba(255, 255, 255, 0.85) inset, 0 6px 18px rgba(20, 20, 20, 0.1),
-    0 1px 3px rgba(20, 20, 20, 0.08);
-  --shadow-panel-hover:
-    0 1px 0 rgba(255, 255, 255, 0.95) inset, 0 10px 26px rgba(20, 20, 20, 0.14),
-    0 2px 6px rgba(20, 20, 20, 0.1);
+  --shadow-panel: none;
+  --shadow-panel-hover: 0 2px 8px rgba(20, 20, 20, 0.06);
 }
 
-/* Canvas — neutral paper, no aurora wash */
+/* Canvas — flat paper, no gradient wash */
 [data-theme="light"],
 [data-theme="light"] body,
 [data-theme="light"] #root {
-  background-image: linear-gradient(180deg, #fafafb 0%, #ececef 100%) !important;
+  background-image: linear-gradient(180deg, #f8f8f8 0%, #f8f8f8 100%) !important;
 }
 
 /* Glass surface for panels — light mode only.
@@ -180,68 +180,51 @@
    Dark mode is unaffected — every rule lives under [data-theme="light"].
    ────────────────────────────────────────────────────────────────── */
 
-/* #1 App bar — glass, not flat white */
+/* #1 App bar — flat solid white with a hairline base border */
 [data-theme="light"] .layout__topbar {
-  background: rgba(255, 255, 255, 0.62);
-  backdrop-filter: blur(18px) saturate(180%);
-  -webkit-backdrop-filter: blur(18px) saturate(180%);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.85);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.6) inset,
-    0 6px 18px rgba(20, 20, 20, 0.06);
-}
-
-@media (max-width: 768px) {
-  [data-theme="light"] {
-    --glass-blur: 4px;
-  }
-
-  [data-theme="light"] .layout__topbar {
-    backdrop-filter: blur(8px) saturate(160%);
-    -webkit-backdrop-filter: blur(8px) saturate(160%);
-  }
+  background: #ffffff;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-bottom: 1px solid var(--border-weak);
+  box-shadow: none;
 }
 
 /* Logo gradient is intentionally theme-locked to the dark palette
    (see Layout.css .layout__logo-icon). Do not add a light-theme override. */
 
-/* #1 Nav active pill — use new violet accent rgba (not legacy cobalt) */
+/* #1 Nav active pill — soft VS Code blue wash + hairline ring */
 [data-theme="light"] .layout__nav-item.active {
-  background: rgba(0, 120, 212, 0.1);
-  box-shadow: inset 0 0 0 1px rgba(0, 120, 212, 0.18);
+  background: #e8f1fb;
+  box-shadow: inset 0 0 0 1px rgba(0, 95, 184, 0.22);
 }
 
-/* #1 Live indicator — match new deep emerald success color */
+/* #1 Live indicator — match the deep emerald success color */
 [data-theme="light"] .layout__live {
-  background: rgba(4, 120, 87, 0.08);
-  border-color: rgba(4, 120, 87, 0.22);
+  background: rgba(26, 127, 55, 0.08);
+  border-color: rgba(26, 127, 55, 0.24);
 }
 
-/* #3 Selector chips (Subscription / Workload RG / Auto-refresh) — glass */
+/* #3 Selector chips (Subscription / Workload RG / Auto-refresh) — flat */
 [data-theme="light"] .cfg-chip {
-  background: rgba(255, 255, 255, 0.7);
-  border-color: rgba(69, 65, 66, 0.22);
-  backdrop-filter: blur(10px) saturate(160%);
-  -webkit-backdrop-filter: blur(10px) saturate(160%);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.7) inset,
-    0 2px 8px rgba(20, 20, 20, 0.06);
+  background: #ffffff;
+  border-color: var(--border-weak);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
   transition:
     border-color var(--motion-fast),
     box-shadow var(--motion-fast);
 }
 [data-theme="light"] .cfg-chip:hover {
-  border-color: rgba(0, 120, 212, 0.32);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.8) inset,
-    0 4px 14px rgba(0, 120, 212, 0.1);
+  border-color: rgba(0, 95, 184, 0.4);
+  box-shadow: none;
 }
 [data-theme="light"] .cfg-chip:focus-within {
   border-color: var(--border-focus);
-  box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.12);
+  box-shadow: 0 0 0 3px rgba(0, 95, 184, 0.14);
 }
 [data-theme="light"] .cfg-chip .lbl {
-  border-right-color: rgba(69, 65, 66, 0.18);
+  border-right-color: var(--border-weak);
 }
 [data-theme="light"] .cfg-chip select option {
   background: #ffffff;
@@ -251,7 +234,7 @@
    colour — repaint it lavender in light mode. */
 [data-theme="light"] .cfg-chip select,
 [data-theme="light"] select.glass-input {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%237c6df5' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23005fb8' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
 /* #3/#4 Gear / icon-only buttons — glass on hover */
@@ -309,51 +292,43 @@
   color: var(--text-muted);
 }
 
-/* #4 Secondary buttons (.glass-button / .gb) — glass surface */
+/* #4 Secondary buttons (.glass-button / .gb) — flat white, hairline */
 [data-theme="light"] .glass-button,
 [data-theme="light"] .gb {
-  background: rgba(255, 255, 255, 0.7);
-  border-color: rgba(69, 65, 66, 0.22);
-  backdrop-filter: blur(10px) saturate(160%);
-  -webkit-backdrop-filter: blur(10px) saturate(160%);
+  background: #ffffff;
+  border-color: var(--border-weak);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   color: var(--text-primary);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.7) inset,
-    0 2px 8px rgba(20, 20, 20, 0.06);
+  box-shadow: none;
 }
 [data-theme="light"] .glass-button:hover,
 [data-theme="light"] .gb:hover {
-  background: rgba(255, 255, 255, 0.85);
-  border-color: rgba(0, 120, 212, 0.32);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.85) inset,
-    0 4px 14px rgba(0, 120, 212, 0.12);
+  background: var(--bg-hover);
+  border-color: rgba(0, 95, 184, 0.4);
+  box-shadow: none;
 }
 
-/* #4 Primary button (.glass-button--primary / .gb-p) — solid violet gradient.
-   Dark-mode keeps the faint cobalt rgba; light gets a true premium CTA. */
+/* #4 Primary button (.glass-button--primary / .gb-p) — solid VS Code blue.
+   Dark-mode keeps the faint cobalt rgba; light gets the flat CTA. */
 [data-theme="light"] .glass-button--primary,
 [data-theme="light"] .gb-p {
-  background: linear-gradient(180deg, #6a78ff 0%, #4f5fe0 100%);
-  border-color: rgba(64, 80, 220, 0.45);
+  background: var(--accent);
+  border-color: var(--accent);
   color: #ffffff;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.45),
-    0 6px 18px rgba(0, 120, 212, 0.32);
+  box-shadow: 0 1px 2px rgba(0, 95, 184, 0.28);
 }
 [data-theme="light"] .glass-button--primary:hover,
 [data-theme="light"] .gb-p:hover {
-  background: linear-gradient(180deg, #7281ff 0%, #5867e6 100%);
-  border-color: rgba(64, 80, 220, 0.55);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.5),
-    0 8px 22px rgba(0, 120, 212, 0.4);
+  background: #0a6cc9;
+  border-color: #0a6cc9;
+  box-shadow: 0 2px 6px rgba(0, 95, 184, 0.32);
 }
 [data-theme="light"] .glass-button--primary:disabled,
 [data-theme="light"] .gb-p:disabled {
-  background: rgba(69, 65, 66, 0.18);
-  border-color: rgba(69, 65, 66, 0.25);
-  color: rgba(45, 36, 90, 0.45);
+  background: #ebebeb;
+  border-color: #e0e0e0;
+  color: rgba(31, 31, 31, 0.38);
   box-shadow: none;
 }
 [data-theme="light"] .glass-button--primary:disabled:hover,
@@ -362,21 +337,20 @@
   border-color: rgba(69, 65, 66, 0.25);
 }
 
-/* #1 Environment pills (used in some toolbars) — match new neutral */
+/* #1 Environment pills (used in some toolbars) — flat white, hairline */
 [data-theme="light"] .env-pill {
-  background: rgba(255, 255, 255, 0.65);
-  border-color: rgba(69, 65, 66, 0.18);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: #ffffff;
+  border-color: var(--border-weak);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
-/* Stat panels — keep solid white card on glass canvas (more legible
-   for big numbers than nested glass-on-glass). */
+/* Stat panels — solid white card, hairline border, no blur. */
 [data-theme="light"] .stat-panel {
-  background: rgba(255, 255, 255, 0.65);
-  border-color: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(14px) saturate(170%);
-  -webkit-backdrop-filter: blur(14px) saturate(170%);
+  background: #ffffff;
+  border-color: var(--border-weak);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -540,51 +514,48 @@
    aurora canvas. All overrides scoped to [data-theme="light"].
    ────────────────────────────────────────────────────────────────── */
 
-/* App bar — bump opacity from 0.62 to 0.82 + a real bottom hairline.
-   Was previously invisible against the OS chrome above it. */
+/* App bar — flat solid white with a hairline base border. */
 [data-theme="light"] .layout__topbar {
-  background: rgba(255, 255, 255, 0.82);
-  border-bottom: 1px solid rgba(20, 20, 20, 0.16);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.7) inset,
-    0 4px 16px rgba(20, 20, 20, 0.08);
+  background: #ffffff;
+  border-bottom: 1px solid var(--border-weak);
+  box-shadow: none;
 }
 
-/* Panel border + shadow — give every card a visible edge. */
+/* Panel border + shadow — hairline edge, no shadow (flat). */
 [data-theme="light"] .panel,
 [data-theme="light"] .glass-card {
-  border: 1px solid rgba(20, 20, 20, 0.14);
+  border: 1px solid var(--border-weak);
   box-shadow: var(--shadow-panel);
 }
 
-/* Selector chips — token bumps already help; reinforce hover ring. */
+/* Selector chips — hairline border. */
 [data-theme="light"] .cfg-chip {
-  border-color: rgba(20, 20, 20, 0.22);
+  border-color: var(--border-weak);
 }
 [data-theme="light"] .cfg-chip .lbl {
-  border-right-color: rgba(20, 20, 20, 0.18);
+  border-right-color: var(--border-weak);
   color: var(--text-muted);
   font-weight: 500;
 }
 [data-theme="light"] .cfg-gear {
-  border-color: rgba(20, 20, 20, 0.18);
+  border-color: var(--border-weak);
   color: var(--text-muted);
 }
 [data-theme="light"] .cfg-gear:hover {
-  border-color: rgba(20, 20, 20, 0.28);
+  border-color: var(--border-medium);
 }
 
-/* Secondary buttons — visible outline + slightly stronger background. */
+/* Secondary buttons — flat white, hairline outline. */
 [data-theme="light"] .glass-button,
 [data-theme="light"] .gb {
-  background: rgba(255, 255, 255, 0.78);
-  border-color: rgba(20, 20, 20, 0.26);
+  background: #ffffff;
+  border-color: var(--border-weak);
   color: var(--text-primary);
 }
 [data-theme="light"] .glass-button:hover,
 [data-theme="light"] .gb:hover {
-  background: rgba(255, 255, 255, 0.92);
-  border-color: rgba(0, 120, 212, 0.4);
+  background: var(--bg-hover);
+  border-color: rgba(0, 95, 184, 0.4);
 }
 
 /* Status chips (.gt-*) — bump from 0.10 → 0.16 so they have actual
@@ -685,24 +656,23 @@
   font-weight: 600;
 }
 
-/* Stat panels — slightly more opaque so big numbers don't fight the
-   aurora behind them. */
+/* Stat panels — solid white, hairline border. */
 [data-theme="light"] .stat-panel {
-  background: rgba(255, 255, 255, 0.78);
-  border-color: rgba(20, 20, 20, 0.18);
+  background: #ffffff;
+  border-color: var(--border-weak);
 }
 
-/* Active job/cluster rows (.dv3-* row backgrounds) — restore a faint
-   tint so the FAILED rows in the JobsSection read as rows, not text. */
+/* Active job/cluster rows (.dv3-* row backgrounds) — solid white rows
+   with a hairline divider; hover lifts to the neutral hover tint. */
 [data-theme="light"] .dv3-row,
 [data-theme="light"] .dv3-job-row {
-  background: rgba(255, 255, 255, 0.55);
-  border-color: rgba(20, 20, 20, 0.12);
+  background: #ffffff;
+  border-color: var(--border-weak);
 }
 [data-theme="light"] .dv3-row:hover,
 [data-theme="light"] .dv3-job-row:hover {
-  background: rgba(255, 255, 255, 0.75);
-  border-color: rgba(20, 20, 20, 0.22);
+  background: var(--bg-hover);
+  border-color: var(--border-medium);
 }
 
 /* ──────────────────────────────────────────────────────────────────
@@ -778,13 +748,11 @@
   color: var(--card-accent-jobs);
 }
 
-/* Topbar — flat white with neutral underline */
+/* Topbar — flat solid white with a hairline underline */
 [data-theme="light"] .layout__topbar {
-  background: rgba(255, 255, 255, 0.96);
-  border-bottom: 1px solid rgba(69, 65, 66, 0.2);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.8) inset,
-    0 4px 14px rgba(20, 20, 20, 0.06);
+  background: #ffffff;
+  border-bottom: 1px solid var(--border-weak);
+  box-shadow: none;
 }
 
 /* Logo gradient is intentionally theme-locked to the dark palette
@@ -792,78 +760,70 @@
 
 /* Nav active pill */
 [data-theme="light"] .layout__nav-item.active {
-  background: rgba(0, 120, 212, 0.1);
-  box-shadow: inset 0 0 0 1px rgba(0, 120, 212, 0.18);
+  background: #e8f1fb;
+  box-shadow: inset 0 0 0 1px rgba(0, 95, 184, 0.22);
 }
 
 /* Live indicator */
 [data-theme="light"] .layout__live {
-  background: rgba(7, 100, 29, 0.08);
-  border-color: rgba(7, 100, 29, 0.28);
+  background: rgba(26, 127, 55, 0.08);
+  border-color: rgba(26, 127, 55, 0.26);
 }
 
-/* Selector chips — flat white with grey border */
+/* Selector chips / secondary buttons — flat white, hairline border */
 [data-theme="light"] .cfg-chip,
 [data-theme="light"] .glass-button,
 [data-theme="light"] .gb {
   background: #ffffff;
-  border-color: rgba(69, 65, 66, 0.28);
+  border-color: var(--border-weak);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.9) inset,
-    0 1px 3px rgba(20, 20, 20, 0.06);
+  box-shadow: none;
 }
 [data-theme="light"] .cfg-chip:hover,
 [data-theme="light"] .glass-button:hover,
 [data-theme="light"] .gb:hover {
-  border-color: rgba(0, 120, 212, 0.45);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.95) inset,
-    0 3px 10px rgba(0, 120, 212, 0.12);
+  border-color: rgba(0, 95, 184, 0.4);
+  box-shadow: none;
 }
 [data-theme="light"] .cfg-chip:focus-within {
   border-color: var(--border-focus);
-  box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.18);
+  box-shadow: 0 0 0 3px rgba(0, 95, 184, 0.14);
 }
 
 /* Select chevron */
 [data-theme="light"] .cfg-chip select,
 [data-theme="light"] select.glass-input {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%230078d4' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23005fb8' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 
-/* Primary button — solid Microsoft blue */
+/* Primary button — solid VS Code blue */
 [data-theme="light"] .glass-button--primary,
 [data-theme="light"] .gb-p {
-  background: linear-gradient(180deg, #2196e8 0%, #0078d4 100%);
-  border-color: #006aba;
+  background: var(--accent);
+  border-color: var(--accent);
   color: #ffffff;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.35),
-    0 4px 14px rgba(0, 120, 212, 0.3);
+  box-shadow: 0 1px 2px rgba(0, 95, 184, 0.28);
 }
 [data-theme="light"] .glass-button--primary:hover,
 [data-theme="light"] .gb-p:hover {
-  background: linear-gradient(180deg, #34a3eb 0%, #1483d7 100%);
-  border-color: #006aba;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.4),
-    0 6px 18px rgba(0, 120, 212, 0.36);
+  background: #0a6cc9;
+  border-color: #0a6cc9;
+  box-shadow: 0 2px 6px rgba(0, 95, 184, 0.32);
 }
 
 /* Status / pill backgrounds */
 [data-theme="light"] .gt-g {
-  background: rgba(7, 100, 29, 0.1);
+  background: rgba(26, 127, 55, 0.1);
 }
 [data-theme="light"] .gt-o {
-  background: rgba(115, 57, 29, 0.1);
+  background: rgba(154, 103, 0, 0.12);
 }
 [data-theme="light"] .gt-r {
-  background: rgba(115, 38, 47, 0.1);
+  background: rgba(181, 37, 31, 0.1);
 }
 [data-theme="light"] .gt-b {
-  background: rgba(0, 120, 212, 0.1);
+  background: rgba(0, 95, 184, 0.1);
 }
 [data-theme="light"] .gt-p {
   background: rgba(134, 97, 197, 0.12);
@@ -873,22 +833,22 @@
   color: var(--text-muted);
 }
 [data-theme="light"] .dv3-pill-success {
-  background: rgba(7, 100, 29, 0.1);
+  background: rgba(26, 127, 55, 0.1);
 }
 [data-theme="light"] .dv3-pill-accent {
-  background: rgba(0, 120, 212, 0.1);
+  background: rgba(0, 95, 184, 0.1);
 }
 [data-theme="light"] .dv3-pill-warning {
-  background: rgba(115, 57, 29, 0.1);
+  background: rgba(154, 103, 0, 0.12);
 }
 [data-theme="light"] .dv3-pill-teal {
-  background: rgba(34, 91, 98, 0.1);
+  background: rgba(29, 107, 115, 0.1);
 }
 [data-theme="light"] .dv3-pill-purple {
   background: rgba(134, 97, 197, 0.12);
 }
 [data-theme="light"] .dv3-pill-danger {
-  background: rgba(115, 38, 47, 0.1);
+  background: rgba(181, 37, 31, 0.1);
 }
 [data-theme="light"] .dv3-pill-faint {
   background: rgba(69, 65, 66, 0.06);
@@ -912,7 +872,7 @@
 /* Table row hover — blue wash */
 [data-theme="light"] .gt-tbl tr:hover td,
 [data-theme="light"] .db-row:hover {
-  background: rgba(0, 120, 212, 0.06) !important;
+  background: rgba(0, 95, 184, 0.06) !important;
 }
 [data-theme="light"] .gt-tbl tbody tr:hover td:first-child {
   box-shadow: inset 2px 0 0 var(--accent);
@@ -936,14 +896,14 @@
 
 /* Refresh button hover */
 [data-theme="light"] .panel-whisper__btn:hover {
-  background: rgba(0, 120, 212, 0.1);
+  background: rgba(0, 95, 184, 0.1);
   color: var(--accent);
 }
 
 /* Stat panel — solid white card */
 [data-theme="light"] .stat-panel {
   background: #ffffff;
-  border-color: rgba(69, 65, 66, 0.18);
+  border-color: var(--border-weak);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }

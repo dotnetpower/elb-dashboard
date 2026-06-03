@@ -20,6 +20,10 @@ export interface NuccoreSummary {
   topology: string | null;
   create_date: string | null;
   update_date: string | null;
+  /** NCBI record status ("live" / "replaced" / "suppressed" / "withdrawn" / "dead"). */
+  status: string | null;
+  /** Accession that supersedes this record, when `status` indicates replacement. */
+  replaced_by: string | null;
   cached: boolean;
   source: "esummary" | "esummary_fallback";
 }
@@ -39,6 +43,8 @@ export interface NuccoreFeatureInterval {
 export interface NuccoreQualifier {
   name: string;
   value: string;
+  /** True when `value` was clipped by the backend and the full text lives on NCBI. */
+  truncated?: boolean;
 }
 
 export interface NuccoreFeature {
@@ -49,9 +55,17 @@ export interface NuccoreFeature {
 }
 
 export interface NuccoreReference {
+  /** Reference ordinal / position label from `GBReference_reference` (e.g. "1"). */
+  reference: string | null;
   title: string | null;
   journal: string | null;
   authors: string[];
+  /** Consortium author from `GBReference_consortium`, when present. */
+  consortium: string | null;
+  /** DOI from the `GBReference_xref` block, when present. */
+  doi: string | null;
+  /** Free-text `GBReference_remark` (GeneRIF / publication notes). */
+  remark: string | null;
   pubmed: string | null;
 }
 
@@ -67,6 +81,14 @@ export interface NuccoreGenBankXref {
 export interface NuccoreGenBank {
   accession: string;
   accession_version: string | null;
+  /** Bare primary accession from `GBSeq_primary-accession`. */
+  primary_accession: string | null;
+  /** GI number extracted from `GBSeq_other-seqids`, when present. */
+  gi: string | null;
+  /** Raw seqid identifiers from `GBSeq_other-seqids`. */
+  other_seqids: string[];
+  /** Secondary accessions from `GBSeq_secondary-accessions`. */
+  secondary_accessions: string[];
   locus: string | null;
   definition: string | null;
   length: number | null;
@@ -79,8 +101,16 @@ export interface NuccoreGenBank {
   organism: string | null;
   /** Semicolon-delimited lineage string from `GBSeq_taxonomy` (root → genus). */
   taxonomy_lineage: string;
+  /** Record-level keywords from `GBSeq_keywords` (empty when none). */
+  keywords: string[];
   source: string | null;
   comment: string | null;
+  /**
+   * Names of record fields the backend clipped (e.g. "definition", "comment",
+   * "taxonomy_lineage"). The UI flags these with a "view full record on NCBI"
+   * affordance so the researcher never mistakes a clipped value for the whole.
+   */
+  truncated_fields?: string[];
   features: NuccoreFeature[];
   references: NuccoreReference[];
   xrefs: NuccoreGenBankXref[];

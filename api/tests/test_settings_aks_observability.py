@@ -168,6 +168,35 @@ def test_enable_rejects_invalid_workspace_resource_id(client: TestClient) -> Non
     assert "workspace_resource_id" in r.json()["detail"]
 
 
+def test_enable_accepts_lowercased_arm_workspace_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Azure App Insights returns the WorkspaceResourceId fully lowercased
+    # (resourcegroups / microsoft.operationalinsights), which the SPA forwards
+    # verbatim. The enable route must accept it.
+    calls, fake_delay = make_delay_recorder("aks-obs-task-lc")
+    monkeypatch.setattr(
+        "api.tasks.azure.enable_aks_container_insights.delay", fake_delay, raising=True
+    )
+    sub = "b052302c-4c8d-49a4-aa2f-9d60a7301a80"
+    ws = (
+        f"/subscriptions/{sub}/resourcegroups/defaultresourcegroup-se"
+        "/providers/microsoft.operationalinsights/workspaces/"
+        f"defaultworkspace-{sub}-se"
+    )
+    r = client.post(
+        "/api/settings/aks-observability/enable",
+        json={
+            "subscription_id": sub,
+            "resource_group": "rg-elb",
+            "cluster_name": "aks-elb",
+            "workspace_resource_id": ws,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert calls[0]["workspace_resource_id"] == ws
+
+
 def test_routes_reject_anonymous_when_bypass_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AUTH_DEV_BYPASS", raising=False)
     monkeypatch.setenv("AZURE_TENANT_ID", "common")

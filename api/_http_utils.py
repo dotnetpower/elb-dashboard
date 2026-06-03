@@ -91,7 +91,7 @@ class AksProvisionRequest(BaseModel):
     subscription_id: str = ""
     resource_group: str = Field(..., min_length=1, max_length=90)
     region: str = Field(default="koreacentral", min_length=1, max_length=64)
-    cluster_name: str = Field(default="elb-cluster", min_length=1, max_length=63)
+    cluster_name: str = Field(..., min_length=1, max_length=63)
     node_sku: str = Field(default="Standard_E32s_v5", min_length=1, max_length=64)
     node_count: int = Field(default=3, ge=1, le=100)
     acr_resource_group: str = ""

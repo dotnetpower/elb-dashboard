@@ -87,3 +87,31 @@ Frontend:
   StorageClass and graceful fallback to ephemeral on PVC attach failure. Requires
   live-cluster validation, hence kept as a separate staged change. The UI labels
   the mode "(preview)" until then.
+
+## Multi-cluster notes / known limitations
+
+- **Per-cluster isolation**: the preference is keyed by
+  `(subscription_id, resource_group, cluster_name)`; each `provision_aks` resolves
+  its own cluster's mode, so there is no cross-cluster leakage. A missing row
+  reads back as `ephemeral` (byte-identical default).
+- **node_disk effectiveness**: the staged DB lives on the node-local
+  `hostPath: /workspace`, which is on the node **root filesystem (OS disk)** — not
+  the temp/resource disk. Pinning a Managed OS disk therefore preserves
+  `/workspace` (and the `.download-complete` marker) across an `az aks stop`/
+  `start` deallocate cycle. It does **not** survive a full node *replacement*
+  (new VMSS instance gets a fresh OS disk) — that is what `data_disk` (PVC) is
+  for. The UI copy reflects this distinction.
+- **Observability**: `provision_aks` now logs an INFO line when a cluster is
+  provisioned with a non-default `warm_cache_mode`, so the choice is visible in
+  App Insights. The default `ephemeral` path stays silent.
+- **Known limitation (fail-safe)**: the SPA resolves the selected cluster's RG by
+  *name* (`availableClusters.find(c => c.name === clusterName)`), the same pattern
+  the Observability / Cluster sections use. If two clusters in one subscription
+  share a name across different resource groups, the UI may resolve the wrong RG
+  and write the preference under that RG's key. This **fails safe**: `provision_aks`
+  reads the preference by the cluster's *real* `(sub, rg, name)`, so a
+  mis-keyed row is simply not found and the cluster provisions with the default
+  `ephemeral` behaviour — never the wrong mode on the wrong cluster. A shared
+  refactor to carry the RG in the dropdown value (across all five Settings
+  sections) is the durable fix and is tracked as a separate follow-up.
+

@@ -17,7 +17,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 
 from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import _safe_delay
@@ -37,8 +37,24 @@ def aks_provision(
 
     job_id = str(uuid.uuid4())
     region = body.get("region", "koreacentral")
-    cluster_name = body.get("cluster_name", "elb-cluster")
-    resource_group = body.get("resource_group", "")
+    cluster_name = str(body.get("cluster_name", "") or "").strip()
+    resource_group = str(body.get("resource_group", "") or "").strip()
+
+    # Never invent a cluster / resource-group name. A hardcoded fallback
+    # (historically ``elb-cluster``) silently provisions or operates on the
+    # wrong resource when the SPA omits the field, so require both explicitly
+    # and fail fast at the HTTP boundary instead.
+    if not (cluster_name and resource_group):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "missing_parameters",
+                "message": (
+                    "cluster_name and resource_group are required to "
+                    "provision an AKS cluster."
+                ),
+            },
+        )
 
     # Create the JobState row up front so:
     #   * `helpers.update_state` calls from the task body have something

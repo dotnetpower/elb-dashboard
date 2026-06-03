@@ -75,6 +75,8 @@ __all__ = [
     "k8s_ensure_job_manifests",
     "k8s_ensure_warmup_scripts_configmap",
     "k8s_get_deployment_env_value",
+    "k8s_get_deployments",
+    "k8s_get_jobs",
     "k8s_get_nodes",
     "k8s_get_pods",
     "k8s_get_service_ip",
@@ -254,7 +256,14 @@ def k8s_get_pods(
     cluster_name: str,
     namespace: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return non-succeeded pods via the Kubernetes API."""
+    """Return every pod (all phases, all namespaces) via the Kubernetes API.
+
+    The Azure portal's "Pods" view lists pods of every phase — Pending,
+    Running, Succeeded (Completed) and Failed — and lets the operator filter
+    by namespace client-side. We mirror that here by NOT applying a phase
+    field selector, so completed BLAST jobs and system pods are visible too.
+    `pod_ip` / `node_ip` are surfaced so the UI can show where a pod landed.
+    """
 
     session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
     try:
@@ -263,11 +272,7 @@ def k8s_get_pods(
             if not namespace
             else f"{server}/api/v1/namespaces/{namespace}/pods"
         )
-        response = session.get(
-            url,
-            params={"fieldSelector": "status.phase!=Succeeded"},
-            timeout=10,
-        )
+        response = session.get(url, timeout=10)
         response.raise_for_status()
         pods: list[dict[str, Any]] = []
         for item in response.json().get("items", []):
@@ -287,8 +292,120 @@ def k8s_get_pods(
                     "restarts": restarts,
                     "age": meta.get("creationTimestamp", ""),
                     "node": spec.get("nodeName", ""),
+                    "pod_ip": status.get("podIP", ""),
+                    "node_ip": status.get("hostIP", ""),
                 }
             )
         return pods
+    finally:
+        session.close()
+
+
+def k8s_get_deployments(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return every Deployment (all namespaces) via the apps/v1 API.
+
+    Mirrors the Azure portal "Deployments" workload view: each row carries
+    ``ready`` (readyReplicas/desired), ``up_to_date`` (updatedReplicas) and
+    ``available`` (availableReplicas) so the operator can spot a Deployment
+    that is scaled but not actually serving. No phase/label field selector —
+    system Deployments (CoreDNS, metrics-server, …) are intentionally
+    included to match the portal.
+    """
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        url = (
+            f"{server}/apis/apps/v1/deployments"
+            if not namespace
+            else f"{server}/apis/apps/v1/namespaces/{namespace}/deployments"
+        )
+        response = session.get(url, timeout=10)
+        response.raise_for_status()
+        deployments: list[dict[str, Any]] = []
+        for item in response.json().get("items", []):
+            meta = item.get("metadata", {})
+            spec = item.get("spec", {})
+            status = item.get("status", {})
+            desired = int(spec.get("replicas") or 0)
+            ready = int(status.get("readyReplicas") or 0)
+            deployments.append(
+                {
+                    "namespace": meta.get("namespace", ""),
+                    "name": meta.get("name", ""),
+                    "ready": f"{ready}/{desired}",
+                    "up_to_date": int(status.get("updatedReplicas") or 0),
+                    "available": int(status.get("availableReplicas") or 0),
+                    "age": meta.get("creationTimestamp", ""),
+                }
+            )
+        return deployments
+    finally:
+        session.close()
+
+
+def k8s_get_jobs(
+    credential: TokenCredential,
+    subscription_id: str,
+    resource_group: str,
+    cluster_name: str,
+    namespace: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return every Job (all namespaces) via the batch/v1 API.
+
+    Mirrors the Azure portal "Jobs" workload view — this is where finished
+    and in-flight ElasticBLAST search Jobs surface. Each row carries
+    ``completions`` (succeeded/desired), a derived ``status``
+    (``Complete`` / ``Failed`` / ``Running`` / ``Pending``) and raw
+    ``start_time`` / ``completion_time`` so the UI can render a duration
+    without a second round trip.
+    """
+
+    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    try:
+        url = (
+            f"{server}/apis/batch/v1/jobs"
+            if not namespace
+            else f"{server}/apis/batch/v1/namespaces/{namespace}/jobs"
+        )
+        response = session.get(url, timeout=10)
+        response.raise_for_status()
+        jobs: list[dict[str, Any]] = []
+        for item in response.json().get("items", []):
+            meta = item.get("metadata", {})
+            spec = item.get("spec", {})
+            status = item.get("status", {})
+            desired = int(spec.get("completions") or 1)
+            succeeded = int(status.get("succeeded") or 0)
+            failed = int(status.get("failed") or 0)
+            active = int(status.get("active") or 0)
+            conditions = status.get("conditions", []) or []
+            if any(c.get("type") == "Complete" and c.get("status") == "True" for c in conditions):
+                derived = "Complete"
+            elif any(c.get("type") == "Failed" and c.get("status") == "True" for c in conditions):
+                derived = "Failed"
+            elif active > 0:
+                derived = "Running"
+            else:
+                derived = "Pending"
+            jobs.append(
+                {
+                    "namespace": meta.get("namespace", ""),
+                    "name": meta.get("name", ""),
+                    "completions": f"{succeeded}/{desired}",
+                    "status": derived,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "age": meta.get("creationTimestamp", ""),
+                    "start_time": status.get("startTime", ""),
+                    "completion_time": status.get("completionTime", ""),
+                }
+            )
+        return jobs
     finally:
         session.close()

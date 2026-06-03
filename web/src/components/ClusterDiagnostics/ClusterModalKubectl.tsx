@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 
 import { monitoringApi } from "@/api/endpoints";
@@ -6,7 +6,7 @@ import type { K8sNodeMetrics } from "@/api/endpoints";
 
 import { CustomCommandPanel } from "./CustomCommandPanel";
 import { K8sNodesSection } from "./K8sNodesSection";
-import { K8sPodsSection } from "./K8sPodsSection";
+import { K8sWorkloadsSection } from "./K8sWorkloadsSection";
 import { NodeResourcesSection } from "./NodeResourcesSection";
 
 /**
@@ -16,8 +16,9 @@ import { NodeResourcesSection } from "./NodeResourcesSection";
  *
  * The `topQuery` for node metrics is passed in by the parent so the
  * existing dashboard polling loop can stay the source of truth — this
- * file just adds two more queries (nodes + pods) that should refresh on
- * demand from the modal's "Refresh All" button.
+ * file just adds the node query plus the Workloads card (Pods /
+ * Deployments / Jobs), which owns its own lazy queries. "Refresh All"
+ * refetches node-level data and invalidates the live Workloads tab.
  */
 export interface ClusterModalKubectlProps {
   subscriptionId: string;
@@ -39,16 +40,10 @@ export function ClusterModalKubectl({
   clusterName,
   topQuery,
 }: ClusterModalKubectlProps) {
+  const queryClient = useQueryClient();
   const nodesQuery = useQuery({
     queryKey: ["aks-nodes-fast", subscriptionId, resourceGroup, clusterName],
     queryFn: () => monitoringApi.k8sNodes(subscriptionId, resourceGroup, clusterName),
-    staleTime: 60_000,
-    retry: 1,
-  });
-
-  const podsQuery = useQuery({
-    queryKey: ["aks-pods-fast", subscriptionId, resourceGroup, clusterName],
-    queryFn: () => monitoringApi.k8sPods(subscriptionId, resourceGroup, clusterName),
     staleTime: 60_000,
     retry: 1,
   });
@@ -57,8 +52,7 @@ export function ClusterModalKubectl({
   // `isFetching` (not just `isLoading`) is what surfaces refresh activity —
   // refetch otherwise updates data silently and looks like "nothing happened"
   // when the numbers are steady.
-  const isRefreshing =
-    topQuery.isFetching || nodesQuery.isFetching || podsQuery.isFetching;
+  const isRefreshing = topQuery.isFetching || nodesQuery.isFetching;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -84,7 +78,9 @@ export function ClusterModalKubectl({
           onClick={() => {
             topQuery.refetch();
             nodesQuery.refetch();
-            podsQuery.refetch();
+            // The Workloads card owns its own lazy queries; invalidate the
+            // shared prefix so the currently-live tab refetches too.
+            queryClient.invalidateQueries({ queryKey: ["aks-workload"] });
           }}
           disabled={isRefreshing}
           style={{
@@ -108,8 +104,7 @@ export function ClusterModalKubectl({
 
       <NodeResourcesSection query={topQuery} />
       <K8sNodesSection query={nodesQuery} />
-      <K8sPodsSection
-        query={podsQuery}
+      <K8sWorkloadsSection
         subscriptionId={subscriptionId}
         resourceGroup={resourceGroup}
         clusterName={clusterName}
