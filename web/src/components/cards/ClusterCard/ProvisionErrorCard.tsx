@@ -15,7 +15,7 @@
  * stays available for debugging but does not visually dominate.
  */
 import { AlertCircle, BookOpen, Check, Copy, ExternalLink, RotateCcw, X } from "lucide-react";
-import { useState } from "react";
+import { useTransientState } from "../../../hooks/useTransientState";
 
 import { classifyArmError, type ArmErrorAction } from "./armErrorClassifier";
 
@@ -59,7 +59,7 @@ function actionIcon(kind: ArmErrorAction["kind"]) {
  *  cross-origin frames / older browsers); shows a transient "Copied!"
  *  label so the operator gets immediate feedback. */
 function CommandActionButton({ action }: { action: ArmErrorAction }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useTransientState(false);
   const onClick = async () => {
     try {
       if (navigator.clipboard?.writeText) {
@@ -75,8 +75,7 @@ function CommandActionButton({ action }: { action: ArmErrorAction }) {
         document.execCommand("copy");
         document.body.removeChild(textarea);
       }
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
+      flashCopied(true, 1500);
     } catch {
       // Clipboard refused (e.g. permissions policy). Leave the command in
       // the details/raw block where the operator can still hand-copy it.

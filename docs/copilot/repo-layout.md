@@ -23,8 +23,7 @@ Create directories on demand; do not scaffold empty folders speculatively.
 │   ├── services/                # Pure-Python wrappers (azure_clients, monitoring, state_repo, sanitise, image_tags, …)
 │   ├── tasks/                   # Celery task modules (BLAST submit/delete, ACR build, AKS provision, schedules)
 │   ├── tests/                   # pytest (FastAPI + Celery + shared service modules)
-│   ├── Dockerfile               # Image used by both `api` and `worker`/`beat` sidecars
-│   └── requirements.txt
+│   └── Dockerfile               # Image used by both `api` and `worker`/`beat` sidecars
 ├── web/                         # React + Vite + TypeScript SPA + Dockerfile + nginx.conf for the `frontend` sidecar
 │   ├── src/
 │   │   ├── components/          # Glassmorphic UI building blocks
@@ -48,6 +47,8 @@ Create directories on demand; do not scaffold empty folders speculatively.
 │   ├── research/                # Research notes that informed design decisions
 │   └── features_change/         # Per-change notes
 ├── tests/                       # Cross-cutting tests; per-component tests live next to their code
+├── pyproject.toml               # uv-managed Python deps (runtime + dev) — single source of truth, no requirements.txt
+├── uv.lock                      # Locked dependency versions (commit with pyproject.toml)
 ├── azure.yaml                   # azd manifest (Bicep provider + pre/postprovision hooks)
 └── README.md
 ```
@@ -56,7 +57,7 @@ Create directories on demand; do not scaffold empty folders speculatively.
 
 | Need to…                                  | Edit                                                |
 | ----------------------------------------- | --------------------------------------------------- |
-| Add a new monitoring card                 | `web/src/pages/Dashboard.tsx` + a new route in `api/routes/monitor.py` |
+| Add a new monitoring card                 | `web/src/pages/Dashboard.tsx` + a new route in `api/routes/monitor/<area>.py` |
 | Add a new HTTP route                      | `api/routes/<area>.py` + register in `api/main.py` |
 | Add a new long-running operation          | `api/tasks/<area>.py` (Celery task) + an enqueue endpoint in `api/routes/` |
 | Change tools installed in the terminal    | `terminal/Dockerfile` + `terminal/entrypoint.sh`    |

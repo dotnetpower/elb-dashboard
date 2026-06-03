@@ -9,7 +9,7 @@ tags:
 
 > **Purpose**: skip 7-8 grep/semantic_search calls. Read this first whenever
 > you need to know "which file owns X?" or "what does service Y do?".
-> Verified 2026-05-19 against `api/main.py` route registration order.
+> Verified 2026-06-03 against `api/main.py` route registration order.
 
 This is the *index*. For policy read [.github/copilot-instructions.md](../../.github/copilot-instructions.md);
 for navigation prose read [AGENTS.md](../../AGENTS.md).
@@ -18,14 +18,15 @@ for navigation prose read [AGENTS.md](../../AGENTS.md).
 
 ## 1. Backend route map (api/routes/)
 
-Registration order is enforced in [api/main.py](../../api/main.py#L403-L421).
+Registration order is enforced in [api/main.py](../../api/main.py#L340-L362).
 Anything new MUST be inserted **above** `frontend_proxy.router`.
 
 | Prefix | File | Verb / path | Notes |
 |--------|------|-------------|-------|
 | `/api/health` | [routes/health.py](../../api/routes/health.py) | GET `/health`, `/health/ready`, `/health/celery`, `/health/celery/result/{task_id}`, POST `/health/celery/enqueue-noop`, GET `/health/azure-discovery` | No auth. Celery diag — see "Celery shared_task trap" in repo memory. |
 | `/api/me` | [routes/me.py](../../api/routes/me.py) | GET `/me` | MSAL bearer required (or `AUTH_DEV_BYPASS=true`). |
-| `/api/monitor` | [routes/monitor/](../../api/routes/monitor/) | `/aks`, `/aks/nodes`, `/aks/pods`, `/aks/top-nodes`, `/aks/pod-logs`, `/aks/service-ip`, `/aks/warmup-status`, `/aks/events`, `/aks/run-command`, `/metrics`, `/sidecar-requests`, `/storage`, `/acr`, `/terminal`, `/cluster`, `/jobs`, `/jobs/{id}`, `/sidecars`, `/sidecars/ticket`, `/sidecars/events` | Read-only package. Common `_graceful` lives in [routes/monitor/common.py](../../api/routes/monitor/common.py) and is re-exported for ARM routes. |
+| `/api/monitor` | [routes/monitor/](../../api/routes/monitor/) | `/aks`, `/aks/nodes`, `/aks/pods`, `/aks/top-nodes`, `/aks/pod-logs`, `/aks/service-ip`, `/aks/warmup-status`, `/aks/events`, `/aks/run-command`, `/metrics`, `/sidecar-requests`, `/storage`, `/acr`, `/terminal`, `/cluster`, `/jobs`, `/jobs/{id}`, `/sidecars`, `/sidecars/ticket`, `/sidecars/events`, `/logs/{container}/events` | Read-only package. Common `_graceful` lives in [routes/monitor/common.py](../../api/routes/monitor/common.py) and is re-exported for ARM routes. |
+| `/api/ncbi` | [routes/ncbi.py](../../api/routes/ncbi.py) | GET `/nuccore/{accession}`, `/nuccore/{accession}/genbank`, `/nuccore/{accession}/fasta` | NCBI accession metadata + FASTA lookup. |
 | `/api/arm` | [routes/arm.py](../../api/routes/arm.py) | `/subscriptions`, `/subscriptions/{sid}/resource-groups`, `/resource-group/tags` (GET/POST), `…/storage-accounts`, `…/acrs`, `…/vms` | ARM proxy via shared MI. |
 | `/api/resources` | [routes/resources.py](../../api/routes/resources.py) | POST `/ensure-rg`, `/ensure-storage`, `/ensure-acr` | Synchronous wizard provisioning. |
 | `/api/storage` | [routes/storage/](../../api/routes/storage/) | POST `/prepare-db`, GET `/local-debug`, POST `/local-debug/open` | Storage package; `prepare_db.py` owns DB copy, `local_debug.py` owns the IP-allowlist toggle (see charter §9). |
@@ -33,11 +34,15 @@ Anything new MUST be inserted **above** `frontend_proxy.router`.
 | `/api/terminal` | [routes/terminal_ws.py](../../api/routes/terminal_ws.py) | POST `/ticket`, GET `/health`, `/azure-cli`, WS `/ws` | WebSocket → loopback ttyd. MSAL on handshake. |
 | `/api/terminal/{vm}/...` | [routes/terminal_legacy.py](../../api/routes/terminal_legacy.py) | `/provision`, `/status/{iid}`, `/{vm}/password`, `/start`, `/stop`, `/destroy` | **HTTP 410 by design** — VM model retired. |
 | `/api/tasks` | [routes/tasks.py](../../api/routes/tasks.py) | GET `/{task_id}` | Celery `AsyncResult` polling. |
+| `/api/operations` | [routes/operations.py](../../api/routes/operations.py) | GET `/{operation_id}` | Async operation status polling. |
 | `/api/aks` | [routes/aks/](../../api/routes/aks/) | `aks_router` package — SKUs, provisioning, OpenAPI deploy/spec/proxy, lifecycle, and role assignment. |
 | `/api/acr` | [routes/acr.py](../../api/routes/acr.py) | `acr_build_router` — ACR build dispatch. |
-| `/api/blast` | [routes/blast/](../../api/routes/blast/) | `blast_router` package — [jobs.py](../../api/routes/blast/jobs.py), [submit.py](../../api/routes/blast/submit.py), [databases.py](../../api/routes/blast/databases.py), [taxonomy.py](../../api/routes/blast/taxonomy.py), [schedules.py](../../api/routes/blast/schedules.py), [results.py](../../api/routes/blast/results.py). Uses [_blast_shared.py](../../api/routes/_blast_shared.py) for shared HTTP helpers. |
+| `/api/blast` | [routes/blast/](../../api/routes/blast/) | `blast_router` package — [jobs.py](../../api/routes/blast/jobs.py), [submit.py](../../api/routes/blast/submit.py), [databases.py](../../api/routes/blast/databases.py), [taxonomy.py](../../api/routes/blast/taxonomy.py), [schedules.py](../../api/routes/blast/schedules.py), [results.py](../../api/routes/blast/results.py), [capacity.py](../../api/routes/blast/capacity.py). Uses [_blast_shared.py](../../api/routes/_blast_shared.py) for shared HTTP helpers. |
 | `/api/warmup` | [routes/warmup.py](../../api/routes/warmup.py) | `warmup_router` — DB warmup planning + status. |
 | `/api/audit` | [routes/audit.py](../../api/routes/audit.py) | `audit_router` — append-blob audit log. |
+| `/api/client-log` | [routes/client_log.py](../../api/routes/client_log.py) | POST `` (204) | Browser client diagnostic logging. |
+| `/api/upgrade` | [routes/upgrade.py](../../api/routes/upgrade.py) | GET `/status`, `/candidates`, `/history`, `/escape-hatch`, `/rollback-preflight`, POST `/check`, `/start`, `/rollback` | In-app control-plane upgrade flow. |
+| `/api/settings` | [routes/settings/](../../api/routes/settings/) | `settings_router` package — `/app-insights/*`, `/aks-observability/*`, `/performance/*`, `/vnet-peering` + `/vnet-peering/apply-nsg-rule`. |
 | `/*` (catch-all) | [routes/frontend_proxy.py](../../api/routes/frontend_proxy.py) | reverse-proxy to `127.0.0.1:8081` | Must stay last. |
 
 > The monolithic `api/routes/stubs.py` (503-only) was split into the above per-domain routers in 2026-05-19. Old `from api.routes import stubs` imports are gone.

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useTransientState } from "../../hooks/useTransientState";
 import { Check, Copy } from "lucide-react";
 
 import type { StepState } from "./constants";
@@ -84,7 +84,7 @@ export function StepLogBlock({
   state: StepState;
   stepKey: string;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useTransientState(false);
 
   const delimIdx = log.indexOf("---");
   const hasSections = delimIdx > 0;
@@ -103,8 +103,7 @@ export function StepLogBlock({
 
   const copyLog = () => {
     navigator.clipboard.writeText(log).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    flashCopied(true);
   };
 
   return (

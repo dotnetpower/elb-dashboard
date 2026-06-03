@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTransientState } from "../../hooks/useTransientState";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -93,7 +94,7 @@ export function BlastJobHeader({
 }: BlastJobHeaderProps) {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [copiedId, setCopiedId] = useState(false);
+  const [copiedId, flashCopiedId] = useTransientState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
   const [loadingQuery, setLoadingQuery] = useState(false);
   const [copyingCitation, setCopyingCitation] = useState(false);
@@ -125,8 +126,7 @@ export function BlastJobHeader({
   const handleCopyId = async () => {
     try {
       await navigator.clipboard.writeText(jobId);
-      setCopiedId(true);
-      setTimeout(() => setCopiedId(false), 1500);
+      flashCopiedId(true, 1500);
     } catch {
       toast("Failed to copy search ID", "error");
     }

@@ -24,6 +24,7 @@ import {
 } from "./derived";
 import type { BlastHit } from "@/api/endpoints";
 import { useState } from "react";
+import { useTransientState } from "../../../hooks/useTransientState";
 
 // Reused by the pairwise renderer. NCBI's pairwise view colors bases by
 // chemistry; we keep our existing palette so existing screenshots/docs
@@ -276,13 +277,12 @@ function HitEvidence({ hit }: { hit: BlastHit }) {
  * (e.g. a tabular-only result file) so we never surface a broken action.
  */
 function AlignmentExportActions({ hit }: { hit: BlastHit }) {
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [feedback, flashFeedback] = useTransientState<string | null>(null);
   const hasSequences = Boolean(hit.qseq && hit.sseq);
   if (!hasSequences) return null;
 
   const showFeedback = (message: string) => {
-    setFeedback(message);
-    window.setTimeout(() => setFeedback(null), 2000);
+    flashFeedback(message);
   };
 
   const handleCopyAlignment = async () => {

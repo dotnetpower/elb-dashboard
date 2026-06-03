@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTransientState } from "../../hooks/useTransientState";
 import { ChevronDown, Copy, Link2, Loader2, Play, Zap } from "lucide-react";
 
 import { METHOD_META } from "@/pages/apiReference/constants";
@@ -31,7 +32,7 @@ export function EndpointCard({
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [bodyText, setBodyText] = useState("");
   const [selectedExample, setSelectedExample] = useState("");
-  const [copiedAnchor, setCopiedAnchor] = useState(false);
+  const [copiedAnchor, flashCopiedAnchor] = useTransientState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const { execute, response, loading, copyResponse, downloadResponse, copyCurl } =
     useOpenApiExecutor({
@@ -123,15 +124,14 @@ export function EndpointCard({
       window.history.replaceState(null, "", `${window.location.pathname}#${id}`);
       navigator.clipboard?.writeText(url).then(
         () => {
-          setCopiedAnchor(true);
-          setTimeout(() => setCopiedAnchor(false), 1500);
+          flashCopiedAnchor(true, 1500);
         },
         () => {
           /* clipboard denied — URL still updated */
         },
       );
     },
-    [id],
+    [flashCopiedAnchor, id],
   );
 
   return (

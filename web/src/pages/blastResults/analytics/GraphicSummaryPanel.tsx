@@ -160,12 +160,17 @@ function QueryRuler({
 }) {
   const qlen = Math.max(group.qlen, 1);
   // Sort hits high-score first so the strongest bars render at the top —
-  // matches NCBI's vertical ordering.
-  const sortedHits = [...group.hits].sort(
-    (a, b) => (numberValue(b.bitscore) ?? 0) - (numberValue(a.bitscore) ?? 0),
+  // matches NCBI's vertical ordering. Memoized so the copy of every hit array
+  // is not re-sorted on unrelated parent re-renders (hover/tooltip state).
+  const sortedHits = useMemo(
+    () =>
+      [...group.hits].sort(
+        (a, b) => (numberValue(b.bitscore) ?? 0) - (numberValue(a.bitscore) ?? 0),
+      ),
+    [group.hits],
   );
 
-  const tickPositions = computeTickPositions(qlen);
+  const tickPositions = useMemo(() => computeTickPositions(qlen), [qlen]);
 
   return (
     <div style={{ marginBottom: 18 }}>

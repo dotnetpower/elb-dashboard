@@ -3,8 +3,8 @@
 Responsibility: /api/blast job listing and lifecycle routes
 Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data-plane work into
 services or tasks.
-Key entry points: `_local_list_row_may_have_split_children`, `_blast_jobs_list_cache_key`,
-`_blast_jobs_list_cache_get`, `blast_jobs_list`, `blast_job_execution_steps`, `blast_job_get`
+Key entry points: `_local_list_row_may_have_split_children`, `blast_jobs_list`,
+`blast_job_execution_steps`, `blast_job_get`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
 Validation: `uv run pytest -q api/tests/test_blast_results_routes.py
@@ -13,11 +13,7 @@ api/tests/test_route_contracts.py`.
 
 from __future__ import annotations
 
-import json
 import logging
-import threading
-import time
-from collections import OrderedDict
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
@@ -44,23 +40,25 @@ from api.routes._blast_shared import (
     blast_shared_visibility_enabled,
 )
 from api.services.blast.job_state import _K8S_REFRESH_PHASES
+from api.services.blast.jobs_list_cache import (
+    jobs_list_cache_get,
+    jobs_list_cache_key,
+    jobs_list_cache_set,
+    reset_jobs_list_cache,
+)
 from api.services.response_contracts import build_meta, request_id_from_scope
 
 LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# The frontend polls ``/api/blast/jobs`` every ~14 s. A 10 s TTL keeps the
-# common case (single user staring at the Jobs page) as a cache hit while
-# tab-switching or page reloads still see fresh data within one cycle.
-_JOBS_LIST_CACHE_TTL_SECONDS = 10.0
-_JOBS_LIST_CACHE_MAX_ENTRIES = 128
-# Store the serialized JSON bytes so cache get/set never deepcopies. JSON
-# round-trip gives callers a fresh mutable dict (same isolation as a deep
-# copy) without ``copy.deepcopy``'s O(N) traversal of nested lists. The
-# OrderedDict supports O(1) LRU eviction via ``popitem(last=False)``.
-_JOBS_LIST_CACHE: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
-_JOBS_LIST_CACHE_LOCK = threading.Lock()
+# Backward-compatible aliases. The jobs-list response cache infrastructure now
+# lives in ``api.services.blast.jobs_list_cache``; these names keep existing
+# call sites (and ``conftest``'s ``_reset_blast_jobs_list_cache`` import) working.
+_blast_jobs_list_cache_key = jobs_list_cache_key
+_blast_jobs_list_cache_get = jobs_list_cache_get
+_blast_jobs_list_cache_set = jobs_list_cache_set
+_reset_blast_jobs_list_cache = reset_jobs_list_cache
 
 _EXTERNAL_LIST_DETAIL_STATUSES = frozenset(
     {
@@ -93,64 +91,6 @@ def _local_list_row_may_have_split_children(row: Any) -> bool:
     phase = str(getattr(row, "phase", "") or "").strip().casefold()
     status = str(getattr(row, "status", "") or "").strip().casefold()
     return phase in _LOCAL_SPLIT_PARENT_PHASES or status in _LOCAL_SPLIT_PARENT_PHASES
-
-
-def _blast_jobs_list_cache_key(
-    *,
-    caller_oid: str,
-    limit: int,
-    subscription_id: str,
-    resource_group: str,
-    cluster_name: str,
-    shared_visibility: bool,
-) -> str:
-    return json.dumps(
-        {
-            "caller_oid": caller_oid,
-            "limit": limit,
-            "subscription_id": subscription_id,
-            "resource_group": resource_group,
-            "cluster_name": cluster_name,
-            "shared_visibility": shared_visibility,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _blast_jobs_list_cache_get(key: str) -> dict[str, Any] | None:
-    now = time.monotonic()
-    with _JOBS_LIST_CACHE_LOCK:
-        entry = _JOBS_LIST_CACHE.get(key)
-        if entry is None:
-            return None
-        expires_at, payload_bytes = entry
-        if expires_at <= now:
-            _JOBS_LIST_CACHE.pop(key, None)
-            return None
-        # Touch for LRU semantics so frequently-read entries stay warm.
-        _JOBS_LIST_CACHE.move_to_end(key)
-    # json.loads outside the lock — deserialization is the only per-call
-    # cost and we don't want it blocking other readers.
-    decoded = json.loads(payload_bytes)
-    return decoded if isinstance(decoded, dict) else None
-
-
-def _blast_jobs_list_cache_set(key: str, response: dict[str, Any]) -> None:
-    payload_bytes = json.dumps(response, separators=(",", ":")).encode("utf-8")
-    expires_at = time.monotonic() + _JOBS_LIST_CACHE_TTL_SECONDS
-    with _JOBS_LIST_CACHE_LOCK:
-        # Replacing an existing key needs explicit pop so move_to_end-on-set
-        # semantics don't collide with the LRU bookkeeping.
-        _JOBS_LIST_CACHE.pop(key, None)
-        _JOBS_LIST_CACHE[key] = (expires_at, payload_bytes)
-        while len(_JOBS_LIST_CACHE) > _JOBS_LIST_CACHE_MAX_ENTRIES:
-            _JOBS_LIST_CACHE.popitem(last=False)
-
-
-def _reset_blast_jobs_list_cache() -> None:
-    with _JOBS_LIST_CACHE_LOCK:
-        _JOBS_LIST_CACHE.clear()
 
 
 def _external_list_row_needs_detail(row: dict[str, Any]) -> bool:

@@ -2797,6 +2797,47 @@ textarea.form-input {
   background: transparent;
   color: var(--text-muted);
 }
+
+/* ── BLAST Databases modal: molecule-type filter (program-oriented) ── */
+.db-filter-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-weak);
+}
+.db-filter-tab {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.15s ease-out,
+    color 0.15s ease-out;
+}
+.db-filter-tab:hover {
+  color: var(--text-primary);
+}
+.db-filter-tab--active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.db-filter-tab__programs {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+}
+
 .blast-program-tab__name {
   display: block;
   font-size: 13px;

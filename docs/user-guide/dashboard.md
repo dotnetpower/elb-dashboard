@@ -32,7 +32,7 @@ The hero header drives every card below it.
     - resource groups tagged with `elb-*` are listed first;
     - AKS-managed node resource groups are **disabled** (you should not deploy into them);
     - resource groups with no `elb-*` tag are listed as `no elb-* tag` and disabled until you add the tags via the Setup Wizard.
-- **Auto refresh chip** — `Live (5 s)` / `Slow (30 s)` / `Manual`. Live uses the SSE channel under `/api/monitor/*/events`; Slow uses a 30 s poll; Manual stops automatic refresh until you reload.
+- **Auto refresh chip** — `Live (5 s)` / `Slow (30 s)` / `Manual`. Live uses the SSE channels under `/api/monitor/sidecars/events` (and `/api/monitor/logs/{container}/events` for sidecar logs); Slow uses a 30 s poll; Manual stops automatic refresh until you reload.
 - **Getting Started** (reopen icon) — re-opens the checklist panel if you dismissed it.
 - **Settings** (gear icon) — opens the side panel with the current resource configuration, a "Re-run setup wizard" action, and runtime feature flags.
 

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -34,6 +35,17 @@ export function StorageLockedPanel({
 }: StorageLockedPanelProps) {
   const { toast } = useToast();
   const resultsUrl = `https://${storageAccount}.blob.core.windows.net/results/${jobId}`;
+  // Hold the post-unlock handoff timer so it can be cancelled if the panel
+  // unmounts within the 8s window (avoids calling onUnlocked after unmount).
+  const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (unlockTimerRef.current !== null) {
+        clearTimeout(unlockTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const enableMutation = useMutation({
     mutationFn: () =>
@@ -48,7 +60,10 @@ export function StorageLockedPanel({
       ),
     onSuccess: () => {
       toast("Storage unlocked. Loading results...", "success");
-      setTimeout(onUnlocked, 8000);
+      if (unlockTimerRef.current !== null) {
+        clearTimeout(unlockTimerRef.current);
+      }
+      unlockTimerRef.current = setTimeout(onUnlocked, 8000);
     },
     onError: (e) => toast(`Failed to enable storage: ${(e as Error).message}`, "error"),
   });

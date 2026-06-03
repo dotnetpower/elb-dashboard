@@ -292,6 +292,15 @@ export function BlastDbRow({
           >
             {db.type === "nucl" ? "N" : "P"}
           </span>
+          {db.recommended && !isDownloaded && (
+            <span
+              className="gt gt-g"
+              style={{ fontSize: 9, padding: "1px 6px", flexShrink: 0 }}
+              title="Recommended starter database for this molecule type"
+            >
+              Recommended
+            </span>
+          )}
           <span
             style={{ fontSize: 11, color: "var(--text-muted)", flexShrink: 0 }}
           >

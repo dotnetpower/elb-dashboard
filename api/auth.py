@@ -30,6 +30,14 @@ _JWKS_CACHE_MAX_TENANTS = max(1, int(os.environ.get("AUTH_JWKS_CACHE_MAX_TENANTS
 # Single-flight coordination for the JWKS fetch — see `_get_jwks_client`.
 _JWKS_INFLIGHT: dict[str, threading.Event] = {}
 _JWKS_INFLIGHT_LOCK = threading.Lock()
+# Guards the eviction+write of ``_JWKS_CACHE``. Single-flight only serialises
+# leaders for the *same* tenant; leaders for *different* tenants run
+# concurrently and both reach the eviction ``min(...)`` below. Without this
+# lock one leader iterating the dict while another inserts raises
+# ``RuntimeError: dictionary changed size during iteration`` — a 500 on the
+# auth path. The critical section is pure in-memory bookkeeping (the slow
+# OIDC/JWKS fetch stays outside it), so the lock is held only briefly.
+_JWKS_CACHE_LOCK = threading.Lock()
 
 # Validated CallerIdentity cache. Key = sha256(token); value = (expires_at, identity).
 # Bounded soft cap to prevent unbounded growth if many distinct tokens hit the
@@ -156,9 +164,13 @@ def _get_jwks_client(tenant_id: str) -> PyJWKClient:
         oidc = client.get(_discovery_url(tenant_id)).raise_for_status().json()
         jwks_uri = oidc["jwks_uri"]
         new_client = PyJWKClient(jwks_uri, cache_keys=True, lifespan=_JWKS_TTL_SECONDS)
-        if len(_JWKS_CACHE) >= _JWKS_CACHE_MAX_TENANTS:
-            _JWKS_CACHE.pop(next(iter(_JWKS_CACHE)), None)
-        _JWKS_CACHE[tenant_id] = (now + _JWKS_TTL_SECONDS, new_client)
+        with _JWKS_CACHE_LOCK:
+            if tenant_id not in _JWKS_CACHE and len(_JWKS_CACHE) >= _JWKS_CACHE_MAX_TENANTS:
+                # Evict the entry closest to expiry rather than FIFO, so a still-valid
+                # tenant is not dropped while a soon-to-expire one survives.
+                soonest = min(_JWKS_CACHE, key=lambda t: _JWKS_CACHE[t][0])
+                _JWKS_CACHE.pop(soonest, None)
+            _JWKS_CACHE[tenant_id] = (now + _JWKS_TTL_SECONDS, new_client)
         return new_client
     finally:
         with _JWKS_INFLIGHT_LOCK:

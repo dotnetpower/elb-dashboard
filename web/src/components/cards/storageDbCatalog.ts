@@ -32,7 +32,23 @@ export interface BlastDbCatalogItem {
   type: "nucl" | "prot";
   /** When set, this DB is not consumable by elastic-blast — see type doc. */
   unsupported?: BlastDbUnsupported;
+  /**
+   * Representative starter database for its molecule type — the one most
+   * researchers should `Get` first (curated, broadly useful, and actually
+   * pullable via the server-side S3 copy). Surfaced with a "Recommended"
+   * badge so the catalog points at the best get path instead of leaving the
+   * user to guess among the long tail.
+   */
+  recommended?: boolean;
 }
+
+/** Molecule type → the BLAST programs that search against it. */
+export const MOLECULE_PROGRAMS: Record<"nucl" | "prot", readonly string[]> = {
+  nucl: ["blastn", "tblastn", "tblastx"],
+  prot: ["blastp", "blastx"],
+};
+
+export type MoleculeFilter = "all" | "nucl" | "prot";
 
 export const DB_CATALOG: BlastDbCatalogItem[] = [
   {
@@ -84,6 +100,7 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~3 min",
     category: "Medium",
     type: "prot",
+    recommended: true,
   },
   {
     value: "core_nt",
@@ -94,6 +111,7 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     estMinutes: "~2-4 hours",
     category: "Large",
     type: "nucl",
+    recommended: true,
   },
   {
     value: "nt",
@@ -342,6 +360,37 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     type: "nucl",
   },
 ];
+
+/**
+ * Filter the catalog for the modal: by molecule type (program-oriented) and,
+ * unless `showUnavailable`, hiding databases NCBI does not publish as a
+ * pullable BLAST DB so the list only shows what the user can actually `Get`.
+ */
+export function filterDbCatalog(
+  catalog: BlastDbCatalogItem[],
+  moleculeFilter: MoleculeFilter,
+  showUnavailable: boolean,
+): BlastDbCatalogItem[] {
+  return catalog.filter(
+    (item) =>
+      (moleculeFilter === "all" || item.type === moleculeFilter) &&
+      (showUnavailable || !item.unsupported),
+  );
+}
+
+/**
+ * Count the databases hidden by the `showUnavailable=false` default for the
+ * current molecule filter, so the modal can label the reveal toggle honestly.
+ */
+export function countUnavailableDbs(
+  catalog: BlastDbCatalogItem[],
+  moleculeFilter: MoleculeFilter,
+): number {
+  return catalog.filter(
+    (item) =>
+      (moleculeFilter === "all" || item.type === moleculeFilter) && item.unsupported,
+  ).length;
+}
 
 export function formatNcbiVersion(v: string | null | undefined): string {
   if (!v) return "";

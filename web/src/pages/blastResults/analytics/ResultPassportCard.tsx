@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useTransientState } from "../../../hooks/useTransientState";
 import { BadgeCheck, Copy, FileText } from "lucide-react";
 
 import type { BlastJobSummary } from "@/api/endpoints";
@@ -27,7 +27,7 @@ const PARITY_COLOR: Record<ParityState, string> = {
  * search space, and an auto-generated, copy-pasteable Methods sentence.
  */
 export function ResultPassportCard({ job }: ResultPassportCardProps) {
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useTransientState(false);
   const verdict = parityVerdict(job);
   const pin = searchSpacePin(job);
   const methods = buildMethodsText(job);
@@ -36,10 +36,9 @@ export function ResultPassportCard({ job }: ResultPassportCardProps) {
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(methods);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      flashCopied(true);
     } catch {
-      setCopied(false);
+      // copy refused (no clipboard/permission) — leave the flag unset
     }
   };
 

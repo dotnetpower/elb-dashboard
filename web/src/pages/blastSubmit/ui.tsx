@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useTransientState } from "../../hooks/useTransientState";
 import { Check, Copy, HelpCircle, Terminal } from "lucide-react";
 
 import { buildCommandString, type FormState, PROGRAMS } from "@/pages/blastSubmitModel";
@@ -122,15 +122,14 @@ export function BlastCommandPreview({
   effectiveSearchSpace?: number;
   toast: ToastFn;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useTransientState(false);
   const cmd = buildCommandString(form, programMeta, { effectiveSearchSpace });
   const previewCommand = formatCommandPreview(cmd);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(cmd).then(() => {
-      setCopied(true);
+      flashCopied(true);
       toast("Command copied to clipboard", "info");
-      setTimeout(() => setCopied(false), 2000);
     });
   };
 

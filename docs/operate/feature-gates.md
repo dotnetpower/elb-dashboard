@@ -36,8 +36,21 @@ run, then flip the default in a separate PR.
 | `STRICT_JWT` | off | Lowers the claims cache TTL from 300 s to 60 s and pins the token `azp`/audience on every validation. | [api/auth.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/auth.py) |
 | `STRICT_CORS` | off | Locks the CORS allow-list to same-origin; `STRICT_CORS_ALLOW_METHODS` / `STRICT_CORS_ALLOW_HEADERS` (comma-separated) override the defaults for custom flows. | [api/main.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/main.py) |
 | `STRICT_EXEC_RATE_LIMIT` | off | Enables a per-window rate limit on the loopback exec server in the `terminal` sidecar. Setting it back to `false` re-opens the gate immediately. | [terminal/exec_server.py](https://github.com/dotnetpower/elb-dashboard/blob/main/terminal/exec_server.py) |
+| `STRICT_CSP` | off | Emits a strict `Content-Security-Policy` response header on API + proxied SPA responses (kept in sync with `web/nginx.conf`). `STRICT_CSP_POLICY` overrides the default policy string. | [api/app/security_headers.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/app/security_headers.py) |
+| `STRICT_READINESS_DETAIL` | off | Collapses the `/api/health/ready` body to the overall status only (drops the per-component `components` map that leaks internal topology to an anonymous recon probe). Default OFF preserves the full-detail body the cli-upgrade Tier-1 gate reads. | [api/routes/health.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/routes/health.py) |
+| `STRICT_SSE_TICKET_BINDING` | off | Binds the one-shot SSE ticket to the caller object id, client IP, and User-Agent hash, and rejects consumption when any differs (audit P0 #2 #3). | [api/routes/monitor/sidecars.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/routes/monitor/sidecars.py), [api/routes/monitor/logs.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/routes/monitor/logs.py) |
+| `STRICT_AUDIT_HASH` | off | Redacts PII out of `jobhistory.payload_json` by hashing matched fields before the append-blob audit write (audit P2 #13 #14). | [api/services/state/repository.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/services/state/repository.py) |
 | `ENFORCE_OPENAPI_EXEC_RBAC` | off (`false` in Bicep) | Requires the caller to hold an [Azure RBAC](https://learn.microsoft.com/azure/role-based-access-control/overview) write role on the target resource group before a state-changing OpenAPI proxy call is forwarded under the admin token. See [OpenAPI execution RBAC gate](openapi-exec-rbac-gate.md). | [api/services/openapi/exec_gate.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/services/openapi/exec_gate.py) |
 | `STRICT_RBAC_REMOVAL_HALT` | off (warn-only) | Makes the azd preprovision RBAC-removal preflight **halt** `azd provision` when a `Microsoft.Authorization/roleAssignments` resource would be deleted, unless `ACCEPT_RBAC_REMOVAL` is set for the run. See [charter §12a Rule 7](https://github.com/dotnetpower/elb-dashboard/blob/main/.github/copilot-instructions.md). | [scripts/dev/check_rbac_removal.py](https://github.com/dotnetpower/elb-dashboard/blob/main/scripts/dev/check_rbac_removal.py) |
+
+## Feature flags (behaviour switches, not hardening)
+
+These select between two supported behaviours rather than tightening a safety
+check. They do not follow the §12a Rule 4 hardening lifecycle.
+
+| Gate | Default | Effect when `=true` | Read by |
+| --- | --- | --- | --- |
+| `BLAST_GATE_ENABLED` | off (legacy direct-submit path) | Routes BLAST submit through the AKS capacity gate instead of submitting directly. The `/api/blast/capacity` preview endpoint reports the would-have-been decision even when the gate is off. | [api/routes/blast/capacity.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/routes/blast/capacity.py), [api/tasks/blast/submit_task.py](https://github.com/dotnetpower/elb-dashboard/blob/main/api/tasks/blast/submit_task.py) |
 
 ## Escape hatches (use only for the specific named situation)
 

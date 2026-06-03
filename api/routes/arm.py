@@ -13,7 +13,6 @@ Validation: `uv run pytest -q api/tests/test_route_contracts.py`.
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -21,6 +20,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from api.auth import CallerIdentity, require_caller
 from api.routes.monitor import _graceful  # reuse degraded-response helper
 from api.services import get_credential
+from api.services.arm_discovery_cache import cached_discovery, store_discovery
+from api.services.arm_tag_rules import (
+    TAG_MAX_PER_REQUEST,
+    validate_tag_name,
+    validate_tag_value,
+)
 from api.services.azure_clients import (
     acr_client,
     compute_client,
@@ -34,73 +39,13 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/arm", tags=["arm"])
 
 ELB_TAG_PREFIX = "elb-"
-_DISCOVERY_CACHE_TTL_SECONDS = 60.0
-_DISCOVERY_CACHE: dict[tuple[str, str, str], tuple[float, list[dict[str, Any]]]] = {}
-
-
-def _cached_discovery(kind: str, subscription_id: str, rg: str) -> list[dict[str, Any]] | None:
-    cached = _DISCOVERY_CACHE.get((kind, subscription_id, rg))
-    if cached is None:
-        return None
-    expires_at, value = cached
-    if expires_at <= time.monotonic():
-        _DISCOVERY_CACHE.pop((kind, subscription_id, rg), None)
-        return None
-    return [dict(item) for item in value]
-
-
-def _store_discovery(
-    kind: str, subscription_id: str, rg: str, value: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    _DISCOVERY_CACHE[(kind, subscription_id, rg)] = (
-        time.monotonic() + _DISCOVERY_CACHE_TTL_SECONDS,
-        [dict(item) for item in value],
-    )
-    return value
-
-# Azure ARM tag limits (Microsoft Learn):
-# - Tag name: 1..512 characters; cannot contain ``<>%&\?/``
-# - Tag value: 0..256 characters
-# - Tags per resource: max 50
-# Validate at the api boundary so a malformed POST cannot turn into an
-# Azure SDK exception that leaks request ids / server messages into the
-# response body. The ELB_TAG_PREFIX check above limits *which* tag names
-# the dashboard can write, but does not limit *length* or *content*.
-_TAG_NAME_MAX_LEN = 512
-_TAG_VALUE_MAX_LEN = 256
-_TAG_MAX_PER_REQUEST = 50
-_TAG_NAME_FORBIDDEN_CHARS = set("<>%&\\?/")
-
-
-def _validate_tag_name(key: str) -> None:
-    if not key:
-        raise HTTPException(400, "tag name must not be empty")
-    if len(key) > _TAG_NAME_MAX_LEN:
-        raise HTTPException(
-            400, f"tag name exceeds {_TAG_NAME_MAX_LEN} characters: {key[:40]}..."
-        )
-    bad = _TAG_NAME_FORBIDDEN_CHARS.intersection(key)
-    if bad:
-        raise HTTPException(
-            400,
-            f"tag name {key!r} contains characters Azure rejects: {sorted(bad)}",
-        )
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in key):
-        raise HTTPException(400, f"tag name {key!r} contains control characters")
-
-
-def _validate_tag_value(key: str, value: str) -> None:
-    if value is None:
-        return
-    if not isinstance(value, str):
-        raise HTTPException(400, f"tag value for {key!r} must be a string")
-    if len(value) > _TAG_VALUE_MAX_LEN:
-        raise HTTPException(
-            400,
-            f"tag value for {key!r} exceeds {_TAG_VALUE_MAX_LEN} characters",
-        )
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-        raise HTTPException(400, f"tag value for {key!r} contains control characters")
+# Discovery caching and tag validation now live in focused service modules
+# (`api.services.arm_discovery_cache`, `api.services.arm_tag_rules`); this route
+# module keeps only HTTP/auth/response shaping. `_cached_discovery` /
+# `_store_discovery` are kept as private aliases so the call sites below stay
+# unchanged and any external importer keeps working.
+_cached_discovery = cached_discovery
+_store_discovery = store_discovery
 
 
 @router.get("/subscriptions")
@@ -239,16 +184,16 @@ def set_rg_tags(
         raise HTTPException(400, "subscription_id, resource_group, tags required")
     if not isinstance(new_tags, dict):
         raise HTTPException(400, "tags must be an object")
-    if len(new_tags) > _TAG_MAX_PER_REQUEST:
+    if len(new_tags) > TAG_MAX_PER_REQUEST:
         raise HTTPException(
             400,
-            f"too many tags in one request ({len(new_tags)} > {_TAG_MAX_PER_REQUEST})",
+            f"too many tags in one request ({len(new_tags)} > {TAG_MAX_PER_REQUEST})",
         )
     for k, v in new_tags.items():
         if not k.startswith(ELB_TAG_PREFIX):
             raise HTTPException(400, f"tag key must start with '{ELB_TAG_PREFIX}': {k}")
-        _validate_tag_name(k)
-        _validate_tag_value(k, v)
+        validate_tag_name(k)
+        validate_tag_value(k, v)
     cred = get_credential()
     try:
         rc = resource_client(cred, sub)

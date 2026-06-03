@@ -15,9 +15,6 @@ _CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 _DETAIL_CACHE_LOCK = threading.Lock()
 _DETAIL_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
 
-_SIBLINGS_CACHE_LOCK = threading.Lock()
-_SIBLINGS_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
-
 
 def clear_taxonomy_cache() -> None:
     with _CACHE_LOCK:

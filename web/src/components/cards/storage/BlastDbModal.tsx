@@ -7,6 +7,10 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StorageDownloadResultBanner } from "@/components/cards/StorageDownloadResultBanner";
 import {
   DB_CATALOG,
+  MOLECULE_PROGRAMS,
+  type MoleculeFilter,
+  countUnavailableDbs,
+  filterDbCatalog,
   formatBytes,
   formatNcbiVersion,
 } from "@/components/cards/storageDbCatalog";
@@ -114,6 +118,11 @@ export function BlastDbModal({
   const [autoWarmupDbs, setAutoWarmupDbs] = useState<Set<string>>(() =>
     readAutoWarmupDbs(),
   );
+  // Program-oriented filter: blastn/tblastn/tblastx need a nucleotide DB,
+  // blastp/blastx need a protein DB. `showUnavailable` is off by default so the
+  // list only shows databases the server-side S3 copy can actually `Get`.
+  const [moleculeFilter, setMoleculeFilter] = useState<MoleculeFilter>("all");
+  const [showUnavailable, setShowUnavailable] = useState(false);
   const { toast } = useToast();
 
   // ESC key closes
@@ -229,6 +238,11 @@ export function BlastDbModal({
     ?.degraded;
   const degradedMsg = (dbQuery.data as { message?: string } | undefined)?.message;
 
+  const visibleDbCount = useMemo(
+    () => filterDbCatalog(DB_CATALOG, moleculeFilter, showUnavailable).length,
+    [moleculeFilter, showUnavailable],
+  );
+
   return createPortal(
     <div
       className="glass-dialog-backdrop"
@@ -337,6 +351,74 @@ export function BlastDbModal({
           </span>
         </div>
 
+        {/* Program-oriented molecule filter + unavailable toggle. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: "var(--space-3)",
+            flexWrap: "wrap",
+          }}
+        >
+          <div className="db-filter-tabs" role="tablist" aria-label="Filter databases by molecule type">
+            {(
+              [
+                { key: "all", label: "All" },
+                { key: "nucl", label: "Nucleotide" },
+                { key: "prot", label: "Protein" },
+              ] as const
+            ).map((tab) => {
+              const active = moleculeFilter === tab.key;
+              const programs =
+                tab.key === "all" ? null : MOLECULE_PROGRAMS[tab.key].join(" · ");
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  className={`db-filter-tab${active ? " db-filter-tab--active" : ""}`}
+                  onClick={() => setMoleculeFilter(tab.key)}
+                  title={
+                    programs ? `Databases for ${programs}` : "Show every database"
+                  }
+                >
+                  {tab.label}
+                  {programs && (
+                    <span className="db-filter-tab__programs">{programs}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          {(() => {
+            const hiddenCount = countUnavailableDbs(DB_CATALOG, moleculeFilter);
+            if (hiddenCount === 0) return null;
+            return (
+              <label
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontSize: 11,
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  marginLeft: "auto",
+                }}
+                title="Show databases NCBI does not publish as a pullable BLAST DB (v4-only, no prebuilt, or too large)"
+              >
+                <input
+                  type="checkbox"
+                  checked={showUnavailable}
+                  onChange={(e) => setShowUnavailable(e.target.checked)}
+                />
+                Show unavailable ({hiddenCount})
+              </label>
+            );
+          })()}
+        </div>
+
         {downloadResult && (
           <StorageDownloadResultBanner
             result={downloadResult}
@@ -436,8 +518,22 @@ export function BlastDbModal({
 
         <div style={{ overflowY: "auto", flex: 1, paddingRight: 4 }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {visibleDbCount === 0 && (
+              <div
+                className="muted"
+                style={{ fontSize: 12, padding: "16px 4px", textAlign: "center" }}
+              >
+                No databases match this filter. Enable “Show unavailable” to see
+                databases NCBI does not publish as a pullable BLAST DB.
+              </div>
+            )}
             {CATEGORIES.map((cat) => {
-              const dbs = DB_CATALOG.filter((d) => d.category === cat);
+              const dbs = filterDbCatalog(
+                DB_CATALOG.filter((d) => d.category === cat),
+                moleculeFilter,
+                showUnavailable,
+              );
+              if (dbs.length === 0) return null;
               const downloadedInCat = dbs.filter((d) =>
                 isDbReady(downloadedDbs.get(d.value)),
               ).length;

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useTransientState } from "../../hooks/useTransientState";
 import { Check, CircleDot, Clock, Copy, Download } from "lucide-react";
 
 import { JsonHighlight } from "@/pages/apiReference/JsonHighlight";
@@ -13,14 +13,13 @@ export function ResponseViewer({
   onCopy: () => void;
   onDownload?: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useTransientState(false);
   const isOk = response.status >= 200 && response.status < 300;
   const borderColor = isOk ? "rgba(115,191,105,0.25)" : "rgba(242,114,111,0.25)";
 
   const doCopy = () => {
     onCopy();
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    flashCopied(true);
   };
 
   return (

@@ -1,4 +1,5 @@
 import { useMemo, useState, type CSSProperties } from "react";
+import { useTransientState } from "../../hooks/useTransientState";
 import { Link, useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -1145,12 +1146,11 @@ function CopyButton({
   label: string;
   title?: string;
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useTransientState(false);
   const onCopy = () => {
     if (!navigator.clipboard?.writeText) return;
     void navigator.clipboard.writeText(value).then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
+      flashCopied(true, 1500);
     });
   };
   return (
