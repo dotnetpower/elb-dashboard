@@ -202,11 +202,13 @@ function UrlChip({
         minWidth: 0,
       }}
     >
-      <span style={{ color: accent, display: "inline-flex" }}>{icon}</span>
+      <span style={{ color: accent, display: "inline-flex", flexShrink: 0 }}>{icon}</span>
       <span
         style={{
           color: tone === "success" ? "var(--text-primary)" : "var(--text-faint)",
           fontWeight: tone === "success" ? 600 : 500,
+          whiteSpace: "nowrap",
+          flexShrink: 0,
         }}
       >
         {label}
@@ -222,7 +224,7 @@ function UrlChip({
       >
         {value}
       </span>
-      <span style={{ color: copied ? "var(--success)" : "var(--text-faint)", display: "inline-flex" }}>
+      <span style={{ color: copied ? "var(--success)" : "var(--text-faint)", display: "inline-flex", flexShrink: 0 }}>
         {copied ? <Check size={11} /> : <Copy size={11} />}
       </span>
     </button>

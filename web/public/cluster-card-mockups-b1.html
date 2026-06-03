@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cluster Card — B1 (stat tiles)</title>
+    <style>
+      :root {
+        --bg-canvas: #111217;
+        --bg-primary: #181b1f;
+        --bg-secondary: #1e2228;
+        --bg-tertiary: #242830;
+        --bg-hover: #282d36;
+        --border-weak: rgba(255, 255, 255, 0.06);
+        --border-medium: rgba(255, 255, 255, 0.1);
+
+        --text-primary: #e4e7ec;
+        --text-muted: #9da5b4;
+        --text-faint: #8a8f9e;
+
+        --accent: #6e9fff;
+        --success: #73bf69;
+        --warning: #f2994a;
+        --danger: #f2726f;
+        --purple: #b877d9;
+        --teal: #5ccab4;
+
+        --radius: 8px;
+        --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: var(--bg-canvas); color: var(--text-primary);
+        font-family: var(--font-sans); font-size: 14px; line-height: 1.45;
+        padding: 32px 24px 100px;
+      }
+      .page-head { max-width: 1080px; margin: 0 auto 8px; }
+      .page-head h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+      .page-head p { margin: 0; color: var(--text-muted); font-size: 13px; }
+
+      .variant-wrap { max-width: 1080px; margin: 0 auto; padding: 28px 0 0; }
+
+      .plane-label {
+        display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700;
+        letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 10px;
+      }
+      .plane-label .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
+
+      .card {
+        background: var(--bg-primary); border: 1px solid var(--border-weak); border-radius: var(--radius);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.15); overflow: hidden;
+      }
+      .mono { font-variant-numeric: tabular-nums; }
+      .muted { color: var(--text-muted); }
+      .faint { color: var(--text-faint); }
+
+      .btn {
+        display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500;
+        border-radius: 6px; padding: 5px 11px; cursor: pointer; border: 1px solid var(--border-medium);
+        background: var(--bg-tertiary); color: var(--text-primary);
+      }
+      .btn-accent { border-color: color-mix(in srgb, var(--accent) 50%, transparent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+      .btn-danger { border-color: color-mix(in srgb, var(--danger) 45%, transparent); color: var(--danger); background: transparent; }
+      .btn-ghost { background: transparent; }
+      .btn-xs { font-size: 11px; padding: 3px 8px; }
+
+      .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; border-radius: 999px; padding: 2px 9px; }
+      .pill .led { width: 7px; height: 7px; border-radius: 50%; }
+      .pill-completed { color: var(--success); background: color-mix(in srgb, var(--success) 13%, transparent); }
+      .ctag { font-size: 10.5px; font-weight: 600; color: var(--text-faint); background: rgba(255,255,255,0.05); border-radius: 4px; padding: 1px 7px; }
+
+      /* card header */
+      .ch { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border-weak); }
+      .ch .t { font-size: 13px; font-weight: 600; }
+      .ch .s { font-size: 11.5px; color: var(--text-faint); }
+      .ch__sum { margin-left: auto; display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--text-muted); }
+      .ch__sum b { color: var(--text-primary); }
+
+      /* ---- collapsible stopped cluster strip ----
+         Start button is hidden by default and only revealed when expanded. */
+      .stopgroup { border-bottom: 1px solid var(--border-weak); }
+      .stopgroup > summary { list-style: none; cursor: pointer; }
+      .stopgroup > summary::-webkit-details-marker { display: none; }
+      .stopstrip {
+        display: flex; align-items: center; gap: 10px; padding: 9px 16px;
+        font-size: 12.5px; color: var(--text-muted);
+        background: color-mix(in srgb, var(--bg-secondary) 50%, transparent);
+      }
+      .stopgroup[open] > summary .stopstrip,
+      .stopstrip:hover { background: color-mix(in srgb, var(--bg-secondary) 75%, transparent); }
+      .stopstrip .nm { font-weight: 600; color: var(--text-primary); font-size: 13px; }
+      .stopstrip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+      .stopstrip .chev { margin-left: auto; color: var(--text-faint); font-size: 11px; transition: transform 150ms ease; }
+      .stopgroup[open] > summary .stopstrip .chev { transform: rotate(90deg); }
+      /* Start button lives inside the expanded panel only */
+      .stopdetail { display: flex; align-items: center; gap: 14px; padding: 4px 16px 12px 32px; font-size: 12px; color: var(--text-faint); }
+      .stopdetail .meta { display: flex; gap: 16px; }
+      .stopdetail .meta b { color: var(--text-muted); font-weight: 600; }
+
+      /* avatar + jobs table */
+      .ava { width: 18px; height: 18px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 9px; font-weight: 700; color: #0b0d10; background: var(--teal); }
+      .usr { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); }
+      .jobtable { width: 100%; border-collapse: collapse; }
+      .jobtable th { font-size: 9.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-faint); text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--border-weak); }
+      .jobtable th.num, .jobtable td.num { text-align: right; }
+      .jobtable td { padding: 8px 12px; font-size: 12.5px; border-bottom: 1px solid var(--border-weak); }
+      .jobtable tr:last-child td { border-bottom: 0; }
+      .jobtable .prog { color: var(--accent); font-weight: 600; }
+
+      /* B1 — STAT TILES */
+      .b1__body { padding: 16px; }
+      .b1__idrow { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+      .b1__name { font-size: 18px; font-weight: 700; }
+      .b1__tiles { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr; gap: 12px; }
+      .stat { border-radius: 10px; padding: 13px 15px; position: relative; overflow: hidden; border: 1px solid var(--border-weak); }
+      .stat .lab { font-size: 10.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); }
+      .stat .big { font-size: 30px; font-weight: 800; line-height: 1.05; margin-top: 2px; font-variant-numeric: tabular-nums; }
+      .stat .big small { font-size: 13px; font-weight: 600; color: var(--text-faint); }
+      .stat .sub { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+      .stat--health { background: linear-gradient(135deg, color-mix(in srgb,var(--success) 22%, var(--bg-secondary)), var(--bg-secondary)); border-color: color-mix(in srgb,var(--success) 30%, transparent); }
+      .stat--health .big { color: var(--success); font-size: 22px; display:flex; align-items:center; gap:8px; }
+      .stat--active { background: linear-gradient(135deg, color-mix(in srgb,var(--accent) 16%, var(--bg-secondary)), var(--bg-secondary)); border-color: color-mix(in srgb,var(--accent) 26%, transparent); }
+      .stat--load { background: linear-gradient(135deg, color-mix(in srgb,var(--teal) 15%, var(--bg-secondary)), var(--bg-secondary)); border-color: color-mix(in srgb,var(--teal) 26%, transparent); }
+      .stat--nodes { background: var(--bg-secondary); }
+      .spark { display: flex; align-items: flex-end; gap: 3px; height: 26px; margin-top: 8px; }
+      .spark > i { flex: 1; background: color-mix(in srgb,var(--accent) 55%, transparent); border-radius: 2px 2px 0 0; min-height: 2px; }
+      .b1__jobs { margin-top: 14px; background: var(--bg-secondary); border-radius: 8px; overflow: hidden; }
+      .b1__jobshead { display: flex; align-items: center; padding: 9px 12px; font-size: 11px; color: var(--text-muted); border-bottom: 1px solid var(--border-weak); }
+    </style>
+  </head>
+  <body>
+    <div class="page-head">
+      <h1>Cluster Plane card — B1 (stat tiles)</h1>
+      <p>
+        Colored stat tiles + sparkline. The stopped cluster is a one-line strip; its <b>Start button only appears once you
+        expand the strip</b> (click the row) — collapsed view shows just name + status.
+      </p>
+    </div>
+
+    <section class="variant-wrap">
+      <div class="plane-label"><span class="dot"></span>Cluster plane</div>
+      <div class="card">
+        <div class="ch">
+          <div><div class="t">Azure Kubernetes Service</div><div class="s">Workspace RG rg-elb-dashboard · subscription-wide</div></div>
+          <div class="ch__sum"><span><b>2</b> clusters</span><span style="color:var(--success)"><b>1</b> running</span><button class="btn btn-accent btn-xs">+ Add Cluster</button></div>
+        </div>
+
+        <!-- collapsed stopped cluster: NO Start button until expanded -->
+        <details class="stopgroup">
+          <summary>
+            <div class="stopstrip">
+              <span class="dot"></span>
+              <span class="nm">elb-cluster-01</span>
+              <span class="ctag">light</span>
+              <span class="faint">Stopped · idle</span>
+              <span class="chev">▶</span>
+            </div>
+          </summary>
+          <div class="stopdetail">
+            <div class="meta">
+              <span>Last run <b>yesterday 18:42</b></span>
+              <span>Nodes <b>0 / 6</b></span>
+              <span>DBs <b>3 ready</b></span>
+            </div>
+            <button class="btn btn-accent btn-xs" style="margin-left:auto">▶ Start</button>
+            <button class="btn btn-ghost btn-xs">Detail</button>
+            <button class="btn btn-danger btn-xs">Delete</button>
+          </div>
+        </details>
+
+        <!-- running cluster -->
+        <div class="b1__body">
+          <div class="b1__idrow"><span class="b1__name">elb-cluster-02</span><span class="ctag">untagged</span><span class="faint" style="margin-left:auto;font-size:12px">k8s 1.34</span></div>
+          <div class="b1__tiles">
+            <div class="stat stat--health">
+              <div class="lab">Health</div>
+              <div class="big"><span style="width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--success);box-shadow:0 0 0 4px color-mix(in srgb,var(--success) 22%,transparent)"></span>Nominal</div>
+              <div class="sub">API p95 106ms · 0 5xx</div>
+            </div>
+            <div class="stat stat--active">
+              <div class="lab">Active jobs</div>
+              <div class="big">0</div>
+              <div class="sub">7 done / 24h</div>
+            </div>
+            <div class="stat stat--load">
+              <div class="lab">Load</div>
+              <div class="big" style="color:var(--teal)">22<small>%</small></div>
+              <div class="spark"><i style="height:30%"></i><i style="height:55%"></i><i style="height:40%"></i><i style="height:80%"></i><i style="height:60%"></i><i style="height:35%"></i><i style="height:50%"></i><i style="height:22%"></i></div>
+            </div>
+            <div class="stat stat--nodes">
+              <div class="lab">Nodes · DBs</div>
+              <div class="big">11<small> / 4</small></div>
+              <div class="sub">CPU 16% · Mem 22%</div>
+            </div>
+          </div>
+          <div class="b1__jobs">
+            <div class="b1__jobshead"><span>Recent jobs · 3 of 24 · 0 active</span><span style="margin-left:auto" class="faint">last 24h</span></div>
+            <table class="jobtable">
+              <thead><tr><th>Program</th><th>Database</th><th>User</th><th>Status</th><th class="num">Age</th><th class="num">Duration</th></tr></thead>
+              <tbody>
+                <tr><td class="prog">blastn</td><td class="muted">core_nt</td><td><span class="usr"><span class="ava">AP</span>api</span></td><td><span class="pill pill-completed">COMPLETED</span></td><td class="num faint mono">1h 7m</td><td class="num mono">4m 12s</td></tr>
+                <tr><td class="prog">blastn</td><td class="muted">core_nt</td><td><span class="usr"><span class="ava">AP</span>api</span></td><td><span class="pill pill-completed">COMPLETED</span></td><td class="num faint mono">2h 17m</td><td class="num mono">3m 48s</td></tr>
+                <tr><td class="prog">blastn</td><td class="muted">core_nt</td><td><span class="usr"><span class="ava">AP</span>api</span></td><td><span class="pill pill-completed">COMPLETED</span></td><td class="num faint mono">2h 19m</td><td class="num mono">5m 02s</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:12px">
+            <button class="btn btn-accent btn-xs">Open cluster detail</button>
+            <button class="btn btn-ghost btn-xs">Portal ↗</button>
+            <button class="btn btn-ghost btn-xs" style="margin-left:auto">⏹ Stop</button>
+            <button class="btn btn-danger btn-xs">Delete</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </body>
+</html>

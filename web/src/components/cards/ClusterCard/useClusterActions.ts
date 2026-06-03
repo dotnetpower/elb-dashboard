@@ -6,6 +6,7 @@ import { formatApiError } from "@/api/client";
 import type { AksClusterSummary, CeleryTaskStatus } from "@/api/endpoints";
 import { DB_CATALOG } from "@/components/cards/storageDbCatalog";
 import { readAutoWarmupDbs } from "@/components/cards/storage/autoWarmupPrefs";
+import { isAksProvisioned } from "@/utils/aksStatus";
 
 type ClustersQueryData = { clusters: AksClusterSummary[] };
 
@@ -132,6 +133,32 @@ function writePersistedTransitions(
   } catch {
     // Quota / private mode — fall back to in-memory only.
   }
+}
+
+/**
+ * True once a starting/stopping cluster has *settled* into its target
+ * power state, i.e. it is safe to drop the optimistic transition chip.
+ *
+ * The key correctness rule: AKS flips `power_state` to "Running" the
+ * instant a start LRO begins while `provisioning_state` stays "Starting",
+ * and the backend's 90s health cache can still serve the pre-start
+ * "Stopped"/"Succeeded" snapshot. Clearing the chip on power alone let the
+ * row flap to "Cluster is stopped" until the cache refreshed (the reported
+ * "starting → suddenly stopped → starting on refresh" bug). Requiring
+ * `provisioning_state === "Succeeded"` keeps the chip through the whole
+ * transient window so the row never falls back to a stale snapshot.
+ */
+export function transitionTargetReached(
+  expected: ClusterTransitionKind,
+  cluster: Pick<AksClusterSummary, "power_state" | "provisioning_state">,
+): boolean {
+  if (expected === "starting") {
+    return cluster.power_state === "Running" && isAksProvisioned(cluster);
+  }
+  if (expected === "stopping") {
+    return cluster.power_state === "Stopped" && isAksProvisioned(cluster);
+  }
+  return false;
 }
 
 /**
@@ -335,12 +362,7 @@ export function useClusterActions(args: {
         });
         continue;
       }
-      const reached =
-        expected === "starting"
-          ? cluster.power_state === "Running"
-          : expected === "stopping"
-            ? cluster.power_state === "Stopped"
-            : false;
+      const reached = transitionTargetReached(expected, cluster);
       if (reached) {
         next.delete(name);
         changed = true;

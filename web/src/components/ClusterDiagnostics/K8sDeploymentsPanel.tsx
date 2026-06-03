@@ -1,17 +1,21 @@
 import { Loader2 } from "lucide-react";
 
+import { monitoringApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import type { K8sDeployment } from "@/api/endpoints";
 
 import { formatAge } from "./k8sFormat";
 import { NamespaceFilter } from "./NamespaceFilter";
 import { useNamespaceFilter } from "./useNamespaceFilter";
+import { useWorkloadActions } from "./useWorkloadActions";
 
 /**
- * Deployments tab of the cluster Workloads card. Read-only table mirroring
- * the Azure portal Deployments view (Ready / Up-to-date / Available / Age)
- * with the same namespace filter as the Pods tab. The collapse chrome lives
- * in the parent `K8sWorkloadsSection`.
+ * Deployments tab of the cluster Workloads card. Table mirroring the Azure
+ * portal Deployments view (Ready / Up-to-date / Available / Age) with the
+ * same namespace filter as the Pods tab, plus the shared per-row Logs /
+ * Describe / Delete actions (`useWorkloadActions`). Delete deletes the
+ * Deployment with Foreground propagation; the backend route gates system
+ * namespaces. The collapse chrome lives in the parent `K8sWorkloadsSection`.
  */
 export interface K8sDeploymentsQuery {
   isLoading: boolean;
@@ -19,13 +23,63 @@ export interface K8sDeploymentsQuery {
   isError: boolean;
   data?: { deployments: K8sDeployment[] } | null;
   error?: unknown;
+  refetch?: () => void;
 }
 
-const HEADERS = ["NS", "NAME", "READY", "UP-TO-DATE", "AVAILABLE", "AGE"];
+const HEADERS = ["NS", "NAME", "READY", "UP-TO-DATE", "AVAILABLE", "AGE", ""];
 
-export function K8sDeploymentsPanel({ query }: { query: K8sDeploymentsQuery }) {
+export function K8sDeploymentsPanel({
+  query,
+  subscriptionId,
+  resourceGroup,
+  clusterName,
+}: {
+  query: K8sDeploymentsQuery;
+  subscriptionId: string;
+  resourceGroup: string;
+  clusterName: string;
+}) {
   const all = query.data?.deployments ?? [];
   const { effectiveNs, setNsFilter, namespaces, filtered } = useNamespaceFilter(all);
+
+  const actions = useWorkloadActions(
+    "Deployment",
+    {
+      logs: (ns, name) =>
+        monitoringApi.k8sDeploymentLogs(
+          subscriptionId,
+          resourceGroup,
+          clusterName,
+          ns,
+          name,
+          200,
+        ),
+      describe: (ns, name) =>
+        monitoringApi.k8sDeploymentDescribe(
+          subscriptionId,
+          resourceGroup,
+          clusterName,
+          ns,
+          name,
+        ),
+      del: (ns, name) =>
+        monitoringApi.k8sDeploymentDelete(
+          subscriptionId,
+          resourceGroup,
+          clusterName,
+          ns,
+          name,
+        ),
+    },
+    () => query.refetch?.(),
+    {
+      details: [
+        "All pods managed by this Deployment will be terminated.",
+        "If a higher-level controller (e.g. a Helm release or operator) owns it, the Deployment may be recreated.",
+      ],
+      footnote: "This stops the workload until it is redeployed.",
+    },
+  );
 
   return (
     <div className="k8s-pods-table-wrap" style={{ overflowX: "auto" }}>
@@ -119,12 +173,16 @@ export function K8sDeploymentsPanel({ query }: { query: K8sDeploymentsQuery }) {
                   >
                     {formatAge(d.age)}
                   </td>
+                  <td style={{ padding: "4px 8px" }}>
+                    {actions.renderActions(d.namespace, d.name)}
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       )}
+      {actions.dialogs}
     </div>
   );
 }

@@ -42,6 +42,9 @@ def test_build_manifests_sets_local_ssd_precise_openapi_env() -> None:
 
     assert env["ELB_NUM_NODES"] == "10"
     assert env["ELB_CORE_NT_SHARDS"] == "10"
+    # Concurrency cap defaults to the measured 2-job ceiling for the
+    # 10x E16 blast pool (floor(node_cpu_alloc / per_shard_cpu_request)).
+    assert env["ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS"] == "2"
     # Token entry is now mandatory — build_manifests refuses to emit a
     # deployment without it (see test_build_manifests_rejects_empty_token).
     assert env["ELB_OPENAPI_API_TOKEN"] == "dummy-token-for-env-test"

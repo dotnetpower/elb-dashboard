@@ -2,16 +2,18 @@ import { createPortal } from "react-dom";
 import { FileText, Loader2, RefreshCw, X } from "lucide-react";
 
 /**
- * Modal that displays the `kubectl describe pod`-style text returned by
- * `/api/monitor/aks/pod-describe`. Sibling to `PodLogsDialog` — pure
- * presentation; the parent owns the fetch lifecycle.
+ * Modal that displays the `kubectl describe`-style text returned by the
+ * describe routes. Used for pods, Deployments, and Jobs. Sibling to
+ * `PodLogsDialog` — pure presentation; the parent owns the fetch lifecycle.
  *
  * Renders the output in a monospace `<pre>` (no LogHighlighter — describe
  * text is structured, not log-ish) so column alignment from the backend
  * formatter survives.
  */
 export interface PodDescribeDialogProps {
-  target: { namespace: string; pod: string };
+  target: { namespace: string; name: string };
+  /** Workload kind shown in the title ("Pod" / "Deployment" / "Job"). */
+  kind?: string;
   output: string | null;
   loading: boolean;
   onRefresh: () => void;
@@ -20,6 +22,7 @@ export interface PodDescribeDialogProps {
 
 export function PodDescribeDialog({
   target,
+  kind = "Pod",
   output,
   loading,
   onRefresh,
@@ -33,7 +36,7 @@ export function PodDescribeDialog({
       }}
       role="dialog"
       aria-modal="true"
-      aria-label={`Describe: ${target.pod}`}
+      aria-label={`Describe: ${target.name}`}
     >
       <div
         className="glass-card glass-card--strong glass-dialog pod-describe-dialog"
@@ -76,9 +79,9 @@ export function PodDescribeDialog({
               <FileText size={14} style={{ color: "#fff" }} />
             </div>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>Pod Describe</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{kind} Describe</div>
               <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                {target.namespace} / {target.pod}
+                {target.namespace} / {target.name}
               </div>
             </div>
           </div>

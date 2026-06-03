@@ -45,6 +45,22 @@ def _copy_support_files(root: Path) -> None:
             dest.write_bytes(src.read_bytes())
 
 
+def _copy_app_overlay(root: Path) -> None:
+    """Copy the self-learning ETA overlay into the build-context ``app/``.
+
+    The Dockerfile already ``COPY ./app /app`` so dropping ``eta.py`` next to
+    ``main.py`` is enough to make ``import eta`` resolve at runtime. The overlay
+    is import-safe and strictly opt-in (``ELB_OPENAPI_ETA_ENABLED``).
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    src = project_root / "scripts" / "dev" / "openapi-overlays" / "eta.py"
+    if not src.is_file():
+        raise RuntimeError(f"missing OpenAPI ETA overlay: {src}")
+    dest = root / "app" / "eta.py"
+    if not dest.exists() or dest.read_bytes() != src.read_bytes():
+        dest.write_bytes(src.read_bytes())
+
+
 def patch_dockerfile(root: Path) -> None:
     _copy_support_files(root)
     path = root / "Dockerfile"
@@ -90,6 +106,7 @@ def patch_dockerfile(root: Path) -> None:
 
 
 def patch_app(root: Path) -> None:
+    _copy_app_overlay(root)
     path = root / "app" / "main.py"
     _replace_once(
         path,
@@ -159,6 +176,29 @@ def patch_app(root: Path) -> None:
             '            config["blast"]["options"] = f"{opts} -searchsp 32156241807668"\n'
         ),
         'profile in {"core_nt_precise", "precise", "core_nt_safe"}',
+    )
+    _insert_once(
+        path,
+        '    if req.batch_len is not None:\n        config["blast"]["batch-len"] = str(req.batch_len)\n',
+        (
+            "\n    # Dashboard concurrency lever (default-OFF): ELB_OPENAPI_NUM_CPUS pins the\n"
+            "    # elastic-blast [cluster] num-cpus. elastic-blast derives the shard pod CPU\n"
+            "    # limit (= num-cpus) and request (= num-cpus - 2) from it, so lowering this\n"
+            "    # raises how many shard pods co-schedule per node (request is the binding\n"
+            "    # constraint). Unset => elastic-blast keeps its profile default\n"
+            "    # (threads_per_pod, currently 8 -> request 6 -> 2 jobs/node), i.e. unchanged\n"
+            "    # behaviour. Search space / sharding / num-nodes are untouched, so NCBI\n"
+            "    # parity (-searchsp) is independent of this knob.\n"
+            '    _elb_num_cpus = os.environ.get("ELB_OPENAPI_NUM_CPUS", "").strip()\n'
+            "    if _elb_num_cpus:\n"
+            "        try:\n"
+            "            _elb_num_cpus_val = int(_elb_num_cpus)\n"
+            "        except ValueError:\n"
+            "            _elb_num_cpus_val = 0\n"
+            "        if _elb_num_cpus_val >= 1:\n"
+            '            config["cluster"]["num-cpus"] = str(_elb_num_cpus_val)\n'
+        ),
+        "ELB_OPENAPI_NUM_CPUS",
     )
     text = path.read_text()
     duplicate = (
@@ -280,6 +320,118 @@ def patch_app(root: Path) -> None:
         "effective_elb_job_id = _effective_elb_job_id(job_info)",
     )
 
+    # ── Self-learning ETA (default-OFF via ELB_OPENAPI_ETA_ENABLED) ──────────
+    # The overlay module (app/eta.py) learns per-(db, query-size, cold/warm) run
+    # times online and simulates the MAX_ACTIVE_SUBMISSIONS-server queue to
+    # project per-job start/finish. Every hook is gated on _eta.enabled() so the
+    # unset default is byte-identical to legacy (no extra job-state writes).
+    _insert_once(
+        path,
+        "from util import run_cancellable, safe_exec\n",
+        (
+            "\ntry:\n"
+            "    import eta as _eta\n"
+            "except Exception:  # pragma: no cover - ETA overlay is optional\n"
+            "    _eta = None\n"
+        ),
+        "import eta as _eta",
+    )
+    _insert_once(
+        path,
+        '        "job_id": job_id, "status": "queued", "mode": "B" if is_b else "A",\n',
+        (
+            '        "query_seqs": (_eta.parse_query_features(req.query_fasta)[0] if (_eta is not None and _eta.enabled() and is_b) else 0),\n'
+            '        "query_bases": (_eta.parse_query_features(req.query_fasta)[1] if (_eta is not None and _eta.enabled() and is_b) else 0),\n'
+        ),
+        '"query_seqs":',
+    )
+    # Completion-sample recording is hooked into the single state-write choke
+    # point _update_job (NOT a status-payload builder) so learning happens on
+    # the terminal transition regardless of which endpoint — or the background
+    # watchdog — observes it. The atomic `eta_recorded` flag (claimed under
+    # _jobs_lock, persisted via _save_job_cm) guarantees exactly-once recording
+    # even under concurrent writes.
+    _replace_once(
+        path,
+        "        data = dict(current)\n"
+        "        data.update(updates)\n"
+        '        data["updated_at"] = _now_iso()\n'
+        "        _jobs[job_id] = data\n"
+        "    _save_job_cm(job_id, data)\n"
+        "    return data\n",
+        "        data = dict(current)\n"
+        "        data.update(updates)\n"
+        '        data["updated_at"] = _now_iso()\n'
+        "        _eta_snapshot = None\n"
+        "        if (\n"
+        "            _eta is not None\n"
+        "            and _eta.enabled()\n"
+        '            and updates.get("status") == "completed"\n'
+        '            and not current.get("eta_recorded")\n'
+        "        ):\n"
+        '            data["eta_recorded"] = True\n'
+        "            _jobs[job_id] = data\n"
+        "            _eta_snapshot = [dict(v) for v in _jobs.values()]\n"
+        "        else:\n"
+        "            _jobs[job_id] = data\n"
+        "    _save_job_cm(job_id, data)\n"
+        "    if _eta_snapshot is not None:\n"
+        "        try:\n"
+        "            _eta.record_sample(data, _eta_snapshot)\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    return data\n",
+    )
+    _replace_once(
+        path,
+        '    if public_status == "queued":\n'
+        '        payload["queue_position"] = _queued_position(job_info["job_id"])\n'
+        '    elif public_status == "running":\n'
+        '        payload["progress_pct"] = _progress_pct(job_info)\n',
+        '    if public_status == "queued":\n'
+        '        payload["queue_position"] = _queued_position(job_info["job_id"])\n'
+        "        if _eta is not None and _eta.enabled():\n"
+        "            with _jobs_lock:\n"
+        "                _eta_jobs = [dict(v) for v in _jobs.values()]\n"
+        "            _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)\n"
+        "            if _eta_out:\n"
+        '                payload["eta"] = _eta_out\n'
+        '    elif public_status == "running":\n'
+        '        payload["progress_pct"] = _progress_pct(job_info)\n'
+        "        if _eta is not None and _eta.enabled():\n"
+        "            with _jobs_lock:\n"
+        "                _eta_jobs = [dict(v) for v in _jobs.values()]\n"
+        "            _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)\n"
+        "            if _eta_out:\n"
+        '                payload["eta"] = _eta_out\n',
+    )    # Primary polling endpoint GET /v1/jobs/{id}/status (get_job_status) builds
+    # its own inline dict and does NOT route through _external_job_payload, so
+    # the ETA hook above never reaches it. Inject the same gated projection here
+    # so callers polling the canonical status_url see `eta` for active/queued
+    # jobs. Terminal jobs are skipped (compute_eta returns None anyway).
+    _replace_once(
+        path,
+        '    return {\n'
+        '        "job_id": job_id,\n'
+        '        "status": job_info.get("status", "unknown"),\n',
+        '    _status_payload: dict[str, Any] = {\n'
+        '        "job_id": job_id,\n'
+        '        "status": job_info.get("status", "unknown"),\n',
+    )
+    _replace_once(
+        path,
+        '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n'
+        "    }\n",
+        '        "kubernetes": {"summary": job_info.get("k8s_summary", {})},\n'
+        "    }\n"
+        "    if _eta is not None and _eta.enabled() and job_info.get(\"status\") in {\"queued\", \"dispatching\", \"submitting\", \"running\"}:\n"
+        "        with _jobs_lock:\n"
+        "            _eta_jobs = [dict(v) for v in _jobs.values()]\n"
+        "        _eta_out = _eta.compute_eta(job_info, _eta_jobs, MAX_ACTIVE_SUBMISSIONS)\n"
+        "        if _eta_out:\n"
+        '            _status_payload["eta"] = _eta_out\n'
+        "    return _status_payload\n",
+    )
 
 def main() -> int:
     if len(sys.argv) != 2:

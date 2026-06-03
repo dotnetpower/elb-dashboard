@@ -536,6 +536,109 @@ def ensure_dashboard_mi_cluster_rg_roles(
     }
 
 
+def ensure_dashboard_mi_resource_group_contributor(
+    cred: Any,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    mi_principal_id: str = "",
+    progress_callback: Callable[[str, str], None] | None = None,
+) -> dict[str, Any]:
+    """Self-grant Contributor to the dashboard MI on an arbitrary RG.
+
+    Used before enabling AKS Container Insights. Patching the cluster's
+    `omsagent` addon creates a `ContainerInsights(<workspace>)` OMS solution
+    in the Log Analytics workspace's resource group, which requires
+    `Microsoft.OperationsManagement/solutions/write` on that RG — a *linked
+    scope* relative to the cluster. When the workspace lives in an RG the
+    shared MI has no role on (typically Azure's auto-created
+    `defaultresourcegroup-<loc>`, which is outside this deployment's IaC),
+    ARM rejects the addon patch with `LinkedAuthorizationFailed`.
+
+    Contributor includes `Microsoft.OperationsManagement/solutions/write`
+    and is on the `Elb Workload RG Creator` custom role's ABAC whitelist, so
+    the MI is permitted to assign it to itself (a ServicePrincipal) at this
+    scope. (Log Analytics Contributor would be narrower but is *not* on the
+    whitelist, so the MI cannot assign it without an infra change.)
+
+    Best-effort, mirroring `ensure_dashboard_mi_cluster_rg_roles`:
+
+    * `mi_principal_id` empty (local dev with no `SHARED_IDENTITY_PRINCIPAL_ID`)
+      → ``{"skipped": True}``.
+    * Grant succeeds / already exists → row in ``roles_assigned``.
+    * Grant fails (MI lacks `roleAssignments/write` on a pre-Part-C
+      deployment) → row in ``roles_failed``; the caller surfaces an
+      actionable recovery command instead of failing hard here.
+
+    Returns ``{"roles_assigned": [...], "roles_failed": {role: error},
+    "mi_principal_id": <oid>, "resource_group": <rg>}``.
+    """
+
+    principal_id = (mi_principal_id or "").strip()
+    if not principal_id:
+        principal_id = (os.environ.get("SHARED_IDENTITY_PRINCIPAL_ID") or "").strip()
+    if not principal_id:
+        return {
+            "skipped": True,
+            "reason": "SHARED_IDENTITY_PRINCIPAL_ID not set",
+            "roles_assigned": [],
+            "roles_failed": {},
+        }
+
+    from azure.mgmt.authorization.models import RoleAssignmentCreateParameters
+
+    from api.services.azure_clients import authorization_client
+
+    scope = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}"
+    auth_cl = authorization_client(cred, subscription_id)
+    role_definition_id = (
+        f"/subscriptions/{subscription_id}/providers/"
+        f"Microsoft.Authorization/roleDefinitions/{_ROLE_CONTRIBUTOR_GUID}"
+    )
+    # Stable assignment id so re-runs hit the idempotent
+    # `RoleAssignmentExists` branch instead of leaving duplicates.
+    assignment_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL, f"{scope}|{principal_id}|{_ROLE_CONTRIBUTOR_GUID}"
+        )
+    )
+
+    roles_assigned: list[str] = []
+    roles_failed: dict[str, str] = {}
+    if progress_callback is not None:
+        progress_callback(
+            "ensuring_workspace_rg_rbac",
+            f"Self-granting Contributor on {resource_group}",
+        )
+    try:
+        _create_role_assignment_with_retry(
+            auth_cl,
+            scope,
+            assignment_id,
+            RoleAssignmentCreateParameters(  # type: ignore[call-arg]
+                role_definition_id=role_definition_id,
+                principal_id=principal_id,
+                principal_type="ServicePrincipal",
+            ),
+            label="dashboard-MI Contributor (LA workspace RG)",
+        )
+        roles_assigned.append("Contributor")
+    except Exception as exc:
+        LOGGER.warning(
+            "dashboard-MI self-grant Contributor on %s failed: %s",
+            resource_group,
+            str(exc)[:200],
+        )
+        roles_failed["Contributor"] = str(exc)[:300]
+
+    return {
+        "roles_assigned": roles_assigned,
+        "roles_failed": roles_failed,
+        "mi_principal_id": principal_id,
+        "resource_group": resource_group,
+    }
+
+
 def ensure_aks_runtime_rbac(
     cred: Any,
     subscription_id: str,

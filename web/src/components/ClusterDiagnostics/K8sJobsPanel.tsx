@@ -1,18 +1,22 @@
 import { Loader2 } from "lucide-react";
 
+import { monitoringApi } from "@/api/endpoints";
 import { formatApiError } from "@/api/client";
 import type { K8sJob } from "@/api/endpoints";
 
 import { formatAge, formatDuration } from "./k8sFormat";
 import { NamespaceFilter } from "./NamespaceFilter";
 import { useNamespaceFilter } from "./useNamespaceFilter";
+import { useWorkloadActions } from "./useWorkloadActions";
 
 /**
- * Jobs tab of the cluster Workloads card. Read-only table mirroring the
- * Azure portal Jobs view (Completions / Status / Duration / Age) with the
- * same namespace filter as the other tabs. This is where finished and
- * in-flight ElasticBLAST search Jobs surface. The collapse chrome lives in
- * the parent `K8sWorkloadsSection`.
+ * Jobs tab of the cluster Workloads card. Table mirroring the Azure portal
+ * Jobs view (Completions / Status / Duration / Age) with the same namespace
+ * filter as the other tabs, plus the shared per-row Logs / Describe / Delete
+ * actions (`useWorkloadActions`). This is where finished and in-flight
+ * ElasticBLAST search Jobs surface; Delete removes the Job (and its pods via
+ * Background propagation). The collapse chrome lives in the parent
+ * `K8sWorkloadsSection`.
  */
 export interface K8sJobsQuery {
   isLoading: boolean;
@@ -20,9 +24,10 @@ export interface K8sJobsQuery {
   isError: boolean;
   data?: { jobs: K8sJob[] } | null;
   error?: unknown;
+  refetch?: () => void;
 }
 
-const HEADERS = ["NS", "NAME", "COMPLETIONS", "STATUS", "DURATION", "AGE"];
+const HEADERS = ["NS", "NAME", "COMPLETIONS", "STATUS", "DURATION", "AGE", ""];
 
 function statusColor(status: string): string {
   const v = status.toLowerCase();
@@ -32,9 +37,39 @@ function statusColor(status: string): string {
   return "var(--warning)";
 }
 
-export function K8sJobsPanel({ query }: { query: K8sJobsQuery }) {
+export function K8sJobsPanel({
+  query,
+  subscriptionId,
+  resourceGroup,
+  clusterName,
+}: {
+  query: K8sJobsQuery;
+  subscriptionId: string;
+  resourceGroup: string;
+  clusterName: string;
+}) {
   const all = query.data?.jobs ?? [];
   const { effectiveNs, setNsFilter, namespaces, filtered } = useNamespaceFilter(all);
+
+  const actions = useWorkloadActions(
+    "Job",
+    {
+      logs: (ns, name) =>
+        monitoringApi.k8sJobLogs(subscriptionId, resourceGroup, clusterName, ns, name, 200),
+      describe: (ns, name) =>
+        monitoringApi.k8sJobDescribe(subscriptionId, resourceGroup, clusterName, ns, name),
+      del: (ns, name) =>
+        monitoringApi.k8sJobDelete(subscriptionId, resourceGroup, clusterName, ns, name),
+    },
+    () => query.refetch?.(),
+    {
+      details: [
+        "The Job and all pods it created will be deleted.",
+        "A running Job will be stopped; completed results already written off-cluster are unaffected.",
+      ],
+      footnote: "Logs from the Job's pods will be lost unless already shipped off-cluster.",
+    },
+  );
 
   return (
     <div className="k8s-pods-table-wrap" style={{ overflowX: "auto" }}>
@@ -140,11 +175,15 @@ export function K8sJobsPanel({ query }: { query: K8sJobsQuery }) {
                 >
                   {formatAge(j.age)}
                 </td>
+                <td style={{ padding: "4px 8px" }}>
+                  {actions.renderActions(j.namespace, j.name)}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
+      {actions.dialogs}
     </div>
   );
 }

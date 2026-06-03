@@ -169,8 +169,22 @@ export function K8sWorkloadsSection({
               clusterName={clusterName}
             />
           )}
-          {tab === "deployments" && <K8sDeploymentsPanel query={deploymentsQuery} />}
-          {tab === "jobs" && <K8sJobsPanel query={jobsQuery} />}
+          {tab === "deployments" && (
+            <K8sDeploymentsPanel
+              query={deploymentsQuery}
+              subscriptionId={subscriptionId}
+              resourceGroup={resourceGroup}
+              clusterName={clusterName}
+            />
+          )}
+          {tab === "jobs" && (
+            <K8sJobsPanel
+              query={jobsQuery}
+              subscriptionId={subscriptionId}
+              resourceGroup={resourceGroup}
+              clusterName={clusterName}
+            />
+          )}
         </div>
       )}
     </div>

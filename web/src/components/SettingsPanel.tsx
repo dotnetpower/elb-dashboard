@@ -1400,11 +1400,14 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
     if (!config) return;
     setError(null);
     setTask(null);
-    let workspaceId = prefs.appInsightsWorkspaceResourceId.trim();
-    if (!workspaceId) {
-      workspaceId = await resolveWorkspace();
-      if (!workspaceId) return;
-    }
+    // Always re-resolve the workspace from the named App Insights component
+    // instead of trusting the stored pref. The workspace is derived solely
+    // from the component (there is no manual workspace-id field), so a stale
+    // cached id — e.g. a default workspace captured before the component was
+    // re-pointed — must never be sent to the omsagent patch. resolveWorkspace
+    // refreshes the pref so the display and the request stay consistent.
+    const workspaceId = await resolveWorkspace();
+    if (!workspaceId) return;
     try {
       const response = await settingsApi.enableAksObservability({
         subscription_id: config.subscriptionId,
@@ -1416,7 +1419,7 @@ function AksSection({ config }: { config: ResourceConfig | null }) {
     } catch (err) {
       setError(formatApiError(err, "aks"));
     }
-  }, [clusterName, config, prefs.appInsightsWorkspaceResourceId, resolveWorkspace, selectedClusterRg]);
+  }, [clusterName, config, resolveWorkspace, selectedClusterRg]);
 
   const disable = useCallback(async () => {
     if (!config) return;

@@ -4,11 +4,15 @@ import { Loader2, RefreshCw, Terminal, X } from "lucide-react";
 import { LogHighlighter } from "./LogHighlighter";
 
 /**
- * Modal that displays the last 200 lines of a pod's logs with syntax
- * coloring. Pure presentation — the parent owns the fetch lifecycle.
+ * Modal that displays the last 200 lines of a workload's logs with syntax
+ * coloring. Used for pods (direct) and for Deployments / Jobs (logs of a
+ * representative pod). Pure presentation — the parent owns the fetch
+ * lifecycle.
  */
 export interface PodLogsDialogProps {
-  target: { namespace: string; pod: string };
+  target: { namespace: string; name: string };
+  /** Workload kind shown in the title ("Pod" / "Deployment" / "Job"). */
+  kind?: string;
   output: string | null;
   loading: boolean;
   onRefresh: () => void;
@@ -17,6 +21,7 @@ export interface PodLogsDialogProps {
 
 export function PodLogsDialog({
   target,
+  kind = "Pod",
   output,
   loading,
   onRefresh,
@@ -30,7 +35,7 @@ export function PodLogsDialog({
       }}
       role="dialog"
       aria-modal="true"
-      aria-label={`Logs: ${target.pod}`}
+      aria-label={`Logs: ${target.name}`}
     >
       <div
         className="glass-card glass-card--strong glass-dialog pod-logs-dialog"
@@ -73,9 +78,9 @@ export function PodLogsDialog({
               <Terminal size={14} style={{ color: "#fff" }} />
             </div>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>Pod Logs</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{kind} Logs</div>
               <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                {target.namespace} / {target.pod} · last 200 lines
+                {target.namespace} / {target.name} · last 200 lines
               </div>
             </div>
           </div>

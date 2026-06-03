@@ -43,6 +43,7 @@ def build_manifests(
     acr_name: str,
     acr_resource_group: str,
     num_nodes: int = 10,
+    max_active_submissions: int = 2,
     api_token: str = "",
     pls: PlsConfig | None = None,
 ) -> str:
@@ -91,6 +92,22 @@ def build_manifests(
         {"name": "ELB_ACR_RESOURCE_GROUP", "value": acr_resource_group},
         {"name": "ELB_NUM_NODES", "value": str(max(1, num_nodes))},
         {"name": "ELB_CORE_NT_SHARDS", "value": str(max(1, num_nodes))},
+        # Server-side cap on concurrently-running BLAST jobs. The hard
+        # ceiling is NOT CPU utilisation but the Kubernetes scheduler's
+        # CPU-*request* reservation: each shard pod requests cpu=6 and a
+        # Standard_E16s_v5 node exposes ~15.74 allocatable CPU, so
+        # floor(15.74/6)=2 shard pods fit per node. Because every job
+        # spreads exactly one shard pod per node (shards == nodes), the
+        # per-node pod ceiling equals the concurrent-job ceiling = 2.
+        # A 3rd job's pods request 18 CPU/node > 15.74 and stay Pending
+        # even while CPU sits idle. Empirically confirmed 2026-06-03
+        # (burst-6 -> peak running_jobs=2, 20 pods, 0 Pending). Default 2
+        # is throughput-optimal for this 10x E16 pool; raising it only
+        # helps if per-shard CPU request drops or nodes are added.
+        {
+            "name": "ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS",
+            "value": str(max(1, max_active_submissions)),
+        },
         {
             "name": "PATH",
             "value": (

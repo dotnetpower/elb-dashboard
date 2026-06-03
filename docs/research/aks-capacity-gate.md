@@ -646,10 +646,53 @@ buys nothing on this 10-node pool; the 3rd job simply waits in `Pending`.
 `MAX_ACTIVE_SUBMISSIONS = 2` is the throughput-optimal value for `core_nt`
 here, and it is integrity-neutral (every job still gets the full-DB searchsp).
 
-> Live env note: the deployed `elb-openapi` has only `ELB_NUM_NODES=10` /
-> `ELB_CORE_NT_SHARDS=10` set — `MAX_ACTIVE_SUBMISSIONS` is unset (default 1),
-> so today the cluster serialises `core_nt` admission to one job at a time even
-> though two would schedule. Bumping it to 2 is the single safe throughput win.
+> Live env note: the deployed `elb-openapi` now carries
+> `ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS=2` (persisted in
+> [api/tasks/openapi/manifests.py](../../api/tasks/openapi/manifests.py)), so
+> two `core_nt` jobs schedule concurrently — the throughput-optimal value for
+> the default `num_cpus=8` packing.
+
+### 9.6 Real ceiling above 2 jobs — `num_cpus=6` measurement (live, 2026-06-03)
+
+§9.5 says the 2-job ceiling is a pure CPU-**request** packing artefact, not a
+memory or CPU-**usage** wall. To confirm the ceiling is movable (and to find
+the real CPU/IO-bound limit) we lowered the per-shard CPU request without
+touching `num_nodes` or shard count, then measured.
+
+* **Lever:** a new env-gated `ELB_OPENAPI_NUM_CPUS` knob (default-OFF) injected
+  by [scripts/dev/patch-openapi-build-context.py](../../scripts/dev/patch-openapi-build-context.py)
+  sets `[cluster] num-cpus` in the generated `elastic-blast` config. The
+  per-shard request is `num-cpus − 2`, so `num_cpus=6 → request=4 CPU` →
+  `floor(15740m / 4000m) = 3` shard pods per node.
+* **Method:** built `elb-openapi:test-numcpus` from the patched sibling context,
+  deployed it temporarily with `ELB_OPENAPI_NUM_CPUS=6` and
+  `ELB_OPENAPI_MAX_ACTIVE_SUBMISSIONS=6`, ran a 4-job `core_nt` burst, then
+  **restored** the shared service to `4.18` / `MAX_ACTIVE=2` / no `NUM_CPUS`.
+
+| Metric | `num_cpus=8` (4.18) | `num_cpus=6` (test) |
+| --- | --- | --- |
+| Per-shard CPU request | `6` | `4` |
+| Shard pods per node | 2 | **3** |
+| Concurrent `core_nt` jobs | 2 | **3** (peak `running_jobs=3`, `running_pods=30`, `Pending=10`) |
+| 4-job burst wall time | ~2 waves (≈230 s) | **145.6 s** (3 jobs done at 126 s, 4th at 145.6 s) |
+
+The pod-watcher timeline captured the exact ceiling — `phases={Running: 30,
+Pending: 10}` = three jobs × ten shards running while the 4th job's ten shards
+wait. The 3 concurrent jobs each request `18 CPU/node` against a `16 vCPU`
+node, so they run under mild CPU throttling (limit `8` vs `16/3 ≈ 5.3`
+schedulable share) — yet the 4-job burst still finished ~1.6× faster than the
+2-job packing. **The ceiling is movable and the real limit is CPU saturation,
+not a per-job memory wall** (page cache is shared per shard file, so memory
+footprint tracks the number of *distinct* shards a node holds, ≤ 10, not the
+job count). NCBI parity is unaffected: the `-searchsp` injection (§9.4) is a
+separate, `num_cpus`-independent config edit, verified present in the patched
+image.
+
+> The knob ships **default-OFF** as code only (no `IMAGE_TAGS` bump). The
+> shared `elb-openapi` was restored to `4.18` immediately after the
+> measurement. Promoting `num_cpus=6` to production is a throughput-vs-latency
+> trade (3 concurrent jobs, each ~35 % slower under throttling) and is left as
+> an explicit future decision, not a default.
 
 ---
 

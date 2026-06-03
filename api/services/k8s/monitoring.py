@@ -54,6 +54,14 @@ from api.services.k8s.warmup_status import (
     k8s_release_warmup_cache,
     k8s_warmup_status,
 )
+from api.services.k8s.workload_ops import (
+    k8s_deployment_delete,
+    k8s_deployment_describe,
+    k8s_deployment_logs,
+    k8s_job_delete,
+    k8s_job_describe,
+    k8s_job_logs,
+)
 
 LOGGER = logging.getLogger(__name__)
 aks_client = _credentials.aks_client
@@ -72,6 +80,9 @@ __all__ = [
     "k8s_cancel_blast_job",
     "k8s_check_blast_status",
     "k8s_check_namespace_exists",
+    "k8s_deployment_delete",
+    "k8s_deployment_describe",
+    "k8s_deployment_logs",
     "k8s_ensure_job_manifests",
     "k8s_ensure_warmup_scripts_configmap",
     "k8s_get_deployment_env_value",
@@ -80,6 +91,9 @@ __all__ = [
     "k8s_get_nodes",
     "k8s_get_pods",
     "k8s_get_service_ip",
+    "k8s_job_delete",
+    "k8s_job_describe",
+    "k8s_job_logs",
     "k8s_list_events",
     "k8s_pod_delete",
     "k8s_pod_describe",

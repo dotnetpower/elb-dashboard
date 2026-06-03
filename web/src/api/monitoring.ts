@@ -412,6 +412,98 @@ export const monitoringApi = {
       `/monitor/aks/pod?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&pod_name=${encodeURIComponent(podName)}`,
     ),
 
+  k8sDeploymentLogs: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    namespace: string,
+    deploymentName: string,
+    tail?: number,
+  ) =>
+    api.get<{ logs: string }>(
+      `/monitor/aks/deployment-logs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&deployment_name=${encodeURIComponent(deploymentName)}&tail=${tail ?? 200}`,
+    ),
+
+  k8sDeploymentDescribe: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    namespace: string,
+    deploymentName: string,
+  ) =>
+    api.get<{ describe: string }>(
+      `/monitor/aks/deployment-describe?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&deployment_name=${encodeURIComponent(deploymentName)}`,
+    ),
+
+  /**
+   * Delete a Deployment. The backend refuses system-managed namespaces —
+   * the SPA hides the button for those, but the route is the authoritative
+   * gate (OWASP A01).
+   */
+  k8sDeploymentDelete: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    namespace: string,
+    deploymentName: string,
+  ) =>
+    api.del<{
+      status: "deleted" | "not_found" | "error";
+      kind: string;
+      namespace: string;
+      name: string;
+      status_code: number;
+      detail?: string;
+    }>(
+      `/monitor/aks/deployment?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&deployment_name=${encodeURIComponent(deploymentName)}`,
+    ),
+
+  k8sJobLogs: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    namespace: string,
+    jobName: string,
+    tail?: number,
+  ) =>
+    api.get<{ logs: string }>(
+      `/monitor/aks/job-logs?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&job_name=${encodeURIComponent(jobName)}&tail=${tail ?? 200}`,
+    ),
+
+  k8sJobDescribe: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    namespace: string,
+    jobName: string,
+  ) =>
+    api.get<{ describe: string }>(
+      `/monitor/aks/job-describe?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&job_name=${encodeURIComponent(jobName)}`,
+    ),
+
+  /**
+   * Delete a Job. The backend refuses system-managed namespaces — the SPA
+   * hides the button for those, but the route is the authoritative gate
+   * (OWASP A01).
+   */
+  k8sJobDelete: (
+    subscriptionId: string,
+    rg: string,
+    clusterName: string,
+    namespace: string,
+    jobName: string,
+  ) =>
+    api.del<{
+      status: "deleted" | "not_found" | "error";
+      kind: string;
+      namespace: string;
+      name: string;
+      status_code: number;
+      detail?: string;
+    }>(
+      `/monitor/aks/job?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(rg)}&cluster_name=${encodeURIComponent(clusterName)}&namespace=${encodeURIComponent(namespace)}&job_name=${encodeURIComponent(jobName)}`,
+    ),
+
   buildAcrImages: (
     subscriptionId: string,
     rg: string,

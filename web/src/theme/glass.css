@@ -2412,6 +2412,13 @@ textarea.form-input {
   color: var(--text-primary);
   font-weight: 500;
 }
+/* Non-navigable section prefix (e.g. ``sequence`` in
+   ``/sequence/<accession>``): rendered as plain text because no index route
+   exists for it. Muted and non-interactive so it does not look like a link. */
+.breadcrumb__section {
+  color: var(--text-muted);
+  cursor: default;
+}
 
 /* #15 Page header */
 .page-header {

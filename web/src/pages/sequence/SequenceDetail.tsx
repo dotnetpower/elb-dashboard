@@ -22,6 +22,7 @@ import {
   type NuccoreSummary,
 } from "@/api/ncbi";
 import { SViewerEmbed } from "./SViewerEmbed";
+import { SequenceBlocks } from "./SequenceBlocks";
 
 const NCBI_NUCCORE_BASE = "https://www.ncbi.nlm.nih.gov/nuccore";
 // Standalone Sequence Viewer lives at the bare ``/projects/sviewer/`` path.
@@ -1003,7 +1004,7 @@ export function SequenceDetail() {
 
       <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 8 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-          <h2 style={{ margin: 0, fontSize: 14 }}>Sequence (FASTA preview)</h2>
+          <h2 style={{ margin: 0, fontSize: 14 }}>Sequence</h2>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {hasHighlight && (
               <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
@@ -1014,24 +1015,7 @@ export function SequenceDetail() {
           </div>
         </div>
         {fastaQuery.isLoading && <p className="muted" style={{ margin: 0 }}>Loading FASTA…</p>}
-        {previewFasta && (
-          <pre
-            style={{
-              margin: 0,
-              maxHeight: 320,
-              overflow: "auto",
-              padding: "10px 12px",
-              borderRadius: 8,
-              background: "rgba(0,0,0,0.18)",
-              fontSize: 12,
-              fontFamily: "var(--font-mono, monospace)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-            }}
-          >
-            {previewFasta}
-          </pre>
-        )}
+        {previewFasta && <SequenceBlocks fasta={previewFasta} highlight={highlightRange} />}
       </div>
 
       <div className="glass-card glass-card--strong" style={{ padding: 16, display: "grid", gap: 8 }}>

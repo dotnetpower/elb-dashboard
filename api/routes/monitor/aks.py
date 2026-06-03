@@ -5,7 +5,8 @@ Edit boundaries: Keep HTTP validation and response shaping here; move cloud/data
 services or tasks.
 Key entry points: `list_aks`, `aks_start_stats`, `aks_nodes`, `aks_pods`, `aks_deployments`,
 `aks_jobs`, `aks_top_nodes`, `aks_pod_logs`, `aks_pod_describe`, `aks_pod_delete`,
-`aks_service_ip`
+`aks_deployment_logs`, `aks_deployment_describe`, `aks_deployment_delete`, `aks_job_logs`,
+`aks_job_describe`, `aks_job_delete`, `aks_service_ip`
 Risky contracts: Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate. Every non-health `/api/*` route must enforce `require_caller` or an equivalent
 auth gate.
@@ -381,6 +382,188 @@ def aks_pod_delete(
 
     invalidate_monitor_snapshot_prefix(
         _cache_key("monitor", "aks", "pods", sub, resource_group, cluster_name)
+    )
+    return result
+
+
+@router.get("/aks/deployment-logs")
+def aks_deployment_logs(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(...),
+    deployment_name: str = Query(...),
+    tail: int = Query(default=200, ge=1, le=10000),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Tail logs from a representative pod of a Deployment."""
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+
+    cred = monitor_package.get_credential()
+    try:
+        logs = monitoring_svc.k8s_deployment_logs(
+            cred, sub, resource_group, cluster_name, namespace, deployment_name, tail
+        )
+        return {"logs": logs}
+    except Exception as exc:
+        return cast(dict[str, Any], _graceful("aks_deployment_logs", exc, empty={"logs": ""}))
+
+
+@router.get("/aks/deployment-describe")
+def aks_deployment_describe(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(...),
+    deployment_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+
+    cred = monitor_package.get_credential()
+    try:
+        describe = monitoring_svc.k8s_deployment_describe(
+            cred, sub, resource_group, cluster_name, namespace, deployment_name
+        )
+        return {"describe": describe}
+    except Exception as exc:
+        return cast(
+            dict[str, Any], _graceful("aks_deployment_describe", exc, empty={"describe": ""})
+        )
+
+
+@router.delete("/aks/deployment")
+def aks_deployment_delete(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(...),
+    deployment_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Delete a Deployment. Refuses system-managed namespaces server-side.
+
+    The SPA hides the action for system namespaces, but this route also
+    enforces it — frontend-only authorization is an OWASP A01 violation."""
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+    from api.services.k8s.observability import SYSTEM_NAMESPACES
+
+    if namespace in SYSTEM_NAMESPACES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"namespace {namespace!r} is system-managed; refusing to delete",
+        )
+
+    cred = monitor_package.get_credential()
+    try:
+        result = monitoring_svc.k8s_deployment_delete(
+            cred, sub, resource_group, cluster_name, namespace, deployment_name
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=sanitise(str(exc))[:200]) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=sanitise(str(exc))[:200]) from exc
+    except Exception as exc:
+        LOGGER.warning("aks_deployment_delete failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"delete failed: {type(exc).__name__}") from exc
+
+    from api.services.monitor_cache import invalidate_monitor_snapshot_prefix
+
+    invalidate_monitor_snapshot_prefix(
+        _cache_key("monitor", "aks", "deployments", sub, resource_group, cluster_name)
+    )
+    return result
+
+
+@router.get("/aks/job-logs")
+def aks_job_logs(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(...),
+    job_name: str = Query(...),
+    tail: int = Query(default=200, ge=1, le=10000),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Tail logs from a representative pod of a Job."""
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+
+    cred = monitor_package.get_credential()
+    try:
+        logs = monitoring_svc.k8s_job_logs(
+            cred, sub, resource_group, cluster_name, namespace, job_name, tail
+        )
+        return {"logs": logs}
+    except Exception as exc:
+        return cast(dict[str, Any], _graceful("aks_job_logs", exc, empty={"logs": ""}))
+
+
+@router.get("/aks/job-describe")
+def aks_job_describe(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(...),
+    job_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+
+    cred = monitor_package.get_credential()
+    try:
+        describe = monitoring_svc.k8s_job_describe(
+            cred, sub, resource_group, cluster_name, namespace, job_name
+        )
+        return {"describe": describe}
+    except Exception as exc:
+        return cast(dict[str, Any], _graceful("aks_job_describe", exc, empty={"describe": ""}))
+
+
+@router.delete("/aks/job")
+def aks_job_delete(
+    subscription_id: str = Query(default=""),
+    resource_group: str = Query(...),
+    cluster_name: str = Query(...),
+    namespace: str = Query(...),
+    job_name: str = Query(...),
+    caller: CallerIdentity = Depends(require_caller),
+) -> dict[str, Any]:
+    """Delete a Job. Refuses system-managed namespaces server-side.
+
+    The SPA hides the action for system namespaces, but this route also
+    enforces it — frontend-only authorization is an OWASP A01 violation."""
+    sub = subscription_id or _sub_default()
+    from api.routes import monitor as monitor_package
+    from api.services.k8s.observability import SYSTEM_NAMESPACES
+
+    if namespace in SYSTEM_NAMESPACES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"namespace {namespace!r} is system-managed; refusing to delete",
+        )
+
+    cred = monitor_package.get_credential()
+    try:
+        result = monitoring_svc.k8s_job_delete(
+            cred, sub, resource_group, cluster_name, namespace, job_name
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=sanitise(str(exc))[:200]) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=sanitise(str(exc))[:200]) from exc
+    except Exception as exc:
+        LOGGER.warning("aks_job_delete failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"delete failed: {type(exc).__name__}") from exc
+
+    from api.services.monitor_cache import invalidate_monitor_snapshot_prefix
+
+    invalidate_monitor_snapshot_prefix(
+        _cache_key("monitor", "aks", "jobs", sub, resource_group, cluster_name)
     )
     return result
 
