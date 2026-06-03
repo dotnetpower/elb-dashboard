@@ -812,8 +812,18 @@ def _aggregate_split_merge_reports(
         "total_input_hsps": 0,
         "total_output_hsps": 0,
         "tie_break_count": 0,
+        "tie_cutoff_overflow_count": 0,
+        "diversity_reserved_count": 0,
         "num_shards": 0,
     }
+    # Per-query score-class cutoff samples (which queries had a tied top-score
+    # class larger than max_target_seqs). The merge step computes these per
+    # child; the parent concatenates a bounded sample so the UI can render a
+    # "displayed N are a sample of a larger tied class" badge for split jobs.
+    tie_cutoff_queries: list[dict[str, Any]] = []
+    # Per-query diversity-aware cutoff samples (opt-in ELB_DIVERSITY_AWARE_CUTOFF):
+    # which queries had lower-scoring near-miss hits reserved into the window.
+    diversity_queries: list[dict[str, Any]] = []
     child_items: list[dict[str, Any]] = []
     for item in child_reports:
         report = item["report"]
@@ -837,6 +847,16 @@ def _aggregate_split_merge_reports(
         for warning in report.get("warnings", []):
             if isinstance(warning, str) and warning not in warnings:
                 warnings.append(warning)
+        child_tie_cutoff_queries = report.get("tie_cutoff_queries")
+        if isinstance(child_tie_cutoff_queries, list):
+            for entry in child_tie_cutoff_queries:
+                if isinstance(entry, dict) and len(tie_cutoff_queries) < 10:
+                    tie_cutoff_queries.append(entry)
+        child_diversity_queries = report.get("diversity_queries")
+        if isinstance(child_diversity_queries, list):
+            for entry in child_diversity_queries:
+                if isinstance(entry, dict) and len(diversity_queries) < 10:
+                    diversity_queries.append(entry)
         child_items.append(
             {
                 "child_job_id": item.get("child_job_id"),
@@ -850,6 +870,7 @@ def _aggregate_split_merge_reports(
                 "total_input_hsps": report.get("total_input_hsps", 0),
                 "total_output_hsps": report.get("total_output_hsps", 0),
                 "tie_break_count": report.get("tie_break_count", 0),
+                "tie_cutoff_overflow_count": report.get("tie_cutoff_overflow_count", 0),
                 "num_shards": report.get("num_shards", 0),
                 "format": report_format,
                 "warnings": report.get("warnings", []),
@@ -877,6 +898,8 @@ def _aggregate_split_merge_reports(
         "child_count": len(child_reports),
         "max_target_seqs": next(iter(max_target_values)) if len(max_target_values) == 1 else None,
         **totals,
+        "tie_cutoff_queries": tie_cutoff_queries,
+        "diversity_queries": diversity_queries,
         "warnings": warnings,
         "children": child_items,
     }

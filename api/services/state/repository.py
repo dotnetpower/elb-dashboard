@@ -392,6 +392,36 @@ class JobStateRepository:
         rows.sort(key=lambda r: r.created_at or "", reverse=True)
         return rows
 
+    def list_all(
+        self,
+        *,
+        limit: int = 50,
+        include_payload: bool = True,
+    ) -> list[JobState]:
+        """Return every non-deleted job row, owner-agnostic.
+
+        Development-stage listing used by the unscoped ``/api/blast/jobs`` path
+        when ``BLAST_JOBS_SHARED_VISIBILITY=true`` so the Recent searches page
+        shows all jobs regardless of which caller submitted them. The route
+        layer still enforces ``require_caller``. Production (flag off) keeps
+        using :meth:`list_for_owner` so dashboard-submitted jobs stay private.
+        """
+        with self._state_client() as t:
+            rows = []
+            try:
+                kwargs: dict[str, Any] = {"results_per_page": limit}
+                if not include_payload:
+                    kwargs["select"] = _JOBSTATE_SUMMARY_SELECT
+                entities = t.query_entities("status ne 'deleted'", **kwargs)
+                for e in entities:
+                    rows.append(JobState.from_entity(dict(e)))
+                    if len(rows) >= limit:
+                        break
+            except ResourceNotFoundError:
+                self._ensure_table("jobstate")
+        rows.sort(key=lambda r: r.created_at or "", reverse=True)
+        return rows
+
     def list_for_scope(
         self,
         *,

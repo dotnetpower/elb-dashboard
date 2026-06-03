@@ -1096,6 +1096,7 @@ export const blastApi = {
       message?: string;
       filtered_hits?: number;
       filters?: Record<string, unknown>;
+      tie_cutoff?: BlastTieCutoff;
     }>(
       `/blast/jobs/${encodeURIComponent(jobId)}/results/alignments?${params.toString()}`,
     );
@@ -1254,6 +1255,26 @@ export interface BlastSubjectAggregate {
   stitle?: string;
   sscinames?: string;
   staxids?: string;
+}
+
+/**
+ * Score-class truncation signal surfaced from the merge step's
+ * merge-report.json. Present on the alignments payload only when the
+ * max_target_seqs cutoff split a tied score class (`overflow_count > 0`) or
+ * the opt-in diversity-aware cutoff reserved near-miss slots
+ * (`diversity_reserved_count > 0`). Absent otherwise.
+ */
+export interface BlastTieCutoff {
+  /** Number of hits in the top tied score class that were dropped because the
+   *  displayed set hit the max_target_seqs limit. */
+  overflow_count: number;
+  /** Slots reserved for lower-scoring near-miss hits by the opt-in
+   *  diversity-aware cutoff (0 when that mode is off). */
+  diversity_reserved_count: number;
+  /** The max_target_seqs value in effect for the job, when recorded. */
+  max_target_seqs?: number;
+  /** Up to 5 sample queries whose top score class was truncated. */
+  queries?: Array<{ query_id?: string; overflow_count?: number }>;
 }
 
 export interface BlastTaxonomyRow {

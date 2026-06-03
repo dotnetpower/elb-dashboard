@@ -12,7 +12,12 @@ const PROGRAM_SHORT_DESCRIPTIONS: Record<string, string> = {
   tblastx: "tNucl -> tNucl",
 };
 
-export function ProgramSection({ form, set, programMeta }: ProgramSectionProps) {
+export function ProgramSection({
+  form,
+  programMeta,
+  onSelectProgram,
+  dbAvailableByType,
+}: ProgramSectionProps) {
   return (
     <section className="glass-card blast-section bsl-input bsl-done">
       <SectionHeader
@@ -22,20 +27,32 @@ export function ProgramSection({ form, set, programMeta }: ProgramSectionProps) 
         subtitle="Choose a BLAST algorithm"
       />
       <div className="blast-program-tabs">
-        {PROGRAMS.map((program) => (
-          <button
-            type="button"
-            key={program.value}
-            onClick={() => set("program", program.value)}
-            className={`blast-program-tab${form.program === program.value ? " blast-program-tab--active" : ""}`}
-            title={`${program.label}: ${program.longDesc}`}
-          >
-            <span className="blast-program-tab__name">{program.label}</span>
-            <span className="blast-program-tab__desc">
-              {PROGRAM_SHORT_DESCRIPTIONS[program.value] ?? program.desc}
-            </span>
-          </button>
-        ))}
+        {PROGRAMS.map((program) => {
+          const available = dbAvailableByType[program.dbType];
+          const active = form.program === program.value;
+          const moleculeLabel = program.dbType === "nucl" ? "nucleotide" : "protein";
+          return (
+            <button
+              type="button"
+              key={program.value}
+              onClick={() => onSelectProgram(program.value)}
+              aria-disabled={!available}
+              className={`blast-program-tab${active ? " blast-program-tab--active" : ""}${
+                available ? "" : " blast-program-tab--blocked"
+              }`}
+              title={
+                available
+                  ? `${program.label}: ${program.longDesc}`
+                  : `No ${moleculeLabel} database downloaded yet — prepare one from the Dashboard first`
+              }
+            >
+              <span className="blast-program-tab__name">{program.label}</span>
+              <span className="blast-program-tab__desc">
+                {PROGRAM_SHORT_DESCRIPTIONS[program.value] ?? program.desc}
+              </span>
+            </button>
+          );
+        })}
       </div>
       <div className="blast-program-info">
         <BookOpen size={14} strokeWidth={1.5} style={{ color: "var(--accent)", flexShrink: 0 }} />

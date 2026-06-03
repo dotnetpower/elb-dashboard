@@ -1,6 +1,6 @@
 import type { RefObject } from "react";
 
-import type { BlastDatabase, WarmupDbInfo } from "@/api/endpoints";
+import type { BlastDatabase, BlastProgram, WarmupDbInfo } from "@/api/endpoints";
 import type { FormState, PROGRAMS } from "@/pages/blastSubmitModel";
 
 export type SetBlastField = <K extends keyof FormState>(key: K, value: FormState[K]) => void;
@@ -21,8 +21,16 @@ export interface QuerySectionProps {
 
 export interface ProgramSectionProps {
   form: FormState;
-  set: SetBlastField;
   programMeta: ProgramMeta;
+  /**
+   * Select a program. The parent decides whether to switch, overwrite the
+   * database, or block the change (and toast) based on which molecule types
+   * have a ready database downloaded — keep that logic in the parent so this
+   * section stays presentational.
+   */
+  onSelectProgram: (value: BlastProgram) => void;
+  /** Which molecule types have at least one ready DB; blocks tabs otherwise. */
+  dbAvailableByType: { nucl: boolean; prot: boolean };
 }
 
 export interface DatabaseSectionProps {
@@ -44,4 +52,10 @@ export interface DatabaseSectionProps {
 export interface TaxonomyFilterSectionProps {
   form: FormState;
   set: SetBlastField;
+}
+
+export interface OptimizeSectionProps {
+  form: FormState;
+  set: SetBlastField;
+  programMeta: ProgramMeta;
 }

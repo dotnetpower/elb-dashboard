@@ -132,7 +132,7 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
   // Sizes are NCBI's published 2026 figures rounded to one significant digit
   // and are deliberately conservative — they only drive the download UX.
   {
-    value: "refseq_select",
+    value: "refseq_select_rna",
     label: "RefSeq Select RNA sequences",
     desc: "A subset of RefSeq RNA representing one transcript per protein-coding locus.",
     size: "~2 GB",
@@ -227,9 +227,9 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     },
   },
   {
-    value: "tsa",
-    label: "Transcriptome Shotgun Assembly (TSA)",
-    desc: "Assembled transcriptome contigs deposited in GenBank/TSA.",
+    value: "tsa_nt",
+    label: "Transcriptome Shotgun Assembly (TSA, nucleotide)",
+    desc: "Assembled transcriptome contigs deposited in GenBank/TSA (nucleotide).",
     size: "~200 GB",
     estFiles: 400,
     estMinutes: "~3-6 hours",
@@ -267,8 +267,8 @@ export const DB_CATALOG: BlastDbCatalogItem[] = [
     },
   },
   {
-    value: "pat",
-    label: "Patent sequences (pat)",
+    value: "patnt",
+    label: "Patent sequences (nucleotide)",
     desc: "Patent-derived nucleotide sequences from GenBank.",
     size: "~40 GB",
     estFiles: 90,

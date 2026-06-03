@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { loadSavedConfig } from "@/components/SetupWizard";
 import { useToast } from "@/components/Toast";
+import type { BlastProgram } from "@/api/endpoints";
 import { AlgorithmParametersSection } from "@/pages/blastSubmit/AlgorithmParametersSection";
 import { BlastSubmitFooter } from "@/pages/blastSubmit/BlastSubmitFooter";
 import { BlastSubmitHeader } from "@/pages/blastSubmit/BlastSubmitHeader";
@@ -19,6 +20,10 @@ import {
   type ExportableFormFields,
 } from "@/pages/blastSubmit/configSerializer";
 import { deriveSubmitValidation } from "@/pages/blastSubmit/submitValidation";
+import {
+  decideProgramSwitch,
+  deriveDbAvailabilityByType,
+} from "@/pages/blastSubmit/helpers";
 import {
   deriveShardingAvailability,
   reconcileShardingSelection,
@@ -216,6 +221,33 @@ export function BlastSubmit() {
   const warmupStatusLoading = Boolean(
     selectedCluster && isAksWorkloadReady(selectedCluster) && warmupQuery.isLoading,
   );
+
+  // Which molecule types have a ready DB downloaded — gates the program tabs.
+  const dbAvailableByType = useMemo(
+    () => deriveDbAvailabilityByType(dbQuery.data?.databases),
+    [dbQuery.data?.databases],
+  );
+
+  // Selecting a program reconciles the database: keep it when compatible,
+  // overwrite it with a ready DB of the right molecule type, or block the
+  // change and tell the user to prepare one (consistent with the step-gating
+  // UX). Same-program clicks are a no-op.
+  const handleProgramSelect = (next: BlastProgram) => {
+    if (next === form.program) return;
+    const meta = PROGRAMS.find((program) => program.value === next) ?? PROGRAMS[0];
+    const decision = decideProgramSwitch(meta, form.db, dbQuery.data?.databases);
+    if (decision.kind === "blocked") {
+      const molecule = decision.molecule === "nucl" ? "nucleotide" : "protein";
+      toast(
+        `No ${molecule} database is downloaded. Prepare one from the Dashboard before choosing ${next}.`,
+        "info",
+      );
+      return;
+    }
+    set("program", next);
+    if (decision.kind === "switch-db") set("db", decision.db);
+  };
+
   const runtimeDataLoading = Boolean(
     clusterQuery.isLoading || dbQuery.isLoading || warmupStatusLoading,
   );
@@ -446,7 +478,12 @@ export function BlastSubmit() {
             }}
             onFocus={() => setActiveStep(1)}
           >
-            <ProgramSection form={form} set={set} programMeta={programMeta} />
+            <ProgramSection
+              form={form}
+              programMeta={programMeta}
+              onSelectProgram={handleProgramSelect}
+              dbAvailableByType={dbAvailableByType}
+            />
           </div>
 
           <div

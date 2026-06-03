@@ -5,7 +5,7 @@ Edit boundaries: Keep reusable domain logic here; routes and tasks should call t
 instead of duplicating SDK code.
 Key entry points: `_number`, `_hit_is_better`, `_StreamingAggregate`,
 `build_result_manifest_payload`, `build_result_aggregate_payload`,
-`build_default_alignments_payload`
+`build_default_alignments_payload`, `_load_merge_report_tie_cutoff`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
@@ -14,6 +14,7 @@ api/tests/test_blast_tasks.py`.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -40,6 +41,61 @@ from api.services.job_artifacts import upsert_artifact_state, write_result_analy
 from api.services.storage import data as storage_data
 
 LOGGER = logging.getLogger(__name__)
+
+# The merge step writes the score-class truncation signal to this blob at the
+# job root in the results container (split parents and DB-partitioned jobs).
+_MERGE_REPORT_BLOB = "merge-report.json"
+_MERGE_REPORT_MAX_BYTES = 256 * 1024
+
+
+def _load_merge_report_tie_cutoff(job_id: str, storage_account: str) -> dict[str, Any] | None:
+    """Best-effort read of the score-class truncation signal from the job's
+    merge-report.json.
+
+    Returns a compact summary when the max_target_seqs cutoff split a tied
+    score class (or the opt-in diversity-aware cutoff reserved near-miss
+    slots), otherwise ``None`` so the field is simply omitted and the UI shows
+    no badge. The read is intentionally tolerant of a missing or malformed
+    report -- result serving must never fail because the report is absent.
+    """
+    blob_path = f"{job_id}/{_MERGE_REPORT_BLOB}"
+    try:
+        text = storage_data.read_blob_text(
+            get_credential(),
+            storage_account,
+            "results",
+            blob_path,
+            max_bytes=_MERGE_REPORT_MAX_BYTES,
+        )
+    except Exception as exc:
+        LOGGER.debug(
+            "merge report unavailable for %s: %s", job_id, type(exc).__name__
+        )
+        return None
+    try:
+        report = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    overflow = report.get("tie_cutoff_overflow_count")
+    overflow = overflow if isinstance(overflow, int) and not isinstance(overflow, bool) else 0
+    reserved = report.get("diversity_reserved_count")
+    reserved = reserved if isinstance(reserved, int) and not isinstance(reserved, bool) else 0
+    if overflow <= 0 and reserved <= 0:
+        return None
+    queries = report.get("tie_cutoff_queries")
+    sample = [q for q in queries if isinstance(q, dict)][:5] if isinstance(queries, list) else []
+    max_target = report.get("max_target_seqs")
+    summary: dict[str, Any] = {
+        "overflow_count": overflow,
+        "diversity_reserved_count": reserved,
+        "queries": sample,
+    }
+    if isinstance(max_target, int) and not isinstance(max_target, bool):
+        summary["max_target_seqs"] = max_target
+    return summary
+
 
 
 def _number(value: Any) -> float | None:
@@ -334,7 +390,8 @@ def build_default_alignments_payload(job_id: str, storage_account: str) -> dict[
     page_size = RESULTS_DEFAULT_PAGE_SIZE
     page_hits = filtered[:page_size]
     page_count = (len(filtered) + page_size - 1) // page_size
-    return {
+    tie_cutoff = _load_merge_report_tie_cutoff(job_id, storage_account)
+    payload: dict[str, Any] = {
         "artifact_schema_version": 2,
         "job_id": job_id,
         "blob_name": read["blob_names"][0] if len(read["blob_names"]) == 1 else "",
@@ -365,6 +422,9 @@ def build_default_alignments_payload(job_id: str, storage_account: str) -> dict[
             "sort_dir": "asc",
         },
     }
+    if tie_cutoff is not None:
+        payload["tie_cutoff"] = tie_cutoff
+    return payload
 
 
 def build_default_taxonomy_payload(job_id: str, storage_account: str) -> dict[str, Any]:

@@ -2787,6 +2787,16 @@ textarea.form-input {
     0 2px 8px rgba(0, 0, 0, 0.15),
     inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }
+/* No ready DB of this program's molecule type — dimmed but still clickable so
+   the click can surface a "prepare a database first" toast. */
+.blast-program-tab--blocked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.blast-program-tab--blocked:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
 .blast-program-tab__name {
   display: block;
   font-size: 13px;

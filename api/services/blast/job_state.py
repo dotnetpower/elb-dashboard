@@ -788,6 +788,33 @@ def _discover_elastic_blast_job_id(storage_account: str, job_id: str) -> str:
     return ""
 
 
+def blast_shared_visibility_enabled() -> bool:
+    """Return True when per-owner BLAST job isolation is relaxed.
+
+    Development-stage switch. With ``BLAST_JOBS_SHARED_VISIBILITY=true`` every
+    authenticated caller may list and open every job regardless of the row's
+    ``owner_oid`` (the Recent searches page then shows all submitters' jobs).
+    Default OFF preserves the production per-user privacy boundary; the route
+    layer still requires ``require_caller`` either way. Flip this off before
+    any multi-tenant / shared-subscription use.
+    """
+    return os.environ.get("BLAST_JOBS_SHARED_VISIBILITY", "").lower() == "true"
+
+
+def _assert_job_owner(owner_oid: str | None, caller: CallerIdentity) -> None:
+    """Raise ``403 not owner`` unless ``caller`` owns the job.
+
+    No-ops when :func:`blast_shared_visibility_enabled` is on (dev stage) or
+    the row carries no concrete ``owner_oid`` (cluster-shared / external rows).
+    Centralises the per-route owner gate so the dev visibility switch has one
+    authority instead of a dozen drifting inline comparisons.
+    """
+    if blast_shared_visibility_enabled():
+        return
+    if owner_oid and owner_oid != caller.object_id:
+        raise HTTPException(403, "not owner")
+
+
 def _ensure_job_read_allowed(job_id: str, caller: CallerIdentity) -> None:
     """Authorise read access to a job for ``caller``.
 
@@ -807,8 +834,8 @@ def _ensure_job_read_allowed(job_id: str, caller: CallerIdentity) -> None:
             return
         LOGGER.warning("job authorisation lookup failed (failing closed): %s", type(exc).__name__)
         raise HTTPException(503, {"code": "auth_lookup_unavailable"}) from exc
-    if state and state.owner_oid and state.owner_oid != caller.object_id:
-        raise HTTPException(403, "not owner")
+    if state:
+        _assert_job_owner(state.owner_oid, caller)
 
 
 def _resolve_job_storage_account(job_id: str, supplied: str) -> str:

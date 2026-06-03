@@ -1,10 +1,10 @@
 import { SlidersHorizontal } from "lucide-react";
 
 import { BLASTN_OPTIMIZE } from "@/pages/blastSubmitModel";
-import type { ProgramSectionProps } from "@/pages/blastSubmit/types";
+import type { OptimizeSectionProps } from "@/pages/blastSubmit/types";
 import { SectionHeader } from "@/pages/blastSubmit/ui";
 
-export function OptimizeSection({ form, set }: ProgramSectionProps) {
+export function OptimizeSection({ form, set }: OptimizeSectionProps) {
   if (form.program !== "blastn") {
     return null;
   }

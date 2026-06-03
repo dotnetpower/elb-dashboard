@@ -227,6 +227,13 @@ resource controlApp 'Microsoft.App/containerApps@2024-03-01' = {
             //   BLAST_GATE_MEM_WATERMARK_PCT     (default 75)
             //   BLAST_GATE_SIGNAL_CACHE_S        (default 30)
             { name: 'BLAST_GATE_ENABLED', value: 'false' }
+            // Dev-stage job visibility (issue: recent searches only showed
+            // API-submitted jobs). Default OFF preserves per-owner BLAST job
+            // isolation (Charter §12a Rule 4). Flip to 'true' to let every
+            // authenticated tenant member see and open all jobs regardless of
+            // `owner_oid` — intended for the single-tenant development phase
+            // only. Flip back to 'false' before multi-user production.
+            { name: 'BLAST_JOBS_SHARED_VISIBILITY', value: 'false' }
             { name: 'LOG_LEVEL', value: 'INFO' }
           ]
           probes: [

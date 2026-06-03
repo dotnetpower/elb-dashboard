@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -42,6 +42,11 @@ export function QuerySection({
 }: QuerySectionProps) {
   const [exampleModalOpen, setExampleModalOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+
+  // Remembers the last title we auto-generated from an example so switching
+  // examples can refresh it, while a title the researcher typed by hand (which
+  // will not match this ref) is preserved untouched.
+  const lastAutoTitleRef = useRef<string | null>(null);
 
   // Sequence-level diagnostics. Computed off the concatenation of every
   // parsed record so the GC% / IUPAC warning describe the whole query
@@ -147,7 +152,15 @@ export function QuerySection({
     set("program", example.blastProgram);
     set("query_from", "");
     set("query_to", "");
-    if (!form.job_title.trim()) set("job_title", buildGeneratedJobTitle(example.label));
+    // Refresh the auto title when it is empty or still holds the title we
+    // generated for a previously picked example. A manually edited title
+    // (which differs from `lastAutoTitleRef`) is left as the researcher set it.
+    const current = form.job_title.trim();
+    if (!current || current === lastAutoTitleRef.current) {
+      const nextTitle = buildGeneratedJobTitle(example.label);
+      set("job_title", nextTitle);
+      lastAutoTitleRef.current = nextTitle;
+    }
     setExampleModalOpen(false);
   };
 

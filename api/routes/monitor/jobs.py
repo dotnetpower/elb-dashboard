@@ -18,6 +18,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.auth import CallerIdentity, require_caller
 from api.routes.monitor.common import _graceful
+from api.services.blast.job_state import (
+    _assert_job_owner,
+    blast_shared_visibility_enabled,
+)
 
 router = APIRouter()
 
@@ -34,7 +38,10 @@ def list_jobs(
         # Only summary fields are returned; ``include_payload=False`` skips the
         # potentially-large payload_json column on the Table-Storage row so
         # dashboard polls do not pull megabytes per refresh.
-        rows = repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
+        if blast_shared_visibility_enabled() and hasattr(repo, "list_all"):
+            rows = repo.list_all(limit=limit, include_payload=False)
+        else:
+            rows = repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
         return {
             "jobs": [
                 {
@@ -66,8 +73,7 @@ def get_job(
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")
-        if state.owner_oid and state.owner_oid != caller.object_id:
-            raise HTTPException(403, "not owner")
+        _assert_job_owner(state.owner_oid, caller)
         history = repo.get_history(job_id, limit=200)
         return {
             "state": {

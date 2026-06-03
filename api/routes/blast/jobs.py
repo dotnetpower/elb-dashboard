@@ -26,6 +26,7 @@ from api.auth import CallerIdentity, require_caller
 from api.routes._blast_shared import (
     _EXTERNAL_DETAIL_ENRICH_LIMIT,
     _EXTERNAL_NOT_ENABLED_REASONS,
+    _assert_job_owner,
     _blocked_refresh_reasons,
     _exception_reason,
     _external_job_detail_or_row,
@@ -40,6 +41,7 @@ from api.routes._blast_shared import (
     _split_child_summaries_from_repo,
     _split_child_summary_from_repo,
     _sync_external_jobs_to_table,
+    blast_shared_visibility_enabled,
 )
 from api.services.blast.job_state import _K8S_REFRESH_PHASES
 from api.services.response_contracts import build_meta, request_id_from_scope
@@ -100,6 +102,7 @@ def _blast_jobs_list_cache_key(
     subscription_id: str,
     resource_group: str,
     cluster_name: str,
+    shared_visibility: bool,
 ) -> str:
     return json.dumps(
         {
@@ -108,6 +111,7 @@ def _blast_jobs_list_cache_key(
             "subscription_id": subscription_id,
             "resource_group": resource_group,
             "cluster_name": cluster_name,
+            "shared_visibility": shared_visibility,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -194,6 +198,7 @@ def blast_jobs_list(
         subscription_id=subscription_id,
         resource_group=resource_group,
         cluster_name=cluster_name,
+        shared_visibility=blast_shared_visibility_enabled(),
     )
     cached = _blast_jobs_list_cache_get(cache_key)
     if cached is not None:
@@ -206,17 +211,23 @@ def blast_jobs_list(
 
         repo = get_state_repo()
         scoped_listing = bool(subscription_id or resource_group or cluster_name)
-        source_rows = (
-            repo.list_for_scope(
+        shared_visibility = blast_shared_visibility_enabled()
+        if scoped_listing and hasattr(repo, "list_for_scope"):
+            source_rows = repo.list_for_scope(
                 subscription_id=subscription_id,
                 resource_group=resource_group,
                 cluster_name=cluster_name,
                 limit=limit,
                 include_payload=False,
             )
-            if scoped_listing and hasattr(repo, "list_for_scope")
-            else repo.list_for_owner(caller.object_id, limit=limit, include_payload=False)
-        )
+        elif shared_visibility and hasattr(repo, "list_all"):
+            # Dev-stage owner-agnostic listing: Recent searches shows every
+            # submitter's jobs. Gated by BLAST_JOBS_SHARED_VISIBILITY.
+            source_rows = repo.list_all(limit=limit, include_payload=False)
+        else:
+            source_rows = repo.list_for_owner(
+                caller.object_id, limit=limit, include_payload=False
+            )
         rows = [
             row
             for row in source_rows
@@ -256,11 +267,27 @@ def blast_jobs_list(
             if refreshed is not row:
                 rows[idx] = refreshed
         parent_ids = [row.job_id for row in rows if _local_list_row_may_have_split_children(row)]
-        split_summaries = _split_child_summaries_from_repo(
-            repo,
-            caller.object_id,
-            parent_ids,
-        )
+        if shared_visibility:
+            # Child rows carry the parent's owner_oid, so group the parents by
+            # owner and query each owner's children. Keeps split-job rollups
+            # working for jobs submitted by other callers in dev mode.
+            split_summaries: dict[str, dict[str, Any]] = {}
+            parents_by_owner: dict[str, list[str]] = {}
+            for row in rows:
+                if not _local_list_row_may_have_split_children(row):
+                    continue
+                owner = str(getattr(row, "owner_oid", "") or "")
+                parents_by_owner.setdefault(owner, []).append(row.job_id)
+            for owner_oid, owned_parent_ids in parents_by_owner.items():
+                split_summaries.update(
+                    _split_child_summaries_from_repo(repo, owner_oid, owned_parent_ids)
+                )
+        else:
+            split_summaries = _split_child_summaries_from_repo(
+                repo,
+                caller.object_id,
+                parent_ids,
+            )
         for row in rows:
             health = blocked_refresh.get(str(row.job_id))
             jobs.append(
@@ -412,8 +439,7 @@ def blast_job_execution_steps(
         summary = repo.get_summary(job_id)
         if summary is None:
             raise HTTPException(404, "job not found")
-        if summary.owner_oid and summary.owner_oid != caller.object_id:
-            raise HTTPException(403, "not owner")
+        _assert_job_owner(summary.owner_oid, caller)
 
         live_state = None
         live_error: Exception | None = None
@@ -482,8 +508,7 @@ def blast_job_get(
         repo = get_state_repo()
         state = repo.get(job_id)
         if state is not None:
-            if state.owner_oid and state.owner_oid != caller.object_id:
-                raise HTTPException(403, "not owner")
+            _assert_job_owner(state.owner_oid, caller)
             state = _refresh_running_blast_state(repo, state)
             split_children = None
             if _local_list_row_may_have_split_children(state):
@@ -551,8 +576,7 @@ def blast_job_citation(
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")
-        if state.owner_oid and state.owner_oid != caller.object_id:
-            raise HTTPException(403, "not owner")
+        _assert_job_owner(state.owner_oid, caller)
 
         raw_payload = getattr(state, "payload", None)
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
@@ -604,8 +628,7 @@ def blast_job_events(
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")
-        if state.owner_oid and state.owner_oid != caller.object_id:
-            raise HTTPException(403, "not owner")
+        _assert_job_owner(state.owner_oid, caller)
         return {
             "job_id": job_id,
             "events": canonical_job_events(repo.get_history(job_id, limit=limit)),
@@ -668,8 +691,7 @@ def blast_job_query(
         ) from exc
     if state is None:
         raise HTTPException(404, "job not found")
-    if state.owner_oid and state.owner_oid != caller.object_id:
-        raise HTTPException(403, "not owner")
+    _assert_job_owner(state.owner_oid, caller)
     payload = state.payload if isinstance(state.payload, dict) else {}
     blob_path = _queries_blob_path(
         _payload_value(payload, "query_file", "query_blob_url")
@@ -788,8 +810,7 @@ def blast_job_queue(
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")
-        if state.owner_oid and state.owner_oid != caller.object_id:
-            raise HTTPException(403, "not owner")
+        _assert_job_owner(state.owner_oid, caller)
         return queue_snapshot(repo.list_active(job_type="blast", limit=500), job_id=job_id)
     except HTTPException:
         raise
@@ -891,8 +912,7 @@ def blast_job_cancel(
 
         state = get_state_repo().get(job_id)
         if state is not None:
-            if state.owner_oid and state.owner_oid != caller.object_id:
-                raise HTTPException(403, "not owner")
+            _assert_job_owner(state.owner_oid, caller)
             payload = state.payload if isinstance(getattr(state, "payload", None), dict) else {}
             for body_key, payload_keys in {
                 "subscription_id": ("subscription_id",),
@@ -947,8 +967,7 @@ def blast_job_delete(
         state = repo.get(job_id)
         if state is None:
             raise HTTPException(404, "job not found")
-        if state.owner_oid and state.owner_oid != caller.object_id:
-            raise HTTPException(403, "not owner")
+        _assert_job_owner(state.owner_oid, caller)
         repo.update(job_id, status="deleted", phase="deleted")
         _reset_external_jobs_cache()
         return {"job_id": job_id, "status": "deleted"}

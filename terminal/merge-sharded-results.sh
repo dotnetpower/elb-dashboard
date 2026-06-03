@@ -108,6 +108,81 @@ def strict_oracle_enabled():
     }
 
 
+def deterministic_tie_order_enabled():
+    # Opt-in (default OFF). When enabled, ties within an identical
+    # (evalue, bitscore) score class are broken by subject accession instead
+    # of input/shard concatenation order. This makes the selected set AND its
+    # ordering reproducible across reruns regardless of which shard finished
+    # first -- a reproducibility requirement for validated diagnostic
+    # pipelines. A tie-order oracle, when present, still takes precedence.
+    return os.environ.get("ELB_DETERMINISTIC_TIE_ORDER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def diversity_aware_cutoff_limit():
+    # Opt-in (default OFF / 0). When set to a positive integer k, and the
+    # selected max_target_seqs window is entirely filled by a SINGLE tied
+    # (evalue, bitscore) score class while lower-scoring hits exist below the
+    # cutoff, the last min(k, available) slots are replaced by the best
+    # lower-scoring (more informative, e.g. 1-mismatch) hits. This preserves
+    # near-miss subjects that a strict max_target_seqs cutoff would otherwise
+    # drop -- the case where 100 perfect matches push out a single SNP-bearing
+    # variant. Default 0 preserves standard BLAST max_target_seqs semantics.
+    raw = os.environ.get("ELB_DIVERSITY_AWARE_CUTOFF", "").strip()
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        return 0
+    return value if value > 0 else 0
+
+
+def tie_break_sort_component(tie_order, accession, ordinal):
+    # Tertiary tie-break component used after (evalue, -bitscore). The oracle,
+    # when active, always wins. Otherwise, in deterministic mode the subject
+    # accession provides a stable, rerun-independent order; the input ordinal
+    # is kept as the final disambiguator.
+    if tie_order:
+        return oracle_sort_key(tie_order, accession, ordinal)
+    if deterministic_tie_order_enabled():
+        return (0, accession)
+    return (0, ordinal)
+
+
+def ranking_basis_label(tie_order):
+    if tie_order:
+        return "evalue_bitscore_oracle_ordinal"
+    if deterministic_tie_order_enabled():
+        return "evalue_bitscore_accession_ordinal"
+    return "evalue_bitscore_ordinal"
+
+
+def apply_diversity_reservation(selected, sorted_hits, limit):
+    # Replace the tail of a saturated selection window with the best
+    # lower-scoring near-miss hits. Only acts when the ENTIRE selected window
+    # is a single tied (evalue, bitscore) score class -- i.e. informative
+    # lower-scoring subjects were pushed out purely by the max_target_seqs
+    # cutoff. Hit tuple layout: (evalue, -bitscore, ordinal, line).
+    top_class = (selected[0][0], selected[0][1])
+    if any((hit[0], hit[1]) != top_class for hit in selected):
+        return selected, 0
+    near_misses = [
+        hit for hit in sorted_hits[len(selected):] if (hit[0], hit[1]) != top_class
+    ]
+    if not near_misses:
+        return selected, 0
+    reserve = min(limit, len(near_misses), len(selected))
+    if reserve <= 0:
+        return selected, 0
+    kept = selected[: len(selected) - reserve]
+    return kept + near_misses[:reserve], reserve
+
+
 def oracle_sort_key(order, accession, fallback):
     if not order:
         return (0, fallback)
@@ -216,6 +291,9 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
     tie_cutoff_overflow_count = 0
     tie_cutoff_queries = []
     oracle_missing_queries = []
+    diversity_limit = diversity_aware_cutoff_limit()
+    diversity_reserved_count = 0
+    diversity_queries = []
     total_output_hits = 0
 
     with gzip.open(output_gz, "wt") as out:
@@ -246,7 +324,9 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                 key=lambda hit: (
                     hit[0],
                     hit[1],
-                    oracle_sort_key(tie_order, tabular_subject_accession(hit[3]), hit[2]),
+                    tie_break_sort_component(
+                        tie_order, tabular_subject_accession(hit[3]), hit[2]
+                    ),
                     hit[2],
                 ),
             )
@@ -273,6 +353,18 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
                                 "tie_overflow_count": cutoff_overflow,
                             }
                         )
+            # Diversity-aware reservation (opt-in) runs AFTER cutoff detection so
+            # the truncation report still reflects the real top-class overflow.
+            if diversity_limit and selected and len(sorted_hits) > len(selected):
+                selected, reserved = apply_diversity_reservation(
+                    selected, sorted_hits, diversity_limit
+                )
+                if reserved:
+                    diversity_reserved_count += reserved
+                    if len(diversity_queries) < 10:
+                        diversity_queries.append(
+                            {"query_id": query_id, "reserved_count": reserved}
+                        )
             out.write(f"# {blast_label}\n")
             out.write(f"# Query: {query_id}\n")
             out.write(f"# Database: merged from {num_shards} shards\n")
@@ -291,6 +383,11 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
             "The max_target_seqs cutoff splits a tied score class; strict Web BLAST "
             "ordering may require original BLAST DB subject order"
         )
+    if diversity_reserved_count:
+        warnings.append(
+            "Diversity-aware cutoff reserved slots for lower-scoring near-miss hits; "
+            "the displayed set is not the strict top max_target_seqs by score"
+        )
 
     report = {
         "outfmt": 6,
@@ -303,8 +400,10 @@ def merge_tabular(input_tsv, output_gz, report_json, num_shards, blast_program, 
         "tie_break_count": tie_break_count,
         "tie_cutoff_overflow_count": tie_cutoff_overflow_count,
         "tie_cutoff_queries": tie_cutoff_queries,
+        "diversity_reserved_count": diversity_reserved_count,
+        "diversity_queries": diversity_queries,
         "num_shards": int(num_shards),
-        "ranking_basis": "evalue_bitscore_oracle_ordinal" if tie_order else "evalue_bitscore_ordinal",
+        "ranking_basis": ranking_basis_label(tie_order),
         "tie_order_oracle_path": oracle_path,
         "tie_order_oracle_accessions": oracle_unique_accessions,
         "tie_order_oracle_strict": strict_oracle,
@@ -495,7 +594,7 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
                 hit[0],
                 hit[1],
                 hit[2],
-                oracle_sort_key(tie_order, xml_subject_accession(hit[4]), hit[3]),
+                tie_break_sort_component(tie_order, xml_subject_accession(hit[4]), hit[3]),
                 hit[3],
             ),
         )
@@ -601,7 +700,11 @@ def merge_xml(input_tsv, output_gz, report_json, num_shards, max_hits, warnings)
         "ranking_basis": (
             "best_hsp_evalue_bitscore_oracle_ordinal"
             if tie_order
-            else "best_hsp_evalue_bitscore_ordinal"
+            else (
+                "best_hsp_evalue_bitscore_accession_ordinal"
+                if deterministic_tie_order_enabled()
+                else "best_hsp_evalue_bitscore_ordinal"
+            )
         ),
         "tie_order_oracle_path": oracle_path,
         "tie_order_oracle_accessions": oracle_unique_accessions,

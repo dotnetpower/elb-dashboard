@@ -260,6 +260,14 @@ export function BlastHitsTable({
                       Max and Total are equal when there is only one HSP per
                       subject.
                     </div>
+                    <div className="tt-note">
+                      The absolute bit score depends on the database's effective
+                      search space, so the same alignment can show a slightly
+                      different bit score here than on NCBI Web BLAST (e.g.
+                      39286.7 vs 39316). That gap reflects the different database
+                      size, not a scoring error — the relative ranking is
+                      unaffected.
+                    </div>
                   </>
                 }
               />

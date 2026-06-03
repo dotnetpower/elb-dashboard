@@ -9,6 +9,8 @@ import { TaxonRollupPanel } from "./TaxonRollupPanel";
 import { isPartialResult, isResultFilesUnavailable, ncbiNuccoreUrl } from "./helpers";
 import type { BlastAnalyticsState } from "./useBlastAnalyticsState";
 import type { BlastHit } from "@/api/endpoints";
+import type { BlastTieCutoff } from "@/api/blast";
+import { Tooltip } from "@/components/Tooltip";
 
 export interface DescriptionsTabBodyProps {
   analytics: BlastAnalyticsState;
@@ -76,6 +78,10 @@ export function DescriptionsTabBody({ analytics, resultsPending = false }: Descr
         <DegradedBanner data={alignQuery.data} resultsPending={resultsPending} />
       )}
 
+      {alignQuery.data?.tie_cutoff && !resultsPending && (
+        <TieCutoffBadge tieCutoff={alignQuery.data.tie_cutoff} />
+      )}
+
       {alignments.length === 0 && !alignQuery.isLoading && resultFilesUnavailable && (
         <div className="glass-card" style={{ padding: 24, textAlign: "center" }}>
           <Eye size={32} className="muted" style={{ marginBottom: 8 }} />
@@ -128,6 +134,66 @@ export function DescriptionsTabBody({ analytics, resultsPending = false }: Descr
           onSubjectDrilldown={handleSubjectDrilldown}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * Score-class truncation notice. ElasticBLAST applies the max_target_seqs
+ * cutoff per shard before the merge, so when the displayed top hits are all
+ * in one tied score class and more hits share that exact score, some are not
+ * shown. This badge surfaces that sampling so a researcher does not mistake
+ * the displayed set for the complete top score class — and points at the
+ * remedy (raise max_target_seqs / re-run). When the opt-in diversity-aware
+ * cutoff reserved slots for lower-scoring near-miss hits, it explains that
+ * the displayed set is intentionally not the strict top-N by score.
+ */
+function TieCutoffBadge({ tieCutoff }: { tieCutoff: BlastTieCutoff }) {
+  const { overflow_count, diversity_reserved_count, max_target_seqs } = tieCutoff;
+  const limitText = max_target_seqs ? ` (max_target_seqs=${max_target_seqs})` : "";
+  return (
+    <div
+      className="glass-card"
+      style={{
+        padding: "10px 14px",
+        marginBottom: 12,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        borderColor: "var(--warning, #b8893a)",
+        fontSize: 13,
+      }}
+    >
+      <span style={{ color: "var(--text-primary)" }}>
+        {overflow_count > 0
+          ? `Displayed hits are a sample of a larger tied score class — ${overflow_count} hit${
+              overflow_count === 1 ? "" : "s"
+            } with the same top score were not shown${limitText}.`
+          : `Diversity-aware cutoff reserved ${diversity_reserved_count} slot${
+              diversity_reserved_count === 1 ? "" : "s"
+            } for lower-scoring near-miss hits; the displayed set is not the strict top hits by score.`}
+      </span>
+      <Tooltip
+        width={360}
+        content={
+          overflow_count > 0 ? (
+            <span>
+              ElasticBLAST splits the database into shards and applies the
+              <code> max_target_seqs</code> cap on each shard before merging. When
+              many subjects tie on the exact same top score, the merged top-N is
+              just one sample of that tied class. To see more of the tied hits,
+              re-run with a higher <code>-max_target_seqs</code>.
+            </span>
+          ) : (
+            <span>
+              The opt-in diversity-aware cutoff intentionally swaps the lowest
+              displayed tied hits for the best lower-scoring near-miss hits so a
+              near-perfect match in a crowded score class is not dropped. Turn it
+              off to restore the strict top-N-by-score view.
+            </span>
+          )
+        }
+      />
     </div>
   );
 }

@@ -29,6 +29,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.auth import CallerIdentity, require_caller
+from api.services.blast.job_state import _assert_job_owner
 from api.services.job_artifacts import build_execution_steps_snapshot
 from api.services.job_logs.event_bus import read_job_log_events
 from api.services.job_logs.k8s import (
@@ -86,8 +87,7 @@ async def blast_job_logs_ticket(
     state = repo.get_summary(job_id)
     if state is None:
         raise HTTPException(404, "job not found")
-    if state.owner_oid and state.owner_oid != caller.object_id:
-        raise HTTPException(403, "not owner")
+    _assert_job_owner(state.owner_oid, caller)
     request = request or BlastLogTicketRequest()
     token = secrets.token_urlsafe(24)
     now = time.time()

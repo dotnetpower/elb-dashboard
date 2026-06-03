@@ -13,6 +13,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import ClassVar
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -388,4 +389,110 @@ def test_blast_job_cancel_external_sibling_unreachable_returns_503(monkeypatch) 
     # "cancel_unavailable" k8s failure.
     assert response.status_code == 503
     assert response.json()["code"] == "openapi_unreachable"
+
+
+def _other_owner_state(job_id: str = "job-other") -> SimpleNamespace:
+    """A job row owned by a different identity than the dev-bypass caller."""
+    return SimpleNamespace(
+        job_id=job_id,
+        task_id="task-other",
+        type="blast",
+        owner_oid="11111111-1111-1111-1111-111111111111",
+        status="completed",
+        phase="completed",
+        created_at="2026-06-03T00:00:00Z",
+        updated_at="2026-06-03T00:01:00Z",
+        error_code=None,
+        parent_job_id=None,
+        payload={"db": "core_nt", "query_file": "query.fa"},
+    )
+
+
+def test_assert_job_owner_isolation_default(monkeypatch) -> None:
+    monkeypatch.delenv("BLAST_JOBS_SHARED_VISIBILITY", raising=False)
+
+    from api.services.blast.job_state import (
+        _assert_job_owner,
+        blast_shared_visibility_enabled,
+    )
+    from fastapi import HTTPException
+
+    assert blast_shared_visibility_enabled() is False
+    caller = SimpleNamespace(object_id=_DEV_BYPASS_OID)
+
+    # A foreign owner is rejected when the dev flag is off.
+    with pytest.raises(HTTPException) as excinfo:
+        _assert_job_owner("11111111-1111-1111-1111-111111111111", caller)
+    assert excinfo.value.status_code == 403
+
+    # An empty owner_oid (external / cluster-shared row) is always allowed.
+    _assert_job_owner("", caller)
+    # The caller's own job is allowed.
+    _assert_job_owner(_DEV_BYPASS_OID, caller)
+
+
+def test_assert_job_owner_relaxed_when_flag_on(monkeypatch) -> None:
+    monkeypatch.setenv("BLAST_JOBS_SHARED_VISIBILITY", "true")
+
+    from api.services.blast.job_state import (
+        _assert_job_owner,
+        blast_shared_visibility_enabled,
+    )
+
+    assert blast_shared_visibility_enabled() is True
+    caller = SimpleNamespace(object_id=_DEV_BYPASS_OID)
+    # No exception even though the owner differs.
+    _assert_job_owner("11111111-1111-1111-1111-111111111111", caller)
+
+
+def test_job_detail_blocks_other_owner_when_flag_off(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.delenv("BLAST_JOBS_SHARED_VISIBILITY", raising=False)
+
+    state = _other_owner_state()
+
+    class Repo:
+        def get(self, job_id: str):
+            assert job_id == "job-other"
+            return state
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get("/api/blast/jobs/job-other")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "not owner"
+
+
+def test_job_detail_allows_other_owner_when_flag_on(monkeypatch) -> None:
+    monkeypatch.setenv("AUTH_DEV_BYPASS", "true")
+    monkeypatch.setenv("BLAST_JOBS_SHARED_VISIBILITY", "true")
+
+    state = _other_owner_state()
+
+    class Repo:
+        def get(self, job_id: str):
+            assert job_id == "job-other"
+            return state
+
+        def list_children(self, *_args, **_kwargs):
+            raise AssertionError("non-split job detail should not query child rows")
+
+    monkeypatch.setattr("api.services.state_repo.JobStateRepository", Repo)
+
+    from api.main import app
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/blast/jobs/job-other",
+        params={"include_database_metadata": "false"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["job_id"] == "job-other"
+    assert body["status"] == "completed"
 

@@ -290,6 +290,54 @@ resolve_image_digest() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# assert_msal_client_matches_target -- refuse to bake a frontend whose MSAL
+# App Registration client id (VITE_AZURE_CLIENT_ID) does not match the one
+# the TARGET Container App's api sidecar already validates bearer tokens
+# against (its API_CLIENT_ID env).
+#
+# Why: .env / web/.env.local in a fresh clone frequently carry a developer's
+# OWN tenant/client values (see the env-leak hardening note
+# docs/features_change/2026-05/2026-05-25-frontend-env-leak-hardening.md).
+# When a different operator runs `quick-deploy.sh all` / `frontend`
+# without exporting the target's MSAL overrides, the SPA is baked to log
+# users in against App Registration A while the api only accepts tokens
+# minted for App Registration B -- the deploy "succeeds" but every /api/*
+# call returns 401. The existing localhost / auth-bypass guards above catch
+# two siblings of this incident class; this catches the wrong-tenant one.
+#
+# Behaviour (mirrors the abort-with-escape-hatch style of the auth-bypass
+# guard, NOT a default-OFF STRICT_* gate -- baking a mismatched audience is
+# always a bug, so the safe default is to stop):
+#   * target api API_CLIENT_ID present AND differs from the value to bake
+#       -> abort with remediation + escape hatch ELB_ALLOW_MSAL_CLIENT_MISMATCH=1
+#         (the intended path when deliberately rotating the App Registration).
+#   * target api API_CLIENT_ID absent (first-ever deploy / bootstrap) OR the
+#     show query fails (transient ARM error / read-only hiccup) -> warn and
+#     continue, so a legitimate first rollout is never blocked.
+#
+# Args: $1 = client id that will be baked into the frontend (API_CLIENT_ID_VAL).
+# ---------------------------------------------------------------------------
+assert_msal_client_matches_target() {
+  local baking="$1" current=""
+  [[ -n "$baking" ]] || return 0
+  if [[ "${ELB_ALLOW_MSAL_CLIENT_MISMATCH:-0}" == "1" ]]; then
+    ts "MSAL client-id match check skipped (ELB_ALLOW_MSAL_CLIENT_MISMATCH=1)"
+    return 0
+  fi
+  current="$(az containerapp show -n "$CONTAINER_APP_NAME" -g "$AZURE_RESOURCE_GROUP" \
+    --query "properties.template.containers[?name=='api'].env[] | [?name=='API_CLIENT_ID'].value | [0]" \
+    -o tsv 2>/dev/null | tr -d '[:space:]')" || true
+  if [[ -z "$current" || "$current" == "None" ]]; then
+    ts "MSAL client-id match check: target api has no API_CLIENT_ID yet (first deploy?) — skipping"
+    return 0
+  fi
+  if [[ "$current" != "$baking" ]]; then
+    die "MSAL client-id mismatch: about to bake VITE_AZURE_CLIENT_ID='$baking' into the cloud frontend, but the target Container App's api sidecar validates bearer tokens against API_CLIENT_ID='$current'. Deploying would log users in against the wrong App Registration — every /api/* call returns 401. Fix the source value (.env / web/.env.local / azd env) so VITE_AZURE_CLIENT_ID/API_CLIENT_ID matches the target, or set ELB_ALLOW_MSAL_CLIENT_MISMATCH=1 if you are intentionally rotating the App Registration."
+  fi
+  ts "MSAL client-id match check OK (frontend VITE_AZURE_CLIENT_ID == target api API_CLIENT_ID)"
+}
+
 if [[ "$SIDECAR" == "all" ]]; then
   # ---------------------------------------------------------------------------
   # Parallel-build path: api / frontend / terminal images build concurrently
@@ -360,6 +408,11 @@ if ! $NO_BUILD; then
   if [[ "$VITE_AUTH_DEV_BYPASS_VAL" == "true" && "${ELB_ALLOW_AUTH_BYPASS_IN_CLOUD:-0}" != "1" ]]; then
     die "VITE_AUTH_DEV_BYPASS=true — refusing to deploy a cloud frontend that skips MSAL while the api enforces bearer tokens. Run 'unset VITE_AUTH_DEV_BYPASS' (or export VITE_AUTH_DEV_BYPASS=false) and retry."
   fi
+  # Guard: a stale .env / web/.env.local carrying a different tenant's MSAL
+  # client id would bake an SPA that authenticates against the wrong App
+  # Registration -> 401 on every /api/* call. Stop unless the target api has
+  # no client id yet or the operator is deliberately rotating it.
+  assert_msal_client_matches_target "$API_CLIENT_ID_VAL"
 
   APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"
   APP_BUILD_NUMBER_VAL="${APP_BUILD_NUMBER:-$(release_build_number)}"
@@ -644,6 +697,10 @@ if ! $NO_BUILD; then
     if [[ "$VITE_AUTH_DEV_BYPASS_VAL" == "true" && "${ELB_ALLOW_AUTH_BYPASS_IN_CLOUD:-0}" != "1" ]]; then
       die "VITE_AUTH_DEV_BYPASS=true — refusing to deploy a cloud frontend that skips MSAL while the api enforces bearer tokens. Run 'unset VITE_AUTH_DEV_BYPASS' (or export VITE_AUTH_DEV_BYPASS=false) and retry."
     fi
+    # Guard: refuse to bake a frontend whose MSAL client id does not match the
+    # target api sidecar's API_CLIENT_ID (the wrong-tenant sibling of the two
+    # guards above). Escape hatch: ELB_ALLOW_MSAL_CLIENT_MISMATCH=1.
+    assert_msal_client_matches_target "$API_CLIENT_ID_VAL"
     # Version stamp: ACR builds run without .git in context, so resolve on host.
     APP_VERSION_VAL="${APP_VERSION:-$(node -p "require('$REPO_ROOT/web/package.json').version" 2>/dev/null || echo 0.0.0)}"
     APP_BUILD_NUMBER_VAL="${APP_BUILD_NUMBER:-$(release_build_number)}"

@@ -15,6 +15,7 @@ Validation: `uv run pytest -q api/tests/test_job_artifacts.py`.
 from __future__ import annotations
 
 import gzip
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -178,6 +179,95 @@ def test_streaming_aggregate_does_not_hit_cap(monkeypatch) -> None:
     assert payload["stats"]["total_hits"] == 3
     assert payload["stats"]["unique_queries"] == 3
     assert payload["truncated"] is False
+
+
+def _patch_merge_report(monkeypatch, text):
+    """Install a fake results-container reader returning ``text`` for the
+    merge-report blob (or raising when ``text`` is an Exception)."""
+
+    def _read(_cred, _account, container, blob_path, max_bytes=4096):
+        assert container == "results"
+        assert blob_path.endswith("/merge-report.json")
+        if isinstance(text, Exception):
+            raise text
+        return text
+
+    monkeypatch.setattr(
+        "api.services.blast.result_artifacts.storage_data.read_blob_text", _read
+    )
+    monkeypatch.setattr("api.services.blast.result_artifacts.get_credential", lambda: object())
+
+
+def test_load_merge_report_tie_cutoff_summarizes_overflow(monkeypatch) -> None:
+    from api.services.blast import result_artifacts
+
+    report = {
+        "tie_cutoff_overflow_count": 4,
+        "diversity_reserved_count": 0,
+        "max_target_seqs": 500,
+        "tie_cutoff_queries": [
+            {"query_id": "q1", "overflow_count": 4},
+            {"query_id": "q2", "overflow_count": 1},
+            {"query_id": "q3"},
+            {"query_id": "q4"},
+            {"query_id": "q5"},
+            {"query_id": "q6"},
+        ],
+    }
+    _patch_merge_report(monkeypatch, json.dumps(report))
+
+    summary = result_artifacts._load_merge_report_tie_cutoff("job-1", "acct")
+
+    assert summary == {
+        "overflow_count": 4,
+        "diversity_reserved_count": 0,
+        "max_target_seqs": 500,
+        "queries": report["tie_cutoff_queries"][:5],
+    }
+
+
+def test_load_merge_report_tie_cutoff_omits_when_no_signal(monkeypatch) -> None:
+    from api.services.blast import result_artifacts
+
+    _patch_merge_report(
+        monkeypatch,
+        json.dumps({"tie_cutoff_overflow_count": 0, "diversity_reserved_count": 0}),
+    )
+
+    assert result_artifacts._load_merge_report_tie_cutoff("job-1", "acct") is None
+
+
+def test_load_merge_report_tie_cutoff_tolerates_missing_report(monkeypatch) -> None:
+    from api.services.blast import result_artifacts
+
+    _patch_merge_report(monkeypatch, RuntimeError("blob not found"))
+
+    assert result_artifacts._load_merge_report_tie_cutoff("job-1", "acct") is None
+
+
+def test_load_merge_report_tie_cutoff_tolerates_malformed_json(monkeypatch) -> None:
+    from api.services.blast import result_artifacts
+
+    _patch_merge_report(monkeypatch, "{not valid json")
+
+    assert result_artifacts._load_merge_report_tie_cutoff("job-1", "acct") is None
+
+
+def test_load_merge_report_tie_cutoff_reports_diversity_only(monkeypatch) -> None:
+    from api.services.blast import result_artifacts
+
+    _patch_merge_report(
+        monkeypatch,
+        json.dumps({"tie_cutoff_overflow_count": 0, "diversity_reserved_count": 2}),
+    )
+
+    summary = result_artifacts._load_merge_report_tie_cutoff("job-1", "acct")
+
+    assert summary == {
+        "overflow_count": 0,
+        "diversity_reserved_count": 2,
+        "queries": [],
+    }
 
 
 def test_worker_command_rejects_untrusted_queue_values() -> None:
