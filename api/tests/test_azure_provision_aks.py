@@ -131,6 +131,79 @@ def test_build_cluster_params_byo_subnet_pins_overlay() -> None:
     assert cluster.network_profile.pod_cidr == "10.244.0.0/16"
 
 
+def test_build_cluster_params_default_warm_cache_is_byte_identical() -> None:
+    """The default `ephemeral` mode must not change the blastpool OS disk.
+
+    Regression guard: a missing Performance preference reads back as
+    `ephemeral`, and that path must leave the blastpool disk fields unset so
+    the ARM payload stays byte-identical to the historical default (Azure
+    picks an ephemeral OS disk when the SKU cache allows).
+    """
+    default = _build_cluster_params(
+        region="koreacentral",
+        cluster_name="elb-smoke-aks",
+        sys_sku="Standard_D2s_v3",
+        sys_count=1,
+        blast_sku="Standard_D8s_v3",
+        blast_count=1,
+        caller_oid="caller-1",
+    )
+    explicit = _build_cluster_params(
+        region="koreacentral",
+        cluster_name="elb-smoke-aks",
+        sys_sku="Standard_D2s_v3",
+        sys_count=1,
+        blast_sku="Standard_D8s_v3",
+        blast_count=1,
+        caller_oid="caller-1",
+        warm_cache_mode="ephemeral",
+    )
+    for cluster in (default, explicit):
+        pools = {pool.name: pool for pool in cluster.agent_pool_profiles}
+        assert pools["blastpool"].os_disk_type is None
+        assert pools["blastpool"].os_disk_size_gb is None
+        assert "elb-warm-cache" not in (cluster.tags or {})
+
+
+def test_build_cluster_params_node_disk_pins_managed_os_disk() -> None:
+    cluster = _build_cluster_params(
+        region="koreacentral",
+        cluster_name="elb-smoke-aks",
+        sys_sku="Standard_D2s_v3",
+        sys_count=1,
+        blast_sku="Standard_D8s_v3",
+        blast_count=1,
+        caller_oid="caller-1",
+        warm_cache_mode="node_disk",
+    )
+    pools = {pool.name: pool for pool in cluster.agent_pool_profiles}
+    assert pools["blastpool"].os_disk_type == "Managed"
+    assert pools["blastpool"].os_disk_size_gb == 512
+    # The systempool must stay untouched.
+    assert pools["systempool"].os_disk_type is None
+    assert pools["systempool"].os_disk_size_gb is None
+    assert (cluster.tags or {}).get("elb-warm-cache") == "node_disk"
+
+
+def test_build_cluster_params_data_disk_tags_but_keeps_default_disk() -> None:
+    """`data_disk` is realised by a PVC in the warmup task, not the cluster
+    model, so the blastpool disk fields stay default — only the tag is set."""
+    cluster = _build_cluster_params(
+        region="koreacentral",
+        cluster_name="elb-smoke-aks",
+        sys_sku="Standard_D2s_v3",
+        sys_count=1,
+        blast_sku="Standard_D8s_v3",
+        blast_count=1,
+        caller_oid="caller-1",
+        warm_cache_mode="data_disk",
+    )
+    pools = {pool.name: pool for pool in cluster.agent_pool_profiles}
+    assert pools["blastpool"].os_disk_type is None
+    assert pools["blastpool"].os_disk_size_gb is None
+    assert (cluster.tags or {}).get("elb-warm-cache") == "data_disk"
+
+
 def test_resolve_aks_vnet_subnet_id_prefers_explicit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

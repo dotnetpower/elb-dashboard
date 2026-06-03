@@ -436,6 +436,13 @@ def provision_aks(
             cluster_name,
         )
 
+    # Resolve the per-cluster warm-cache persistence mode. A missing
+    # preference row reads back as `ephemeral`, which keeps the historical
+    # cluster payload byte-identical (no disk overrides).
+    from api.services.performance_pref import resolve_warm_cache_mode
+
+    warm_cache_mode = resolve_warm_cache_mode(subscription_id, resource_group, cluster_name)
+
     cluster_params = build_cluster_params(
         region=region,
         cluster_name=cluster_name,
@@ -446,6 +453,7 @@ def provision_aks(
         caller_oid=caller_oid,
         tier=tier,
         vnet_subnet_id=aks_vnet_subnet_id,
+        warm_cache_mode=warm_cache_mode,
     )
 
     portal_url = None

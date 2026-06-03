@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { stripConsoleOutputBlock } from "./StepLogSection";
+import { formatLiveLogLine, stripConsoleOutputBlock } from "./StepLogSection";
 
 describe("stripConsoleOutputBlock", () => {
   it("removes the snapshot live console block while keeping the prologue", () => {
@@ -35,5 +35,60 @@ describe("stripConsoleOutputBlock", () => {
 
   it("returns empty string for empty input", () => {
     expect(stripConsoleOutputBlock("")).toBe("");
+  });
+});
+
+describe("formatLiveLogLine", () => {
+  it("does not label elastic-blast (terminal_exec) stderr as an error", () => {
+    // ElasticBLAST routes its full INFO log to stderr by design, so the
+    // line must render verbatim — no misleading `[stderr]` prefix.
+    expect(
+      formatLiveLogLine({
+        source: "terminal_exec",
+        stream: "stderr",
+        line: "Splitting queries into batches",
+      }),
+    ).toBe("Splitting queries into batches");
+  });
+
+  it("renders terminal_exec stdout verbatim", () => {
+    expect(
+      formatLiveLogLine({
+        source: "terminal_exec",
+        stream: "stdout",
+        line: "Submitting 4 jobs to cluster",
+      }),
+    ).toBe("Submitting 4 jobs to cluster");
+  });
+
+  it("prefixes k8s pod logs with the pod/container", () => {
+    expect(
+      formatLiveLogLine({
+        source: "k8s",
+        pod: "blast-worker-0",
+        container: "blast",
+        line: "running blastn",
+      }),
+    ).toBe("[blast-worker-0/blast] running blastn");
+  });
+
+  it("omits the container segment when absent", () => {
+    expect(
+      formatLiveLogLine({
+        source: "k8s",
+        pod: "blast-worker-0",
+        line: "running blastn",
+      }),
+    ).toBe("[blast-worker-0] running blastn");
+  });
+
+  it("keeps a [stderr] marker for an unknown source's stderr stream", () => {
+    expect(
+      formatLiveLogLine({
+        source: "other",
+        stream: "stderr",
+        line: "boom",
+      }),
+    ).toBe("[stderr] boom");
   });
 });

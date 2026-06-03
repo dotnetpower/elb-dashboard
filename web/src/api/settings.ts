@@ -81,6 +81,46 @@ export interface AksObservabilityStatusQuery {
   cluster_name: string;
 }
 
+/** Warm-cache persistence mode for an AKS cluster's BLAST DB staging.
+ *  - `ephemeral`: redownload + vmtouch on every start (current behaviour).
+ *  - `node_disk`: persist the staged DB on the node OS/managed disk.
+ *  - `data_disk`: persist on a dedicated managed data disk (PVC). */
+export type WarmCacheMode = "ephemeral" | "node_disk" | "data_disk";
+
+export interface PerformancePreference {
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+  warm_cache_mode: WarmCacheMode;
+  updated_at: string;
+  owner_oid: string;
+  tenant_id: string;
+}
+
+export interface PerformancePreferenceResponse {
+  /** Null when no preference row exists yet (effective mode is the default). */
+  preference: PerformancePreference | null;
+  warm_cache_mode: WarmCacheMode;
+}
+
+export interface PerformancePreferenceQuery {
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+}
+
+export interface PerformancePreferencePutRequest {
+  subscription_id: string;
+  resource_group: string;
+  cluster_name: string;
+  warm_cache_mode: WarmCacheMode;
+}
+
+export interface PerformancePreferenceSavedResponse {
+  status: "saved";
+  preference: PerformancePreference;
+}
+
 export interface VnetPeeringRequest {
   /** Subscription that hosts the AKS cluster (i.e. the dashboard subscription). */
   subscription_id: string;
@@ -246,6 +286,21 @@ export const settingsApi = {
   disableAksObservability: (body: AksObservabilityDisableRequest) =>
     api.post<AppInsightsTaskQueuedResponse>(
       "/settings/aks-observability/disable",
+      body,
+    ),
+
+  /** Read the per-cluster warm-cache mode. Returns the default `ephemeral`
+   *  (and `preference: null`) when no row exists — never 404s. */
+  getPerformance: (q: PerformancePreferenceQuery) =>
+    api.get<PerformancePreferenceResponse>(
+      `/settings/performance?${querystring({ ...q })}`,
+    ),
+
+  /** Persist the per-cluster warm-cache mode. Applies to the NEXT provisioned
+   *  cluster — the OS disk type is fixed at create time. */
+  putPerformance: (body: PerformancePreferencePutRequest) =>
+    api.put<PerformancePreferenceSavedResponse>(
+      "/settings/performance",
       body,
     ),
 

@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
 
 import { FilePreview } from "@/components/BlastFilePreview";
-import { useBlastJobLogStream } from "@/hooks/useBlastJobLogStream";
+import {
+  useBlastJobLogStream,
+  type BlastLogEvent,
+} from "@/hooks/useBlastJobLogStream";
 
 import { buildStepLog } from "./buildStepLog";
 import {
@@ -30,6 +33,37 @@ export function stripConsoleOutputBlock(log: string): string {
   if (!log) return "";
   const re = /\n+(?:--- (?:Live )?Console Output ---)[\s\S]*$/;
   return log.replace(re, "").trimEnd();
+}
+
+/**
+ * Format a single live-log event line for display in the step timeline.
+ *
+ * ElasticBLAST deliberately routes its *entire* INFO progress log to stderr
+ * (`elastic-blast … --logfile stderr`, see
+ * api/tasks/blast/cli_parsing.py::_elastic_blast_argv), so a blanket
+ * `[stderr]` prefix mislabels ordinary progress output (query splitting,
+ * workfile upload, "Submitting N jobs to cluster") as if it were an error.
+ * To avoid the false-alarm look we:
+ *  - prefix Kubernetes pod logs with `[pod/container]` so the source pod is
+ *    identifiable;
+ *  - leave `terminal_exec` (the elastic-blast CLI) lines unprefixed — stderr
+ *    is the intended log channel here, not an error indicator. The CLI's own
+ *    `ERROR:` / `WARNING:` level tokens still surface in the line text;
+ *  - keep a `[stderr]` marker only for some *other* source that emits a
+ *    genuine separate stderr stream.
+ */
+export function formatLiveLogLine(
+  event: Pick<BlastLogEvent, "source" | "stream" | "pod" | "container" | "line">,
+): string {
+  if (event.source === "k8s" && event.pod) {
+    const container = event.container ? `/${event.container}` : "";
+    return `[${event.pod}${container}] ${event.line}`;
+  }
+  if (event.source === "terminal_exec") {
+    return event.line;
+  }
+  const prefix = event.stream === "stderr" ? "[stderr] " : "";
+  return `${prefix}${event.line}`;
 }
 
 export function StepLogSection({
@@ -75,12 +109,7 @@ export function StepLogSection({
     const grouped: Record<string, string[]> = {};
     for (const event of liveStream.events) {
       const key = event.phase || "running";
-      const prefix = event.source === "k8s" && event.pod
-        ? `[${event.pod}${event.container ? `/${event.container}` : ""}] `
-        : event.stream === "stderr"
-          ? "[stderr] "
-          : "";
-      grouped[key] = [...(grouped[key] ?? []), `${prefix}${event.line}`];
+      grouped[key] = [...(grouped[key] ?? []), formatLiveLogLine(event)];
     }
     for (const key of Object.keys(grouped)) {
       const lines = grouped[key];

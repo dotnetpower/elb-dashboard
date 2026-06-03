@@ -17,13 +17,33 @@ Risky contracts: The pool names (`systempool`, `blastpool`), the
     `snet-aks` subnet) and the network profile is pinned to Azure CNI Overlay so
     pods stay on the overlay pod CIDR and do not consume subnet IPs — the
     overlay CIDRs (`10.244.0.0/16` pod, `10.0.0.0/16` service, `10.0.0.10` DNS)
-    must not collide with the hub VNet address space (`10.20.0.0/20`).
+    must not collide with the hub VNet address space (`10.20.0.0/20`). The
+    `warm_cache_mode` parameter governs the blastpool OS disk: the default
+    `ephemeral` keeps the historical payload byte-identical (Azure picks an
+    ephemeral OS disk when the SKU cache allows), while `node_disk` pins a
+    Managed OS disk (survives `az aks stop` deallocation) sized to hold the
+    staged BLAST database so a stop/start cycle re-touches RAM instead of
+    re-downloading. `data_disk` is a no-op here — it is realised by a PVC in
+    the warmup task, not the cluster model.
 Validation: `uv run pytest -q api/tests/test_azure_provision_aks.py`.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+# Warm-cache persistence modes. Keep in lock-step with
+# `api.services.performance_pref.WARM_CACHE_MODES` and the SPA WarmCacheMode
+# union — adding a value requires updating all three.
+WARM_CACHE_MODE_EPHEMERAL = "ephemeral"
+WARM_CACHE_MODE_NODE_DISK = "node_disk"
+WARM_CACHE_MODE_DATA_DISK = "data_disk"
+
+# Managed OS disk size for `node_disk` mode. The default 128 GB AKS OS disk is
+# too small for a staged BLAST database (the `nt` set alone expands past
+# ~200 GB), so node_disk provisions a 512 GB managed OS disk to hold the warm
+# cache across a stop/start cycle.
+_NODE_DISK_OS_DISK_SIZE_GB = 512
 
 
 def build_cluster_params(
@@ -37,6 +57,7 @@ def build_cluster_params(
     caller_oid: str,
     tier: str | None = None,
     vnet_subnet_id: str | None = None,
+    warm_cache_mode: str = WARM_CACHE_MODE_EPHEMERAL,
 ) -> Any:
     """Build the AKS managed cluster model used by the provision task.
 
@@ -89,6 +110,22 @@ def build_cluster_params(
     tier_clean = (tier or "").strip()
     if tier_clean:
         tags["elb-tier"] = tier_clean
+
+    # Resolve the blastpool OS-disk overrides for the warm-cache mode. Only
+    # `node_disk` changes the payload; `ephemeral` (default) and `data_disk`
+    # leave the disk fields unset so the model stays byte-identical to the
+    # historical default.
+    mode_clean = (warm_cache_mode or "").strip() or WARM_CACHE_MODE_EPHEMERAL
+    blast_os_disk_type: str | None = None
+    blast_os_disk_size_gb: int | None = None
+    if mode_clean == WARM_CACHE_MODE_NODE_DISK:
+        blast_os_disk_type = "Managed"
+        blast_os_disk_size_gb = _NODE_DISK_OS_DISK_SIZE_GB
+        tags["elb-warm-cache"] = WARM_CACHE_MODE_NODE_DISK
+    elif mode_clean == WARM_CACHE_MODE_DATA_DISK:
+        # Realised by a PVC in the warmup task; tag the cluster so the
+        # dashboard can surface the intended mode without re-reading the pref.
+        tags["elb-warm-cache"] = WARM_CACHE_MODE_DATA_DISK
 
     subnet_id = (vnet_subnet_id or "").strip()
     pool_subnet_id = subnet_id or None
@@ -160,6 +197,8 @@ def build_cluster_params(
                 node_labels={BLAST_LABEL_KEY: BLAST_LABEL_VALUE},
                 node_taints=[BLAST_TAINT],
                 vnet_subnet_id=pool_subnet_id,
+                os_disk_type=blast_os_disk_type,
+                os_disk_size_gb=blast_os_disk_size_gb,
             ),
         ],
         tags=tags,

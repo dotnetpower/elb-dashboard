@@ -281,3 +281,38 @@ def test_normalise_accession_requires_storage(monkeypatch: pytest.MonkeyPatch) -
     detail = ctx.value.detail
     assert isinstance(detail, dict)
     assert detail["code"] == "validation_error"
+
+
+# ---------------------------------------------------------------------------
+# Pre-side-effect precision contract: precise sharding must be eligible for an
+# accession-only submit, since the accession resolves to a single query and is
+# only fetched later in `_normalise_blast_submit_body`.
+# ---------------------------------------------------------------------------
+def test_submit_contracts_precise_sharding_allows_accession_query() -> None:
+    from api.services.blast.submit_payload import submit_contracts
+
+    body = {
+        **_base_submit_body(),
+        "query_accession": "OZ254605.1",
+        "sharding_mode": "precise",
+        "db_effective_search_space": 32156241807668,
+        "db_total_letters": 32156241807668,
+        "shard_sets": [4],
+    }
+    contracts = submit_contracts(body)
+    precision = contracts["precision"]
+    assert precision["eligible"] is True, precision.get("blocking_errors")
+    assert "precise sharding requires query metadata" not in (
+        precision.get("blocking_errors") or []
+    )
+
+
+def test_canonical_query_reports_single_count_for_accession() -> None:
+    from api.services.blast.submit_payload import _canonical_query_from_body
+
+    query = _canonical_query_from_body(
+        {**_base_submit_body(), "query_accession": "OZ254605.1"}
+    )
+    assert query["kind"] == "ncbi_accession"
+    assert query["query_count"] == 1
+    assert query["accession"] == "OZ254605.1"

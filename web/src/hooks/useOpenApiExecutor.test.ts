@@ -4,6 +4,7 @@ import {
   buildCurl,
   buildTargetPath,
   formatBinarySummary,
+  formatResponseBody,
   isBinaryContentType,
   pickDownloadFilename,
 } from "./useOpenApiExecutor";
@@ -97,6 +98,22 @@ describe("OpenAPI executor binary handling", () => {
     expect(text).toContain("merged_results.zip");
     expect(text).toContain("2.00 KiB");
     expect(text).toContain("application/zip");
+  });
+});
+
+describe("OpenAPI executor response body formatter", () => {
+  it("shows an explicit notice when a textual response has an empty body", () => {
+    expect(formatResponseBody("")).toBe(
+      "(empty response body — the server returned 0 bytes)",
+    );
+    expect(formatResponseBody("   \n  ")).toBe(
+      "(empty response body — the server returned 0 bytes)",
+    );
+  });
+
+  it("pretty-prints JSON and passes other text through unchanged", () => {
+    expect(formatResponseBody('{"a":1}')).toBe('{\n  "a": 1\n}');
+    expect(formatResponseBody("<root>x</root>")).toBe("<root>x</root>");
   });
 });
 

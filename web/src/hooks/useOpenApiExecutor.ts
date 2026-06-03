@@ -290,7 +290,10 @@ async function executeDirect(
   return fetch(baseUrl + targetPath, opts);
 }
 
-function formatResponseBody(text: string): string {
+export function formatResponseBody(text: string): string {
+  if (text.trim().length === 0) {
+    return "(empty response body — the server returned 0 bytes)";
+  }
   try {
     return JSON.stringify(JSON.parse(text), null, 2);
   } catch {

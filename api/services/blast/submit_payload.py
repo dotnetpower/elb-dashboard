@@ -222,6 +222,20 @@ def _canonical_query_from_body(body: dict[str, Any]) -> dict[str, Any]:
     query_file = body.get("query_file") or body.get("query_blob_url")
     if query_file not in (None, ""):
         return {"kind": "query_file", "path": str(query_file)}
+    accession = body.get("query_accession")
+    if isinstance(accession, str) and accession.strip():
+        # An NCBI nuccore accession resolves to exactly one FASTA record (a
+        # subrange narrows that record but does not change the count), so the
+        # query count is deterministically 1. The accession is only fetched
+        # later in ``_normalise_blast_submit_body``; declaring the count here
+        # lets the pre-side-effect precision contract validate precise
+        # sharding instead of failing with "precise sharding requires query
+        # metadata" before the fetch happens.
+        return {
+            "kind": "ncbi_accession",
+            "accession": accession.strip(),
+            "query_count": 1,
+        }
     return {"kind": "missing"}
 
 
