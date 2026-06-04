@@ -622,12 +622,22 @@ export const monitoringApi = {
       db_name: string;
       deleted: number;
       errors: number;
+      partial?: boolean;
       metadata_deleted: boolean;
-    }>(`/storage/prepare-db/${encodeURIComponent(dbName)}/delete`, {
-      subscription_id: subscriptionId,
-      storage_resource_group: storageRg,
-      account_name: accountName,
-    }),
+    }>(
+      `/storage/prepare-db/${encodeURIComponent(dbName)}/delete`,
+      {
+        subscription_id: subscriptionId,
+        storage_resource_group: storageRg,
+        account_name: accountName,
+      },
+      // A large DB (e.g. `nt`, ~4.8k shard blobs) is removed in batches of
+      // 256 server-side, but under throttling that can still outlast the
+      // default 30 s window. Give the synchronous delete a generous timeout
+      // so it returns success instead of a misleading "Request timed out"
+      // while the backend keeps deleting.
+      { timeoutMs: 180_000 },
+    ),
 
   warmupStatus: (subscriptionId: string, rg: string, clusterName: string) =>
     api.get<WarmupStatus>(

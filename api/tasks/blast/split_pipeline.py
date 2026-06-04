@@ -38,6 +38,7 @@ from typing import Any
 
 from celery import shared_task
 
+from api.services.blast.coordination import SUBMIT_COORDINATION_NAMESPACE
 from api.services.query_grouping import QuerySplitExecutionPlan
 from api.tasks import blast as _blast
 from api.tasks.blast.split_constants import (
@@ -225,25 +226,29 @@ def _dispatch_split_child_submits(
     subscription_id: str = "",
     resource_group: str = "",
     cluster_name: str = "",
-    namespace: str = "default",
+    namespace: str = SUBMIT_COORDINATION_NAMESPACE,
     terminal_run: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Create child state records and submit each child ElasticBLAST config.
 
-    Under ``BLAST_COORD_BACKEND=k8s`` each child ``elastic-blast submit`` is a
-    distinct submit (one finalizer = one Gate B slot, §5.1), so each child must
-    pass the same submit Lease (Gate A) + cluster-count (Gate B) gate as the
-    regular path or the split fan-out re-opens the cross-path race the gate
-    closes (§7.1.4). Children are dispatched sequentially inside this one parent
-    task, so they cannot Celery-requeue mid-fan-out; instead each waits inline,
-    bounded by ``split_child_gate_wait_max_seconds()`` (a SMALL per-child cap, not
-    the full requeue-path ``submit_slot_wait_max_seconds``) AND a single
+    Under ``BLAST_COORD_BACKEND=k8s`` each child ``elastic-blast submit`` is
+    serialised through the submit Lease (Gate A) against every OTHER submitter,
+    but NOT counted against the Gate B run-concurrency ceiling. A split is one
+    logical submit whose shards are dispatched sequentially inside this one
+    parent task and whose finalizers are lifecycle-long; counting each shard
+    against the ceiling would self-deadlock any split with more shards than the
+    ceiling (the earlier shards permanently occupy the slots the later shards
+    wait for) and let one split starve unrelated submitters. The split planner
+    bounds shard concurrency; Gate B bounds distinct submit *jobs* (§7.1.4).
+    Children cannot Celery-requeue mid-fan-out, so each waits inline for the
+    Lease, bounded by ``split_child_gate_wait_max_seconds()`` (a SMALL per-child
+    cap, not the full requeue-path ``submit_slot_wait_max_seconds``) AND a single
     ``split_parent_gate_budget_seconds()`` wall-clock budget computed ONCE before
     the loop. The per-child cap bounds head-of-line blocking on the single
     worker; the parent budget bounds the total monopoly across all children and
     is immune to Celery re-running the parent task (which would otherwise reset
-    each child's wait window — critique H4/H5). A child whose gate wait times out
-    or whose Lease API errors is marked failed (the parent reports partial
+    each child's wait window — critique H4/H5). A child whose Lease wait times
+    out or whose Lease API errors is marked failed (the parent reports partial
     failure) rather than blocking the single worker indefinitely.
     """
     import time
@@ -320,7 +325,7 @@ def _dispatch_split_child_submits(
             now = time.time()
             child_deadline = min(now + child_gate_cap, parent_gate_deadline)
             if now >= parent_gate_deadline:
-                error = "submit_gate_unavailable: parent_gate_budget_exhausted"
+                error = "blast_submit_gate_unavailable"
                 LOGGER.info(
                     "split child gate budget exhausted job_id=%s",
                     child_job_id,
@@ -338,6 +343,7 @@ def _dispatch_split_child_submits(
                         "parent_job_id": parent_job_id,
                         "group_id": child.get("group_id"),
                         "error": error,
+                        "detail": "parent_gate_budget_exhausted",
                     },
                 )
                 dispatched.append(
@@ -361,13 +367,20 @@ def _dispatch_split_child_submits(
                     job_id=child_job_id,
                     deadline_ts=child_deadline,
                     source="dashboard-split",
+                    # Gate-A-only: a split is one logical submit whose shards are
+                    # dispatched sequentially here. Counting each shard against
+                    # the global Gate B ceiling would self-deadlock once a split
+                    # has more shards than the ceiling (earlier shards' finalizers
+                    # never free during this dispatch window) — see
+                    # acquire_k8s_admission(check_capacity=...). Shards still
+                    # serialise through the submit Lease against other submitters.
+                    check_capacity=False,
                 )
-            except Exception as exc:
-                error = f"submit_gate_unavailable: {type(exc).__name__}"
+            except Exception:
+                error = "blast_submit_gate_unavailable"
                 LOGGER.info(
-                    "split child gate denied job_id=%s: %s",
+                    "split child gate denied job_id=%s",
                     child_job_id,
-                    type(exc).__name__,
                 )
                 repo.update(
                     child_job_id,
@@ -382,6 +395,7 @@ def _dispatch_split_child_submits(
                         "parent_job_id": parent_job_id,
                         "group_id": child.get("group_id"),
                         "error": error,
+                        "detail": "submit_lease_unavailable",
                     },
                 )
                 dispatched.append(
@@ -402,6 +416,46 @@ def _dispatch_split_child_submits(
                 stdin_file=_blast.ELASTIC_BLAST_CFG_FILE,
                 timeout_seconds=SUBMIT_EXEC_TIMEOUT_SECONDS,
             )
+        except Exception as exc:  # isolate one shard's failure
+            # A raised terminal exec (timeout, exec-server down, az/kubectl
+            # error) must fail ONLY this child and let the loop continue. Before
+            # round-3 this exception propagated out of the function, abandoning
+            # every subsequent shard AND leaving this child stuck at the
+            # "running" row set above (round-3 H-A: orphaned child + sibling
+            # abandonment). The ``finally`` below still releases this shard's
+            # Lease so the next shard / other submitters are not blocked.
+            error = "terminal_exec_unavailable"
+            LOGGER.warning(
+                "split child submit exec failed job_id=%s: %s",
+                child_job_id,
+                type(exc).__name__,
+            )
+            repo.update(
+                child_job_id,
+                status="failed",
+                phase="submit_failed",
+                error_code=error,
+            )
+            repo.append_history(
+                child_job_id,
+                "submit_failed",
+                {
+                    "parent_job_id": parent_job_id,
+                    "group_id": child.get("group_id"),
+                    "error": error,
+                    "detail": "submit_exec_error",
+                },
+            )
+            dispatched.append(
+                {
+                    "child_job_id": child_job_id,
+                    "group_id": child.get("group_id"),
+                    "status": "failed",
+                    "phase": "submit_failed",
+                    "error": error,
+                }
+            )
+            continue
         finally:
             if child_lease is not None:
                 from api.services.blast import k8s_gate

@@ -68,6 +68,9 @@ class _FakeContainer:
         self._meta = meta
         self._blobs = list(blobs)
         self.deleted: list[str] = []
+        # Names that must report a failed delete (batch status 503 / per-blob
+        # raise) so partial-failure handling can be exercised.
+        self.fail_names: set[str] = set()
 
     def get_blob_client(self, name: str) -> Any:
         if name.endswith("-metadata.json"):
@@ -90,10 +93,29 @@ class _FakeContainer:
             self._meta = None
             self.deleted.append(name)
             return
+        if name in self.fail_names:
+            raise RuntimeError(f"simulated delete failure for {name}")
         if name not in self._blobs:
             raise ResourceNotFoundError(name)
         self._blobs.remove(name)
         self.deleted.append(name)
+
+    def delete_blobs(self, *names: str, **_kw: Any) -> list[Any]:
+        # Mirror the real ContainerClient batch API: remove each blob and
+        # return a per-blob response carrying a status_code the route counts
+        # (202 deleted, 404 already gone, 503 failed).
+        responses: list[Any] = []
+        for name in names:
+            if name in self.fail_names:
+                responses.append(SimpleNamespace(status_code=503))
+            elif name in self._blobs:
+                self._blobs.remove(name)
+                self.deleted.append(name)
+                responses.append(SimpleNamespace(status_code=202))
+            else:
+                responses.append(SimpleNamespace(status_code=404))
+        return responses
+
 
 
 class _FakeBlobSvc:
@@ -169,6 +191,38 @@ def test_delete_ready_db_removes_blobs_and_metadata(
     assert container._blobs == []
     assert container._meta is None
     assert "core_nt-metadata.json" in container.deleted
+
+
+def test_delete_partial_failure_keeps_metadata(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One shard fails to delete (transient 503). The metadata blob must be
+    # retained so the DB stays listed and re-deletable, and the response must
+    # report partial=True with a non-zero error count.
+    container = _FakeContainer(
+        meta={"db_name": "core_nt", "copy_status": {"phase": "completed"}},
+        blobs=[
+            "core_nt/core_nt.000.nhr",
+            "core_nt/core_nt.000.nin",
+            "core_nt/core_nt.001.nhr",
+        ],
+    )
+    container.fail_names = {"core_nt/core_nt.001.nhr"}
+    _patch_common(monkeypatch, container)
+
+    resp = client.post("/api/storage/prepare-db/core_nt/delete", json=_BODY)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["deleted"] == 2
+    assert payload["errors"] == 1
+    assert payload["partial"] is True
+    assert payload["metadata_deleted"] is False
+    # Metadata blob is intentionally retained for re-delete.
+    assert container._meta is not None
+    assert "core_nt-metadata.json" not in container.deleted
+    # The surviving shard is still present.
+    assert container._blobs == ["core_nt/core_nt.001.nhr"]
 
 
 def test_delete_refused_while_copy_in_flight(

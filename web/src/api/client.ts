@@ -9,6 +9,12 @@ const DEV_BYPASS = isDevBypassEnabled();
 
 interface FetchApiOptions {
   redirectOnUnauthorized?: boolean;
+  /**
+   * Override the default 30 s request timeout for a single call. Used by
+   * genuinely long synchronous operations (e.g. deleting every shard blob of
+   * a multi-thousand-file database) that would otherwise abort mid-flight.
+   */
+  timeoutMs?: number;
 }
 
 interface ApiTokenCacheEntry {
@@ -144,10 +150,14 @@ async function fetchApi(
   if (!headers.has("x-client-request-id")) {
     headers.set("x-client-request-id", makeRequestId());
   }
-  const response = await fetchWithRetry(`${API_BASE}/api${path}`, {
-    ...init,
-    headers,
-  });
+  const response = await fetchWithRetry(
+    `${API_BASE}/api${path}`,
+    {
+      ...init,
+      headers,
+    },
+    options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {},
+  );
   // #44: Auto-handle 401 — trigger re-authentication
   if (response.status === 401 && !DEV_BYPASS) {
     clearApiAccessTokenCache();
@@ -186,8 +196,12 @@ function filenameFromDisposition(value: string | null): string | null {
   return decodeURIComponent(match[1].replace(/"$/, "").trim());
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetchApi(path, init);
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  options: FetchApiOptions = {},
+): Promise<T> {
+  const response = await fetchApi(path, init, options);
   const text = await response.text();
   const body = parseBody(text);
   if (!response.ok) {
@@ -230,8 +244,8 @@ async function requestText(
 export const api = {
   get: <T>(path: string) => request<T>(path),
   getText: (path: string) => requestText(path),
-  post: <T>(path: string, body: unknown) =>
-    request<T>(path, { method: "POST", body: JSON.stringify(body) }),
+  post: <T>(path: string, body: unknown, options?: { timeoutMs?: number }) =>
+    request<T>(path, { method: "POST", body: JSON.stringify(body) }, options),
   put: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),

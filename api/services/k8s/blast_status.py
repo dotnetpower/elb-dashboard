@@ -325,6 +325,49 @@ def _job_is_terminal(job: dict[str, Any]) -> bool:
     return succeeded > 0 or failed > 0
 
 
+def _finalizer_is_terminal(job: dict[str, Any]) -> bool:
+    """Fail-closed terminal test for Gate B finalizer counting.
+
+    Stricter than ``_job_is_terminal``: a bare ``status.failed > 0`` does NOT
+    prove a Job is done — the Job controller increments ``failed`` per failed Pod
+    attempt and keeps retrying until ``backoffLimit`` is exhausted, at which point
+    it sets a ``Failed`` condition. Treating ``failed > 0`` as terminal (the
+    ``_job_is_terminal`` heuristic) would DROP a still-retrying finalizer from the
+    count → under-count → over-admit past the ceiling (round-3 M-B, a fail-OPEN
+    error in the wrong direction for an admission gate).
+
+    A finalizer is counted as terminal here ONLY when it is definitively done:
+
+    * ``status.succeeded > 0`` (completed successfully), OR
+    * ``status.completionTime`` is set, OR
+    * a ``status.conditions`` entry of type ``Complete``/``Failed`` has
+      ``status == "True"``.
+
+    Anything else (including a bare ``failed > 0`` with no terminal condition) is
+    treated as STILL ACTIVE and counted — the fail-closed direction for a gate.
+    """
+    status = job.get("status", {}) or {}
+    if not isinstance(status, dict):
+        return False
+    try:
+        if int(status.get("succeeded", 0) or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        return False
+    if status.get("completionTime"):
+        return True
+    conditions = status.get("conditions", []) or []
+    if isinstance(conditions, list):
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if cond.get("type") in ("Complete", "Failed") and (
+                str(cond.get("status", "")).lower() == "true"
+            ):
+                return True
+    return False
+
+
 def _job_label(job: dict[str, Any], name: str) -> str:
     return str(((job.get("metadata", {}) or {}).get("labels", {}) or {}).get(name) or "")
 
@@ -377,7 +420,18 @@ def k8s_count_active_blast_submissions(
     )
     from api.services.k8s.monitoring import _get_k8s_session
 
-    session, server = _get_k8s_session(credential, subscription_id, resource_group, cluster_name)
+    # Gate B reads under the SAME admin kubeconfig as Gate A (the Lease in
+    # api.services.k8s.submit_lease uses admin=True). Without this the two gates
+    # are credential-asymmetric: Gate A acquires via the RBAC-bypassing admin
+    # kubeconfig while Gate B lists Jobs via the non-admin MI token. On a cluster
+    # where the shared MI lacks ``jobs:list`` RBAC, Gate B's list 403s → the
+    # fail-closed contract requeues EVERY submit forever even though Gate A keeps
+    # admitting — a cluster-wide submit outage from an auth split. Reading the
+    # admission ceiling from the same cluster-truth credential closes that gap
+    # (round-3 H-B).
+    session, server = _get_k8s_session(
+        credential, subscription_id, resource_group, cluster_name, admin=True
+    )
     try:
         # Gate B MUST count in the EXACT same namespace Gate A (the Lease) locked.
         # The Lease (api.services.k8s.submit_lease) scopes itself to the raw
@@ -405,7 +459,7 @@ def k8s_count_active_blast_submissions(
         finalizers: list[dict[str, Any]] = []
         for job in items:
             app = _job_label(job, "app")
-            if _job_is_terminal(job):
+            if _finalizer_is_terminal(job):
                 continue
             if app == finalizer_app:
                 finalizers.append(job)

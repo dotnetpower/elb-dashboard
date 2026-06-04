@@ -87,6 +87,7 @@ def acquire_k8s_admission(
     namespace: str,
     job_id: str,
     source: str = "dashboard",
+    check_capacity: bool = True,
 ) -> K8sAdmission:
     """Acquire Gate A then check Gate B; release Gate A on any deny.
 
@@ -98,6 +99,17 @@ def acquire_k8s_admission(
     * ``capacity_full`` — ceiling reached (retryable wait); Lease released.
     * ``capacity_count_error`` — count read failed; fail-closed (retryable wait);
       Lease released.
+
+    ``check_capacity=False`` runs **Gate A only** — acquire the submit Lease and
+    admit without consulting the Gate B ceiling. This is for the split fan-out
+    (critique re-review): a split is ONE logical submit whose shards are
+    dispatched sequentially inside one parent task. Each shard's finalizer is
+    lifecycle-long, so counting shards against the global ceiling would make any
+    split with more shards than the ceiling deadlock on itself (the earlier
+    shards permanently occupy the slots the later shards wait for) AND let one
+    split starve unrelated submitters. The shards still serialise through Gate A
+    (the submit Lease) against every other submitter; the split planner — not
+    Gate B — bounds shard concurrency.
     """
     holder = new_holder_identity(source)
     try:
@@ -118,6 +130,15 @@ def acquire_k8s_admission(
         return K8sAdmission(
             admitted=False, reason=REASON_SUBMIT_SLOT_BUSY, retryable=True
         )
+
+    if not check_capacity:
+        # Gate A only — see the docstring. The split parent owns shard
+        # concurrency; the ceiling cannot be enforced per-shard without a
+        # self-deadlock.
+        LOGGER.info(
+            "k8s_gate admit (gate-a-only) job_id=%s holder=%s", job_id, holder
+        )
+        return K8sAdmission(admitted=True, lease=lease)
 
     # Gate B — counted while holding Gate A so the count cannot race a peer
     # admission. Import lazily to keep this module free of k8s SDK seams at
@@ -192,6 +213,7 @@ def wait_for_k8s_admission(
     job_id: str,
     deadline_ts: float,
     source: str = "dashboard-split",
+    check_capacity: bool = True,
     sleep: object = None,
 ) -> SubmitLeaseHandle:
     """Block until admitted, then return the held Lease (split fan-out only).
@@ -201,10 +223,19 @@ def wait_for_k8s_admission(
     (:class:`K8sGateWaitTimeout`), or a genuine Lease API error occurs
     (:class:`SubmitLeaseApiError`). A retryable deny (Lease busy / ceiling full)
     sleeps ``_GATE_RETRY_INTERVAL_SECONDS`` and retries. ``sleep`` is injectable
-    for tests; it defaults to ``time.sleep``.
+    for tests; it defaults to ``time.sleep``. ``check_capacity`` is forwarded to
+    :func:`acquire_k8s_admission` (the split path passes ``False`` for Gate-A-only
+    serialisation — see that function's docstring).
     """
     do_sleep = sleep if callable(sleep) else time.sleep
     while True:
+        # Pre-check the deadline BEFORE acquiring so an already-expired wait
+        # raises immediately instead of taking the submit Lease one more time
+        # (a wasted CAS write that briefly blocks live submitters).
+        if time.time() >= deadline_ts:
+            raise K8sGateWaitTimeout(
+                f"split child {job_id} gate wait exceeded deadline before acquire"
+            )
         admission = acquire_k8s_admission(
             credential,
             subscription_id,
@@ -213,6 +244,7 @@ def wait_for_k8s_admission(
             namespace=namespace,
             job_id=job_id,
             source=source,
+            check_capacity=check_capacity,
         )
         if admission.admitted and admission.lease is not None:
             return admission.lease
@@ -220,12 +252,15 @@ def wait_for_k8s_admission(
             raise SubmitLeaseApiError(
                 f"submit lease unavailable for split child {job_id}: {admission.reason}"
             )
-        if time.time() >= deadline_ts:
+        remaining = deadline_ts - time.time()
+        if remaining <= 0:
             raise K8sGateWaitTimeout(
                 f"split child {job_id} gate wait exceeded deadline: {admission.reason}"
             )
         # Jittered sleep so a thundering herd of split children (or sibling
         # submitters) released at the same instant don't re-poll the apiserver
-        # in lock-step (critique L25). +/-20% around the base interval.
-        do_sleep(_GATE_RETRY_INTERVAL_SECONDS * random.uniform(0.8, 1.2))  # noqa: S311 - jitter, not crypto
+        # in lock-step (critique L25). +/-20% around the base interval, clamped
+        # to whatever budget remains so we never overshoot the deadline.
+        nap = _GATE_RETRY_INTERVAL_SECONDS * random.uniform(0.8, 1.2)  # noqa: S311 - jitter, not crypto
+        do_sleep(min(nap, remaining))
 

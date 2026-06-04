@@ -1269,6 +1269,58 @@ def test_dispatch_split_child_submits_records_terminal_failure(
     )
 
 
+def test_dispatch_split_child_submits_raised_exec_fails_child_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round-3 H-A: a raised terminal exec (timeout / exec-server down) must fail
+    # ONLY the affected child and let the loop continue. Before the fix the
+    # exception propagated out of the function, abandoning every subsequent shard
+    # and leaving the failing child stuck at the "running" row.
+    from api.services.terminal_exec import TerminalExecError
+
+    updates: list[tuple[str, dict[str, object]]] = []
+    history: list[tuple[str, str, dict[str, object]]] = []
+    _fake_split_repo(updates, history, monkeypatch)
+
+    calls: list[int] = []
+
+    def fake_terminal_run(
+        *, argv: list[str], stdin: str, stdin_file: str, timeout_seconds: int
+    ) -> dict[str, object]:
+        del argv, stdin, stdin_file, timeout_seconds
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:  # first child (qg1) — exec raises
+            raise TerminalExecError("exec server unreachable")
+        return {"exit_code": 0, "stdout": '{"decision": "accepted"}', "stderr": ""}
+
+    result = blast._dispatch_split_child_submits(
+        parent_job_id="job-123",
+        owner_oid="oid-1",
+        tenant_id="tenant-1",
+        children=[_split_child("qg1"), _split_child("qg2")],
+        terminal_run=fake_terminal_run,
+    )
+
+    # Both children were processed — the second was NOT abandoned.
+    assert len(calls) == 2
+    assert {r["child_job_id"]: r["status"] for r in result} == {
+        "job-123-qg1": "failed",
+        "job-123-qg2": "running",
+    }
+    # The failing child is recorded failed (NOT left at the earlier "running" row)
+    # with the terminal-exec error code, and an audit history row is written.
+    qg1_updates = [kw for jid, kw in updates if jid == "job-123-qg1"]
+    assert qg1_updates[-1] == {
+        "status": "failed",
+        "phase": "submit_failed",
+        "error_code": "terminal_exec_unavailable",
+    }
+    assert any(
+        jid == "job-123-qg1" and payload.get("detail") == "submit_exec_error"
+        for jid, _event, payload in history
+    )
+
+
 def _fake_split_repo(
     updates: list[tuple[str, dict[str, object]]],
     history: list[tuple[str, str, dict[str, object]]],
@@ -1437,7 +1489,12 @@ def test_dispatch_split_child_submits_parent_budget_exhausted_fails_fast(
     )
 
     assert [r["status"] for r in result] == ["failed", "failed"]
-    assert "parent_gate_budget_exhausted" in str(result[0]["error"])
+    assert result[0]["error"] == "blast_submit_gate_unavailable"
+    # The human-readable cause moves to the history detail (greppable error_code
+    # in the state row, detail in history).
+    assert any(
+        rec[2].get("detail") == "parent_gate_budget_exhausted" for rec in history
+    )
     assert waited == []  # never even attempted a gate wait
     assert terminal_ran is False
 

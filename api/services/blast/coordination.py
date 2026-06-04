@@ -15,6 +15,7 @@ Key entry points: ``coordination_backend``, ``max_run_concurrency``,
 ``submit_lease_ttl_seconds``, ``capacity_wait_max_seconds``,
 ``submit_slot_wait_max_seconds``, ``lease_clock_skew_seconds``,
 ``finalizer_grace_seconds``, ``FINALIZER_LABEL_SELECTOR``,
+``SUBMIT_COORDINATION_NAMESPACE``,
 ``SUBMIT_EXEC_TIMEOUT_SECONDS``, ``assert_coordination_invariants``.
 Risky contracts: ``BLAST_COORD_BACKEND=k8s`` *wins* over ``BLAST_GATE_ENABLED``
 (§2a precedence). The ordering invariant
@@ -39,6 +40,15 @@ import os
 # exact selector and dedup by ``elb-job-id`` or they disagree on "3".
 FINALIZER_LABEL_SELECTOR = "app=finalizer"
 FINALIZER_JOB_ID_LABEL = "elb-job-id"
+
+# The single namespace BOTH gates (Gate A Lease + Gate B count) AND both submit
+# code paths (regular submit_task + split fan-out) coordinate in. It MUST be one
+# value: if the regular path locked the ``default`` Lease while the split path
+# locked a ``<other>`` Lease, the two mutexes would be split-brained and never
+# exclude each other (design I1). ElasticBLAST deploys into ``default`` today;
+# keep this the single source of truth rather than re-typing the literal at each
+# call site (critique round-3 M-A).
+SUBMIT_COORDINATION_NAMESPACE = "default"
 
 # Companion markers that prove a finalizer's ``elb-job-id`` is doing live work.
 # A lone finalizer with none of these and past the grace window is a phantom

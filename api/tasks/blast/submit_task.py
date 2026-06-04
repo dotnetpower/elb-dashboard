@@ -32,6 +32,7 @@ from typing import Any
 from celery import shared_task
 
 from api.services.blast.coordination import (
+    SUBMIT_COORDINATION_NAMESPACE,
     capacity_wait_max_seconds,
     coordination_backend,
     submit_slot_wait_max_seconds,
@@ -541,6 +542,7 @@ def submit(
         submit_lock: tuple[Any, str] | None = None
         capacity_reservation = None
         k8s_lease = None
+        k8s_gate_credential: Any | None = None
         # §2a precedence: BLAST_COORD_BACKEND=k8s wins over BLAST_GATE_ENABLED.
         # In k8s mode the cluster-backed Lease (Gate A) + job-count ceiling
         # (Gate B) are authoritative; the Redis capacity gate / submit lock are
@@ -551,12 +553,16 @@ def submit(
             from api.services.blast import k8s_gate
 
             credential = get_credential()
+            # Captured so the ``finally`` release reuses the SAME credential
+            # instead of re-calling get_credential() (which, if it raised in
+            # finally, would mask the original submit exception — round-3 M-D).
+            k8s_gate_credential = credential
             admission = k8s_gate.acquire_k8s_admission(
                 credential,
                 subscription_id,
                 resource_group,
                 cluster_name,
-                namespace="default",
+                namespace=SUBMIT_COORDINATION_NAMESPACE,
                 job_id=job_id,
                 source="dashboard",
             )
@@ -618,13 +624,19 @@ def submit(
                         "phase": phase_name,
                         "error_code": deadline_code,
                     }
+                # Compute the jittered requeue delay ONCE so the informational
+                # ``retry_after_seconds`` written to the state row matches the
+                # actual Celery ``countdown`` the task is re-enqueued with
+                # (round-3 L-A: previously the row advertised the bare base 30s
+                # while the task slept 30-40s).
+                requeue_countdown = _gate_requeue_countdown()
                 _blast._update_state(
                     job_id,
                     phase_name,
                     status="running",
                     event="k8s_gate_deny",
                     error_code=error_code,
-                    retry_after_seconds=_GATE_REQUEUE_BASE_COUNTDOWN_SECONDS,
+                    retry_after_seconds=requeue_countdown,
                 )
                 try:
                     submit.apply_async(
@@ -646,7 +658,7 @@ def submit(
                             "submit_slot_wait_deadline_ts": next_submit_slot_deadline,
                             "capacity_wait_deadline_ts": next_capacity_deadline,
                         },
-                        countdown=_gate_requeue_countdown(),
+                        countdown=requeue_countdown,
                         queue="blast",
                     )
                 except Exception as enq_exc:
@@ -905,21 +917,31 @@ def submit(
                     job_id,
                 )
             if k8s_lease is not None:
-                from api.services import get_credential
                 from api.services.blast import k8s_gate
 
-                k8s_gate.release_k8s_admission(
-                    get_credential(),
-                    subscription_id,
-                    resource_group,
-                    cluster_name,
-                    k8s_lease,
-                )
-                LOGGER.info(
-                    "blast_k8s_gate_release cluster=%s job_id=%s",
-                    cluster_name,
-                    job_id,
-                )
+                # Reuse the credential captured at acquire time and never let a
+                # best-effort release raise out of ``finally`` \u2014 that would mask
+                # the real submit exception this block is unwinding (round-3 M-D).
+                try:
+                    k8s_gate.release_k8s_admission(
+                        k8s_gate_credential,
+                        subscription_id,
+                        resource_group,
+                        cluster_name,
+                        k8s_lease,
+                    )
+                    LOGGER.info(
+                        "blast_k8s_gate_release cluster=%s job_id=%s",
+                        cluster_name,
+                        job_id,
+                    )
+                except Exception:  # best-effort release, must not mask
+                    LOGGER.warning(
+                        "blast_k8s_gate_release_failed cluster=%s job_id=%s",
+                        cluster_name,
+                        job_id,
+                        exc_info=True,
+                    )
     except TerminalExecError as exc:
         return _blast._retry_or_fail(
             self,

@@ -790,7 +790,23 @@ export function BlastDbRow({
           paddingTop: 1,
         }}
       >
-        {isUpdating ? (
+        {isDeleting ? (
+          // A delete is in flight. Override every other state (Ready /
+          // partial-Retry / Get) so the row shows a single, unambiguous
+          // "Deleting…" chip and never offers the Get/Retry button — clicking
+          // it would race a download against the in-progress blob removal.
+          <span
+            className="gt gt-b"
+            style={{
+              fontSize: 10,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <Loader2 size={10} className="spin" /> Deleting…
+          </span>
+        ) : isUpdating ? (
           <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
             <span
               className="gt gt-b"

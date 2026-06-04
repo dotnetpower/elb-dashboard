@@ -140,6 +140,122 @@ flips ON:
   *mutate* cluster state (create a probe Lease), violating the probe's
   read-only/no-mutate contract, so it is deliberately not added.
 
+## Critique round 3 — broad/cold audit, 20+ findings (2026-06-04)
+
+A colder, wider self-critique across new scenarios (auth asymmetry,
+partial-failure/orphaning, namespace split-brain, fail-open counting,
+exception-masking, observability) surfaced two genuine **HIGH** defects plus a
+set of MEDIUM/LOW hardening items. Only real defects were changed; verified
+non-issues are recorded so they are not re-litigated.
+
+### Fixed — HIGH
+
+- **H-A — split child orphaned + siblings abandoned on exec raise.**
+  `_dispatch_split_child_submits` set each child to `status="running"` *before*
+  the gate, then ran `terminal_run(...)` inside a bare `try/finally`. A raised
+  `TerminalExecError` (timeout, exec-server down, `az`/`kubectl` error)
+  propagated out of the function, **abandoning every subsequent shard** and
+  leaving the failing child stuck at `running` forever. Fix: wrap the exec in
+  `try/except/finally` — the exception now fails ONLY that child
+  (`error_code=terminal_exec_unavailable`, audit history `submit_exec_error`),
+  the loop continues to the next shard, and the `finally` still releases the
+  shard's Lease. Test:
+  `test_dispatch_split_child_submits_raised_exec_fails_child_continues`.
+- **H-B — Gate A / Gate B credential asymmetry.** Gate A (the Lease,
+  `api/services/k8s/submit_lease.py`) acquires via the RBAC-bypassing **admin**
+  kubeconfig, while Gate B (`k8s_count_active_blast_submissions`) listed Jobs via
+  the **non-admin** MI token. On a cluster where the shared MI lacks `jobs:list`
+  RBAC, Gate B's list `403`s → the fail-closed contract requeues **every**
+  submit forever even though Gate A keeps admitting — a cluster-wide submit
+  outage from an auth split. Fix: Gate B now reads under `admin=True`, the same
+  cluster-truth credential as the Lease. Existing count tests stay green (they
+  stub `_get_k8s_session`).
+
+### Fixed — MEDIUM
+
+- **M-A — namespace split-brain (latent).** `submit_task` hard-coded
+  `namespace="default"` while `_dispatch_split_child_submits` took a
+  `namespace: str` parameter — two independent literals that could drift so the
+  two mutexes lock *different* Leases and never exclude each other. Fix: a single
+  `SUBMIT_COORDINATION_NAMESPACE = "default"` constant in `coordination.py` now
+  feeds both paths.
+- **M-B — fail-OPEN terminal count.** Gate B excluded any finalizer with
+  `status.failed > 0` as "terminal". But `failed` increments per failed Pod
+  attempt while the Job controller is *still retrying* (backoffLimit not
+  exhausted) → a retrying finalizer was dropped from the count → under-count →
+  over-admit past the ceiling. Fix: a count-local `_finalizer_is_terminal`
+  treats a finalizer as terminal ONLY when definitively done (`succeeded>0`,
+  `completionTime` set, or a `Complete`/`Failed` condition `True`); a bare
+  `failed>0` with no terminal condition is counted (fail-closed). The shared
+  `_job_is_terminal` (used by `k8s_check_blast_status`) is left unchanged to
+  avoid broad regressions. Tests: `test_retrying_finalizer_counted`,
+  `test_completion_time_is_terminal`, updated `test_skips_terminal`.
+- **M-D — release in `finally` could mask the real exception.** The submit_task
+  `finally` re-called `get_credential()` for the Lease release; if that raised it
+  would mask the original submit exception being unwound. Fix: reuse the
+  credential captured at acquire time and wrap the release so a best-effort
+  failure logs and never escapes `finally`.
+
+### Fixed — LOW
+
+- **L-A — advertised vs actual requeue delay mismatch.** The state row wrote
+  `retry_after_seconds=30` (the bare base) while the task re-enqueued with the
+  jittered 30–40 s countdown. Fix: compute the jittered countdown once and use
+  the same value for both the row and the Celery `countdown`.
+
+### Verified non-issues / deferred (recorded, no change)
+
+- **M-C (regular gate-deny audit parity)** — the regular path already emits an
+  `event="k8s_gate_deny"` state event with `error_code`; this is the audit-trail
+  equivalent of the split path's `append_history`, so no change is needed.
+- **Pooled credentials** — admin kubeconfig + sessions are pooled (5-min TTL) in
+  `api/services/k8s/client.py`, so per-poll token storms are a non-issue.
+- **Frontend deny phases** are status-keyed (Running/Failed) in the SPA, so the
+  `waiting_for_*` phase strings are cosmetic, not a state-machine surface.
+- **Lease CAS without `resourceVersion`** and **second-409 release with no log**
+  are residual LOW edges retained as-is: both are best-effort paths whose worst
+  case is one extra retry, well within Phase-0 risk tolerance.
+
+After these fixes the worst remaining severity is LOW.
+
+## Critique round 2 — split fan-out Gate B self-deadlock (2026-06-04)
+
+A second design-critique pass on the round-1 hardening found one **HIGH** defect
+and two **MEDIUM** liveness tightenings, all still default-OFF:
+
+- **HIGH — split fan-out self-deadlock via Gate B.** The split parent dispatches
+  shards sequentially inside one task, and each shard's `app=finalizer` Job is
+  lifecycle-long. Routing every shard through the FULL gate (Gate A + Gate B)
+  meant a split with more shards than the run-concurrency ceiling (default 3)
+  would **deadlock on itself**: the earlier shards permanently occupy the slots
+  the later shards block on, so every shard past the ceiling waits its whole
+  per-child cap and then FAILS — and meanwhile a single multi-shard split could
+  starve unrelated submitters out of all ceiling slots. **Fix:** split children
+  now take **Gate A only** (`acquire_k8s_admission(..., check_capacity=False)` /
+  `wait_for_k8s_admission(..., check_capacity=False)`). They still serialise
+  through the submit Lease against every other submitter, but are not counted
+  against the Gate B ceiling. A split is one logical submit; the split planner —
+  not Gate B — bounds shard concurrency. Gate B continues to bound distinct
+  submit *jobs* on the regular path (unchanged).
+- **MEDIUM — wait loop took the Lease one extra time past the deadline.**
+  `wait_for_k8s_admission` now pre-checks the deadline at the TOP of the loop, so
+  an already-expired wait raises `K8sGateWaitTimeout` **before** issuing another
+  submit-Lease CAS write (a wasted apiserver write that briefly blocks live
+  submitters).
+- **MEDIUM — retry sleep could overshoot a near deadline.** The jittered retry
+  nap is now clamped to the remaining budget (`min(nap, remaining)`), so the last
+  poll lands at the deadline instead of up to ~6s past it.
+- **LOW (observability) — split-child `error_code` was a human sentence.** The
+  state-row `error_code` is now a greppable `blast_submit_gate_unavailable`; the
+  human-readable cause (`parent_gate_budget_exhausted` /
+  `submit_lease_unavailable`) moves to the history `detail` field.
+
+New regression tests in `api/tests/test_blast_k8s_gate.py`:
+`test_gate_a_only_admits_without_counting` (Gate B never consulted),
+`test_gate_a_only_still_busy_when_lease_held` (Gate A still serialises),
+`test_wait_forwards_check_capacity`, `test_wait_predeadline_raises_without_acquire`
+(no Lease CAS past deadline), `test_wait_clamps_sleep_to_remaining_budget`.
+
 ## API / IaC diff summary
 
 New modules:
@@ -161,7 +277,8 @@ Modified:
 - `api/tasks/blast/submit_task.py` — k8s gate block + `finally` Lease release;
   carries **both** wait deadlines through requeues so an oscillation between
   submit_slot_busy and capacity_full cannot reset either bound.
-- `api/tasks/blast/split_pipeline.py` — per-child inline gating.
+- `api/tasks/blast/split_pipeline.py` — per-child inline gating, **Gate A only**
+  (`check_capacity=False`) so a split cannot self-deadlock on its own shards.
 - `api/celery_app.py` — `assert_coordination_invariants()` at import (no-op
   unless k8s backend).
 

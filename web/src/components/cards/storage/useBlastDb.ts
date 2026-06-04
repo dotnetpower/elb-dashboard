@@ -489,18 +489,29 @@ export function useBlastDb({
         accountName,
         dbName,
       );
-      setInProgress((prev) => {
-        if (!prev.has(dbName)) return prev;
-        const next = new Map(prev);
-        next.delete(dbName);
-        return next;
-      });
       phaseToastedRef.current.delete(dbName);
-      setDownloadResult({
-        db: dbName,
-        msg: `Deleted — removed ${resp.deleted} blobs${resp.errors ? ` (${resp.errors} errors)` : ""}.`,
-        type: "ok",
-      });
+      if (resp.errors) {
+        // Partial delete: the backend kept the metadata so the DB is still
+        // listed and can be re-deleted. Warn instead of reporting a clean
+        // removal, and leave the in-progress marker untouched.
+        setDownloadResult({
+          db: dbName,
+          msg: `Partial delete — removed ${resp.deleted} blobs, ${resp.errors} could not be deleted. Try Delete again to clear the rest.`,
+          type: "err",
+        });
+      } else {
+        setInProgress((prev) => {
+          if (!prev.has(dbName)) return prev;
+          const next = new Map(prev);
+          next.delete(dbName);
+          return next;
+        });
+        setDownloadResult({
+          db: dbName,
+          msg: `Deleted — removed ${resp.deleted} blobs.`,
+          type: "ok",
+        });
+      }
       void dbQuery.refetch();
     } catch (e) {
       setDownloadResult({
@@ -508,6 +519,10 @@ export function useBlastDb({
         msg: formatApiError(e, "storage"),
         type: "err",
       });
+      // The request may have aborted (client timeout) while the backend kept
+      // deleting, or failed outright. Reconcile the row against server truth
+      // so a successful-but-timed-out delete doesn't leave a stale Get button.
+      void dbQuery.refetch();
     } finally {
       setPendingAction((prev) => {
         if (!prev.has(dbName)) return prev;

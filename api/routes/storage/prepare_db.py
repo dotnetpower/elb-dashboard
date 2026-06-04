@@ -1649,9 +1649,13 @@ def prepare_db_delete(
        ``init_failed`` / ``completed`` database is safe to delete.
     2. Delete any leftover AKS-fanout Job + ConfigMap recorded in
        ``aks_job_ref`` (idempotent; a 404 is success).
-    3. Delete every blob under ``{db_name}/`` (the shards + taxonomy) and
+    3. Delete every blob under ``{db_name}/`` (the shards + taxonomy) in
+       batches of up to 256, and — only when every shard was removed —
        finally the ``{db_name}-metadata.json`` blob, so the DB vanishes
-       from ``list_databases``.
+       from ``list_databases``. If any shard delete failed (``errors > 0``)
+       the metadata blob is **kept** so the row stays visible and
+       re-deletable instead of leaking orphan blobs; the response carries
+       ``partial=True`` in that case.
 
     Idempotent — deleting an absent database returns a no-op success.
     """
@@ -1725,35 +1729,102 @@ def prepare_db_delete(
     # Delete all shard / taxonomy blobs under {db_name}/, then the metadata
     # blob last so a mid-delete crash still leaves the metadata pointing at a
     # (now-partial) DB the user can re-delete rather than orphaning blobs.
+    #
+    # Use Azure batch delete (up to 256 blobs per HTTP request) so a large DB
+    # like `nt` (~4.8k shard blobs) finishes in a handful of round-trips
+    # instead of thousands of serial ones — the serial loop routinely blew
+    # past the client request timeout, surfacing a misleading
+    # "Request timed out" while the backend was still deleting.
     deleted = 0
     errors = 0
-    for blob in container.list_blobs(name_starts_with=f"{db_name}/"):
+
+    def _delete_chunk(names: list[str]) -> tuple[int, int]:
+        if not names:
+            return 0, 0
+        ok = 0
+        bad = 0
         try:
-            container.delete_blob(blob.name, delete_snapshots="include")
-            deleted += 1
-        except ResourceNotFoundError:
-            pass
+            responses = container.delete_blobs(
+                *names,
+                delete_snapshots="include",
+                raise_on_any_failure=False,
+            )
+            for resp in responses:
+                status = getattr(resp, "status_code", 202)
+                # 202 Accepted = deleted; 404 = already gone (treat as success).
+                if status in (200, 202, 404):
+                    ok += 1
+                else:
+                    bad += 1
+                    LOGGER.debug(
+                        "prepare_db_delete batch entry failed db=%s status=%s",
+                        db_name,
+                        status,
+                    )
         except Exception as exc:
-            errors += 1
-            LOGGER.debug(
-                "prepare_db_delete blob delete failed db=%s blob=%s: %s",
+            # One bad batch must not strand the remaining blobs: fall back to
+            # per-blob deletes for just this chunk.
+            LOGGER.warning(
+                "prepare_db_delete batch failed db=%s n=%d: %s; falling back",
                 db_name,
-                blob.name,
+                len(names),
                 type(exc).__name__,
             )
+            for name in names:
+                try:
+                    container.delete_blob(name, delete_snapshots="include")
+                    ok += 1
+                except ResourceNotFoundError:
+                    ok += 1
+                except Exception:
+                    bad += 1
+        return ok, bad
+
+    chunk: list[str] = []
+    # Fully enumerate the shard names BEFORE deleting anything so listing and
+    # deleting never interleave — mutating the container mid-pagination could
+    # otherwise interact with the server-side continuation marker. The name
+    # list is tiny (a few hundred KB even for nt's ~4.8k shards).
+    names = [blob.name for blob in container.list_blobs(name_starts_with=f"{db_name}/")]
+    for name in names:
+        chunk.append(name)
+        if len(chunk) >= 256:
+            ok, bad = _delete_chunk(chunk)
+            deleted += ok
+            errors += bad
+            chunk = []
+    ok, bad = _delete_chunk(chunk)
+    deleted += ok
+    errors += bad
 
     metadata_deleted = False
-    try:
-        container.delete_blob(f"{db_name}-metadata.json", delete_snapshots="include")
-        metadata_deleted = True
-    except ResourceNotFoundError:
-        metadata_deleted = True
-    except Exception as exc:
+    if errors:
+        # Some shard blobs survived (throttling / transient 5xx). Deleting the
+        # metadata now would drop the DB from list_databases while orphan blobs
+        # linger — an invisible storage leak the user can no longer re-delete
+        # from the UI. Keep the metadata so the row stays visible and a repeat
+        # Delete (idempotent) can sweep the remainder.
         LOGGER.warning(
-            "prepare_db_delete metadata blob delete failed db=%s: %s",
+            "prepare_db_delete kept metadata db=%s deleted=%d errors=%d "
+            "(partial delete; metadata retained for re-delete)",
             db_name,
-            type(exc).__name__,
+            deleted,
+            errors,
         )
+    else:
+        try:
+            container.delete_blob(
+                f"{db_name}-metadata.json", delete_snapshots="include"
+            )
+            metadata_deleted = True
+        except ResourceNotFoundError:
+            metadata_deleted = True
+        except Exception as exc:
+            LOGGER.warning(
+                "prepare_db_delete metadata blob delete failed db=%s: %s",
+                db_name,
+                type(exc).__name__,
+            )
 
     # Drop the merged display-metadata cache so the SPA's DB list reflects the
     # removal on the next read instead of waiting out the TTL.
@@ -1798,6 +1869,10 @@ def prepare_db_delete(
         "db_name": db_name,
         "deleted": deleted,
         "errors": errors,
+        # When some shard blobs survived we deliberately keep the metadata blob
+        # so the row stays re-deletable; partial=True tells the SPA to warn the
+        # user and leave the DB in the list instead of reporting a clean delete.
+        "partial": bool(errors),
         "metadata_deleted": metadata_deleted,
         "aks_job_deleted": aks_job_deleted,
     }

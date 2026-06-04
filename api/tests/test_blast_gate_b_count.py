@@ -37,13 +37,20 @@ def _job(
     age_seconds: int = 5,
     succeeded: int = 0,
     failed: int = 0,
+    conditions: list[tuple[str, str]] | None = None,
+    completion_time: str | None = None,
 ) -> dict[str, Any]:
+    status: dict[str, Any] = {"succeeded": succeeded, "failed": failed}
+    if conditions is not None:
+        status["conditions"] = [{"type": t, "status": s} for t, s in conditions]
+    if completion_time is not None:
+        status["completionTime"] = completion_time
     return {
         "metadata": {
             "labels": {"app": app, "elb-job-id": job_id},
             "creationTimestamp": _ts(age_seconds),
         },
-        "status": {"succeeded": succeeded, "failed": failed},
+        "status": status,
     }
 
 
@@ -97,13 +104,33 @@ def test_counts_distinct_finalizers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_skips_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Fail-closed terminal test (round-3 M-B): only a DEFINITIVELY done finalizer
+    # is dropped from the count — succeeded>0, a completionTime, or a
+    # Complete/Failed condition. A bare failed>0 is NOT proof of termination.
     items = [
-        _job("finalizer", "jid-1", succeeded=1),  # terminal
-        _job("finalizer", "jid-2", failed=1),  # terminal
+        _job("finalizer", "jid-1", succeeded=1),  # terminal (succeeded)
+        _job("finalizer", "jid-2", failed=1, conditions=[("Failed", "True")]),  # terminal
         _job("finalizer", "jid-3"),  # active
     ]
     _patch(monkeypatch, _FakeResponse(200, items))
     assert _count() == 1
+
+
+def test_retrying_finalizer_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A finalizer with failed>0 but NO terminal condition is still retrying
+    # (backoffLimit not exhausted) and occupies a slot. The old failed>0
+    # heuristic dropped it — under-counting and over-admitting past the ceiling
+    # (round-3 M-B, fail-OPEN). It must now be counted (fail-closed).
+    items = [_job("finalizer", "jid-1", failed=1)]  # young, no terminal condition
+    _patch(monkeypatch, _FakeResponse(200, items))
+    assert _count() == 1
+
+
+def test_completion_time_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    # completionTime set (with no succeeded/failed counters) is also terminal.
+    items = [_job("finalizer", "jid-1", completion_time=_ts(1))]
+    _patch(monkeypatch, _FakeResponse(200, items))
+    assert _count() == 0
 
 
 def test_phantom_past_grace_not_counted(monkeypatch: pytest.MonkeyPatch) -> None:
