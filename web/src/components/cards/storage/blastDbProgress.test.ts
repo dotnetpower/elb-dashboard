@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  computeWindowedBytesPerSec,
   computeWindowedSpeed,
   formatDuration,
   formatEta,
+  formatEtaFromBytes,
   formatSpeed,
   recordSpeedSample,
   SPEED_WINDOW_MS,
@@ -174,3 +176,69 @@ describe("computeWindowedSpeed", () => {
     expect(computeWindowedSpeed(samples, 10_000 + SPEED_WINDOW_MS + 1)).toBe("");
   });
 });
+
+describe("computeWindowedBytesPerSec", () => {
+  it("returns null with fewer than two distinct samples", () => {
+    expect(computeWindowedBytesPerSec([], 1_000)).toBeNull();
+    expect(
+      computeWindowedBytesPerSec([{ bytes: 100, t: 1_000 }], 1_000),
+    ).toBeNull();
+    expect(
+      computeWindowedBytesPerSec(
+        [
+          { bytes: 100, t: 1_000 },
+          { bytes: 200, t: 1_000 },
+        ],
+        1_000,
+      ),
+    ).toBeNull();
+  });
+
+  it("computes the numeric rate from the first↔last delta", () => {
+    // 50 MB across a 10 s window → 5 MB/s as a raw number.
+    const samples: SpeedSample[] = [
+      { bytes: 0, t: 0 },
+      { bytes: 50_000_000, t: 10_000 },
+    ];
+    expect(computeWindowedBytesPerSec(samples, 10_000)).toBe(5_000_000);
+  });
+
+  it("returns null when the latest sample is stale", () => {
+    const samples: SpeedSample[] = [
+      { bytes: 0, t: 0 },
+      { bytes: 50_000_000, t: 10_000 },
+    ];
+    expect(
+      computeWindowedBytesPerSec(samples, 10_000 + SPEED_WINDOW_MS + 1),
+    ).toBeNull();
+  });
+
+  it("returns null when bytes did not advance", () => {
+    const samples: SpeedSample[] = [
+      { bytes: 100, t: 0 },
+      { bytes: 100, t: 10_000 },
+    ];
+    expect(computeWindowedBytesPerSec(samples, 10_000)).toBeNull();
+  });
+});
+
+describe("formatEtaFromBytes", () => {
+  it("returns empty without a positive rate", () => {
+    expect(formatEtaFromBytes(1_000, null)).toBe("");
+    expect(formatEtaFromBytes(1_000, 0)).toBe("");
+    expect(formatEtaFromBytes(1_000, -5)).toBe("");
+  });
+
+  it("returns empty when nothing remains", () => {
+    expect(formatEtaFromBytes(0, 1_000)).toBe("");
+    expect(formatEtaFromBytes(-100, 1_000)).toBe("");
+  });
+
+  it("projects remaining time from the byte rate", () => {
+    // 60 GB remaining at 37 MB/s → ~1622 s → 27m.
+    expect(formatEtaFromBytes(60_000_000_000, 37_000_000)).toBe("~27m left");
+    // 100 MB remaining at 10 MB/s → 10 s.
+    expect(formatEtaFromBytes(100_000_000, 10_000_000)).toBe("~10s left");
+  });
+});
+

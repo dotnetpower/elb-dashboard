@@ -115,23 +115,51 @@ def _node_capacity_with_meta(session: Any, server: str) -> dict[str, dict[str, A
 
 
 def _parse_cpu_millicores(raw: str) -> int:
-    value = str(raw)
-    if value.endswith("n"):
-        return int(value[:-1]) // 1_000_000
-    if value.endswith("m"):
-        return int(value[:-1])
-    return int(value) * 1000
+    """Parse a Kubernetes CPU quantity into millicores (best-effort).
+
+    The metrics API reports node/pod CPU usage with a unit suffix that depends
+    on the kubelet's precision: ``n`` (nanocores), ``u`` (microcores), or ``m``
+    (millicores); capacity is usually a bare core count (``"8"``) or millicores.
+    Unrecognised shapes return ``0`` instead of raising so one odd value can't
+    crash the whole AKS top-nodes snapshot refresh.
+    """
+    value = str(raw).strip()
+    if not value:
+        return 0
+    try:
+        if value.endswith("n"):
+            return int(value[:-1]) // 1_000_000
+        if value.endswith("u"):
+            return int(value[:-1]) // 1_000
+        if value.endswith("m"):
+            return int(value[:-1])
+        return int(float(value) * 1000)
+    except (ValueError, TypeError):
+        return 0
 
 
 def _parse_memory_ki(raw: str) -> int:
-    value = str(raw)
-    if value.endswith("Ki"):
-        return int(value[:-2])
-    if value.endswith("Mi"):
-        return int(value[:-2]) * 1024
-    if value.endswith("Gi"):
-        return int(value[:-2]) * 1024 * 1024
-    return int(value) // 1024
+    """Parse a Kubernetes memory quantity into KiB (best-effort).
+
+    Handles the IEC suffixes the metrics/capacity API emit (``Ki``/``Mi``/``Gi``/
+    ``Ti``) plus a bare byte count. Unrecognised shapes return ``0`` rather than
+    raising so a single odd value can't crash the node snapshot refresh.
+    """
+    value = str(raw).strip()
+    if not value:
+        return 0
+    try:
+        if value.endswith("Ki"):
+            return int(value[:-2])
+        if value.endswith("Mi"):
+            return int(value[:-2]) * 1024
+        if value.endswith("Gi"):
+            return int(value[:-2]) * 1024 * 1024
+        if value.endswith("Ti"):
+            return int(value[:-2]) * 1024 * 1024 * 1024
+        return int(value) // 1024
+    except (ValueError, TypeError):
+        return 0
 
 
 def k8s_top_pods(

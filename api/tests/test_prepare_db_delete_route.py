@@ -71,6 +71,8 @@ class _FakeContainer:
         # Names that must report a failed delete (batch status 503 / per-blob
         # raise) so partial-failure handling can be exercised.
         self.fail_names: set[str] = set()
+        # When True the metadata blob delete raises a transient error.
+        self.fail_metadata = False
 
     def get_blob_client(self, name: str) -> Any:
         if name.endswith("-metadata.json"):
@@ -88,6 +90,8 @@ class _FakeContainer:
 
     def delete_blob(self, name: str, **_kw: Any) -> None:
         if name.endswith("-metadata.json"):
+            if self.fail_metadata:
+                raise RuntimeError("simulated metadata delete failure")
             if self._meta is None:
                 raise ResourceNotFoundError("already gone")
             self._meta = None
@@ -223,6 +227,30 @@ def test_delete_partial_failure_keeps_metadata(
     assert "core_nt-metadata.json" not in container.deleted
     # The surviving shard is still present.
     assert container._blobs == ["core_nt/core_nt.001.nhr"]
+
+
+def test_delete_metadata_failure_reports_partial(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every shard is removed but the metadata blob delete fails. The DB is
+    # therefore still listed, so the response must report partial=True even
+    # though errors==0, and metadata_deleted=False.
+    container = _FakeContainer(
+        meta={"db_name": "core_nt", "copy_status": {"phase": "completed"}},
+        blobs=["core_nt/core_nt.000.nhr", "core_nt/core_nt.000.nin"],
+    )
+    container.fail_metadata = True
+    _patch_common(monkeypatch, container)
+
+    resp = client.post("/api/storage/prepare-db/core_nt/delete", json=_BODY)
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["deleted"] == 2
+    assert payload["errors"] == 0
+    assert payload["partial"] is True
+    assert payload["metadata_deleted"] is False
+    assert container._meta is not None
 
 
 def test_delete_refused_while_copy_in_flight(

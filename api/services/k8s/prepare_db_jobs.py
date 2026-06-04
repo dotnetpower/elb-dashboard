@@ -180,7 +180,35 @@ VERIFY_EVERY_N="${ELB_VERIFY_EVERY_N:-10}"
 # Shared by the per-file idempotency check and the post-upload verify.
 blob_content_length() {
     azcopy list "$1" --output-type=json 2>/dev/null \
-        | python3 -c 'import json,sys
+        | python3 -c 'import json,re,sys
+def to_bytes(v):
+    # azcopy <= ~10.31 emitted ContentLength as a raw integer byte count;
+    # azcopy >= 10.32 emits a human-readable string ("2.79 GiB", "512 B").
+    # Normalize BOTH to an integer byte count so the verify step can
+    # compare against the raw NCBI Content-Length. Returns None on shapes
+    # we cannot interpret so the caller falls back to PARSE_FAIL.
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    m = re.match(r"^([0-9]*\.?[0-9]+)\s*([KMGTPE]?i?B)$", s, re.IGNORECASE)
+    if not m:
+        return None
+    mult = {
+        "B": 1,
+        "KIB": 1024, "MIB": 1024 ** 2, "GIB": 1024 ** 3,
+        "TIB": 1024 ** 4, "PIB": 1024 ** 5,
+        "KB": 1000, "MB": 1000 ** 2, "GB": 1000 ** 3,
+        "TB": 1000 ** 4, "PB": 1000 ** 5,
+    }.get(m.group(2).upper())
+    if mult is None:
+        return None
+    return int(float(m.group(1)) * mult)
 got = False
 for line in sys.stdin:
     line=line.strip()
@@ -191,6 +219,7 @@ for line in sys.stdin:
     except Exception:
         continue
     msg=obj.get("MessageContent") or obj.get("messageContent")
+    cl=None
     if isinstance(msg, str) and msg:
         try:
             inner=json.loads(msg)
@@ -198,11 +227,12 @@ for line in sys.stdin:
             inner=None
         if isinstance(inner, dict):
             cl=inner.get("ContentLength") or inner.get("contentLength")
-            if cl is not None:
-                print(cl); got=True; break
-    cl=obj.get("ContentLength") or obj.get("contentLength")
+    if cl is None:
+        cl=obj.get("ContentLength") or obj.get("contentLength")
     if cl is not None:
-        print(cl); got=True; break
+        b=to_bytes(cl)
+        if b is not None:
+            print(b); got=True; break
 if not got:
     print("PARSE_FAIL")'
 }
@@ -211,7 +241,13 @@ ok=0
 fail=0
 skip=0
 file_index=0
-while IFS= read -r KEY; do
+# Read the shard file list on fd 3, NOT stdin. azcopy subcommands invoked
+# inside the loop without an explicit stdin redirect (e.g. `azcopy remove`)
+# will otherwise DRAIN fd 0 — when that fd is the FILE_LIST, the very first
+# such call swallows every remaining line and the loop ends silently after
+# one file. Isolating the list on fd 3 keeps the loop fed regardless of what
+# any in-loop process does to stdin.
+while IFS= read -r KEY <&3; do
     [ -z "$KEY" ] && continue
     file_index=$((file_index + 1))
     file_basename="${KEY##*/}"
@@ -323,9 +359,21 @@ print(val)')
                 ok=$((ok + 1))
                 continue
             fi
-            if [ "$uploaded_size" != "$expected_size" ]; then
+            # blob_content_length normalizes the uploaded size to an integer
+            # byte count even when azcopy >= 10.32 reports a human-readable
+            # "2.79 GiB" string. That conversion keeps only ~3 significant
+            # figures, so an EXACT compare against the raw NCBI byte count
+            # would false-fail every multi-GB file (2999987448 vs 2.79 GiB =
+            # 2995639357 after round-trip). Accept a 1% / 1 KiB tolerance: a
+            # genuinely truncated body or an HTML error page is orders of
+            # magnitude smaller and still trips the check.
+            if ! python3 -c 'import sys
+up=int(sys.argv[1]); exp=int(sys.argv[2])
+sys.exit(0 if abs(up - exp) <= max(1024, exp // 100) else 1)' \
+                    "$uploaded_size" "$expected_size"; then
                 log "ERROR size mismatch ${KEY} exp=${expected_size} got=${uploaded_size}"
-                azcopy remove "$dst_url" --log-level=ERROR >/dev/null 2>&1 || true
+                # </dev/null so azcopy cannot drain the loop's fd-3 list.
+                azcopy remove "$dst_url" --log-level=ERROR </dev/null >/dev/null 2>&1 || true
                 fail=$((fail + 1))
                 continue
             fi
@@ -335,7 +383,7 @@ print(val)')
         log "ERROR pipeline failed for ${KEY}"
         fail=$((fail + 1))
     fi
-done < "$FILE_LIST"
+done 3< "$FILE_LIST"
 
 log "DONE shard=${SHARD_INDEX} ok=${ok} fail=${fail} skip=${skip}"
 

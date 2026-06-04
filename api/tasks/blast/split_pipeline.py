@@ -217,6 +217,42 @@ def _child_state_payload(child: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_child_state_write(action: Any, *args: Any, **kwargs: Any) -> None:
+    """Best-effort per-child state/history write inside the split fan-out.
+
+    The split fan-out dispatches MANY children inside ONE Celery ``submit`` task.
+    The authoritative per-child outcome is the ``dispatched`` list returned by
+    ``_dispatch_split_child_submits`` — it is built from plain list appends that
+    cannot raise. The JobState row + history entry are SECONDARY bookkeeping.
+
+    A transient Storage Table failure (429 throttle, network blip) on ONE
+    child's write must NOT escape the loop. If it did, the ``submit`` task's
+    ``except Exception -> _retry_or_fail`` (``max_retries=12``) would re-run the
+    WHOLE fan-out from scratch — re-uploading the split query files and
+    RE-SUBMITTING every shard whose ``elastic-blast submit`` already succeeded on
+    the cluster (duplicate BLAST jobs, duplicate finalizers inflating the Gate B
+    count, wasted cost), up to 12 times. Round-3 H-A isolated a raised
+    ``terminal_run``; this isolates the per-child bookkeeping writes, the last
+    unguarded surface that could trigger that mass re-submission.
+
+    The submit itself still proceeds regardless of a bookkeeping failure, so no
+    shard is skipped or duplicated. A child left with a stale row is healed by
+    the beat reconciler. ``args[0]`` is always the child job id (both
+    ``repo.update`` and ``repo.append_history`` take it first), used only for the
+    log line.
+    """
+    try:
+        action(*args, **kwargs)
+    except Exception as exc:  # secondary bookkeeping — never abandon siblings
+        job_id = args[0] if args else "?"
+        LOGGER.warning(
+            "split child state write failed fn=%s job_id=%s: %s",
+            getattr(action, "__name__", "?"),
+            job_id,
+            type(exc).__name__,
+        )
+
+
 def _dispatch_split_child_submits(
     *,
     parent_job_id: str,
@@ -312,7 +348,9 @@ def _dispatch_split_child_submits(
                 type(exc).__name__,
             )
 
-        repo.update(child_job_id, status="running", phase="submitting")
+        _safe_child_state_write(
+            repo.update, child_job_id, status="running", phase="submitting"
+        )
 
         child_lease = None
         if gate_k8s:
@@ -330,13 +368,15 @@ def _dispatch_split_child_submits(
                     "split child gate budget exhausted job_id=%s",
                     child_job_id,
                 )
-                repo.update(
+                _safe_child_state_write(
+                    repo.update,
                     child_job_id,
                     status="failed",
                     phase="submit_failed",
                     error_code=error,
                 )
-                repo.append_history(
+                _safe_child_state_write(
+                    repo.append_history,
                     child_job_id,
                     "submit_failed",
                     {
@@ -376,26 +416,55 @@ def _dispatch_split_child_submits(
                     # serialise through the submit Lease against other submitters.
                     check_capacity=False,
                 )
-            except Exception:
-                error = "blast_submit_gate_unavailable"
+            except k8s_gate.K8sGateWaitTimeout as exc:
+                # The Lease stayed busy past this child's deadline — capacity
+                # CONTENTION, not a cluster outage. Fail this child and continue;
+                # keep the greppable ``blast_submit_gate_unavailable`` code that
+                # the deadline path also uses.
+                gate_error = "blast_submit_gate_unavailable"
+                gate_detail = "submit_lease_wait_timeout"
                 LOGGER.info(
-                    "split child gate denied job_id=%s",
+                    "split child gate wait timed out job_id=%s: %s",
                     child_job_id,
+                    type(exc).__name__,
                 )
-                repo.update(
+            except Exception as exc:  # genuine Lease / apiserver failure
+                # SubmitLeaseApiError (admin kubeconfig rejected, apiserver
+                # unreachable, transport error). Previously this collapsed into
+                # the SAME INFO log + error_code as a plain contention timeout,
+                # so when an apiserver outage failed EVERY shard an operator
+                # could not tell "cluster down → page" from "cluster busy →
+                # wait". The regular submit path already makes this distinction
+                # (admission.error → bounded retry vs deny → requeue); mirror it
+                # here with a distinct error_code and a WARNING that carries the
+                # exception type (round-4 observability).
+                gate_error = "blast_submit_lease_api_error"
+                gate_detail = "submit_lease_api_error"
+                LOGGER.warning(
+                    "split child gate lease api error job_id=%s: %s",
+                    child_job_id,
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+            else:
+                gate_error = None
+            if gate_error is not None:
+                _safe_child_state_write(
+                    repo.update,
                     child_job_id,
                     status="failed",
                     phase="submit_failed",
-                    error_code=error,
+                    error_code=gate_error,
                 )
-                repo.append_history(
+                _safe_child_state_write(
+                    repo.append_history,
                     child_job_id,
                     "submit_failed",
                     {
                         "parent_job_id": parent_job_id,
                         "group_id": child.get("group_id"),
-                        "error": error,
-                        "detail": "submit_lease_unavailable",
+                        "error": gate_error,
+                        "detail": gate_detail,
                     },
                 )
                 dispatched.append(
@@ -404,7 +473,7 @@ def _dispatch_split_child_submits(
                         "group_id": child.get("group_id"),
                         "status": "failed",
                         "phase": "submit_failed",
-                        "error": error,
+                        "error": gate_error,
                     }
                 )
                 continue
@@ -430,13 +499,15 @@ def _dispatch_split_child_submits(
                 child_job_id,
                 type(exc).__name__,
             )
-            repo.update(
+            _safe_child_state_write(
+                repo.update,
                 child_job_id,
                 status="failed",
                 phase="submit_failed",
                 error_code=error,
             )
-            repo.append_history(
+            _safe_child_state_write(
+                repo.append_history,
                 child_job_id,
                 "submit_failed",
                 {
@@ -471,8 +542,11 @@ def _dispatch_split_child_submits(
         exit_code = int(result.get("exit_code", 1) or 0)
         if exit_code == 0:
             phase, status = _blast._submit_success_status(payload_json)
-            repo.update(child_job_id, status=status, phase=phase)
-            repo.append_history(
+            _safe_child_state_write(
+                repo.update, child_job_id, status=status, phase=phase
+            )
+            _safe_child_state_write(
+                repo.append_history,
                 child_job_id,
                 phase,
                 {
@@ -494,8 +568,15 @@ def _dispatch_split_child_submits(
             continue
 
         error = _blast._result_error(result, payload_json)
-        repo.update(child_job_id, status="failed", phase="submit_failed", error_code=error)
-        repo.append_history(
+        _safe_child_state_write(
+            repo.update,
+            child_job_id,
+            status="failed",
+            phase="submit_failed",
+            error_code=error,
+        )
+        _safe_child_state_write(
+            repo.append_history,
             child_job_id,
             "submit_failed",
             {"parent_job_id": parent_job_id, "group_id": child.get("group_id"), "error": error},

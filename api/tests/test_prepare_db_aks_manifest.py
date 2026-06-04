@@ -316,3 +316,139 @@ def test_labels_are_k8s_safe() -> None:
         assert label_re.match(v), v
     for v in pod_labels.values():
         assert label_re.match(v), v
+
+
+def _extract_blob_content_length_parser() -> str:
+    """Pull the python3 -c body out of the `blob_content_length` helper so
+    the real shipped parser (not a copy) can be exercised against sample
+    azcopy-list JSON."""
+    import re
+
+    m = re.search(
+        r"blob_content_length\(\) \{.*?python3 -c '(.*?)'\n\}",
+        PREPARE_DB_AKS_SCRIPT,
+        re.DOTALL,
+    )
+    assert m, "blob_content_length python parser not found in script"
+    return m.group(1)
+
+
+def _run_blob_parser(stdin_text: str) -> str:
+    import subprocess
+    import sys
+
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _extract_blob_content_length_parser()],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_blob_content_length_normalizes_human_readable_size() -> None:
+    """Regression guard for the 2026-06-04 nt outage: azcopy 10.32.4's
+    `azcopy list --output-type=json` reports ContentLength as a human
+    string ("2.79 GiB"), not raw bytes. The shipped helper must convert it
+    back to an integer byte count so the verify step can compare against
+    the raw NCBI Content-Length instead of false-failing every multi-GB
+    file and deleting the (correct) blob."""
+    import json
+
+    line = json.dumps(
+        {
+            "MessageType": "ListObject",
+            "MessageContent": json.dumps({"ContentLength": "2.79 GiB"}),
+        }
+    )
+    out = _run_blob_parser(line + "\n")
+    # 2.79 * 1024^3 = 2995639357 (within 1% of the real 2999987448 bytes).
+    assert out == str(int(2.79 * 1024**3))
+
+
+def test_blob_content_length_accepts_raw_integer_and_units() -> None:
+    """The parser must stay backward-compatible with older azcopy builds
+    that emit a raw integer, and handle the common binary units."""
+    import json
+
+    def _wrap(cl: object) -> str:
+        return json.dumps(
+            {"MessageContent": json.dumps({"ContentLength": cl})}
+        )
+
+    assert _run_blob_parser(_wrap(2999987448) + "\n") == "2999987448"
+    assert _run_blob_parser(_wrap("2999987448") + "\n") == "2999987448"
+    assert _run_blob_parser(_wrap("512 B") + "\n") == "512"
+    assert _run_blob_parser(_wrap("1 KiB") + "\n") == str(1024)
+    assert _run_blob_parser(_wrap("1 MiB") + "\n") == str(1024**2)
+
+
+def test_blob_content_length_reports_parse_fail_on_unknown_shape() -> None:
+    """Unparseable / absent ContentLength must yield PARSE_FAIL so callers
+    fall through to a clean re-download (idempotency) or trust the upload
+    exit code (verify), never silently treat garbage as a valid size."""
+    assert _run_blob_parser('{"MessageType":"Init"}\n') == "PARSE_FAIL"
+    assert _run_blob_parser("not json at all\n") == "PARSE_FAIL"
+    assert _run_blob_parser("") == "PARSE_FAIL"
+
+
+def test_verify_uses_tolerant_byte_comparison() -> None:
+    """The post-upload verify must NOT compare the uploaded size to the
+    expected size with exact string equality.
+
+    azcopy 10.32's human-readable ContentLength keeps only ~3 significant
+    figures, so an exact compare false-fails every multi-GB file. The
+    shipped script compares with a 1% / 1 KiB tolerance via python3."""
+    # The brittle exact compare must be gone.
+    assert '[ "$uploaded_size" != "$expected_size" ]' not in PREPARE_DB_AKS_SCRIPT
+    # The tolerant byte compare is present.
+    assert "exp // 100" in PREPARE_DB_AKS_SCRIPT
+
+
+def test_verify_tolerance_formula_passes_rounded_size() -> None:
+    """Exercise the exact tolerance expression the script ships: a value
+    rounded to GiB precision passes, a truncated body fails."""
+    import re
+    import subprocess
+    import sys
+
+    m = re.search(
+        r"if ! python3 -c '(import sys\nup=int.*?else 1\))'",
+        PREPARE_DB_AKS_SCRIPT,
+        re.DOTALL,
+    )
+    assert m, "tolerance comparison snippet not found"
+    snippet = m.group(1)
+
+    def _cmp(up: int, exp: int) -> int:
+        return subprocess.run(  # noqa: S603
+            [sys.executable, "-c", snippet, str(up), str(exp)],
+            timeout=30,
+        ).returncode
+
+    expected = 2999987448
+    rounded = int(2.79 * 1024**3)  # 2995639357, what azcopy round-trips to
+    assert _cmp(rounded, expected) == 0  # within 1% -> pass
+    assert _cmp(expected, expected) == 0  # identical -> pass
+    assert _cmp(expected // 2, expected) == 1  # truncated body -> fail
+
+
+def test_loop_reads_file_list_on_dedicated_fd() -> None:
+    """The shard loop must read the file list on fd 3, not stdin.
+
+    Regression guard for the early-termination half of the 2026-06-04 nt
+    outage: `azcopy remove` (run on a verify mismatch) inherits fd 0, and
+    azcopy drains stdin. When the loop reads the file list from stdin, the
+    first remove swallows every remaining line and the shard stops after
+    one file. Reading on fd 3 + redirecting azcopy remove's stdin keeps the
+    loop fed."""
+    assert "read -r KEY <&3" in PREPARE_DB_AKS_SCRIPT
+    assert 'done 3< "$FILE_LIST"' in PREPARE_DB_AKS_SCRIPT
+    assert "while IFS= read -r KEY;" not in PREPARE_DB_AKS_SCRIPT
+    # azcopy remove must not be able to drain the loop's input.
+    assert (
+        'azcopy remove "$dst_url" --log-level=ERROR </dev/null'
+        in PREPARE_DB_AKS_SCRIPT
+    )

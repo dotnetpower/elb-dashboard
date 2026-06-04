@@ -1446,6 +1446,117 @@ def test_dispatch_split_child_submits_k8s_gate_timeout_fails_child(
     assert "submit_gate_unavailable" in str(result[0]["error"])
     assert terminal_ran is False
     assert released == []  # no Lease acquired → nothing to release
+    # A contention timeout is bucketed distinctly from a genuine apiserver
+    # failure: same greppable error_code, but the history detail says timeout.
+    assert any(
+        rec[2].get("detail") == "submit_lease_wait_timeout" for rec in history
+    )
+
+
+def test_dispatch_split_child_submits_lease_api_error_distinct_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine Lease/apiserver failure gets a DISTINCT error_code from a plain
+    contention timeout so an operator can tell "cluster down" from "cluster busy"
+    (round-4 observability)."""
+    from api.services.blast import k8s_gate
+    from api.services.k8s.submit_lease import SubmitLeaseApiError
+
+    monkeypatch.setenv("BLAST_COORD_BACKEND", "k8s")
+    updates: list[tuple[str, dict[str, object]]] = []
+    history: list[tuple[str, str, dict[str, object]]] = []
+    _fake_split_repo(updates, history, monkeypatch)
+    monkeypatch.setattr("api.services.get_credential", lambda: object())
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise SubmitLeaseApiError("apiserver unreachable")
+
+    monkeypatch.setattr(k8s_gate, "wait_for_k8s_admission", _boom)
+    released: list[object] = []
+    monkeypatch.setattr(
+        k8s_gate, "release_k8s_admission", lambda *a, **_k: released.append(a[-1])
+    )
+
+    terminal_ran = False
+
+    def fake_terminal_run(**_kwargs: object) -> dict[str, object]:
+        nonlocal terminal_ran
+        terminal_ran = True
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    result = blast._dispatch_split_child_submits(
+        parent_job_id="job-123",
+        owner_oid="oid-1",
+        tenant_id="tenant-1",
+        children=[_split_child("qg1")],
+        subscription_id="sub",
+        resource_group="rg",
+        cluster_name="cluster",
+        terminal_run=fake_terminal_run,
+    )
+
+    assert result[0]["status"] == "failed"
+    assert result[0]["error"] == "blast_submit_lease_api_error"
+    assert terminal_ran is False
+    assert released == []  # no Lease acquired → nothing to release
+    assert any(
+        rec[2].get("detail") == "submit_lease_api_error" for rec in history
+    )
+
+
+def test_dispatch_split_child_submits_state_write_failure_does_not_abandon_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient state-store write failure on one shard must NOT escape the
+    fan-out. If it did, the submit task's ``except -> _retry_or_fail``
+    (max_retries=12) would re-run the whole fan-out and RE-SUBMIT every shard
+    that already succeeded on the cluster. Best-effort per-child writes keep the
+    authoritative ``dispatched`` summary intact and let every shard submit."""
+    from api.services.state.job_state import JobState
+
+    monkeypatch.delenv("BLAST_COORD_BACKEND", raising=False)  # non-k8s path
+
+    class FlakyRepo:
+        def create(self, state: JobState) -> JobState:
+            return state
+
+        def update(self, job_id: str, **_kwargs: object) -> JobState:
+            raise RuntimeError("table throttled 429")
+
+        def append_history(
+            self, job_id: str, event: str, payload: dict[str, object]
+        ) -> None:
+            raise RuntimeError("table throttled 429")
+
+    monkeypatch.setattr(
+        "api.services.state_repo.JobStateRepository", lambda: FlakyRepo()
+    )
+
+    ran: list[str] = []
+
+    def fake_terminal_run(
+        *, argv: list[str], stdin: str, stdin_file: str, timeout_seconds: int
+    ) -> dict[str, object]:
+        del stdin, stdin_file, timeout_seconds
+        ran.append(str(argv[0]))
+        return {"exit_code": 0, "stdout": '{"decision":"accepted"}\n', "stderr": ""}
+
+    # subscription_id="" disables the k8s gate → no Lease, pure fan-out.
+    result = blast._dispatch_split_child_submits(
+        parent_job_id="job-123",
+        owner_oid="oid-1",
+        tenant_id="tenant-1",
+        children=[_split_child("qg1"), _split_child("qg2")],
+        subscription_id="",
+        resource_group="rg",
+        cluster_name="cluster",
+        terminal_run=fake_terminal_run,
+    )
+
+    # Every shard submitted despite EVERY state write raising, and the summary
+    # is accurate (no exception bubbled up to trigger a parent retry/resubmit).
+    assert [r["status"] for r in result] == ["running", "running"]
+    assert len(ran) == 2
 
 
 def test_dispatch_split_child_submits_parent_budget_exhausted_fails_fast(

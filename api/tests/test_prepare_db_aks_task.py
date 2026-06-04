@@ -442,6 +442,7 @@ def test_on_job_progress_reports_file_level_success() -> None:
         snapshot,
         mode_label="aks",
         update_metadata=_fake_update_metadata,
+        bytes_total=123_456_789,
     )
 
     cs = container.meta["copy_status"]
@@ -454,6 +455,31 @@ def test_on_job_progress_reports_file_level_success() -> None:
     assert cs["success"] == 3
     # Byte-level signal for download speed: 1000 + 2000 + 500, decoy excluded.
     assert cs["bytes_done"] == 3500
+    # Total expected bytes is the denominator for the SPA's byte-based ETA.
+    assert cs["bytes_total"] == 123_456_789
+
+
+def test_on_job_progress_omits_bytes_total_when_unknown() -> None:
+    """No expected-size total → no `bytes_total` key (SPA keeps count ETA)."""
+    container = _FakeContainer({"db_name": "core_nt"})
+    container.blob_names = ["core_nt/core_nt.000.nhr"]
+    container.blob_sizes = {"core_nt/core_nt.000.nhr": 1000}
+
+    task_module._on_job_progress(
+        container,
+        "core_nt",
+        "stworkload",
+        ["v/core_nt.000.nhr"],
+        {"active_pods": 1, "succeeded_pods": 0, "failed_pods": 0, "shard_count": 1},
+        mode_label="aks",
+        update_metadata=_fake_update_metadata,
+        bytes_total=0,
+    )
+
+    cs = container.meta["copy_status"]
+    assert "bytes_total" not in cs
+    assert cs["bytes_done"] == 1000
+
 
 
 def test_on_job_progress_falls_back_when_listing_fails() -> None:

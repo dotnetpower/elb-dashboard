@@ -82,6 +82,11 @@ export interface DownloadedDbMeta {
      * this by elapsed seconds to render a live download speed (MB/s).
      */
     bytes_done?: number;
+    /**
+     * AKS-fanout only: total expected bytes. The SPA projects a byte-based
+     * ETA from `(bytes_total - bytes_done)` over the trailing-window rate.
+     */
+    bytes_total?: number;
   };
   failed_files?: Array<{ blob: string; status: string; reason?: string }>;
   db_order_oracle?: {
@@ -490,22 +495,29 @@ export function useBlastDb({
         dbName,
       );
       phaseToastedRef.current.delete(dbName);
-      if (resp.errors) {
-        // Partial delete: the backend kept the metadata so the DB is still
-        // listed and can be re-deleted. Warn instead of reporting a clean
-        // removal, and leave the in-progress marker untouched.
+      // A delete attempt — partial or clean — makes any local copy-tracking
+      // for this DB meaningless. Clear it (guarded no-op when absent) so a
+      // stale "Copying … Ns" elapsed timer / poll loop does not linger on a
+      // just-deleted row. Row truth comes from the refetch below.
+      setInProgress((prev) => {
+        if (!prev.has(dbName)) return prev;
+        const next = new Map(prev);
+        next.delete(dbName);
+        return next;
+      });
+      if (resp.errors || resp.partial) {
+        // Partial delete: the backend kept (or failed to remove) the metadata
+        // so the DB is still listed and can be re-deleted. Warn instead of
+        // reporting a clean removal.
+        const tail = resp.errors
+          ? `${resp.errors} could not be deleted. Try Delete again to clear the rest.`
+          : "could not finish removing it. Try Delete again.";
         setDownloadResult({
           db: dbName,
-          msg: `Partial delete — removed ${resp.deleted} blobs, ${resp.errors} could not be deleted. Try Delete again to clear the rest.`,
+          msg: `Partial delete — removed ${resp.deleted} blobs, ${tail}`,
           type: "err",
         });
       } else {
-        setInProgress((prev) => {
-          if (!prev.has(dbName)) return prev;
-          const next = new Map(prev);
-          next.delete(dbName);
-          return next;
-        });
         setDownloadResult({
           db: dbName,
           msg: `Deleted — removed ${resp.deleted} blobs.`,

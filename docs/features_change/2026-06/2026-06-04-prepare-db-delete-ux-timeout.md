@@ -42,7 +42,9 @@ dashboard:
   **Partial-failure invariant:** when any shard delete fails (`errors > 0`) the
   metadata blob is **kept** (not deleted) so the row stays visible and
   re-deletable instead of leaking orphan blobs; the response gains
-  `partial: true` in that case. Response is otherwise backward compatible.
+  `partial: true`. `partial` is also true when every shard was removed but the
+  metadata blob delete itself failed (DB still listed). Response is otherwise
+  backward compatible.
 - `web/src/api/client.ts` — `FetchApiOptions` gains an optional `timeoutMs`;
   `fetchApi` forwards it to `fetchWithRetry`, and `api.post` accepts an optional
   `{ timeoutMs }` third argument. Default behaviour (30 s) is unchanged for all
@@ -50,19 +52,22 @@ dashboard:
 - `web/src/api/monitoring.ts` — `deletePrepareBlastDb` requests a 180 s timeout
   and its response type gains the optional `partial` field.
 - `web/src/components/cards/storage/useBlastDb.ts` — on a partial delete
-  (`errors > 0`) the hook warns ("Partial delete … Try Delete again") and leaves
-  the row in place; the error/timeout path now also calls `dbQuery.refetch()` so
-  a successful-but-timed-out delete reconciles against server truth instead of
-  leaving a stale Get button.
+  (`errors > 0` or `partial`) the hook warns ("Partial delete … Try Delete
+  again") and leaves the row in place; the error/timeout path now also calls
+  `dbQuery.refetch()` so a successful-but-timed-out delete reconciles against
+  server truth instead of leaving a stale Get button. Any local copy-tracking
+  (`inProgress`) for the DB is cleared after every delete attempt so a stale
+  "Copying … Ns" timer/poll never lingers on a just-deleted row.
 - `web/src/components/cards/storage/BlastDbRow.tsx` — a high-priority
   `isDeleting` branch renders the "Deleting…" chip and hides the download button.
 
 ## Validation evidence
 
-- `uv run pytest -q api/tests/test_prepare_db_delete_route.py` → 6 passed
-  (added `test_delete_partial_failure_keeps_metadata`; mock `_FakeContainer`
-  extended with `delete_blobs` + a `fail_names` failure-injection set).
-- `uv run pytest -q api/tests` → 2722 passed, 3 skipped.
+- `uv run pytest -q api/tests/test_prepare_db_delete_route.py` → 7 passed
+  (added `test_delete_partial_failure_keeps_metadata` +
+  `test_delete_metadata_failure_reports_partial`; mock `_FakeContainer`
+  extended with `delete_blobs`, a `fail_names` set and `fail_metadata`).
+- `uv run pytest -q api/tests` → 2723 passed, 3 skipped.
 - `uv run ruff check api/routes/storage/prepare_db.py api/tests/test_prepare_db_delete_route.py` → clean.
 - `cd web && npm run build` + `npx tsc --noEmit` → clean.
 - `cd web && npm test -- --run src/components/cards/storage/ src/api/resilience.test.ts src/api/aks.test.ts` → 39 + 10 passed.

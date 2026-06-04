@@ -177,6 +177,11 @@ def prepare_db_via_aks(
     container = blob_svc.get_container_client("blast-db")
 
     sizes = file_sizes or {}
+    # Sum of known source sizes is the denominator for the SPA's byte-based
+    # ETA. It can undercount when some sizes are unknown (0), which is fine —
+    # an approximate total still yields a far better remaining-time estimate
+    # than file-count extrapolation over heterogeneous multi-GB volumes.
+    total_bytes_expected = sum(int(v) for v in sizes.values() if v and v > 0)
     shards = plan_prepare_db_shards(
         file_keys,
         sizes=sizes,
@@ -314,6 +319,7 @@ def prepare_db_via_aks(
                 snap,
                 mode_label="aks",
                 update_metadata=_update_metadata,
+                bytes_total=total_bytes_expected,
             ),
         )
         job_timed_out = bool(job_result.get("timed_out"))
@@ -497,6 +503,7 @@ def _on_job_progress(
     *,
     mode_label: str,
     update_metadata: Any,
+    bytes_total: int = 0,
 ) -> None:
     """Mirror the server-side `_record_progress` shape so the SPA can render."""
 
@@ -519,6 +526,13 @@ def _on_job_progress(
         if staged is not None:
             copy_status["success"] = staged[0]
             copy_status["bytes_done"] = staged[1]
+        # Total expected bytes lets the SPA project a byte-based ETA from the
+        # trailing-window throughput. File-count ETA mis-estimates badly here
+        # because the few remaining files are the largest `.nsq` volumes and
+        # because a re-run pre-stages thousands of small blobs instantly,
+        # inflating the count rate.
+        if bytes_total > 0:
+            copy_status["bytes_total"] = bytes_total
         meta["copy_status"] = copy_status
         return meta
 

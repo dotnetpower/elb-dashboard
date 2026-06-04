@@ -105,13 +105,37 @@ export function recordSpeedSample(
 }
 
 /**
- * Compute an instantaneous download-speed label from trailing-window samples.
+ * Compute an instantaneous download throughput (bytes / second) from
+ * trailing-window samples, or `null` when there is nothing meaningful to
+ * measure.
  *
  * Uses the first↔last sample delta so the dead startup time (AKS pods
  * scheduling / pulling images / scanning NCBI S3 with zero bytes landed) is
- * excluded from the divisor. Returns `""` (hide the figure) when there is no
- * forward movement to measure or the most recent sample is stale (nothing has
- * advanced within `windowMs`), so a stalled copy stops showing an old rate.
+ * excluded from the divisor. Returns `null` when there is no forward movement
+ * to measure or the most recent sample is stale (nothing has advanced within
+ * `windowMs`), so a stalled copy stops projecting an old rate. This is the
+ * numeric basis shared by the speed label and the byte-based ETA.
+ */
+export function computeWindowedBytesPerSec(
+  samples: readonly SpeedSample[],
+  nowMs: number,
+  windowMs: number = SPEED_WINDOW_MS,
+): number | null {
+  const first = samples[0];
+  const latest = samples[samples.length - 1];
+  if (!first || !latest || latest.t <= first.t) return null;
+  if (nowMs - latest.t > windowMs) return null;
+  const deltaBytes = latest.bytes - first.bytes;
+  const deltaSeconds = (latest.t - first.t) / 1000;
+  if (deltaBytes <= 0 || deltaSeconds <= 0) return null;
+  return deltaBytes / deltaSeconds;
+}
+
+/**
+ * Compute an instantaneous download-speed label from trailing-window samples.
+ *
+ * Returns `""` (hide the figure) when there is nothing to measure or fewer
+ * than ~5 s of forward movement (the `formatSpeed` stability gate).
  */
 export function computeWindowedSpeed(
   samples: readonly SpeedSample[],
@@ -125,4 +149,29 @@ export function computeWindowedSpeed(
   const deltaBytes = latest.bytes - first.bytes;
   const deltaSeconds = (latest.t - first.t) / 1000;
   return formatSpeed(deltaBytes, deltaSeconds);
+}
+
+/**
+ * Project the remaining copy time from the bytes still to land and a recent
+ * throughput (bytes / second).
+ *
+ * Preferred over {@link formatEta} for the AKS-fanout path: file-count
+ * extrapolation mis-estimates badly when the remaining files are the largest
+ * `.nsq` volumes, or when a re-run finds thousands of small blobs already
+ * staged (which inflates the count rate to a near-instant, bogus ETA). The
+ * byte rate comes from a trailing window, so it reflects only recent movement
+ * and is immune to that startup inflation.
+ *
+ * Returns:
+ *   - `""` when there is nothing meaningful to show (no rate, no remaining
+ *     bytes, or already done)
+ *   - `"~28m left"` once a positive rate and positive remaining bytes exist
+ */
+export function formatEtaFromBytes(
+  remainingBytes: number,
+  bytesPerSec: number | null,
+): string {
+  if (!bytesPerSec || bytesPerSec <= 0) return "";
+  if (remainingBytes <= 0) return "";
+  return `~${formatDuration(remainingBytes / bytesPerSec)} left`;
 }

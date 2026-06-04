@@ -339,6 +339,8 @@ export interface BlastDatabase {
     initiation_errors?: number;
     /** AKS-fanout only: total bytes landed so far (drives download speed). */
     bytes_done?: number;
+    /** AKS-fanout only: total expected bytes (drives the byte-based ETA). */
+    bytes_total?: number;
   };
   /** Per-blob failure details from copy.status polling (truncated to 50). */
   failed_files?: Array<{ blob: string; status: string; reason?: string }>;

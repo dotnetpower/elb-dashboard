@@ -12,8 +12,10 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import {
+  computeWindowedBytesPerSec,
   computeWindowedSpeed,
   formatEta,
+  formatEtaFromBytes,
   recordSpeedSample,
   type SpeedSample,
 } from "@/components/cards/storage/blastDbProgress";
@@ -243,15 +245,6 @@ export function BlastDbRow({
   const copyElapsedSeconds = Number.isFinite(copyStartMs)
     ? Math.max(0, Math.floor((Date.now() - copyStartMs) / 1000))
     : 0;
-  // Dynamic estimate from observed throughput, replacing the static catalog
-  // `estMinutes`. Recomputed every render (the parent re-renders ~1 Hz via the
-  // `elapsed` tick) so it tightens as the copy progresses. Only meaningful for
-  // per-file progress with a known elapsed; the AKS pod-level path has no
-  // reliable per-file rate.
-  const etaLabel =
-    hasPerFile && copyElapsedSeconds > 0
-      ? formatEta(copyElapsedSeconds, copiedFiles, perFileTotal)
-      : null;
   // Live *instantaneous* download speed from recent `bytes_done` samples.
   // Only the AKS-fanout path reports `bytes_done`; the server-side
   // blob-to-blob copy does not (no real network download on the worker side).
@@ -262,12 +255,18 @@ export function BlastDbRow({
   // an instantaneous rate, hiding the figure when nothing advances recently.
   const speedSamplesRef = useRef<SpeedSample[]>([]);
   const [speedLabel, setSpeedLabel] = useState("");
+  // Byte-based ETA label, derived from the same trailing-window rate (AKS
+  // path only). Held in state because it is computed in the sampling effect.
+  const [byteEtaLabel, setByteEtaLabel] = useState<string | null>(null);
   const bytesDone =
     copyActive && typeof cs?.bytes_done === "number" ? cs.bytes_done : null;
+  const bytesTotal =
+    copyActive && typeof cs?.bytes_total === "number" ? cs.bytes_total : null;
   useEffect(() => {
     if (!copyActive) {
       speedSamplesRef.current = [];
       setSpeedLabel("");
+      setByteEtaLabel(null);
       return;
     }
     if (bytesDone === null) return;
@@ -278,9 +277,35 @@ export function BlastDbRow({
       now,
     );
     setSpeedLabel(computeWindowedSpeed(speedSamplesRef.current, now));
+    // Byte-based ETA: bytes still to land over the trailing-window throughput.
+    // The windowed rate reflects only recent movement, so it is immune to the
+    // startup inflation a re-run causes — a re-run finds thousands of small
+    // blobs already staged, which spikes the file-count rate to a near-instant
+    // bogus "~12s left" even though the remaining multi-GB `.nsq` volumes take
+    // many minutes. The byte projection stays honest there.
+    const rate = computeWindowedBytesPerSec(speedSamplesRef.current, now);
+    if (rate !== null && bytesTotal !== null) {
+      setByteEtaLabel(formatEtaFromBytes(bytesTotal - bytesDone, rate) || null);
+    } else {
+      setByteEtaLabel(null);
+    }
     // `elapsed` advances ~1 Hz via the parent tick, so a stalled copy still
     // re-runs this effect and `computeWindowedSpeed` clears the stale rate.
-  }, [copyActive, bytesDone, elapsed]);
+  }, [copyActive, bytesDone, bytesTotal, elapsed]);
+  // Dynamic remaining-time estimate. Prefer the byte-based projection (AKS
+  // path, `bytes_total` present): file-count extrapolation mis-estimates badly
+  // when the remaining files are the largest volumes or a re-run pre-stages
+  // many blobs instantly. Fall back to the file-count `formatEta` only for the
+  // server-side path, which reports no byte totals. When the AKS byte rate is
+  // momentarily unavailable (between PipeBlob commits) `byteEtaLabel` is null
+  // and the "transferring large volumes…" note covers the gap instead of a
+  // misleading count-based figure.
+  const etaLabel =
+    bytesTotal !== null
+      ? byteEtaLabel
+      : hasPerFile && copyElapsedSeconds > 0
+        ? formatEta(copyElapsedSeconds, copiedFiles, perFileTotal)
+        : null;
   // "Looks frozen but isn't" guard. The AKS pods stream each NCBI file to a
   // block blob with azcopy `--from-to=PipeBlob`, which COMMITS the blob only
   // when the whole file finishes. The committed-blob listing that feeds

@@ -1869,10 +1869,12 @@ def prepare_db_delete(
         "db_name": db_name,
         "deleted": deleted,
         "errors": errors,
-        # When some shard blobs survived we deliberately keep the metadata blob
-        # so the row stays re-deletable; partial=True tells the SPA to warn the
-        # user and leave the DB in the list instead of reporting a clean delete.
-        "partial": bool(errors),
+        # partial=True whenever the DB is NOT fully gone: either a shard delete
+        # failed (errors>0, metadata deliberately kept) OR every shard was
+        # removed but the metadata blob delete itself failed (DB still listed).
+        # Tells the SPA to warn the user and leave the row re-deletable instead
+        # of reporting a clean delete.
+        "partial": bool(errors) or not metadata_deleted,
         "metadata_deleted": metadata_deleted,
         "aks_job_deleted": aks_job_deleted,
     }

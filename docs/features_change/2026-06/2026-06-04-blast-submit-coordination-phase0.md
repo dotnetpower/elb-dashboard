@@ -140,6 +140,112 @@ flips ON:
   *mutate* cluster state (create a probe Lease), violating the probe's
   read-only/no-mutate contract, so it is deliberately not added.
 
+## Critique round 5 — diverse-scenario pass, split fan-out partial-failure (2026-06-04)
+
+A fifth diverse-scenario critique focused on **partial-failure correctness** of
+the split fan-out (what happens when a single shard's *bookkeeping* — not its
+submit — fails mid-loop). It surfaced one genuine **HIGH** defect.
+
+### Fixed — HIGH
+
+- **H5 — unguarded per-child state/history writes in the split fan-out could
+  trigger mass re-submission.** `_dispatch_split_child_submits` runs every shard
+  submit inside **one** Celery task. After each shard it wrote child status via
+  `repo.update(...)` / `repo.append_history(...)`. Those writes hit Azure Storage
+  Table and **raise** on a transient fault (429 throttle, network blip) —
+  `state/repository.py::update()` does not swallow errors and itself triggers a
+  second history write. An exception from any one of those ~11 write sites would
+  escape `_dispatch_split_child_submits`, propagate to the submit task's
+  `except → _retry_or_fail` (**`max_retries=12`**), and re-run the *entire*
+  fan-out — **re-submitting every already-succeeded shard**, up to 12×. Each
+  re-submit creates a duplicate BLAST job and a duplicate finalizer, which also
+  inflates the Gate B running-count ceiling. Blast radius: one throttled Table
+  write on shard 7 of 10 re-submits shards 1–6 plus 8–10.
+  Fix: a module-level best-effort wrapper `_safe_child_state_write(action, *args,
+  **kwargs)` now guards **all** per-child `repo.update` / `repo.append_history`
+  calls in the loop. The authoritative parent summary is the in-memory
+  `dispatched` list (plain list appends, cannot throw); a write failure is logged
+  at WARNING (fn + job_id + exc type) and the loop proceeds, so the submit always
+  completes and no shard is skipped or duplicated. A stale child row is later
+  healed by the beat reconciler. Best-effort writes were chosen over
+  per-child `try/except: continue` because the latter would *skip a shard's
+  actual submit* on a pre-submit write failure (strictly worse).
+
+### Verified non-defects (left unchanged by design)
+
+- **`repo.create(...)` at the top of the loop stays bare** — it is already
+  wrapped in its own `try/except` that fails the child cleanly before any submit.
+- **Post-exec CLI parsing helpers** (`_last_json`, `_result_error`,
+  `_submit_success_status`, `_is_retryable_result`, `_retry_after`) are
+  defensive (handle `None`, `str()`-coerce, internal `try/except`) and cannot
+  raise into the fan-out. Unchanged.
+
+### Validation
+
+- New regression test
+  `test_dispatch_split_child_submits_state_write_failure_does_not_abandon_siblings`
+  uses a `FlakyRepo` whose `update`/`append_history` always raise
+  `RuntimeError("table throttled 429")` and asserts both shards still report
+  `running` and both submits actually ran (no exception escapes, no shard
+  skipped).
+- `uv run ruff check api` clean; `uv run pytest -q api/tests` →
+  **2750 passed, 3 skipped** (the one full-suite `test_terminal_exec.py::
+  test_run_truncates_stdout_above_cap` blip is an unrelated parallel-execution
+  flake — passes in isolation and on re-run; it exercises subprocess stdout
+  truncation, a different subsystem).
+
+## Critique round 4 — diverse-scenario cold pass, observability/consistency (2026-06-04)
+
+A fourth, deliberately diverse-scenario critique (apiserver outage vs. capacity
+contention, all-shards-fail blast radius, operator paging signal, parity with
+the regular submit path) surfaced one genuine **LOW** defect. The code is mature
+after three prior rounds, so the remaining finding is a consistency/observability
+gap rather than a design defect.
+
+### Fixed — LOW
+
+- **L4 — split fan-out collapsed apiserver outage and capacity contention into
+  one error bucket.** In `_dispatch_split_child_submits`, the per-shard gate
+  wait caught every failure with a single `except Exception:` that always set
+  `error_code="blast_submit_gate_unavailable"` and logged at INFO without the
+  exception type. When the AKS apiserver (or the admin kubeconfig) is genuinely
+  down, **every** shard fails identically, and an operator reading the audit log
+  could not distinguish "cluster down → page now" from "cluster busy → it will
+  drain." The regular submit path already makes this distinction
+  (`admission.error` → bounded retry vs. a plain deny → requeue), so the split
+  path was inconsistent. Fix: split the handler into two clauses —
+  `K8sGateWaitTimeout` keeps `error_code=blast_submit_gate_unavailable`
+  (history detail `submit_lease_wait_timeout`, INFO log incl. exc type), while a
+  genuine `SubmitLeaseApiError`/Lease/apiserver failure gets a **distinct**
+  `error_code=blast_submit_lease_api_error` (history detail
+  `submit_lease_api_error`, WARNING log with exc type + traceback). `error_code`
+  is a free-form string (truncated to 128 chars in `celery_signals`, no
+  whitelist), so the new value is fully backward-compatible.
+
+### Verified non-defects (left unchanged by design)
+
+- **Split path bypasses the Gate B finalizer-count ceiling.** Documented
+  round-2 self-deadlock prevention — a split parent must not block on its own
+  children's running slots. Unchanged.
+- **Lease TTL covers the submit subprocess, not the az-login/kubeconfig
+  prelude.** The 300 s margin (`lease_ttl 900` − `submit_exec 600`) absorbs the
+  prelude; tightening it would risk premature expiry under slow ARM. Unchanged.
+- **Pooled `session.close()` is a no-op.** `finally: session.close()` call sites
+  are safe because the credential/session pool owns lifecycle and temp cert
+  files. Unchanged.
+
+### Validation
+
+- New regression test
+  `test_dispatch_split_child_submits_lease_api_error_distinct_code` asserts the
+  distinct `blast_submit_lease_api_error` code + `submit_lease_api_error` detail;
+  the existing
+  `test_dispatch_split_child_submits_k8s_gate_timeout_fails_child` keeps the
+  `submit_gate_unavailable` contract and now also asserts the
+  `submit_lease_wait_timeout` detail.
+- `uv run ruff check api` clean; `uv run pytest -q api/tests` →
+  **2724 passed, 3 skipped**.
+
 ## Critique round 3 — broad/cold audit, 20+ findings (2026-06-04)
 
 A colder, wider self-critique across new scenarios (auth asymmetry,
