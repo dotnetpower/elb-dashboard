@@ -5,9 +5,11 @@ import { Server, Trash2 } from "lucide-react";
 import type { BlastJobSummary } from "@/api/endpoints";
 import {
   isActiveJobState,
+  isQueuedJobState,
   toJobRowView,
 } from "@/components/cards/ClusterBento/jobMapping";
-import { statusColor } from "@/constants";
+import type { DisplayJobState } from "@/components/cards/ClusterBento/jobTypes";
+import { queueReasonText, statusColor } from "@/constants";
 
 import { timeAgo } from "./dateGroup";
 
@@ -30,15 +32,19 @@ function formatDuration(seconds: number): string {
   return `${secs}s`;
 }
 
-function runtimeLabel(job: BlastJobSummary, active: boolean, now: number) {
+function runtimeLabel(job: BlastJobSummary, state: DisplayJobState, now: number) {
   const created = Date.parse(job.created_at || "");
   if (!Number.isFinite(created)) return null;
+  const active = isActiveJobState(state);
   const finished = Date.parse(job.updated_at || "");
   const end = active ? now : finished;
   if (!Number.isFinite(end) || end < created) return null;
   const seconds = Math.floor((end - created) / 1000);
+  // A queued job is "active" but has not started running on the cluster, so
+  // "Elapsed" reads wrong. Show how long it has been waiting in line instead.
+  const label = isQueuedJobState(state) ? "Queued for" : active ? "Elapsed" : "Duration";
   return {
-    label: active ? "Elapsed" : "Duration",
+    label,
     value: formatDuration(seconds),
   };
 }
@@ -47,7 +53,10 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
   const view = toJobRowView(job);
   const phase = view.state;
   const color = statusColor(phase.toLowerCase());
-  const runtime = runtimeLabel(job, isActiveJobState(phase), now);
+  const runtime = runtimeLabel(job, phase, now);
+  // Why a queued job is waiting (submit slot / cluster capacity / queue), shown
+  // as a calm secondary line under the QUEUED badge. Null for non-queued states.
+  const queueReason = isQueuedJobState(phase) ? queueReasonText(job.phase) : null;
   const cluster = job.infrastructure?.cluster_name;
   const upn = job.owner_upn;
   // Legacy rows pre-dating owner_upn capture still carry submission_source on
@@ -166,6 +175,19 @@ function JobRowComponent({ job, onDelete, deleting, now = Date.now() }: JobRowPr
         >
           {phase}
         </span>
+        {queueReason && (
+          <div
+            style={{
+              fontSize: 9,
+              marginTop: 3,
+              color: "var(--text-faint)",
+              whiteSpace: "nowrap",
+            }}
+            title={queueReason}
+          >
+            {queueReason}
+          </div>
+        )}
         {job.stale && (
           <div
             style={{

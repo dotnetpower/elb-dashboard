@@ -4,9 +4,10 @@ import { useSearchParams } from "react-router-dom";
 
 import { blastApi, type BlastJobSummary } from "@/api/endpoints";
 import {
-  isDashboardJobActive,
   isDashboardJobCompleted,
   isDashboardJobFailed,
+  isDashboardJobQueued,
+  isDashboardJobRunning,
   toJobRowView,
 } from "@/components/cards/ClusterBento/jobMapping";
 import { useClusterReadiness } from "@/hooks/usePrerequisites";
@@ -14,10 +15,11 @@ import { useScopedBlastJobs } from "@/hooks/useScopedBlastJobs";
 
 import { GROUP_ORDER, getDateGroup, type DateGroup } from "./dateGroup";
 
-export type FilterKind = "all" | "running" | "completed" | "failed";
+export type FilterKind = "all" | "queued" | "running" | "completed" | "failed";
 
 const FILTER_KINDS: ReadonlySet<FilterKind> = new Set([
   "all",
+  "queued",
   "running",
   "completed",
   "failed",
@@ -118,7 +120,8 @@ export function useBlastJobsState() {
     let list = [...allJobs];
     if (filter !== "all") {
       list = list.filter((j) => {
-        if (filter === "running") return isDashboardJobActive(j);
+        if (filter === "queued") return isDashboardJobQueued(j);
+        if (filter === "running") return isDashboardJobRunning(j);
         if (filter === "failed") return isDashboardJobFailed(j);
         return isDashboardJobCompleted(j);
       });
@@ -156,11 +159,12 @@ export function useBlastJobsState() {
   }, [filtered]);
 
   const counts = useMemo(() => {
-    const c = { running: 0, completed: 0, failed: 0 };
+    const c = { queued: 0, running: 0, completed: 0, failed: 0 };
     allJobs.forEach((j) => {
       if (isDashboardJobCompleted(j)) c.completed++;
       else if (isDashboardJobFailed(j)) c.failed++;
-      else if (isDashboardJobActive(j)) c.running++;
+      else if (isDashboardJobQueued(j)) c.queued++;
+      else if (isDashboardJobRunning(j)) c.running++;
     });
     return c;
   }, [allJobs]);

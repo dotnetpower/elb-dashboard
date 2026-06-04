@@ -373,6 +373,7 @@ export function KpiInline({
 /* -------------------------------------------------------------------------- */
 
 const JOB_STATE_TONES: Record<DisplayJobState, { color: string; bg: string }> = {
+  Queued: { color: "var(--text-muted)", bg: "rgba(157,165,180,0.10)" },
   Pending: { color: "var(--text-faint)", bg: "rgba(255,255,255,0.04)" },
   Running: { color: "var(--accent)", bg: "rgba(110,159,255,0.10)" },
   Reducing: { color: "var(--purple)", bg: "rgba(180,130,255,0.10)" },

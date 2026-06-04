@@ -394,9 +394,23 @@ def _local_to_blast_job(
             "steps": progress.get("steps", {}),
         }
     if include_database_metadata:
+        from api.services.blast.db_metadata import extract_trusted_storage_account
+
+        # Jobs synced from the sibling OpenAPI store their blob-URL database
+        # under payload.external.db and leave infrastructure.storage_account
+        # empty. Recover the account (gated to the trusted workload account) so
+        # the Storage-backed resolver fills the sequence/letter counts and
+        # snapshot date, matching dashboard jobs. The trust gate stops an
+        # attacker-influenced db URL from leaking the MI Storage token.
+        storage_account = str(infrastructure.get("storage_account") or "")
+        if not storage_account:
+            external = payload.get("external") if isinstance(payload.get("external"), dict) else {}
+            storage_account = extract_trusted_storage_account(
+                db
+            ) or extract_trusted_storage_account(str(external.get("db") or ""))
         database_metadata = _database_metadata_for_response(
             db,
-            str(infrastructure.get("storage_account") or ""),
+            storage_account,
         )
         if database_metadata is not None:
             out["database_metadata"] = database_metadata

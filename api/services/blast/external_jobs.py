@@ -506,9 +506,20 @@ def _external_to_blast_job(
     if any(infrastructure.values()):
         out["infrastructure"] = {k: v for k, v in infrastructure.items() if v}
     if include_database_metadata:
+        from api.services.blast.db_metadata import extract_trusted_storage_account
+
+        # External-API jobs never populate infrastructure.storage_account, but
+        # they carry the BLAST database as a full blob URL. Recover the account
+        # (gated to the trusted workload account) so the same Storage-backed
+        # resolver fills the sequence / letter counts and snapshot date
+        # dashboard-submitted jobs show. The gate stops an attacker-influenced
+        # db URL from leaking the MI Storage token to a foreign account.
+        storage_account = str(
+            infrastructure.get("storage_account") or ""
+        ) or extract_trusted_storage_account(str(job.get("db") or ""))
         database_metadata = _database_metadata_for_response(
             db,
-            str(infrastructure.get("storage_account") or ""),
+            storage_account,
         )
         if database_metadata is not None:
             out["database_metadata"] = database_metadata

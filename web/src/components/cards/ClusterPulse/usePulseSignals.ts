@@ -25,12 +25,13 @@ import type { DisplayJobState, JobRowView } from "@/components/cards/ClusterBent
 export const JOB_PREVIEW = 3;
 
 const JOB_STATE_ORDER: Record<DisplayJobState, number> = {
-  Pending: 0,
-  Running: 1,
-  Reducing: 2,
-  Failed: 3,
-  Completed: 4,
-  Unknown: 5,
+  Queued: 0,
+  Pending: 1,
+  Running: 2,
+  Reducing: 3,
+  Failed: 4,
+  Completed: 5,
+  Unknown: 6,
 };
 
 export interface PulseSignals {

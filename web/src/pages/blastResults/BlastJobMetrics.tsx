@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 
 import { formatBytes } from "@/components/BlastFilePreview";
+import { phaseLabel } from "@/constants";
 import type { BlastExportFormat, BlastResultFile } from "@/api/endpoints";
 import { BlastJobStatusIcon } from "@/pages/blastResults/BlastJobBanners";
 
@@ -54,7 +55,7 @@ export function BlastJobMetrics({
             }}
           >
             <BlastJobStatusIcon completedButFailed={completedButFailed} />
-            {completedButFailed ? "failed" : phase}
+            {completedButFailed ? "failed" : phaseLabel(phase)}
           </div>
           <div className="mu">Status</div>
         </div>

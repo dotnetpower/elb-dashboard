@@ -736,11 +736,6 @@
     flex: 1 1 100% !important;
     order: 2 !important;
   }
-  .endpoint-card__response-codes {
-    order: 3 !important;
-    flex: 1 1 100% !important;
-    max-width: none !important;
-  }
   .endpoint-card__summary,
   .endpoint-card__copylink {
     display: none !important;

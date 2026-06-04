@@ -3,6 +3,7 @@ import { Loader2, XCircle } from "lucide-react";
 
 import { BlastResultsTable, NoResultFilesPanel } from "./BlastResultsTable";
 import { StorageLockedPanel } from "./StorageLockedPanel";
+import { phaseLabel } from "@/constants";
 import type { splitBlastResultFiles } from "@/pages/blastResultsModel";
 
 type ResultFile = ReturnType<typeof splitBlastResultFiles>["files"][number];
@@ -146,7 +147,7 @@ export function ResultsBody({
         />
         <span style={{ color: "var(--text-muted)" }}>
           Output files will appear here once the search completes. Current phase:{" "}
-          <strong style={{ color: "var(--accent)" }}>{effectivePhase}</strong>
+          <strong style={{ color: "var(--accent)" }}>{phaseLabel(effectivePhase)}</strong>
         </span>
       </div>
     );

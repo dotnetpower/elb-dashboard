@@ -3,8 +3,9 @@
 Responsibility: BLAST database metadata helpers shared by submit, oracle, and result views
 Edit boundaries: Keep reusable domain logic here; routes and tasks should call this layer
 instead of duplicating SDK code.
-Key entry points: `extract_db_name`, `resolve_db_metadata`, `resolve_database_display_metadata`,
-`resolve_blastdb_json_metadata`, `database_display_metadata_from_info`
+Key entry points: `extract_db_name`, `extract_storage_account`, `extract_trusted_storage_account`,
+`resolve_db_metadata`, `resolve_database_display_metadata`, `resolve_blastdb_json_metadata`,
+`database_display_metadata_from_info`
 Risky contracts: Keep Azure credentials centralized and sanitise data before HTTP, WebSocket, or
 log boundaries.
 Validation: `uv run pytest -q api/tests/test_blast_results_parser.py
@@ -55,6 +56,80 @@ def extract_db_name(database: str) -> str:
         return path_parts[1]
     db = db.removeprefix("blast-db/")
     return db.split("/", 1)[0]
+
+
+def extract_storage_account(database: str) -> str:
+    """Extract the Storage account name from a BLAST db blob URL.
+
+    External-API jobs carry the BLAST database as a full blob URL such as
+    ``https://<account>.blob.core.windows.net/blast-db/core_nt/core_nt`` but
+    never populate ``infrastructure.storage_account``. Recovering the account
+    from the URL lets the result view resolve the same rich DB metadata
+    (sequence/letter counts, snapshot date) that dashboard-submitted jobs show.
+
+    Returns the account name, or ``""`` for a bare DB name or any value that is
+    not a recognised Azure Blob endpoint.
+
+    SECURITY: the returned name is NOT yet trusted — the ``db`` value of an
+    external job is influenced by whoever called the sibling OpenAPI. Callers
+    that turn the account into an authenticated Storage request (which sends the
+    api sidecar's managed-identity token to ``<account>.blob.core.windows.net``)
+    MUST gate it through :func:`extract_trusted_storage_account` so the token is
+    never sent to an attacker-owned account.
+    """
+    value = database.strip()
+    if not value.startswith("https://"):
+        return ""
+    host = urlparse(value).netloc
+    if ".blob.core.windows.net" not in host.casefold():
+        return ""
+    account = host.split(".", 1)[0]
+    return account
+
+
+def _configured_workload_storage_accounts() -> set[str]:
+    """Return the case-folded set of Storage accounts this deployment trusts.
+
+    The Container App always sets ``AZURE_BLOB_ENDPOINT`` and/or
+    ``STORAGE_ACCOUNT_NAME`` / ``AZURE_STORAGE_ACCOUNT`` to the single workload
+    Storage account (state lives in one account per deployment). An empty set
+    means "no workload account configured" (local dev / unit tests), in which
+    case URL-derived accounts are refused rather than blindly trusted.
+    """
+    accounts: set[str] = set()
+    endpoint = os.environ.get("AZURE_BLOB_ENDPOINT", "").strip()
+    if endpoint:
+        host = urlparse(endpoint).netloc or endpoint.removeprefix("https://").split("/", 1)[0]
+        account = host.split(".", 1)[0].strip()
+        if account:
+            accounts.add(account.casefold())
+    for name in ("AZURE_STORAGE_ACCOUNT", "STORAGE_ACCOUNT_NAME"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            accounts.add(value.casefold())
+    return accounts
+
+
+def extract_trusted_storage_account(database: str) -> str:
+    """Like :func:`extract_storage_account` but only returns the account when it
+    matches the deployment's configured workload Storage account.
+
+    External-API jobs carry an attacker-influenceable ``db`` URL. Sending the
+    api sidecar's managed-identity Storage token to an arbitrary
+    ``<account>.blob.core.windows.net`` host would leak a valid Azure AD token
+    (scoped to ``storage.azure.com``) to whoever owns that account — and that
+    token grants the dashboard MI's RBAC on the real workload account. We
+    therefore refuse any account that is not the known workload account and
+    fall back to ``""`` (the caller then renders the static catalogue only,
+    exactly the pre-enrichment behaviour).
+    """
+    account = extract_storage_account(database)
+    if not account:
+        return ""
+    trusted = _configured_workload_storage_accounts()
+    if not trusted:
+        return ""
+    return account if account.casefold() in trusted else ""
 
 
 def resolve_db_metadata(storage_account: str, db_name: str) -> dict[str, Any] | None:

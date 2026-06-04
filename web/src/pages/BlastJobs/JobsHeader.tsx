@@ -30,8 +30,8 @@ export function JobsHeader({
       <div className="page-header" style={{ marginBottom: 0 }}>
         <div className="page-header__title">Recent BLAST searches</div>
         <div className="page-header__desc">
-          {allJobsLength} total · {counts.running} running · {counts.completed}{" "}
-          completed · {counts.failed} failed
+          {allJobsLength} total · {counts.queued} queued · {counts.running}{" "}
+          running · {counts.completed} completed · {counts.failed} failed
         </div>
         {allJobsLength > 0 && (
           <div className="prog" style={{ width: 200, height: 6, marginTop: 6 }}>
@@ -47,6 +47,12 @@ export function JobsHeader({
                 style={{
                   width: `${(counts.running / allJobsLength) * 100}%`,
                   background: "var(--warning)",
+                }}
+              />
+              <div
+                style={{
+                  width: `${(counts.queued / allJobsLength) * 100}%`,
+                  background: "var(--text-muted)",
                 }}
               />
               <div

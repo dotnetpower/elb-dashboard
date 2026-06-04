@@ -2,6 +2,7 @@ import { memo, useMemo, type CSSProperties } from "react";
 import { CheckCircle2, Clock, Copy } from "lucide-react";
 
 import { ElapsedTimer } from "@/components/BlastFilePreview";
+import { phaseLabel, queueReasonText } from "@/constants";
 import type { BlastJobSummary } from "@/api/endpoints";
 
 interface BlastJobDetailsGridProps {
@@ -30,6 +31,10 @@ function BlastJobDetailsGridComponent({
 }: BlastJobDetailsGridProps) {
   const config = job.config_snapshot as Record<string, unknown> | undefined;
   const infra = job.infrastructure as Record<string, unknown> | undefined;
+  // When the job is waiting in line, explain why beneath the status label so
+  // the details view matches the job list's QUEUED secondary line.
+  const queueReason =
+    effectivePhase === "submit_failed" ? null : queueReasonText(effectivePhase);
   const gridStyle = useMemo<CSSProperties>(
     () => ({
       display: "grid",
@@ -70,7 +75,18 @@ function BlastJobDetailsGridComponent({
       <span className="muted">Status</span>
       <span style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
         <span style={statusDotStyle} />
-        {effectivePhase === "submit_failed" ? "failed" : effectivePhase}
+        <span style={{ display: "flex", flexDirection: "column" }}>
+          <span>
+            {effectivePhase === "submit_failed"
+              ? "failed"
+              : phaseLabel(effectivePhase)}
+          </span>
+          {queueReason && (
+            <span className="muted" style={{ fontSize: 11 }}>
+              {queueReason}
+            </span>
+          )}
+        </span>
       </span>
       <span className="muted">Created</span>
       <span>{job.created_at ? new Date(job.created_at).toLocaleString() : "—"}</span>

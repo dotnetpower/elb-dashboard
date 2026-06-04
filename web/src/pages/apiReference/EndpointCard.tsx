@@ -62,10 +62,6 @@ export function EndpointCard({
     () => sortResponses(Object.entries(ep.responses || {})),
     [ep.responses],
   );
-  const responseHighlights = useMemo(
-    () => buildResponseHighlights(responseEntries),
-    [responseEntries],
-  );
   const pathIdHint = getPathIdHint(ep.path);
   const defaultExampleKey = useMemo(
     () => getDefaultRequestExampleKey(ep, exampleKeys),
@@ -212,42 +208,6 @@ export function EndpointCard({
         >
           {ep.summary}
         </span>
-        {responseHighlights.length > 0 && (
-          <div
-            className="endpoint-card__response-codes"
-            aria-label="Response shapes"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              flexWrap: "wrap",
-              flexShrink: 0,
-              maxWidth: 220,
-            }}
-          >
-            {responseHighlights.map((highlight) => (
-              <span
-                key={highlight.key}
-                title={highlight.title}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  padding: "2px 6px",
-                  borderRadius: 5,
-                  border: `1px solid ${responseBorder(highlight.code)}`,
-                  background: responseBackground(highlight.code),
-                  color: responseTone(highlight.code),
-                  fontSize: 10,
-                  fontFamily: "var(--font-mono)",
-                  fontWeight: 700,
-                  lineHeight: 1.3,
-                }}
-              >
-                {highlight.label}
-              </span>
-            ))}
-          </div>
-        )}
         {/* A2: copy a shareable deep-link to this endpoint */}
         <button
           type="button"
@@ -991,67 +951,6 @@ function sortResponses(entries: ResponseEntry[]): ResponseEntry[] {
     if (Number.isFinite(rightNumber)) return 1;
     return left.localeCompare(right);
   });
-}
-
-function buildResponseHighlights(entries: ResponseEntry[]): {
-  key: string;
-  code: string;
-  label: string;
-  title: string;
-}[] {
-  const success = entries.find(([code]) => code.startsWith("2"));
-  const clientErrors = entries.filter(([code]) => code.startsWith("4"));
-  const serverErrors = entries.filter(([code]) => code.startsWith("5"));
-  const highlights: { key: string; code: string; label: string; title: string }[] = [];
-
-  if (success) {
-    const [code, info] = success;
-    const shape = info.shapeName || responseTitle(code, info.description);
-    highlights.push({
-      key: code,
-      code,
-      label: `${code} ${shape}`,
-      title: info.description || `HTTP ${code}`,
-    });
-  }
-
-  if (clientErrors.length > 0) {
-    highlights.push({
-      key: "4xx",
-      code: clientErrors[0][0],
-      label: "4xx ErrorResponse",
-      title: clientErrors
-        .map(
-          ([code, info]) =>
-            `${code} ${info.shapeName || responseTitle(code, info.description)}`,
-        )
-        .join("; "),
-    });
-  }
-
-  if (serverErrors.length > 0) {
-    const [code, info] = serverErrors[0];
-    highlights.push({
-      key: "5xx",
-      code,
-      label: `5xx ${info.shapeName || "RuntimeFailure"}`,
-      title: serverErrors
-        .map(
-          ([statusCode, response]) =>
-            `${statusCode} ${response.shapeName || responseTitle(statusCode, response.description)}`,
-        )
-        .join("; "),
-    });
-  }
-
-  if (highlights.length > 0) return highlights;
-
-  return entries.slice(0, 3).map(([code, info]) => ({
-    key: code,
-    code,
-    label: `${code} ${info.shapeName || responseTitle(code, info.description)}`,
-    title: info.description || `HTTP ${code}`,
-  }));
 }
 
 function getPathIdHint(path: string): { label: string; title: string } | undefined {

@@ -6,6 +6,8 @@ Azure calls.
 Key entry points: `_state`, `test_local_to_blast_job_minimum_shape`,
 `test_local_to_blast_job_query_label_extracted`,
 `test_local_to_blast_job_can_include_database_metadata`,
+`test_local_to_blast_job_derives_storage_account_from_external_db_url`,
+`test_local_to_blast_job_refuses_foreign_external_db_storage_account`,
 `test_local_to_blast_job_exposes_error_for_frontend`,
 `test_local_to_blast_job_exposes_progress_steps`,
 `test_refresh_running_blast_state_skips_pre_runtime_phases`,
@@ -89,6 +91,75 @@ def test_local_to_blast_job_can_include_database_metadata(monkeypatch):
         "name": "core_nt",
         "title": "Core nucleotide BLAST database",
     }
+
+
+def test_local_to_blast_job_derives_storage_account_from_external_db_url(monkeypatch):
+    # Jobs synced from the sibling OpenAPI leave infrastructure.storage_account
+    # empty but carry the blob-URL database under payload.external.db. The
+    # storage account MUST be recovered from that URL — but only when it matches
+    # the deployment's configured workload account — so the Storage-backed
+    # resolver can fill the sequence/letter counts and snapshot date.
+    monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbdashboard3abp67bppe")
+    seen: dict[str, str] = {}
+
+    def fake_database_metadata(database: str, storage_account: str):
+        seen["database"] = database
+        seen["storage_account"] = storage_account
+        return {"name": "core_nt", "number_of_sequences": 125_940_211}
+
+    monkeypatch.setattr(blast_job_state, "_database_metadata_for_response", fake_database_metadata)
+
+    out = _local_to_blast_job(
+        _state(
+            db="core_nt",
+            payload={
+                "external": {
+                    "db": (
+                        "https://stelbdashboard3abp67bppe.blob.core.windows.net/"
+                        "blast-db/core_nt/core_nt"
+                    )
+                }
+            },
+        ),
+        include_database_metadata=True,
+    )
+
+    assert seen["database"] == "core_nt"
+    assert seen["storage_account"] == "stelbdashboard3abp67bppe"
+    assert out["database_metadata"]["number_of_sequences"] == 125_940_211
+
+
+def test_local_to_blast_job_refuses_foreign_external_db_storage_account(monkeypatch):
+    # SECURITY: an attacker-influenced external db URL pointing at a foreign
+    # Storage account must NOT cause an authenticated Storage call (which would
+    # leak the MI Storage token). The resolver is still invoked, but with an
+    # empty storage account so it falls back to the static catalogue only.
+    monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbdashboard3abp67bppe")
+    seen: dict[str, str] = {}
+
+    def fake_database_metadata(database: str, storage_account: str):
+        seen["storage_account"] = storage_account
+        return None
+
+    monkeypatch.setattr(blast_job_state, "_database_metadata_for_response", fake_database_metadata)
+
+    _local_to_blast_job(
+        _state(
+            db="core_nt",
+            payload={
+                "external": {
+                    "db": "https://attackeracct.blob.core.windows.net/blast-db/core_nt/core_nt"
+                }
+            },
+        ),
+        include_database_metadata=True,
+    )
+
+    assert seen["storage_account"] == ""
 
 
 def test_local_to_blast_job_exposes_error_for_frontend():

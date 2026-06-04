@@ -10,7 +10,7 @@ export interface JobsFilterBarProps {
   counts: BlastJobsState["counts"];
 }
 
-const FILTERS: FilterKind[] = ["all", "running", "completed", "failed"];
+const FILTERS: FilterKind[] = ["all", "queued", "running", "completed", "failed"];
 
 export function JobsFilterBar({
   filter,

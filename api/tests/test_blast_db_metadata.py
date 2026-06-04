@@ -4,6 +4,8 @@ Responsibility: Tests for BLAST database Metadata behavior
 Edit boundaries: Keep assertions focused on the behavior under test; prefer fakes over live
 Azure calls.
 Key entry points: `test_extract_db_name_handles_every_input_shape`,
+`test_extract_storage_account_handles_every_input_shape`,
+`test_extract_trusted_storage_account_gates_on_workload_account`,
 `test_database_display_metadata_merges_core_nt_catalogue_with_storage_stats`,
 `test_database_display_metadata_prefers_blastdb_metadata_title`
 Risky contracts: Do not require network access or real Azure credentials unless the test is
@@ -17,7 +19,12 @@ import threading
 import time
 from typing import Any
 
-from api.services.blast.db_metadata import database_display_metadata_from_info, extract_db_name
+from api.services.blast.db_metadata import (
+    database_display_metadata_from_info,
+    extract_db_name,
+    extract_storage_account,
+    extract_trusted_storage_account,
+)
 
 
 def test_extract_db_name_handles_every_input_shape() -> None:
@@ -34,6 +41,65 @@ def test_extract_db_name_handles_every_input_shape() -> None:
     )
     assert extract_db_name("https://elbstg01.blob.core.windows.net/queries/q.fa") == ""
     assert extract_db_name("") == ""
+
+
+def test_extract_storage_account_handles_every_input_shape() -> None:
+    assert (
+        extract_storage_account(
+            "https://stelbdashboard3abp67bppe.blob.core.windows.net/blast-db/core_nt/core_nt"
+        )
+        == "stelbdashboard3abp67bppe"
+    )
+    assert (
+        extract_storage_account(
+            "https://elbstg01.blob.core.windows.net/blast-db/core_nt/core_nt?sig=ignored"
+        )
+        == "elbstg01"
+    )
+    # Bare DB names and non-blob hosts yield no account.
+    assert extract_storage_account("core_nt") == ""
+    assert extract_storage_account("blast-db/core_nt/core_nt") == ""
+    assert extract_storage_account("https://example.com/blast-db/core_nt") == ""
+    assert extract_storage_account("") == ""
+
+
+def test_extract_trusted_storage_account_gates_on_workload_account(monkeypatch) -> None:
+    # The workload account is the one the deployment configured. Only a db URL
+    # pointing at that exact account is trusted; anything else (an
+    # attacker-influenced external job db URL) must be refused so the MI
+    # Storage token is never sent to a foreign account.
+    monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.setenv("STORAGE_ACCOUNT_NAME", "stelbdashboard3abp67bppe")
+
+    trusted_url = (
+        "https://stelbdashboard3abp67bppe.blob.core.windows.net/blast-db/core_nt/core_nt"
+    )
+    foreign_url = "https://attackeracct.blob.core.windows.net/blast-db/core_nt/core_nt"
+    assert extract_trusted_storage_account(trusted_url) == "stelbdashboard3abp67bppe"
+    assert extract_trusted_storage_account(foreign_url) == ""
+    # Bare names never reach Storage at all.
+    assert extract_trusted_storage_account("core_nt") == ""
+
+
+def test_extract_trusted_storage_account_refuses_when_unconfigured(monkeypatch) -> None:
+    # No workload account configured (local dev / tests): refuse URL-derived
+    # accounts rather than blindly trusting them.
+    monkeypatch.delenv("AZURE_BLOB_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.delenv("STORAGE_ACCOUNT_NAME", raising=False)
+    url = "https://anyacct.blob.core.windows.net/blast-db/core_nt/core_nt"
+    assert extract_trusted_storage_account(url) == ""
+
+
+def test_extract_trusted_storage_account_accepts_blob_endpoint_env(monkeypatch) -> None:
+    monkeypatch.delenv("AZURE_STORAGE_ACCOUNT", raising=False)
+    monkeypatch.delenv("STORAGE_ACCOUNT_NAME", raising=False)
+    monkeypatch.setenv(
+        "AZURE_BLOB_ENDPOINT", "https://stelbdashboard3abp67bppe.blob.core.windows.net"
+    )
+    url = "https://stelbdashboard3abp67bppe.blob.core.windows.net/blast-db/core_nt/core_nt"
+    assert extract_trusted_storage_account(url) == "stelbdashboard3abp67bppe"
 
 
 def test_database_display_metadata_merges_core_nt_catalogue_with_storage_stats() -> None:

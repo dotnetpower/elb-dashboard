@@ -5,6 +5,8 @@ import {
   isDashboardJobActive,
   isDashboardJobCompleted,
   isDashboardJobFailed,
+  isDashboardJobQueued,
+  isDashboardJobRunning,
   toJobRowView,
 } from "./jobMapping";
 import type { BlastJobSummary } from "@/api/endpoints";
@@ -22,6 +24,32 @@ describe("classifyJobState", () => {
     expect(classifyJobState({ phase: "mystery_phase", status: "running" })).toBe(
       "Running",
     );
+  });
+
+  it("surfaces a queued job as Queued even though the backend keeps status=running", () => {
+    // submit_task.py persists status="running" as a reconciler sentinel
+    // while a job waits for a submit lock / capacity gate. The phase is the
+    // truth, so the row must say Queued, not Running.
+    expect(
+      classifyJobState({ phase: "waiting_for_submit_slot", status: "running" }),
+    ).toBe("Queued");
+    expect(classifyJobState({ phase: "waiting_for_capacity", status: "running" })).toBe(
+      "Queued",
+    );
+    expect(classifyJobState({ phase: "capacity_reserve_lost", status: "running" })).toBe(
+      "Queued",
+    );
+    expect(classifyJobState({ phase: "queued", status: "queued" })).toBe("Queued");
+  });
+
+  it("keeps a terminal outcome ahead of a queued phase", () => {
+    // A late failure/completion must still win over a stale queued phase.
+    expect(classifyJobState({ phase: "waiting_for_submit_slot", status: "failed" })).toBe(
+      "Failed",
+    );
+    expect(
+      classifyJobState({ phase: "waiting_for_capacity", status: "completed" }),
+    ).toBe("Completed");
   });
 
   it("classifies submit_failed as failed even without an error string", () => {
@@ -130,5 +158,57 @@ describe("toJobRowView", () => {
         phase: "submit_failed",
       } as BlastJobSummary),
     ).toBe(true);
+  });
+});
+
+describe("queued vs running classifiers", () => {
+  const recent = new Date().toISOString();
+  const base = {
+    job_id: "dddddddddddd",
+    job_title: "query.fa",
+    program: "blastn",
+    db: "core_nt",
+    created_at: recent,
+    updated_at: recent,
+  } satisfies Partial<BlastJobSummary>;
+
+  it("treats a waiting-in-line job as queued, not running", () => {
+    const queued = {
+      ...base,
+      status: "running",
+      phase: "waiting_for_capacity",
+    } as BlastJobSummary;
+    // Still active (in-flight) but bucketed as queued, never running.
+    expect(isDashboardJobActive(queued)).toBe(true);
+    expect(isDashboardJobQueued(queued)).toBe(true);
+    expect(isDashboardJobRunning(queued)).toBe(false);
+  });
+
+  it("treats a job running on the cluster as running, not queued", () => {
+    const running = {
+      ...base,
+      status: "running",
+      phase: "submitted",
+      output: {
+        execution: {
+          shard_count: 4,
+          shards_succeeded: 1,
+          shards_failed: 0,
+          shards_active: 3,
+        },
+      },
+    } as BlastJobSummary;
+    expect(isDashboardJobRunning(running)).toBe(true);
+    expect(isDashboardJobQueued(running)).toBe(false);
+  });
+
+  it("does not count a completed job as queued or running", () => {
+    const done = {
+      ...base,
+      status: "completed",
+      phase: "completed",
+    } as BlastJobSummary;
+    expect(isDashboardJobQueued(done)).toBe(false);
+    expect(isDashboardJobRunning(done)).toBe(false);
   });
 });

@@ -32,6 +32,8 @@ export function toneColor(tone: HealthTone): string {
 
 export function jobStateTone(state: DisplayJobState): string {
   switch (state) {
+    case "Queued":
+      return "var(--text-muted)";
     case "Running":
       return "var(--accent)";
     case "Reducing":
@@ -54,6 +56,7 @@ export function jobTimeText(
 ): string {
   if (state === "Completed") return `done in ${fmtSec(elapsedSec)}`;
   if (state === "Failed") return `failed @ ${fmtSec(elapsedSec)}`;
+  if (state === "Queued") return "queued";
   if (state === "Pending") return "queued";
   if (etaSec != null) return `${fmtSec(elapsedSec)} · ETA ${fmtSec(etaSec)}`;
   return fmtSec(elapsedSec);

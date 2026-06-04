@@ -9,12 +9,29 @@
  */
 
 import type { BlastJobSummary } from "@/api/endpoints";
+import { QUEUED_PHASES } from "@/constants";
 
 import type { DisplayJobState, JobRowView } from "./jobTypes";
 
 type UnknownRecord = Record<string, unknown>;
 
 const STALE_ACTIVE_WITHOUT_PROGRESS_MS = 30 * 60 * 1000;
+
+// Queued / waiting-in-line sub-states. The backend deliberately persists
+// ``status="running"`` for every one of these (see
+// api/tasks/blast/submit_task.py) so its reconciler keeps the row "active"
+// and does not treat it as terminal. But none of these jobs is actually
+// running on the cluster yet — they are waiting for a submit lock, for the
+// capacity gate, or simply sitting in the Celery queue. The phase is the
+// source of truth, so we bucket them as a distinct ``Queued`` state and
+// (in ``classifyJobState``) let that phase win over the running-status
+// sentinel. Without this the UI shows "RUNNING" for jobs that have not
+// started, which is exactly the bug this set fixes.
+//
+// The raw backend phases come from ``QUEUED_PHASES`` (the single source of
+// truth in constants.ts); we add the capitalised display token so
+// ``classifyValue`` also recognises an already-classified "Queued".
+const QUEUED = new Set<string>([...QUEUED_PHASES, "Queued"]);
 
 const ACTIVE_PENDING = new Set([
   "Pending",
@@ -24,7 +41,6 @@ const ACTIVE_PENDING = new Set([
   "submitted",
   "submitting",
   "preparing",
-  "queued",
   "waiting_for_warmup",
 ]);
 
@@ -75,6 +91,7 @@ function classifyValue(value: string | undefined): DisplayJobState | null {
   if (COMPLETED.has(value)) return "Completed";
   if (ACTIVE_REDUCING.has(value)) return "Reducing";
   if (ACTIVE_RUNNING.has(value)) return "Running";
+  if (QUEUED.has(value)) return "Queued";
   if (ACTIVE_PENDING.has(value)) return "Pending";
   return null;
 }
@@ -92,6 +109,13 @@ export function classifyJobState(input: {
   const statusState = classifyValue(input.status);
   if (phaseState === "Failed" || statusState === "Failed") return "Failed";
   if (phaseState === "Completed" || statusState === "Completed") return "Completed";
+  // Queued / waiting sub-states: the backend keeps ``status="running"`` as a
+  // reconciler sentinel while the job waits for a submit lock, the capacity
+  // gate, or a free Celery slot. The phase is the truth, so honour a queued
+  // phase over the running-status sentinel — otherwise the row claims
+  // "Running" for a job that has not started. Mirrors the cancelling
+  // precedence below. See api/tasks/blast/submit_task.py.
+  if (phaseState === "Queued") return "Queued";
   // Cancel-in-flight: the Celery cancel task intentionally keeps
   // ``status="running"`` while retrying so the reconciler does not race
   // it, but ``phase="cancelling"`` is the source of truth from the user's
@@ -106,7 +130,21 @@ export function classifyJobState(input: {
 }
 
 export function isActiveJobState(s: DisplayJobState): boolean {
-  return s === "Pending" || s === "Running" || s === "Reducing";
+  return s === "Queued" || s === "Pending" || s === "Running" || s === "Reducing";
+}
+
+/** True only for the queued/waiting-in-line display state. */
+export function isQueuedJobState(s: DisplayJobState): boolean {
+  return s === "Queued";
+}
+
+/**
+ * Active but not queued — the job is genuinely executing (or about to) on the
+ * cluster. Used where the UI wants to separate "running now" from "waiting in
+ * line" (the job list counts and the running filter).
+ */
+export function isRunningJobState(s: DisplayJobState): boolean {
+  return isActiveJobState(s) && s !== "Queued";
 }
 
 export function jobDisplayState(j: BlastJobSummary): DisplayJobState {
@@ -115,6 +153,16 @@ export function jobDisplayState(j: BlastJobSummary): DisplayJobState {
 
 export function isDashboardJobActive(j: BlastJobSummary): boolean {
   return isActiveJobState(jobDisplayState(j));
+}
+
+/** A BLAST job that is waiting in line (not yet running on the cluster). */
+export function isDashboardJobQueued(j: BlastJobSummary): boolean {
+  return isQueuedJobState(jobDisplayState(j));
+}
+
+/** A BLAST job that is genuinely running/reducing on the cluster (not queued). */
+export function isDashboardJobRunning(j: BlastJobSummary): boolean {
+  return isRunningJobState(jobDisplayState(j));
 }
 
 export function isDashboardJobCompleted(j: BlastJobSummary): boolean {

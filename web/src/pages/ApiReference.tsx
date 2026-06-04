@@ -259,6 +259,7 @@ export function ApiReference() {
 
       {baseUrl &&
         hasOpenApiImage &&
+        !clusterStopped &&
         (() => {
           // Only render the update panel when the actual deployed container
           // image tag differs from the dashboard-pinned tag. The OpenAPI
@@ -298,9 +299,9 @@ export function ApiReference() {
           );
         })()}
 
-      {baseUrl && specQuery.isLoading && <SpecLoadingState />}
+      {baseUrl && specQuery.isLoading && !clusterStopped && <SpecLoadingState />}
 
-      {specQuery.isError && (
+      {specQuery.isError && !clusterStopped && (
         <SpecErrorState
           message={(specQuery.error as Error).message}
           showRepair={isPeerWithPlatformRecovery(specQuery.error)}
@@ -314,7 +315,7 @@ export function ApiReference() {
       {/* Spec returned 200 with `degraded: true` — the api sidecar reached
           the proxy route but the upstream elb-openapi did not answer. Render
           the same recovery affordance as the hard error case. */}
-      {specQuery.isSuccess && isPeerWithPlatformRecovery(specQuery.data) && (
+      {specQuery.isSuccess && !clusterStopped && isPeerWithPlatformRecovery(specQuery.data) && (
         <SpecErrorState
           message="The elb-openapi service did not respond. The dashboard could not load the live OpenAPI spec."
           showRepair
@@ -325,7 +326,7 @@ export function ApiReference() {
         />
       )}
 
-      {baseUrl && hasOpenApiImage && clusterName && (
+      {baseUrl && hasOpenApiImage && clusterName && !clusterStopped && (
         <PlsTransitionBanner
           subscriptionId={sub}
           resourceGroup={clusterRg}
@@ -337,7 +338,7 @@ export function ApiReference() {
         />
       )}
 
-      {baseUrl && hasOpenApiImage && clusterName && (
+      {baseUrl && hasOpenApiImage && clusterName && !clusterStopped && (
         <ApiTokenPanel
           subscriptionId={sub}
           resourceGroup={clusterRg}
@@ -345,9 +346,9 @@ export function ApiReference() {
         />
       )}
 
-      <ApiResponseContractPanel loading={contractLoading} />
+      {!clusterStopped && <ApiResponseContractPanel loading={contractLoading} />}
 
-      {spec && grouped.length > 0 && (
+      {spec && grouped.length > 0 && !clusterStopped && (
         // A1: two-column layout — sticky sidebar (tag list + endpoint search +
         // method chips) on the left, tag sections on the right. The sidebar is
         // sticky to `top: 16px` so scrolling through long specs still keeps

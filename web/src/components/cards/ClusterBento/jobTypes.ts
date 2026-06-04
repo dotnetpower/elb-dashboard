@@ -1,4 +1,5 @@
 export type DisplayJobState =
+  | "Queued"
   | "Pending"
   | "Running"
   | "Reducing"

@@ -45,6 +45,11 @@ function isReachableUpstream(baseUrl: string): boolean {
   }
 }
 
+// Shared height for every item in the hero action row (URL chips, the
+// Swagger UI link, and the refresh button) so they line up cleanly
+// regardless of label length.
+const API_HERO_ACTION_HEIGHT = 30;
+
 export function ApiHero({
   spec,
   baseUrl,
@@ -113,7 +118,17 @@ export function ApiHero({
           )}
         </div>
 
-        <div className="api-hero__actions" style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>
+        <div
+          className="api-hero__actions"
+          style={{
+            display: "flex",
+            gap: 6,
+            alignItems: "center",
+            flexShrink: 0,
+            flexWrap: "wrap",
+            justifyContent: "flex-end",
+          }}
+        >
           {baseUrl && (
             <UrlChip
               icon={<Network size={11} />}
@@ -140,7 +155,13 @@ export function ApiHero({
               target="_blank"
               rel="noreferrer"
               className="glass-button api-hero__swagger"
-              style={{ fontSize: 11, textDecoration: "none" }}
+              style={{
+                height: API_HERO_ACTION_HEIGHT,
+                boxSizing: "border-box",
+                fontSize: 11,
+                textDecoration: "none",
+                whiteSpace: "nowrap",
+              }}
             >
               <ExternalLink size={11} /> Swagger UI
             </a>
@@ -151,7 +172,14 @@ export function ApiHero({
               className="glass-button"
               onClick={onRefresh}
               disabled={refreshing}
-              style={{ fontSize: 11 }}
+              style={{
+                height: API_HERO_ACTION_HEIGHT,
+                width: API_HERO_ACTION_HEIGHT,
+                padding: 0,
+                boxSizing: "border-box",
+                justifyContent: "center",
+                fontSize: 11,
+              }}
               title="Refresh API spec"
               aria-label="Refresh API spec"
             >
@@ -190,16 +218,19 @@ function UrlChip({
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        padding: "3px 8px",
+        height: API_HERO_ACTION_HEIGHT,
+        padding: "0 10px",
+        boxSizing: "border-box",
         background: "var(--bg-tertiary)",
         border: "1px solid var(--border-weak)",
-        borderRadius: 5,
+        borderRadius: 6,
         fontFamily: "var(--font-mono)",
         fontSize: 10,
         color: "var(--text-faint)",
         cursor: "pointer",
-        maxWidth: 360,
+        maxWidth: 340,
         minWidth: 0,
+        whiteSpace: "nowrap",
       }}
     >
       <span style={{ color: accent, display: "inline-flex", flexShrink: 0 }}>{icon}</span>

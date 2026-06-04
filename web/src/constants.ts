@@ -1,6 +1,9 @@
 /** Shared UI constants — single source of truth for status colors, defaults, etc. */
 
 export const STATUS_COLORS: Record<string, string> = {
+  queued: "var(--text-muted)",
+  waiting_for_submit_slot: "var(--text-muted)",
+  waiting_for_capacity: "var(--text-muted)",
   submitted: "var(--accent)",
   preparing: "var(--accent)",
   checking_vm: "var(--accent)",
@@ -37,6 +40,54 @@ export const STATUS_COLORS: Record<string, string> = {
 
 export function statusColor(phase: string): string {
   return STATUS_COLORS[phase] ?? "var(--text-faint)";
+}
+
+// Backend phases that the reconciler keeps with status="running" while the job
+// is actually waiting in line (submit-slot lock, cluster capacity). The job list
+// already collapses these to the "Queued" display state via `classifyJobState`;
+// this set lets the Job Details surfaces (which render the raw phase string) show
+// the same "queued" label instead of the internal phase id.
+//
+// This is the single source of truth for "which backend phases mean queued".
+// `jobMapping.ts` imports it to build its classifier set, so adding a new
+// waiting phase here flows to the badge, counts, filter, and details at once.
+export const QUEUED_PHASES = new Set([
+  "queued",
+  "waiting_for_submit_slot",
+  "waiting_for_capacity",
+  "capacity_reserve_lost",
+]);
+
+/**
+ * Human-friendly label for a raw backend phase string. Keeps the queued-family
+ * phases (which co-occur with the status="running" reconciler sentinel) reading
+ * as "queued" so the Job Details Status matches the job list badge. All other
+ * phases pass through unchanged.
+ */
+export function phaseLabel(phase: string): string {
+  if (QUEUED_PHASES.has(phase)) return "queued";
+  return phase;
+}
+
+// Why a job is queued, keyed by the raw backend phase. Surfaced as the calm
+// secondary line next to the QUEUED badge so the user knows whether the job is
+// waiting on the submit lock, on cluster capacity, or simply sitting in the
+// Celery queue — instead of an opaque "queued".
+const QUEUE_REASONS: Record<string, string> = {
+  waiting_for_submit_slot: "Waiting for submit slot",
+  waiting_for_capacity: "Waiting for cluster capacity",
+  capacity_reserve_lost: "Waiting for cluster capacity",
+  queued: "Waiting in queue",
+};
+
+/**
+ * Secondary explanation for a queued job's raw backend phase, or null when the
+ * phase is not a queued-family phase. Used by the list row and Job Details to
+ * render "why is this waiting" beneath the QUEUED badge.
+ */
+export function queueReasonText(phase: string | undefined | null): string | null {
+  if (!phase) return null;
+  return QUEUE_REASONS[phase] ?? (QUEUED_PHASES.has(phase) ? "Waiting in queue" : null);
 }
 
 /** Max FASTA file upload size in bytes (50 MB). */
