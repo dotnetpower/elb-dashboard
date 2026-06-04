@@ -19,7 +19,12 @@ from __future__ import annotations
 # rate-bucket dict, exact-match autoscaler pool name parser; 4.18 == 4.17 app
 # code REBUILT FROM THE PATCHED LOCAL CONTEXT to restore the core_nt sharding
 # translation that 4.17 silently dropped — see
-# docs/features_change/2026-06/2026-06-02-openapi-resharding-regression-fix.md).
+# docs/features_change/2026-06/2026-06-02-openapi-resharding-regression-fix.md;
+# 4.19 == upstream 3.7.4 — Mode B /v1/jobs request examples now use a real
+# E. coli K-12 16S rRNA query (NR_024570.1) against 16S_ribosomal_RNA with
+# taxid 562 and outfmt 5, replacing the biologically nonsensical Monkeypox
+# ATGC-repeat placeholders — see
+# docs/features_change/2026-06/2026-06-04-openapi-mode-b-16s-example-fix.md).
 # Bump in lock-step with the sibling repo's ``docker-openapi/app/main.py``
 # ``VERSION`` constant and record the mapping in the per-bump change note under
 # ``docs/features_change/``.
@@ -39,7 +44,7 @@ IMAGE_TAGS: dict[str, str] = {
     "ncbi/elb": "1.4.0",
     "ncbi/elasticblast-job-submit": "4.1.0",
     "ncbi/elasticblast-query-split": "0.1.4",
-    "elb-openapi": "4.18",
+    "elb-openapi": "4.19",
 }
 
 # GitHub source repo for ACR Build Tasks.
